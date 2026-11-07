@@ -47,8 +47,7 @@ fn is_zero(value: &u64) -> bool {
 
 /// The memory of a host, or of a pool's floor, as an operator reads it: what was
 /// configured, the percent of it that may be booked, and what that comes to (the
-/// `memory_bytes` of a host's `shape`; under `--placement js-sched` the placement engine
-/// books no more than this).
+/// `memory_bytes` of a host's `shape`; the placement engine books no more than this).
 #[derive(Debug, Serialize)]
 pub(crate) struct MemoryView {
     pub(crate) configured_bytes: u64,

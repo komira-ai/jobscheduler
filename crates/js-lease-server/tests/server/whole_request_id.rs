@@ -236,12 +236,13 @@ async fn same_request_id_different_body_is_a_conflict() {
     );
 }
 
-/// Asserts D55 through the HTTP path. A request under an id has its host set aside
-/// (draining while it settles) when the server stops. After a `--boot resume` over the
-/// same lease file, a repeat of the acquire is answered with the same pending lease. Ten
-/// seconds later (inside `regain_grace`) the host says hello and is listed as it was:
-/// reserved for the id, with the drain deadline it had before the restart (above the boot
-/// floor, so neither reset nor floored). The next tick presents the request again under
+/// Asserts D55 through the HTTP path. A request under an id has its host set aside when
+/// the server stops: the host's lease was released, so it is granted to the request with
+/// nothing to drain and no drain deadline. After a `--boot resume` over the same lease
+/// file, a repeat of the acquire is answered with the same pending lease. Ten seconds
+/// later (inside `regain_grace`) the host says hello and is listed as it was: reserved for
+/// the id, with the drain deadline it had before the restart, none (a deadline kept above
+/// the boot floor is asserted by `agents_whole`, on a host that drains). The next tick presents the request again under
 /// its id, which claims the restored record: the request takes that host, nothing was
 /// dropped as unclaimed, and after the ready report the lease is held there. It catches a
 /// request id lost with the process (the repeat would make a second lease), a ledger that
@@ -257,7 +258,8 @@ async fn request_id_survives_a_restart_and_rebinds() {
     first.ticks.step().await;
     let host = entry(&hosts(&first).await, "burst-1");
     assert_eq!(host["reserved_for"], ID, "{host}");
-    let deadline = host["drain_deadline_ms"].as_u64().unwrap();
+    let deadline = host.get("drain_deadline_ms").cloned();
+    assert_eq!(deadline, None, "{host}");
     first.ticks.step().await;
 
     let h = restarted(first).await;
@@ -267,9 +269,7 @@ async fn request_id_survives_a_restart_and_rebinds() {
     let host = entry(&hosts(&h).await, "burst-1");
     assert_eq!(host["mark"], "reserved", "{host}");
     assert_eq!(host["reserved_for"], ID, "{host}");
-    assert_eq!(host["drain_deadline_ms"], deadline, "{host}");
-    let floor = T0 + js_lease_server::RESERVATION_BOOT_GRACE.as_secs() * 1000;
-    assert!(deadline > floor, "{deadline}");
+    assert_eq!(host.get("drain_deadline_ms").cloned(), deadline, "{host}");
 
     h.ticks.step().await;
     let registry = h.running.registry().unwrap();

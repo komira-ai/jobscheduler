@@ -100,7 +100,7 @@
 //!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
 //!   restart of the server and a forgotten host, each over sixteen seeds; the whole-host
 //!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run the whole-host
-//!   path, and the ways its handshake fails, under every value of `--placement`; the
+//!   path, and the ways its handshake fails; the
 //!   elastic family (`tests/elastic.rs`) runs pools whose machines the scaler launches on
 //!   demand and releases once idle, billed as EC2 and as Lambda bill.
 //! - [`agreement`]: one scenario run with every agent a fake and again with every agent

@@ -1,7 +1,5 @@
 //! The scenarios of the whole-host fault family (`whole_host_faults.rs`) but the
-//! cancelled request, which the replay tests also run (`whole_host_cancel.rs`). Each
-//! builder takes the placement the server runs under; the family runs each under every
-//! one.
+//! cancelled request, which the replay tests also run (`whole_host_cancel.rs`).
 //!
 //! Sizes, in agent requests a seed (heartbeats every 5 s, the server's default, with the
 //! hellos besides), each far under the 30,000 a seed of the cell's sizing rule:
@@ -19,7 +17,6 @@
 use std::time::Duration;
 
 use js_agent_wire::RefusalReason;
-use js_lease_server::Placement;
 use js_sim_cell::actions::{
     agent_prepare_delay, agent_refuses_prepare, agent_silent_on_prepare, agents, replace_agents,
     submit_work,
@@ -56,7 +53,7 @@ const SILENT_SETTLE: Duration = Duration::from_secs(600);
 /// refused `exclusive-not-ready`. Ten hosts, the agents of the first three
 /// ([`SILENT`]) silent on every prepare. At time zero [`SILENT_FIRST`] whole-host
 /// requests, more than the hosts that answer, so at least one is committed on a silent
-/// host whatever the placement: each such request fails its prepare after
+/// host: each such request fails its prepare after
 /// [`SILENT_PREPARE`] and is held on a host that reported ready (`held-means-ready`
 /// reads the report). At [`SILENT_LAST`] every agent goes silent and one more request
 /// is made: it meets a silent host at every try and is refused after exactly
@@ -66,7 +63,7 @@ const SILENT_SETTLE: Duration = Duration::from_secs(600);
 /// within the backoff (`kept-off-a-failed-host`, read from the server's listing), never
 /// fails a silent prepare (no request would be held after a failed try), or refuses a
 /// request after more or fewer failures than `max_replace` (`tries(item8)`).
-pub fn silent_hosts(placement: Placement) -> Scenario {
+pub fn silent_hosts() -> Scenario {
     let spec = pool(SILENT_HOSTS)
         .prepare_timeout(SILENT_PREPARE)
         .reserve_backoff(SILENT_BACKOFF)
@@ -78,7 +75,6 @@ pub fn silent_hosts(placement: Placement) -> Scenario {
     Scenario::new("a_silent_host_fails_the_prepare_and_the_request_goes_to_another_host")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
-        .under(placement)
         .hosts("burst", SILENT_HOSTS)
         .at(Duration::ZERO, agent_silent_on_prepare(agents(SILENT)))
         .work(SILENT_FIRST, run.clone())
@@ -124,19 +120,18 @@ fn serving_after(reason: RefusalReason) -> Expect {
 /// request's tries for the pool's `reserve_backoff` (excluded until then, for life for
 /// `unsupported`, or tainted for `host-unsafe`). Four hosts, the first host's agent
 /// refusing every prepare with `reason`, and four requests at time zero, so one is
-/// committed on the refusing host whatever the placement. Red for a refusal the server
+/// committed on the refusing host. Red for a refusal the server
 /// does not act on (that request would never be held: four held and released), a retry
 /// on the refusing host inside the backoff (`kept-off-a-failed-host`), a lease held
 /// without a ready report, and a `host-unsafe` refusal that leaves the host serving, or
 /// another that does not (`hosts-not-serving`, `every-host-serving`).
-pub fn a_refusal(placement: Placement, reason: RefusalReason) -> Scenario {
+pub fn a_refusal(reason: RefusalReason) -> Scenario {
     let name = "a_refused_prepare_goes_elsewhere_for_each_refusal_reason";
     let spec = pool(REFUSE_HOSTS).reserve_backoff(REFUSE_BACKOFF);
     let requests = REFUSE_HOSTS as u32;
     Scenario::new(&format!("{name}-{}", String::from(reason)))
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
-        .under(placement)
         .hosts("burst", REFUSE_HOSTS)
         .at(Duration::ZERO, agent_refuses_prepare(agents(0..1), reason))
         .work(requests, Work::whole_host(REFUSE_RUN))
@@ -167,13 +162,12 @@ const DRAIN_SETTLE: Duration = Duration::from_secs(900);
 /// (the run would not succeed; `drain-kills-nothing` while the host is set aside), grants
 /// the request before its host's run ended (`held-after-the-runs-on-its-host`,
 /// `whole-host-is-exclusive`), or drops the waiting request.
-pub fn a_drain(placement: Placement) -> Scenario {
+pub fn a_drain() -> Scenario {
     let requests = DRAIN_HOSTS as u32;
     let waiting = ItemId(requests);
     Scenario::new("drain_waits_for_a_busy_host_and_cuts_no_run")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(pool(DRAIN_HOSTS))
-        .under(placement)
         .hosts("burst", DRAIN_HOSTS)
         .work(requests, Work::whole_host(DRAIN_BUSY))
         .at(DRAIN_ASK_AT, submit_work(1, Work::whole_host(DRAIN_RUN)))
@@ -203,7 +197,7 @@ pub fn race_delay(step: i64) -> Duration {
 
 /// Proves section 7's "Whole-host ready report races the prepare deadline" (the registry
 /// is asked first and the lease expires only if there is still no answer): two hosts,
-/// two requests at time zero, so one is committed on each whatever the placement; the
+/// two requests at time zero, so one is committed on each; the
 /// first host's agent reports ready `delay` after it was told to prepare, and the pool's
 /// deadline is [`RACE_PREPARE`]. Whichever wins, the request on the first host is held
 /// there with the host ready, or its prepare fails and it goes to the other host, never
@@ -215,7 +209,7 @@ pub fn race_delay(step: i64) -> Duration {
 /// a lease held on a late report (`held-means-ready` holds, but the request would
 /// also be retried: `kept-off-a-failed-host` or a booking on the held host), and a
 /// request lost in the race (two held and released).
-pub fn a_race(placement: Placement, delay: Duration) -> Scenario {
+pub fn a_race(delay: Duration) -> Scenario {
     let name = "a_ready_report_racing_the_prepare_deadline_never_double_books";
     let spec = pool(RACE_HOSTS)
         .prepare_timeout(RACE_PREPARE)
@@ -224,7 +218,6 @@ pub fn a_race(placement: Placement, delay: Duration) -> Scenario {
     Scenario::new(&format!("{name}-{}s", delay.as_secs()))
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
-        .under(placement)
         .hosts("burst", RACE_HOSTS)
         .at(Duration::ZERO, agent_prepare_delay(agents(0..1), delay))
         .work(requests, Work::whole_host(RACE_RUN))
@@ -251,7 +244,7 @@ const RESTART_SETTLE: Duration = Duration::from_secs(900);
 /// Proves section 7's "Flapping agent during whole-host commit" as far as it is not
 /// Open: the agent of a committed host says hello again several times before it reports
 /// ready, and nothing is booked twice. Three hosts, three requests at time zero, so one
-/// is committed on each whatever the placement; the first host's agent takes
+/// is committed on each; the first host's agent takes
 /// [`RESTART_PREPARE_DELAY`] to prepare, longer than the restarts last, and is started
 /// again with empty state ([`RESTART_AT`], `replace_agents`), each new process saying
 /// hello once the server holds the host lost. Invariants only: whether the request is
@@ -262,14 +255,13 @@ const RESTART_SETTLE: Duration = Duration::from_secs(900);
 /// `no-double-booking`), holds the lease on a ready report of an earlier process for
 /// another lease (`held-means-ready`), leaves a booking behind (`bookings-match-agents`)
 /// or never settles the request (`settles-when-quiet`).
-pub fn restarts(placement: Placement) -> Scenario {
+pub fn restarts() -> Scenario {
     let first = agents(0..1);
     let requests = RESTART_HOSTS as u32;
     let [one, two, three] = RESTART_AT;
     Scenario::new("an_agent_that_restarts_while_the_host_is_committed_does_not_double_book")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(pool(RESTART_HOSTS))
-        .under(placement)
         .hosts("burst", RESTART_HOSTS)
         .at(
             Duration::ZERO,
@@ -307,12 +299,11 @@ const HELD_SETTLE: Duration = Duration::from_secs(900);
 /// the waiting request while the restarted host's lease is still held
 /// (`whole-host-is-exclusive`, `no-double-booking`), a lease held again without a ready
 /// report, a booking left behind, or the other host's run cut.
-pub fn held_lease_restart(placement: Placement) -> Scenario {
+pub fn held_lease_restart() -> Scenario {
     let requests = HELD_HOSTS as u32;
     Scenario::new("a_whole_host_lease_whose_agent_restarts_after_it_is_held")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(pool(HELD_HOSTS))
-        .under(placement)
         .hosts("burst", HELD_HOSTS)
         .work(requests, Work::whole_host(HELD_BUSY))
         .at(HELD_ASK_AT, submit_work(1, Work::whole_host(HELD_RUN)))

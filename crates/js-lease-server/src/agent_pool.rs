@@ -57,7 +57,7 @@ struct RawPool {
     prepare_timeout: Option<String>,
     max_replace: Option<u32>,
     regain_grace: Option<String>,
-    // A class that books part of a host, served beside `class` (`--placement js-sched`).
+    // A class that books part of a host, served beside `class`.
     share_class: Option<String>,
 }
 
