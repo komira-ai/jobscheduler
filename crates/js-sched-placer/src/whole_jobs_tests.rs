@@ -415,6 +415,23 @@ fn a_job_is_marked_on_another_host_than_the_one_its_prepare_failed_on() {
     assert_eq!(marked.exclusions, BTreeMap::from([(host("a"), until)]));
 }
 
+/// Catches: a back-off a job's row carries (one an older build wrote when a hold could be
+/// given up) dropped, or written back as a hard exclusion: `j` is backed off `a` until
+/// 100 s, so it marks `b`, and the mark written keeps `a` as a back-off until then.
+#[test]
+fn a_back_off_on_a_jobs_row_is_kept_soft_in_the_mark_written() {
+    let tables = Tables::new();
+    let mut j = tables.whole("j");
+    let backoff = Exclusion::Backoff(store(100_000));
+    j.prepare_bars.insert(host("a"), backoff);
+    let mut e = engine(&[("a", &[1]), ("b", &[2])]);
+    let steps = run(&mut e, (&[j], &[]), 20_000);
+    assert_eq!(steps.len(), 1);
+    let marked = written(&steps[0]);
+    assert_eq!(marked.host, host("b"));
+    assert_eq!(marked.exclusions, BTreeMap::from([(host("a"), backoff)]));
+}
+
 /// Catches: a grant a round of another term made (a start or a job placed in it) kept for
 /// the job, numbered as the next lease. `j` marks `a`; `a`'s lease ends and a plain tick
 /// grants `a` to `j` in the registry's term: it is put back at once, and the next pass
