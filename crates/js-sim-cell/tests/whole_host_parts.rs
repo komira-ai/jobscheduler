@@ -5,23 +5,20 @@
 //! actions that set how agents answer a prepare, request whole hosts and cancel a request
 //! once a host is set aside for it, the whole-host expectations (those on a raw answer and
 //! on the server as it stands when they are judged, at the end or at a virtual time, and
-//! those over a request's tries), `Scenario::under`, the list of refusal reasons the
+//! those over a request's tries), the list of refusal reasons the
 //! refusal scenario runs over, and what the server spec adds for them (the whole-node
-//! class and keys, the placement and its architecture).
+//! class and keys, and the architecture the scheduler needs).
 //!
 //! Sizes: one or two hosts beating every 5 s for at most 1,900 s of virtual time, under
 //! 800 agent requests a seed; the scripted front runs no server at all.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, Response};
-use clap::ValueEnum;
 use js_agent_wire::RefusalReason;
-use js_lease_server::Placement;
 use js_registry::Exclusion;
 use js_sim::Faults;
 use js_sim_cell::actions::{
@@ -53,14 +50,6 @@ fn scratch(name: &str) -> TestDir {
         Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-sim-cell"),
         name,
     )
-}
-
-/// `placement` as the server's command line spells it.
-fn spelled(placement: Placement) -> String {
-    let value = placement
-        .to_possible_value()
-        .expect("every placement has a name");
-    value.get_name().to_owned()
 }
 
 /// A whole-node pool of `hosts` hosts.
@@ -329,36 +318,32 @@ fn requested_whole_hosts_are_held_in_turn_and_a_wrong_count_fails() {
 }
 
 /// Asserts what the server spec adds: a whole-node pool's file names the class
-/// `whole-node`, every placement is passed as `--placement` with its own spelling, the
-/// default is `registry`, and a placement gives a shape with no architecture `arch =
-/// x86_64` while keeping one it has; and the virtual time of a wall time, from the cell's
-/// epoch and floored at zero. Catches a placement that never reaches the server, a pool
-/// `js-sched` refuses, an architecture written over, and a tail end off by the epoch.
+/// `whole-node`, a registered pool's shape with no architecture is given `arch = x86_64`
+/// while one it has is kept, and no `--placement` flag is passed (the server has one
+/// placement); and the virtual time of a wall time, from the cell's epoch and floored at
+/// zero. Catches a pool the scheduler refuses for want of an `arch`, an architecture
+/// written over, a deprecated flag still passed, and a tail end off by the epoch.
 #[test]
-fn the_server_spec_passes_the_placement_the_class_and_an_arch() {
-    let flag = |spec: &ServerSpec, name: &str| {
+fn the_server_spec_passes_the_class_and_an_arch_and_no_placement() {
+    let flagged = |spec: &ServerSpec, name: &str| {
         let dir = scratch(name);
         let args = spec.args(dir.path()).expect("the files are written");
-        let at = args.iter().position(|arg| arg == "--placement");
-        args[at.expect("the flag is passed") + 1].clone()
+        args.iter().any(|arg| arg == "--placement")
     };
-    for placement in Placement::value_variants() {
-        let spec = whole_pool(1).placement(*placement);
-        let name = format!("spec-{}", spelled(*placement));
-        assert_eq!(flag(&spec, &name), OsString::from(spelled(*placement)));
-        assert!(spec.pool_file().contains("class = \"whole-node\""));
-        let arch = spec.shape().capabilities.get(ARCH_KEY);
-        assert_eq!(arch.map(String::as_str), Some(ARCH));
-    }
+    let whole = whole_pool(1);
+    assert!(!flagged(&whole, "spec-whole"));
+    assert!(whole.pool_file().contains("class = \"whole-node\""));
+    let arch = whole.shape().capabilities.get(ARCH_KEY);
+    assert_eq!(arch.map(String::as_str), Some(ARCH));
     let plain = ServerSpec::registered_pool("burst", Shape::gpu_host(), 1);
-    assert_eq!(flag(&plain, "spec-default"), OsString::from("registry"));
+    assert!(!flagged(&plain, "spec-plain"));
     assert!(plain.pool_file().contains("class = \"gpu-host\""));
-    assert_eq!(plain.shape().capabilities.get(ARCH_KEY), None);
+    assert!(plain.pool_file().contains("\"arch\" = \"x86_64\""));
     let arm = Shape {
         capabilities: BTreeMap::from([(ARCH_KEY.to_owned(), "arm64".to_owned())]),
         ..Shape::gpu_host()
     };
-    let kept = ServerSpec::registered_pool("burst", arm, 1).placement(Placement::default());
+    let kept = ServerSpec::registered_pool("burst", arm, 1);
     let arch = kept.shape().capabilities.get(ARCH_KEY);
     assert_eq!(arch.map(String::as_str), Some("arm64"));
     assert_eq!(virtual_time(EPOCH_MS + 5_000), ms(5_000));
@@ -826,35 +811,6 @@ fn the_server_holds_the_whole_node_keys_and_an_ordinary_pool_refuses_them() {
         refused.is_err(),
         "an ordinary pool refuses a whole-node key"
     );
-}
-
-/// Asserts `Scenario::under`: under each placement the scenario's name is followed by
-/// the placement as the server spells it, which a failure names, and the scenario runs
-/// on that server. Catches two placements' runs under one name (a failure would not say
-/// which placement failed) and a placement that never reaches the server (`js-sched`
-/// refuses a pool without the architecture `under` gives it).
-#[test]
-fn a_scenario_under_a_placement_is_named_for_it_and_runs_on_it() {
-    for placement in Placement::value_variants() {
-        let failure = Scenario::new("named")
-            .scratch(env!("CARGO_TARGET_TMPDIR"))
-            .server(whole_pool(1))
-            .under(*placement)
-            .hosts("burst", 1)
-            .work(1, Work::whole_host(secs(10)))
-            .expect(Expect::held_and_released(2))
-            .settle_within(secs(300))
-            .try_run_seeds(1);
-        match failure {
-            Err(ScenarioFailure::Unmet {
-                scenario, detail, ..
-            }) => {
-                assert_eq!(scenario, format!("named-{}", spelled(*placement)));
-                assert_eq!(detail, "held-and-released: wanted 2, got 1");
-            }
-            other => panic!("not an unmet expectation: {other:?}"),
-        }
-    }
 }
 
 /// Asserts the new whole-host expectations on the real server, met and failing: one

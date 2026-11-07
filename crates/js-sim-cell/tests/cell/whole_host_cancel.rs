@@ -1,6 +1,5 @@
 //! The cancelled whole-host request of the whole-host fault family, shared by the family
-//! (`whole_host_faults.rs`), which runs it under every placement, and the replay tests,
-//! which pin its trace hashes in the golden file (family `whole_host_faults`).
+//! (`whole_host_faults.rs`) and the replay tests, which pin its trace hashes in the golden file (family `whole_host_faults`).
 //!
 //! Size: [`CANCEL_HOSTS`] agent beating every 5 s (the server's default) for
 //! [`CANCEL_LAST`] plus [`CANCEL_SETTLE`], 900 s: 180 heartbeats a seed, with the hellos
@@ -8,7 +7,6 @@
 
 use std::time::Duration;
 
-use js_lease_server::Placement;
 use js_sim_cell::actions::{cancel_when_set_aside, cancel_work, items, submit_work};
 use js_sim_cell::{Expect, HowEnded, ItemId, Scenario, ServerSpec, Shape, Work};
 
@@ -48,13 +46,12 @@ const CANCEL_SETTLE: Duration = Duration::from_secs(600);
 /// `every-host-serving`, and item 3 would never be held), a cancel that is not acted on
 /// while the request is marked (item 2 would be held: two cancels expected), and a
 /// cancel that cuts a run.
-pub fn a_cancelled_request(placement: Placement) -> Scenario {
+pub fn a_cancelled_request() -> Scenario {
     let spec = ServerSpec::whole_node_pool("burst", Shape::gpu_host(), CANCEL_HOSTS);
     let run = Work::whole_host(CANCEL_RUN);
     Scenario::new("a_cancelled_whole_host_request_drops_its_mark_and_the_host_serves_again")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
-        .under(placement)
         .hosts("burst", CANCEL_HOSTS)
         .work(1, run.clone())
         .at(CANCEL_WAIT_AT, submit_work(2, run.clone()))
