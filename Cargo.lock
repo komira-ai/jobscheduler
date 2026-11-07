@@ -1419,6 +1419,7 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-system-clock",
  "js-testkit",
  "js-types",
  "serde",
@@ -1818,8 +1819,6 @@ dependencies = [
  "js-agent-wire",
  "js-caps",
  "js-jobs",
- "js-lease",
- "js-provider",
  "js-registry",
  "js-sched",
  "js-state",
@@ -1896,6 +1895,13 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "js-system-clock"
+version = "0.1.0"
+dependencies = [
+ "js-types",
 ]
 
 [[package]]

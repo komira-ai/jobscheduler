@@ -5,18 +5,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_lease::Timestamp;
-use js_provider::{Candidate, Held, StartSpec};
 use js_registry::{
     Exclusion, MarkedTails, Reservation, Standing, WaitingWhole, WholeHost, WholeNodeConfig,
     WholeRound,
 };
 use js_sched::{Event, NodePhase, OpState};
+use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, WorkerId};
 use js_types::{
     Admission, ClassId, HostId, LeaseId, Request as HostRequest, RequestId, ResourceClass,
     Resources, Shape,
 };
+use js_types::{Candidate, Held, StartSpec};
 
 use super::WHOLE_TERM;
 use crate::engine::{Engine, Settings};

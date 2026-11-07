@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tracing::warn;
 
-use crate::clock::Monotonic;
+use crate::Monotonic;
 
 /// A step that takes longer than this is logged as slow. A step of exactly this long
 /// is not.

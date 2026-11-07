@@ -6,7 +6,9 @@
 //! (`tries.rs`), read what the cell observed. [`Expect::answer`] reads an answer the
 //! client kept (`answer.rs`), and the seven from [`Expect::listed`] on read the server at
 //! the moment they are judged (`facts.rs`): the facts the server's own HTTP tests read,
-//! so a test moved onto the cell asserts what it asserted.
+//! so a test moved onto the cell asserts what it asserted. The two from
+//! [`Expect::pool_tripped`] on read the elastic pool's cloud and its brake when they are
+//! judged (`cloud.rs`).
 
 use std::time::Duration;
 
@@ -23,6 +25,7 @@ use crate::observe::{ClientEvent, HowEnded, ItemId, ItemRecord};
 use crate::server::ServerNode;
 
 use super::answer::{self, Call};
+use super::cloud::{self, CloudFact};
 use super::facts::{self, Booked, Fact, Listed, RecordFact};
 use super::{launched_on, tries};
 
@@ -54,6 +57,7 @@ enum Wanted {
     Seen(Seen),
     Answer(Call, u16, Option<Value>),
     Fact(Fact),
+    Cloud(CloudFact),
 }
 
 /// A statement over what the cell observed.
@@ -218,6 +222,24 @@ impl Expect {
         Self(Wanted::Fact(Fact::SetAside(index, request)))
     }
 
+    /// The server's scaler reads the brake of elastic pool `pool` tripped (`true`: it
+    /// launches nothing until an operator resets it) or not, when this is judged. A pool
+    /// that is not the cell's elastic pool is `no-pool`.
+    #[must_use]
+    pub fn pool_tripped(pool: &str, tripped: bool) -> Self {
+        Self(Wanted::Cloud(CloudFact::Tripped(pool.to_owned(), tripped)))
+    }
+
+    /// The cloud of elastic pool `pool` has launched exactly `count` machines for the
+    /// scheduler by the time this is judged, by the elastic fake: every machine it made
+    /// (`ElasticFake::launched`) but those added as another's
+    /// ([`crate::Cell::add_foreign_machine`]), whether it still runs or not. A pool that is
+    /// not the cell's elastic pool is `no-pool`.
+    #[must_use]
+    pub fn machines_launched(pool: &str, count: usize) -> Self {
+        Self(Wanted::Cloud(CloudFact::Launched(pool.to_owned(), count)))
+    }
+
     /// `None` when `cell` meets the statement; otherwise what it wanted and what it got,
     /// as `<statement>: wanted <w>, got <g>`. A statement about the server reads it now,
     /// the lease list through the client router (a call the trace shows).
@@ -231,6 +253,10 @@ impl Expect {
             }
             Wanted::Fact(fact) => {
                 let [name, wanted, got] = facts::judged(fact, cell);
+                (name, wanted, got)
+            }
+            Wanted::Cloud(fact) => {
+                let [name, wanted, got] = cloud::judged(fact, cell);
                 (name, wanted, got)
             }
             Wanted::Seen(seen) => observed(seen, cell),

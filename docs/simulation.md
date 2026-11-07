@@ -162,6 +162,8 @@ with `#[path = ...]`; they are not binaries of their own.
 | `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: the lease front's whole-host path (under its own request id, a given one or none) and the answers it keeps, the actions that set how agents answer a prepare, request whole hosts and cancel a marked request, the whole-host expectations (on a raw answer, on the server as it stands when judged, at the end or at a virtual time, and over a request's tries), `Scenario::under`, the list of refusal reasons, and the server spec's class, whole-node keys and placement. |
 | `migrated_whole_host` | `tests/migrated_whole_host.rs` | The whole-host placement and failover tests of the lease server's HTTP suite, moved onto the cell: one scenario per moved test, named by it, each assertion an `Expect` at the same virtual time, run in the old test's world and at fifty hosts under every placement over sixteen seeds; and a negative case per scenario, its old world with agents that answer the prepare the wrong way. |
 | `elastic` | `tests/elastic.rs` | The elastic family: a hundred whole-host runs scale an empty pool of at most forty machines up and back to none, billed as EC2 bills and as Lambda bills, each over sixteen seeds; and cells driven by hand: a machine that boots with the token of its launch payload, the recording wrapper's times, a pool that does not join, machines the cloud drops or preempts, a foreign machine, the operator's brake reset, and an acquire armed to crash the server (down from the tick of that acquire until a restart, after which no second acquire is made). The scenarios are in `tests/cell/elastic.rs`. |
+| `elastic_faults` | `tests/elastic_faults.rs` | The elastic fault family: the cloud loses the first acquire's answer (the call landed, or did not), denies launches, refuses them for capacity, answers 429 for five minutes, holds two machines that are not the scheduler's under a quota, preempts a machine mid-run, lags 60 s in its list, and boots machines that never join until three boot failures trip the brake and the operator resets it through the server's route, each over sixteen seeds; and two negative cases, a cloud that refuses every release (`launched-machines-settle` names the machine) and a hand-built record of a pool that ignores its brake (`no-acquire-while-plan-only`). The scenarios are in `tests/cell/elastic_faults.rs`. |
+| `elastic_fault_actions` | `tests/elastic_fault_actions.rs` | The machinery the elastic fault family added: each action that scripts the cloud, sets its knobs, preempts, drops or adds a machine, switches whether machines join or resets the brake by the route, shown to change what it says; `Expect::pool_tripped` and `Expect::machines_launched`; and the cloud's counts in the cell's total. |
 | `store` | `tests/store.rs` | The store family: a restart over the store, a stop of the server in a burst of hellos that consume join tokens, a second server on the store of a running one, and a crash of the server at the scaler's acquire, each over sixteen seeds over SQLite and, with the `postgres` feature, over eight seeds over Postgres; and with the feature, the same seeds' trace hashes compared between the two stores. The scenarios are in `tests/cell/store.rs`. |
 | `replay` | `tests/replay.rs` | Whether a seed replays, the failure report, and the golden trace hashes. |
 | `docs` | `tests/docs.rs` | The check that holds this page to the crate. |
@@ -351,7 +353,15 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   starts), `mint_join_token(count)` (one-time tokens through the operator route) and
   `join_agents(tokens)` (a host for each minted token, saying hello with it); for an
   elastic pool, `crash_at_next_acquire()` (the server stopped at the end of the tick in
-  which the scaler's next acquire reached the cloud, answered as for a lost answer); for
+  which the scaler's next acquire reached the cloud, answered as for a lost answer),
+  `script_provider(call, &steps)` and `script_provider_forever(call, step)` (steps of the
+  elastic fake, `Step::Pass`, `Refuse(code)`, `Lost { landed }` or `Throttled`, queued for
+  its `acquire`, `list`, `release` or `is_gone`, or repeated for good), `set_knobs(knobs)`
+  (its quota, room and lags), `preempt_machine(n)`, `drop_machine(n)`,
+  `add_foreign_machine(name)` (a machine of the account the scheduler did not launch),
+  `machines_never_join(pool, never)` (machines that boot from then on say no hello, or
+  say it again) and `reset_brake(pool)` (the operator's reset through
+  `POST /v1/pools/{pool}/brake/reset`); for
   whole hosts, `request_whole_host`,
   `agent_prepare_delay`, `agent_refuses_prepare`, `agent_silent_on_prepare` and
   `cancel_when_set_aside(item, within)` (the item cancelled at the first read of the
@@ -378,10 +388,15 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `Expect::no_leases_listed()` (the lease list as a client reads it),
   `Expect::booked(call, Booked::...)` (where the agent registry books the lease),
   `Expect::request_record(key, RecordFact::...)`, `Expect::waiting(id, place)`,
-  `Expect::no_reservations()` and `Expect::set_aside(index, request)`;
+  `Expect::no_reservations()` and `Expect::set_aside(index, request)`; and for an elastic
+  pool `Expect::pool_tripped(pool, tripped)` (the scaler's brake, when judged) and
+  `Expect::machines_launched(pool, n)` (the machines the fake launched for the
+  scheduler, foreign ones left out);
 - witnesses: `.witness(name, |counters| ...)`, a predicate over the agents' counters
   (`start_repeated`, `start_after_stop`, `start_dropped_late`, `result_resent`,
-  `reply_invalid`, `cut_with_unlisted_run`, `unknown_host`) added over one seed, which at least one seed must satisfy. A witness
+  `reply_invalid`, `cut_with_unlisted_run`, `unknown_host`) and the elastic pool's
+  cloud's (`acquire_lost`, `acquire_throttled`, `acquire_refused`, `machine_preempted`)
+  added over one seed, which at least one seed must satisfy. A witness
   shows that the situation the scenario is about happened, so a scenario that passes
   because nothing happened fails instead;
 - `.settle_within(d)`: the virtual time the cell runs after the last action before the
@@ -523,6 +538,11 @@ The cell writes its own lines, `<t> cell ...`, for what the kernel does not see:
 | `<t> cell cloud launch m<n>` | the cell first saw the elastic pool's cloud run the scheduler's machine number `n` (in launch order) |
 | `<t> cell cloud boot m<n>`, `<t> cell cloud boot m<n> silent` | machine `n`'s agent started, its boot time after its launch; or, for a pool whose machines do not join, the boot that starts no agent |
 | `<t> cell cloud release m<n>`, `<t> cell cloud preempt m<n>`, `<t> cell cloud drop m<n>` | the cloud stopped running machine `n`: released by the scheduler, preempted, or gone outside it; its agent is killed in this step |
+| `<t> cell cloud script <call> <steps>`, `<t> cell cloud script <call> forever <step>` | a scenario queued steps for a call of the elastic fake (`acquire`, `list`, `release`, `is-gone`), or set the step it repeats; a step is `pass`, `refuse-<code>`, `lost-landed`, `lost-not-landed` or `throttled` |
+| `<t> cell cloud knobs quota=<n> capacity=<n> boot=<ms> list-lag=<ms> remove-lag=<ms> unknown-hold=<ms>` | a scenario replaced the fake's knobs (`-` for no limit) |
+| `<t> cell cloud foreign named\|unnamed <bool>` | a scenario added a machine the scheduler did not launch, and whether the cell has a pool to add it to |
+| `<t> cell cloud never-join <pool> <bool> <bool>` | a scenario made the machines that boot from now on never say hello (or say it again), and whether `pool` is the cell's |
+| `<t> cell cloud brake reset route <status>` | the operator's reset of the brake through the server's route, after its `client POST` line; a 202 is recorded with the cloud's calls |
 | `<t> cell cloud brake reset <bool>` | the operator asked the scaler to reset the pool's brake, and whether the scaler took the pool's name |
 | `<t> cell job <job> <state>` | the server's job table showed the job in a new state |
 | `<t> cell allocation <job> <step> <host>` | the server's allocation table showed the job's allocation `booked`, `releasing` or `freed` on the host (never its id) |
@@ -556,7 +576,9 @@ first two seeds of the cancelled whole-host request (`tests/cell/whole_host_canc
 under each value of `--placement`, family `jobs` the first seed of jobs over
 the job front on a lossy agent wire (`tests/cell/jobs.rs`, eight hosts), family
 `elastic` the first seed of the EC2-like elastic pool scaled up to forty machines and back
-to none (`tests/cell/elastic.rs`), and family `store` the first two seeds of the restart
+to none (`tests/cell/elastic.rs`), family `elastic_faults` the first seed of the acquire
+whose answer is lost though it landed (`tests/cell/elastic_faults.rs`), and family `store`
+the first two seeds of the restart
 over a SQLite store (`tests/cell/store.rs`). With the `postgres` feature,
 `tests/store.rs` holds the same seeds over Postgres to the `store` lines, so one file pins
 both stores. A trace hash covers the
@@ -571,7 +593,8 @@ own, `crates/js-sim/tests/golden/trace-hashes.txt`.)
 `the_whole_host_scenario_matches_the_golden_file_under_every_placement`,
 `the_whole_host_fault_scenario_matches_the_golden_file_under_every_placement`,
 `the_job_scenario_matches_the_golden_file`,
-`the_elastic_scenario_matches_the_golden_file` and
+`the_elastic_scenario_matches_the_golden_file`,
+`the_elastic_fault_scenario_matches_the_golden_file` and
 `the_store_scenario_matches_the_golden_file` fail on a moved
 hash and print the command
 that regenerates the lines:
@@ -653,6 +676,7 @@ and how much of each. A row not listed has no scenario.
 | 31 | `an_agent_that_relaunches_a_repeated_start` | `tests/broken_agent.rs` | The server sends a start again (runs shorter than the heartbeat interval on a bus slower than it); agents that run the repeated start fail `at-most-one-launch`, correct agents pass with the witness `start_repeated` held. The other half of the row, an agent restart that empties the retired list, has no scenario. |
 | 33 | `a_hello_that_consumes_a_join_token_commits_the_binding_with_it` | `tests/cell/store.rs` | Twelve hosts with join tokens of their own say hello at once and the server is stopped between two of their hellos; the store, read while the server is down, holds a binding for every used token and a used token for every binding to one, and after the restart every host is seated and serving, over SQLite and Postgres. The row's failed bindings save is not run: the cell cannot fail a commit, and the hosts take no host credential. |
 | 34 | `the_scaler_records_survive_a_restart_and_launch_nothing_twice` | `tests/cell/store.rs` | The server crashes at the scaler's first acquire, after the call reached the cloud and before its answer was read; the restarted scaler finds the machine its stored record names, makes no second acquire, and the machine's agent joins with the token minted before the launch, over SQLite and Postgres. That a retried launch's token is the one the machine booted with is not asserted: the scaler retries nothing here. |
+| 34 | `an_acquire_whose_answer_is_lost_and_did_not_land_is_retried_once` | `tests/cell/elastic_faults.rs` | The first acquire's answer is lost and the call did not land; the scaler holds the unresolved record for the unknown hold (30 minutes), then gives it up and launches once more: two acquires, one machine, which joins and runs the waiting run. As built the lost acquire is never sent again under its own id, so the row's retry (the same instance, a fresh token) does not happen here and which token the second launch uses is not asserted. |
 | 35 | `a_silent_host_is_never_given_a_second_copy_of_its_run` | `tests/faults.rs` | Agents are cut off longer than the grace while they run a run no heartbeat of theirs had listed (witness `cut_with_unlisted_run`); the run is never run on another host. The start timeout of the row is not built and not asserted. |
 | 38 | `a_stale_start_after_a_stop_does_not_run` | `tests/faults.rs` | The stale-start situation of the row below (the same settings), over sixteen seeds with every invariant of the fault family on. |
 | 38 | `an_agent_that_never_retires_a_stopped_run` | `tests/broken_agent.rs` | Every item is cancelled while its start is still on the bus, and a start arrives after the stop that follows it; agents that do not retire the stopped run fail `at-most-one-launch`, correct agents pass with the witness `start_after_stop` held. That the allocation is freed in the same commit is not asserted. |
@@ -698,6 +722,23 @@ tick skipped while the last is busy) needs a slow provider; the crash after a la
 more of the scheduler's machines than `max_instances`) and section 6.5's idle release (every
 machine released once quiet), under every invariant of `Invariant::ALL`; its bill check
 holds the cloud's clock to the server's, and says nothing of the scheduler's cost.
+
+The elastic fault family (`tests/elastic_faults.rs`, its scenarios in
+`tests/cell/elastic_faults.rs`) runs every invariant of `Invariant::ALL`, the five of an
+elastic pool's cloud included. Beside row 34 above it covers section 7's "Scaler double
+launch" when the cloud loses the first answer and the call landed (one machine at every
+step, found by the next list under the record's acquire id, and it joins) and when a list
+lags 60 s (one machine, taken from the acquire's answer), and section 6.5's brake: three
+boot failures in a row (machines that never say hello, given up at the boot timeout) trip
+the pool after cooldowns of 10 and 20 minutes, `denied` refusals do the same by the other
+route, `capacity` refusals trip nothing, `no-acquire-while-plan-only` holds until the
+operator's reset through the server's route and the pool launches after it. A 429 storm
+holds `throttle-honoured`; machines of the account that are not the scheduler's are never
+released (`only-own-machines-released`) and count toward the quota; a machine preempted
+mid-run double-books nothing and new demand gets a new machine. Row 16 (a scaler tick
+skipped while the last is busy) needs a provider call that takes time, which the fake's
+calls never do, so it has no scenario. Its witnesses read the cloud's counts:
+`acquire_lost`, `acquire_throttled`, `acquire_refused` and `machine_preempted`.
 
 The whole-host family covers no row yet. Its fifty requests wait on the server's wait list
 and are presented again at every tick, but it pins neither the order the list serves

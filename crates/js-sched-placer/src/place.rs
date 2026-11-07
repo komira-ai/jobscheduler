@@ -4,8 +4,9 @@
 //! from the server's configuration: the backfill ceiling (`server.max_lease_wall`), the
 //! CPU slack (`--cpu-slack`, js-sched's default 1.1x unless given) and the share of each
 //! host's memory it may book (`memory_schedulable_percent` of the pool). The registry
-//! tells it of every hello, accepted heartbeat, stop and host it forgets as they happen
-//! ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`], [`Placer::host_gone`]), so
+//! tells it of every hello, accepted heartbeat, lease put back at a start, stop and host it
+//! forgets as they happen ([`Placer::host_up`], [`Placer::heard`], [`Placer::seated`],
+//! [`Placer::ended`], [`Placer::host_gone`]), so
 //! the engine's picture of the hosts follows the registry's books without being rebuilt;
 //! a heartbeat's load reading reaches the engine there, as the registry vetted and
 //! converted it. When the engine is built again it is given the last three readings kept
@@ -73,16 +74,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use js_lease::{Clock, Timestamp};
-use js_provider::Candidate;
-use js_provider::{RefusalCode, StartSpec};
 use js_registry::{
     MarkedTails, Placer, PrepareFailure, Presented, ProbeHost, RequestKey, RequestRecord,
-    Reservation, Waiter, WaitingRequest, WholeKept, WholeRound,
+    Reservation, SeatedLease, Waiter, WaitingRequest, WholeKept, WholeRound,
 };
+use js_types::Candidate;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
+use js_types::{Clock, Timestamp};
 use js_types::{HostId, LeaseId, Request, RequestId, Shape};
+use js_types::{RefusalCode, StartSpec};
 
 use tracing::warn;
 
@@ -265,7 +266,7 @@ impl SchedPlacer {
 impl Default for SchedPlacer {
     /// A placer with the default settings on a clock that stands still at zero.
     fn default() -> Self {
-        let clock = js_lease::ManualClock::new(js_lease::Timestamp::from_millis(0));
+        let clock = js_types::ManualClock::new(js_types::Timestamp::from_millis(0));
         Self::new(Settings::default(), clock)
     }
 }
@@ -378,6 +379,11 @@ impl Placer for SchedPlacer {
 
     fn ended(&self, lease: LeaseId) {
         self.engine().ended(lease);
+    }
+
+    /// The engine takes the lease up on its host ([`Engine::seat`]).
+    fn seated(&self, seated: &SeatedLease) {
+        self.engine().seat(seated);
     }
 
     /// Recorded for the job pass ([`SchedPlacer::gone`]) as well as told to the engine: a

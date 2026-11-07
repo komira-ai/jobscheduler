@@ -82,6 +82,10 @@ pub struct HostView {
     /// the pool's floor; `None` for a host that has not said hello since a restart. A
     /// scaler compares it with the machine it launched.
     pub claim: Option<Shape>,
+    /// Whether the host is placed by the capabilities of `claim` the pool's shape does not
+    /// name as well ([`crate::PoolConfig::placing_by_hello`]); see
+    /// [`HostView::placement_shape`].
+    pub by_hello: bool,
     /// The labels the host announced.
     pub labels: BTreeMap<String, String>,
     /// The agent version the host announced, once it has.
@@ -535,7 +539,10 @@ impl Registry {
             },
         );
         state.runs.sync(&host, &hello.held, true);
-        self.tell_up(&host);
+        // The placer sees the host as the book lists it: outside a pool that places by
+        // hello, a host that holds a lease keeps the shape it was booked with.
+        let listed = state.book.shape_of(&host).cloned();
+        listed.iter().for_each(|shape| self.tell_up(&host, shape));
         again.iter().for_each(|lease| self.tell_again(lease));
         Ok(Welcome {
             protocol,

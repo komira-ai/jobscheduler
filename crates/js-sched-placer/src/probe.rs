@@ -9,11 +9,11 @@
 //! draining, and the agent's phases are the scheduler's of the same name.
 
 use js_agent_wire::Phase;
-use js_provider::{RefusalCode, StartSpec};
 use js_registry::ProbeHost;
 use js_sched::{Cordon, MemoryPercent, ProbeHost as SchedHost, ProbeRefusal, admit_probe};
 use js_types::HostId;
 use js_types::sched::{LeaseId as SchedLeaseId, NodePhase};
+use js_types::{RefusalCode, StartSpec};
 
 use tracing::info;
 

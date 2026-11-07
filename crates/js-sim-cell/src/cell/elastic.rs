@@ -5,7 +5,7 @@
 //!
 //! The trace names a machine by its number, `m<n>`, in launch order: `cloud launch m<n>`
 //! when the cell first sees the cloud run it, `cloud boot m<n>` when its agent starts
-//! (`cloud boot m<n> silent` for a pool that does not join, and nothing for a machine the
+//! (`cloud boot m<n> silent` for a machine that does not join, and nothing for a machine the
 //! cloud no longer runs by then), and `cloud release m<n>`, `cloud preempt m<n>` or `cloud
 //! drop m<n>` in the step the cloud stops running it, by the cloud's release, its
 //! preemption, or the machine's disappearance; `cloud brake reset <bool>` for the
@@ -111,7 +111,7 @@ impl Cell {
     /// Makes the cloud preempt machine `number` (it stops, and reads preempted until it
     /// is released), and checks: its agent is killed in this step.
     pub fn preempt_machine(&mut self, number: usize) {
-        self.on_machine(number, |cloud, id| cloud.fake().preempt(id));
+        self.on_machine(number, Cloud::preempt);
     }
 
     fn on_machine(&mut self, number: usize, act: impl FnOnce(&Cloud, &HostRef)) {
@@ -184,9 +184,9 @@ impl Cell {
     }
 
     /// Starts the agent of machine `number`, unless the cloud no longer runs it or its
-    /// pool does not join.
+    /// machines do not join now ([`Cloud::joins`]).
     fn boot(&mut self, number: usize) {
-        let joins = self.cloud().is_some_and(|cloud| cloud.pool().joined());
+        let joins = self.cloud().is_some_and(Cloud::joins);
         let machine = &mut self.machines.launched[number];
         if machine.gone {
             return;

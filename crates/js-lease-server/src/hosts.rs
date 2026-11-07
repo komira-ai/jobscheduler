@@ -7,10 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::Taint;
-use js_provider::{Held, HostCapacity, Pool as _};
 use js_registry::{HostMark, HostState, HostView};
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostId, LeaseId, MemoryHeadroom, Shape};
+use js_types::{Held, HostCapacity, HostId, LeaseId, MemoryHeadroom, Shape};
 
 use crate::api::Shared;
 use crate::sched::map::lease_text as sched_lease_text;
@@ -367,10 +366,12 @@ fn static_leases(
 
 /// Every host the server leases, the static pool's and the registered ones, with the leases
 /// booked on each: what `GET /v1/hosts` and the job service's `ListHosts` both read. The
-/// table's lock is taken first and dropped, then the registry's; the order of the two never
-/// reverses. It books, cordons and counts nothing.
+/// capacity is read from the host table of the table's pool ([`Shared::hosts`]), not
+/// through the lease table, so the listing never takes the table's lock. The pool's lock is
+/// taken first and dropped, then the registry's; the order of the two never reverses. It
+/// books, cordons and counts nothing.
 pub(crate) async fn listing(shared: &Shared) -> (HostList, LeasesOn) {
-    let capacity = shared.table().lock().await.provider().capacity();
+    let capacity = shared.hosts().capacity();
     match shared.agents() {
         Some(agents) => {
             let reserved = agents.registry.reserved();
@@ -419,6 +420,7 @@ mod tests {
             shape: Shape::new(resources, BTreeMap::new()),
             memory: MemoryHeadroom::full(1 << 20),
             claim: None,
+            by_hello: false,
             labels: BTreeMap::new(),
             agent_version: None,
             epoch: 1,
@@ -559,5 +561,81 @@ mod tests {
         assert_eq!(sized.count(), 1);
         let disk = shapes.iter().find_map(|shape| shape.get("disk_bytes"));
         assert_eq!(disk.and_then(|disk| disk.as_u64()), Some(5 << 30));
+    }
+
+    /// The listing reads the hosts of the table's pool, with the lease the table booked on
+    /// one of them, and answers while another caller holds the table's lock: it is polled
+    /// once, with nothing to wake it, and is ready. Catches a listing that reads the hosts
+    /// through the lease table, which would wait for that lock.
+    #[tokio::test]
+    async fn the_listing_reads_the_pool_without_the_table_lock() {
+        use std::future::Future as _;
+        use std::task::{Context, Poll, Waker};
+
+        use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
+        use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
+        use js_testkit::dir::TestDir;
+        use js_types::{ClassId, ProviderId, Request};
+
+        use crate::adapt::{BoxedPool, SharedClock};
+        use crate::config::parse_token;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/hosts_unit");
+        let dir = TestDir::under(root, "listing");
+        let pool = StaticPool::from_toml(ProviderId::new("static").unwrap(), EXAMPLE_CONFIG);
+        let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(1_000)));
+        let table = LeaseTable::open(
+            BoxedPool::new(Box::new(pool.unwrap())),
+            clock,
+            Settings::new(),
+            dir.path().join("leases.toml"),
+            Boot::Initialise,
+        )
+        .unwrap();
+        let shared = Shared::new(table, parse_token(&[b'q'; 40]).unwrap(), None);
+        let request = Request {
+            class: ClassId::new("gpu-host").unwrap(),
+            resources: Resources::new(1, 1, 1, Some("nvidia-a100".into())).unwrap(),
+            capabilities: BTreeMap::new(),
+            max_wall: std::time::Duration::from_secs(60),
+            labels: BTreeMap::new(),
+            validation_run: None,
+            probe_host: None,
+        };
+        let lease = shared.table().lock().await.acquire(request).unwrap();
+
+        let held = shared.table().lock().await;
+        let mut listed = std::pin::pin!(listing(&shared));
+        let polled = listed
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        drop(held);
+
+        // What the listing answered, as plain values: the host ids, the lease each lists, the
+        // source of each, and the leases booked per host. `Pending` means it waited for the
+        // table's lock.
+        let seen = polled.map(|(list, leases)| {
+            let hosts = list.hosts.iter();
+            let rows: Vec<(String, Option<String>, Source)> = hosts
+                .map(|host| (host.id.to_string(), host.lease.clone(), host.source))
+                .collect();
+            (rows, leases)
+        });
+        let shape = Resources::new(64_000, 549_755_813_888, 8, Some("nvidia-a100".into()));
+        let whole = Held {
+            lease: lease.id,
+            resources: shape.unwrap(),
+            whole: true,
+        };
+        let rows = vec![
+            (
+                "gpu-01".to_owned(),
+                Some(lease.id.to_string()),
+                Source::Static,
+            ),
+            ("gpu-02".to_owned(), None, Source::Static),
+        ];
+        let booked = BTreeMap::from([(lease.host, vec![whole])]);
+        assert_eq!(seen, Poll::Ready((rows, booked)));
     }
 }

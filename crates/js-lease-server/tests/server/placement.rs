@@ -116,12 +116,16 @@ fn the_key_is_read_from_the_file() {
     }
 }
 
-/// Asserts that `js-sched` is refused at start for a pool whose shape the scheduler cannot
-/// take as a node (no `arch`), by the flag and by the key, naming the flag or key and the
-/// missing `arch`; and that the same pool is accepted by the registry. Without the refusal
-/// every start would fall back to the first host and the flag would do nothing.
+/// Asserts that `js-sched` is refused at start for an agent or joined pool whose shape the
+/// scheduler cannot take as a node (no `arch`), by the flag (an agent pool) and by the key
+/// (a joined pool), naming the flag or key and the missing `arch`; that the same agent pool
+/// is accepted by the registry; and that an elastic pool, whose floor names no `arch`
+/// either, is accepted by the key: its hosts are placed by the `arch` their agents report
+/// at hello. Without the refusal every start on such an agent or joined pool would fall
+/// back to the first host and the flag would do nothing; with it on an elastic pool, no
+/// elastic pool could be placed by `js-sched`.
 #[test]
-fn js_sched_is_refused_for_a_pool_with_no_arch() {
+fn js_sched_is_refused_for_an_agent_or_joined_pool_with_no_arch_but_not_for_an_elastic_one() {
     let scratch = Scratch::new("placement_no_arch");
     let mut flags = args(&scratch, &["--placement", "js-sched"]);
     let at = flags
@@ -141,8 +145,10 @@ fn js_sched_is_refused_for_a_pool_with_no_arch() {
 
     let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
     let table = server(&scratch, &format!("{listeners}\nplacement = \"js-sched\""));
-    let text = file(&table, &[&pool(&scratch)]);
-    let said = refusal(&scratch, &text);
+    let joined = PoolText::joined("burst").set("capabilities", "{ isa = \"x86-64-v3\" }");
+    let said = refusal(&scratch, &file(&table, &[&joined]));
     assert!(said.starts_with("server.placement: "), "{said}");
     assert!(said.contains("arch"), "{said}");
+    let elastic = load(&scratch, &file(&table, &[&pool(&scratch)])).unwrap();
+    assert_eq!(elastic.placement(), Placement::JsSched);
 }

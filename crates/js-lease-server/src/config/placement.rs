@@ -28,9 +28,11 @@ pub enum Placement {
 impl Placement {
     /// Refuses `js-sched` for a pool whose shape the scheduler cannot take as a node (a
     /// shape with no `arch`): every start would fall back to the first host, and the flag
-    /// would do nothing it says. Refuses `registry` for a pool with a `share_class`: the
-    /// registry places no lease of a class that books part of a host, so every one would
-    /// be refused. `place` names the flag or key for the message.
+    /// would do nothing it says. A pool that places each host by what its hello reported
+    /// ([`PoolConfig::placing_by_hello`], an elastic pool) is not refused for its shape: its
+    /// hosts are nodes by the `arch` they report. Refuses `registry` for a pool with a
+    /// `share_class`: the registry places no lease of a class that books part of a host, so
+    /// every one would be refused. `place` names the flag or key for the message.
     pub(crate) fn check(self, pool: &PoolConfig, place: &str) -> Result<(), StartupError> {
         match self {
             Self::Registry if pool.share_class().is_some() => Err(StartupError::at(
@@ -38,6 +40,7 @@ impl Placement {
                 "the pool's share_class needs js-sched: the registry places no lease that shares a host",
             )),
             Self::Registry => Ok(()),
+            Self::JsSched if pool.places_by_hello() => Ok(()),
             Self::JsSched => map::host(pool.shape()).map(|_| ()).map_err(|err| {
                 let reason = format!(
                     "the pool's shape cannot be taken as a node by the scheduler ({err}); \
@@ -107,5 +110,62 @@ impl Placement {
                 Some(Arc::new(SchedPlacer::new(settings, clock.clone())))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
+
+    use super::*;
+
+    /// A pool of `capabilities`, of a class that books whole hosts.
+    fn pool(capabilities: &[(&str, &str)]) -> PoolConfig {
+        let caps: BTreeMap<String, String> = capabilities
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let shape = Shape::new(Resources::new(4000, 8 << 30, 0, None).unwrap(), caps);
+        let id = ProviderId::new("burst").unwrap();
+        PoolConfig::new(id, ResourceClass::gpu_host(), shape, 2)
+    }
+
+    /// Asserts each answer of the check, by the whole message where it refuses: under
+    /// `js-sched` a pool whose shape names an `arch` is taken, one that names none is
+    /// refused naming `arch`, and the same arch-less shape is taken when the pool places
+    /// each host by its hello (an elastic pool, whose hosts report their `arch`); under
+    /// `registry` a pool is taken unless it has a `share_class`. Catches an elastic pool
+    /// refused for the floor its hosts are not placed by, and an agent or joined pool with
+    /// no `arch` let through.
+    #[test]
+    fn each_placement_takes_or_refuses_the_pools_it_should() {
+        let place = "server.placement";
+        let named = pool(&[("arch", "x86_64")]);
+        assert!(Placement::JsSched.check(&named, place).is_ok());
+        let bare = pool(&[]);
+        let refused = Placement::JsSched.check(&bare, place).err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "server.placement: the pool's shape cannot be taken as a node by the scheduler \
+             (shape does not describe a node: the node report has no \"arch\" entry); \
+             give the pool capabilities with an arch"
+        );
+        let elastic = pool(&[]).placing_by_hello();
+        assert!(Placement::JsSched.check(&elastic, place).is_ok());
+        assert!(Placement::Registry.check(&elastic, place).is_ok());
+        let share = ResourceClass::new(
+            ClassId::new("share").unwrap(),
+            Admission::Book(Default::default()),
+            0,
+        );
+        let sharing = pool(&[("arch", "x86_64")]).with_share_class(share).unwrap();
+        let refused = Placement::Registry.check(&sharing, place).err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "server.placement: the pool's share_class needs js-sched: the registry places no \
+             lease that shares a host"
+        );
     }
 }
