@@ -19,7 +19,11 @@ use crate::PrepareFailure;
 pub(crate) struct Ending<'a> {
     pub(crate) book: &'a mut HostBook,
     pub(crate) runs: &'a mut Runs,
-    pub(crate) requests: &'a mut Requests,
+    /// The registry's request records: `None` under a placer that keeps them
+    /// ([`crate::Placer::keeps_wait_list`]), which counts every failure itself.
+    pub(crate) requests: Option<&'a mut Requests>,
+    /// The failed prepares not yet handed to the allocation log.
+    pub(crate) failed: &'a mut Vec<FailedPrepare>,
     pub(crate) rules: Rules,
     pub(crate) now: Timestamp,
     /// The placer, told of the lease's end as of any stop ([`crate::Placer::ended`]).
@@ -33,7 +37,7 @@ impl Ending<'_> {
     /// it keeps the lease's request ([`crate::Placer::prepare_failed`]), else here.
     /// `detail` is kept as received and read by nothing here. `taint` and `exclusive` are
     /// the host's record.
-    /// The failure is noted ([`Requests::note_failed`]) for the record of the booking's end.
+    /// The failure is noted (`failed`) for the record of the booking's end.
     pub(crate) fn fail(
         &mut self,
         (taint, exclusive): (&mut Option<Taint>, &mut Exclusive),
@@ -64,11 +68,13 @@ impl Ending<'_> {
         let kept = self
             .placer
             .is_some_and(|placer| placer.prepare_failed(&lease, &handed));
-        match kept {
-            true => self.requests.release(&lease),
-            false => self.requests.fail(&lease, cause, detail, failure),
+        if let Some(requests) = self.requests.as_deref_mut() {
+            match kept {
+                true => requests.release(&lease),
+                false => requests.fail(&lease, cause, detail, failure),
+            }
         }
-        self.requests.note_failed(FailedPrepare {
+        self.failed.push(FailedPrepare {
             lease,
             host: host.clone(),
             at: self.now,

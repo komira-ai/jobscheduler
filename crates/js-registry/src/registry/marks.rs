@@ -39,7 +39,7 @@ use js_types::HostId;
 
 use super::{HostMark, Record, Registry, State};
 use crate::runs::Runs;
-use crate::whole::reserve::Marks;
+use crate::whole::reserve::Reservation;
 
 /// A host mark of scale-down, held in a host's record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,11 +102,11 @@ impl Registry {
     /// the state it had.
     pub fn drain(&self, host: &HostId) -> Result<(), Busy> {
         let mut guard = self.lock();
+        let marks = self.marks_now(&guard);
         let State {
             book,
             records,
             runs,
-            marks,
             ..
         } = &mut *guard;
         let record = records.get_mut(host).ok_or(Busy::UnknownHost)?;
@@ -115,7 +115,7 @@ impl Registry {
             Some(Leaving::Draining | Leaving::Retiring) => return Ok(()),
             None => {}
         }
-        quiet(book, runs, marks, host, record)?;
+        quiet(book, runs, &marks, host, record)?;
         record.leaving = Some(Leaving::Draining);
         Ok(())
     }
@@ -135,6 +135,7 @@ impl Registry {
     /// [`Busy::Releasing`] when it is releasing: that mark is not undone.
     pub fn retire(&self, host: &HostId) -> Result<(), Busy> {
         let mut guard = self.lock();
+        let keeper = self.keeper();
         let State { records, marks, .. } = &mut *guard;
         let record = records.get_mut(host).ok_or(Busy::UnknownHost)?;
         match record.leaving {
@@ -145,7 +146,10 @@ impl Registry {
                 // and no machine is launched for a request that holds one: it is let go,
                 // so the scaler sees it unreserved. A whole-node lease already committed
                 // on the host is not a mark and runs on.
-                marks.drop_host(host);
+                match keeper {
+                    Some(keeper) => keeper.whole_drop_host(host),
+                    None => marks.drop_host(host),
+                }
                 Ok(())
             }
         }
@@ -182,11 +186,11 @@ impl Registry {
     /// registry does not hold, and the reason it is busy otherwise.
     pub fn release_host(&self, host: &HostId) -> Result<(), Busy> {
         let mut guard = self.lock();
+        let marks = self.marks_now(&guard);
         let State {
             book,
             records,
             runs,
-            marks,
             ..
         } = &mut *guard;
         let record = records.get_mut(host).ok_or(Busy::UnknownHost)?;
@@ -195,7 +199,7 @@ impl Registry {
             Some(Leaving::Releasing) => return Ok(()),
             Some(Leaving::Draining | Leaving::Retiring) => {}
         }
-        quiet(book, runs, marks, host, record)?;
+        quiet(book, runs, &marks, host, record)?;
         record.leaving = Some(Leaving::Releasing);
         Ok(())
     }
@@ -259,14 +263,15 @@ impl Registry {
 fn quiet(
     book: &HostBook,
     runs: &Runs,
-    marks: &Marks,
+    marks: &[Reservation],
     host: &HostId,
     record: &Record,
 ) -> Result<(), Busy> {
     if book.booked().contains_key(host) {
         return Err(Busy::Lease);
     }
-    let whole = [marks.holder(host).is_some(), !record.exclusive.is_free()];
+    let marked = marks.iter().any(|mark| mark.host == *host);
+    let whole = [marked, !record.exclusive.is_free()];
     if whole.into_iter().any(|set| set) {
         return Err(Busy::Whole);
     }

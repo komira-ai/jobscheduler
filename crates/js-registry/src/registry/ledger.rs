@@ -35,20 +35,19 @@
 //! give-ups and back-offs, and the failed prepares and bars of requests it committed
 //! ([`crate::Placer::whole_round`] and its siblings). The ledger is then written from the
 //! engine: a request's mark is the engine's ([`crate::Placer::whole_reservations`]) and its
-//! counts and exclusions are the engine's ([`crate::Placer::whole_ledger`]), each count the
-//! larger of the engine's and the registry's. The place and the first-presentation instant
-//! are still the registry's wait list's. The format does not change: a file written under
-//! one placement is read under the other.
+//! counts and exclusions are the engine's ([`crate::Placer::whole_ledger`]); the place and
+//! the first-presentation instant are its wait list's ([`crate::Placer::whole_places`]). The
+//! format does not change: a file written under one placement is read under the other.
 //!
 //! A restore checks the records as above and hands what stands of each request's counts and
 //! exclusions to the engine ([`crate::Placer::whole_restore`]), which queues the request with
 //! them when it is presented again (`js_sched::Scheduler::restore_whole`) and answers a
-//! terminal request at its next start; the registry keeps only the give-up count. A timed
-//! exclusion of a record with no failed prepare can only be a give-up's back-off, and is put
-//! back as one; any other is a failed prepare's bar. A mark is put back on the registry's
-//! side as above, and is handed to the engine with its request when the request is presented
-//! again and its host has said hello: until then, or until it is dropped, the engine holds
-//! the host for it outside its queue ([`crate::WholeRound::outside`]).
+//! terminal request at its next start. A timed exclusion of a record with no failed prepare
+//! can only be a give-up's back-off, and is put back as one; any other is a failed
+//! prepare's bar. The place goes back on the engine's wait list
+//! ([`crate::Placer::whole_restore_place`]) and the mark to the engine
+//! ([`crate::Placer::whole_revive`]), which holds the host for the request outside its queue
+//! until the request is presented again and its host has said hello, or the mark is dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -81,7 +80,25 @@ impl Registry {
         let placer = self.shared.placer.get().map(|placer| &**placer);
         let marks = self.marks_now(&state);
         let kept = placer.map(Placer::whole_ledger).unwrap_or_default();
-        export(&state, &marks, kept)
+        // The wait list's places, and the registry's own records, are the placer's when it
+        // keeps them.
+        let (places, own) = match self.keeper() {
+            Some(keeper) => (keeper.whole_places(), Vec::new()),
+            None => {
+                let places = state.waiting.queue();
+                let places = places.map(|(id, since)| (id.clone(), since));
+                let own = state.requests.recorded().map(|(id, record)| {
+                    let kept = WholeKept {
+                        give_ups: record.give_ups,
+                        prepare_failures: record.prepare_failures,
+                        exclusions: record.exclusions.clone(),
+                    };
+                    (id.clone(), kept)
+                });
+                (places.collect(), own.collect())
+            }
+        };
+        export(&places, &marks, own.into_iter().chain(kept))
     }
 
     /// Puts back the state `records` hold, as the module documentation says. Called once
@@ -99,6 +116,7 @@ impl Registry {
             max_reserve_attempts: whole.max_reserve_attempts,
             max_exclusions: self.shared.config.max_machines(),
             placer: self.shared.placer.get().map(|placer| &**placer),
+            keeper: self.keeper(),
         };
         let mut ordered: Vec<&ReservationRecord> = records.iter().collect();
         ordered.sort_by(|a, b| order(a).cmp(&order(b)));
@@ -128,16 +146,17 @@ fn order(record: &ReservationRecord) -> (bool, Option<(u32, Timestamp)>, &str) {
     (record.queued.is_none(), place, record.request_id.as_str())
 }
 
-/// The ledger as records: the wait list's places, the hosts set aside (`marks`), and the
-/// counts and exclusions of the registry's records and of what a placer that keeps the
-/// queue keeps (`kept`), the larger of each count and the longer of each exclusion.
+/// The ledger as records: the wait list's places (`places`, front first), the hosts set
+/// aside (`marks`), and the counts and exclusions of the registry's records and of what a
+/// placer that keeps the queue keeps (`kept`), the larger of each count and the longer of
+/// each exclusion.
 fn export(
-    state: &State,
+    places: &[(RequestId, Timestamp)],
     marks: &[Reservation],
-    kept: BTreeMap<RequestId, WholeKept>,
+    kept: impl Iterator<Item = (RequestId, WholeKept)>,
 ) -> Vec<ReservationRecord> {
     let mut rows: BTreeMap<RequestId, ReservationRecord> = BTreeMap::new();
-    for (place, (id, since)) in state.waiting.queue().enumerate() {
+    for (place, (id, since)) in places.iter().enumerate() {
         let mark = marks.iter().find(|mark| mark.request == *id);
         let held = mark.map(|mark| Held {
             host: mark.host.clone(),
@@ -148,7 +167,7 @@ fn export(
         });
         let queued = Queued {
             place: u32::try_from(place).unwrap_or(u32::MAX),
-            since,
+            since: *since,
         };
         let row = ReservationRecord {
             held,
@@ -157,15 +176,7 @@ fn export(
         };
         rows.insert(id.clone(), row);
     }
-    let recorded = state.requests.recorded().map(|(id, record)| {
-        let kept = WholeKept {
-            give_ups: record.give_ups,
-            prepare_failures: record.prepare_failures,
-            exclusions: record.exclusions.clone(),
-        };
-        (id.clone(), kept)
-    });
-    for (id, kept) in recorded.chain(kept) {
+    for (id, kept) in kept {
         let row = rows.entry(id.clone()).or_insert_with(|| empty(&id));
         row.give_ups = row.give_ups.max(kept.give_ups);
         row.prepare_failures = row.prepare_failures.max(kept.prepare_failures);
@@ -224,6 +235,9 @@ struct Standing<'a> {
     /// The placer, which keeps the counts and exclusions when it keeps the queue
     /// ([`Placer::whole_restore`]).
     placer: Option<&'a dyn Placer>,
+    /// The placer when it keeps the wait list as well ([`Placer::keeps_wait_list`]): it
+    /// takes the places and the marks back too.
+    keeper: Option<&'a dyn Placer>,
 }
 
 /// Puts back one record, if it can stand; what came of it. `seen` holds the request ids
@@ -285,32 +299,49 @@ fn revive(
             },
         };
         let key = RequestKey::Id(id.clone());
-        if [kept.give_ups > 0, !engine].into_iter().any(|keep| keep) {
+        let registry = ctx.keeper.is_none();
+        if [kept.give_ups > 0, !engine].into_iter().any(|keep| keep) & registry {
             state.requests.restore(key, kept, ctx.now);
         }
     }
-    let room = state.waiting.len() < MAX_WAITING_REQUESTS;
     let wants_place = record.queued;
-    let placed = [wants_place.is_some(), room].into_iter().all(|ok| ok);
-    dropped += usize::from(wants_place.is_some() & !room);
-    if let (Some(queued), true) = (wants_place, placed) {
-        state.waiting.restore(id.clone(), queued.since, ctx.now);
-    }
+    let placed = wants_place.is_some_and(|queued| match ctx.keeper {
+        Some(keeper) => keeper.whole_restore_place(&id, queued.since),
+        None => {
+            let room = state.waiting.len() < MAX_WAITING_REQUESTS;
+            room.then(|| state.waiting.restore(id.clone(), queued.since, ctx.now))
+                .is_some()
+        }
+    });
+    dropped += usize::from(wants_place.is_some() & !placed);
     let mut marked = false;
     if let Some(held) = &record.held {
         let leaving = state.ending.contains(&held.host);
         let standing = [placed, !leaving].into_iter().all(|ok| ok);
-        let revived = Revived {
-            request: id,
-            host: held.host.clone(),
-            at: held.reserved_at,
-            deadline: held.deadline,
-            assigned: held.assigned,
-            capped: record.give_ups >= ctx.max_reserve_attempts,
-            tail_end: held.tail_end,
-            claim_by: ctx.claim_by,
-        };
-        marked = standing && state.marks.revive(revived);
+        marked = standing
+            && match ctx.keeper {
+                Some(keeper) => {
+                    let mark = Reservation {
+                        request: id,
+                        host: held.host.clone(),
+                        at: held.reserved_at,
+                        deadline: held.deadline,
+                        assigned: held.assigned,
+                        tail_end: held.tail_end,
+                    };
+                    keeper.whole_revive(&mark, ctx.claim_by)
+                }
+                None => state.marks.revive(Revived {
+                    request: id,
+                    host: held.host.clone(),
+                    at: held.reserved_at,
+                    deadline: held.deadline,
+                    assigned: held.assigned,
+                    capped: record.give_ups >= ctx.max_reserve_attempts,
+                    tail_end: held.tail_end,
+                    claim_by: ctx.claim_by,
+                }),
+            };
         dropped += usize::from(!marked);
     }
     let resumed = [counted, placed, marked].into_iter().any(|kept| kept);

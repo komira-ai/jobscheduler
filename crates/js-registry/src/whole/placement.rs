@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use js_provider::{HostCapacity, RefusalCode, StartAck, StartSpec};
 use js_types::{Capabilities, HostId, Resources};
 
-use super::queue::Verdict;
 use super::requests::{RequestKey, Requests};
+use crate::Presented;
 
 /// What decides whether some host could ever be given whole to a request.
 pub(crate) struct Asking<'a> {
@@ -23,9 +23,10 @@ pub(crate) struct Asking<'a> {
 }
 
 /// Whether some listed host could ever be given whole to the request: it could hold it
-/// ([`could_hold`]) and is not barred for the request's life. A busy, lost or reserved
-/// host counts as capable.
-pub(crate) fn capable(asking: &Asking<'_>, requests: &Requests) -> bool {
+/// ([`could_hold`]) and is not barred for the request's life, by `requests` (the
+/// registry's records, `None` under a placer that keeps them) or by the placer. A busy,
+/// lost or reserved host counts as capable.
+pub(crate) fn capable(asking: &Asking<'_>, requests: Option<&Requests>) -> bool {
     let wanted = asking.spec.request();
     asking.hosts.iter().any(|host| {
         let holds = could_hold(
@@ -34,8 +35,8 @@ pub(crate) fn capable(asking: &Asking<'_>, requests: &Requests) -> bool {
             &wanted.capabilities,
             asking.tainted,
         );
-        let barred =
-            requests.barred_for_life(asking.key, &host.host) | asking.for_life.contains(&host.host);
+        let own = requests.is_some_and(|requests| requests.barred_for_life(asking.key, &host.host));
+        let barred = own | asking.for_life.contains(&host.host);
         holds & !barred
     })
 }
@@ -58,11 +59,11 @@ pub(crate) fn could_hold(
 /// else `None`. No host that could ever be given whole is the one refusal for lack of a
 /// host; otherwise a request on the list waits (`Unknown`), one the list is full for is
 /// answered `NoCapacity`, and so is one that does not queue.
-pub(crate) fn answer(verdict: Option<Verdict>, capable: bool) -> StartAck {
+pub(crate) fn answer(verdict: Option<Presented>, capable: bool) -> StartAck {
     match (verdict, capable) {
-        (Some(Verdict::Waiting(_)), _) => StartAck::Unknown,
-        (Some(Verdict::Full), _) => StartAck::Refused(RefusalCode::NoCapacity),
-        (Some(Verdict::Unservable), _) | (None, false) => {
+        (Some(Presented::Waiting(_)), _) => StartAck::Unknown,
+        (Some(Presented::Full), _) => StartAck::Refused(RefusalCode::NoCapacity),
+        (Some(Presented::Unservable), _) | (None, false) => {
             StartAck::Refused(RefusalCode::NoCapableHost)
         }
         (None, true) => StartAck::Refused(RefusalCode::NoCapacity),
