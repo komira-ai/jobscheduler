@@ -564,8 +564,10 @@ fn a_directory_held_elsewhere_refuses_the_step_before_anything_is_made_in_it() {
     assert_eq!(
         error.to_string(),
         format!(
-            "cannot lock {}: Resource temporarily unavailable (os error 11)",
-            tmp.path().display()
+            "cannot lock {}: {}",
+            tmp.path().display(),
+            // EWOULDBLOCK is 11 on Linux and 35 on Darwin: the platform's own text.
+            io::Error::from(rustix::io::Errno::WOULDBLOCK)
         )
     );
     assert!(!tmp.path().join(LOCK_FILE).exists());
