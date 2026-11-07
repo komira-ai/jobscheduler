@@ -1470,6 +1470,7 @@ dependencies = [
  "js-update-hook",
  "js-usage",
  "log",
+ "nix 0.31.3",
  "postgres",
  "prost-reflect",
  "prost-types",

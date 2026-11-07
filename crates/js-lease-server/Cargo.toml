@@ -70,6 +70,9 @@ x509-parser.workspace = true
 in-process = []
 
 [dev-dependencies]
+# `mkfifo` for the named-pipe token file test (tests/server/startup.rs): rustix has `mknodat` on
+# Linux only, and the tests run on macOS too.
+nix = { workspace = true, features = ["fs"] }
 js-agent = { path = "../js-agent" }
 # The output tails of the v1 acceptance target's jobs, which the job service's JSON carries
 # as base64 (tests/v1_acceptance/rig.rs).
