@@ -173,19 +173,12 @@ impl Registry {
         let round = placer.map(|placer| (placer, self.round_of(state, &pass)));
         let placed = round.and_then(|(placer, round)| {
             let marks = placer.whole_round(&round)?;
-            Some((marks, round, placer.whole_give_ups()))
+            Some((marks, round))
         });
-        if let Some((marks, round, give_ups)) = placed {
+        if let Some((marks, round)) = placed {
             let presented = round.waiting.into_iter().map(|waiting| waiting.id);
             let presented: BTreeSet<RequestId> = presented.collect();
             state.marks.adopt(marks, &presented);
-            // The placer's give-ups are counted in the requests' records, as the registry's
-            // own pass counts its own (the placer queues only the requests presented).
-            for (id, count) in give_ups {
-                state
-                    .requests
-                    .raise_give_ups(RequestKey::from(&id), count, now);
-            }
             return;
         }
         let State {
@@ -217,7 +210,7 @@ impl Registry {
                 id: id.clone(),
                 max_wall: request.max_wall,
                 since,
-                give_ups: state.requests.give_ups(&key),
+                give_ups: 0,
                 exclusions: record.map(|r| r.exclusions.clone()).unwrap_or_default(),
                 mark: state.marks.reservation_of(id),
             }
@@ -518,17 +511,12 @@ impl Registry {
             let end = now.plus(wanted.max_wall);
             tail.started(holder(host), spec.request_id());
             let own_mark = id.is_some_and(|id| holder(host) == Some(id));
-            let (marked, give_ups) = match keeper {
-                Some(_) => waiter
-                    .as_ref()
-                    .map_or((false, 0), |waiter| (waiter.marked, waiter.give_ups)),
-                None => {
-                    let marked = id.is_some_and(|id| marks.ever_marked(id));
-                    (marked, requests.give_ups(&key))
-                }
+            let marked = match keeper {
+                Some(_) => waiter.as_ref().is_some_and(|waiter| waiter.marked),
+                None => id.is_some_and(|id| marks.ever_marked(id)),
             };
             let queue = match whole {
-                true => Queue::whole(now, since, (own_mark, marked), give_ups),
+                true => Queue::whole(now, since, (own_mark, marked)),
                 false => Queue::ORDINARY,
             };
             let here = book.leases().remove(host).unwrap_or_default();

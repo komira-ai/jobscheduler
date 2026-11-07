@@ -17,10 +17,11 @@
 //!   (`ForLife` ones included): the consumer is gone, and the records stay bounded by the
 //!   requests in flight rather than by every request that ever failed.
 //!
-//! The failed-prepare and give-up counts and the exclusions of a request that carries an
-//! id are kept in the lease file (the registry's reservation ledger) and put back at a
-//! start by [`Requests::restore`], so a restart does not reset `max_replace` or
-//! `max_reserve_attempts`. What is not kept: the last failure's text (a restored record
+//! The failed-prepare count and the exclusions of a request that carries an id are kept in
+//! the lease file (the registry's reservation ledger) and put back at a start by
+//! [`Requests::restore`], so a restart does not reset `max_replace`. No request gives a
+//! host up, so the give-up count is always zero: the ledger writes zero, and a count an
+//! older file holds is read and ignored. What is not kept: the last failure's text (a restored record
 //! has none) and the records of requests without an id, which are told apart by their
 //! content and forgotten by a restart.
 //!
@@ -113,8 +114,8 @@ pub struct NotReady {
 pub struct RequestRecord {
     /// Prepares that failed, by a refusal or a timeout.
     pub prepare_failures: u32,
-    /// Drain give-ups: reservations of the request that passed their deadline with the
-    /// host not quiet.
+    /// Deprecated, always zero: a reservation is never given up. Kept so that the
+    /// records and the reservation ledger keep their shape.
     pub give_ups: u32,
     /// The hosts left out of the request's placements, and until when.
     pub exclusions: BTreeMap<HostId, Exclusion>,
@@ -181,7 +182,7 @@ impl Requests {
     }
 
     /// Drops the record of request `id`: its consumer cancelled it, so a later request
-    /// under the id starts with no failures, give-ups or exclusions.
+    /// under the id starts with no failures or exclusions.
     pub(crate) fn forget(&mut self, id: &RequestId) {
         self.calls.note();
         let key = RequestKey::from(id);
@@ -293,37 +294,6 @@ impl Requests {
         });
         self.records[at].touched = now;
         &mut self.records[at].record
-    }
-
-    /// Counts one drain give-up of the request under `key` on `host` at `now`; the host is
-    /// left out of its placements until `backoff_end`.
-    pub(crate) fn give_up(
-        &mut self,
-        key: RequestKey,
-        host: &HostId,
-        (now, backoff_end): (Timestamp, Timestamp),
-    ) {
-        self.calls.note();
-        let record = self.entry(key, now);
-        record.give_ups = record.give_ups.saturating_add(1);
-        record.exclude(host, Exclusion::Until(backoff_end));
-    }
-
-    /// Raises the drain give-ups counted for the request under `key` to `count` at `now`,
-    /// when that is more than are counted: the give-ups of a placer that keeps the
-    /// whole-node queue ([`crate::Placer::whole_give_ups`]). No host is excluded here: a
-    /// give-up's back-off stays the placer's.
-    pub(crate) fn raise_give_ups(&mut self, key: RequestKey, count: u32, now: Timestamp) {
-        self.calls.note();
-        if count > self.give_ups(&key) {
-            self.entry(key, now).give_ups = count;
-        }
-    }
-
-    /// The drain give-ups counted for the request under `key`.
-    pub(crate) fn give_ups(&self, key: &RequestKey) -> u32 {
-        self.calls.note();
-        self.record(key).map_or(0, |record| record.give_ups)
     }
 
     /// Counts one prepare failure of the request `lease` was committed for, as the row

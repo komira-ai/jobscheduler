@@ -4,14 +4,13 @@
 //! value against its pool.
 //!
 //! A pool file's values are loaded into this type and put on the registry's pool. The
-//! registry reads the caps, `drain_after`, `drain_deadline`, `reserve_backoff` and
-//! `max_reserve_attempts` of its reservations (`whole::reserve`), `prepare_timeout` and
+//! registry reads the caps, `drain_after` and `drain_deadline` of its reservations
+//! (`whole::reserve`), `reserve_backoff`, `prepare_timeout` and
 //! `max_replace` (the prepare failure handling, and how long a request's record is
 //! kept) and the dedicated defaults for a pool that has none; the lease server also
 //! hands `prepare_timeout` to its lease table.
 
-/// How long a host stays excluded for a request after a give-up or a failed prepare:
-/// five minutes.
+/// How long a host stays excluded for a request after a failed prepare: five minutes.
 pub const DEFAULT_RESERVE_BACKOFF_MS: u64 = 300_000;
 /// The default time a lease may take to become ready, counted from its commit: ten
 /// minutes.
@@ -40,11 +39,16 @@ pub struct WholeNodeConfig {
     pub allow_last_capable: bool,
     /// How long a request waits before it reserves; zero reserves at once.
     pub drain_after_ms: u64,
-    /// The reservation deadline; `None` is the pool's max wall time at use time.
+    /// When a reservation's host is expected to be drained at the latest, counted from
+    /// the reservation; `None` is the request's wall limit at use time. Reaching it
+    /// changes nothing: a reservation is never given up, and no running work is stopped.
+    /// There is no default and no cap.
     pub drain_deadline_ms: Option<u64>,
-    /// How long a host stays excluded for a request after a give-up or a failed prepare.
+    /// How long a host stays excluded for a request after a failed prepare.
     pub reserve_backoff_ms: u64,
-    /// Give-ups after which a reservation's deadline is the max wall time.
+    /// Deprecated and ignored: a reservation is never given up, so there are no attempts
+    /// to count. Still parsed and checked (it may not be zero) so that existing pool
+    /// files load unchanged.
     pub max_reserve_attempts: u32,
     /// The time a lease may take to become ready, counted from its commit.
     pub prepare_timeout_ms: u64,
@@ -84,7 +88,8 @@ impl WholeNodeConfig {
         }
     }
 
-    /// The reservation deadline for a pool whose max wall time is `max_wall_ms`.
+    /// The reservation deadline for a request whose wall limit is `max_wall_ms`:
+    /// `drain_deadline_ms` when set, else `max_wall_ms`.
     pub fn drain_deadline_ms(&self, max_wall_ms: u64) -> u64 {
         self.drain_deadline_ms.unwrap_or(max_wall_ms)
     }
@@ -115,5 +120,31 @@ impl WholeNodeConfig {
             .into_iter()
             .find(|(_, value)| *value == 0)
             .map(|(key, _)| key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_set_drain_deadline_is_the_deadline_shorter_or_longer_than_the_wall() {
+        // Catches: the deadline cut to the wall limit, or the wall limit taken whatever
+        // is set: no count of attempts changes it, and nothing caps it.
+        let set = |ms| WholeNodeConfig {
+            drain_deadline_ms: Some(ms),
+            ..WholeNodeConfig::dedicated(2)
+        };
+        assert_eq!(set(60).drain_deadline_ms(1_000), 60);
+        assert_eq!(set(5_000).drain_deadline_ms(1_000), 5_000);
+    }
+
+    #[test]
+    fn an_unset_drain_deadline_is_the_wall_limit() {
+        // Catches: treating `None` as zero, or as a default of its own.
+        let cfg = WholeNodeConfig::dedicated(2);
+        assert_eq!(cfg.drain_deadline_ms, None);
+        assert_eq!(cfg.drain_deadline_ms(1_000), 1_000);
+        assert_eq!(cfg.drain_deadline_ms(u64::MAX), u64::MAX);
     }
 }

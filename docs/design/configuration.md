@@ -426,7 +426,7 @@ max_whole_node = 2                          # this mixed pool offers whole-node 
 max_draining = 1                            # most hosts reserved and not yet held; default 1
 max_whole_node_per_consumer = 1             # default 1
 keep_for_ordinary = 1                       # hosts kept unmarked for ordinary work; default 1 in a mixed pool; max_whole_node + this <= max_machines
-drain_deadline = "4h"                       # a reservation is given up after this; default the pool's max wall time (whole-node.md, section 4)
+drain_deadline = "4h"                       # when a reserved host is expected to be drained at the latest, shown only; default the request's wall limit; nothing happens at it (whole-node.md, section 4)
 base_images = ["macos15-xcode16-a"]         # what an elastic host of this pool is launched with; the scaler counts a guest constraint as demand only if one of these can meet it
 [pool.capabilities]
 os = "macos"

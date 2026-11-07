@@ -155,7 +155,6 @@ fn a_cancel_returns_every_caller_and_clears_what_the_operation_held() {
     let mut f = busy(cfg(0, 2));
     let op = ask(&mut f);
     let state = RestoredWhole {
-        give_ups: 1,
         bars: BTreeMap::from([(w("c"), Bar::ForLife)]),
         ..restored(op, None)
     };
@@ -165,7 +164,6 @@ fn a_cancel_returns_every_caller_and_clears_what_the_operation_held() {
         matches!(cancelled, Cancelled::Queued { .. }),
         "{cancelled:?}"
     );
-    assert_eq!(f.s.whole_give_ups(op), 0);
     assert_eq!(f.s.whole_barred(op, t(0)), BTreeMap::new());
 }
 

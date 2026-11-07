@@ -90,17 +90,15 @@ request is then the pending lease the acquire made, the server presents it to th
 place and commits the host set aside for it), and `DELETE /v1/leases/{id}` of that pending lease is the cancel. A request without one is
 not queued: it is refused `no-capacity` while no host is quiet.*
 
-**Reservations survive a restart (D55).** *In the lease server, the registry's marks, the wait list's order and the give-up and failed-prepare counts are persisted as below, in the reservation ledger of the lease file. The js-sched copy of the state machine (`scheduler/whole.rs`) keeps its state in memory; under `--placement js-sched` the lease server runs it, writes the ledger from it (the marks, give-ups and back-offs of the requests it queues, and the failed prepares and bars of those it committed) and puts a restart's ledger back into it; it keeps the wait list as well (`js-sched-placer`'s `engine::wait`: the place and the first presentation), and the registry's own wait list, request records and marks are not called. A caller that keeps that state outside it puts it back with `restore_whole` (the queue time, the give-up count, the bars and the mark with its deadline and tail end) and sets a hard bar from outside with `bar_whole` (`Bar::Until` or `Bar::ForLife`: the worker is neither marked for nor granted to that request, quiet or not; a give-up's `Bar::Backoff` stays the soft bar it was). `cancel_whole` ends an operation in any state, dropping its mark in the same call, `unplace_keeping_queued_at` puts a lease back without restarting `drain_after`, and `whole_marked_worker`, `whole_holder` and `whole_room` read the marks, holders and quiet workers. These are methods, not events.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
+**Reservations survive a restart (D55).** *In the lease server, the registry's marks, the wait list's order and the failed-prepare counts are persisted as below, in the reservation ledger of the lease file. The js-sched copy of the state machine (`scheduler/whole.rs`) keeps its state in memory; under `--placement js-sched` the lease server runs it, writes the ledger from it (the marks of the requests it queues, and the failed prepares and bars of those it committed; a row's `give_ups` field is written 0) and puts a restart's ledger back into it; it keeps the wait list as well (`js-sched-placer`'s `engine::wait`: the place and the first presentation), and the registry's own wait list, request records and marks are not called. A caller that keeps that state outside it puts it back with `restore_whole` (the queue time, the bars and the mark with its deadline and tail end; a give-up count passed in is ignored) and sets a hard bar from outside with `bar_whole` (`Bar::Until` or `Bar::ForLife`: the worker is neither marked for nor granted to that request, quiet or not; a failed prepare's `Bar::Backoff` stays the soft bar it was). `cancel_whole` ends an operation in any state, dropping its mark in the same call, `unplace_keeping_queued_at` puts a lease back without restarting `drain_after`, and `whole_marked_worker`, `whole_holder` and `whole_room` read the marks, holders and quiet workers. These are methods, not events.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
 atomic write as the leases and under the same single-writer, fsync and lock rules, before the scheduler acts on it (commit before act). A
-*reservation record* holds: the request id, the host, the time reserved, the deadline, the request's two counters (`max_reserve_attempts`
-give-ups and `max_replace` prepare failures) and its host exclusions with their end times; in the registry's ledger it also holds the request's place on the wait list and the instant it was first presented, and whether the host was quiet when it was set aside (an assigned mark drains nothing). The record outlives the reservation only
+*reservation record* holds: the request id, the host, the time reserved, the deadline, the request's prepare-failure counter (`max_replace`; the older `give_ups` field is still in the record, written 0 and ignored when read) and its host exclusions with their end times; in the registry's ledger it also holds the request's place on the wait list and the instant it was first presented, and whether the host was quiet when it was set aside (an assigned mark drains nothing). The record outlives the reservation only
 while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
 cancelled or unclaimed. The queue's order is persisted (the place and the first-seen instant) but not what each request asks for (the table holds leases, not requests); a consumer presents the same request id
 again after a restart, as it re-presents any request, and the registry binds it to its record and its place (*in the lease server the consumer is the lease table: the pending lease keeps its request id and its request in the lease file, so the first tick after the boot presents it, and a client's repeat of the acquire answers the same lease*), so the drain in progress continues with its
-original deadline (raised to at least boot plus the boot grace, `RESERVATION_BOOT_GRACE`, two minutes in the lease server; never the stored deadline plus the grace; the lease-side grace is a separate setting, not yet wired) and the counters keep the bounds of sections 4 and 5 across any number of
+original deadline (raised to at least boot plus the boot grace, `RESERVATION_BOOT_GRACE`, two minutes in the lease server; never the stored deadline plus the grace; the lease-side grace is a separate setting, not yet wired) and the counter keeps the bound of section 5 across any number of
 restarts. A record not claimed within `regain_grace` of the boot is dropped, and the host returns to `serving`. Why persisted: the drain
-is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain and let a restart loop
-defeat `max_reserve_attempts`. A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer
+is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain. A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer
 exists is dropped at boot, and counted (a request id listed twice, a host being given back, a host two records name, and a mark with no place on the wait list are dropped at once; a request not presented again, and a mark whose host does not say hello, within `regain_grace`). The file is one tick behind the registry at most, and the final tick of a shutdown brings it level. Estimates are not persisted: they are recomputed. The file format is additive; a build that does not know the keys reads past them. Cost: a few small rows, written with the same rewrite as the leases.
 
 ## 4. Draining
@@ -126,20 +124,14 @@ exist. (The scheduler-side mark is `reserved`; the agent-announced phase `draini
 - The scheduler never stops a lease or a run because of a reservation (D48). The only work released early is the requesting consumer's
   own, if it chooses to release it.
 
-**The drain bound.** Every reservation has a deadline, `drain_deadline` (pool configuration; default: the pool's max wall time, so that no
-running lease is cut short by design: by that time every lease that was on the host at the reservation has ended). An operator may set it
-shorter. When it passes with the host still not quiet, the reservation is **given up**: the host returns to `serving`, nothing on it was
-touched, the request returns to the queue with that host excluded for it for `reserve_backoff`, and it reserves the cheapest other host by
-the rule above. If no other host is available the request waits unreserved until the back-off ends. Give-ups are counted per request:
-after `max_reserve_attempts` of them (default 2) the deadline of its next reservation is the pool's max wall time whatever
-`drain_deadline` says, and that reservation cannot be given up for a non-quiet host, since by then every lease on the host has ended.
-Once the count has reached the cap the scheduler does not give the reservation up at that deadline either: the deadline is the request's own
-wall time, which may be shorter than the max wall of a lease that was on the host, and the reservation stays until the host is quiet or the
-request is cancelled. The bound assumes the pool's max wall time: a request submitted with no wall time has no deadline of its own (its reservation after the cap
-never ends before the host is quiet or the request is cancelled), so a consumer that wants the bound gives every request a wall time.
-Load validation refuses nothing here; the counter alone makes the bound hold for every setting. Stopping other tenants' work was
-considered and rejected (D48): a deadline that kills is a silent loss for a tenant who did nothing wrong, and it would let one consumer's
-request destroy another's results; re-queueing wastes only the drain already spent, which the caps bound.
+**The drain bound.** A drain never cuts work and never gives up. Every reservation has a deadline: `drain_deadline` if the pool sets it, else the
+request's own wall limit (in the registry, the larger of that and the host wait); there is no default of its own and no cap. The deadline is
+informational: it is when the host is expected to be drained at the latest, and it is shown as `drain_deadline_ms` on the hosts listing and in
+the view of the waiting. Reaching it changes nothing: the reservation stays, no host is barred or excluded, and nothing is counted. The request
+keeps its host until the host is quiet and it is committed, until it is cancelled, until the host is tainted or gone, or until the ceiling falls;
+it still moves to a quiet host if one turns up first. Whole-node placement reserves the fitting host with the least estimated remaining time (the
+tail), so the wait is the shortest the leases on the hosts allow. Stopping other tenants' work was considered and rejected (D48): a deadline that
+kills is a silent loss for a tenant who did nothing wrong, and it would let one consumer's request destroy another's results.
 
 **The host is quiet** when the scheduler's table shows no lease and no placed run on it. The scheduler then commits the whole-node lease
 (state `pending`), the host mark becomes `held`, and the lease follows section 5.
@@ -157,7 +149,7 @@ request destroy another's results; re-queueing wastes only the drain already spe
 3. **Not ready in time.** `prepare_timeout` (pool configuration, default 10 minutes) is one deadline counted from the commit of the lease:
    the agent must report `exclusive_ready` or a refusal (item 4) before it. A silent agent (no `preparing` phase, no report, or a host that
    goes lost in the interval) is the same case as one that is slow. When it passes, the scheduler gives the lease up, tells the consumer,
-   excludes that host for this request for `reserve_backoff`, and the request is placed again. A finding on the way taints the host as usual
+   excludes that host for this request for `reserve_backoff` (which sizes only this failed-prepare exclusion), and the request is placed again. A finding on the way taints the host as usual
    and ends the reservation on it.
 4. **A readiness refusal is typed and acts at once.** The agent (or a readiness hook it runs, item 5) may instead report
    `exclusive_refused` in the heartbeat: the lease id, a **reason code** from the bounded set below, and a **detail** of text, which the receiver cuts to at most 256 bytes (the longest prefix within the bound that ends on a character
@@ -175,8 +167,7 @@ request destroy another's results; re-queueing wastes only the drain already spe
    An unknown code (a newer agent) is read as `setup-failed` (R3). The codes are data in the scheduler's table of reasons, not branches in
    its logic: each row is the pair (host effect, request effect) above, so a new code is a new row. Every row, and a timeout, is a
    **prepare failure**: it ends the lease, clears the reservation on the host once the agent has restored it (section 8), and counts one
-   toward the request's `max_replace` (default 3). It does **not** count toward `max_reserve_attempts`, which counts only drain give-ups
-   (section 4); the two counters are separate and each is kept with the request (section 3). The request is re-queued on another eligible
+   toward the request's `max_replace` (default 3). A drain is never given up, so nothing else counts against the request (section 4); `max_reserve_attempts` is deprecated: the pool file still parses and validates it (zero is refused) and it is ignored. The request is re-queued on another eligible
    host at once if one is available; otherwise it waits until the exclusion ends (the back-off). After `max_replace` prepare failures the
    request fails `exclusive-not-ready`, and its detail names the last code and detail reported.
 
@@ -215,7 +206,8 @@ held. A request waiting unreserved counts toward nothing.
 | `max_whole_node_per_consumer` | most hosts one authenticated consumer has whole at once in the pool (K7: the caller's identity, not a request field) | 1 for a mixed pool whose lease API authenticates per-consumer identities; `max_whole_node` (no limit) in a dedicated pool, and wherever the API has no per-consumer identity (the merged single-token service: every client is one consumer). An operator may set 1 explicitly. |
 | `keep_for_ordinary` | fewest hosts of a mixed pool that are neither reserved nor held, so ordinary work always has them | 1 for a mixed pool, 0 for a dedicated one |
 | `allow_last_capable` | whether a reservation may start on the last unreserved capable host of an ordinary request queued ahead of it | false |
-| `drain_after`, `drain_deadline`, `reserve_backoff`, `max_reserve_attempts`, `prepare_timeout`, `max_replace` | times and the retry caps of sections 3 to 5 | see there |
+| `drain_after`, `drain_deadline`, `reserve_backoff`, `prepare_timeout`, `max_replace` | times and the retry cap of sections 3 to 5; `reserve_backoff` sizes only the failed-prepare exclusion; `drain_deadline` is when the host is expected drained, with no default of its own (the request's wall limit) and no effect on reaching it | see there |
+| `max_reserve_attempts` | deprecated: parsed and validated (zero is refused), ignored | none |
 
 **The effective ceiling** is `min(max_whole_node, capable_hosts - keep_for_ordinary)`, where `capable_hosts` are the pool's hosts that are
 capable for its ordinary class (tainted, denied and releasing hosts excluded; lost ones counted). A reservation starts only while whole
@@ -244,8 +236,8 @@ rule does not read it as taking a host from the request that holds it.*
 
 *The view of the waiting (`js-sched`).* `whole_state(op)` is one value for a queued whole-machine request when the settings are on (`None`
 otherwise, and for a request that is not a queued whole-machine one): `Early` (before `drain_after`, with the time it may hold), `Holding` (the
-worker, when the hold was made, its deadline, or none once `max_reserve_attempts` holds were given up, the give-ups so far, and whether the
-worker still has leases), `Barred` (some workers are barred to it, by a give-up's back-off or by `bar_whole`, and no other worker could be held: each barred worker and when its bar ends, the end of time for a bar for life),
+worker, when the hold was made, its deadline, which is kept once passed, and whether the
+worker still has leases), `Barred` (some workers are barred to it, by a failed prepare's back-off or by `bar_whole`, and no other worker could be held: each barred worker and when its bar ends, the end of time for a bar for life),
 `Stopped` (the cap or the last-capable rule of `whole_wait`), `Queued` (past `drain_after`, nothing recorded: the workers it could hold are
 held by requests ahead, or no round has run since it became due or its bar ended; a status page may label it "Waiting") and `Unservable` (no live worker could ever run it, with `waiting`'s reason as text, to show, and as an `Unservable` value in `cause`, to match on, count or group by; also before `drain_after`). It reads what
 the last placement round recorded, except two things read at the time now: whether the request is before `drain_after`, and which bars have not ended (one that ended since the last round shows `Queued`, not `Barred`). `whole_summary()` gives the numbers the caps read between rounds:
@@ -266,10 +258,9 @@ host does no work), and the ceiling bounds the capacity held by granted leases. 
 request that fits such a host is placed as without this class. The one exception is a fall of the ceiling (a host lost or tainted) while
 leases are held: the floor is then restored after at most the longest remaining max wall time of those held leases, and meanwhile no
 reservation exists beyond the ceiling. A queued ordinary request is delayed by whole-node work only by the
-hosts it holds. Whole-node work: a request holding a reservation is committed within `drain_deadline` or gives up; after at most
-`max_reserve_attempts` give-ups its reservation has the max wall time as deadline, and a reserved host is empty by then because nothing
-new is placed on it. So the request is committed within `max_reserve_attempts` times `drain_deadline`, plus the max wall time, plus
-`prepare_timeout` for each of at most `max_replace` tries, for every setting of `drain_deadline`. A request without a reservation waits for a slot: each
+hosts it holds. Whole-node work: a request holding a reservation keeps it, and the reserved host is empty once the leases that were on it
+have ended, within their max wall time, because nothing new is placed on it. So the request is committed within the max wall time, plus
+`prepare_timeout` for each of at most `max_replace` tries, for every setting of `drain_deadline`, which changes only the deadline shown. A request without a reservation waits for a slot: each
 slot is held for at most the whole-node lease's own max wall time plus its drain, so its wait is finite and a function of its queue
 position, the ceiling and the limits. These are properties of the injected clock, tested on it (R2).
 
@@ -372,9 +363,9 @@ Invariants, checked at every step of seeded runs of the fake agent and the simul
   most `max_draining`; each consumer within its limit; no reservation starts unless at least `keep_for_ordinary` hosts of a mixed pool
   would stay unmarked. When the ceiling has fallen under held leases, unmarked hosts may be fewer until those leases end (at most the
   longest remaining max wall time); reservations beyond the ceiling are dropped at once, and the test asserts both forms.
-- W6. **The drain is bounded:** every reservation ends, by commit, deadline give-up or cancel, by the deadline on the injected clock; a
-  give-up touches no work; a request gives up at most `max_reserve_attempts` times, and its next reservation then carries the max wall
-  time as deadline and commits.
+- W6. **The drain is never given up:** a reservation ends by commit, cancel, a tainted or lost host or a fall of the ceiling, never by its
+  deadline; a mark kept at and past its deadline gives up nothing, excludes no host and counts nothing, and the host is committed when it
+  empties.
 - W7. **Nothing is killed for a reservation:** the scheduler stops no lease or run because of one.
 - W8. Refused only when no registered host could ever be given whole and no elastic provider could launch one (D35); a busy, lost, cordoned
   or reserved host is capable; a tainted or denied host is not.
@@ -387,27 +378,25 @@ Invariants, checked at every step of seeded runs of the fake agent and the simul
   idle rule when a quiet host took the request first.
 - W13. **Reservations survive a restart.** After a restart over the same store, every reservation whose request is presented again within
   `regain_grace` is the same (host, deadline plus boot grace, both counters, exclusions); none is lost, none is made twice, no host
-  carries two; an unclaimed record is dropped and its host returns to `serving`; a restart never resets `max_reserve_attempts` or
-  `max_replace`, so the bounds of W6 and W14 hold across restarts.
+  carries two; an unclaimed record is dropped and its host returns to `serving`; a restart never resets `max_replace`, so the bound of W14 holds across restarts; a ledger record with an older `give_ups` count parses, restores and is written back as 0.
 - W14. **A prepare failure is acted on at once and counted once.** A typed refusal ends the lease without waiting for `prepare_timeout`,
-  excludes or taints the host as its row says, and counts one toward `max_replace` and none toward `max_reserve_attempts`; a request
+  excludes or taints the host as its row says, and counts one toward `max_replace`; a request
   fails `exclusive-not-ready` after `max_replace` of them and not before; an unknown code acts as `setup-failed`; no scheduler decision
   depends on a measured value.
 
 Cases: a drain of a host with three leases ending at different bounds picks the host with the smallest bound, then the fewest leases, then
-the lowest id; a give-up at the deadline re-queues on another host and the first is excluded for `reserve_backoff`; an agent that finds a
+the lowest id; a mark that reaches its deadline is kept, with nothing excluded and nothing counted; an agent that finds a
 VM at `preparing` destroys it and reports a finding; a timeout (a silent agent) gives the lease up, excludes the host for
 `reserve_backoff` and the retries stop at `max_replace`; a `noise-over-bound` refusal re-queues the request on another host at once,
-without waiting for `prepare_timeout`, counts toward `max_replace` and not `max_reserve_attempts`, and the same request after a drain
-give-up counts the other way; `host-unsafe` taints and `unsupported` excludes for good; an unknown code acts as `setup-failed`; a
-detail over 256 bytes is cut by the receiver to a character boundary and the heartbeat is accepted with its results, held list and code; a restart in the middle of a drain (three leases left on the reserved host, one give-up already counted)
-keeps the host reserved with the same deadline once the request is presented again, and a restart loop does not reset the counters; an
+without waiting for `prepare_timeout`, counts toward `max_replace`; `host-unsafe` taints and `unsupported` excludes for good; an unknown code acts as `setup-failed`; a
+detail over 256 bytes is cut by the receiver to a character boundary and the heartbeat is accepted with its results, held list and code; a restart in the middle of a drain (three leases left on the reserved host)
+keeps the host reserved with the same deadline once the request is presented again, and a restart loop does not reset the counter; an
 unclaimed record is dropped after `regain_grace`; a lease lost mid-run is reported gone and the scheduler issues no rerun; `gpu-host` configs
 and lease files from the merged service load as the retained `gpu-host` alias (id, `min_gpus` 1 and error text unchanged) and its tests
 pass unchanged, including two hosts taken with the one bearer token because the per-consumer default is no limit there; a GPU request
 under class `action` is refused `no-matching-pool`; with an explicit per-consumer limit of 1 on a GPU pool of two hosts and per-consumer
 identities, a consumer's second request waits while another consumer's first is granted; a `drain_deadline` shorter than the max wall time
-gives up `max_reserve_attempts` times and then commits.
+is passed with the mark kept, and the host is committed when it empties.
 
 ## 12. Extraction steps
 

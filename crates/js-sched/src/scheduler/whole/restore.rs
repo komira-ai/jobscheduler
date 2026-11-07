@@ -21,8 +21,6 @@ pub struct RestoredWhole {
     pub operation: OperationId,
     /// When it entered the queue: `drain_after` counts from it.
     pub queued_at: FarmTime,
-    /// How many holds it has given up ([`Scheduler::whole_give_ups`]).
-    pub give_ups: u32,
     /// The workers barred to it, and how ([`Scheduler::whole_barred`]).
     pub bars: BTreeMap<WorkerId, Bar>,
     /// The mark it has, if it is queued and holds a worker.
@@ -36,7 +34,7 @@ pub struct RestoredMark {
     pub worker: WorkerId,
     /// When the mark was made.
     pub made: FarmTime,
-    /// When the hold is given up if the worker is still busy.
+    /// When the worker is expected to be drained at the latest ([`WholeMark::deadline`]).
     pub deadline: FarmTime,
     /// The end of the worker's tail when the mark was made (`None`: not known).
     pub tail_end: Option<FarmTime>,
@@ -89,14 +87,13 @@ pub enum WholeError {
 impl Scheduler {
     /// Puts back the whole-node state `state` names for an operation this scheduler holds
     /// (one taken up with [`Scheduler::recover`] or [`Scheduler::take_in`], or submitted):
-    /// its queue time, its give-up count, its bars and its mark, each replacing what the
-    /// scheduler has for it. A restart then neither restarts `drain_after` nor the count
-    /// toward `max_reserve_attempts`, nor lifts a back-off or a bar, and a standing mark
-    /// keeps its deadline and its tail end: the next round's backfill start on the worker
-    /// is the restored tail end (or the tail now, if that ends sooner), never the start
-    /// the mark it replaces held by. The next placement round reads them as it reads its
-    /// own: the mark is counted by the caps, kept while its worker is the pick, and given
-    /// up at its deadline.
+    /// its queue time, its bars and its mark, each replacing what the scheduler has for
+    /// it. A restart then neither restarts `drain_after` nor lifts a back-off or a bar,
+    /// and a standing mark keeps its deadline and its tail end: the next round's backfill
+    /// start on the worker is the restored tail end (or the tail now, if that ends
+    /// sooner), never the start the mark it replaces held by. The next placement round
+    /// reads them as it reads its own: the mark is counted by the caps and kept while its
+    /// worker could hold the request, past its deadline too.
     ///
     /// Refused, changing nothing, without whole-node settings ([`WholeError::Off`]), for
     /// an operation it does not hold or that is not a whole-machine request, and for a mark
@@ -107,7 +104,6 @@ impl Scheduler {
         let RestoredWhole {
             operation,
             queued_at,
-            give_ups,
             bars,
             mark,
         } = state;
@@ -118,7 +114,7 @@ impl Scheduler {
         self.ops
             .entry(operation)
             .and_modify(|op| op.queued_at = queued_at);
-        self.drain.restore(operation, give_ups, bars);
+        self.drain.restore(operation, bars);
         // The start a hold kept from the mark it replaces is not the restored mark's.
         self.backfill.forget(operation);
         self.drain.marks.remove(&operation);
@@ -138,8 +134,7 @@ impl Scheduler {
     /// stronger bar, [`Bar`]): from the next placement round the operation does not mark
     /// it, and, unless `bar` is a [`Bar::Backoff`], is not granted it either, quiet or not,
     /// even when it is the last worker that could run the operation (it then waits, and is
-    /// not refused for it). A mark the operation has on `worker` is dropped at once, with
-    /// no give-up counted. Other operations are not affected, and neither is
+    /// not refused for it). A mark the operation has on `worker` is dropped at once. Other operations are not affected, and neither is
     /// [`crate::Fate::avoid`], which stays a preference. The worker need not have
     /// registered.
     ///
@@ -163,9 +158,8 @@ impl Scheduler {
         Ok(())
     }
 
-    /// The workers barred to `operation` at `now`, each with its bar: the back-offs of the
-    /// holds it gave up and the bars set with [`Scheduler::bar_whole`] or restored, those
-    /// that have not ended. Empty for an operation the scheduler holds no bar for.
+    /// The workers barred to `operation` at `now`, each with its bar: those set with
+    /// [`Scheduler::bar_whole`] or restored, those that have not ended. Empty for an operation the scheduler holds no bar for.
     #[must_use]
     pub fn whole_barred(&self, operation: OperationId, now: FarmTime) -> BTreeMap<WorkerId, Bar> {
         self.drain.bars_at(operation, now)

@@ -526,7 +526,7 @@ lease that books a host's shape under `Book` is a share, not this class.
   registered host could ever be given whole and no elastic provider could launch one; otherwise queued (D35). A quiet host is taken at
   once, else exactly one host is reserved: least worst-case drain, then fewest leases, then lowest id. The only reservation (R1).
 - **Draining.** A reserved host takes no new work but backfill ending a minute before its tail (whole-node.md 4); its work finishes or
-  reaches its end. At `drain_deadline` (default: the pool's max wall time) the reservation is given up and another host tried; nothing
+  reaches its end. `drain_deadline` (default: the request's wall limit) is when the host is expected to be drained at the latest; reaching it changes nothing and the reservation is kept; nothing
   is stopped for a reservation. The token is minted only when the agent reports the host quiet, and the clock starts then (D48, D52).
 - **Caps.** Per pool `max_whole_node`, `max_draining`, a per-consumer limit and a floor of unmarked hosts in a mixed pool; a held lease is
   never revoked (D49). An elastic pool acquires before it drains (D50). Release returns the host only after the checks; host jobs only in

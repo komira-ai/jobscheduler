@@ -29,8 +29,7 @@
 //!   whose host never came back is dropped and counted; one on a tainted host is dropped.
 //!
 //! A request that leaves the list leaves the engine's queue at once ([`Engine::leave`]): its
-//! mark or pending grant goes, and the holds it gave up are kept, as the registry keeps them
-//! in the request's record, for its next presentation within the idle horizon.
+//! mark or pending grant goes, and nothing of its wait is carried to a next presentation.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -264,7 +263,7 @@ impl Engine {
             .wait
             .present((id, lease, request), capable, at, millis(grace));
         if presented == Presented::Unservable {
-            self.leave(id, now);
+            self.leave(id);
         }
         presented
     }
@@ -274,23 +273,23 @@ impl Engine {
     pub fn whole_expire(&mut self, grace: Duration, now: FarmTime) -> u64 {
         let gone = self.wait.expire(stamp(now), millis(grace));
         for id in gone {
-            self.leave(&id, now);
+            self.leave(&id);
         }
         std::mem::take(&mut self.wait.dropped)
     }
 
-    /// Takes `id` off the list and out of the queue at `now`; whether it waited.
-    pub fn whole_cancel(&mut self, id: &RequestId, now: FarmTime) -> bool {
+    /// Takes `id` off the list and out of the queue; whether it waited.
+    pub fn whole_cancel(&mut self, id: &RequestId) -> bool {
         let waited = self.wait.cancel(id);
-        self.leave(id, now);
+        self.leave(id);
         waited
     }
 
-    /// Takes the request `lease` presented last off the list and out of the queue at `now`.
-    pub fn whole_cancel_lease(&mut self, lease: &LeaseId, now: FarmTime) -> Option<RequestId> {
+    /// Takes the request `lease` presented last off the list and out of the queue.
+    pub fn whole_cancel_lease(&mut self, lease: &LeaseId) -> Option<RequestId> {
         let at = self.wait.of_lease(lease)?;
         let id = self.wait.entries[at].id.clone();
-        self.whole_cancel(&id, now);
+        self.whole_cancel(&id);
         Some(id)
     }
 
@@ -318,7 +317,8 @@ impl Engine {
         Waiter {
             id: entry.id.clone(),
             since: entry.since,
-            give_ups: self.give_ups_of(&entry.id),
+            // No hold is given up, so none is counted.
+            give_ups: 0,
             marked: entry.marked,
         }
     }
@@ -419,35 +419,15 @@ impl Engine {
         held
     }
 
-    /// Request `id` left the wait list at `now`: its mark put back goes, and it leaves the
-    /// queue, its mark or pending grant with it, keeping the holds it gave up for its next
-    /// presentation within the idle horizon.
-    pub(super) fn leave(&mut self, id: &RequestId, now: FarmTime) {
+    /// Request `id` left the wait list: its mark put back goes, and it leaves the queue,
+    /// its mark or pending grant with it.
+    pub(super) fn leave(&mut self, id: &RequestId) {
         self.wait.kept.remove(id);
         let Some(operation) = self.whole.remove(id) else {
             return;
         };
-        let give_ups = self.sched.whole_give_ups(operation);
-        if give_ups > 0 {
-            let carried = self.carried.entry(id.clone()).or_default();
-            carried.0 = carried.0.max(give_ups);
-            self.restored.insert(id.clone(), now);
-        }
         self.prepare.dequeue(id);
         let _ = self.sched.cancel_whole(operation);
-    }
-
-    /// The holds request `id` has given up: the most the queue, a carried count or its
-    /// record holds.
-    pub(super) fn give_ups_of(&self, id: &RequestId) -> u32 {
-        let queued = self.whole.get(id).map(|op| self.sched.whole_give_ups(*op));
-        let carried = self.carried.get(id).map(|carried| carried.0);
-        let kept = self.prepare.give_ups_of(id);
-        [queued, carried, kept]
-            .into_iter()
-            .flatten()
-            .max()
-            .unwrap_or(0)
     }
 }
 

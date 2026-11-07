@@ -15,8 +15,8 @@ mod whole_rig;
 use std::collections::BTreeMap;
 
 use js_sched::{
-    DaemonInstance, Event, Request, Scheduler, Unservable, WholeReason, WholeState, WholeSummary,
-    WholeWait,
+    Bar, DaemonInstance, Event, Request, Scheduler, Unservable, WholeReason, WholeState,
+    WholeSummary, WholeWait,
 };
 use js_types::sched::{FarmTime, LeaseGrant, LeaseKind, NodePhase, OperationId, Resources};
 use js_whole::WholeNodeConfig;
@@ -90,17 +90,11 @@ fn next_round(f: &mut Farm) {
     tick_at(f, at);
 }
 
-fn holding(
-    (worker, tail_end): (&str, u64),
-    made: u64,
-    deadline: Option<u64>,
-    give_ups: u32,
-) -> WholeState {
+fn holding((worker, tail_end): (&str, u64), made: u64, deadline: u64) -> WholeState {
     WholeState::Holding {
         worker: w(worker),
         made: t(made),
-        deadline: deadline.map(t),
-        give_ups,
+        deadline: t(deadline),
         draining: true,
         tail_end: Some(t(tail_end)),
     }
@@ -134,25 +128,19 @@ fn before_drain_after_a_request_holds_nothing_and_then_holds() {
     );
     assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Early, 1)]));
     tick_at(&mut f, 30_000);
-    assert_eq!(
-        state(&f, op),
-        holding(("a", 600_000), 30_000, Some(90_000), 0)
-    );
+    assert_eq!(state(&f, op), holding(("a", 600_000), 30_000, 90_000));
     assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Holding, 1)]));
 }
 
-/// Catches: the hold's fields wrong: the worker, when it was made, the deadline and the
-/// give-up count are the mark's and the counter's; the worker is draining while it has a
+/// Catches: the hold's fields wrong: the worker, when it was made, the and the
+/// deadline are the mark's; the worker is draining while it has a
 /// lease and no longer once the lease ended, before the round that grants it; granted,
 /// the request leaves the view.
 #[test]
 fn a_hold_shows_its_worker_deadline_and_whether_it_is_draining_until_granted() {
     let (mut f, grants) = busy(cfg(0, 2), &[("a", 600)]);
     let op = ask(&mut f);
-    assert_eq!(
-        state(&f, op),
-        holding(("a", 600_000), 10_000, Some(70_000), 0)
-    );
+    assert_eq!(state(&f, op), holding(("a", 600_000), 10_000, 70_000));
     let mark = f.s.whole_mark(op).cloned().expect("marked");
     assert_eq!(
         (mark.made, Some(mark.deadline)),
@@ -163,7 +151,6 @@ fn a_hold_shows_its_worker_deadline_and_whether_it_is_draining_until_granted() {
         worker,
         made,
         deadline,
-        give_ups,
         draining,
         tail_end,
     } = state(&f, op)
@@ -171,8 +158,8 @@ fn a_hold_shows_its_worker_deadline_and_whether_it_is_draining_until_granted() {
         panic!("holds");
     };
     assert_eq!(
-        (worker, made, deadline, give_ups, tail_end),
-        (w("a"), t(10_000), Some(t(70_000)), 0, Some(t(600_000)))
+        (worker, made, deadline, tail_end),
+        (w("a"), t(10_000), t(70_000), Some(t(600_000)))
     );
     assert!(!draining);
     let s = summary(&f);
@@ -187,83 +174,45 @@ fn a_hold_shows_its_worker_deadline_and_whether_it_is_draining_until_granted() {
     assert_eq!(summary(&f).waiting, counts(&[]));
 }
 
-/// Catches: the back-off of a give-up not shown: the only worker is given up at its
-/// deadline and barred until exactly the back-off ends, with the give-up counted; then it
-/// is held again, and granted when its lease ends.
+/// Catches: a back-off bar not shown: the only worker is barred with a back-off that
+/// ends at 80 s, so the request shows as barred until exactly then; it is then held again,
+/// and granted when its lease ends.
 #[test]
-fn a_given_up_hold_is_barred_until_the_backoff_ends_then_holds_again() {
+fn a_backed_off_worker_is_barred_until_the_backoff_ends_then_holds_again() {
     let (mut f, grants) = busy(cfg(0, 2), &[("a", 600)]);
     let op = ask(&mut f);
+    assert_eq!(f.s.bar_whole(op, w("a"), Bar::Backoff(t(80_000))), Ok(()));
     tick_at(&mut f, 70_000);
     let barred = WholeState::Barred {
         workers: BTreeMap::from([(w("a"), t(80_000))]),
-        give_ups: 1,
     };
     assert_eq!(state(&f, op), barred);
-    assert_eq!(f.s.whole_give_ups(op), 1);
     assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Barred, 1)]));
     tick_at(&mut f, 79_999);
     assert_eq!(state(&f, op), barred);
     tick_at(&mut f, 80_000);
-    assert_eq!(
-        state(&f, op),
-        holding(("a", 600_000), 80_000, Some(140_000), 1)
-    );
+    assert_eq!(state(&f, op), holding(("a", 600_000), 80_000, 140_000));
     f.finish(&grants[0]);
     assert_eq!(f.advance(90_000).len(), 1);
     assert_eq!(f.s.whole_state(op), None);
 }
 
-/// Catches: the next worker and the end of give-ups not shown: given up at its deadline,
-/// the request holds the other worker at once with the count raised; given up there
-/// too (the attempts it has are two), it holds the first again with no deadline, as it is
-/// not given up again, and is granted when that worker empties.
+/// Catches: a mark that is moved or dropped at its deadline, or a hold that shows no
+/// deadline: the request holds `a`, the cheaper to drain, from 10 s with its deadline at
+/// 70 s; past that deadline, and however long it waits after, it still holds `a` with the
+/// mark as it was made, and it is granted when `a` empties.
 #[test]
-fn a_given_up_request_holds_another_worker_and_at_the_cap_no_deadline() {
+fn a_hold_is_kept_on_its_worker_past_its_deadline() {
     let (mut f, grants) = busy(cfg(0, 2), &[("a", 600), ("b", 1_200)]);
     let op = ask(&mut f);
-    assert_eq!(
-        state(&f, op),
-        holding(("a", 600_000), 10_000, Some(70_000), 0)
-    );
+    let on_a = holding(("a", 600_000), 10_000, 70_000);
+    assert_eq!(state(&f, op), on_a);
     tick_at(&mut f, 70_000);
-    assert_eq!(
-        state(&f, op),
-        holding(("b", 1_200_000), 70_000, Some(130_000), 1)
-    );
+    assert_eq!(state(&f, op), on_a);
     tick_at(&mut f, 130_000);
-    assert_eq!(state(&f, op), holding(("a", 600_000), 130_000, None, 2));
+    assert_eq!(state(&f, op), on_a);
     f.finish(&grants[0]);
     let granted = f.advance(140_000);
-    assert_eq!(granted.len(), 1);
-    assert_eq!((granted[0].operation, &granted[0].worker), (op, &w("a")));
-    assert_eq!(f.s.whole_state(op), None);
-}
-
-/// Catches: a mark that moves back to the cheaper worker when a back-off ends, or is given
-/// up again at the cap. `a` is always the cheaper to drain. Given up there at 70 s the
-/// request holds `b`, and stays on `b` when `a`'s back-off ends at 80 s. Given up on `b`
-/// at 130 s (count two, the attempts it has) it holds `a` with no deadline, and stays on
-/// `a` when `b`'s back-off ends at 140 s and however long it waits after, with the mark
-/// as it was made; it is granted when `a` empties.
-#[test]
-fn a_mark_stays_on_its_worker_when_a_back_off_ends_and_at_the_cap() {
-    let (mut f, grants) = busy(cfg(0, 2), &[("a", 600), ("b", 1_200)]);
-    let op = ask(&mut f);
-    tick_at(&mut f, 70_000);
-    let on_b = holding(("b", 1_200_000), 70_000, Some(130_000), 1);
-    assert_eq!(state(&f, op), on_b);
-    tick_at(&mut f, 80_000);
-    assert_eq!(state(&f, op), on_b);
-    tick_at(&mut f, 130_000);
-    let on_a = holding(("a", 600_000), 130_000, None, 2);
-    assert_eq!(state(&f, op), on_a);
-    for ms in [140_000, 150_000, 900_000] {
-        tick_at(&mut f, ms);
-        assert_eq!(state(&f, op), on_a, "at {ms} ms");
-    }
-    f.finish(&grants[0]);
-    let granted = f.advance(910_000);
     assert_eq!(granted.len(), 1);
     assert_eq!((granted[0].operation, &granted[0].worker), (op, &w("a")));
     assert_eq!(f.s.whole_state(op), None);
@@ -574,6 +523,7 @@ fn the_summary_follows_the_capable_hosts() {
 fn an_ended_backoff_shows_queued_until_the_next_round() {
     let (mut f, _) = busy(cfg(0, 2), &[("a", 600)]);
     let op = ask(&mut f);
+    assert_eq!(f.s.bar_whole(op, w("a"), Bar::Backoff(t(80_000))), Ok(()));
     tick_at(&mut f, 70_000);
     assert!(matches!(state(&f, op), WholeState::Barred { .. }));
     f.at(85_000);
@@ -583,8 +533,8 @@ fn an_ended_backoff_shows_queued_until_the_next_round() {
     assert!(matches!(state(&f, op), WholeState::Holding { .. }));
 }
 
-/// Catches: `Barred` checked before `Stopped`: a request that gave up its hold on `a` (barred
-/// there) and whose only other worker `b` is the last capable one of an older ordinary
+/// Catches: `Barred` checked before `Stopped`: a request barred from `a` by a back-off
+/// and whose only other worker `b` is the last capable one of an older ordinary
 /// request shows the stop, as `whole_wait` does.
 #[test]
 fn a_request_both_barred_and_stopped_shows_the_stop() {
@@ -614,12 +564,9 @@ fn a_request_both_barred_and_stopped_shows_the_stop() {
     });
     assert!(f.grants().is_empty(), "only b could run it, and it is busy");
     let op = ask(&mut f);
-    assert_eq!(
-        state(&f, op),
-        holding(("a", 60_000), 10_000, Some(70_000), 0)
-    );
+    assert_eq!(state(&f, op), holding(("a", 60_000), 10_000, 70_000));
+    assert_eq!(f.s.bar_whole(op, w("a"), Bar::Backoff(t(80_000))), Ok(()));
     tick_at(&mut f, 70_000);
-    assert_eq!(f.s.whole_give_ups(op), 1);
     assert_eq!(f.s.whole_wait(op), Some(WholeWait::LastCapable));
     assert_eq!(state(&f, op), WholeState::Stopped(WholeWait::LastCapable));
 }

@@ -34,14 +34,13 @@ use crate::whole_api::{
 };
 use crate::whole_rig::{Farm, request, secs, w};
 
-/// Catches: a restart that loses the queue time, the give-up count or the mark (today's
-/// `recover` takes the time now and starts every count at zero): an operation taken up at
-/// 200 s and restored as queued at 100 s with one give-up and a mark on `a` keeps the mark
-/// in the next round without waiting `drain_after` (30 s) again, with the restored time,
-/// deadline and tail end (500 s, not the 600 s the worker's tail reads now), and the
-/// give-up at that deadline is counted as the second, with the back-off it sets readable.
+/// Catches: a restart that loses the queue time or the mark (today's `recover` takes the
+/// time now): an operation taken up at 200 s and restored as queued at 100 s with a mark on
+/// `a` keeps the mark in the next round without waiting `drain_after` (30 s) again, with the
+/// restored time, deadline and tail end (500 s, not the 600 s the worker's tail reads now),
+/// and keeps it past that deadline with nothing barred.
 #[test]
-fn restore_whole_keeps_give_ups_queued_at_and_the_mark() {
+fn restore_whole_keeps_queued_at_and_the_mark() {
     let mut f = busy(cfg(30_000, 2));
     assert!(f.advance(200_000).is_empty());
     let op = f.s.next_operation();
@@ -64,7 +63,6 @@ fn restore_whole_keeps_give_ups_queued_at_and_the_mark() {
     let state = RestoredWhole {
         operation: op,
         queued_at: t(100_000),
-        give_ups: 1,
         bars: BTreeMap::new(),
         mark: Some(mark),
     };
@@ -78,17 +76,12 @@ fn restore_whole_keeps_give_ups_queued_at_and_the_mark() {
     };
     assert_eq!(f.s.whole_mark(op), Some(&standing));
     assert_eq!(f.held_for(op), Some(&w("a")));
-    assert_eq!(f.s.whole_give_ups(op), 1);
     assert!(f.advance(259_999).is_empty());
     assert_eq!(f.s.whole_mark(op), Some(&standing));
     assert!(f.advance(260_000).is_empty());
-    assert_eq!(f.s.whole_give_ups(op), 2);
-    assert_eq!(f.s.whole_mark(op), None);
-    assert_eq!(
-        f.s.whole_barred(op, t(260_000)),
-        BTreeMap::from([(w("a"), Bar::Backoff(t(270_000)))])
-    );
-    assert_eq!(f.s.whole_barred(op, t(270_000)), BTreeMap::new());
+    assert!(f.advance(400_000).is_empty());
+    assert_eq!(f.s.whole_mark(op), Some(&standing));
+    assert_eq!(f.s.whole_barred(op, t(400_000)), BTreeMap::new());
 }
 
 /// Worker `a` busy and `b` quiet; a whole-machine request granted `b` at zero, then at
@@ -154,7 +147,6 @@ fn a_hard_bar_is_never_offered() {
         f.s.whole_state(first),
         Some(WholeState::Barred {
             workers: BTreeMap::from([(w("a"), t(50_000))]),
-            give_ups: 0,
         })
     );
     let other = f.submit_whole(Some(secs(MAX_WALL)));
@@ -181,7 +173,6 @@ fn a_hard_bar_is_never_offered() {
         f.s.whole_state(last),
         Some(WholeState::Barred {
             workers: BTreeMap::from([(w("a"), t(u64::MAX))]),
-            give_ups: 0,
         })
     );
 }
@@ -189,7 +180,7 @@ fn a_hard_bar_is_never_offered() {
 /// Catches: a bar on the marked worker that leaves the mark (the request would keep
 /// holding a worker it may not take), or one that drops a mark it does not bar (a bar
 /// that has already ended, a bar on another worker): only the bar that holds on `a` drops
-/// the mark, with no give-up counted, and the request marks `a` again when it ends.
+/// the mark, and the request marks `a` again when it ends.
 #[test]
 fn a_bar_on_the_marked_worker_drops_the_mark() {
     let mut f = busy(cfg(0, 2));
@@ -202,7 +193,6 @@ fn a_bar_on_the_marked_worker_drops_the_mark() {
     assert_eq!(f.s.whole_mark(op), Some(&mark));
     assert_eq!(f.s.bar_whole(op, w("a"), Bar::Until(t(30_000))), Ok(()));
     assert_eq!(f.s.whole_mark(op), None);
-    assert_eq!(f.s.whole_give_ups(op), 0);
     assert_eq!(
         f.s.whole_barred(op, t(0)),
         BTreeMap::from([(w("a"), Bar::Until(t(30_000))), (w("b"), Bar::ForLife)])
@@ -487,20 +477,13 @@ fn restore_refuses_what_it_cannot_hold() {
     assert_eq!(refused, Err(WholeError::UnknownOperation(unknown)));
     assert_eq!(snapshot(&f), before);
 
-    // Taken: its own mark again, a leased operation's count with no mark, and a mark on
+    // Taken: its own mark again, a leased operation with no mark, and a mark on
     // a worker whose bar has ended while another operation marks another worker.
-    let own = RestoredWhole {
-        give_ups: 1,
-        ..restored(op1, Some(mark_on("a")))
-    };
+    let own = restored(op1, Some(mark_on("a")));
     assert_eq!(f.s.restore_whole(own), Ok(()));
-    assert_eq!(f.s.whole_give_ups(op1), 1);
-    let counted = RestoredWhole {
-        give_ups: 1,
-        ..restored(leased, None)
-    };
-    assert_eq!(f.s.restore_whole(counted), Ok(()));
-    assert_eq!(f.s.whole_give_ups(leased), 1);
+    assert_eq!(f.s.whole_marked_worker(op1), Some(&w("a")));
+    assert_eq!(f.s.restore_whole(restored(leased, None)), Ok(()));
+    assert_eq!(f.s.whole_mark(leased), None);
     let ended = RestoredWhole {
         bars: BTreeMap::from([(w("c"), Bar::Until(t(0)))]),
         ..restored(op2, Some(mark_on("c")))

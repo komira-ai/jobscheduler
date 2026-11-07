@@ -39,10 +39,9 @@ fn at(millis: u64) -> Timestamp {
 /// The first instant of every world: its clock starts here.
 const T0: u64 = 1_000_000;
 
-/// One busy host `a` and two requests: `r1` reserved it, gave it up at its deadline
-/// (thirty seconds in) and is excluded from it for five minutes; `r2`, behind it, was
-/// set the host then. A minute of the clock has not passed: the world is thirty-one
-/// seconds old.
+/// One busy host `a` and two requests: `r1` reserved it and still holds it a second past
+/// its deadline (thirty seconds in); `r2`, behind it, holds no host. A minute of the clock
+/// has not passed: the world is thirty-one seconds old.
 fn two_waiting(p: Placement) -> World {
     let mut w = World::of_in(p, pool(), &["a"]);
     w.share(1, HOUR_S);
@@ -116,28 +115,23 @@ fn kept_off(w: &World, name: &str) -> Vec<String> {
 }
 
 /// Asserts the ledger the registry keeps while two requests wait: for each request its
-/// place and the instant it was first presented, its give-up count and the host it is
-/// kept off with the instant that ends it, and for the one that holds a host the host,
-/// when it was set aside, the deadline and that the host was not quiet. It catches a
-/// ledger without the order of the wait list, one without the exclusion that bounds the
-/// next try, and a mark written without its deadline.
-fn the_ledger_holds_marks_places_counters_and_exclusions(p: Placement) {
+/// place and the instant it was first presented, a give-up count of 0 and no exclusion,
+/// and for the one that holds a host the host, when it was set aside, the deadline (kept
+/// past, not given up at) and that the host was not quiet. It catches a ledger without the
+/// order of the wait list, a mark written without its deadline or dropped at it, and an
+/// exclusion or give-up count written for a mark that outlived its deadline.
+fn the_ledger_holds_marks_and_places_and_no_give_ups(p: Placement) {
     let w = two_waiting(p);
     let first = ReservationRecord {
-        queued: queued(0),
-        give_ups: 1,
-        exclusions: vec![LeaseExclusion {
-            host: host("a"),
-            until: ExclusionEnd::At(at(T0 + 30_000 + 300_000)),
-        }],
-        ..record("r1")
-    };
-    let second = ReservationRecord {
         // The host's one lease ends at its bound, an hour after its start at T0.
         held: Some(Held {
             tail_end: Some(T0 + 3_600_000),
-            ..held("a", T0 + 30_000, T0 + 60_000)
+            ..held("a", T0, T0 + 30_000)
         }),
+        queued: queued(0),
+        ..record("r1")
+    };
+    let second = ReservationRecord {
         queued: queued(1),
         ..record("r2")
     };
@@ -145,17 +139,16 @@ fn the_ledger_holds_marks_places_counters_and_exclusions(p: Placement) {
 }
 
 /// Asserts a restart over the ledger: the host is marked for the same request with the
-/// same instants, the requests wait in the same order, the give-up count and the
-/// exclusion are the first registry's to the field, and nothing is dropped. Then the
-/// consumer presents both requests again: the mark, the places and the count are as they
-/// were (the count is not reset, so the bound on give-ups holds across the restart). It
-/// catches a restart that forgets the wait list, one that resets `max_reserve_attempts`
-/// by forgetting the count, and a presentation that takes the place of a restored entry
-/// to the back.
-fn a_restart_puts_back_the_mark_the_places_and_the_counters(p: Placement) {
+/// same instants, the requests wait in the same order, the records are the first
+/// registry's to the field, and nothing is dropped. Then the consumer presents both
+/// requests again: the mark and the places are as they were, and the mark, past its
+/// deadline, is still held. It catches a restart that forgets the wait list, one that
+/// drops a mark whose deadline has passed, and a presentation that takes the place of a
+/// restored entry to the back.
+fn a_restart_puts_back_the_mark_and_the_places(p: Placement) {
     let w = two_waiting(p);
     let marks = w.reservations();
-    assert_eq!(names(&marks), [("r2".to_string(), "a".to_string())]);
+    assert_eq!(names(&marks), [("r1".to_string(), "a".to_string())]);
     let ledger = w.fx.registry.reservation_ledger();
 
     let (mut back, restored) = restarted(p, &w, &ledger, true);
@@ -183,23 +176,14 @@ fn a_restart_puts_back_the_mark_the_places_and_the_counters(p: Placement) {
     assert_eq!(back.reservations(), marks);
     assert_eq!(back.fx.registry.queue_position(&id("r1")), Some(0));
     assert_eq!(back.fx.registry.queue_position(&id("r2")), Some(1));
-    let kept = back.fx.registry.request_record(&id("r1")).unwrap();
-    assert_eq!(kept.give_ups, 1);
-    let until = ExclusionEnd::At(at(T0 + 30_000 + 300_000));
-    let first = row(&back, "r1");
-    assert_eq!(first.exclusions.len(), 1);
-    assert_eq!(
-        (&first.exclusions[0].host, first.exclusions[0].until),
-        (&host("a"), until)
-    );
+    assert!(kept_off(&back, "r1").is_empty());
     assert_eq!(back.fx.registry.reservation_ledger(), ledger);
 }
 
 /// Asserts that a request nobody presents again is let go with its reservation once the
 /// regain grace has passed since the restart, and not before: one millisecond short of
 /// it both requests still hold their places and the mark stands; at it both are gone,
-/// two restored reservations are counted dropped, and the request's give-up count is
-/// still kept (the counters outlive the wait). It catches an unclaimed record kept for
+/// two restored requests are counted dropped, and nothing of either is left. It catches an unclaimed record kept for
 /// ever, one dropped early, and one dropped without being counted.
 fn a_request_that_is_not_presented_again_is_dropped_and_counted(p: Placement) {
     let w = two_waiting(p);
@@ -208,20 +192,19 @@ fn a_request_that_is_not_presented_again_is_dropped_and_counted(p: Placement) {
 
     back.step(14_999);
     assert_eq!(back.fx.registry.queue_position(&id("r1")), Some(0));
-    assert_eq!(back.reserved_host("r2"), Some("a".to_string()));
+    assert_eq!(back.reserved_host("r1"), Some("a".to_string()));
     assert_eq!(back.fx.registry.dropped_reservations(), 0);
     back.step(1);
     assert_eq!(back.fx.registry.queue_position(&id("r1")), None);
     assert_eq!(back.fx.registry.queue_position(&id("r2")), None);
     assert!(back.reservations().is_empty());
     assert_eq!(back.fx.registry.dropped_reservations(), 2);
-    let kept = back.fx.registry.request_record(&id("r1")).unwrap();
-    assert_eq!(kept.give_ups, 1);
+    assert_eq!(back.fx.registry.request_record(&id("r1")), None);
 }
 
 /// Asserts that a mark on a host that never says hello again is dropped and counted once
 /// the regain grace has passed, while the request that held it, presented again, keeps
-/// waiting: another busy host is up, so the request is still servable. It catches a mark
+/// waiting, and the other busy host that is up is set aside for one of the two waiting requests. It catches a mark
 /// on a gone host that holds the request's place for ever, and a drop that is not
 /// counted.
 fn a_mark_on_a_host_that_never_returns_is_dropped_and_counted(p: Placement) {
@@ -232,21 +215,24 @@ fn a_mark_on_a_host_that_never_returns_is_dropped_and_counted(p: Placement) {
     back.share(10, HOUR_S);
     back.ask(2, "r1");
     back.ask(3, "r2");
-    assert_eq!(back.reserved_host("r2"), Some("a".to_string()));
+    assert_eq!(back.reserved_host("r1"), Some("a".to_string()));
 
     back.step(14_999);
-    assert_eq!(back.reserved_host("r2"), Some("a".to_string()));
+    assert_eq!(back.reserved_host("r1"), Some("a".to_string()));
     assert_eq!(back.fx.registry.dropped_reservations(), 0);
     back.step(1);
-    assert_eq!(back.reserved_host("r2"), None);
     assert_eq!(back.fx.registry.dropped_reservations(), 1);
-    assert_eq!(back.fx.registry.queue_position(&id("r2")), Some(1));
+    // Which of the two waiting requests is set aside `b` is the placement's to decide.
+    let marks = back.reservations();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].host, host("b"));
+    assert_eq!(back.fx.registry.queue_position(&id("r1")), Some(0));
 }
 
 /// Asserts what a restore does with records that cannot stand, counting each: a request
 /// id that is not one, or is listed twice, is dropped whole; a host two records claim
 /// stays with the first and the second keeps its place without it; a host being released keeps no mark; a
-/// mark with no place on the wait list is dropped and its counters kept. The one good
+/// mark with no place on the wait list is dropped and its failed-prepare count kept. The one good
 /// record keeps its assigned flag. It catches two marks on one host, a mark on a host
 /// that is leaving, and a count that misses a kind of drop.
 fn records_that_cannot_stand_are_dropped_at_restore(p: Placement) {
@@ -272,7 +258,7 @@ fn records_that_cannot_stand_are_dropped_at_restore(p: Placement) {
     };
     let no_place = ReservationRecord {
         held: Some(held("d", T0, T0 + 60_000)),
-        give_ups: 2,
+        prepare_failures: 2,
         ..record("r-d")
     };
     let leaving = ReservationRecord {
@@ -300,39 +286,32 @@ fn records_that_cannot_stand_are_dropped_at_restore(p: Placement) {
     assert_eq!(back.fx.registry.queue_position(&id("r-b")), Some(1));
     assert_eq!(back.fx.registry.queue_position(&id("r-e")), Some(2));
     assert_eq!(back.fx.registry.queue_position(&id("r-d")), None);
-    assert_eq!(
-        back.fx
-            .registry
-            .request_record(&id("r-d"))
-            .unwrap()
-            .give_ups,
-        2
-    );
+    let dropped = back.fx.registry.request_record(&id("r-d")).unwrap();
+    assert_eq!(dropped.prepare_failures, 2);
     assert_eq!(back.fx.registry.dropped_reservations(), 5);
 }
 
-/// Asserts that a reservation made after the give-up limit comes back capped: with two
-/// give-ups on the record (the default limit) and a deadline that passes while the host
-/// is busy, the request keeps its host and its count stays two. It catches a restart
-/// that makes a capped reservation givable-up again, which would let a restart loop
-/// push the count past the bound the design promises.
-fn a_capped_reservation_is_not_given_up_at_its_deadline_after_a_restart(p: Placement) {
+/// Asserts that a ledger written by an older release, whose record carries give-ups,
+/// restores and is read forward: a mark with two give-ups on the record is put back, held
+/// through a deadline that passes while the host is busy, and the next ledger writes the
+/// give-up count as 0. It catches a restore that refuses the old count, one that keeps
+/// honouring it, and a mark dropped at its deadline.
+fn an_old_ledger_record_with_give_ups_restores_and_is_written_back_as_zero(p: Placement) {
     let w = World::of_in(p, pool(), &[]);
-    let capped = ReservationRecord {
+    let old = ReservationRecord {
         held: Some(held("a", T0, T0 + 10_000)),
         queued: queued(0),
         give_ups: 2,
         ..record("r1")
     };
-    let (mut back, restored) = restarted(p, &w, &[capped], true);
+    let (mut back, restored) = restarted(p, &w, &[old], true);
     assert_eq!(restored.dropped, 0);
     back.ask(2, "r1");
     back.step(20_000);
     assert_eq!(back.reserved_host("r1"), Some("a".to_string()));
-    assert_eq!(
-        back.fx.registry.request_record(&id("r1")).unwrap().give_ups,
-        2
-    );
+    let kept = back.fx.registry.request_record(&id("r1"));
+    assert_eq!(kept.map_or(0, |kept| kept.give_ups), 0);
+    assert_eq!(row(&back, "r1").give_ups, 0);
 }
 
 /// Asserts that the count of failed prepares comes back with its consequence: a request
@@ -461,8 +440,8 @@ fn a_ledger_past_the_wait_list_cap_is_trimmed_and_counted(p: Placement) {
 
 /// Asserts the bound on exclusions per record: a request is kept off a host at most
 /// once, so the pool's machine limit (four here) is the bound. A record with six hosts
-/// keeps the first four by id, is counted as one drop, and its give-up count is kept; a
-/// record with exactly four is untouched. It catches an unbounded list loaded from an
+/// keeps the first four by id and is counted as one drop, and the give-up count it
+/// carried from an older release is read as 0; a record with exactly four is untouched. It catches an unbounded list loaded from an
 /// edited file.
 fn exclusions_past_the_pool_size_are_trimmed_and_counted(p: Placement) {
     let w = World::of_in(p, pool(), &[]);
@@ -492,21 +471,19 @@ fn exclusions_past_the_pool_size_are_trimmed_and_counted(p: Placement) {
         }
     );
     assert_eq!(kept_off(&back, "r-many"), ["h1", "h2", "h3", "h4"]);
-    let kept = back.fx.registry.request_record(&id("r-many")).unwrap();
-    assert_eq!(kept.give_ups, 1);
+    assert_eq!(row(&back, "r-many").give_ups, 0);
     assert_eq!(kept_off(&back, "r-exact").len(), 4);
     assert_eq!(back.fx.registry.dropped_reservations(), 1);
 }
 
 /// Asserts the two drops of the regain grace after a restart, and that neither is a
-/// give-up. The ledger holds `r1`, with one give-up, set aside a host `s` that never says
-/// hello again, and `r2`, with one give-up, behind it; host `b` is up and busy. The consumer
-/// presents only `r1`. One millisecond short of the grace both still wait and `r1` still
-/// holds `s`; at it `r2` is gone (never presented), `r1`'s mark is gone (its host never came
-/// back), two drops are counted, `r1` waits on, setting aside `b` instead, and both keep the
-/// one give-up they had: neither drop is counted as one. It catches a request or a mark kept
-/// for ever, a drop not counted, and a drop counted as a give-up (a restart loop would then
-/// use up `max_reserve_attempts`).
+/// give-up. The ledger holds `r1`, with one give-up from an older release, set aside a
+/// host `s` that never says hello again, and `r2`, with one give-up, behind it; host `b`
+/// is up and busy. The consumer presents only `r1`. One millisecond short of the grace
+/// both still wait and `r1` still holds `s`; at it `r2` is gone (never presented), `r1`'s
+/// mark is gone (its host never came back), two drops are counted, `r1` waits on, setting
+/// aside `b` instead, and its ledger row carries a give-up count of 0. It catches a request
+/// or a mark kept for ever, a drop not counted, and a drop counted as a give-up.
 fn a_restored_request_not_presented_again_is_dropped_and_a_silent_host_loses_its_mark(
     p: Placement,
 ) {
@@ -542,22 +519,18 @@ fn a_restored_request_not_presented_again_is_dropped_and_a_silent_host_loses_its
     assert_eq!(w.fx.registry.queue_position(&id("r2")), None);
     assert_eq!(w.fx.registry.queue_position(&id("r1")), Some(0));
     assert_eq!(w.reserved_host("r1"), Some("b".to_string()));
-    for name in ["r1", "r2"] {
-        let kept = w.fx.registry.request_record(&id(name)).unwrap();
-        assert_eq!(kept.give_ups, 1, "{name}");
-    }
-    assert_eq!(row(&w, "r1").give_ups, 1);
-    assert_eq!(row(&w, "r2").give_ups, 1);
+    assert_eq!(w.fx.registry.request_record(&id("r1")), None);
+    assert_eq!(row(&w, "r1").give_ups, 0);
 }
 
 crate::both!(
-    the_ledger_holds_marks_places_counters_and_exclusions,
+    the_ledger_holds_marks_and_places_and_no_give_ups,
     a_restored_request_not_presented_again_is_dropped_and_a_silent_host_loses_its_mark,
-    a_restart_puts_back_the_mark_the_places_and_the_counters,
+    a_restart_puts_back_the_mark_and_the_places,
     a_request_that_is_not_presented_again_is_dropped_and_counted,
     a_mark_on_a_host_that_never_returns_is_dropped_and_counted,
     records_that_cannot_stand_are_dropped_at_restore,
-    a_capped_reservation_is_not_given_up_at_its_deadline_after_a_restart,
+    an_old_ledger_record_with_give_ups_restores_and_is_written_back_as_zero,
     a_request_that_used_up_its_tries_is_still_terminal_after_a_restart,
     an_exclusion_for_life_comes_back_and_keeps_the_request_off_the_host,
     a_ledger_past_the_wait_list_cap_is_trimmed_and_counted,
