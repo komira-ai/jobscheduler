@@ -1,11 +1,9 @@
 //! The prepare, ready and failure path of a whole-node lease, and the record its request
-//! keeps, under each engine: the registry's own pass (`--placement registry`) and the
-//! js-sched engine (`--placement js-sched`), which keeps the deadline, the failed-prepare
-//! count, the bars and the record of a request it commits from its queue. Every test runs
-//! the same steps and asserts the same under both (`registry::<test>` and
-//! `js_sched::<test>`, by `both!`), on the World harness: hosts that beat every five
-//! seconds on a manual clock and a consumer that polls its whole-node requests by id. The
-//! registry's tick (`Registry::advance`) is the only place a deadline is checked.
+//! keeps, under the placer, which keeps the deadline, the failed-prepare count, the bars and
+//! the record of a request it commits from its queue, on the World harness: hosts that
+//! beat every five seconds on a manual clock and a consumer that polls its whole-node
+//! requests by id. The registry's tick (`Registry::advance`) is the only place a deadline
+//! is checked.
 
 mod support;
 
@@ -57,10 +55,10 @@ fn barred(pairs: &[(&str, Exclusion)]) -> Bars {
     pairs.iter().map(|(name, e)| (host(name), *e)).collect()
 }
 
-/// A pool of `a` and `b` under `engine` in which request `r` has committed lease `1-1` on
+/// A pool of `a` and `b` in which request `r` has committed lease `1-1` on
 /// `a`, the first host by id.
-fn committed(engine: Placement) -> World {
-    let mut w = World::new_in(engine, &["a", "b"], short);
+fn committed() -> World {
+    let mut w = World::new(&["a", "b"], short);
     assert_eq!(w.ask(1, "r"), StartAck::Unknown);
     assert_eq!(w.lease_on("a"), Some(lease(1)));
     w
@@ -72,8 +70,9 @@ fn committed(engine: Placement) -> World {
 /// at once on the other quiet host. The committed host never reports ready: at the first
 /// tick at its deadline the lease is gone, the host is barred for `reserve_backoff` and the
 /// request counts one failure, which it keeps until a lease of it is ready on `b`.
-fn a_prepare_that_times_out_places_the_request_on_another_host(engine: Placement) {
-    let mut w = committed(engine);
+#[test]
+fn a_prepare_that_times_out_places_the_request_on_another_host() {
+    let mut w = committed();
     w.step(TIMEOUT - 1);
     w.fx.registry.advance();
     assert_eq!(w.lease_on("a"), Some(lease(1)));
@@ -106,8 +105,9 @@ fn a_prepare_that_times_out_places_the_request_on_another_host(engine: Placement
 /// tick that runs ahead of the beats): the report arrives in the beat at the deadline,
 /// before the tick that would end the lease, and wins. The lease is ready and no failure is
 /// counted.
-fn a_ready_report_that_crosses_the_deadline_wins(engine: Placement) {
-    let mut w = committed(engine);
+#[test]
+fn a_ready_report_that_crosses_the_deadline_wins() {
+    let mut w = committed();
     w.step(TIMEOUT);
     w.ready("a", &lease(1));
     w.fx.registry.advance();
@@ -124,7 +124,8 @@ fn a_ready_report_that_crosses_the_deadline_wins(engine: Placement) {
 /// `noise-over-bound` and `setup-failed` bar the host for `reserve_backoff`, `unsupported`
 /// for the request's life, and `host-unsafe` taints the host and bars nothing of its own;
 /// in every case the request counts one failure and is placed again on `b` at once.
-fn each_cause_has_its_effect(engine: Placement) {
+#[test]
+fn each_cause_has_its_effect() {
     let backoff = |at| barred(&[("a", Exclusion::Until(after(at, BACKOFF)))]);
     let rows: [Row<'_>; 5] = [
         (RefusalReason::NotQuiet, &backoff, false),
@@ -138,7 +139,7 @@ fn each_cause_has_its_effect(engine: Placement) {
         (RefusalReason::HostUnsafe, &|_| barred(&[]), true),
     ];
     for (code, exclusions, tainted) in rows {
-        let mut w = committed(engine);
+        let mut w = committed();
         let refused = w.now();
         w.refuse("a", &lease(1), code);
         assert_eq!(w.provider.observe(&lease(1)), Observed::Absent, "{code:?}");
@@ -159,8 +160,9 @@ fn each_cause_has_its_effect(engine: Placement) {
 /// refused prepares, on `a` then `b`, use up `max_replace`; the next start is refused
 /// `exclusive-not-ready` once, naming the last code; the start after it is placed on `a`,
 /// first by id, which the first failure had barred.
-fn max_replace_makes_the_next_start_exclusive_not_ready(engine: Placement) {
-    let mut w = committed(engine);
+#[test]
+fn max_replace_makes_the_next_start_exclusive_not_ready() {
+    let mut w = committed();
     w.refuse("a", &lease(1), RefusalReason::NotQuiet);
     w.drop_ask(1);
     assert_eq!(w.ask(2, "r"), StartAck::Unknown);
@@ -186,8 +188,9 @@ fn max_replace_makes_the_next_start_exclusive_not_ready(engine: Placement) {
 /// comes from a host in another state (free, with nothing committed) or from a tainted host.
 /// Each is ignored: the lease stays pending, and at its deadline it fails as a prepare that
 /// never became ready.
-fn a_ready_report_for_another_lease_changes_nothing(engine: Placement) {
-    let mut w = committed(engine);
+#[test]
+fn a_ready_report_for_another_lease_changes_nothing() {
+    let mut w = committed();
     w.ready("a", &lease(9));
     assert_eq!(w.provider.observe(&lease(1)), Observed::Unknown);
     w.ready("b", &lease(1));
@@ -206,8 +209,9 @@ fn a_ready_report_for_another_lease_changes_nothing(engine: Placement) {
 /// tick early. `r` is refused `unsupported` on `a` and not started again: one millisecond
 /// short of the idle horizon its record holds the bar; at the horizon record and bar are
 /// gone, and the next start of `r` is placed on `a`.
-fn an_idle_record_is_dropped_after_the_horizon(engine: Placement) {
-    let mut w = committed(engine);
+#[test]
+fn an_idle_record_is_dropped_after_the_horizon() {
+    let mut w = committed();
     w.refuse("a", &lease(1), RefusalReason::Unsupported);
     w.drop_ask(1);
     let kept = record(&w).unwrap();
@@ -224,8 +228,9 @@ fn an_idle_record_is_dropped_after_the_horizon(engine: Placement) {
 /// would not name a fresh request when it is used again). `r` is barred from `a` for life
 /// and `b` is busy, so its second start waits; its lease is stopped, which cancels it; the
 /// next start of `r` is placed on `a`.
-fn a_cancelled_request_forgets_its_failures_and_bars(engine: Placement) {
-    let mut w = committed(engine);
+#[test]
+fn a_cancelled_request_forgets_its_failures_and_bars() {
+    let mut w = committed();
     assert!(matches!(w.share(10, 3_600), StartAck::Started { .. }));
     assert_eq!(w.lease_on("b"), Some(lease(10)));
     w.refuse("a", &lease(1), RefusalReason::Unsupported);
@@ -244,8 +249,9 @@ fn a_cancelled_request_forgets_its_failures_and_bars(engine: Placement) {
 /// Catches: a request barred for its life from every host left waiting for ever. With one
 /// host, refused `unsupported` there, the next start finds no host that could ever take it
 /// and is refused `no-capable-host`.
-fn a_request_barred_for_life_from_every_host_is_refused(engine: Placement) {
-    let mut w = World::new_in(engine, &["a"], short);
+#[test]
+fn a_request_barred_for_life_from_every_host_is_refused() {
+    let mut w = World::new(&["a"], short);
     assert_eq!(w.ask(1, "r"), StartAck::Unknown);
     w.refuse("a", &lease(1), RefusalReason::Unsupported);
     w.drop_ask(1);
@@ -253,14 +259,3 @@ fn a_request_barred_for_life_from_every_host_is_refused(engine: Placement) {
     let refused = StartAck::Refused(RefusalCode::NoCapableHost);
     assert_eq!(w.poll(2, "r", 600), refused);
 }
-
-crate::both!(
-    a_prepare_that_times_out_places_the_request_on_another_host,
-    a_ready_report_that_crosses_the_deadline_wins,
-    each_cause_has_its_effect,
-    max_replace_makes_the_next_start_exclusive_not_ready,
-    a_ready_report_for_another_lease_changes_nothing,
-    an_idle_record_is_dropped_after_the_horizon,
-    a_cancelled_request_forgets_its_failures_and_bars,
-    a_request_barred_for_life_from_every_host_is_refused,
-);

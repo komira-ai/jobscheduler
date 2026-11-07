@@ -32,58 +32,14 @@ pub fn class() -> ResourceClass {
     ResourceClass::new(ClassId::new("mac-host").unwrap(), Admission::BookAll, 0)
 }
 
-/// What the pool promises and books: 4 cores, 8 GiB, no GPU, macOS.
+/// The architecture the pool's shape names and every test host reports: the engine of the
+/// placer (js-sched's) describes a host by its architecture, and refuses a shape without one.
+pub const ARCH: &str = "arm64";
+
+/// What the pool promises and books: 4 cores, 8 GiB, no GPU, macOS on [`ARCH`].
 pub fn pool_shape() -> Shape {
     let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
-    Shape::new(resources, map(&[("os", "macos")]))
-}
-
-/// The architecture the hosts of [`world::World`] report, which its pool's shape
-/// ([`world_shape`]) names.
-pub const WORLD_ARCH: &str = "arm64";
-
-/// The shape of the whole-node pool of [`world::World`]: [`pool_shape`] with an `arch`
-/// as well, so an engine that describes a host by its architecture (js-sched's does) can
-/// describe the World's hosts.
-pub fn world_shape() -> Shape {
-    let shape = pool_shape();
-    let mut capabilities = shape.capabilities().clone();
-    capabilities.insert("arch".into(), WORLD_ARCH.into());
-    Shape::new(shape.resources().clone(), capabilities)
-}
-
-/// Which engine decides a whole-node pool's queue: the registry's own pass
-/// (`--placement registry`, the default) or the engine of `--placement js-sched`, a
-/// [`SchedPlacer`] the registry hands its wait list at every pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Placement {
-    Registry,
-    JsSched,
-}
-
-/// Defines each named test, a `fn(Placement)` of the file, once under each placement:
-/// `registry::<name>` runs it under [`Placement::Registry`] and `js_sched::<name>` under
-/// [`Placement::JsSched`], with the same assertions.
-#[macro_export]
-macro_rules! both {
-    ($($name:ident),* $(,)?) => {
-        mod registry {
-            $(
-                #[test]
-                fn $name() {
-                    super::$name($crate::support::Placement::Registry)
-                }
-            )*
-        }
-        mod js_sched {
-            $(
-                #[test]
-                fn $name() {
-                    super::$name($crate::support::Placement::JsSched)
-                }
-            )*
-        }
-    };
+    Shape::new(resources, map(&[("os", "macos"), ("arch", ARCH)]))
 }
 
 pub fn config(max_machines: usize) -> PoolConfig {
@@ -91,10 +47,16 @@ pub fn config(max_machines: usize) -> PoolConfig {
     PoolConfig::new(name, class(), pool_shape(), max_machines)
 }
 
-/// [`config`] over [`world_shape`]: a pool whose hosts js-sched's engine can describe.
-pub fn world_config(max_machines: usize) -> PoolConfig {
-    let name = ProviderId::new("builders").unwrap();
-    PoolConfig::new(name, class(), world_shape(), max_machines)
+/// The placer the server gives a registry, with its defaults: backfill up to any wall time
+/// (no `server.max_lease_wall`), the default CPU slack and `percent` of each host's memory,
+/// on `clock`.
+pub fn sched_placer(percent: u32, clock: &ManualClock) -> Arc<SchedPlacer> {
+    let settings = Settings {
+        backfill: Backfill::enforced(Duration::MAX),
+        load: LoadConfig::default(),
+        memory: MemoryPercent::clamped(percent),
+    };
+    Arc::new(SchedPlacer::new(settings, clock.clone()))
 }
 
 /// A pool of up to `max_machines` hosts on a clock that moves only when a test says.
@@ -102,8 +64,8 @@ pub struct Fixture {
     pub registry: Registry,
     pub provider: RegisteredProvider,
     pub clock: ManualClock,
-    /// The placer of [`Placement::JsSched`]; `None` under [`Placement::Registry`].
-    pub placer: Option<Arc<SchedPlacer>>,
+    /// The registry's placer ([`sched_placer`]).
+    pub placer: Arc<SchedPlacer>,
     sessions: Mutex<BTreeMap<String, String>>,
 }
 
@@ -111,35 +73,18 @@ pub fn fixture(max_machines: usize) -> Fixture {
     fixture_of(config(max_machines))
 }
 
-/// A fixture over `config`, with session secrets from a deterministic source.
-pub fn fixture_of(config: PoolConfig) -> Fixture {
-    fixture_in(config, Placement::Registry)
-}
-
-/// A fixture over `config` under `placement`. Under [`Placement::JsSched`] the registry is
-/// set up as the server sets it up for `--placement js-sched` with its defaults: it books
-/// each host's whole memory ([`PoolConfig::booking_whole_memory`]), and its placer, on the
-/// registry's clock and set before any host joins, is built with backfill up to any wall
-/// time (no `server.max_lease_wall`), the default CPU slack and the pool's
+/// A fixture over `config`, with session secrets from a deterministic source, set up as the
+/// server sets a registry up: it books each host's whole memory
+/// ([`PoolConfig::booking_whole_memory`]), and its placer ([`sched_placer`], on the
+/// registry's clock, given at construction) holds each host to the pool's
 /// `memory_schedulable_percent`.
-pub fn fixture_in(config: PoolConfig, placement: Placement) -> Fixture {
+pub fn fixture_of(config: PoolConfig) -> Fixture {
     let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
-    let config = match placement {
-        Placement::Registry => config,
-        Placement::JsSched => config.booking_whole_memory(),
-    };
+    let config = config.booking_whole_memory();
     let percent = u32::from(config.memory_percent().get());
-    let registry = Registry::with_sessions(config, clock.clone(), SequentialSessions::new());
-    let placer = (placement == Placement::JsSched).then(|| {
-        let settings = Settings {
-            backfill: Backfill::enforced(Duration::MAX),
-            load: LoadConfig::default(),
-            memory: MemoryPercent::clamped(percent),
-        };
-        let placer = Arc::new(SchedPlacer::new(settings, clock.clone()));
-        registry.set_placer(placer.clone());
-        placer
-    });
+    let placer = sched_placer(percent, &clock);
+    let sessions = SequentialSessions::new();
+    let registry = Registry::with_sessions(config, clock.clone(), sessions, placer.clone());
     let provider = registry.provider();
     Fixture {
         registry,
@@ -186,11 +131,6 @@ impl Fixture {
         self.hello(&hello(host), &cred(token)).unwrap().epoch
     }
 
-    /// Admits `host` saying hello as [`world_hello`] does, expecting it to work.
-    pub fn join_world(&self, host: &str) -> u64 {
-        self.hello(&world_hello(host), &cred("t")).unwrap().epoch
-    }
-
     pub fn beat(&self, host: &str, epoch: u64) {
         self.registry
             .heartbeat(&self.heartbeat(host, epoch), &cred("t"))
@@ -203,7 +143,7 @@ pub fn cred(token: &str) -> Credential {
 }
 
 /// A hello a pool of `pool_shape` accepts: more than the pool promises, in pool
-/// `builders`, serving.
+/// `builders`, serving, on [`ARCH`].
 pub fn hello(host: &str) -> Hello {
     Hello {
         protocol: ProtocolRange { min: 1, max: 1 },
@@ -220,7 +160,7 @@ pub fn hello(host: &str) -> Hello {
             max_leases: None,
             accelerator: None,
         },
-        capabilities: map(&[("os", "macos")]),
+        capabilities: map(&[("os", "macos"), ("arch", ARCH)]),
         gpu_devices: Vec::new(),
         labels: map(&[("rack", "r1")]),
         phase: Phase::Serving,
@@ -228,14 +168,6 @@ pub fn hello(host: &str) -> Hello {
         accepts_host_credential: false,
         identity: None,
     }
-}
-
-/// [`hello`] reporting the architecture [`WORLD_ARCH`] as well, as a host of a pool of
-/// [`world_shape`] says it.
-pub fn world_hello(host: &str) -> Hello {
-    let mut said = hello(host);
-    said.capabilities.insert("arch".into(), WORLD_ARCH.into());
-    said
 }
 
 pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {

@@ -151,8 +151,7 @@ fn a_whole_host_lease_takes_the_first_open_host_by_id() {
 }
 
 /// Catches: a host the scheduler cannot describe (no `arch`) failing the start or being
-/// skipped silently: the registry's first host is booked, as without a placer, and the
-/// fallback is counted as unmappable. With no host there is nothing to book or count.
+/// skipped silently: the first host is booked, and the fallback is counted as unmappable. With no host there is nothing to book or count.
 #[test]
 fn hosts_that_do_not_describe_a_node_fall_back_to_the_first_and_are_counted() {
     let placer = SchedPlacer::default();
@@ -386,7 +385,6 @@ fn a_whole_node_start_books_the_host_of_its_pending_grant() {
     for candidate in &open {
         placer.host_up(&candidate.host, &candidate.shape);
     }
-    assert!(placer.keeps_wait_list());
     let id = js_types::RequestId::new("r").unwrap();
     let start = spec_of(&ResourceClass::whole_node(), 7).with_request_id(id.clone());
     let grace = Duration::from_secs(600);

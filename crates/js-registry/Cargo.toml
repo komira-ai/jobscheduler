@@ -7,12 +7,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[features]
-# The call counters of the registry's reservation machine (`Registry::machine_calls`), which
-# the tests read to show which placement calls it. The crate's own tests turn it on through
-# the `[dev-dependencies]` entry below.
-test-support = []
-
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
@@ -28,14 +22,12 @@ subtle.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-js-registry = { path = ".", features = ["test-support"] }
 # tests/capacity.rs runs the registered set of the machine-provider conformance suite
 # against `StaticCapacity`.
 js-elastic = { path = "../js-elastic", features = ["conformance"] }
 js-pool-static = { path = "../js-pool-static" }
-# The whole-node suites run under both placements: js-sched's engine is the placer
-# `--placement js-sched` gives the registry (tests/support `Placement`); a test reads how
-# often the engine was rebuilt through `test-support`.
+# The tests place with js-sched's engine, the placer the server gives the registry
+# (tests/support); a test reads how often the engine was rebuilt through `test-support`.
 js-sched = { path = "../js-sched" }
 js-sched-placer = { path = "../js-sched-placer", features = ["test-support"] }
 js-sim = { path = "../js-sim" }

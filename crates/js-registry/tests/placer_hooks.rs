@@ -18,6 +18,7 @@ use js_provider::Observed;
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{
     DEFAULT_LOST_RETENTION_MS, DEFAULT_PREPARE_TIMEOUT_MS, MarkedTails, Placer, PoolConfig,
+    Registry, SequentialSessions,
 };
 use js_types::sched::usage::NodeLoad;
 use js_types::{Admission, ClassId, Dims, HostId, LeaseId, Request, ResourceClass, Resources};
@@ -110,8 +111,20 @@ fn sharing(sequence: u64, cpu_millis: u64) -> StartSpec {
 /// A pool of `book` leases (4 cores per host) with the placer `told` set.
 fn pool(told: Arc<Told>) -> Fixture {
     let name = ProviderId::new("builders").unwrap();
-    let fx = fixture_of(PoolConfig::new(name, book(), pool_shape(), 4));
-    fx.registry.set_placer(told);
+    with_placer(PoolConfig::new(name, book(), pool_shape(), 4), told)
+}
+
+/// A fixture as `fixture_of` builds it, but with `placer` as the registry's placer in place of
+/// the production one.
+fn with_placer(config: PoolConfig, placer: Arc<dyn Placer>) -> Fixture {
+    let mut fx = fixture_of(config.clone());
+    fx.registry = Registry::with_sessions(
+        config.booking_whole_memory(),
+        fx.clock.clone(),
+        SequentialSessions::new(),
+        placer,
+    );
+    fx.provider = fx.registry.provider();
     fx
 }
 
@@ -202,9 +215,8 @@ fn a_placer_may_read_every_listed_host_at_a_start() {
 }
 
 /// Catches: the placer's slack not handed to the book (a host whose cores are booked
-/// refuses one more), handed for memory too, or handed by a second placer, which takes no
-/// effect. At 250 thousandths a 4-core host takes five one-core leases and not a sixth;
-/// with no slack (the default of a placer) it takes four.
+/// refuses one more), or handed for memory too. At 250 thousandths a 4-core host takes five
+/// one-core leases and not a sixth; with no slack (the default of a placer) it takes four.
 #[test]
 fn the_book_lets_shared_cpu_go_over_by_the_placers_slack() {
     let told = Arc::new(Told {
@@ -212,10 +224,6 @@ fn the_book_lets_shared_cpu_go_over_by_the_placers_slack() {
         ..Told::default()
     });
     let fx = pool(told);
-    fx.registry.set_placer(Arc::new(Told {
-        slack: 1000,
-        ..Told::default()
-    }));
     fx.join("a", "t");
     let mut provider = fx.registry.provider().with_classes(vec![book()]);
     for sequence in 1..=5 {
@@ -250,8 +258,8 @@ fn a_failed_prepare_is_told_to_the_placer_as_an_end() {
         let told = Arc::new(Told::default());
         let class = ResourceClass::whole_node();
         let name = ProviderId::new("builders").unwrap();
-        let fx = fixture_of(PoolConfig::new(name, class.clone(), pool_shape(), 4));
-        fx.registry.set_placer(told.clone());
+        let config = PoolConfig::new(name, class.clone(), pool_shape(), 4);
+        let fx = with_placer(config, told.clone());
         let epoch = fx.join("a", "t");
         let request = Request {
             class: class.id().clone(),
@@ -303,8 +311,7 @@ fn a_pool_that_books_whole_memory_keeps_the_percent_for_fit_and_report() {
     let config = PoolConfig::new(name, book(), pool_shape(), 4)
         .with_memory_percent(percent)
         .booking_whole_memory();
-    let fx = fixture_of(config);
-    fx.registry.set_placer(Arc::new(Declines));
+    let fx = with_placer(config, Arc::new(Declines));
     fx.join("a", "t");
     let mut provider = fx.registry.provider().with_classes(vec![book()]);
     let listed = provider.capacity();
@@ -367,8 +374,8 @@ fn a_host_the_registry_forgets_is_told_gone() {
 #[test]
 fn a_placer_that_ignores_gone_hosts_leaves_their_removal_as_it_was() {
     let name = ProviderId::new("builders").unwrap();
-    let fx = fixture_of(PoolConfig::new(name, book(), pool_shape(), 4));
-    fx.registry.set_placer(Arc::new(Declines));
+    let config = PoolConfig::new(name, book(), pool_shape(), 4);
+    let fx = with_placer(config, Arc::new(Declines));
     fx.join("a", "t");
     let a = HostId::new("a").unwrap();
     fx.registry.drain(&a).unwrap();

@@ -38,6 +38,17 @@ fn reference(id: &str) -> HostRef {
     HostRef(id.to_owned())
 }
 
+/// A pool of up to `max_machines` hosts that requires macOS and no architecture, so hosts of
+/// different architectures join it.
+fn macos_pool(max_machines: usize) -> Fixture {
+    let shape = Shape::new(
+        Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        map(&[("os", "macos")]),
+    );
+    let name = ProviderId::new("builders").unwrap();
+    fixture_of(PoolConfig::new(name, class(), shape, max_machines))
+}
+
 /// A hello from `host` that also reports `arch`.
 fn on_arch(host: &str, arch: &str) -> js_agent_wire::Hello {
     let mut hello = hello(host);
@@ -123,7 +134,7 @@ fn hello_of(name: &str, instance: Option<&str>) -> Hello {
 /// through on, and an acquire or a release that clears or changes a booking or a binding.
 #[test]
 fn acquire_on_static_is_refused_with_capacity() {
-    let mut fx = fixture(8);
+    let mut fx = macos_pool(8);
     let a = fx.hello(&on_arch("a", "x86_64"), &cred("t")).unwrap().epoch;
     assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
     fx.hello(&on_arch("l", "x86_64"), &cred("t")).unwrap();
@@ -281,7 +292,7 @@ fn a_booked_silent_host_never_observes_absent() {
 /// table does not hold or offers a launch, and capabilities that drift from the hosts.
 #[test]
 fn static_provider_reports_hosts_supplied_and_nothing_to_launch() {
-    let fx = fixture(8);
+    let fx = macos_pool(8);
     let static_hosts = provider(&fx);
     assert_eq!(static_hosts.id().as_str(), "builders");
     assert!(!static_hosts.can_launch());
@@ -399,7 +410,7 @@ struct StaticRig {
 
 impl StaticRig {
     fn new() -> Self {
-        let fx = fixture(8);
+        let fx = macos_pool(8);
         let provider = provider(&fx);
         Self {
             fx,

@@ -89,7 +89,7 @@ request is then the pending lease the acquire made, the server presents it to th
 place and commits the host set aside for it), and `DELETE /v1/leases/{id}` of that pending lease is the cancel. A request without one is
 not queued: it is refused `no-capacity` while no host is quiet.*
 
-**Reservations survive a restart (D55).** *In the lease server, the registry's marks, the wait list's order and the failed-prepare counts are persisted as below, in the reservation ledger of the lease file. The js-sched copy of the state machine (`scheduler/whole.rs`) keeps its state in memory; under `--placement js-sched` the lease server runs it, writes the ledger from it (the marks of the requests it queues, and the failed prepares and bars of those it committed; a row's `give_ups` field is written 0) and puts a restart's ledger back into it; it keeps the wait list as well (`js-sched-placer`'s `engine::wait`: the place and the first presentation), and the registry's own wait list, request records and marks are not called. A caller that keeps that state outside it puts it back with `restore_whole` (the queue time, the bars and the mark with its deadline and tail end; a give-up count passed in is ignored) and sets a hard bar from outside with `bar_whole` (`Bar::Until` or `Bar::ForLife`: the worker is neither marked for nor granted to that request, quiet or not; a failed prepare's `Bar::Backoff` stays the soft bar it was). `cancel_whole` ends an operation in any state, dropping its mark in the same call, `unplace_keeping_queued_at` puts a lease back without restarting `drain_after`, and `whole_marked_worker`, `whole_holder` and `whole_room` read the marks, holders and quiet workers. These are methods, not events.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
+**Reservations survive a restart (D55).** *In the lease server, the marks, the wait list's order and the failed-prepare counts are persisted as below, in the reservation ledger of the lease file. The js-sched copy of the state machine (`scheduler/whole.rs`) keeps its state in memory; the lease server runs it, writes the ledger from it (the marks of the requests it queues, and the failed prepares and bars of those it committed; a row's `give_ups` field is written 0) and puts a restart's ledger back into it; it keeps the wait list as well (`js-sched-placer`'s `engine::wait`: the place and the first presentation); the registry keeps no wait list, request records or marks of its own. A caller that keeps that state outside it puts it back with `restore_whole` (the queue time, the bars and the mark with its deadline and tail end; a give-up count passed in is ignored) and sets a hard bar from outside with `bar_whole` (`Bar::Until` or `Bar::ForLife`: the worker is neither marked for nor granted to that request, quiet or not; a failed prepare's `Bar::Backoff` stays the soft bar it was). `cancel_whole` ends an operation in any state, dropping its mark in the same call, `unplace_keeping_queued_at` puts a lease back without restarting `drain_after`, and `whole_marked_worker`, `whole_holder` and `whole_room` read the marks, holders and quiet workers. These are methods, not events.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
 atomic write as the leases and under the same single-writer, fsync and lock rules, before the scheduler acts on it (commit before act). A
 *reservation record* holds: the request id, the host, the time reserved, the deadline, the request's prepare-failure counter (`max_replace`; the older `give_ups` field is still in the record, written 0 and ignored when read) and its host exclusions with their end times; in the registry's ledger it also holds the request's place on the wait list and the instant it was first presented, and whether the host was quiet when it was set aside (an assigned mark drains nothing). The record outlives the reservation only
 while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
@@ -112,7 +112,7 @@ exist. (The scheduler-side mark is `reserved`; the agent-announced phase `draini
   and counts only where the max wall is enforced, up to a ceiling; work with no known end, a host with an unknown tail and a tail already
   past take none. In `js-sched` this is `Scheduler::with_backfill` (off unless the caller says its bounds are enforced, with the ceiling
   it enforces) and applies to every held worker, a blocked head's too; the kept start never moves later. On the lease server it applies
-  under `--placement js-sched`, to a lease of the pool's `share_class` that is not a probe, with `server.max_lease_wall` as the
+  to a lease of the pool's `share_class` that is not a probe, with `server.max_lease_wall` as the
   ceiling (the lease table ends every lease at its wall); without it, and for every other start, a reserved host takes nothing new.
 
 - A lease ends by release or by its max wall time, whichever is first. The host list (`GET /v1/hosts`) carries `reserved_for` on a reserved
@@ -169,15 +169,15 @@ kills is a silent loss for a tenant who did nothing wrong, and it would let one 
    host at once if one is available; otherwise it waits until the exclusion ends (the back-off). After `max_replace` prepare failures the
    request fails `exclusive-not-ready`, and its detail names the last code and detail reported.
 
-   *Under `--placement js-sched`, items 3 and 4 are the engine's for a request it commits from its queue (`js-sched-placer`,
+   *Items 3 and 4 are the engine's for a request it commits from its queue (`js-sched-placer`,
    `engine::prepare`): it keeps the deadline from the commit, counts the failures toward `max_replace`, keeps the failing host from the
    request with a hard bar (`Bar::Until` the back-off, or `Bar::ForLife`; a row that taints the host bars nothing of its own), answers the
    terminal start once and keeps the request's record until a lease of it is ready, the terminal start is refused, the request is
    cancelled while it waits, or it has gone the registry's idle horizon without a start. The registry keeps the host's state (committed,
    ready, restoring), checks the deadline only at its tick (so a ready report sent before that tick wins), reads the row of the cause and
    hands the failure to the engine. A request whose prepare failed is queued again from when it was first queued, so it does not wait out
-   `drain_after` again (the registry's own pass queues it afresh). A start without a request id, and a booking put back after a restart,
-   stay the registry's. Under `--placement js-sched` the registry writes these counts and bars into the reservation ledger (D55) from
+   `drain_after` again. A start without a request id, and a booking put back after a restart,
+   stay the registry's. The registry writes these counts and bars into the reservation ledger (D55) from
    the engine, and a restart puts them back into it.*
 5. **Environment measurement is the consumer's, and runs inside `preparing`.** Whether the host is *quiet in the scheduler's sense* (no
    lease, no run, no VM, checks clean, not tainted) is all the scheduler's readiness means. Measuring the environment (timer noise, CPU
@@ -192,7 +192,7 @@ kills is a silent loss for a tenant who did nothing wrong, and it would let one 
    consumer's time. The reaper is as for any lease (12.1): the lease ends at the token time plus the max wall
    time.
 7. **A whole-host job (the job path).** A job that needs the whole host takes these steps without a lease, in the job store
-   (`js-lease-server`, `job_whole`; `js-sched-placer`, `engine::whole_jobs`; both under `--placement js-sched`, with the pool's whole-node
+   (`js-lease-server`, `job_whole`; `js-sched-placer`, `engine::whole_jobs`; with the pool's whole-node
    settings). It waits as a queued job, with no presentation and no wait list: its row is its place in the queue. The engine marks a
    host for it as in section 4, and the mark is a row of the job store, `mark/<job id>`, written when the mark is made or moved or its
    deadline, tail or exclusions change, and left alone while unchanged. The mark is deleted in the commit that places the job, in the
