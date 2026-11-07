@@ -374,16 +374,15 @@
 //! store's next writer generation and every commit checks it, so once another process takes
 //! the lock no commit of this one succeeds, between ticks too.
 //!
-//! With the setting, the host bindings (each with its host's taint and cordon) and the join
-//! tokens' digests are kept in the store, under `hosts/binding/<host id>` and
-//! `hosts/join/<digest>`, instead of `<state file>.agents` and `.joins`, which are then
-//! neither read nor written. Each change is committed before it is held in memory, and a
-//! heartbeat with no new taint, a known host's hello and the host book use no store. The
-//! lease file, the job
-//! store and the usage file are kept as without the setting. A server with an elastic pool
-//! is refused at start with a store setting, after the lock is taken and before any listener
-//! is bound, with `--store: store-backed server state is not available yet ...`, until the
-//! scaler's records move. Without the setting nothing is opened and the server is as it was.
+//! With the setting, the host bindings (with their taints and cordons) and the join tokens'
+//! digests are kept in the store, under `hosts/binding/<host id>` and `hosts/join/<digest>`,
+//! instead of `<state file>.agents` and `.joins`, which are then neither read nor written.
+//! Each change is committed before it is held in memory; a heartbeat with no new taint, a
+//! known host's hello and the host book use no store. The lease file, the job store and the
+//! usage file are kept as without the setting. With an elastic pool a store setting is
+//! refused at start, after the lock is taken and before any listener is bound, with
+//! `--store: store-backed server state is not available yet ...`, until the scaler's records
+//! move. Without the setting nothing is opened and the server is as it was.
 //!
 //! # Who may do what
 //!
@@ -556,10 +555,9 @@
 //! it placed (the server does not tell who placed one, and an uncordon lifts any cordon, so a
 //! requester uncordons only after a cordon whose reply said `already_cordoned: false`). There is no
 //! total cap on a cordon that is renewed; a requester that dies leaves it to lapse within its last
-//! `lease_secs`, at most an hour. A cordon is written to the agent
-//! state file (with a store setting, committed to the store) before it is acknowledged and
-//! survives a restart; an uncordon is written the same way. The routes are served by the agent routes' listener (`agent_listen`, when
-//! there is one).
+//! `lease_secs`, at most an hour. A cordon is written to the agent state file (with a store setting,
+//! committed to the store) before it is acknowledged and survives a restart; an uncordon is written
+//! the same way. The routes are served by the agent routes' listener (`agent_listen`, if any).
 //!
 //! A leasing client asks for a lease as ever and is given a static host first, a
 //! registered one when the static pool has none; it cannot tell which it got except by
@@ -717,21 +715,20 @@
 //! That hello is admitted as any other and the lease then observes `Present`. An awaiting
 //! host whose lease has ended and whose agent has not returned is forgotten, binding
 //! included, once the grace period and `lost_retention` have passed since the restart
-//! that seated it; the next tick writes the file of bindings (or the store) without it. An agent
-//! whose heartbeat reaches a restarted server is answered 409 `unknown-host` and says
-//! hello.
+//! that seated it; the next tick writes the file of bindings (or the store) without it.
+//! An agent whose heartbeat reaches a restarted server is answered 409 `unknown-host` and
+//! says hello.
 //!
 //! What would otherwise let any join-token holder take such a lease with the first hello
 //! after the restart is the binding of the host id to the credential and instance it was
 //! admitted with. The server keeps the bindings (in the store with a store setting, see
-//! "The store") in a file of its own beside the lease
-//! file, `<state file>.agents` (TOML, mode 0600, replaced whole, keys it does not know
-//! ignored), written when a hello admits a host and again at a tick when it differs, and
-//! reads it at start. It holds SHA-256 digests of join tokens, not tokens, and the taint of
-//! each host that reported one: such a host is put back at start as an awaiting host (and
-//! counts toward `max_machines`) whether or not it holds a lease. The file is
-//! not part of the lease file, so the lease file's format and the static-only start are
-//! unchanged. A file that is present and unreadable, or not private, is a refused start
+//! "The store") in a file of its own beside the lease file, `<state file>.agents` (TOML,
+//! mode 0600, replaced whole, keys it does not know ignored), written when a hello admits a
+//! host and again at a tick when it differs, and reads it at start. It holds SHA-256
+//! digests of join tokens, not tokens, and the taint of each host that reported one: such a
+//! host is put back at start as an awaiting host (and counts toward `max_machines`) whether
+//! or not it holds a lease. The file is not part of the lease file, so the lease file's
+//! format and the static-only start are unchanged. A file that is present and unreadable, or not private, is a refused start
 //! naming `--state-file`. A missing file means no bindings: a lease on a registered host
 //! then restores without one, and the first hello binds the id. If the file cannot be
 //! written (the failure is logged and counted) a lease granted meanwhile survives a
