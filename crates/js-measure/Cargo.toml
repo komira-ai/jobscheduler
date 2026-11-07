@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 js-client = { path = "../js-client" }
+base64.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

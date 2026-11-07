@@ -1,4 +1,4 @@
-//! The live farm against a server that gives canned answers: the requests it sends, the
+//! The live farm against a server that gives canned answers: the job requests it sends, the
 //! answers it reads, the refusals and the answers it cannot read.
 
 use std::io::{Read, Write};
@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use js_measure::farm::Standing;
-use js_measure::{Acquired, Curve, Farm, FarmError, HostShape, HttpFarm, LeaseAsk, RunAsk};
+use js_measure::farm::Phase;
+use js_measure::{Farm, FarmError, HostShape, HttpFarm, JobAsk, LogTail};
 use js_testkit::dir::TestDir;
 
 use crate::support::job;
@@ -99,192 +99,264 @@ fn token() -> (TestDir, PathBuf) {
     (dir, path)
 }
 
+/// A farm whose job server and main server are the same canned server.
 fn farm_at(url: &str) -> (TestDir, HttpFarm) {
+    two_farms(url, url)
+}
+
+/// A farm whose jobs go to `job_url` and whose host and usage reads go to `url`.
+fn two_farms(url: &str, job_url: &str) -> (TestDir, HttpFarm) {
     let (dir, path) = token();
-    (dir, HttpFarm::connect(url, &path, None).unwrap())
+    (dir, HttpFarm::connect(url, job_url, &path, None).unwrap())
 }
 
-fn lease_ask() -> LeaseAsk {
-    job("a", 1, None).lease
+fn shared_ask() -> JobAsk {
+    job("a", 90_000).ask
 }
 
-fn run_ask() -> RunAsk {
-    job("a", 90_000, Some("prof")).run
+fn whole_ask() -> JobAsk {
+    JobAsk {
+        whole_host: true,
+        ..shared_ask()
+    }
 }
 
-/// Asserts the lease request: what is sent (class, resources, wall time, with the token),
-/// 201 read as held with its host and 202 as pending, and a refusal as the server's
-/// status and code.
+/// Asserts the submit: the body a job sends (image, args, the CPU and memory it needs and
+/// its wall limit in seconds, 64-bit numbers as text as the gateway writes them), the
+/// whole-host job sending only `wholeHost`, the id read from the 201, and a refusal as the
+/// server's status and code.
 #[test]
-fn a_lease_request_and_its_three_answers() {
-    let held = Canned::serve(vec![(
-        "POST /v1/leases",
+fn a_job_is_submitted_with_its_needs() {
+    let server = Canned::serve(vec![(
+        "POST /v1/jobs",
         201,
-        r#"{"id":"1-1","host":"gpu-01","ends_at_ms":5}"#,
+        r#"{"job":{"id":"j-7","state":"JOB_STATE_QUEUED","spec":{}}}"#,
     )]);
-    let (_dir, farm) = farm_at(&held.url);
+    let (_dir, farm) = farm_at(&server.url);
+    let mut ask = shared_ask();
+    ask.args = vec!["--flag".to_owned()];
+    assert_eq!(farm.submit(&ask).unwrap(), "j-7");
+    assert_eq!(farm.submit(&whole_ask()).unwrap(), "j-7");
+    let sent = server.seen();
+    assert_eq!(sent.len(), 2);
+    let body = |line: &str| -> serde_json::Value {
+        serde_json::from_str(line.strip_prefix("POST /v1/jobs ").unwrap()).unwrap()
+    };
+    let spec = &body(&sent[0])["spec"];
+    assert_eq!(spec["image"], "img");
+    assert_eq!(spec["args"], serde_json::json!(["--flag"]));
     assert_eq!(
-        farm.acquire(&lease_ask()).unwrap(),
-        Acquired::Held {
-            id: "1-1".to_owned(),
-            host: "gpu-01".to_owned()
-        }
+        spec["needs"],
+        serde_json::json!({"cpuMillis": "4000", "memoryBytes": (8u64 << 30).to_string()})
     );
-    let sent = held.seen();
-    assert_eq!(sent.len(), 1);
-    let body = sent[0].strip_prefix("POST /v1/leases ").unwrap();
-    let body: serde_json::Value = serde_json::from_str(body).unwrap();
-    assert_eq!(body["class"], "whole-node");
-    assert_eq!(body["resources"]["cpu_millis"], 4_000);
-    assert_eq!(body["resources"]["memory_bytes"], 8u64 << 30);
-    assert_eq!(body["max_wall_seconds"], 3_600);
-
-    let pending = Canned::serve(vec![(
-        "POST /v1/leases",
-        202,
-        r#"{"id":"1-2","state":"pending"}"#,
-    )]);
-    let (_dir, farm) = farm_at(&pending.url);
+    assert_eq!(spec["wallLimitSeconds"], "90");
     assert_eq!(
-        farm.acquire(&lease_ask()).unwrap(),
-        Acquired::Pending {
-            id: "1-2".to_owned()
-        }
+        body(&sent[1])["spec"]["needs"],
+        serde_json::json!({"wholeHost": true})
     );
 
-    let full = Canned::serve(vec![("POST /v1/leases", 409, r#"{"error":"no-capacity"}"#)]);
+    let full = Canned::serve(vec![(
+        "POST /v1/jobs",
+        422,
+        r#"{"error":"no-capable-host"}"#,
+    )]);
     let (_dir, farm) = farm_at(&full.url);
     assert_eq!(
-        farm.acquire(&lease_ask()).unwrap_err(),
+        farm.submit(&shared_ask()).unwrap_err(),
         FarmError::Refused {
-            status: 409,
-            code: "no-capacity".to_owned()
+            status: 422,
+            code: "no-capable-host".to_owned()
         }
     );
 }
 
-/// Asserts how the lease list is read: a held lease with its host, a pending one, one in
-/// another state (releasing) and one not listed are held, pending, gone and gone.
+/// Asserts how a job that has not ended is read: queued with no host, placed on a host
+/// and running, and that a job in a live state asks for no result.
 #[test]
-fn a_lease_is_looked_up_in_the_list() {
-    let server = Canned::serve(vec![(
-        "GET /v1/leases",
-        200,
-        r#"{"leases":[
-          {"id":"1-1","state":"held","host":"h1","acquired_at_ms":1,"ends_at_ms":3,"labels":{}},
-          {"id":"1-2","state":"pending","acquired_at_ms":1,"ends_at_ms":3,"labels":{}},
-          {"id":"1-3","state":"releasing","host":"h2","acquired_at_ms":1,"ends_at_ms":3,"labels":{}}]}"#,
-    )]);
-    let (_dir, farm) = farm_at(&server.url);
-    assert_eq!(
-        farm.lease("1-1").unwrap(),
-        Standing::Held {
-            host: "h1".to_owned()
-        }
-    );
-    assert_eq!(farm.lease("1-2").unwrap(), Standing::Pending);
-    assert_eq!(farm.lease("1-3").unwrap(), Standing::Gone);
-    assert_eq!(farm.lease("9-9").unwrap(), Standing::Gone);
-}
-
-/// Asserts the run calls: the body that is sent (image, limits, the profile), the run id
-/// read from the 202, a run's state and outcome read from its entry, and a release that is
-/// accepted (200 or 202) or refused (404).
-#[test]
-fn runs_are_queued_read_and_released() {
+fn a_job_that_has_not_ended_is_read_by_state_and_host() {
     let server = Canned::serve(vec![
         (
-            "POST /v1/leases/1-1/runs",
-            202,
-            r#"{"run_id":"r-7","state":"queued"}"#,
+            "GET /v1/jobs/q",
+            200,
+            r#"{"job":{"id":"q","state":"JOB_STATE_QUEUED"}}"#,
         ),
         (
-            "GET /v1/leases/1-1/runs/r-7",
+            "GET /v1/jobs/p",
             200,
-            r#"{"run_id":"r-7","state":"exited","outcome":"out_of_memory","exit_code":null}"#,
+            r#"{"job":{"id":"p","state":"JOB_STATE_PLACED","hostId":"h1"}}"#,
         ),
         (
-            "GET /v1/leases/1-1/runs/r-8",
+            "GET /v1/jobs/r",
             200,
-            r#"{"run_id":"r-8","state":"running"}"#,
+            r#"{"job":{"id":"r","state":"JOB_STATE_RUNNING","hostId":"h1"}}"#,
         ),
-        ("DELETE /v1/leases/1-1", 200, r#"{"state":"released"}"#),
-        ("DELETE /v1/leases/1-2", 202, r#"{"state":"releasing"}"#),
     ]);
     let (_dir, farm) = farm_at(&server.url);
-    assert_eq!(farm.start_run("1-1", &run_ask()).unwrap(), "r-7");
-    let sent = server.seen().remove(0);
-    let body = sent.split_once("runs ").unwrap().1;
-    let body: serde_json::Value = serde_json::from_str(body).unwrap();
-    assert_eq!(body["image"], "img");
-    assert_eq!(body["limits"]["cpu_millis"], 4_000);
-    assert_eq!(body["limits"]["wall_ms"], 90_000);
-    assert_eq!(body["profile"], "prof");
-    let over = farm.run("1-1", "r-7").unwrap();
+    let queued = farm.job("q").unwrap();
     assert_eq!(
-        (over.state.as_str(), over.outcome.as_deref()),
-        ("exited", Some("out_of_memory"))
+        (queued.phase(), queued.host, queued.outcome),
+        (Phase::Waiting, None, None)
     );
-    let live = farm.run("1-1", "r-8").unwrap();
-    assert_eq!((live.state.as_str(), live.outcome), ("running", None));
-    farm.release("1-1").unwrap();
-    farm.release("1-2").unwrap();
+    let placed = farm.job("p").unwrap();
     assert_eq!(
-        farm.release("1-3").unwrap_err(),
+        (placed.phase(), placed.host.as_deref()),
+        (Phase::Waiting, Some("h1"))
+    );
+    let running = farm.job("r").unwrap();
+    assert_eq!((running.phase(), running.log_tail), (Phase::Running, None));
+    assert!(server.seen().iter().all(|line| !line.contains("/result")));
+}
+
+/// Asserts how an ended job is read: its outcome from the state and the reason of its
+/// result (succeeded, out of memory, wall limit, any other failure, cancelled, lost, failed
+/// to start), and its output tails decoded from base64 with `truncated`.
+#[test]
+fn an_ended_job_is_read_with_its_outcome_and_output() {
+    let ended = |state: &str| {
+        let body = format!(r#"{{"job":{{"id":"x","state":"{state}","hostId":"h1"}}}}"#);
+        &*Box::leak(body.into_boxed_str())
+    };
+    let result = |reason: &str| {
+        let body = format!(
+            r#"{{"result":{{"reason":"{reason}","stdoutTail":"anMtbWVhc3VyZS1yZXN1bHQgeyJhIjoxfQo=","stderrTail":"d2Fybgo=","truncated":true}}}}"#
+        );
+        &*Box::leak(body.into_boxed_str())
+    };
+    let cases = [
+        ("succeeded", "JOB_STATE_SUCCEEDED", "RESULT_REASON_EXIT"),
+        ("out_of_memory", "JOB_STATE_FAILED", "RESULT_REASON_MEMORY"),
+        ("wall_limit", "JOB_STATE_FAILED", "RESULT_REASON_WALL_LIMIT"),
+        ("failed", "JOB_STATE_FAILED", "RESULT_REASON_EXIT"),
+        (
+            "cancelled",
+            "JOB_STATE_CANCELLED",
+            "RESULT_REASON_CANCELLED",
+        ),
+        ("lost", "JOB_STATE_LOST", "RESULT_REASON_UNSPECIFIED"),
+        (
+            "failed_to_start",
+            "JOB_STATE_FAILED_TO_START",
+            "RESULT_REASON_UNSPECIFIED",
+        ),
+    ];
+    let routes: Vec<(&'static str, u16, &'static str)> = cases
+        .iter()
+        .flat_map(|(outcome, state, reason)| {
+            let get: &'static str = Box::leak(format!("GET /v1/jobs/{outcome}").into_boxed_str());
+            let got: &'static str =
+                Box::leak(format!("GET /v1/jobs/{outcome}/result").into_boxed_str());
+            [(get, 200, ended(state)), (got, 200, result(reason))]
+        })
+        .collect();
+    let server = Canned::serve(routes);
+    let (_dir, farm) = farm_at(&server.url);
+    for (outcome, state, _) in cases {
+        let standing = farm.job(outcome).unwrap();
+        assert_eq!(standing.state, state);
+        assert_eq!(standing.phase(), Phase::Over, "{outcome}");
+        assert_eq!(standing.outcome.as_deref(), Some(outcome));
+        assert_eq!(standing.host.as_deref(), Some("h1"));
+        assert_eq!(
+            standing.log_tail,
+            Some(LogTail {
+                stdout: "js-measure-result {\"a\":1}\n".to_owned(),
+                stderr: "warn\n".to_owned(),
+                truncated: true,
+            })
+        );
+    }
+}
+
+/// Asserts that a result with no tails reads as empty text (not an error), that a tail
+/// that is not base64 is an unreadable answer, and that a result the server refuses is the
+/// server's refusal.
+#[test]
+fn a_result_without_tails_is_empty_and_a_bad_tail_is_unreadable() {
+    let server = Canned::serve(vec![
+        (
+            "GET /v1/jobs/bare",
+            200,
+            r#"{"job":{"id":"bare","state":"JOB_STATE_SUCCEEDED"}}"#,
+        ),
+        ("GET /v1/jobs/bare/result", 200, r#"{"result":{}}"#),
+        (
+            "GET /v1/jobs/junk",
+            200,
+            r#"{"job":{"id":"junk","state":"JOB_STATE_SUCCEEDED"}}"#,
+        ),
+        (
+            "GET /v1/jobs/junk/result",
+            200,
+            r#"{"result":{"stdoutTail":"not base64!"}}"#,
+        ),
+        (
+            "GET /v1/jobs/gone",
+            200,
+            r#"{"job":{"id":"gone","state":"JOB_STATE_FAILED"}}"#,
+        ),
+        ("GET /v1/jobs/gone/result", 410, r#"{"error":"expired"}"#),
+    ]);
+    let (_dir, farm) = farm_at(&server.url);
+    let bare = farm.job("bare").unwrap();
+    assert_eq!(bare.host, None);
+    assert_eq!(bare.outcome.as_deref(), Some("succeeded"));
+    assert_eq!(bare.log_tail, Some(LogTail::default()));
+    assert!(matches!(farm.job("junk"), Err(FarmError::Malformed(_))));
+    assert_eq!(
+        farm.job("gone").unwrap_err(),
+        FarmError::Refused {
+            status: 410,
+            code: "expired".to_owned()
+        }
+    );
+}
+
+/// Asserts the cancel: it is a POST of `:cancel` on the job, accepted on 200, and a
+/// refusal (an unknown job) is the server's status and code.
+#[test]
+fn a_job_is_cancelled() {
+    let server = Canned::serve(vec![
+        ("POST /v1/jobs/j-1:cancel", 200, r#"{"job":{"id":"j-1"}}"#),
+        (
+            "POST /v1/jobs/j-2:cancel",
+            404,
+            r#"{"error":"unknown-job"}"#,
+        ),
+    ]);
+    let (_dir, farm) = farm_at(&server.url);
+    farm.cancel("j-1").unwrap();
+    assert_eq!(
+        farm.cancel("j-2").unwrap_err(),
         FarmError::Refused {
             status: 404,
-            code: "not-found".to_owned()
+            code: "unknown-job".to_owned()
         }
     );
 }
 
-/// Asserts that a run entry's `log_tail` is read with both streams and `truncated`, that
-/// an entry without one reads as none (not an empty tail), and that a tail missing its
-/// streams reads as empty text.
+/// Asserts that the jobs go to the job server and the host and usage reads to the main
+/// server: each canned server sees only its own requests.
 #[test]
-fn a_runs_log_tail_is_read() {
-    let server = Canned::serve(vec![
-        (
-            "GET /v1/leases/1-1/runs/r-1",
-            200,
-            r#"{"run_id":"r-1","state":"exited","outcome":"succeeded","log_tail":{"stdout":"js-measure-result {\"a\":1}\n","stderr":"warn\n","truncated":true}}"#,
-        ),
-        (
-            "GET /v1/leases/1-1/runs/r-2",
-            200,
-            r#"{"run_id":"r-2","state":"exited","outcome":"succeeded"}"#,
-        ),
-        (
-            "GET /v1/leases/1-1/runs/r-3",
-            200,
-            r#"{"run_id":"r-3","state":"exited","log_tail":{}}"#,
-        ),
-    ]);
-    let (_dir, farm) = farm_at(&server.url);
-    let tail = |stdout: &str, stderr: &str, truncated| {
-        Some(js_client::LogTail {
-            stdout: stdout.to_owned(),
-            stderr: stderr.to_owned(),
-            truncated,
-        })
-    };
-    assert_eq!(
-        farm.run("1-1", "r-1").unwrap().log_tail,
-        tail("js-measure-result {\"a\":1}\n", "warn\n", true)
-    );
-    assert_eq!(farm.run("1-1", "r-2").unwrap().log_tail, None);
-    assert_eq!(
-        farm.run("1-1", "r-3").unwrap().log_tail,
-        tail("", "", false)
-    );
+fn jobs_and_reads_go_to_their_own_servers() {
+    let main = Canned::serve(vec![(
+        "GET /v1/hosts",
+        200,
+        r#"{"hosts":[{"id":"h1","shape":{"cpu_millis":1,"memory_bytes":2}}]}"#,
+    )]);
+    let jobs = Canned::serve(vec![("POST /v1/jobs", 201, r#"{"job":{"id":"j-1"}}"#)]);
+    let (_dir, farm) = two_farms(&main.url, &jobs.url);
+    farm.submit(&shared_ask()).unwrap();
+    farm.host("h1").unwrap();
+    assert_eq!(main.seen(), vec!["GET /v1/hosts ".to_owned()]);
+    assert_eq!(jobs.seen().len(), 1);
+    assert!(jobs.seen()[0].starts_with("POST /v1/jobs "));
 }
 
 /// Asserts the reads of the server's data: a host's shape from the host list (and an
-/// unlisted host as an unreadable answer), the usage rows of a range from the query it
-/// sends, and a curve with the minutes it has, with none when the key is unknown (404) or
-/// has no fit yet.
+/// unlisted host as an unreadable answer) and the usage rows of a range from the query it
+/// sends.
 #[test]
-fn hosts_usage_and_curves_are_read() {
+fn hosts_and_usage_are_read() {
     let server = Canned::serve(vec![
         (
             "GET /v1/hosts",
@@ -295,16 +367,6 @@ fn hosts_usage_and_curves_are_read() {
             "GET /v1/usage/nodes/h1?from=10&to=11",
             200,
             r#"{"host":"h1","from":10,"to":11,"rows":[{"minute":10,"cpu_millis":8000,"ws_bytes":5,"leases":1}],"next":null}"#,
-        ),
-        (
-            "GET /v1/usage/keys/known",
-            200,
-            r#"{"key":"known","runs":4,"curve":[{"minute":0,"cores_milli":500,"ws_bytes":7},{"minute":1,"cores_milli":null,"ws_bytes":9}],"last_used_day":1,"stale":false}"#,
-        ),
-        (
-            "GET /v1/usage/keys/fresh",
-            200,
-            r#"{"key":"fresh","runs":1,"curve":null,"last_used_day":1,"stale":false}"#,
         ),
     ]);
     let (_dir, farm) = farm_at(&server.url);
@@ -327,16 +389,6 @@ fn hosts_usage_and_curves_are_read() {
         ),
         (10, 8_000, 5, 1)
     );
-    assert_eq!(
-        farm.curve("known").unwrap(),
-        Some(Curve {
-            runs: 4,
-            ws_bytes: vec![7, 9],
-            cores_milli: vec![500]
-        })
-    );
-    assert_eq!(farm.curve("fresh").unwrap(), None);
-    assert_eq!(farm.curve("unknown").unwrap(), None);
 }
 
 /// Asserts that an answer the harness cannot read is an error of its own kind for every
@@ -345,26 +397,27 @@ fn hosts_usage_and_curves_are_read() {
 #[test]
 fn unreadable_answers_and_a_missing_server_are_errors() {
     let junk = Canned::serve(vec![
-        ("POST /v1/leases", 201, r#"{"nope":1}"#),
-        ("GET /v1/leases", 200, r#"{"nope":1}"#),
-        ("POST /v1/leases/1/runs", 202, r#"{"nope":1}"#),
-        ("GET /v1/leases/1/runs/r", 200, r#"{"nope":1}"#),
+        ("POST /v1/jobs", 201, r#"{"nope":1}"#),
+        ("GET /v1/jobs/j", 200, r#"{"nope":1}"#),
         ("GET /v1/hosts", 200, r#"{"nope":1}"#),
         ("GET /v1/usage/nodes/h?from=1&to=2", 200, r#"{"nope":1}"#),
-        ("GET /v1/usage/keys/k", 200, r#"{"nope":1}"#),
-        ("DELETE /v1/leases/1", 500, ""),
+        ("POST /v1/jobs/j:cancel", 500, ""),
+        (
+            "GET /v1/jobs/k",
+            200,
+            r#"{"job":{"id":"k","state":"JOB_STATE_FAILED"}}"#,
+        ),
+        ("GET /v1/jobs/k/result", 200, r#"{"nope":1}"#),
     ]);
     let (_dir, farm) = farm_at(&junk.url);
     let malformed = |result: Result<(), FarmError>| matches!(result, Err(FarmError::Malformed(_)));
-    assert!(malformed(farm.acquire(&lease_ask()).map(drop)));
-    assert!(malformed(farm.lease("1").map(drop)));
-    assert!(malformed(farm.start_run("1", &run_ask()).map(drop)));
-    assert!(malformed(farm.run("1", "r").map(drop)));
+    assert!(malformed(farm.submit(&shared_ask()).map(drop)));
+    assert!(malformed(farm.job("j").map(drop)));
+    assert!(malformed(farm.job("k").map(drop)));
     assert!(malformed(farm.host("h").map(drop)));
     assert!(malformed(farm.usage_rows("h", 1, 2).map(drop)));
-    assert!(malformed(farm.curve("k").map(drop)));
     assert_eq!(
-        farm.release("1").unwrap_err(),
+        farm.cancel("j").unwrap_err(),
         FarmError::Refused {
             status: 500,
             code: String::new()
@@ -377,22 +430,29 @@ fn unreadable_answers_and_a_missing_server_are_errors() {
     };
     let (_dir, farm) = farm_at(&closed);
     assert!(matches!(farm.host("h"), Err(FarmError::Transport(_))));
-    assert!(matches!(farm.lease("1"), Err(FarmError::Transport(_))));
-    assert!(matches!(farm.release("1"), Err(FarmError::Transport(_))));
     assert!(matches!(
-        farm.acquire(&lease_ask()),
+        farm.usage_rows("h", 1, 2),
+        Err(FarmError::Transport(_))
+    ));
+    assert!(matches!(farm.job("j"), Err(FarmError::Transport(_))));
+    assert!(matches!(farm.cancel("j"), Err(FarmError::Transport(_))));
+    assert!(matches!(
+        farm.submit(&shared_ask()),
         Err(FarmError::Transport(_))
     ));
 }
 
 /// Asserts that `connect` refuses what the client refuses: a plain-http server off the
-/// loopback, and a token file that anyone can read.
+/// loopback (as the main server or as the job server), and a token file that anyone can
+/// read.
 #[test]
 fn connect_refuses_unusable_flags() {
     let (dir, path) = token();
-    assert!(HttpFarm::connect("http://example.com", &path, None).is_err());
+    let local = "http://127.0.0.1:1";
+    assert!(HttpFarm::connect("http://example.com", local, &path, None).is_err());
+    assert!(HttpFarm::connect(local, "http://example.com", &path, None).is_err());
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(HttpFarm::connect("http://127.0.0.1:1", &path, None).is_err());
+    assert!(HttpFarm::connect(local, local, &path, None).is_err());
     drop(dir);
 }
 
@@ -403,8 +463,8 @@ fn connect_refuses_unusable_flags() {
 fn refused_tokens_and_truncated_bodies() {
     let server = Canned::serve(vec![
         ("GET /v1/hosts", 401, r#"{"error":"unauthorized"}"#),
-        ("POST /v1/leases", 403, r#"{"error":"forbidden"}"#),
-        ("GET /v1/leases", 999, r#"{"leases":["#),
+        ("POST /v1/jobs", 403, r#"{"error":"forbidden"}"#),
+        ("GET /v1/jobs/j", 999, r#"{"job":{"#),
     ]);
     let (_dir, farm) = farm_at(&server.url);
     assert_eq!(
@@ -415,11 +475,11 @@ fn refused_tokens_and_truncated_bodies() {
         }
     );
     assert_eq!(
-        farm.acquire(&lease_ask()).unwrap_err(),
+        farm.submit(&shared_ask()).unwrap_err(),
         FarmError::Refused {
             status: 403,
             code: "forbidden".to_owned()
         }
     );
-    assert!(matches!(farm.lease("1-1"), Err(FarmError::Transport(_))));
+    assert!(matches!(farm.job("j"), Err(FarmError::Transport(_))));
 }

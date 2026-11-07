@@ -176,7 +176,7 @@ fn apply_command_runs_before_each_run() {
 }
 
 /// Asserts the live mode against a server that is not there: the flags are accepted and
-/// the client built, every lease request fails, and the run still records each run with
+/// the client built, every submit fails, and the run still records each run with
 /// its failures counted and its makespan not available (nothing is invented).
 #[test]
 fn live_mode_records_failures_when_the_server_is_down() {
@@ -189,7 +189,15 @@ fn live_mode_records_failures_when_the_server_is_down() {
         format!("http://{}", listener.local_addr().unwrap())
     };
     let token = token.display().to_string();
-    let (result, _) = files.run(&["--live", "--server", &closed, "--token-file", &token]);
+    let (result, _) = files.run(&[
+        "--live",
+        "--server",
+        &closed,
+        "--job-server",
+        &closed,
+        "--token-file",
+        &token,
+    ]);
     result.unwrap();
     let records = read_records(&files.lines("records.jsonl").join("\n")).unwrap();
     assert_eq!(records.len(), 8);
@@ -202,6 +210,8 @@ fn live_mode_records_failures_when_the_server_is_down() {
     let (result, _) = files.run(&[
         "--live",
         "--server",
+        &closed,
+        "--job-server",
         "http://example.com",
         "--token-file",
         &token,
@@ -209,8 +219,8 @@ fn live_mode_records_failures_when_the_server_is_down() {
     assert!(matches!(result, Err(CliError::Client(_))));
 }
 
-/// Asserts that the live flags go together: `--live` needs the server and the token, and
-/// the server flags mean nothing without `--live`.
+/// Asserts that the live flags go together: `--live` needs the server, the job server and
+/// the token, and the server flags mean nothing without `--live`.
 #[test]
 fn the_live_flags_go_together() {
     let base = [
@@ -231,12 +241,25 @@ fn the_live_flags_go_together() {
     };
     assert!(with(&["--live"]).is_err());
     assert!(with(&["--live", "--server", "http://127.0.0.1:1"]).is_err());
-    assert!(with(&["--server", "http://127.0.0.1:1"]).is_err());
     assert!(
         with(&[
             "--live",
             "--server",
             "http://127.0.0.1:1",
+            "--token-file",
+            "t"
+        ])
+        .is_err()
+    );
+    assert!(with(&["--server", "http://127.0.0.1:1"]).is_err());
+    assert!(with(&["--job-server", "http://127.0.0.1:2"]).is_err());
+    assert!(
+        with(&[
+            "--live",
+            "--server",
+            "http://127.0.0.1:1",
+            "--job-server",
+            "http://127.0.0.1:2",
             "--token-file",
             "t"
         ])

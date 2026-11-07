@@ -6,8 +6,8 @@ use std::io;
 
 use js_measure::metric::name;
 use js_measure::{
-    Arm, CommandSetter, Curve, Experiment, ExperimentError, FakeClock, FakeFarm, HostShape,
-    NoSetter, PlanError, RunOutput, SetError, Setter, run_plan,
+    Arm, CommandSetter, Experiment, ExperimentError, FakeClock, FakeFarm, HostShape, NoSetter,
+    PlanError, RunOutput, SetError, Setter, run_plan,
 };
 
 use crate::support::{GIB, T0, job, plan, plan_over};
@@ -56,7 +56,7 @@ fn a_plan_runs_in_its_order_and_labels_each_run() {
     let slots = p.schedule().unwrap();
     let clock = FakeClock::at(T0);
     let farm = farm(&clock);
-    let jobs = [job("a", 60_000, None)];
+    let jobs = [job("a", 60_000)];
     let setter = Recording(RefCell::new(Vec::new()));
     let experiment = Experiment {
         plan: &p,
@@ -111,7 +111,7 @@ fn a_run_on_the_simulated_farm_records_its_numbers() {
     let p = plan(&["a"], 1, 0, 1);
     let clock = FakeClock::at(T0);
     let farm = farm(&clock);
-    let jobs = [job("a", 60_000, None)];
+    let jobs = [job("a", 60_000)];
     let experiment = Experiment {
         plan: &p,
         jobs: &jobs,
@@ -132,33 +132,22 @@ fn a_run_on_the_simulated_farm_records_its_numbers() {
     assert_eq!(m[name::HOST_CPU_SHARE_MAX], Some(2_000.0 / 32_000.0));
     assert_eq!(m[name::CPU_USED_OVER_BOOKED], Some(0.5));
     assert_eq!(m[name::MEMORY_USED_OVER_BOOKED], Some(0.5));
-    assert_eq!(m[name::RUNTIME_ACTUAL_OVER_PREDICTED_MEAN], None);
 }
 
-/// Asserts that a job with a profile the server has a curve for is compared with it, and
-/// that a profile without a curve, or with a curve of no minute, is not.
+/// Asserts that an arm's `whole_host` decides what every job of the run asks for: an arm
+/// that leaves it out runs the workload's own share of a host (4 cores and 8 GiB booked,
+/// half used), an arm that sets it books the whole 32-core, 128 GiB host, and an arm that
+/// sets it to false turns a whole-host job into a share.
 #[test]
-fn predictions_come_from_the_servers_curves() {
-    let p = plan(&["a"], 1, 0, 1);
+fn an_arm_decides_whether_jobs_take_the_whole_host() {
+    let mut p = plan(&["own", "whole", "share"], 1, 0, 1);
+    p.arms[1].whole_host = Some(true);
+    p.arms[2].whole_host = Some(false);
     let clock = FakeClock::at(T0);
-    let curve = Curve {
-        runs: 4,
-        ws_bytes: vec![4 * GIB, 2 * GIB],
-        cores_milli: Vec::new(),
-    };
-    let empty = Curve {
-        runs: 1,
-        ws_bytes: Vec::new(),
-        cores_milli: Vec::new(),
-    };
-    let farm = farm(&clock)
-        .with_curve("known", curve)
-        .with_curve("empty", empty);
-    let jobs = [
-        job("a", 60_000, Some("known")),
-        job("b", 60_000, Some("unknown")),
-        job("c", 60_000, Some("empty")),
-    ];
+    let farm = farm(&clock);
+    let mut whole = job("a", 60_000);
+    whole.ask.whole_host = true;
+    let jobs = [whole];
     let experiment = Experiment {
         plan: &p,
         jobs: &jobs,
@@ -169,15 +158,15 @@ fn predictions_come_from_the_servers_curves() {
         poll_ms: 10_000,
         deadline_ms: 3_600_000,
     };
-    let (_, outputs) = run_all(&experiment);
-    let rows = &outputs[0].jobs;
-    assert_eq!(rows[0].metrics["predicted_runtime_ms"], Some(120_000.0));
-    assert_eq!(
-        rows[0].metrics["predicted_peak_ws_bytes"],
-        Some(4.0 * GIB as f64)
-    );
-    assert_eq!(rows[1].metrics["predicted_runtime_ms"], None);
-    assert_eq!(rows[2].metrics["predicted_runtime_ms"], None);
+    let (result, outputs) = run_all(&experiment);
+    assert_eq!(result.unwrap(), 3);
+    let memory_used = |arm: &str| {
+        let run = outputs.iter().find(|o| o.record.arm == arm).unwrap();
+        run.record.metrics[name::MEMORY_USED_OVER_BOOKED]
+    };
+    assert_eq!(memory_used("own"), Some(4.0 / 128.0));
+    assert_eq!(memory_used("whole"), Some(4.0 / 128.0));
+    assert_eq!(memory_used("share"), Some(0.5));
 }
 
 /// Asserts that an out-of-memory outcome is counted as a memory kill in the record.
@@ -186,7 +175,7 @@ fn memory_kills_are_counted() {
     let p = plan(&["a"], 1, 0, 1);
     let clock = FakeClock::at(T0);
     let farm = farm(&clock).with_outcome("out_of_memory");
-    let jobs = [job("a", 20_000, None)];
+    let jobs = [job("a", 20_000)];
     let experiment = Experiment {
         plan: &p,
         jobs: &jobs,
@@ -217,7 +206,7 @@ impl Setter for Failing {
 fn a_plan_stops_on_a_bad_plan_a_failed_setter_or_a_failed_write() {
     let clock = FakeClock::at(T0);
     let farm = farm(&clock);
-    let jobs = [job("a", 20_000, None)];
+    let jobs = [job("a", 20_000)];
     let mut experiment = Experiment {
         plan: &plan(&[], 1, 0, 1),
         jobs: &jobs,
@@ -268,7 +257,7 @@ fn the_command_setter_runs_a_program() {
     let arm = |control| Arm {
         label: "x".to_owned(),
         control,
-        lease_class: None,
+        whole_host: None,
     };
     assert_eq!(ok.apply("fill", "0.8", &arm(false)), Ok(()));
     assert_eq!(ok.apply("fill", "0.8", &arm(true)), Ok(()));
@@ -299,7 +288,7 @@ fn every_emitted_line_is_what_the_analysis_reads() {
     let p = plan_over(&["0.8", "1.0"], &["whole", "booked"], 1, 1, 3);
     let clock = FakeClock::at(T0);
     let farm = farm(&clock);
-    let jobs = [job("a", 60_000, Some("unknown"))];
+    let jobs = [job("a", 60_000)];
     let experiment = Experiment {
         plan: &p,
         jobs: &jobs,
@@ -322,10 +311,7 @@ fn every_emitted_line_is_what_the_analysis_reads() {
         assert_eq!((read.seed, read.commit.as_str()), (3, "abc1234"));
         assert_eq!(read.label, if index < 4 { "warmup" } else { "" });
         assert_eq!(read.metrics["makespan_ms"], Some(60_000.0));
-        assert_eq!(read.metrics["runtime_actual_over_predicted_mean"], None);
-        assert!(
-            line.contains(r#""runtime_actual_over_predicted_mean":null"#),
-            "{line}"
-        );
+        assert_eq!(read.metrics["queue_wait_ms_max"], Some(10_000.0));
+        assert!(line.contains(r#""host_cpu_share_max":"#), "{line}");
     }
 }

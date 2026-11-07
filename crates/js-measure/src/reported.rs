@@ -7,7 +7,7 @@
 //! ```
 //!
 //! The line is the tag [`TAG`], one space, and a JSON object whose values are numbers (any
-//! other value is ignored, see below). The harness reads the end of the run's output from the lease server after the
+//! other value is ignored, see below). The harness reads the end of the run's output from the job server after the
 //! run is over (the log tail, at most 8 KiB of each stream) and takes the numbers from it.
 //!
 //! # The rules
