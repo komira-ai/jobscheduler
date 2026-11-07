@@ -608,22 +608,33 @@ mod tests {
         let polled = listed
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop()));
-        let Poll::Ready((list, leases)) = polled else {
-            panic!("the listing waited for the table's lock");
-        };
         drop(held);
 
-        let ids: Vec<&str> = list.hosts.iter().map(|host| host.id.as_str()).collect();
-        assert_eq!(ids, ["gpu-01", "gpu-02"]);
-        let on: Vec<Option<String>> = list.hosts.iter().map(|host| host.lease.clone()).collect();
-        assert_eq!(on, [Some(lease.id.to_string()), None]);
-        assert!(list.hosts.iter().all(|host| host.source == Source::Static));
+        // What the listing answered, as plain values: the host ids, the lease each lists, the
+        // source of each, and the leases booked per host. `Pending` means it waited for the
+        // table's lock.
+        let seen = polled.map(|(list, leases)| {
+            let hosts = list.hosts.iter();
+            let rows: Vec<(String, Option<String>, Source)> = hosts
+                .map(|host| (host.id.to_string(), host.lease.clone(), host.source))
+                .collect();
+            (rows, leases)
+        });
         let shape = Resources::new(64_000, 549_755_813_888, 8, Some("nvidia-a100".into()));
         let whole = Held {
             lease: lease.id,
             resources: shape.unwrap(),
             whole: true,
         };
-        assert_eq!(leases, BTreeMap::from([(lease.host, vec![whole])]));
+        let rows = vec![
+            (
+                "gpu-01".to_owned(),
+                Some(lease.id.to_string()),
+                Source::Static,
+            ),
+            ("gpu-02".to_owned(), None, Source::Static),
+        ];
+        let booked = BTreeMap::from([(lease.host, vec![whole])]);
+        assert_eq!(seen, Poll::Ready((rows, booked)));
     }
 }
