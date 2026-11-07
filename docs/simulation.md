@@ -95,7 +95,8 @@ What is simulated:
   by job id, as their engine: a start of a job it holds is a repeat, a stop of a job it
   does not hold retires the id, each result rides in every heartbeat until an answer
   acknowledges it, and each retired id until an answer acknowledges it. A real agent's
-  node does not speak them.
+  node speaks them too, with the lifecycle of `js-agent` as the engine (`held_jobs`,
+  `retired_jobs`, `JobStart`, `JobStop`), and writes the same ledger entries and counters.
 - an elastic pool's cloud: the elastic fake (`js-elastic-fake`), its clock advanced to the
   virtual time of every input of the server, behind a recording wrapper the scaler is
   handed, which forwards every call and writes down each acquire, release and list with
@@ -583,7 +584,9 @@ model:
   connection turns `reorder` or `duplicate` on for itself, with `.bus(...)` or
   `set_bus_faults`. Today two scenarios do: `an_agent_that_never_retires_a_stopped_run`
   in `tests/broken_agent.rs` and `a_stale_start_after_a_stop_does_not_run` in
-  `tests/faults.rs` turn `reorder` on for every message from 2 s to 30 s. None
+  `tests/faults.rs` turn `reorder` on for every message from 2 s to 30 s, except an agent's
+  heartbeat request, which a later one never overtakes (the real agent has one call in flight
+  at a time, for at most `REQUEST_LIMIT`, 10 s; `bus::may_overtake`). None
   turns `duplicate` on. A result or a stop sent again is covered by the server's HTTP
   tests (`crates/js-lease-server/tests/server/runs.rs`).
 - **Lost client answers.** The client's calls are never dropped, delayed or reordered;
@@ -670,11 +673,9 @@ of an unknown job"), and its replacement is that of rows 4 and 31 (a host whose
 containers and retired list died with the agent), so a scenario that pins either row
 with fake agents is held to the real one there.
 
-The real side cannot run today: the cell's real agent node (`js_sim_cell::agent::real`) speaks
-the per-run messages only and does not report the per-job capability, so the job service
-places nothing on a real host and the real runs of the family (and the `real_agent` golden
-family) end in `settles-when-quiet`. They stay in the family until the node speaks the
-per-job messages of the lifecycle of `js-agent`.
+The real side runs the job front: the cell's real agent node (`js_sim_cell::agent::real`)
+reports the per-job capability and speaks the per-job messages of the lifecycle of
+`js-agent` (`agent/real_jobs.rs`).
 
 The store family (`tests/store.rs`, its scenarios in `tests/cell/store.rs`) runs every
 invariant of `Invariant::ALL` over SQLite and, with the `postgres` feature, over

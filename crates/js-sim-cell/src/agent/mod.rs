@@ -125,7 +125,10 @@
 //! it acts on `JobStart` and `JobStop`, lists its jobs with their state in every heartbeat,
 //! sends each result until an answer acknowledges it, and lists the ids it retired until
 //! an answer acknowledges them, with a second [`FakeAgent`], keyed by job id, as the
-//! engine (module `per_job`). A real agent's node does not.
+//! engine (module `per_job`). A real agent's node does too, with the lifecycle's own per-job
+//! half as the engine (module `real_jobs`); the cell writes down what it carries as it does
+//! for the fake. An agent's heartbeat request is never overtaken by a later one on the bus
+//! ([`crate::bus::may_overtake`]).
 //!
 //! The node reads no clock and no random source: time arrives in each
 //! [`js_sim::NodeInput`].
@@ -155,6 +158,7 @@ mod exclusive;
 mod per_job;
 mod process;
 mod real;
+mod real_jobs;
 
 pub use exclusive::Prepare;
 use process::{Answer, Process};

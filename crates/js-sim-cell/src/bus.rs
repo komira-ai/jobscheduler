@@ -8,7 +8,8 @@
 //! dropped message is a connection reset (the request or its answer is lost), a delay is
 //! a slow network, and a [`js_sim::Partition`] is a cut link. A scenario that models a
 //! request retried over a second connection, which can overtake the first, turns
-//! `reorder` on for itself with [`js_sim::Sim::set_faults`].
+//! `reorder` on for itself with [`js_sim::Sim::set_faults`]. An agent's heartbeat is the
+//! exception ([`may_overtake`]): it is not overtaken by a later one, whatever the chance.
 //!
 //! A message carries its body as the JSON text the HTTP route carries, built from and
 //! read into the types of `js-agent-wire`, so the agent and the server read exactly the
@@ -100,9 +101,57 @@ pub fn trace_msg(msg: &Msg) -> String {
     }
 }
 
+/// Whether `msg` may overtake an earlier message of its link when the bus reorders: every
+/// message but an agent's heartbeat.
+///
+/// The real agent has one call in flight at a time and gives it
+/// `js_agent::REQUEST_LIMIT` (10 s), so a heartbeat is never overtaken by the next one
+/// within that time. The cell's agent sends a heartbeat every interval whether or not the
+/// last was answered, and the heartbeat carries no number the server could order by, so a
+/// heartbeat that overtook a later one would reach the server as the host's latest word
+/// although it was sent before the host knew of a job: the server would take it as the
+/// host no longer listing the job and free its allocation. A request retried over a second
+/// connection (the fault `reorder` models) overtakes a start or a stop in an answer, and
+/// a hello; not a heartbeat.
+#[must_use]
+pub fn may_overtake(msg: &Msg) -> bool {
+    !matches!(
+        msg,
+        Msg::Request {
+            route: Route::Heartbeat,
+            ..
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(route: Route) -> Msg {
+        Msg::Request {
+            id: CallId(0),
+            route,
+            bearer: String::new(),
+            body: String::new(),
+        }
+    }
+
+    /// Catches: a heartbeat that may be overtaken by a later one (which a server would read
+    /// as the host's latest listing), and an answer or a hello that may no longer be (which
+    /// would take the stale start out of the scenarios that count on it).
+    #[test]
+    fn only_a_heartbeat_request_may_not_overtake() {
+        assert!(!may_overtake(&request(Route::Heartbeat)));
+        assert!(may_overtake(&request(Route::Hello)));
+        let reply = Msg::Reply {
+            id: CallId(0),
+            status: 200,
+            retry_after: None,
+            body: String::new(),
+        };
+        assert!(may_overtake(&reply));
+    }
 
     /// Catches: agents named by anything but their index in three digits, from zero, which
     /// would give two agents one name or break the order the cell adds them in.

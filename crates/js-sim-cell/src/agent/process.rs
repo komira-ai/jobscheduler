@@ -24,18 +24,21 @@ use js_agent_wire::{
     ProtocolRange, RETRY_AFTER_CAP, ResultAck, RunResult, Welcome, WireShape, refusal,
 };
 use js_conformance::agent::{AgentHarness, FakeAgent};
+use js_jobs::JobId;
 use js_types::sched::FarmTime;
 use js_types::{LeaseId, Resources};
 
 use super::exclusive::Exclusive;
-use super::per_job::{Acks, PerJob};
+use super::per_job::{Acks, Listing, PerJob};
 use super::real::RealAgent;
+use super::real_jobs::RealJobs;
 use super::{AgentKind, AgentSpec, Io, SIM_RUN_IMAGE};
 use crate::bus::{CallId, Route};
 use crate::counters::Counter;
 use crate::ledger::{Acked, Completion};
 use crate::observe::{
-    AgentTruth, Launch, ReadyReport, RunId, Running, StartSeen, StopCommand, StopSeen, Verdict,
+    AgentTruth, Launch, ReadyReport, RunId, Running, RunningJob, StartSeen, StopCommand, StopSeen,
+    Verdict,
 };
 
 /// The agent version every hello names.
@@ -171,6 +174,22 @@ impl Behind {
         }
     }
 
+    /// The real agent, when this is it.
+    fn real(&self) -> Option<&RealAgent> {
+        match self {
+            Behind::Fake(_) => None,
+            Behind::Real(real) => Some(real),
+        }
+    }
+
+    /// The real agent, when this is it.
+    fn real_mut(&mut self) -> Option<&mut RealAgent> {
+        match self {
+            Behind::Fake(_) => None,
+            Behind::Real(real) => Some(real),
+        }
+    }
+
     /// The runs whose jobs run now.
     fn running(&self) -> BTreeSet<String> {
         match self {
@@ -280,6 +299,8 @@ pub(super) struct Process {
     exclusive: Exclusive,
     /// The per-job half, for a fake agent that speaks the per-job messages.
     jobs: Option<PerJob>,
+    /// The per-job half, for a real agent that speaks the per-job messages.
+    real_jobs: Option<RealJobs>,
 }
 
 impl Process {
@@ -295,6 +316,7 @@ impl Process {
             disconnected: false,
             exclusive: Exclusive::default(),
             jobs: PerJob::of(spec),
+            real_jobs: RealJobs::of(spec),
         })
     }
 
@@ -321,8 +343,24 @@ impl Process {
             running: running.collect(),
             completed: self.book.completed.clone(),
             acknowledged: self.book.acknowledged.clone(),
-            jobs: self.jobs.as_ref().map(PerJob::truth).unwrap_or_default(),
+            jobs: self.jobs_truth(),
         }
+    }
+
+    /// The jobs the agent runs now, whichever agent is behind the per-job half.
+    fn jobs_truth(&self) -> BTreeMap<JobId, RunningJob> {
+        let fake = self.jobs.as_ref().map(PerJob::truth);
+        let jobs = self.real_jobs.as_ref().zip(self.agent.real());
+        let real = jobs.map(|(jobs, real)| jobs.truth(real));
+        fake.or(real).unwrap_or_default()
+    }
+
+    /// What the next heartbeat lists as jobs, whichever agent is behind the per-job half.
+    fn jobs_listing(&self) -> Listing {
+        let fake = self.jobs.as_ref().map(PerJob::listing);
+        let real = self.real_jobs.as_ref().zip(self.agent.real());
+        let real = real.map(|(_, real)| RealJobs::listing(real));
+        fake.or(real).unwrap_or_default()
     }
 
     /// The process's tick: a hello while not welcomed, else a heartbeat. Returns when the
@@ -343,8 +381,10 @@ impl Process {
     /// completes unless it no longer runs (it was stopped, or this is the end of a second
     /// launch of a run that already ended).
     pub(super) fn timer(&mut self, tag: u64, io: &mut Io) {
-        let per_job = self.jobs.as_mut();
-        if per_job.is_some_and(|jobs| jobs.timer(tag, io)) {
+        let fake = self.jobs.as_mut().is_some_and(|jobs| jobs.timer(tag, io));
+        let real = self.real_jobs.as_mut().zip(self.agent.real_mut());
+        let real = real.is_some_and(|(jobs, real)| jobs.timer(tag, real, io));
+        if fake || real {
             return;
         }
         let Some(run) = self.book.run_timers.remove(&tag) else {
@@ -419,12 +459,13 @@ impl Process {
         if let Behind::Real(real) = &mut self.agent {
             real.step();
         }
+        self.settle(io);
         session.seq += 1;
         self.beats_sent.insert(session.seq, io.now);
         let results = self.agent.results(&self.book.runs);
         self.book.count_resent(&results, io);
         let held = self.list();
-        let listing = self.jobs.as_ref().map(PerJob::listing).unwrap_or_default();
+        let listing = self.jobs_listing();
         let (ready, refused) = self.exclusive.report(io.prepare, held.is_empty(), io.now);
         if let Some(lease) = &ready {
             io.ledger.reported_ready(ReadyReport {
@@ -457,8 +498,19 @@ impl Process {
         let id = io.call(Route::Heartbeat, &spec.join_token, body);
         session.unanswered.insert(id, false);
         if let Some(jobs) = self.jobs.as_mut() {
+            jobs.sent(id, listing.clone(), io);
+        }
+        if let Some(jobs) = self.real_jobs.as_mut() {
             jobs.sent(id, listing, io);
         }
+    }
+
+    /// Writes down the results the real lifecycle holds now, when it speaks the per-job
+    /// messages.
+    fn settle(&mut self, io: &mut Io) {
+        let jobs = self.real_jobs.as_mut().zip(self.agent.real());
+        jobs.into_iter()
+            .for_each(|(jobs, real)| jobs.settle(real, io));
     }
 
     /// What a hello or heartbeat lists as held ([`Behind::held`]), noted as listed.
@@ -474,7 +526,10 @@ impl Process {
     pub(super) fn runs_unlisted(&self) -> bool {
         let running = self.agent.running();
         let runs = running.iter().any(|run| !self.book.listed.contains(run));
-        runs || self.jobs.as_ref().is_some_and(PerJob::runs_unlisted)
+        let fake = self.jobs.as_ref().is_some_and(PerJob::runs_unlisted);
+        let real = self.real_jobs.as_ref().zip(self.agent.real());
+        let real = real.is_some_and(|(jobs, real)| jobs.runs_unlisted(real));
+        runs || fake || real
     }
 
     fn reconnect(&mut self) {
@@ -589,8 +644,16 @@ impl Process {
                     _ => None,
                 });
                 starts.unaccounted.extend(withheld);
+                let acks = Acks::of(&reply, &check);
+                let jobs = self.real_jobs.as_mut();
+                let noted = jobs.map(|jobs| jobs.noted(id, &check.commands, &acks, capacity, io));
+                let skipped = noted.iter().flat_map(|noted| noted.unaccounted.iter());
+                starts.unaccounted.extend(skipped.cloned());
                 drop(check);
-                hand_over(real, &mut self.book, &mut reply, starts, io);
+                let created = hand_over(real, &mut self.book, &mut reply, starts, io);
+                let jobs = self.real_jobs.as_mut().zip(noted);
+                jobs.into_iter()
+                    .for_each(|(jobs, noted)| jobs.landed(noted, &created, real, io));
                 return;
             }
         }
@@ -700,21 +763,25 @@ impl Book {
 
 /// Hands `reply` to the real lifecycle, less the starts the cell cannot account for, and
 /// lets it take a step. Each container it created is a launch of the start that names it;
-/// each result the reply's acknowledgements ended is acknowledged with its verdict.
+/// each result the reply's acknowledgements ended is acknowledged with its verdict. Returns
+/// the run id of each container created, jobs' included.
 fn hand_over(
     real: &mut RealAgent,
     book: &mut Book,
     reply: &mut HeartbeatReply,
     starts: Starts,
     io: &mut Io,
-) {
+) -> Vec<String> {
     let Starts {
         mut accounted,
         unaccounted,
     } = starts;
-    reply.commands.retain(
-        |command| !matches!(command, Command::Start(job) if unaccounted.contains(&job.run_id)),
-    );
+    reply.commands.retain(|command| match command {
+        Command::Start(job) => !unaccounted.contains(&job.run_id),
+        Command::JobStart(job) => !unaccounted.contains(&job.job_id),
+        Command::JobStop { job_id } => !unaccounted.contains(job_id),
+        _ => true,
+    });
     let owed = real.owed();
     let launched = real.apply(reply);
     let kept = real.owed();
@@ -734,6 +801,7 @@ fn hand_over(
     for (job, info) in launches {
         book.launched(&job, info, io);
     }
+    launched
 }
 
 /// The runs the fake holds: those it runs, and those whose result is not yet

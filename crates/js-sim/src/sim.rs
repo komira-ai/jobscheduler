@@ -289,7 +289,8 @@ impl<N: Node> Sim<N> {
         for copy in 0..copies {
             let delay = self.draw_delay();
             let mut at = self.now.saturating_add(delay);
-            let reordered = self.rng.chance(self.faults.reorder);
+            let hit = self.rng.chance(self.faults.reorder);
+            let reordered = hit && N::may_overtake(&msg);
             if !reordered {
                 let last = self
                     .link_last

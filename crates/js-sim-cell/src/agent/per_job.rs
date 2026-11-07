@@ -2,8 +2,8 @@
 //! second [`FakeAgent`], keyed by job id, as their engine.
 //!
 //! A fake agent speaks them when its hello reports [`PER_JOB_CAPABILITY`] (the cell's
-//! agents do). The real agent's node does not:
-//! its lifecycle's per-job half is not run here. Every call below goes to the second fake,
+//! agents do). The real agent's node has its own half (`real_jobs.rs`), which shares the
+//! heartbeat book and the start intent below. Every call below goes to the second fake,
 //! so a [`Defect`] of the agent acts on its jobs as it acts on its runs.
 //!
 //! | what arrives or happens | what the agent does |
@@ -42,15 +42,15 @@ use super::{AgentKind, AgentSpec, Io, SIM_RUN_IMAGE};
 use crate::bus::CallId;
 use crate::counters::Counter;
 use crate::jobs::{JobBeat, JobReply, JobStartSeen, ResultMade, allocation_id};
-use crate::observe::{Launch, RunId, RunningJob};
+use crate::observe::{Launch, RunId, RunningJob, Verdict};
 
 #[cfg(doc)]
 use js_conformance::agent::Defect;
 
 /// A job the agent launched, as its start named it.
-struct Placed {
-    allocation: AllocationId,
-    resources: Resources,
+pub(super) struct Placed {
+    pub(super) allocation: AllocationId,
+    pub(super) resources: Resources,
 }
 
 /// A heartbeat sent and not yet answered: when, and the jobs it listed without a result.
@@ -61,22 +61,22 @@ struct Sent {
 }
 
 /// What one heartbeat lists.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Listing {
     /// The wire's `jobs`.
     pub(super) held: Vec<HeldJob>,
     /// The wire's `retired_jobs`.
     pub(super) retired: Vec<String>,
-    running: BTreeSet<JobId>,
-    results: BTreeSet<JobId>,
-    retired_ids: BTreeSet<JobId>,
+    pub(super) running: BTreeSet<JobId>,
+    pub(super) results: BTreeSet<JobId>,
+    pub(super) retired_ids: BTreeSet<JobId>,
 }
 
 /// The verdicts and the retired ids an answer acknowledges, each list as the wire's check let
 /// it pass: a list that fails its check is ignored whole, as the wire says.
 pub(super) struct Acks<'a> {
-    job_acks: &'a [JobResultAck],
-    retired_acks: &'a [String],
+    pub(super) job_acks: &'a [JobResultAck],
+    pub(super) retired_acks: &'a [String],
 }
 
 impl<'a> Acks<'a> {
@@ -99,6 +99,146 @@ impl<'a> Acks<'a> {
     }
 }
 
+/// What both engines keep of the heartbeats: those sent and not yet answered, the jobs
+/// whose result a heartbeat sent, and the jobs a heartbeat listed as running.
+#[derive(Default)]
+pub(super) struct Beats {
+    /// The heartbeats sent and not yet answered.
+    sent: BTreeMap<CallId, Sent>,
+    /// Every job whose result a heartbeat sent at least once.
+    reported: BTreeSet<JobId>,
+    /// Every job a heartbeat listed as running at least once.
+    listed: BTreeSet<JobId>,
+}
+
+impl Beats {
+    /// The heartbeat of `listing` was sent as call `id`: each result sent before counts as
+    /// sent again ([`Counter::ResultResent`]), and the ledger is told.
+    pub(super) fn sent(&mut self, id: CallId, listing: Listing, io: &mut Io) {
+        for job in &listing.results {
+            if !self.reported.insert(job.clone()) {
+                io.bump(Counter::ResultResent);
+            }
+        }
+        let Listing {
+            running,
+            results,
+            retired_ids,
+            ..
+        } = listing;
+        self.listed.extend(running.iter().cloned());
+        let sent = Sent {
+            at: io.now,
+            listed: running.clone(),
+        };
+        self.sent.insert(id, sent);
+        io.ledger.job_beat(JobBeat {
+            host: io.host.clone(),
+            at: io.now,
+            running,
+            results,
+            retired: retired_ids,
+        });
+    }
+
+    /// What the answer to the heartbeat sent as call `id` reads, so far: when that
+    /// heartbeat was sent and the jobs it listed without a result.
+    pub(super) fn reply(&mut self, id: CallId, io: &Io) -> JobReply {
+        let beat = self.sent.remove(&id).unwrap_or_default();
+        JobReply {
+            host: io.host.clone(),
+            at: io.now,
+            beat_at: beat.at,
+            listed: beat.listed,
+            starts: Vec::new(),
+            stops: BTreeSet::new(),
+            acks: Vec::new(),
+        }
+    }
+
+    /// Whether a heartbeat listed `job` as running.
+    pub(super) fn was_listed(&self, job: &JobId) -> bool {
+        self.listed.contains(job)
+    }
+}
+
+/// A start of a job whose job id and allocation id are the cell server's form.
+pub(super) struct Intent {
+    pub(super) job: JobId,
+    pub(super) allocation: AllocationId,
+    /// How long the job runs by itself, for a [`SIM_RUN_IMAGE`] job.
+    millis: Option<u64>,
+    /// What the job holds on the host.
+    resources: Resources,
+}
+
+impl Intent {
+    /// The start `spec` makes on a host of `capacity`; `None` when it names a job id or an
+    /// allocation id that does not parse.
+    pub(super) fn of(spec: &JobStartSpec, capacity: &Resources) -> Option<Self> {
+        let first = spec.command.first();
+        let millis = first.and_then(|first| first.parse::<u64>().ok());
+        JobId::parse(&spec.job_id)
+            .ok()
+            .zip(allocation_id(&spec.allocation_id))
+            .map(|(job, allocation)| Self {
+                job,
+                allocation,
+                millis: millis.filter(|_| spec.image == SIM_RUN_IMAGE),
+                resources: booked(spec, capacity),
+            })
+    }
+
+    /// The agent launched the job: the ledger is told, the end of a [`SIM_RUN_IMAGE`] job
+    /// is armed in `timers`, and the job is entered in `jobs`.
+    pub(super) fn launched(
+        self,
+        jobs: &mut BTreeMap<JobId, Placed>,
+        timers: &mut BTreeMap<u64, JobId>,
+        io: &mut Io,
+    ) {
+        io.ledger.launched(Launch {
+            run: RunId::new(format!("{}/{}", self.job, self.allocation)),
+            host: io.host.clone(),
+            at: io.now,
+        });
+        if let Some(millis) = self.millis {
+            let tag = io.timer(Duration::from_millis(millis));
+            timers.insert(tag, self.job.clone());
+        }
+        let placed = Placed {
+            allocation: self.allocation,
+            resources: self.resources,
+        };
+        jobs.insert(self.job, placed);
+    }
+}
+
+/// Counts a start of `job` that arrives after a stop of it (`stopped`), or for a job the
+/// agent launched already (`launched`).
+pub(super) fn note_start(stopped: &BTreeSet<JobId>, launched: bool, job: &JobId, io: &mut Io) {
+    if stopped.contains(job) {
+        io.bump(Counter::StartAfterStop);
+    } else if launched {
+        io.bump(Counter::StartRepeated);
+    }
+}
+
+/// The verdicts `acks` carries on job ids and verdicts this version reads.
+pub(super) fn verdicts(acks: &Acks<'_>) -> Vec<(JobId, Verdict)> {
+    let read = acks
+        .job_acks
+        .iter()
+        .filter_map(|ack| JobId::parse(&ack.job_id).ok().zip(verdict(ack.ack)));
+    read.collect()
+}
+
+/// Whether the hello of `spec` reports [`PER_JOB_CAPABILITY`] as `true`.
+pub(super) fn speaks(spec: &AgentSpec) -> bool {
+    let value = spec.capabilities.get(PER_JOB_CAPABILITY);
+    value.is_some_and(|value| value == "true")
+}
+
 /// The per-job half of one agent process.
 pub(super) struct PerJob {
     fake: FakeAgent,
@@ -112,34 +252,26 @@ pub(super) struct PerJob {
     killed: BTreeSet<JobId>,
     /// The ids retired by a stop of a job not held, until an answer acknowledges them.
     retired: BTreeSet<JobId>,
-    /// The heartbeats sent and not yet answered.
-    sent: BTreeMap<CallId, Sent>,
-    /// Every job whose result a heartbeat sent at least once.
-    reported: BTreeSet<JobId>,
-    /// Every job a heartbeat listed as running at least once.
-    listed: BTreeSet<JobId>,
+    beats: Beats,
 }
 
 impl PerJob {
     /// The per-job half of a process of `spec`'s agent: `None` unless it is a fake whose
     /// hello reports [`PER_JOB_CAPABILITY`].
     pub(super) fn of(spec: &AgentSpec) -> Option<Self> {
-        let speaks = spec.capabilities.get(PER_JOB_CAPABILITY);
         let defect = match &spec.kind {
             AgentKind::Fake(defect) => *defect,
             AgentKind::Real(_) => return None,
         };
         let fake = defect.map_or_else(|| FakeAgent::with_window(None), FakeAgent::broken);
-        speaks.filter(|value| *value == "true").map(|_| Self {
+        speaks(spec).then(|| Self {
             fake,
             jobs: BTreeMap::new(),
             timers: BTreeMap::new(),
             stopped: BTreeSet::new(),
             killed: BTreeSet::new(),
             retired: BTreeSet::new(),
-            sent: BTreeMap::new(),
-            reported: BTreeSet::new(),
-            listed: BTreeSet::new(),
+            beats: Beats::default(),
         })
     }
 
@@ -208,38 +340,18 @@ impl PerJob {
     /// and each result sent before counts as sent again ([`Counter::ResultResent`]).
     pub(super) fn sent(&mut self, id: CallId, listing: Listing, io: &mut Io) {
         self.fake.heartbeat();
-        for job in &listing.results {
-            if !self.reported.insert(job.clone()) {
-                io.bump(Counter::ResultResent);
-            }
-        }
-        let Listing {
-            running,
-            results,
-            retired_ids,
-            ..
-        } = listing;
-        self.listed.extend(running.iter().cloned());
-        let sent = Sent {
-            at: io.now,
-            listed: running.clone(),
-        };
-        self.sent.insert(id, sent);
-        io.ledger.job_beat(JobBeat {
-            host: io.host.clone(),
-            at: io.now,
-            running,
-            results,
-            retired: retired_ids,
-        });
+        self.beats.sent(id, listing, io);
     }
 
     /// Whether the agent runs a job that no heartbeat it sent listed, so the server cannot
     /// have seen it listed.
     pub(super) fn runs_unlisted(&self) -> bool {
         let running = self.fake.observed().running;
-        let mut jobs = self.jobs.keys();
-        jobs.any(|job| running.contains(job.as_str()) && !self.listed.contains(job))
+        let mut jobs = self
+            .jobs
+            .keys()
+            .filter(|job| running.contains(job.as_str()));
+        jobs.any(|job| !self.beats.was_listed(job))
     }
 
     /// The connection dropped: the heartbeat before had no answer when the next was due.
@@ -264,16 +376,7 @@ impl PerJob {
         io: &mut Io,
     ) {
         self.fake.contact();
-        let beat = self.sent.remove(&id).unwrap_or_default();
-        let mut read = JobReply {
-            host: io.host.clone(),
-            at: io.now,
-            beat_at: beat.at,
-            listed: beat.listed,
-            starts: Vec::new(),
-            stops: BTreeSet::new(),
-            acks: Vec::new(),
-        };
+        let mut read = self.beats.reply(id, io);
         for command in commands {
             match command {
                 Command::JobStart(spec) => self.start(spec, capacity, &mut read, io),
@@ -281,10 +384,7 @@ impl PerJob {
                 _ => {}
             }
         }
-        for ack in acks.job_acks {
-            let (Ok(job), Some(verdict)) = (JobId::parse(&ack.job_id), verdict(ack.ack)) else {
-                continue;
-            };
+        for (job, verdict) in verdicts(acks) {
             self.fake.ack(job.as_str());
             read.acks.push((job, verdict));
         }
@@ -302,47 +402,22 @@ impl PerJob {
         read: &mut JobReply,
         io: &mut Io,
     ) {
-        let named = (
-            JobId::parse(&spec.job_id).ok(),
-            allocation_id(&spec.allocation_id),
-        );
-        let (Some(job), Some(allocation)) = named else {
+        let Some(intent) = Intent::of(spec, capacity) else {
             return io.bump(Counter::ReplyInvalid);
         };
+        let job = intent.job.clone();
         read.starts.push(JobStartSeen {
             job: job.clone(),
-            allocation,
+            allocation: intent.allocation,
         });
         let before = self.fake.observed();
-        if self.stopped.contains(&job) {
-            io.bump(Counter::StartAfterStop);
-        } else if before.launches.contains_key(job.as_str()) {
-            io.bump(Counter::StartRepeated);
-        }
+        let launched = before.launches.contains_key(job.as_str());
+        note_start(&self.stopped, launched, &job, io);
         self.fake.start(job.as_str(), 0, 0);
         let after = self.fake.observed();
-        if after.launches.get(job.as_str()) == before.launches.get(job.as_str()) {
-            return;
+        if after.launches.get(job.as_str()) != before.launches.get(job.as_str()) {
+            intent.launched(&mut self.jobs, &mut self.timers, io);
         }
-        io.ledger.launched(Launch {
-            run: RunId::new(format!("{job}/{allocation}")),
-            host: io.host.clone(),
-            at: io.now,
-        });
-        let first = spec.command.first();
-        let millis = first.and_then(|first| first.parse::<u64>().ok());
-        if let Some(millis) = millis.filter(|_| spec.image == SIM_RUN_IMAGE) {
-            let tag = io.timer(Duration::from_millis(millis));
-            self.timers.insert(tag, job.clone());
-        }
-        let resources = booked(spec, capacity);
-        self.jobs.insert(
-            job,
-            Placed {
-                allocation,
-                resources,
-            },
-        );
     }
 
     /// A stop of the job `text` names.
@@ -377,7 +452,7 @@ impl PerJob {
 }
 
 /// Writes into the ledger that the agent made the result of `job`, now.
-fn made(job: JobId, io: &mut Io) {
+pub(super) fn made(job: JobId, io: &mut Io) {
     io.ledger.result_made(ResultMade {
         host: io.host.clone(),
         job,
@@ -387,7 +462,7 @@ fn made(job: JobId, io: &mut Io) {
 
 /// What the job `spec` starts holds on a host of `capacity`: its booked cpu, memory and
 /// disk, and one GPU of the host's class per index it names.
-fn booked(spec: &JobStartSpec, capacity: &Resources) -> Resources {
+pub(super) fn booked(spec: &JobStartSpec, capacity: &Resources) -> Resources {
     let booked = &spec.booked;
     let gpus = booked.gpu_indices.len() as u64;
     let class = capacity.gpu_class().filter(|_| gpus > 0).map(str::to_owned);

@@ -65,10 +65,17 @@ impl Node for Recorder {
         format!("msg({msg})")
     }
 
+    fn may_overtake(msg: &u32) -> bool {
+        *msg < PINNED
+    }
+
     fn take_outputs(&mut self) -> Vec<Output<u32>> {
         std::mem::take(&mut self.out)
     }
 }
+
+/// Messages numbered from here on may not overtake an earlier message of their link.
+const PINNED: u32 = 1_000;
 
 /// "a" sends 0..100 to "b" at time 0; returns what "b" received.
 fn hundred_to_b(seed: u64, faults: Faults) -> Recorder {
@@ -157,6 +164,41 @@ fn reorder_lets_messages_overtake() {
     assert!(
         msgs.windows(2).any(|w| w[0] > w[1]),
         "no message overtook another: {msgs:?}"
+    );
+}
+
+/// Asserts that with `reorder` always on, the messages the node says may not overtake
+/// arrive in the order sent while the others still overtake. Catches a bus that reorders a
+/// message the node pinned, and one that stops reordering the rest.
+#[test]
+fn a_message_that_may_not_overtake_arrives_in_order() {
+    let reorder = Faults {
+        reorder: Chance::always(),
+        ..Faults::default()
+    };
+    let mixed = (0..100).map(|m| (0, "b", if m % 2 == 0 { m } else { PINNED + m }));
+    let mut sim = Sim::new(3, reorder);
+    sim.add_node("a", Recorder::sending(mixed));
+    sim.add_node("b", Recorder::default());
+    sim.run_until(FarmTime::from_millis(1_000));
+    let b = sim.node(&NodeId::from("b")).expect("b was added");
+    let pinned: Vec<u32> = b.msgs().into_iter().filter(|m| *m >= PINNED).collect();
+    let sent: Vec<u32> = (0..100)
+        .filter(|m| m % 2 == 1)
+        .map(|m| PINNED + m)
+        .collect();
+    assert_eq!(pinned.len(), 50);
+    assert!(
+        pinned.windows(2).all(|w| w[0] < w[1]),
+        "a pinned message was overtaken: {pinned:?}"
+    );
+    let mut sorted = pinned.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, sent);
+    let free: Vec<u32> = b.msgs().into_iter().filter(|m| *m < PINNED).collect();
+    assert!(
+        free.windows(2).any(|w| w[0] > w[1]),
+        "no other message overtook: {free:?}"
     );
 }
 

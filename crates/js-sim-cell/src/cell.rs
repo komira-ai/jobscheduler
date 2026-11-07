@@ -312,10 +312,7 @@ impl Cell {
         let name = agent_name(self.agents);
         let host = HostId::new(name.as_str())?;
         let mut capabilities = self.spec.shape().capabilities.clone();
-        // A real agent's node does not speak the per-job messages, so it does not say so.
-        if matches!(kind, AgentKind::Fake(_)) {
-            capabilities.insert(PER_JOB_CAPABILITY.to_owned(), "true".to_owned());
-        }
+        capabilities.insert(PER_JOB_CAPABILITY.to_owned(), "true".to_owned());
         let spec = AgentSpec {
             host: host.clone(),
             pool: self.spec.pool().to_owned(),
