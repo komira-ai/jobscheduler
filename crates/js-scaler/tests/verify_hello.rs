@@ -31,6 +31,9 @@ fn hello_of(offer: &Offer) -> Offer {
     }
 }
 
+/// A change that lowers one size of a hello.
+type Lower = fn(&mut Offer);
+
 fn judge(offer: &Offer, hello: &Offer, tolerance: u8) -> Verdict {
     verify_hello(&StoredOffer::from_offer(offer), hello, tolerance)
 }
@@ -72,7 +75,7 @@ fn a_size_within_tolerance_matches() {
         ..hello_of(&offer)
     };
     assert_eq!(judge(&offer, &edge, 10), Verdict::Match);
-    let below: [(fn(&mut Offer), HelloDimension); 3] = [
+    let below: [(Lower, HelloDimension); 3] = [
         (|hello| hello.cpu_millis -= 1, Cpu),
         (|hello| hello.memory_bytes -= 1, Memory),
         (|hello| hello.disk_bytes -= 1, Disk),
