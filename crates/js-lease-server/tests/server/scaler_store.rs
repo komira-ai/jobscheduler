@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use js_lease_server::{RecordsFile, UnremovedFile};
+use js_provider::Pool;
 use js_scaler::Records;
 use js_state::{Revision, Store};
 use serde_json::{Value, json};
