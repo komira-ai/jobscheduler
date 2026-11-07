@@ -24,12 +24,14 @@
 //! has none) and the records of requests without an id, which are told apart by their
 //! content and forgotten by a restart.
 //!
-//! Under `--placement js-sched` the engine keeps all of this for a request with an id that it
-//! commits from its queue (`js-sched-placer`'s `engine::prepare`), through
-//! [`crate::Placer::prepare_failed`] and its siblings: the registry then keeps only the lease
-//! that holds the request's key here, and the horizon. The engine hands its counts and bars
-//! to the ledger and takes them back at a start ([`crate::Placer::whole_ledger`],
-//! [`crate::Placer::whole_restore`]), so a restart under that placement keeps them too.
+//! Under `--placement js-sched` the engine keeps all of this (`js-sched-placer`'s
+//! `engine::prepare`) for every whole-node request, those told apart by their content
+//! included, through [`crate::Placer::prepare_failed`], [`crate::Placer::whole_commit`] and
+//! their siblings, and these records are never called ([`crate::Placer::keeps_wait_list`]).
+//! The engine hands its counts and bars to the ledger and takes them back at a start
+//! ([`crate::Placer::whole_ledger`], [`crate::Placer::whole_restore`]), so a restart under
+//! that placement keeps them too. The failed prepares the allocation log records are the
+//! registry's under both placements ([`FailedPrepare`]).
 //!
 //! [`Registry::not_ready`]: crate::Registry::not_ready
 
@@ -44,6 +46,7 @@ use js_usage::ProfileKey;
 use crate::config::PoolConfig;
 use crate::whole_config::WholeNodeConfig;
 
+use super::calls::Calls;
 use super::reasons::{Cause, HostEffect, RequestEffect};
 
 /// What a request's record is kept under: the consumer's request id when the start
@@ -138,12 +141,13 @@ impl RequestRecord {
 pub(crate) struct Requests {
     placed: BTreeMap<LeaseId, RequestKey>,
     records: Vec<Entry>,
-    /// The committed leases whose prepare failed since the registry last took them, for the
-    /// record of each one's end.
-    failed: Vec<FailedPrepare>,
+    /// The calls the records have had ([`crate::Registry::machine_calls`]).
+    pub(crate) calls: Calls,
 }
 
-/// A committed whole-node lease whose prepare failed: the booking it freed.
+/// A committed whole-node lease whose prepare failed: the booking it freed, kept by the
+/// registry for the record of its end until the lock is released (under every placement:
+/// it is the allocation log's, not a request's record).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FailedPrepare {
     pub(crate) lease: LeaseId,
@@ -165,11 +169,13 @@ struct Entry {
 impl Requests {
     /// `lease` was committed for `request`.
     pub(crate) fn commit(&mut self, lease: LeaseId, key: RequestKey) {
+        self.calls.note();
         self.placed.insert(lease, key);
     }
 
     /// Whether a lease other than `lease` is committed for the request under `key`.
     pub(crate) fn held_by_other(&self, key: &RequestKey, lease: &LeaseId) -> bool {
+        self.calls.note();
         self.placed
             .iter()
             .any(|(held, kept)| (kept == key) & (held != lease))
@@ -178,28 +184,21 @@ impl Requests {
     /// Drops the record of request `id`: its consumer cancelled it, so a later request
     /// under the id starts with no failures, give-ups or exclusions.
     pub(crate) fn forget(&mut self, id: &RequestId) {
+        self.calls.note();
         let key = RequestKey::from(id);
         self.records.retain(|entry| entry.key != key);
     }
 
     /// The lease ended; it no longer stands for its request.
     pub(crate) fn release(&mut self, lease: &LeaseId) {
+        self.calls.note();
         self.placed.remove(lease);
-    }
-
-    /// Notes that the prepare of a committed lease failed and freed its booking.
-    pub(crate) fn note_failed(&mut self, failed: FailedPrepare) {
-        self.failed.push(failed);
-    }
-
-    /// The failed prepares noted since the last call, oldest first.
-    pub(crate) fn take_failed(&mut self) -> Vec<FailedPrepare> {
-        std::mem::take(&mut self.failed)
     }
 
     /// The agent reported `lease` ready: its request is placed, and the record of its
     /// failed tries is no longer needed.
     pub(crate) fn granted(&mut self, lease: &LeaseId) {
+        self.calls.note();
         let key = self.placed.get(lease);
         key.into_iter().for_each(|key| {
             self.records.retain(|entry| entry.key != *key);
@@ -210,6 +209,7 @@ impl Requests {
     /// removed and `true` is returned, so the start is refused and the next start of the
     /// request is a fresh one; any other record is marked as in use.
     pub(crate) fn start(&mut self, key: &RequestKey, now: Timestamp) -> bool {
+        self.calls.note();
         let at = self.records.iter().position(|entry| entry.key == *key);
         let Some(at) = at else {
             return false;
@@ -227,6 +227,7 @@ impl Requests {
     /// Drops the records whose request has no committed lease and has not started or
     /// failed for `horizon_ms`.
     pub(crate) fn sweep(&mut self, now: Timestamp, horizon_ms: u64) {
+        self.calls.note();
         let placed = &self.placed;
         self.records.retain(|entry| {
             let idle = now.millis().saturating_sub(entry.touched.millis());
@@ -239,6 +240,7 @@ impl Requests {
     /// so the idle horizon counts from the start. Called once per request, at a start,
     /// before the request has a record of its own.
     pub(crate) fn restore(&mut self, key: RequestKey, record: RequestRecord, now: Timestamp) {
+        self.calls.note();
         self.records.push(Entry {
             key,
             record,
@@ -248,6 +250,7 @@ impl Requests {
 
     /// The records of the requests that carry an id, for the ledger.
     pub(crate) fn recorded(&self) -> impl Iterator<Item = (&RequestId, &RequestRecord)> {
+        self.calls.note();
         self.records.iter().filter_map(|entry| match &entry.key {
             RequestKey::Id(id) => Some((id, &entry.record)),
             RequestKey::Content(_) => None,
@@ -256,12 +259,14 @@ impl Requests {
 
     /// The record of the request under `key`, if a prepare of it failed.
     pub(crate) fn record(&self, key: &RequestKey) -> Option<&RequestRecord> {
+        self.calls.note();
         let found = self.records.iter().find(|entry| entry.key == *key);
         found.map(|entry| &entry.record)
     }
 
     /// Whether `host` is left out of the placements of the request under `key` at `now`.
     pub(crate) fn excluded(&self, key: &RequestKey, host: &HostId, now: Timestamp) -> bool {
+        self.calls.note();
         let record = self.record(key);
         let exclusion = record.and_then(|record| record.exclusions.get(host));
         exclusion.is_some_and(|exclusion| exclusion.holds(now))
@@ -270,6 +275,7 @@ impl Requests {
     /// Whether `host` is left out of the placements of the request under `key` for the
     /// rest of its life: no wait makes it eligible.
     pub(crate) fn barred_for_life(&self, key: &RequestKey, host: &HostId) -> bool {
+        self.calls.note();
         let record = self.record(key);
         let exclusion = record.and_then(|record| record.exclusions.get(host));
         exclusion == Some(&Exclusion::ForLife)
@@ -298,6 +304,7 @@ impl Requests {
         host: &HostId,
         (now, backoff_end): (Timestamp, Timestamp),
     ) {
+        self.calls.note();
         let record = self.entry(key, now);
         record.give_ups = record.give_ups.saturating_add(1);
         record.exclude(host, Exclusion::Until(backoff_end));
@@ -308,6 +315,7 @@ impl Requests {
     /// whole-node queue ([`crate::Placer::whole_give_ups`]). No host is excluded here: a
     /// give-up's back-off stays the placer's.
     pub(crate) fn raise_give_ups(&mut self, key: RequestKey, count: u32, now: Timestamp) {
+        self.calls.note();
         if count > self.give_ups(&key) {
             self.entry(key, now).give_ups = count;
         }
@@ -315,6 +323,7 @@ impl Requests {
 
     /// The drain give-ups counted for the request under `key`.
     pub(crate) fn give_ups(&self, key: &RequestKey) -> u32 {
+        self.calls.note();
         self.record(key).map_or(0, |record| record.give_ups)
     }
 
@@ -322,6 +331,7 @@ impl Requests {
     /// of `cause` says, and releases the lease. A lease with no request (one put back
     /// after a restart) counts nowhere.
     pub(crate) fn fail(&mut self, lease: &LeaseId, cause: Cause, detail: &str, ctx: Failure<'_>) {
+        self.calls.note();
         let Some(key) = self.placed.remove(lease) else {
             return;
         };

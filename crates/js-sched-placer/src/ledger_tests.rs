@@ -9,8 +9,8 @@ use std::time::Duration;
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Candidate, Held, StartSpec};
 use js_registry::{
-    Exclusion, MarkedTails, NotReady, Placer, PrepareFailure, Standing, WaitingWhole, WholeHost,
-    WholeKept, WholeNodeConfig, WholeRound,
+    Exclusion, MarkedTails, NotReady, Placer, PrepareFailure, RequestRecord, Standing,
+    WaitingWhole, WholeHost, WholeKept, WholeNodeConfig, WholeRound,
 };
 use js_sched::Bar;
 use js_types::sched::FarmTime;
@@ -45,6 +45,11 @@ fn host(name: &str) -> HostId {
 
 fn id(name: &str) -> RequestId {
     RequestId::new(name).unwrap()
+}
+
+/// The key of the request `name`, as the registry asks for its record.
+fn key(name: &str) -> js_registry::RequestKey {
+    js_registry::RequestKey::Id(id(name))
 }
 
 fn lease(seq: u64) -> LeaseId {
@@ -233,16 +238,21 @@ fn a_restored_request_is_queued_with_its_counts_and_a_terminal_one_is_refused() 
         ]),
     };
     e.whole_restore(&id("t"), &used, (true, stamp(0)), at(1_000));
-    assert_eq!(e.whole_record(&id("r")), None);
-    let terminal = e.whole_record(&id("t")).unwrap();
+    // A request put back with a give-up shows its count, and no bar: its back-off is soft.
+    let shown = RequestRecord {
+        give_ups: 1,
+        ..RequestRecord::default()
+    };
+    assert_eq!(e.whole_record(&key("r")), Some(shown));
+    let terminal = e.whole_record(&key("t")).unwrap();
     assert_eq!((terminal.prepare_failures, terminal.terminal), (2, true));
     assert_eq!(terminal.last, None);
     assert_eq!(terminal.exclusions, used.exclusions);
     let ledger = e.whole_ledger(at(1_000));
     assert_eq!(ledger[&id("r")], gave_up);
     assert_eq!(ledger[&id("t")], used);
-    assert!(e.whole_start(&id("t"), at(2_000)));
-    assert!(!e.whole_start(&id("t"), at(2_000)));
+    assert!(e.whole_start(&key("t"), at(2_000)));
+    assert!(!e.whole_start(&key("t"), at(2_000)));
 
     pass(&mut e, vec![waiting("r", 0)], &["a"], 2_000);
     let operation = e.whole[&id("r")];

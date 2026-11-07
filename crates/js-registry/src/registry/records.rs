@@ -20,10 +20,15 @@ impl Registry {
             RequestKey::Id(id) => Some(id),
             RequestKey::Content(_) => None,
         };
+        // A placer that keeps the records answers for every request; another one only for
+        // a request with an id it keeps.
+        if let Some(keeper) = self.keeper() {
+            return keeper.whole_record(&key);
+        }
         let placer = self.shared.placer.get();
         let kept = id
             .zip(placer)
-            .and_then(|(id, placer)| placer.whole_record(id));
+            .and_then(|(_, placer)| placer.whole_record(&key));
         kept.or_else(|| state.requests.record(&key).cloned())
     }
 

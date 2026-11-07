@@ -1,7 +1,7 @@
 //! What the engine keeps of the registry's whole-node requests across a restart under
 //! `--placement js-sched`: it hands the registry's reservation ledger (design
 //! `whole-node.md`, D55) the give-ups, back-offs, failed prepares and bars of its requests
-//! ([`Engine::whole_ledger`]) and the marks they hold ([`Engine::whole_reservations`]), and
+//! ([`Engine::whole_ledger`]) and the marks they hold ([`Engine::whole_held`]), and
 //! takes them back from the ledger a restart read ([`Engine::whole_restore`]).
 //!
 //! - **Out.** A request the engine queues gives its give-ups and the bars the scheduler
@@ -20,15 +20,15 @@
 //!   is put back and not queued within the registry's idle horizon goes
 //!   ([`Engine::whole_sweep`]), as the registry's own records do.
 //!
-//! The mark of a request put back is not taken here: the registry keeps it until the request
-//! is presented again and its host has said hello, and hands it over then with the request
-//! ([`js_registry::WaitingWhole::mark`]); until then the engine holds the host outside its
-//! queue ([`js_registry::WholeRound::outside`]).
+//! The place of a request put back and its mark are not taken here: the wait list keeps them
+//! ([`super::wait`]) until the request is presented again and its mark's host has said
+//! hello, and hands the mark to the queue then with the request; until then the engine holds
+//! the host outside its queue ([`js_registry::WholeRound::outside`]).
 
 use std::collections::BTreeMap;
 
 use js_lease::Timestamp;
-use js_registry::{Exclusion, Reservation, WholeKept};
+use js_registry::{Exclusion, WholeKept};
 use js_sched::Bar;
 use js_types::RequestId;
 use js_types::sched::{FarmTime, WorkerId};
@@ -82,12 +82,6 @@ impl Engine {
                 (id, kept)
             });
         kept.filter(|(_, kept)| !kept.is_empty()).collect()
-    }
-
-    /// The hosts the requests the engine queues hold at `now`, as the registry shows them:
-    /// a pending grant as an assigned reservation, a mark with its deadline and tail.
-    pub fn whole_reservations(&self, now: FarmTime) -> Vec<Reservation> {
-        self.reservations(now)
     }
 
     /// Puts back at `now` what a restart's ledger kept of request `id` (see the module

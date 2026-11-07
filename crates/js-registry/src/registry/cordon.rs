@@ -86,11 +86,11 @@ impl Registry {
     pub fn cordon(&self, host: &HostId, lease: Duration) -> Result<Cordoned, NotHeld> {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
+        let marks = self.marks_now(&guard);
         let State {
             book,
             records,
             runs,
-            marks,
             ..
         } = &mut *guard;
         let record = records.get_mut(host).ok_or(NotHeld)?;
@@ -102,7 +102,7 @@ impl Registry {
                 .filter(|held| *held > wanted)
                 .unwrap_or(wanted),
         );
-        let view = self.viewer((&*book, &*runs, &*marks), now);
+        let view = self.viewer((&*book, &*runs, marks), now);
         let host = OwnHost::of(view(host, &*record), &*record, now);
         Ok(Cordoned { host, placed })
     }
@@ -116,17 +116,17 @@ impl Registry {
     pub fn uncordon(&self, host: &HostId) -> Result<Uncordoned, NotHeld> {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
+        let marks = self.marks_now(&guard);
         let State {
             book,
             records,
             runs,
-            marks,
             ..
         } = &mut *guard;
         let record = records.get_mut(host).ok_or(NotHeld)?;
         let lifted = record.cordoned(now);
         record.cordon = None;
-        let view = self.viewer((&*book, &*runs, &*marks), now);
+        let view = self.viewer((&*book, &*runs, marks), now);
         let host = OwnHost::of(view(host, &*record), &*record, now);
         Ok(Uncordoned { host, lifted })
     }
@@ -136,7 +136,7 @@ impl Registry {
         let now = self.shared.clock.now();
         let guard = self.lock_at(now);
         let record = guard.records.get(host)?;
-        let view = self.viewer((&guard.book, &guard.runs, &guard.marks), now);
+        let view = self.viewer((&guard.book, &guard.runs, self.marks_now(&guard)), now);
         Some(OwnHost::of(view(host, record), record, now))
     }
 }
