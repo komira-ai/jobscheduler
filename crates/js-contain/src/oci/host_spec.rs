@@ -14,7 +14,7 @@
 //! | `noNewPrivileges`       | true                                            | false (a host job may run a set-uid program)          |
 //! | `hostname`              | `localhost`                                     | none: setting it would rename the host                |
 //! | `process.cwd`           | the exec root or below it                       | `exec_root`: the run's scratch directory on the host  |
-//! | `process.args`          | the init at its bind in `/dev`, then the argv   | the init at its path on the host, then the argv       |
+//! | `process.args`          | the init at its bind in `/dev`, then the argv   | the init at its host path with `--end-descendants`, then the argv |
 //! | `cgroupsPath`           | `<lease cgroup>/ctr`                            | the same                                              |
 //! | pids limit, OOM group   | `resources.pids`, `memory.oom.group=1`          | the same                                              |
 //! | rlimits, OOM score      | `nofile`, `nproc`, no core dump; the default     | the same                                              |
@@ -99,10 +99,16 @@ fn environment(env: &[(String, String)]) -> Vec<String> {
 }
 
 /// The container's `process.args`: the init at its path on the host (it reaps what the
-/// job orphans, as it does in a contained job), `--`, then the job's argv. No route wait:
-/// the host's network is already there.
+/// job orphans, as it does in a contained job) with `--end-descendants`, `--`, then the job's
+/// argv. A host container shares the host's PID namespace, so no namespace ends with its
+/// first process: the init kills what the job left once the job has ended, or `crun run`
+/// would wait for it. No route wait: the host's network is already there.
 fn init_argv(init: &str, argv: &[String]) -> Vec<String> {
-    let mut args = vec![init.to_owned(), "--".to_owned()];
+    let mut args = vec![
+        init.to_owned(),
+        "--end-descendants".to_owned(),
+        "--".to_owned(),
+    ];
     args.extend(argv.iter().cloned());
     args
 }

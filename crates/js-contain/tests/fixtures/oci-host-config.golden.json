@@ -18,6 +18,7 @@
   "process": {
     "args": [
       "/scratch/oci-bin/js-init",
+      "--end-descendants",
       "--",
       "tool",
       "--flag",

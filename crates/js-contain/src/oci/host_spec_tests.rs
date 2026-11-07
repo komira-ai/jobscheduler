@@ -157,7 +157,14 @@ fn a_host_job_runs_under_the_init_at_its_host_path_in_its_exec_root() {
     assert_eq!(config["process"]["cwd"], "/scratch/runs/r1");
     assert_eq!(
         config["process"]["args"],
-        json!(["/scratch/oci-bin/js-init", "--", "tool", "--flag", "a b"])
+        json!([
+            "/scratch/oci-bin/js-init",
+            "--end-descendants",
+            "--",
+            "tool",
+            "--flag",
+            "a b"
+        ])
     );
 }
 

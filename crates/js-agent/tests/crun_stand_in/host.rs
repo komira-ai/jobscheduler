@@ -107,7 +107,7 @@ fn a_host_run_is_made_started_read_and_removed() {
     let init = node.scratch.join("oci-bin/js-init");
     assert_eq!(
         bundle["process"]["args"],
-        json!([init, "--", "/bin/tool", "--go"])
+        json!([init, "--end-descendants", "--", "/bin/tool", "--go"])
     );
     let env = bundle["process"]["env"].as_array().expect("env");
     assert!(env.contains(&json!("A=1")), "{env:?}");

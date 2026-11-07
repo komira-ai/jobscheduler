@@ -74,7 +74,11 @@ A host job is an OCI container that `crun` runs as root and that shares the mach
 - **Its own cgroup.** It runs in `ctr` below its lease's cgroup, which the booking limits as it
   does a contained job's: its CPU, memory and pids are accounted and bounded there, and a stop
   (SIGTERM, then the lease's `cgroup.kill` once the grace is spent) or a cancel ends it whole,
-  whatever it started. Being root, a host job can move a process of its own out of that cgroup;
+  whatever it started. The job also ends whole when its program does: a contained job's other
+  processes end with its PID namespace, and a host job, which shares the host's, has its init
+  kill every process the program left below it. A host job cannot leave a process running
+  after it ends; a service it means to leave running must be started by the host's own
+  service manager. Being root, a host job can move a process of its own out of that cgroup;
   that is one of the reasons the machine is tainted for good.
 
 The image's config still gives the program and the environment (its entrypoint and the start's

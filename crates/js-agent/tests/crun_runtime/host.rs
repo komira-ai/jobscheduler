@@ -17,8 +17,13 @@ use js_agent::crun::CrunRuntime;
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
 use js_agent_wire::Isolation;
 
-use crate::runtime_suite::{LONG, Program, Subject, spec_of};
+use crate::runtime_suite::{Program, Subject, spec_of};
 use crate::subject::{CrunSubject, crun_subject};
+
+/// The grace of the stop whose SIGTERM the job handles: far more than a job that ends on it
+/// takes, and a bound for one that does not, which the stop then kills (exit 137, not 7)
+/// instead of waiting for ever.
+const TERM_GRACE: Duration = Duration::from_secs(60);
 
 /// The namespaces a host job shares with the host.
 const SHARED: [&str; 7] = ["pid", "net", "mnt", "ipc", "uts", "user", "cgroup"];
@@ -68,8 +73,8 @@ fn own_namespace(what: &str) -> String {
 
 /// Proves a host job is in every namespace of the host: its pid, network, mount, IPC, UTS,
 /// user and cgroup namespace links are this test's own, the pid it reports is a pid of the
-/// host whose process is in the host's pid namespace, and it lists the host's network
-/// interfaces. Catches a host job given namespaces of its own (it could not change the
+/// host whose process is in the host's pid namespace, and it lists an interface other than
+/// loopback. Catches a host job given namespaces of its own (it could not change the
 /// machine), such as a contained job's network with loopback only.
 #[test]
 #[ignore = "real crun: run through cargo xtask crun-tests"]
@@ -89,17 +94,27 @@ fn a_host_job_shares_the_hosts_namespaces_and_network() {
     );
     let spec = host_spec(&mut s, "h1", &script);
     let id = start_and_wait(&mut runtime, &spec, &sync);
-    for ns in SHARED {
-        assert_eq!(wrote(&sync, ns), own_namespace(ns), "the {ns} namespace");
-    }
+    // Every namespace at once, so a failure names all that differ.
+    let seen: Vec<(&str, String, String)> = SHARED
+        .iter()
+        .map(|ns| (*ns, wrote(&sync, ns), own_namespace(ns)))
+        .filter(|(_, job, host)| job != host)
+        .collect();
+    assert!(
+        seen.is_empty(),
+        "namespaces not the host's (job, host): {seen:?}"
+    );
     let pid = wrote(&sync, "pid");
     let theirs = fs::read_link(format!("/proc/{pid}/ns/pid")).expect("the job's pid on the host");
     assert_eq!(theirs.display().to_string(), own_namespace("pid"));
-    let host_dev = fs::read_to_string("/proc/net/dev").expect("the host's interfaces");
-    assert_eq!(interfaces(&wrote(&sync, "netdev")), interfaces(&host_dev));
+    // The network namespace is the host's (above); what the job lists of it is more than a
+    // contained job's loopback. The host's own list is not compared: another test running
+    // beside this one may add or remove an interface between the two reads.
+    let listed = wrote(&sync, "netdev");
+    let seen = interfaces(&listed);
     assert!(
-        interfaces(&host_dev).len() > 1,
-        "more than loopback: {host_dev}"
+        seen.iter().any(|name| name != "lo"),
+        "the job sees loopback only: {listed}"
     );
     assert_eq!(runtime.stop(&id, Duration::ZERO), Ok(()));
     assert_eq!(runtime.remove(&id), Ok(()));
@@ -154,7 +169,7 @@ fn a_stop_and_a_cancel_end_a_host_job_whole() {
     s.prepared();
     let mut runtime = s.open_allowing_host_jobs("crun-host-stop");
     let cases: [(&str, &str, Option<Duration>); 3] = [
-        ("t1", "trap 'exit 7' TERM;", Some(LONG)),
+        ("t1", "trap 'exit 7' TERM;", Some(TERM_GRACE)),
         ("k1", "trap '' TERM;", Some(Duration::ZERO)),
         ("c1", "trap '' TERM;", None),
     ];
@@ -171,12 +186,18 @@ fn a_stop_and_a_cancel_end_a_host_job_whole() {
         if let Some(grace) = grace {
             assert_eq!(runtime.stop(&id, grace), Ok(()), "{run}");
             runtime.wait_ended(&id);
-            let code = if grace == LONG { 7 } else { 137 };
+            let code = if grace == TERM_GRACE { 7 } else { 137 };
             let want = Status::Exited(Exit {
                 code,
                 oom_killed: false,
             });
-            assert_eq!(runtime.poll(&id), Ok(want), "{run}");
+            // A job that SIGTERM did not end whole is killed when the grace is spent, and
+            // ends 137 instead of 7.
+            assert_eq!(
+                runtime.poll(&id),
+                Ok(want),
+                "{run}: the host job did not end whole on SIGTERM within its grace"
+            );
         }
         assert_eq!(runtime.remove(&id), Ok(()), "{run}");
         assert!(!lease.exists(), "{run}: the lease's cgroup is left");

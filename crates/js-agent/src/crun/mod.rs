@@ -148,7 +148,9 @@
 //! every capability and no seccomp filter, in the run's scratch directory; the image's config
 //! still gives its program and environment. Its cgroup is `ctr` below the lease's, which the
 //! booking limits, so it is accounted as a contained run is, and a stop's or a removal's write
-//! to the lease's `cgroup.kill` ends it whole. Its lease directory and cgroup are the agent's
+//! to the lease's `cgroup.kill` ends it whole. It has no PID namespace whose end takes its
+//! other processes with its first, so its init kills what its program left once the program
+//! has ended (`js-init --end-descendants`): the run ends when its program does. Its lease directory and cgroup are the agent's
 //! own, the bundle writes a host-lease marker of the agent's into the directory, and `crun`
 //! and its supervisor run as the agent for a lease whose directory and marker are both the
 //! agent's (`Oci::lease_user`): every other lease's are the job user's, whoever made its
