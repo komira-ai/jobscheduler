@@ -62,7 +62,7 @@ fn id_tools(dir: &Path, uid_mode: u32, gid_mode: u32) -> PathBuf {
 
 /// A source that fetches nothing: the start-up checks never reach the registry.
 #[derive(Debug)]
-struct NoImages;
+pub(super) struct NoImages;
 
 #[async_trait::async_trait]
 impl ImageSource for NoImages {

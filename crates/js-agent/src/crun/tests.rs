@@ -10,11 +10,12 @@ use js_contain::container::{ContainerLimits, Ended, HostMount};
 use js_contain::oci::image::PinnedImage;
 use js_contain::oci::{LeaseDirs, LogTail as Captured, StreamTail};
 
+use super::config_dir;
+use super::settings::system_now_ms;
 use super::spec::{
     EXEC_ROOT, NOT_RUN, container_spec, ctr_of, end_of, exit_of, job_env, log_tail_of,
     not_run_words, pinned,
 };
-use super::{config_dir, system_now_ms};
 use crate::cli_runtime::DEFAULT_PIDS;
 use crate::image::ImageConfig;
 use crate::lifecycle::{Body, Exit, ResolvedMount, RunSpec};

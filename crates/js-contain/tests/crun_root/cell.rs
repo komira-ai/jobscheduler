@@ -338,6 +338,7 @@ impl Cell {
             image_digest: self.image.digest.clone(),
             dir: dir.clone(),
             cgroup_parent: cgroup.name().to_owned(),
+            isolation: js_contain::Isolation::Contained,
             exec_root: "/work".to_owned(),
             input_root: dir.join("root"),
             upper: dir.join("upper"),

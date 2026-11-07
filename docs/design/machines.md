@@ -89,6 +89,17 @@ condition is on the lease: it must be a whole-node lease (5.17, D51), so that no
 
 The default is contained only. A pool that allows host jobs should be a pool of throwaway machines, since every host job costs its machine.
 
+**How a host job runs.** Only the `crun` runtime launches one, and the agent takes `--allow-host-jobs` with `--runtime crun` only (it
+then reports `host-jobs`; on any other runtime the flag is refused at start). A host job is an OCI container run by `crun` as root that
+shares the host's namespaces (pid, network, mount, IPC, UTS and cgroup; no user namespace and no id mapping), with the host's `/` as
+its root, every capability, no seccomp filter and no mount of its own; it starts in the run's scratch directory, and the image's config
+gives its program and environment. Its bundle comes from the same spec generator as a contained job's, with only the namespaces, the
+root and the privileges different. It runs in a cgroup of its own, `ctr` below its lease's cgroup, which the booking limits, so its
+CPU, memory and pids are accounted and bounded as a contained job's are, and a stop or a cancel ends it whole through the lease's
+`cgroup.kill`. When its program ends, its init kills what the program left (a contained job's processes end with its PID
+namespace; a host job has none of its own), so the job ends whole. A host job asks for no mount, run files or GPU (it sees the host's own paths and devices), and is never wired (it has
+the host's network). The container engine runtime refuses host isolation: it has no lease cgroup to account, limit and kill a job in.
+
 **After a host job the machine is tainted.** On completion (any outcome: success, failure, kill, timeout), the agent marks the host
 tainted before it frees anything.
 

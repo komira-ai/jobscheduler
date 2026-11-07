@@ -32,6 +32,7 @@ pub fn spec() -> ContainerSpec {
         image_digest: format!("sha256:{}", "a".repeat(64)),
         dir: PathBuf::from("/scratch/lease-1-2"),
         cgroup_parent: "/js.slice/actions/lease-1-2".to_owned(),
+        isolation: js_contain::Isolation::Contained,
         exec_root: "/job/root".to_owned(),
         input_root: PathBuf::from("/scratch/lease-1-2/root"),
         upper: PathBuf::from("/scratch/lease-1-2/upper"),

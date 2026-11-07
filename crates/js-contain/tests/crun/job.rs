@@ -37,6 +37,7 @@ async fn run(cell: &Cell, name: &str, argv: &[&str]) -> (Ended, String) {
         image_digest: image.digest.clone(),
         dir: lease.clone(),
         cgroup_parent: cgroup.name().to_owned(),
+        isolation: js_contain::Isolation::Contained,
         exec_root: "/job/root".to_owned(),
         input_root: root,
         upper,
