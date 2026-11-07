@@ -88,7 +88,7 @@ fn a_host_job_shares_the_hosts_namespaces_and_network() {
         .map(|ns| format!("readlink /proc/self/ns/{ns} > {}/{ns}; ", sync.display()))
         .collect();
     let script = format!(
-        "{links}cat /proc/net/dev > {dir}/netdev; echo $$ > {dir}/pid; \
+        "{links}cat /proc/net/dev > {dir}/netdev; echo $$ > {dir}/process; \
          echo up > {dir}/ready; exec sleep 100000",
         dir = sync.display()
     );
@@ -104,7 +104,7 @@ fn a_host_job_shares_the_hosts_namespaces_and_network() {
         seen.is_empty(),
         "namespaces not the host's (job, host): {seen:?}"
     );
-    let pid = wrote(&sync, "pid");
+    let pid = wrote(&sync, "process");
     let theirs = fs::read_link(format!("/proc/{pid}/ns/pid")).expect("the job's pid on the host");
     assert_eq!(theirs.display().to_string(), own_namespace("pid"));
     // The network namespace is the host's (above); what the job lists of it is more than a
