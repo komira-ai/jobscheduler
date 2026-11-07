@@ -14,7 +14,7 @@
 //! | `spec.image` | `NAME[:TAG]@sha256:<64 hex>`: a tag alone is refused | `field: spec.image` |
 //! | `spec.env` | names and values as given; nothing to refuse | |
 //! | `spec.needs` | `whole_host` with no other need; a GPU count with a class (from `gpu_class`, else `constraints.accelerator.model`) and a class with a count | `field: spec.needs`, `spec.needs.gpus`, `spec.needs.gpuClass` |
-//! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode; `isaLevel` empty or a level; `accelerator` keys valid and not contradicting the booked class | `field: spec.constraints.<name>` |
+//! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode; `isaLevel` empty or a level; `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained) | `field: spec.constraints.<name>` |
 //! | `spec.wallLimitSeconds` | present and above 0, and at most the ceiling | the refusals `wall-time-not-positive` and `wall-time-above-ceiling` |
 //! | `spec.network` | a known level | `field: spec.network` |
 //! | `spec.ports` | each port 1 to 65535, no host port twice | `field: spec.ports[i].hostPort`, `spec.ports[i].containerPort` |
@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{RunFile, validate_files};
-use js_jobs::{Constraints, DeclaredPort, JobFiles, JobId, JobSpec, Needs, NetworkPolicy};
+use js_jobs::{Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy};
 use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,
@@ -94,6 +94,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
     let labels = labels(&spec.labels)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
         .map_err(|_| Fault::Field("spec.constraints.accelerator"))?;
+    let isolation = isolation(constraints.isolation)?;
     let wanted = Requirements {
         resources: resources.shape().clone(),
         disk_bytes: Some(resources.shape().disk_bytes()).filter(|bytes| *bytes > 0),
@@ -122,6 +123,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
             arch: kept.arch,
             exec: kept.exec,
             capabilities,
+            isolation,
         },
         wall_limit_secs,
         network,
@@ -216,6 +218,15 @@ fn resources(needs: Option<&v1::Needs>, constraints: &v1::Constraints) -> Result
     Ok(Asked::Shape(
         resources.with_disk_bytes(needs.disk_bytes.unwrap_or(0)),
     ))
+}
+
+/// How the job is confined: unspecified reads as contained, an unknown value is refused.
+fn isolation(value: i32) -> Result<Isolation, Fault> {
+    match v1::Isolation::try_from(value) {
+        Ok(v1::Isolation::Unspecified | v1::Isolation::Contained) => Ok(Isolation::Contained),
+        Ok(v1::Isolation::Host) => Ok(Isolation::Host),
+        Err(_) => Err(Fault::Field("spec.constraints.isolation")),
+    }
 }
 
 /// The constraints admission reads, each `None` when the job leaves it empty.

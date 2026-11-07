@@ -86,6 +86,7 @@ fn start_of(job: &str, allocation: &str, command: &[&str]) -> Command {
         ports: Vec::new(),
         log_sink: None,
         kind: Default::default(),
+        isolation: Default::default(),
     }))
 }
 

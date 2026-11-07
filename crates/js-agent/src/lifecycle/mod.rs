@@ -196,10 +196,12 @@
 //! - **A user-namespace remapping engine is not supported.** The container user would be
 //!   another uid on the host, and the check for a job's leftover processes compares the
 //!   host's uid with `--container-user`.
-//! - **Host jobs are not available.** `--allow-host-jobs` is refused at start until the
-//!   scheduler records a host job's taint itself ([`Local::from_cli`]).
-//!   [`Config::allow_host_jobs`] is the switch the lifecycle honours once that exists; it
-//!   already taints the host when such a job starts.
+//! - **Host jobs are not available.** `--allow-host-jobs` is refused at start in every
+//!   configuration, because no runtime launches a host job yet ([`Local::from_cli`]), so the
+//!   agent never reports `host-jobs` and a server never taints a host for a job it cannot
+//!   start. [`Config::allow_host_jobs`] is the switch the lifecycle honours once a runtime
+//!   can launch one; it already refuses a host start without it and taints the host when
+//!   such a job starts.
 //!
 //! # The threading contract of the runtime seam
 //!
@@ -533,8 +535,8 @@ fn seconds(flag: &str, given: Option<u64>, default: Duration) -> Result<Duration
 }
 
 impl Local {
-    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (the scheduler does
-    /// not record a host job's taint yet), every mount root exists and is canonicalised,
+    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (no runtime launches a
+    /// host job yet), every mount root exists and is canonicalised,
     /// the scratch root and the state root are private to the user running the agent, the
     /// container runtime is an absolute path to an executable file, containers need a state
     /// root (the taint marker is kept there) that is not, and does not lie in, a mount root
@@ -589,11 +591,9 @@ impl Local {
             None => DirLayout::Private,
         };
         if cli.allow_host_jobs {
-            return Err(
-                "--allow-host-jobs: host jobs are not available yet: the scheduler \
-                        does not record a host job's taint"
-                    .to_owned(),
-            );
+            return Err("--allow-host-jobs: no runtime of this agent launches a host job yet: \
+                        crun and docker run contained jobs only"
+                .to_owned());
         }
         let egress = egress_of(cli, crun.is_some())?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;

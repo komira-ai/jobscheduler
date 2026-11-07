@@ -841,6 +841,21 @@ impl Registry {
         bound.collect()
     }
 
+    /// Taints `host` with `taint` unless it is tainted already: the first taint a host has
+    /// stands, whichever side set it (a heartbeat's report or this call). From then on the
+    /// host's view ([`Registry::hosts`]) and [`Registry::bindings`] carry the taint, and the
+    /// host takes no new lease, run or job. Returns whether this call set the taint: `false`
+    /// when the registry does not hold `host` or its taint was set before.
+    pub fn taint_host(&self, host: &HostId, taint: Taint) -> bool {
+        let mut guard = self.lock_at(self.shared.clock.now());
+        let Some(record) = guard.records.get_mut(host) else {
+            return false;
+        };
+        let was = record.taint.is_some();
+        record.taint.get_or_insert(taint);
+        !was
+    }
+
     /// Puts back a host that reported a taint, or was cordoned, before a restart, whether
     /// or not it holds a lease: an awaiting host, bound as it was, tainted or cordoned
     /// as it was, that counts toward the pool's limit and is not forgotten for being

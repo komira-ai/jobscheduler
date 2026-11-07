@@ -15,7 +15,7 @@ use proptest::test_runner::RngSeed;
 
 use super::tests::{allocation, at, bare_job, full_job, full_result, shape};
 use super::*;
-use crate::record::{FileDigest, JobFiles};
+use crate::record::{FileDigest, Isolation, JobFiles};
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::rows;
 use crate::suite::{digest, full_spec};
@@ -74,12 +74,14 @@ fn constraints() -> impl Strategy<Value = Constraints> {
             Just(ExecMode::SandboxExec)
         ]),
         text_pairs(),
+        prop_oneof![Just(Isolation::Contained), Just(Isolation::Host)],
     )
-        .prop_map(|(os, arch, exec, capabilities)| Constraints {
+        .prop_map(|(os, arch, exec, capabilities, isolation)| Constraints {
             os,
             arch,
             exec,
             capabilities,
+            isolation,
         })
 }
 

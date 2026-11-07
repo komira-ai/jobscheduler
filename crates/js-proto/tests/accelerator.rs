@@ -3,7 +3,7 @@
 
 use js_caps::{AcceleratorRequest, RequestNeedError};
 use js_proto::request_need;
-use js_proto::v1::{Accelerator, Constraints, ExecMode, Job, JobSpec, Needs};
+use js_proto::v1::{Accelerator, Constraints, ExecMode, Isolation, Job, JobSpec, Needs};
 use prost::Message;
 
 /// The bytes of a golden `.hex` file: hex pairs separated by white space, each line's text
@@ -201,6 +201,7 @@ fn new_spec() -> JobSpec {
                 interconnect: Some("nvlink>=300".to_owned()),
                 form_factor: Some("sxm".to_owned()),
             }),
+            isolation: Isolation::Unspecified as i32,
         }),
         ..JobSpec::default()
     }

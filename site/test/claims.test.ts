@@ -277,7 +277,7 @@ const ROWS: readonly Row[] = [
   ['install', '<code>packaging/js-agent/crun_host_setup.sh</code> sets a host up for it', 'packaging/js-agent/crun_host_setup.sh', 'sets up a Linux host to run js-agent with `--runtime crun`'],
   ['install', '<span class="tag tag-planned">none</span> A published package or', '.github/workflows/js-agent-deb.yml', 'It publishes nothing: no release, no package repository, no registry'],
   ['install', '<span class="tag tag-planned">none</span> A lease server for macOS.', 'docs/release.md', 'there is no macOS `js-lease-server`'],
-  ['install', '<span class="tag tag-planned">not available yet</span> The agent flag <code>--allow-host-jobs</code>: it is refused at start.', 'crates/js-agent/src/lib.rs', '`--allow-host-jobs` | not available yet: refused at start'],
+  ['install', '<span class="tag tag-planned">not available yet</span> The agent flag <code>--allow-host-jobs</code>: it is refused at start in every configuration, because no runtime launches a host job yet', 'crates/js-agent/src/lib.rs', '`--allow-host-jobs` | refused at start in every configuration: no runtime launches a host job yet'],
   ['install', 'Take the archives <span class="tag tag-ok">works today</span>', 'docs/release.md', '`publish` creates the GitHub release for `vX.Y.Z`'],
   ['install', '<code>ci</code> other than the macOS job have passed.', 'docs/release.md', 'after the jobs of `ci` other than `macos` have passed on it'],
   ['install', 'A <a href="https://github.com/komira-ai/jobscheduler/releases">release</a> for version <code>X.Y.Z</code> carries:', 'docs/release.md', 'For version `X.Y.Z`:'],

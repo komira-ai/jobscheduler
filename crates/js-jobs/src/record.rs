@@ -30,6 +30,29 @@ pub struct Constraints {
     pub exec: Option<ExecMode>,
     /// Further capabilities the host must report, by key and value.
     pub capabilities: BTreeMap<String, String>,
+    /// How the job is confined on its host.
+    pub isolation: Isolation,
+}
+
+/// How a job is confined on its host (design section 3.8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Isolation {
+    /// In a container (or the native runtime's sandbox): the default.
+    #[default]
+    Contained,
+    /// On the machine itself: the host is tainted when the job's placement commits.
+    Host,
+}
+
+/// The reason of the taint a host-isolation job's placement puts on its host.
+pub const HOST_JOB_TAINT: &str = "host-job";
+
+/// The taint a host-isolation job's placement puts on its host (`taint/<host>`): the job that
+/// placed there. Only [`JobStore::drop_taints`](crate::JobStore::drop_taints) deletes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostTaint {
+    /// The job whose placement tainted the host.
+    pub job: JobId,
 }
 
 /// What a job may reach on the network (design section 5.8).

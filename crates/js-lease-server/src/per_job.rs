@@ -82,6 +82,10 @@ pub(crate) struct BeatContext<'a> {
     pub(crate) host: &'a HostId,
     /// The most network the host's agent reported it gives a job.
     pub(crate) ceiling: &'a NetworkCeiling,
+    /// Whether the host's agent reported that it runs host jobs
+    /// ([`js_agent_wire::HOST_JOBS_CAPABILITY`]); a host-isolation start is built only for
+    /// one that did.
+    pub(crate) host_jobs: bool,
     /// The sinks of live logs a start carries, when the server has one and the host's agent
     /// reported that it uploads ([`crate::logs`]); `None` otherwise.
     pub(crate) logs: Option<&'a LogGrants>,

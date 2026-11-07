@@ -1,4 +1,4 @@
-//! The bytes of the job, allocation and mark rows (the mark row's tags are in `mark_fields`).
+//! The bytes of the job, allocation, mark and taint rows (see `mark_fields`, `host_fields`).
 //!
 //! A row is a format byte ([`FORMAT`]) and then fields, each a tag (two bytes, big-endian),
 //! a length (four bytes, big-endian) and that many bytes of value:
@@ -40,9 +40,11 @@ use crate::record::{
 };
 
 mod file_fields;
+mod host_fields;
 mod mark_fields;
 mod result_fields;
 
+pub(crate) use host_fields::{decode_taint, encode_taint};
 pub(crate) use mark_fields::{decode_mark, encode_mark};
 
 /// The format byte of the rows this build writes.
@@ -143,6 +145,8 @@ pub(crate) mod job_tag {
     /// in place of [`FILES`], so a row with it holds no contents. A row a build before this
     /// field rewrote holds it beside an empty [`FILES`].
     pub const FILE_DIGESTS: u16 = 44;
+    /// Present (one byte, 1) when the job runs on the host itself.
+    pub const ISOLATION: u16 = 45;
 }
 
 /// The tags of an allocation row.
@@ -328,6 +332,7 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
     row.put_opt(t::ARCH, constraints.arch.as_deref().map(text));
     row.put_opt(t::EXEC, constraints.exec.map(|exec| vec![exec_code(exec)]));
     row.put(t::CAPABILITIES, text_map(&constraints.capabilities));
+    host_fields::put_isolation(row, constraints.isolation);
     row.put(t::WALL_LIMIT_SECS, spec.wall_limit_secs.to_be_bytes());
     row.put(t::NETWORK, [network_code(spec.network)]);
     let ports: Vec<u8> = spec
@@ -845,6 +850,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
         capabilities: fields
             .opt(t::CAPABILITIES, text_map_of)?
             .unwrap_or_default(),
+        isolation: host_fields::take_isolation(fields)?,
     };
     let wall_limit_secs = fields.need(t::WALL_LIMIT_SECS, u64_of)?;
     let network = fields.opt(t::NETWORK, network_of)?.unwrap_or_default();

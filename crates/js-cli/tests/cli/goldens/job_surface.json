@@ -277,6 +277,19 @@
         "required": false
       },
       {
+        "doc": "How the job is confined. Unspecified: contained.",
+        "field": [
+          "spec",
+          "constraints",
+          "isolation"
+        ],
+        "kind": "Enum([(\"unspecified\", \"ISOLATION_UNSPECIFIED\"), (\"contained\", \"ISOLATION_CONTAINED\"), (\"host\", \"ISOLATION_HOST\")])",
+        "name": "spec.constraints.isolation",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
         "doc": "The most seconds the job may run, counted from running. The service refuses a job without one (absent or 0, wall-time-not-positive) and one above its ceiling (wall-time-above-ceiling).",
         "field": [
           "spec",

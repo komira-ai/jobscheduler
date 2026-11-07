@@ -19,8 +19,8 @@ use js_types::{ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources}
 
 use crate::interfere::Interfere;
 use crate::{
-    Booked, Constraints, DeclaredPort, JobEnd, JobId, JobSpec, JobState, JobStore, Needs,
-    NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
+    Booked, Constraints, DeclaredPort, Isolation, JobEnd, JobId, JobSpec, JobState, JobStore,
+    Needs, NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
 };
 
 mod clock;
@@ -40,6 +40,7 @@ mod races;
 mod retention;
 mod rows;
 mod scrub;
+mod taints;
 
 pub use clock::*;
 pub use collect::*;
@@ -58,6 +59,7 @@ pub use races::*;
 pub use retention::*;
 pub use rows::*;
 pub use scrub::*;
+pub use taints::*;
 
 /// Runs every check of the suite against `backend`, one after another.
 pub fn run_job_store_suite<B: Backend>(backend: &B)
@@ -152,6 +154,14 @@ where
     end_and_unmark_deletes_both_or_neither(backend);
     delete_mark_removes_the_mark_it_read(backend);
     a_mark_that_loses_to_an_end_or_another_mark_is_stale(backend);
+    a_host_isolation_placement_taints_its_host_in_the_same_commit(backend);
+    a_contained_placement_writes_no_taint(backend);
+    a_failed_host_placement_writes_no_taint(backend);
+    a_second_host_job_on_a_tainted_host_is_stale(backend);
+    a_whole_host_job_in_host_isolation_taints_its_host(backend);
+    host_taints_lists_every_taint_and_refuses_a_bad_row(backend);
+    the_retention_tick_keeps_taint_rows(backend);
+    drop_taints_deletes_the_named_rows_in_one_commit(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -258,6 +268,14 @@ macro_rules! job_store_tests {
             end_and_unmark_deletes_both_or_neither,
             delete_mark_removes_the_mark_it_read,
             a_mark_that_loses_to_an_end_or_another_mark_is_stale,
+            a_host_isolation_placement_taints_its_host_in_the_same_commit,
+            a_contained_placement_writes_no_taint,
+            a_failed_host_placement_writes_no_taint,
+            a_second_host_job_on_a_tainted_host_is_stale,
+            a_whole_host_job_in_host_isolation_taints_its_host,
+            host_taints_lists_every_taint_and_refuses_a_bad_row,
+            the_retention_tick_keeps_taint_rows,
+            drop_taints_deletes_the_named_rows_in_one_commit,
         );
     };
 }
@@ -424,6 +442,7 @@ pub(crate) fn full_spec() -> JobSpec {
             arch: Some("x86_64".to_owned()),
             exec: Some(ExecMode::Container),
             capabilities: BTreeMap::from([("driver".to_owned(), "550".to_owned())]),
+            isolation: Isolation::Contained,
         },
         wall_limit_secs: 600,
         network: NetworkPolicy::AllowList,
@@ -438,6 +457,18 @@ pub(crate) fn full_spec() -> JobSpec {
         labels: Labels::from_caller(&caller)
             .and_then(|labels| labels.with_reserved(ReservedKey::Run, "run-1"))
             .expect("labels"),
+    }
+}
+
+/// [`full_spec`], run on the host itself: placing it taints the host.
+pub(crate) fn host_spec() -> JobSpec {
+    let spec = full_spec();
+    JobSpec {
+        constraints: Constraints {
+            isolation: Isolation::Host,
+            ..spec.constraints.clone()
+        },
+        ..spec
     }
 }
 

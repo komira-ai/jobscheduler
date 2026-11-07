@@ -1,4 +1,4 @@
-//! [`JobStore`]: the job, allocation and mark tables over a state [`Store`].
+//! [`JobStore`]: the job, allocation, mark and taint tables over a state [`Store`].
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -22,6 +22,7 @@ mod hosts;
 mod index;
 mod marks;
 mod queue;
+mod taints;
 
 pub use index::Backfill;
 
@@ -341,7 +342,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// the version read, and its allocation row must still be absent, or freed (a requeued job's
     /// earlier allocation, which the new one overwrites), at the version read. The new allocation
     /// id differs from the freed row's: a source that repeats it is drawn again, at most
-    /// [`MINT_TRIES`] times.
+    /// [`MINT_TRIES`] times. For a job that runs on the host itself ([`crate::Isolation::Host`])
+    /// the same transaction also puts `taint/<host>`, which must be absent, so a host a host job
+    /// already tainted makes the placement stale.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not
@@ -402,6 +405,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let txn = index::put_job(Txn::new(), Some(&job), &placed, Cond::Version(job_version))?;
         let earlier = earlier.as_ref().map(|(record, _)| record);
         let txn = index::put_allocation(txn, earlier, &allocation, allocation_cond)?;
+        let txn = taints::with_taint(txn, &placed, &allocation.host)?;
         self.commit(id, txn)?;
         Ok((placed, allocation))
     }

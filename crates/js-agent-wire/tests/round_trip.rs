@@ -215,8 +215,9 @@ fn job_start_frame() -> impl Strategy<Value = JobStartSpec> {
         ident(),
         proptest::collection::vec("[ -~]{0,30}", 0..6),
         (1..=MAX_CPU_MILLIS, 1..=MAX_MEMORY_BYTES, 1..=MAX_WALL_MS),
+        prop_oneof![Just(Isolation::Contained), Just(Isolation::Host)],
     )
-        .prop_map(|(job_id, allocation_id, command, (cpu, memory, wall))| {
+        .prop_map(|(job_id, allocation_id, command, (cpu, memory, wall), isolation)| {
             let mut spec: JobStartSpec = serde_json::from_value(json!({
                 "job_id": "j",
                 "allocation_id": "a",
@@ -231,6 +232,7 @@ fn job_start_frame() -> impl Strategy<Value = JobStartSpec> {
             spec.booked.cpu_millis = cpu;
             spec.booked.memory_bytes = memory;
             spec.wall_ms = wall;
+            spec.isolation = isolation;
             spec
         })
 }

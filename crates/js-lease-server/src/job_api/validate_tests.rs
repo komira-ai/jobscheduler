@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_jobs::{Constraints, DeclaredPort, JobId, JobSpec, Needs, NetworkPolicy};
+use js_jobs::{Constraints, DeclaredPort, Isolation, JobId, JobSpec, Needs, NetworkPolicy};
 use js_proto::v1;
 use js_types::JobNetwork as Reach;
 use js_types::{
@@ -65,6 +65,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
             exec: v1::ExecMode::Container.into(),
             isa_level: "x86-64-v3".to_owned(),
             accelerator: Some(accelerator),
+            isolation: v1::Isolation::Unspecified.into(),
         });
         spec.network = v1::NetworkLevel::Open.into();
         spec.ports = vec![v1::PortForward {
@@ -105,6 +106,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
             arch: Some("x86_64".to_owned()),
             exec: Some(ExecMode::Container),
             capabilities: capabilities.clone(),
+            isolation: Isolation::Contained,
         },
         wall_limit_secs: 600,
         network: NetworkPolicy::Open,
@@ -309,6 +311,10 @@ fn each_fault_names_its_field() {
             Box::new(|spec| spec.constraints = Some(constraints(|c| c.exec = 9))),
         ),
         (
+            Fault::Field("spec.constraints.isolation"),
+            Box::new(|spec| spec.constraints = Some(constraints(|c| c.isolation = 9))),
+        ),
+        (
             Fault::Field("spec.constraints.isaLevel"),
             Box::new(|spec| {
                 spec.constraints = Some(constraints(|c| c.isa_level = "x86-64-v9".to_owned()))
@@ -397,4 +403,22 @@ fn admission_is_asked_for_the_host_ports_in_order() {
     assert_eq!(checked.wanted.host_ports, [8000, 9000]);
     let declared: Vec<u16> = checked.spec.ports.iter().map(|port| port.host).collect();
     assert_eq!(declared, [9000, 8000]);
+}
+
+/// Asserts that an unspecified or contained isolation is recorded as contained and a host
+/// isolation as host, and that the isolation is part of the recorded job. Catches a mapping
+/// that drops the field, which would run a host job in a container, or reads unspecified as
+/// host.
+#[test]
+fn isolation_is_recorded_as_given_and_unspecified_is_contained() {
+    for (given, recorded) in [
+        (v1::Isolation::Unspecified, Isolation::Contained),
+        (v1::Isolation::Contained, Isolation::Contained),
+        (v1::Isolation::Host, Isolation::Host),
+    ] {
+        let checked = valid(|spec| {
+            spec.constraints = Some(constraints(|c| c.isolation = given.into()));
+        });
+        assert_eq!(checked.spec.constraints.isolation, recorded);
+    }
 }

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use js_agent_wire::{
-    BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, RunFile,
+    BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, Isolation, NetworkCeiling, RunFile,
 };
 use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobFiles, JobId, JobRecord, NetworkPolicy};
 use js_types::{HostId, JobNetwork as Level, PortMap};
@@ -30,11 +30,22 @@ fn records() -> (JobRecord, AllocationRecord) {
     placed(&jobs, "job-a", "host-a", job_spec, BOOKED)
 }
 
-/// The start of `job` for `allocation` to `host-a`, whose agent reports `ceiling`.
+/// The start of `job` for `allocation` to `host-a`, whose agent reports `ceiling` and no
+/// `host-jobs`.
 fn build(
     job: &JobRecord,
     allocation: &AllocationRecord,
     ceiling: &NetworkCeiling,
+) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
+    build_for(job, allocation, (ceiling, false))
+}
+
+/// The start of `job` for `allocation` to `host-a`, whose agent reports `ceiling` and, when
+/// `host_jobs`, that it runs host jobs.
+fn build_for(
+    job: &JobRecord,
+    allocation: &AllocationRecord,
+    (ceiling, host_jobs): (&NetworkCeiling, bool),
 ) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
     let host = HostId::new("host-a").unwrap();
     start_of(
@@ -43,6 +54,7 @@ fn build(
         &BeatContext {
             host: &host,
             ceiling,
+            host_jobs,
             logs: None,
             metrics: &NoMetrics,
         },
@@ -180,5 +192,30 @@ fn a_start_the_wire_cannot_carry_says_why() {
             code: "invalid-job",
             field: "job_id",
         })
+    );
+}
+
+/// A job on a contained host carries `Isolation::Contained` (the wire leaves it out), and a
+/// job that runs on the machine itself carries `Isolation::Host` to a host whose agent
+/// reported `host-jobs`; the same start to a host that did not report it is refused with its
+/// reason, whatever else the host gives. It catches an isolation dropped from the start, so
+/// a host job runs contained, and a host job sent to an agent that cannot run it.
+#[test]
+fn a_host_job_start_carries_its_isolation_and_goes_only_to_a_host_that_reports_host_jobs() {
+    let (job, allocation) = records();
+    let ceiling = allow_list();
+    let contained = build_for(&job, &allocation, (&ceiling, true)).unwrap();
+    assert_eq!(contained.isolation, Isolation::Contained);
+    let mut on_the_machine = job.clone();
+    on_the_machine.spec.constraints.isolation = js_jobs::Isolation::Host;
+    let host = build_for(&on_the_machine, &allocation, (&ceiling, true)).unwrap();
+    assert_eq!(host.isolation, Isolation::Host);
+    assert_eq!(
+        build_for(&on_the_machine, &allocation, (&ceiling, false)),
+        Err(Unsendable::HostJobsNotReported)
+    );
+    assert_eq!(
+        Unsendable::HostJobsNotReported.to_string(),
+        "the job runs on the machine itself and the host does not report host-jobs"
     );
 }

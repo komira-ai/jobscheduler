@@ -9,13 +9,16 @@ use std::time::Duration;
 
 use js_agent_wire::{Command, HeldJob, HeldState, NetworkCeiling};
 use js_jobs::interfere::Interfere;
-use js_jobs::{AllocationStep, Booked, JobEnd, JobId, JobSpec, JobState, Needs, NewJob, Output};
+use js_jobs::{
+    AllocationStep, Booked, Constraints, Isolation, JobEnd, JobId, JobSpec, JobState, Needs, NewJob,
+    Output,
+};
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Candidate, Pool};
 use js_registry::{Credential, Placer};
 use js_sched::Event;
 use js_sched_placer::engine::Engine;
-use js_sched_placer::engine::jobs::{JobStarts, NoStarts};
+use js_sched_placer::engine::jobs::{JobStarts, NoStarts, OpenHost};
 use js_sched_placer::map;
 use js_sched_placer::place::SchedPlacer;
 use js_state::Store;
@@ -62,12 +65,22 @@ pub(super) fn placer_on(clock: &ManualClock, hosts: &[&str]) -> SchedPlacer {
     placer
 }
 
-/// The hosts `names`, each advertising no network and no port.
-pub(super) fn open(names: &[&str]) -> BTreeMap<HostId, NetworkCeiling> {
+/// The hosts `names`, each advertising no network and no port, and `host_jobs` for whether
+/// each reported that it runs host jobs.
+pub(super) fn open_hosts(names: &[&str], host_jobs: bool) -> BTreeMap<HostId, OpenHost> {
+    let offer = OpenHost {
+        ceiling: NetworkCeiling::default(),
+        host_jobs,
+    };
     names
         .iter()
-        .map(|name| (host(name), NetworkCeiling::default()))
+        .map(|name| (host(name), offer.clone()))
         .collect()
+}
+
+/// The hosts `names`, each advertising no network and no port, and none running host jobs.
+pub(super) fn open(names: &[&str]) -> BTreeMap<HostId, OpenHost> {
+    open_hosts(names, false)
 }
 
 /// A job asking for one core and `gib` GiB.
@@ -75,6 +88,18 @@ pub(super) fn sized(gib: u64) -> JobSpec {
     JobSpec {
         needs: Needs::Shape(Resources::new(1000, gib * GIB, 0, None).unwrap()),
         ..spec()
+    }
+}
+
+/// A job asking for one core and `gib` GiB that runs on the machine itself.
+pub(super) fn on_the_machine(gib: u64) -> JobSpec {
+    let constraints = Constraints {
+        isolation: Isolation::Host,
+        ..Constraints::default()
+    };
+    JobSpec {
+        constraints,
+        ..sized(gib)
     }
 }
 
@@ -207,6 +232,8 @@ struct Recorder<'a> {
     jobs: &'a ServerJobs,
     store: &'a Interfere<Fake>,
     seen: Mutex<Vec<Seen>>,
+    /// The (host, job) of each taint told, in order.
+    taints: Mutex<Vec<(String, String)>>,
 }
 
 impl JobStarts for Recorder<'_> {
@@ -220,6 +247,11 @@ impl JobStarts for Recorder<'_> {
             state: record.state,
             step: allocation.map(|allocation| allocation.step),
         });
+    }
+
+    fn tainted(&self, host: &HostId, job: &JobId) {
+        let told = (host.to_string(), job.to_string());
+        self.taints.lock().unwrap().push(told);
     }
 }
 
@@ -237,6 +269,7 @@ fn placement_and_allocation_are_one_commit() {
         jobs: &jobs,
         store: &store,
         seen: Mutex::new(Vec::new()),
+        taints: Mutex::new(Vec::new()),
     };
     queue(&jobs, "job-a", 4, 0);
     let before = store.commit_stats().txns;
@@ -271,6 +304,93 @@ fn placement_and_allocation_are_one_commit() {
     assert_eq!(store.commit_stats().txns, commits + 1);
 }
 
+/// The host the allocation of the job `id` is on.
+fn host_of(jobs: &ServerJobs, id: &str) -> String {
+    let id = JobId::parse(id).unwrap();
+    jobs.get_allocation(&id).unwrap().unwrap().host.to_string()
+}
+
+/// Asserts that a job with host isolation is capable only of a host that reported it runs
+/// host jobs: with none offered it stays queued and closes nothing it cannot use, so a
+/// contained job behind it is placed; with one host that reported it and one that did not, it
+/// is placed on the one that did. It catches a host job placed on any host, and a host job
+/// that waits for a host it can never use and holds the contained jobs behind it back.
+#[test]
+fn a_host_isolation_job_is_placed_only_on_a_host_that_runs_host_jobs() {
+    let placer = placer_on(&clock(), &["host-a", "host-b"]);
+    let (_store, jobs) = tables();
+    queue_spec(&jobs, "job-h", on_the_machine(4), 5);
+    queue(&jobs, "job-c", 2, 0);
+    let plain = open(&["host-a", "host-b"]);
+    let placed = placer.place_jobs(&jobs, &plain, (&NoStarts, &NoMetrics));
+    assert_eq!(placed, Ok(vec![JobId::parse("job-c").unwrap()]));
+    assert_eq!(state(&jobs, "job-h"), JobState::Queued);
+
+    let mut hosts = open(&["host-a"]);
+    hosts.extend(open_hosts(&["host-b"], true));
+    let placed = placer.place_jobs(&jobs, &hosts, (&NoStarts, &NoMetrics));
+    assert_eq!(placed, Ok(vec![JobId::parse("job-h").unwrap()]));
+    assert_eq!(host_of(&jobs, "job-h"), "host-b");
+}
+
+/// Asserts that in one pass the host a host-isolation job is placed on is left to no job
+/// behind it, though one fits: with that host the only one offered, a contained job behind
+/// the host job stays queued, and with a second host offered it is placed there. It catches a
+/// walk that lets a later job take the host a host job has just tainted.
+#[test]
+fn a_host_isolation_job_leaves_its_host_to_no_later_job_of_the_pass() {
+    let placer = placer_on(&clock(), &["host-a", "host-b"]);
+    let (_store, jobs) = tables();
+    queue_spec(&jobs, "job-h", on_the_machine(4), 5);
+    queue(&jobs, "job-c", 2, 0);
+    let alone = open_hosts(&["host-a"], true);
+    let placed = placer.place_jobs(&jobs, &alone, (&NoStarts, &NoMetrics));
+    assert_eq!(placed, Ok(vec![JobId::parse("job-h").unwrap()]));
+    assert_eq!(state(&jobs, "job-c"), JobState::Queued);
+
+    let other = placer_on(&clock(), &["host-a", "host-b"]);
+    let (_store, jobs) = tables();
+    queue_spec(&jobs, "job-h", on_the_machine(4), 5);
+    queue(&jobs, "job-c", 2, 0);
+    let both = open_hosts(&["host-a", "host-b"], true);
+    let placed = other.place_jobs(&jobs, &both, (&NoStarts, &NoMetrics));
+    assert_eq!(placed.map(|placed| placed.len()), Ok(2));
+    assert_ne!(host_of(&jobs, "job-h"), host_of(&jobs, "job-c"));
+}
+
+/// Asserts that a pass tells the taint of a host exactly for a committed host-isolation
+/// placement: after the start of the host job (the host and the job), not for a contained job
+/// placed in the same pass, and not for a host job whose commit failed. It catches a taint
+/// told for every placement, one told before the commit, and one told for a placement that
+/// did not land.
+#[test]
+fn a_taint_is_told_only_for_a_committed_host_isolation_placement() {
+    let placer = placer_on(&clock(), &["host-a"]);
+    let (store, jobs) = tables();
+    let starts = Recorder {
+        jobs: &jobs,
+        store: &store,
+        seen: Mutex::new(Vec::new()),
+        taints: Mutex::new(Vec::new()),
+    };
+    let hosts = open_hosts(&["host-a"], true);
+    queue(&jobs, "job-c", 2, 5);
+    queue_spec(&jobs, "job-h", on_the_machine(4), 0);
+    let placed = placer.place_jobs(&jobs, &hosts, (&starts, &NoMetrics));
+    assert_eq!(placed.map(|placed| placed.len()), Ok(2));
+    let told = [("host-a".to_owned(), "job-h".to_owned())];
+    assert_eq!(*starts.taints.lock().unwrap(), told);
+    assert_eq!(starts.seen.lock().unwrap().len(), 2);
+
+    queue_spec(&jobs, "job-h2", on_the_machine(4), 0);
+    store.fail_next();
+    let refused = placer.place_jobs(&jobs, &hosts, (&starts, &NoMetrics));
+    assert_eq!(refused, Ok(Vec::new()));
+    assert_eq!(state(&jobs, "job-h2"), JobState::Queued);
+    assert_eq!(*starts.taints.lock().unwrap(), told);
+    assert_eq!(starts.seen.lock().unwrap().len(), 2);
+}
+
 /// Asserts that after a placement is committed and the server stops before its start goes
 /// out, a new engine over the same tables books the allocation before it places anything
 /// (its room is not offered to the next job) and does not place the job again; that the
@@ -301,6 +421,7 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
         ceiling: &ceiling,
         logs: None,
         metrics: &NoMetrics,
+        host_jobs: false,
     };
     let holds = [HeldJob {
         job_id: "job-a".to_owned(),
@@ -380,6 +501,7 @@ fn only_absent_frees_an_allocation() {
                     ceiling: &ceiling,
                     logs: None,
                     metrics: &NoMetrics,
+                    host_jobs: false,
                 };
                 let holds = [HeldJob {
                     job_id: "job-a".to_owned(),
