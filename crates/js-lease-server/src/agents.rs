@@ -775,10 +775,11 @@ impl Agents {
             }
         }
         self.save_bindings().await;
+        // A due time that cannot be committed (only a store's commit fails here) is counted
+        // with no arm of its own, so every test binary runs the same code of the tick.
         let this = Arc::clone(self);
-        if !blocking(move || this.joins.flush()).await {
-            self.errors.fetch_add(1, Ordering::SeqCst);
-        }
+        let flushed = blocking(move || this.joins.flush()).await;
+        self.errors.fetch_add(u64::from(!flushed), Ordering::SeqCst);
         if let Some(usage) = &self.usage {
             usage.tick().await;
         }

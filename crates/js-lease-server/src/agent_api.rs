@@ -68,7 +68,9 @@ use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, ProtocolRange, Welcome, refusal};
+use js_agent_wire::{
+    Heartbeat, HeartbeatReply, Hello, HostCredential, ProtocolRange, Welcome, refusal,
+};
 use js_registry::{Credential, Refusal};
 use js_types::HostId;
 use serde::Serialize;
@@ -78,6 +80,7 @@ use tracing::{info, warn};
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
 use crate::fence::STATE_FENCED;
+use crate::host_keys::Writes;
 use crate::job_loss;
 use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admission, JoinRefusal};
@@ -226,40 +229,7 @@ async fn serve_hello(
     let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
     let change = agents.hello_change(&host, &hello, &who);
     let writes = change.writes.clone();
-    // A one-time token registers the host that names its instance, and only that host
-    // thereafter. The token is consumed before the registry is asked, so that two hellos
-    // cannot both pass; a hello the registry then refuses (the pool is full, the host id
-    // is bound to another credential) gives the use back, and the token stays unused for
-    // its instance.
-    //
-    // A hello that says it keeps a host credential, and registers its host with an unused
-    // token, retires the token in the same step and is answered with the credential: the
-    // token alone opens nothing from then on. When the registry refuses that hello the
-    // credential goes back with the use, since the answer that carries it is not sent.
-    let mut fresh_use = None;
-    let mut issued = None;
-    if let Some(presented) = &one_time {
-        let instance = hello.instance.clone();
-        let host = hello.host_id.clone();
-        let asked = hello.accepts_host_credential;
-        let admitted = agents
-            .admit_join(presented.clone(), (host, instance), asked, writes)
-            .await;
-        let admitted = admitted.map_err(|refusal| {
-            warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
-            Refused::join(refusal)
-        })?;
-        if admitted.admission == Admission::Fresh {
-            fresh_use = Some(presented.clone());
-        }
-        issued = admitted.issued;
-    } else if let Err(error) = agents.commit_hosts(writes).await {
-        warn!(%error, host = %hello.host_id, "agent hello refused: the binding could not be committed");
-        return Err(Refused::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            STATE_WRITE_FAILED,
-        ));
-    }
+    let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;
     agents.applied(&change);
     between();
     let mut welcome = match agents.registry.hello(&hello, &who) {
@@ -292,6 +262,52 @@ async fn serve_hello(
     agents.logs.iter().for_each(on_hello);
     info!(host = %hello.host_id, epoch = welcome.epoch, credential_issued, "agent admitted");
     Ok(Json(welcome))
+}
+
+/// What a hello's token takes before the registry is asked, with `writes` (the host's
+/// binding, with the store) in the same commit: the use that was fresh, to give back if the
+/// registry refuses, and the host credential issued. One refusal for every failure, so
+/// that [`serve_hello`] has no arm that only a failed commit takes: every test binary runs
+/// the same code of it.
+///
+/// A one-time token registers the host that names its instance, and only that host
+/// thereafter. The token is consumed before the registry is asked, so that two hellos
+/// cannot both pass; a hello the registry then refuses (the pool is full, the host id is
+/// bound to another credential) gives the use back, and the token stays unused for its
+/// instance. A hello that says it keeps a host credential, and registers its host with an
+/// unused token, retires the token in the same step and is answered with the credential:
+/// the token alone opens nothing from then on. When the registry refuses that hello the
+/// credential goes back with the use, since the answer that carries it is not sent. The
+/// pool's token commits `writes` alone.
+async fn take_hello(
+    agents: &Arc<Agents>,
+    one_time: Option<&Credential>,
+    hello: &Hello,
+    writes: Writes,
+) -> Result<(Option<Credential>, Option<HostCredential>), Refused> {
+    let Some(presented) = one_time else {
+        let committed = agents.commit_hosts(writes).await;
+        committed.map_err(|error| {
+            warn!(%error, host = %hello.host_id, "agent hello refused: the binding could not be committed");
+            Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
+        })?;
+        return Ok((None, None));
+    };
+    let instance = hello.instance.clone();
+    let host = hello.host_id.clone();
+    let asked = hello.accepts_host_credential;
+    let admitted = agents
+        .admit_join(presented.clone(), (host, instance), asked, writes)
+        .await;
+    let admitted = admitted.map_err(|refusal| {
+        warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
+        Refused::join(refusal)
+    })?;
+    let fresh = match admitted.admission {
+        Admission::Fresh => Some(presented.clone()),
+        _ => None,
+    };
+    Ok((fresh, admitted.issued))
 }
 
 async fn heartbeat(
@@ -327,16 +343,7 @@ async fn heartbeat(
     // brings is committed before the registry records it, and a failed commit answers 503
     // `state-write-failed` with nothing recorded, so the agent reports again; in file mode
     // the file is written after, and when it cannot be the reply does not acknowledge it.
-    let taint = agents
-        .durable_taint(&heartbeat, &who)
-        .await
-        .map_err(|error| {
-            warn!(%error, host = %heartbeat.host_id, "a heartbeat's taint could not be committed");
-            Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
-        })?;
-    let reply = agents.registry.heartbeat(&heartbeat, &who);
-    drop(taint);
-    let mut reply = reply?;
+    let mut reply = beat_durably(&agents, &heartbeat, &who).await?;
     // A start refused as host-tainted taints the host too, with nothing to acknowledge
     // there: the file is made current and a failure is retried by the next tick.
     let refused = heartbeat
@@ -504,6 +511,28 @@ fn fenced() -> Refused {
 }
 
 /// [`fenced`] when the fence has tripped, else nothing.
+/// The registry's reply to `heartbeat`, with the taint it brings committed first
+/// ([`Agents::durable_taint`]) and the commit's guard held until the registry has recorded
+/// the beat. One refusal for a failed commit and the registry's own, so that the heartbeat
+/// route has no arm that only a failed commit takes: every test binary runs the same code
+/// of it.
+async fn beat_durably(
+    agents: &Arc<Agents>,
+    heartbeat: &Heartbeat,
+    who: &Credential,
+) -> Result<HeartbeatReply, Refused> {
+    let taint = agents
+        .durable_taint(heartbeat, who)
+        .await
+        .map_err(|error| {
+            warn!(%error, host = %heartbeat.host_id, "a heartbeat's taint could not be committed");
+            Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
+        })?;
+    let reply = agents.registry.heartbeat(heartbeat, who);
+    drop(taint);
+    reply.map_err(Refused::from)
+}
+
 fn refuse_when_fenced(agents: &Agents) -> Result<(), Refused> {
     match agents.fence.is_tripped() {
         true => Err(fenced()),

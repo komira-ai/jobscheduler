@@ -520,7 +520,11 @@ async fn a_pool_token_hello_commits_the_binding_first_and_takes_it_back_when_ref
         (failed.status.as_u16(), failed.error),
         (503, "state-write-failed")
     );
-    logged(&lines, "WARN", "agent hello refused: the binding could not be committed");
+    logged(
+        &lines,
+        "WARN",
+        "agent hello refused: the binding could not be committed",
+    );
     assert!(rig.held("host-a").is_none());
 
     let before = rig.commits();
