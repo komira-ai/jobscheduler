@@ -1,4 +1,5 @@
-//! A restart over the same lease file, and over a job store restored from an older backup.
+//! A restart over the same lease file, and over a job store restored from an older backup;
+//! and the job path, which has no lease and no time to live to keep.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -49,9 +50,6 @@ async fn resume_keeps_leases_and_never_reuses_ids() {
     assert_eq!(next.json()["id"], "2-2");
     assert_eq!(next.json()["host"], "gpu-02");
 
-    let renewed = second.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(renewed.status, 200);
-    assert_eq!(renewed.json().as_object().unwrap().len(), 1);
     assert_eq!(
         second.call("DELETE", "/v1/leases/1-1", None).await.json(),
         json!({ "state": "freed" })
@@ -117,7 +115,7 @@ async fn restarted(first: Harness) -> Harness {
 /// file, keeps a held lease held on the same host (the lease file is the record of the
 /// pool's bookings), that the host is not leased to anyone else (the second host is
 /// taken by the next acquire and the third acquire has no capacity), that the lease can
-/// be renewed and released, and that its host is free after the release.
+/// be released, and that its host is free after the release.
 #[tokio::test]
 async fn a_restart_keeps_a_held_lease_on_the_shipped_pool() {
     let first = Harness::new("resume_shipped").await;
@@ -136,8 +134,6 @@ async fn a_restart_keeps_a_held_lease_on_the_shipped_pool() {
     assert_eq!(full.status, 409, "{}", full.body);
     assert_eq!(full.json(), json!({ "error": "no-capacity" }));
 
-    let renewed = second.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(renewed.status, 200, "{}", renewed.body);
     let released = second.call("DELETE", "/v1/leases/1-1", None).await;
     assert_eq!(released.json(), json!({ "state": "freed" }));
     let again = second.call("POST", "/v1/leases", Some(&lease_body())).await;
@@ -506,4 +502,72 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     ];
     expected.sort();
     assert_eq!(stored(&jobs_file(&scratch)), expected);
+}
+
+/// Asserts that the job path works with no ttl flag given, over the same server that
+/// serves leases: a job is submitted through the job service, placed on a registered
+/// agent (its start names the job and the agent lists it running with nothing told
+/// back), a second job submitted while the first holds the host is queued and then
+/// cancelled (200 `JOB_STATE_CANCELLED`) and is never started, and the first job's
+/// success, reported by the agent, is accepted (`ACCEPTED`), after which the job reads
+/// `JOB_STATE_SUCCEEDED` and its result is served. It catches a removal of lease renewal
+/// that reaches into job submission, placement, results or cancel.
+#[tokio::test]
+async fn the_job_path_is_unaffected() {
+    let scratch = Scratch::new("job_path");
+    let clock = Arc::new(StoreClock::default());
+    clock.advance(Duration::from_millis(T0));
+    let ids = ScriptedIds::new([1; 16], [[2; 16], [3; 16], [0xf0; 16]]);
+    let h = job_server(scratch, "initialise", &clock, Arc::new(ids)).await;
+    let host = job_agent(&h, "host-1").await;
+
+    let a = submit(&h).await;
+    h.ticks.step().await;
+    let (started, allocation) = one_start(&beat_with(&h, &host, &[]).await);
+    assert_eq!(started, a);
+    let quiet = beat_with(&h, &host, &[running(&a)]).await;
+    assert_eq!(commands(&quiet), (vec![], vec![]), "{quiet}");
+
+    let b = submit(&h).await;
+    h.ticks.step().await;
+    let busy = beat_with(&h, &host, &[running(&a)]).await;
+    assert_eq!(commands(&busy), (vec![], vec![]), "{busy}");
+    let addr = h.running.job_addr().expect("the job service is on");
+    let path = format!("/v1/jobs/{b}:cancel");
+    let cancelled = request(addr, "POST", &path, Some(TOKEN), Some(b"{}")).await;
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+    assert_eq!(cancelled.json()["job"]["state"], "JOB_STATE_CANCELLED");
+
+    let done = json!({
+        "job_id": a,
+        "state": "exited_unacked",
+        "result": { "job_id": a, "allocation_id": allocation, "outcome": "succeeded", "exit_code": 0 },
+    });
+    let acked = beat_with(&h, &host, &[done]).await;
+    assert_eq!(
+        acked["job_acks"],
+        json!([{ "job_id": a, "ack": "ACCEPTED" }]),
+        "{acked}"
+    );
+    h.ticks.step().await;
+    let after = beat_with(&h, &host, &[]).await;
+    assert_eq!(commands(&after), (vec![], vec![]), "{after}");
+
+    let read = job_of(&h, &a).await;
+    assert_eq!(read.status, 200, "{}", read.body);
+    assert_eq!(read.json()["job"]["state"], "JOB_STATE_SUCCEEDED");
+    let result = request(
+        addr,
+        "GET",
+        &format!("/v1/jobs/{a}/result"),
+        Some(TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(result.status, 200, "{}", result.body);
+    assert!(result.json()["result"].is_object(), "{}", result.body);
+    assert_eq!(
+        job_of(&h, &b).await.json()["job"]["state"],
+        "JOB_STATE_CANCELLED"
+    );
 }

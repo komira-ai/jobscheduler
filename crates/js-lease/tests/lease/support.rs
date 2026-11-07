@@ -80,7 +80,7 @@ pub fn host(name: &str) -> HostId {
 }
 
 pub fn settings() -> Settings {
-    Settings::new(secs(60), secs(120)).unwrap()
+    Settings::new()
 }
 
 pub fn clock() -> ManualClock {

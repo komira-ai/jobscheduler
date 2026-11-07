@@ -1,5 +1,7 @@
 //! The ceiling on a request's maximum wall time: what it refuses, that a refusal leaves
-//! nothing behind, that no renewal passes it, and that a restart keeps both.
+//! nothing behind, that a lease ends at it, and that a restart keeps both.
+
+use std::time::Duration;
 
 use js_lease::{AcquireError, Boot, LeaseTable, Settings, SettingsError};
 use js_types::LeaseId;
@@ -30,7 +32,7 @@ fn table(name: &str) -> (Table, js_lease::ManualClock, Scratch) {
 #[test]
 fn a_request_above_the_ceiling_is_refused_and_leaves_nothing() {
     let (mut table, _clock, _scratch) = table("ceiling_refuse");
-    let err = table.acquire(request(601), None).unwrap_err();
+    let err = table.acquire(request(601)).unwrap_err();
     assert!(matches!(
         err,
         AcquireError::WallAboveCeiling { ceiling } if ceiling == secs(600)
@@ -41,25 +43,22 @@ fn a_request_above_the_ceiling_is_refused_and_leaves_nothing() {
     );
     assert!(table.list().is_empty());
     assert!(table.provider().booked().is_empty());
-    let granted = table.acquire(request(600), None).unwrap();
+    let granted = table.acquire(request(600)).unwrap();
     assert_eq!(granted.id, LeaseId::new(1, 1));
 }
 
-/// Asserts that no renewal takes a lease past its maximum wall time: a client that renews
-/// every 50 seconds holds the lease no later than the ceiling after it began, and the lease
-/// is expired after it. It proves a draining host empties within the ceiling.
+/// Asserts that a lease granted at the ceiling ends at the ceiling after it began and not
+/// later: it is still held one millisecond before and a tick at that moment expires it. It
+/// proves a draining host empties within the ceiling.
 #[test]
-fn renewals_never_pass_the_ceiling() {
-    let (mut table, clock, _scratch) = table("ceiling_renew");
-    let granted = table.acquire(request(600), None).unwrap();
-    let mut last = granted.expires_at;
-    for _ in 0..11 {
-        clock.advance(secs(50));
-        last = table.renew(&granted.id, None).unwrap();
-    }
-    assert_eq!(last, at(T0 + 600_000));
-    clock.advance(secs(51));
-    assert!(table.renew(&granted.id, None).is_err());
+fn a_lease_at_the_ceiling_ends_at_the_ceiling() {
+    let (mut table, clock, _scratch) = table("ceiling_ends");
+    let granted = table.acquire(request(600)).unwrap();
+    assert_eq!(granted.ends_at, at(T0 + 600_000));
+    clock.advance(Duration::from_millis(599_999));
+    assert!(table.tick().expired.is_empty());
+    clock.advance(Duration::from_millis(1));
+    assert_eq!(table.tick().expired, vec![granted.id]);
 }
 
 /// Asserts that with no ceiling set a long wall time is still granted (the default is
@@ -76,19 +75,19 @@ fn no_ceiling_grants_as_before_and_a_zero_ceiling_is_refused() {
     )
     .unwrap();
     assert_eq!(settings().max_wall(), None);
-    assert!(table.acquire(request(10 * 24 * 3600), None).is_ok());
+    assert!(table.acquire(request(10 * 24 * 3600)).is_ok());
     let zero = settings().with_max_wall(secs(0));
     assert_eq!(zero.unwrap_err(), SettingsError::MaxWallNotPositive);
 }
 
-/// Asserts that across a restart a lease granted at the ceiling keeps its end (a renewal
-/// after the restart is still clamped to it), and the reopened table, given the same
+/// Asserts that across a restart a lease granted at the ceiling keeps its end (it still
+/// expires at it after the restart), and the reopened table, given the same
 /// settings, refuses the same request. It catches a ceiling that lives only in memory of
 /// the first process, or a restart that lengthens a lease.
 #[test]
 fn the_ceiling_and_the_lease_end_survive_a_restart() {
     let (mut table, clock, scratch) = table("ceiling_restart");
-    let granted = table.acquire(request(600), None).unwrap();
+    let granted = table.acquire(request(600)).unwrap();
     let before = table.list();
     let provider = table.into_provider();
     let mut table = LeaseTable::open(
@@ -101,13 +100,12 @@ fn the_ceiling_and_the_lease_end_survive_a_restart() {
     .unwrap();
     assert_eq!(table.list(), before);
     assert!(matches!(
-        table.acquire(request(601), None),
+        table.acquire(request(601)),
         Err(AcquireError::WallAboveCeiling { .. })
     ));
-    let mut last = granted.expires_at;
-    for _ in 0..11 {
-        clock.advance(secs(50));
-        last = table.renew(&granted.id, None).unwrap();
-    }
-    assert_eq!(last, at(T0 + 600_000));
+    assert_eq!(granted.ends_at, at(T0 + 600_000));
+    clock.advance(Duration::from_millis(599_999));
+    assert!(table.tick().expired.is_empty());
+    clock.advance(Duration::from_millis(1));
+    assert_eq!(table.tick().expired, vec![granted.id]);
 }

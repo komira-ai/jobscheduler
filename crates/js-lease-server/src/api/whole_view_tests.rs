@@ -1,5 +1,5 @@
-//! The marks as the routes show them: the renewal answer, `GET /v1/hosts` and the tick's
-//! log line. The server's routes are called without a socket over a registry on a manual
+//! The marks as the routes show them: `GET /v1/hosts` and the tick's log line. The
+//! server's routes are called without a socket over a registry on a manual
 //! clock; the pool serves a share class and the whole-node class, which this server's
 //! pool files do not yet (a mixed pool), so a reservation can be made on a busy host.
 //! Nothing here sleeps.
@@ -8,8 +8,8 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use axum::body::{Bytes, to_bytes};
-use axum::extract::{Path, State};
+use axum::body::to_bytes;
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
@@ -229,7 +229,7 @@ impl Rig {
                 asker.start(spec.unwrap());
             }
         }
-        let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+        let settings = Settings::new();
         let settings = crate::reservations::with_restart_grace(settings, Some(&whole));
         let table = LeaseTable::open(
             BoxedPool(Box::new(provider)),
@@ -317,11 +317,7 @@ impl Rig {
     /// Takes a share lease on the host; its id.
     pub(super) async fn lease(&self) -> String {
         let mut table = self.shared.table.lock().await;
-        table
-            .acquire(request("share", 600), None)
-            .unwrap()
-            .id
-            .to_string()
+        table.acquire(request("share", 600)).unwrap().id.to_string()
     }
 
     /// Polls whole-node request `name`, as its consumer would.
@@ -336,11 +332,6 @@ impl Rig {
         self.asker.start(spec);
     }
 
-    async fn renew(&self, id: &str) -> (StatusCode, String) {
-        let reply = renew(State(self.shared.clone()), Path(id.into()), Bytes::new()).await;
-        text(reply.unwrap()).await
-    }
-
     pub(super) async fn hosts(&self) -> String {
         text(hosts(State(self.shared.clone())).await).await.1
     }
@@ -350,42 +341,6 @@ async fn text(reply: Response) -> (StatusCode, String) {
     let status = reply.status();
     let body = to_bytes(reply.into_body(), 1 << 20).await.unwrap();
     (status, String::from_utf8(body.to_vec()).unwrap())
-}
-
-/// Asserts the renewal answer over the life of a reservation. A lease on a host that is
-/// not reserved renews to a body with only the expiry; when a waiting request reserves
-/// the host the same lease renews, never refused, to a new expiry and `host_reserved`;
-/// the reservation's deadline passes the flag stays, since nothing is given up at the
-/// deadline. It catches a renewal refused for a reservation, a flag that never shows, a
-/// flag that goes at the deadline, and an expiry that does not move.
-#[tokio::test]
-async fn a_renewal_says_when_its_host_is_reserved_and_keeps_saying_so_past_its_deadline() {
-    let mut rig = Rig::new("renew").await;
-    let id = rig.lease().await;
-    rig.advance(10);
-    let (status, body) = rig.renew(&id).await;
-    assert_eq!(
-        (status, body.as_str()),
-        (StatusCode::OK, "{\"expires_at_ms\":1310000}")
-    );
-
-    rig.ask("r1");
-    assert_eq!(rig.registry.reservations().len(), 1);
-    rig.advance(10);
-    rig.ask("r1");
-    let (status, body) = rig.renew(&id).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "{\"expires_at_ms\":1320000,\"host_reserved\":true}");
-
-    // The consumer polls every ten seconds, so its entry stays on the wait list.
-    rig.advance(10);
-    rig.ask("r1");
-    rig.advance(10);
-    rig.ask("r1");
-    assert_eq!(rig.registry.reservations().len(), 1, "kept at the deadline");
-    let (status, body) = rig.renew(&id).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "{\"expires_at_ms\":1340000,\"host_reserved\":true}");
 }
 
 /// Asserts the host listing with a reserved host: `mark`, the request it is for and the
@@ -477,8 +432,8 @@ impl Lines {
 
 /// Asserts the tick's line: when a tick changes the reserved, held or queued count the
 /// line carries the registry's counts, a tick that changes nothing logs nothing, and a
-/// tick that changes a lease (here an expiry) logs the line with the counts it has.
-/// It catches counters that are not the registry's, a count that is logged only when a
+/// tick that changes a lease (here a lease reaching its wall end) logs the line with the
+/// counts it has. It catches counters that are not the registry's, a count that is logged only when a
 /// lease changes, and a line logged at every tick.
 #[tokio::test]
 async fn the_tick_logs_the_counts_of_reserved_held_and_queued() {
@@ -511,7 +466,7 @@ async fn the_tick_logs_the_counts_of_reserved_held_and_queued() {
     rig.shared.tick().await;
     assert_eq!(lines.take(), "");
 
-    rig.advance(400);
+    rig.advance(601);
     rig.shared.tick().await;
     let line = lines.take();
     assert!(line.contains("expired=1"), "{line}");

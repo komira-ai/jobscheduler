@@ -86,7 +86,7 @@ impl Scratch {
 }
 
 /// The flags of a test server: an ephemeral loopback port, `boot`, the shipped two-host
-/// pool, an owner-only token file, a lease ttl of 60 s and, with `agents`, registration of
+/// pool, an owner-only token file and, with `agents`, registration of
 /// hosts into [`POOL`] with [`JOIN`].
 pub fn args(scratch: &Scratch, boot: &str, agents: bool) -> Vec<OsString> {
     let pool = scratch.write("pool.toml", EXAMPLE_CONFIG, 0o644);
@@ -97,7 +97,6 @@ pub fn args(scratch: &Scratch, boot: &str, agents: bool) -> Vec<OsString> {
         ("--boot", boot.into()),
         ("--pool-config", pool.into_os_string()),
         ("--token-file", token.into_os_string()),
-        ("--default-ttl", "60s".into()),
     ];
     if agents {
         let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
@@ -276,11 +275,16 @@ impl Listening {
 
 /// A request body that asks for one whole host of the shipped pool.
 pub fn lease_body() -> Value {
+    lease_body_with_wall(7200)
+}
+
+/// [`lease_body`] asking for a maximum wall time of `seconds`.
+pub fn lease_body_with_wall(seconds: u64) -> Value {
     json!({
         "class": "gpu-host",
         "resources": { "cpu_millis": 1000, "memory_bytes": 1024, "gpus": 1, "gpu_class": "nvidia-a100" },
         "capabilities": { "isa": "x86-64-v3" },
-        "max_wall_seconds": 7200,
+        "max_wall_seconds": seconds,
         "labels": { "team": "infra" },
     })
 }

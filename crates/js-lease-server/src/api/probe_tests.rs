@@ -99,7 +99,7 @@ impl Rig {
                 .unwrap();
         }
         let provider = registry.provider().with_classes(vec![share()]);
-        let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+        let settings = Settings::new();
         let table = LeaseTable::open(
             BoxedPool(Box::new(provider)),
             shared_clock.clone(),

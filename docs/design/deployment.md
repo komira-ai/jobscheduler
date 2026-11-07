@@ -135,13 +135,13 @@ lease table and the bindings in a database, with conditional writes (the `js-sta
   URL file, backups, restores and the checks after a restore are in the
   [state-database runbook](../runbooks/state-database.md).
 - **Loss of the volume** is a loss of the leases and the jobs. With `--boot resume` the pod refuses to start; an operator restores the
-  files from a backup (the runbook, steps 5 and 6), or deliberately runs `--boot initialise`. After either, a client's renew of a lease
+  files from a backup (the runbook, steps 5 and 6), or deliberately runs `--boot initialise`. After either, a client's release of a lease
   the table does not hold fails 404 `unknown-lease`, so the client leases again and the work reruns under the platform-fault budget
   (8.1), and a run a host lists that the server has no record of is answered `Cancel`. A host that lists a job the restored job store
   does not know is told to stop it and takes no new start until its listing is clean; minted job and allocation ids are random, so a
   restore issues none of them again.
 - **A restore must not lower the term.** A backup holds a term below the ones the lost boots took, so booting it plainly would reissue
-  `(term, sequence)` pairs that stale holders still carry, and a renew of an old id could match a different lease. No flag raises it
+  `(term, sequence)` pairs that stale holders still carry, and a release of an old id could match a different lease. No flag raises it
   (the `--term-floor` and `--verify-state` this section once prescribed were not built): before the first boot the operator sets `term`
   in the restored lease file to at least the highest term any lease id carried, and the boot takes the next one. After `--boot
   initialise` the same applies, so ids of the lost table are never valid again.
@@ -167,14 +167,14 @@ leases.
 | The zone or the volume is lost | The service stays down; a zonal volume cannot follow the pod elsewhere | Restore a snapshot (loss bounded by its age, above). This is the one case with data loss. |
 | An agent's connection drops (its own or the service's) | The agent's session ends | The agent re-hellos with its backoff (merged); the server's per-token hello limit (`--agent-hello-burst`, `--agent-hello-interval`) smooths a herd after a restart. The binding file keeps each id bound to its credential and instance, and the heartbeat reconciles its leases by the graded absence rule: silence is not absence. |
 
-**Leases, TTLs and the reaper across an outage.** A lease holds its expiry as an absolute time. While the service is down, nothing
-renews and nothing expires, because only the tick expires leases (K13). After a boot, the first tick would expire every lease whose
-expiry passed during the outage, including leases of clients that could not renew. Options (D34): (a) as merged, expire at the first tick;
-(b) no held lease expires before a boot grace (`--boot-grace`, off by default) has passed after a boot, so clients get a window to renew.
-Recommend (b), with the grace at the default TTL, set by the operator. It touches only expiry: an `absent` observation still drops a
+**Leases and the reaper across an outage.** A lease holds its end as an absolute time (its acquisition plus its max wall time). While the
+service is down nothing ends a lease, because only the tick ends leases (K13). After a boot, the first tick would end every lease whose
+end passed during the outage. Options (D34): (a) as merged, end it at the first tick;
+(b) no held lease ends before a boot grace (`--boot-grace`, off by default) has passed after a boot.
+Recommend (b), with the grace set by the operator. It touches only the end: an `absent` observation still drops a
 lease at once, an `unknown` one is still kept, and the grace opens on the table's injected clock. The reaper and the pool scaler run inside
 the tick, so while the service is down no machine is released or launched; a restart resolves the open acquire intents by `list` (K8).
-An outage is tolerated up to the smaller of the lease TTL and the agents' fence: a self-fencing agent stops its work after its fixed time
+An outage is tolerated up to the smaller of the lease's remaining wall time and the agents' fence: a self-fencing agent stops its work after its fixed time
 without contact, and a run-on one continues. Work already placed inside a lease keeps running: the consumer places work itself (9.1) and
 the scheduler is not in the data path (D22).
 
@@ -184,7 +184,7 @@ nothing to elect, and such a lease is not a fence anyway, since a paused leader 
 conditional write on the term (D11), with an election to choose who ticks.
 
 **What is not HA, and why that is acceptable now.** The service is down for the length of a pod start after a crash and for minutes after
-a node loss; new leases, renewals and scaling wait, placed work does not stop, and nothing is lost except in a lost volume. The first
+a node loss; new leases and scaling wait, placed work does not stop, and nothing is lost except in a lost volume. The first
 users, kbf and the ucdk realization, ask for capacity at the pace of builds and jobs, retry, and hold leases for many minutes, so a bounded
 outage costs a delay and not a failure. The price of more (an external store, an election, a fence) is larger than the cost of that
 delay today (K28 names the risk).
@@ -203,7 +203,7 @@ delay today (K28 names the risk).
 
 ## Moving from the single host
 
-Today's `js-lease-server` on one host is the stepping stone. The move needs no new format and is bounded by the smaller of the lease TTL
+Today's `js-lease-server` on one host is the stepping stone. The move needs no new format and is bounded by the smaller of the lease's remaining wall time
 and the agents' fence (above). Each step is reversible until the last.
 
 1. Prepare the objects with the pod at zero replicas: the volume, the Secrets (the **same** bearer token and join tokens, so no client

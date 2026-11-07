@@ -295,11 +295,9 @@ const EXPECTED: Record<string, (string | null)[]> = {
   index: ["gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS\n", null],
   concepts: [
     [
-      'js lease acquire --class <class> --max-wall <dur> [--ttl <dur>] [--label k=v ...]',
-      'js lease renew <id> [--ttl <dur>]',
+      'js lease acquire --class <class> --max-wall <dur> [--label k=v ...]',
       'js lease release <id>',
       'js lease list',
-      'js lease run <the flags of acquire> -- <command> [args...]',
       '',
     ].join('\n'),
   ],

@@ -27,7 +27,7 @@ use js_types::{
     accelerator_of,
 };
 
-use crate::support::{Scratch, Stepping, TOKEN, clock, lease_body, routed};
+use crate::support::{Scratch, Stepping, TOKEN, clock, lease_body_with_wall, routed};
 
 /// What the cloud's provider and the static pool were asked, in order.
 type Log = Arc<Mutex<Vec<String>>>;
@@ -206,7 +206,7 @@ fn offer() -> Offer {
 }
 
 /// The configuration file of a server with one live pool `burst` of the `logged-cloud` kind,
-/// leases of 60 s, the agent routes on a port of their own (which an elastic pool needs,
+/// leases of 60 s wall time, the agent routes on a port of their own (which an elastic pool needs,
 /// and which the seam does not bind), and the job service on, so the server holds the job
 /// tables beside the state file (the seam binds no job listener either).
 fn file_text(scratch: &Scratch) -> String {
@@ -220,7 +220,6 @@ fn file_text(scratch: &Scratch) -> String {
          boot = \"initialise\"\n\
          client_token_file = {token}\n\
          max_lease_wall = \"2h\"\n\
-         default_ttl = \"60s\"\n\
          listen = \"127.0.0.1:0\"\n\
          agent_listen = \"127.0.0.2:0\"\n\
          job_listen = \"127.0.0.3:0\"\n\
@@ -291,8 +290,8 @@ fn first(calls: &[String], call: &str) -> usize {
 /// Asserts the order of a tick over an elastic pool with a job queued from the start. The
 /// first tick runs the pool's first pass of checks (so the pool is available) and then the
 /// scaler, which launches for the job: the log shows the checks before the first `acquire`.
-/// Then a lease on the static pool passes its ttl and the checks fall due again (60 s); in
-/// the tick that follows, the table's stop of the expired lease comes before the scaler's
+/// Then a lease on the static pool passes its wall end and the checks fall due again (60 s); in
+/// the tick that follows, the table's stop of the ended lease comes before the scaler's
 /// first call (its `list`), and the job, still on its way to its machine, launches nothing
 /// more. It catches a tick that runs the scaler before the checks (the scaler would read the
 /// pool as still being checked and launch nothing), one that skips the checks (no `checks`,
@@ -321,7 +320,7 @@ async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
         "POST",
         "/v1/leases",
         Some(TOKEN),
-        Some(&lease_body()),
+        Some(&lease_body_with_wall(60)),
     )
     .await;
     assert_eq!(granted.status, 201, "{:?}", granted.body);

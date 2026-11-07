@@ -104,24 +104,30 @@ pub(crate) struct StoredLease {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     pub acquired_at_ms: u64,
-    /// When the lease's ttl and maximum wall time started counting, written only when it
+    /// When the lease's maximum wall time started counting, written only when it
     /// is not `acquired_at_ms` (a whole lease observed ready after its acquire). Absent is
     /// `acquired_at_ms`; a build that predates the field reads the row without it and keeps
     /// it on rewrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+    /// A pending whole lease's prepare deadline. Any other lease is written with its
+    /// `ends_at_ms` here and the row is not read back for it: a lease has no time to live,
+    /// and the row is kept so that a release that renewed leases still loads the file (and
+    /// reads it as the lease's expiry, which is then its wall end).
     pub expires_at_ms: u64,
     pub ends_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_run: Option<String>,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-    /// Whether the lease is of a whole-node class, whose ttl and maximum wall time
-    /// count from the moment it is observed ready. Absent in a file written before the
+    /// Whether the lease is of a whole-node class, whose maximum wall time counts from
+    /// the moment it is observed ready. Absent in a file written before the
     /// field existed, which loads as not whole.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub whole: bool,
-    /// The ttl granted at acquire, kept while a whole lease is pending.
+    /// The ttl a release that renewed leases granted a pending whole lease. Read and
+    /// ignored, never written (it is always `None` here): a known row, so that it is not
+    /// kept among the fields of a later version and written back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
     /// The maximum wall time of the request, kept while a whole lease is pending.

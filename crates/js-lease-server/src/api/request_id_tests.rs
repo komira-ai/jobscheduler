@@ -386,10 +386,10 @@ async fn a_request_with_no_host_left_is_dropped_after_regain_grace() {
 
 /// Asserts a presentation that comes later than the pool's `regain_grace` after the last
 /// one (a tick far slower than the grace): the registry has let the request go, and the
-/// late presentation enters it again. In the same gap the ordinary lease lapsed by its
-/// ttl, so that tick also commits the quiet host to the waiting lease: the lease is
-/// pending on the host and nothing is left on the wait list. It catches a lease dropped,
-/// or left pending with no request, by a slow tick.
+/// late presentation enters it again. In the same gap the ordinary lease reached its
+/// maximum wall time, so that tick also commits the quiet host to the waiting lease: the
+/// lease is pending on the host and nothing is left on the wait list. It catches a lease
+/// dropped, or left pending with no request, by a slow tick.
 #[tokio::test]
 async fn a_late_presentation_enters_the_request_again() {
     let (rig, _busy, waiting) = reserved("request_id_late").await;

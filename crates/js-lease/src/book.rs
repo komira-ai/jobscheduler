@@ -13,7 +13,7 @@ use js_types::{
 };
 
 use crate::clock::{Monotonic, SystemMonotonic, Timestamp};
-use crate::error::{AcquireError, OpenError, RenewError, SaveError};
+use crate::error::{AcquireError, OpenError, SaveError};
 use crate::reservations;
 use crate::state::LeaseState;
 use crate::store::{
@@ -27,7 +27,8 @@ use crate::types::{Booking, Boot, Lease, LeaseInfo, ReservationRecord, Settings}
 pub(crate) enum Step {
     /// Nothing: held and not due.
     Idle,
-    /// The expiry has passed: start the stop.
+    /// The lease reached its end: its maximum wall time, or for a pending whole lease its
+    /// prepare deadline (observed once first). Start the stop.
     Expire,
     /// Releasing: stop again.
     Retry,
@@ -60,12 +61,12 @@ pub(crate) enum Seen {
     Unsure,
 }
 
-/// What a pending whole-node lease keeps until it is observed ready: the ttl granted
-/// and the maximum wall time asked, both counted from that moment.
+/// What a pending whole-node lease keeps until it is observed ready: the maximum wall time
+/// asked, counted from that moment, and the prepare deadline it must be ready by.
 #[derive(Debug, Clone, Copy)]
 struct Token {
-    ttl: Duration,
     wall: Duration,
+    deadline: Timestamp,
 }
 
 /// The request id a lease was acquired under and what that acquire asked for: a repeat
@@ -158,15 +159,15 @@ pub(crate) struct Record {
     state: LeaseState,
     host: Option<HostId>,
     acquired_at: Timestamp,
-    /// When the lease's ttl and maximum wall time started counting: `acquired_at`, or for
-    /// a whole lease the moment it was observed ready. `ends_at` is this plus its maximum
-    /// wall time.
+    /// When the lease's maximum wall time started counting: `acquired_at`, or for a whole
+    /// lease the moment it was observed ready. `ends_at` is this plus its maximum wall
+    /// time, and the one clock of a lease that is not a pending whole lease.
     started_at: Timestamp,
-    expires_at: Timestamp,
     ends_at: Timestamp,
     /// Whether the lease is of a whole-node class.
     whole: bool,
-    /// Set while a whole lease is pending: what its clock starts from when it is ready.
+    /// Set while a whole lease is pending: its prepare deadline, and what its clock starts
+    /// from when it is ready.
     token: Option<Token>,
     /// Set (in memory only) once a pending whole lease has been observed at or after its
     /// prepare deadline and the provider still had no answer. Until then the deadline
@@ -223,7 +224,6 @@ impl Record {
             started_at: Timestamp::from_millis(
                 stored.started_at_ms.unwrap_or(stored.acquired_at_ms),
             ),
-            expires_at: Timestamp::from_millis(stored.expires_at_ms),
             ends_at: Timestamp::from_millis(stored.ends_at_ms),
             whole: stored.whole,
             token,
@@ -259,36 +259,44 @@ impl Record {
         found
     }
 
-    /// The token of a pending whole lease: both of its fields are required, because a
-    /// pending lease without them could never start its clock.
+    /// The token of a pending whole lease: `wall_ms` is required, because a pending lease
+    /// without it could never start its clock, and its prepare deadline is the row's
+    /// `expires_at_ms`. A `ttl_ms` row, which a release that renewed leases wrote, is read
+    /// and ignored: a lease has no time to live.
     fn restore_token(stored: &StoredLease) -> Result<Option<Token>, String> {
         let waiting = stored.whole && stored.state == LeaseState::Pending;
         if !waiting {
             return Ok(None);
         }
-        let (Some(ttl), Some(wall)) = (stored.ttl_ms, stored.wall_ms) else {
-            let reason = "a pending whole lease lacks ttl_ms or wall_ms";
+        let Some(wall) = stored.wall_ms else {
+            let reason = "a pending whole lease lacks wall_ms";
             return Err(format!(
                 "lease {}.{}: {reason}",
                 stored.term, stored.sequence
             ));
         };
         Ok(Some(Token {
-            ttl: Duration::from_millis(ttl),
             wall: Duration::from_millis(wall),
+            deadline: Timestamp::from_millis(stored.expires_at_ms),
         }))
     }
 
     /// The lease is ready at `now`: a whole lease's clock starts here, so it started at
-    /// `now`, expires at `now + ttl` (at most its wall time) and ends at `now + wall`. A
-    /// lease with no token is left as it is.
+    /// `now` and ends at `now + wall`, and its prepare deadline no longer applies. A lease
+    /// with no token is left as it is.
     fn start_clock(&mut self, now: Timestamp) {
         let Some(token) = self.token.take() else {
             return;
         };
         self.started_at = now;
         self.ends_at = now.plus(token.wall);
-        self.expires_at = now.plus(token.ttl).min(self.ends_at);
+    }
+
+    /// When a tick ends the lease: a pending whole lease at its prepare deadline, any other
+    /// at the end of its maximum wall time. Nothing else ends a lease by time.
+    fn due(&self) -> Timestamp {
+        let pending = self.token.filter(|_| self.state == LeaseState::Pending);
+        pending.map_or(self.ends_at, |token| token.deadline)
     }
 
     fn stored(&self) -> StoredLease {
@@ -299,10 +307,13 @@ impl Record {
             host: self.host.as_ref().map(|host| host.as_str().to_string()),
             acquired_at_ms: self.acquired_at.millis(),
             started_at_ms: (self.started_at != self.acquired_at).then(|| self.started_at.millis()),
-            expires_at_ms: self.expires_at.millis(),
+            // A held lease is written with its wall end as its expiry, which a release that
+            // renewed leases reads as the lease's expiry, so a rollback to it ends the lease
+            // at the same moment; a pending whole lease writes its prepare deadline there.
+            expires_at_ms: self.due().millis(),
             ends_at_ms: self.ends_at.millis(),
             whole: self.whole,
-            ttl_ms: self.token.map(|token| millis_of(token.ttl)),
+            ttl_ms: None,
             wall_ms: self.token.map(|token| millis_of(token.wall)),
             validation_run: self.validation_run.clone(),
             labels: self.request_labels.clone(),
@@ -321,7 +332,6 @@ impl Record {
             state: self.state,
             host: self.host.clone(),
             acquired_at: self.acquired_at,
-            expires_at: self.expires_at,
             ends_at: self.ends_at,
             labels: self.labels.clone(),
         }
@@ -331,7 +341,7 @@ impl Record {
     /// whole lease it is the one the provider is given before the table expires the lease.
     fn note_unknown_at(&mut self, now: Timestamp) {
         let pending_whole = self.whole && self.state == LeaseState::Pending;
-        self.deadline_observed |= pending_whole && self.expires_at <= now;
+        self.deadline_observed |= pending_whole && self.due() <= now;
     }
 
     /// A pending whole lease's deadline is the provider's prepare deadline too, and the
@@ -339,6 +349,7 @@ impl Record {
     /// holds against the host). So a pending whole lease that has reached its deadline is
     /// observed first; only when that observation still has no answer does the next tick
     /// expire it (the table's own stop, which the provider does not count as a failure).
+    /// Any other lease is expired when its maximum wall time ends ([`Record::due`]).
     fn step(&self, now: Timestamp) -> Step {
         if self.state == LeaseState::Releasing {
             return Step::Retry;
@@ -354,7 +365,7 @@ impl Record {
             !self.deadline_observed,
         ];
         let unasked = unasked.into_iter().all(|yes| yes);
-        if self.expires_at <= now && !unasked {
+        if self.due() <= now && !unasked {
             return Step::Expire;
         }
         if self.state == LeaseState::Pending {
@@ -555,10 +566,6 @@ impl Book {
         self.settings.max_wall()
     }
 
-    pub(crate) fn grant(&self, asked: Option<Duration>) -> Option<Duration> {
-        self.settings.grant(asked)
-    }
-
     /// The next lease id of this boot; `None` when the sequence after it could not be
     /// stored (the file holds integers up to [`store::LARGEST`]), in which case nothing
     /// changes.
@@ -571,26 +578,16 @@ impl Book {
     }
 
     /// Records a lease before the provider is told to start it, and returns the record.
-    pub(crate) fn insert_pending(
-        &mut self,
-        spec: &StartSpec,
-        now: Timestamp,
-        ttl: Duration,
-    ) -> Record {
+    pub(crate) fn insert_pending(&mut self, spec: &StartSpec, now: Timestamp) -> Record {
         let request = spec.request();
         let ends_at = now.plus(request.max_wall);
         let whole = *spec.class().admission() == Admission::Whole;
         // A whole lease waits, pending, for at most the prepare timeout and is not charged
-        // for the wait: its own ttl and wall time start when it is ready, so its maximum
-        // wall time does not clamp the wait.
-        let expires_at = if whole {
-            now.plus(self.settings.prepare_timeout())
-        } else {
-            now.plus(ttl).min(ends_at)
-        };
-        let token = whole.then_some(Token {
-            ttl,
+        // for the wait: its wall time starts when it is ready, so its maximum wall time
+        // does not clamp the wait.
+        let token = whole.then(|| Token {
             wall: request.max_wall,
+            deadline: now.plus(self.settings.prepare_timeout()),
         });
         let record = Record {
             id: spec.lease(),
@@ -598,7 +595,6 @@ impl Book {
             host: None,
             acquired_at: now,
             started_at: now,
-            expires_at,
             ends_at,
             whole,
             token,
@@ -630,7 +626,7 @@ impl Book {
                 let lease = Lease {
                     id: record.id,
                     host,
-                    expires_at: record.expires_at,
+                    ends_at: record.ends_at,
                     labels: record.labels.clone(),
                 };
                 self.leases.insert(record.id, record);
@@ -665,7 +661,7 @@ impl Book {
             (LeaseState::Held, Some(host)) => Ok(Lease {
                 id: record.id,
                 host,
-                expires_at: record.expires_at,
+                ends_at: record.ends_at,
                 labels: record.labels.clone(),
             }),
             (LeaseState::Releasing, _) => Err(AcquireError::Refused(RefusalCode::LeaseEnded)),
@@ -692,7 +688,8 @@ impl Book {
     /// Applies what presenting waiting lease `id` again at `now` found: `ack`, the
     /// answer to the start (`None` when there was no start to make), and `waits`, whether
     /// the provider still holds the request on its wait list. A refusal drops the lease.
-    /// Otherwise its deadline is the prepare timeout from `now`: a lease that still waits
+    /// Otherwise its prepare deadline (a whole lease's; any other lease has none) is the
+    /// prepare timeout from `now`: a lease that still waits
     /// keeps waiting, and one that left the list without a refusal (a host was committed
     /// to it) is resolved from here as any pending lease, its prepare counted from now.
     pub(crate) fn settle_presented(
@@ -710,37 +707,14 @@ impl Book {
         let record = self.leases.get_mut(id);
         let _ = record.map(|record| {
             record.waiting = waits;
-            record.expires_at = deadline;
+            let token = record.token.as_mut();
+            let _ = token.map(|token| token.deadline = deadline);
             record.deadline_observed = false;
         });
         match waits {
             true => Presented::Waiting,
             false => Presented::Placed,
         }
-    }
-
-    /// Extends a held lease: to `now + ttl` at most, never past its maximum wall time,
-    /// never earlier than it already was.
-    pub(crate) fn renew(
-        &mut self,
-        id: &LeaseId,
-        asked: Option<Duration>,
-        now: Timestamp,
-    ) -> Result<Timestamp, RenewError> {
-        let ttl = self.grant(asked).ok_or(RenewError::TtlNotPositive)?;
-        let record = self.leases.get_mut(id).ok_or(RenewError::Unknown(*id))?;
-        if record.state != LeaseState::Held {
-            return Err(RenewError::NotHeld {
-                id: *id,
-                state: record.state,
-            });
-        }
-        if record.expires_at <= now {
-            return Err(RenewError::Expired(*id));
-        }
-        let extended = now.plus(ttl).min(record.ends_at);
-        record.expires_at = record.expires_at.max(extended);
-        Ok(record.expires_at)
     }
 
     /// Marks a lease releasing; `None` when the table has no such lease.
@@ -769,7 +743,7 @@ impl Book {
     }
 
     /// Applies an observation of a pending or reloaded lease: present makes it held on
-    /// the host named (a whole lease's ttl and wall time start now), absent drops it,
+    /// the host named (a whole lease's wall time starts now), absent drops it,
     /// unknown keeps it as it was.
     pub(crate) fn settle_observe(&mut self, id: &LeaseId, seen: Observed, now: Timestamp) -> Seen {
         match seen {

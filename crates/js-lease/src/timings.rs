@@ -72,7 +72,7 @@ impl Timings {
     }
 
     /// What was timed, one operation after another in name order, for example
-    /// `renew: 3 timed, 1 over 1 s, longest 1500 ms`; `no lease steps timed` when
+    /// `release: 3 timed, 1 over 1 s, longest 1500 ms`; `no lease steps timed` when
     /// nothing was. A step that has begun and not ended is counted as `in flight`, shown
     /// only while there is one.
     pub fn report(&self) -> String {

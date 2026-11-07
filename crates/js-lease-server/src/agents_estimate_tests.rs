@@ -432,7 +432,7 @@ fn with_the_flag_and_a_sink_with_no_curves_a_restored_lease_keeps_its_bound() {
 /// bound to end 15 minutes after that.
 const FILE: &str = "version = 1\nterm = 1\nnext_sequence = 2\nlease_count = 1\n\n\
     [[lease]]\nterm = 1\nsequence = 1\nstate = \"held\"\nhost = \"a\"\n\
-    acquired_at_ms = 880000\nexpires_at_ms = 940000\nends_at_ms = 1780000\n";
+    acquired_at_ms = 880000\nexpires_at_ms = 1780000\nends_at_ms = 1780000\n";
 
 /// Asserts that a start read from an actual lease file reaches the drain cost through the
 /// server's startup path (`read_bookings`, the layered source, the registry). Lease 1 on
@@ -590,7 +590,7 @@ fn with_the_flag_a_restart_puts_back_a_held_lease_on_its_host() {
         let credential = Credential::of_token(JOIN);
         agents.registry.hello(&hello("a"), &credential).unwrap();
         let class = ResourceClass::new(ClassId::new("burst-host").unwrap(), Admission::BookAll, 0);
-        let lease = table.acquire(request(&class, Duration::from_secs(600)), None);
+        let lease = table.acquire(request(&class, Duration::from_secs(600)));
         let lease = lease.unwrap();
         assert_eq!(lease.host, host("a"), "{name}");
         drop(table);

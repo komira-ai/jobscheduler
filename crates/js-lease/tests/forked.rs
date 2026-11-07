@@ -18,8 +18,7 @@ use js_types::ProviderId;
 fn open(dir: &TestDir) -> LeaseTable<FakePool, ManualClock> {
     let provider = FakePool::new(ProviderId::new("fake").unwrap(), Vec::new());
     let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
-    let ttl = std::time::Duration::from_secs(60);
-    let settings = Settings::new(ttl, 2 * ttl).unwrap();
+    let settings = Settings::new();
     let file = dir.join("leases.toml");
     LeaseTable::open(provider, clock, settings, file, Boot::Initialise)
         .unwrap_or_else(|err| panic!("open: {err}"))

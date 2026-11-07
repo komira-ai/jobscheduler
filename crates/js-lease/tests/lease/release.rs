@@ -1,32 +1,22 @@
-//! Renewing and releasing a lease, and how an Unknown stop is treated.
+//! Releasing a lease, and how an Unknown stop is treated.
 
-use std::time::Duration;
-
-use js_lease::{LeaseState, ReleaseOutcome, RenewError};
+use js_lease::{LeaseState, ReleaseOutcome};
 use js_provider::{Call, HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_provider_fake::FakePool;
 use js_types::{LeaseId, ProviderId, ResourceClass};
 
 use crate::support::{Scratch, T0, at, fake, fresh, host, open_with, request, secs, states};
 
-/// Asserts that acquire, renew and release work on the fake: the lease takes the first
-/// host, expires after the default ttl, renews from the renewal's time, never shortens
-/// on a short ttl, and release frees the provider's host.
+/// Asserts that acquire and release work on the fake: the lease takes the first host and
+/// ends at its maximum wall time, and release frees the provider's host.
 #[test]
-fn acquire_renew_release_on_the_fake() {
-    let (mut table, clock, _scratch) = fresh("happy_fake");
-    let lease = table.acquire(request(3600), None).unwrap();
+fn acquire_release_on_the_fake() {
+    let (mut table, _clock, _scratch) = fresh("happy_fake");
+    let lease = table.acquire(request(3600)).unwrap();
     assert_eq!(lease.id, LeaseId::new(1, 1));
     assert_eq!(lease.host, host("h1"));
-    assert_eq!(lease.expires_at, at(T0 + 60_000));
+    assert_eq!(lease.ends_at, at(T0 + 3_600_000));
     assert_eq!(states(&table), vec![(lease.id, LeaseState::Held)]);
-
-    clock.advance(secs(50));
-    assert_eq!(table.renew(&lease.id, None).unwrap(), at(T0 + 110_000));
-    let short = table
-        .renew(&lease.id, Some(Duration::from_millis(1)))
-        .unwrap();
-    assert_eq!(short, at(T0 + 110_000));
 
     assert_eq!(table.release(&lease.id).unwrap(), ReleaseOutcome::Freed);
     assert!(table.list().is_empty());
@@ -34,24 +24,16 @@ fn acquire_renew_release_on_the_fake() {
 }
 
 /// Asserts that an Unknown stop keeps the lease releasing with its host still booked,
-/// that a renew of it is refused, that a tick whose stop and observe both answer
-/// Unknown keeps it and changes nothing, and that a later tick frees it.
+/// that a tick whose stop and observe both answer Unknown keeps it and changes nothing,
+/// and that a later tick frees it.
 #[test]
 fn unknown_stop_keeps_releasing_and_tick_retries() {
     let (mut table, _clock, _scratch) = fresh("unknown_stop");
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     table.provider_mut().script_unknown(Call::Stop, false);
     assert_eq!(table.release(&lease.id).unwrap(), ReleaseOutcome::Releasing);
     assert_eq!(states(&table), vec![(lease.id, LeaseState::Releasing)]);
     assert_eq!(table.provider().booked().len(), 1);
-    let err = table.renew(&lease.id, None).unwrap_err();
-    assert!(matches!(
-        err,
-        RenewError::NotHeld {
-            state: LeaseState::Releasing,
-            ..
-        }
-    ));
 
     table.provider_mut().script_unknown(Call::Stop, false);
     table.provider_mut().script_unknown(Call::Observe, false);
@@ -71,13 +53,13 @@ fn unknown_stop_keeps_releasing_and_tick_retries() {
 #[test]
 fn observe_absent_frees_a_releasing_lease() {
     let (mut table, clock, _scratch) = fresh("observe_frees");
-    let a = table.acquire(request(3600), None).unwrap();
+    let a = table.acquire(request(60)).unwrap();
     table.provider_mut().script_unknown(Call::Stop, false);
     table.release(&a.id).unwrap();
     table.provider_mut().script_unknown(Call::Stop, true);
     assert_eq!(table.tick().freed, vec![a.id]);
 
-    let b = table.acquire(request(3600), None).unwrap();
+    let b = table.acquire(request(60)).unwrap();
     clock.advance(secs(60));
     table.provider_mut().script_unknown(Call::Stop, false);
     let report = table.tick();
@@ -94,7 +76,7 @@ fn observe_absent_frees_a_releasing_lease() {
 fn stop_that_reads_back_present_does_not_free() {
     let scratch = Scratch::new("present_readback");
     let mut table = open_with(Odd(fake()), &scratch);
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     assert_eq!(table.release(&lease.id).unwrap(), ReleaseOutcome::Releasing);
     assert_eq!(table.list()[0].state, LeaseState::Releasing);
     let report = table.tick();
@@ -140,7 +122,7 @@ impl Pool for Odd {
 fn a_pending_lease_can_be_released() {
     let (mut table, _clock, _scratch) = fresh("release_pending");
     table.provider_mut().script_unknown(Call::Start, true);
-    table.acquire(request(3600), None).unwrap_err();
+    table.acquire(request(3600)).unwrap_err();
     let id = LeaseId::new(1, 1);
     assert_eq!(states(&table), vec![(id, LeaseState::Pending)]);
     assert_eq!(table.release(&id).unwrap(), ReleaseOutcome::Freed);

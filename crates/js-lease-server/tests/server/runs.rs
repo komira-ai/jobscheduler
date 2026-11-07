@@ -44,8 +44,8 @@ async fn run_started_on_next_heartbeat_and_result_returned() {
         "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
     assert_eq!(start["limits"]["cpu_millis"], 2000);
-    assert_eq!(start["limits"]["wall_ms"], 600_000);
-    assert_eq!(start["valid_for_ms"], 600_000);
+    assert_eq!(start["limits"]["wall_ms"], 7_200_000);
+    assert_eq!(start["valid_for_ms"], 7_200_000);
     assert_eq!(start["heartbeat_seq"], 1);
 
     let running = [held("run-1-1", "running")];
@@ -461,8 +461,8 @@ async fn result_for_other_host_is_mismatch() {
 
 /// Asserts that a run never outlives its lease. The wall limit is the one asked for, cut
 /// to the time the lease has left, and the time the agent may still start it for is that
-/// too; a run asked for after the lease has lapsed (before a tick expires it) is refused
-/// 409 `not-held`; and when the tick expires the lease the host is told to stop both runs
+/// too; a run asked for after the lease has lapsed (before a tick ends it) is refused
+/// 409 `not-held`; and when the tick ends the lease the host is told to stop both runs
 /// and is not bookable until it lists none. It catches a run with a bound longer than the
 /// lease and a lease that ends with its work left running.
 #[tokio::test]
@@ -470,7 +470,7 @@ async fn a_run_never_outlives_its_lease() {
     let h = start_agents("runs_lease_bound", false).await;
     let me = join(&h, "burst-1").await;
     let mut ask = lease_body();
-    ask["ttl_seconds"] = json!(100);
+    ask["max_wall_seconds"] = json!(100);
     let granted = h.call("POST", "/v1/leases", Some(&ask)).await;
     let lease = granted.json()["id"].as_str().unwrap().to_string();
 

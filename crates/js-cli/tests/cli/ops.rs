@@ -1,4 +1,4 @@
-//! `lease renew`, `lease release` and `lease list`.
+//! `lease release`, `lease list`, and the commands that were removed.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -6,79 +6,15 @@ use std::time::Duration;
 use js_provider::Call;
 use serde_json::json;
 
-use crate::support::{Driven, Harness, T0, acquire_words, tick_on};
+use crate::support::{
+    Driven, Harness, Scratch, T0, acquire_words, against, http, sequence, tick_on,
+};
 
-/// Asserts that a renewal prints the new expiry, as text and as JSON, that `--ttl` sets
-/// how far it reaches from the server's clock, and that the lease stays listed.
-#[test]
-fn renew_prints_the_new_expiry() {
-    let h = Harness::new("renew");
-    assert_eq!(h.js.go(&acquire_words(&["--ttl", "60s"])).code, 0);
-    h.advance(Duration::from_secs(30));
+/// What `js lease run` says.
+const RUN_REMOVED: &str = "js lease run was removed: leases are no longer renewed; submit a job";
 
-    let short = h.js.go(&["lease", "renew", "1-1", "--ttl", "90s"]);
-    assert_eq!(short.code, 0, "{}", short.err);
-    assert_eq!(
-        short.out,
-        format!("lease 1-1 expires {}\n", T0 + 30_000 + 90_000)
-    );
-
-    let plain = h.js.go(&["--json", "lease", "renew", "1-1"]);
-    assert_eq!(
-        plain.json(),
-        json!({ "id": "1-1", "expires_at_ms": T0 + 30_000 + 600_000 })
-    );
-    assert_eq!(h.listed(), vec!["1-1"]);
-}
-
-/// Asserts that a renewal the server refuses is exit 3 with the code: an unknown lease
-/// and one past its ttl (`expired`).
-#[test]
-fn renew_refusals_are_exit_three() {
-    let h = Harness::new("renew_refused");
-    let unknown = h.js.go(&["lease", "renew", "9-9"]);
-    assert_eq!(
-        (unknown.code, unknown.err.as_str()),
-        (3, "js: refused: unknown-lease\n")
-    );
-
-    let held = h.js.go(&acquire_words(&["--ttl", "10s"]));
-    assert_eq!(held.code, 0, "{}", held.err);
-    h.advance(Duration::from_secs(11));
-    let late = h.js.go(&["lease", "renew", "1-1"]);
-    assert_eq!(
-        (late.code, late.err.as_str()),
-        (3, "js: refused: expired\n")
-    );
-}
-
-/// Asserts that a lease still pending cannot be renewed (the server says `not-held`),
-/// and that the list shows it pending, with no host: both asked from the waiter, while
-/// the start is being polled.
-#[test]
-fn a_pending_lease_cannot_be_renewed() {
-    let h = Harness::scripted("renew_pending", vec![(Call::Start, true)]);
-    let (js, ticks, handle) = (h.js.clone(), h.ticks.clone(), h.rt.handle().clone());
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let record = seen.clone();
-    let waiter = Driven::new(move || {
-        let renew = js.go(&["lease", "renew", "1-1"]);
-        let listed = js.go(&["lease", "list"]);
-        record
-            .lock()
-            .unwrap()
-            .push((renew.code, renew.err, listed.out));
-        tick_on(&handle, &ticks);
-    });
-    let started = h.js.waiting(&acquire_words(&[]), waiter);
-    assert_eq!(started.code, 0, "{}", started.err);
-    let expected = vec![(
-        3,
-        "js: refused: not-held\n".to_owned(),
-        format!("1-1 pending host - expires {}\n", T0 + 600_000),
-    )];
-    assert_eq!(*seen.lock().unwrap(), expected);
-}
+/// When a lease asked for with `--max-wall 2h` ends on a server whose clock reads [`T0`].
+const WALL_END: u64 = T0 + 7_200_000;
 
 /// Asserts that a release prints `freed`, as text and as JSON, that the host is free
 /// for the next start, and that releasing it again is a refusal (exit 3, unknown lease).
@@ -117,7 +53,7 @@ fn an_unconfirmed_release_is_exit_six() {
     assert!(h.listed().is_empty());
 }
 
-/// Asserts that the list prints a line per lease (id, state, host or `-`, expiry), the
+/// Asserts that the list prints a line per lease (id, state, host or `-`, end), the
 /// server's own body with `--json`, and nothing for an empty table.
 #[test]
 fn list_prints_the_leases() {
@@ -143,15 +79,12 @@ fn list_prints_the_leases() {
     });
     assert_eq!(h.js.waiting(&acquire_words(&[]), waiter).code, 0);
     let pending = (
-        format!("1-1 pending host - expires {}\n", T0 + 600_000),
+        format!("1-1 pending host - ends {WALL_END}\n"),
         json!("pending"),
     );
     assert_eq!(*seen.lock().unwrap(), vec![pending]);
     let held = h.js.go(&["lease", "list"]);
-    assert_eq!(
-        held.out,
-        format!("1-1 held host h1 expires {}\n", T0 + 600_000)
-    );
+    assert_eq!(held.out, format!("1-1 held host h1 ends {WALL_END}\n"));
 }
 
 /// Asserts that an id that is not two runs of digits around a dash is a usage error
@@ -159,11 +92,81 @@ fn list_prints_the_leases() {
 #[test]
 fn a_malformed_id_is_a_usage_error() {
     let h = Harness::new("ids");
-    for id in ["x", "1-", "-1", "1-2/renew", "../x", "1-2-3", ""] {
-        for verb in ["renew", "release"] {
-            let got = h.js.go(&["lease", verb, "--", id]);
-            assert_eq!(got.code, 2, "{verb} {id:?}");
-            assert!(got.err.contains("lease id"), "{}", got.err);
-        }
+    for id in ["x", "1-", "-1", "1-2/runs", "../x", "1-2-3", ""] {
+        let got = h.js.go(&["lease", "release", "--", id]);
+        assert_eq!(got.code, 2, "release {id:?}");
+        assert!(got.err.contains("lease id"), "{}", got.err);
     }
+}
+
+/// The request lines a [`sequence`] server has read.
+fn requests(log: &Mutex<Vec<String>>) -> Vec<String> {
+    log.lock().unwrap().clone()
+}
+
+/// Asserts that `js lease renew <id>` is an unknown subcommand (clap's own error, exit 2,
+/// naming `renew`), and that `js lease run --class c --max-wall 1h -- true` is exit 2 with
+/// exactly the message that `lease run` was removed (as text and as JSON), whatever flags
+/// and command follow; the server is sent nothing in either case, so no lease is taken
+/// and no command is started. It catches a `renew` or `run` that is still wired to the
+/// server, a `run` that takes a lease before it refuses, and a `run` whose arguments clap
+/// rejects with its own message instead of the removal message.
+#[test]
+fn lease_renew_and_run_are_removed() {
+    let scratch = Scratch::new("ops_removed");
+    let (url, log) = sequence(vec![http("500 Internal Server Error", "{}")]);
+    let js = against(&url, &scratch);
+
+    let renew = js.go(&["lease", "renew", "1-1"]);
+    assert_eq!((renew.code, renew.out.as_str()), (2, ""));
+    assert!(
+        renew.err.contains("unrecognized subcommand 'renew'"),
+        "{}",
+        renew.err
+    );
+
+    let words = [
+        "lease",
+        "run",
+        "--class",
+        "c",
+        "--max-wall",
+        "1h",
+        "--",
+        "true",
+    ];
+    let run = js.go(&words);
+    assert_eq!((run.code, run.out.as_str()), (2, ""));
+    assert_eq!(run.err, format!("js: {RUN_REMOVED}\n"));
+    let bare = js.go(&["lease", "run"]);
+    assert_eq!((bare.code, bare.err), (2, format!("js: {RUN_REMOVED}\n")));
+    let flags = js.go(&["lease", "run", "--renew-every", "5s", "--", "x"]);
+    assert_eq!((flags.code, flags.err), (2, format!("js: {RUN_REMOVED}\n")));
+
+    let json = js.go(&["--json", "lease", "run", "--class", "c", "--", "true"]);
+    assert_eq!(json.code, 2, "{}", json.err);
+    let said: serde_json::Value = serde_json::from_str(&json.err).unwrap();
+    assert_eq!(said, json!({ "error": "usage", "message": RUN_REMOVED }));
+
+    assert!(requests(&log).is_empty(), "{:?}", requests(&log));
+}
+
+/// Asserts that a lease started with `--max-wall 2h` is still listed after an hour and
+/// after a second short of two hours (well past the ten minutes that were once the time to
+/// live, with nothing renewing it), and is gone the second the wall time is reached. It
+/// catches a lease that still ends at a time to live no client extends, and one that
+/// outlives its wall time.
+#[test]
+fn a_lease_ends_at_its_wall_time_and_not_before() {
+    let h = Harness::new("ops_wall_end");
+    assert_eq!(h.js.go(&acquire_words(&[])).code, 0);
+    h.advance(Duration::from_secs(3600));
+    h.tick();
+    assert_eq!(h.listed(), vec!["1-1"]);
+    h.advance(Duration::from_secs(3599));
+    h.tick();
+    assert_eq!(h.listed(), vec!["1-1"]);
+    h.advance(Duration::from_secs(1));
+    h.tick();
+    assert!(h.listed().is_empty());
 }

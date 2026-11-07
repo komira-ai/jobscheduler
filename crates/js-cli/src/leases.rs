@@ -6,17 +6,17 @@ use std::time::Duration;
 use js_client::Client;
 
 use crate::api::{Freed, Granted, Lease, Routes, Standing, entries};
-use crate::cli::{AcquireArgs, IdArgs, NativeArgs, RenewArgs};
-use crate::events::{ForwardedSignal, Waiter};
+use crate::cli::{AcquireArgs, IdArgs, NativeArgs, TTL_REMOVED};
+use crate::events::Waiter;
 use crate::failure::{Failure, exit};
 use crate::render::Render;
-use crate::tag::RunTag;
 
 /// How often a pending start is looked at. The server settles pending starts on its
 /// ticks (5s unless configured), so a tighter poll gains nothing.
 const POLL: Duration = Duration::from_secs(2);
 
-/// `lease acquire`: prints the lease once it is held.
+/// `lease acquire`: prints the lease once it is held. `--ttl` is only read to be refused,
+/// before anything is sent.
 pub(crate) fn acquire(
     client: &Client,
     render: Render,
@@ -24,66 +24,35 @@ pub(crate) fn acquire(
     waiter: &dyn Waiter,
     out: &mut dyn Write,
 ) -> Result<u8, Failure> {
-    let lease = obtain(client, args, waiter, &|| None, None)?;
+    if args.ttl.is_some() {
+        return Err(Failure::Usage(TTL_REMOVED.to_owned()));
+    }
+    let lease = obtain(client, args, waiter)?;
     let _ = out.write_all(render.held(&lease).as_bytes());
     Ok(exit::OK)
-}
-
-/// Finds the leases that carry `tag` in the server's list and releases them: the way
-/// back from a start whose answer was lost, when the start may have created a lease
-/// nobody knows the id of. Returns the ids it released. One list and one release per
-/// lease found, each as long as the client's limit at most; the first failure ends it.
-pub(crate) fn recover(client: &Client, tag: &RunTag) -> Result<Vec<String>, Failure> {
-    let listed = entries(&client.list()?)?;
-    let marked: Vec<String> = listed
-        .into_iter()
-        .filter(|entry| tag.marks(entry))
-        .map(|entry| entry.id)
-        .collect();
-    marked
-        .iter()
-        .try_for_each(|id| client.release(id).map(drop))?;
-    Ok(marked)
 }
 
 /// Asks for a lease and, when the provider has not confirmed the start (202), looks at
 /// the list every [`POLL`] until the lease is held or gone, for at most
 /// `--wait-pending`. Time passes only through `waiter`: the wait is the sum of the
-/// intervals asked of it. A lease still pending at the end is released (it would be
-/// held later with nobody to renew it) and the failure is exit 5. So is a pending lease
-/// whose poll fails, and one that `interrupt` reports a signal for before a poll (the
-/// failure is then the signal's: 128 plus its number). A lease that is already held is
-/// returned whatever `interrupt` says: the caller has the signal and acts on it. The
-/// start is sent once, with `tag` (when given) among its labels.
-pub(crate) fn obtain(
-    client: &Client,
-    args: &AcquireArgs,
-    waiter: &dyn Waiter,
-    interrupt: Interrupt,
-    tag: Option<&RunTag>,
-) -> Result<Lease, Failure> {
-    match client.acquire(&args.body(tag))? {
+/// intervals asked of it. A lease still pending at the end is released (it would be held
+/// later with nobody to release it) and the failure is exit 5. So is a pending lease
+/// whose poll fails. The start is sent once.
+fn obtain(client: &Client, args: &AcquireArgs, waiter: &dyn Waiter) -> Result<Lease, Failure> {
+    match client.acquire(&args.body())? {
         Granted::Held(lease) => Ok(lease),
-        Granted::Pending(id) => settle(client, id, args.wait_pending, waiter, interrupt),
+        Granted::Pending(id) => settle(client, id, args.wait_pending, waiter),
     }
 }
-
-/// Reports the signal `js` was sent, if one is waiting to be acted on.
-pub(crate) type Interrupt<'a> = &'a dyn Fn() -> Option<ForwardedSignal>;
 
 fn settle(
     client: &Client,
     id: String,
     limit: Duration,
     waiter: &dyn Waiter,
-    interrupt: Interrupt,
 ) -> Result<Lease, Failure> {
     let mut waited = Duration::ZERO;
     loop {
-        if let Some(signal) = interrupt() {
-            let _ = client.release(&id);
-            return Err(Failure::Interrupted(signal));
-        }
         let standing = client.standing(&id).inspect_err(|_| {
             let _ = client.release(&id);
         })?;
@@ -102,18 +71,6 @@ fn settle(
         waiter.wait(POLL);
         waited += POLL;
     }
-}
-
-/// `lease renew`: prints the new expiry.
-pub(crate) fn renew(
-    client: &Client,
-    render: Render,
-    args: &RenewArgs,
-    out: &mut dyn Write,
-) -> Result<u8, Failure> {
-    let expires_at_ms = client.renew(&args.id, args.ttl)?;
-    let _ = out.write_all(render.renewed(&args.id, expires_at_ms).as_bytes());
-    Ok(exit::OK)
 }
 
 /// `lease release`: exit 0 when freed, 6 when the stop is not confirmed yet.

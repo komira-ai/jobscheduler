@@ -39,10 +39,10 @@ fn requests_carry_the_token_and_replies_are_parsed() {
     assert_eq!((got.status, got.body), (200, json!({ "leases": [] })));
     let got = client.post("/v1/leases", &json!({ "a": 1 })).unwrap();
     assert_eq!((got.status, got.body), (201, json!({ "id": "1-1" })));
-    let body = json!({ "ttl_seconds": 5 });
+    let body = json!({ "wall_ms": 5 });
     let got = client
         .clone()
-        .post_within("/v1/leases/1-1/renew", &body, Duration::from_secs(5))
+        .post_within("/v1/leases/1-1/runs", &body, Duration::from_secs(5))
         .unwrap();
     assert_eq!((got.status, got.body), (202, json!({ "ok": true })));
     let got = client.delete("/v1/leases/1-1").unwrap();
@@ -57,7 +57,7 @@ fn requests_carry_the_token_and_replies_are_parsed() {
     for (head, first) in heads.iter().zip([
         "get /v1/leases http/1.1",
         "post /v1/leases http/1.1",
-        "post /v1/leases/1-1/renew http/1.1",
+        "post /v1/leases/1-1/runs http/1.1",
         "delete /v1/leases/1-1 http/1.1",
     ]) {
         assert!(head.starts_with(first), "{head}");
@@ -69,7 +69,7 @@ fn requests_carry_the_token_and_replies_are_parsed() {
         heads[1]
     );
     assert!(seen[1].ends_with(r#"{"a":1}"#), "{}", seen[1]);
-    assert!(seen[2].ends_with(r#"{"ttl_seconds":5}"#), "{}", seen[2]);
+    assert!(seen[2].ends_with(r#"{"wall_ms":5}"#), "{}", seen[2]);
 }
 
 /// Asserts that a delete with a body sends the method, the path, the token, the JSON
