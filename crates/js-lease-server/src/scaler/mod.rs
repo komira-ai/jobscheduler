@@ -27,7 +27,8 @@
 //! - the queued jobs set aside for the machines launched for them (the `jobs` module), in
 //!   memory only;
 //! - the hosts the registry refused to remove (`unremoved`), tried again at every tick. The
-//!   set is kept in its own file ([`UnremovedFile`]) and is a write-ahead: a host is added
+//!   set is kept in its own file ([`UnremovedFile`]), or with a store setting in its own key
+//!   (the `kept` module), and is a write-ahead: a host is added
 //!   to the set and the file is written before the registry is asked to remove it, and the
 //!   host is dropped and the file written again only after the registry has removed it. A
 //!   refusal therefore needs no write of its own; the file already lists the host. A tick
@@ -82,6 +83,7 @@ mod complete;
 mod effects;
 mod events;
 mod jobs;
+pub(crate) mod kept;
 mod launch;
 mod live;
 mod store;

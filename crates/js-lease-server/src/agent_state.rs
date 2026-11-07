@@ -39,7 +39,8 @@
 //!
 //! # With a store setting
 //!
-//! With `--store` (or `server.store`) no file is read or written. Each host's binding is
+//! With `--store` (or `server.store`) no file is written, and the file is read only by the
+//! first start over an empty store, which imports it once (`crate::store`). Each host's binding is
 //! the key `hosts/binding/<host id>` of the store ([`crate::host_keys`]): a JSON object
 //! with a `version` and the fields of a file entry (all but `id`, which is the key). The
 //! keys are read once at start, and nothing on the hot path reads the store. A change the
@@ -218,6 +219,17 @@ pub(crate) fn load(path: &Path) -> Result<BTreeMap<HostId, Binding>, StartupErro
         );
         StartupError::new(FLAG, named)
     })
+}
+
+/// The keys the first start over a store imports from the file at `path` (none when there is
+/// no file): each binding at `hosts/binding/<host id>`, as the store keeps it. The file is
+/// read as [`load`] reads it, so its refusals stand.
+pub(crate) fn import(path: &Path) -> Result<Vec<(String, Vec<u8>)>, StartupError> {
+    let bindings = load(path)?;
+    let extra = Extra::new();
+    let value =
+        |(host, binding): (&HostId, &Binding)| (key(host), stored_value(host, binding, &extra));
+    Ok(bindings.iter().map(value).collect())
 }
 
 /// The bytes of the owner-only file at `path`; none when there is no file. Any other

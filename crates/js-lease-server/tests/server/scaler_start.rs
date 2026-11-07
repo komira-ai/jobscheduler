@@ -17,10 +17,10 @@ use serde_json::json;
 
 use crate::agents_support::{entry, hosts};
 use crate::scaler_support::{
-    account, beat, hello, host_id_in, join, name_of, records_path, spec, start, start_refused,
-    text, text_with, token_in,
+    RECORDS_KEY, account, beat, hello, host_id_in, join, kept_records, name_of, open_store,
+    put_in_store, records_path, spec, start, start_refused, text, text_in, text_with, token_in,
 };
-use crate::support::{Harness, Scratch, T0};
+use crate::support::{Harness, Kept, Scratch, T0};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -77,18 +77,26 @@ async fn a_plan_pool_starts_without_an_agent_pin() {
 /// Asserts that a `live` pool launches once for a request and not again after a restart:
 /// before the scaler has ticked a request is refused (no launch is known to be possible),
 /// after it the request waits; one tick later the machine is launched with a join token in
-/// its user data, the records are in a file that only the owner can use, and the account
-/// holds one machine; the ticks that follow add none. The server is stopped and another
-/// started over the same files, the request is presented again, and the account still holds
-/// one machine, the scaler one record, and no second token is minted for it. It catches a
-/// launch that is forgotten at a restart, and a request queued before a launch is known to
-/// be possible.
+/// its user data, the records are in a file that only the owner can use (or, with a store, in
+/// the store and in no file), and the account holds one machine; the ticks that follow add
+/// none. The server is stopped and another started over the same files or store, the request
+/// is presented again, and the account still holds one machine, the scaler one record, and no
+/// second token is minted for it. It runs with the records in their file and in the state
+/// store. It catches a launch that is forgotten at a restart, a store mode that writes the
+/// records file, and a request queued before a launch is known to be possible.
 #[tokio::test]
 async fn a_live_pool_launches_once_and_not_again_after_a_restart() {
-    let scratch = Scratch::new("scaler_live");
+    for kept in Kept::BOTH {
+        launches_once_in(kept).await;
+    }
+}
+
+async fn launches_once_in(kept: Kept) {
+    let scratch = Scratch::new(&kept.named("scaler_live"));
     let account = account(&scratch);
-    let first = text(&scratch, "live", "initialise");
+    let first = text_in(&scratch, "live", "initialise", kept);
     let h = start(scratch, &first).await;
+    assert_eq!(Kept::of(&h), kept);
     let registry = h.running.registry().unwrap();
     let early = registry.provider().start(spec(1, "early"));
     assert!(!matches!(early, StartAck::Started { .. }));
@@ -100,11 +108,14 @@ async fn a_live_pool_launches_once_and_not_again_after_a_restart() {
     h.ticks.step().await;
     assert_eq!(account.launched(), 1);
     let path = records_path(&h.scratch);
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    let written = RecordsFile::new(path.clone()).load().unwrap();
+    match kept {
+        Kept::Files => assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        ),
+        Kept::Store => assert!(!path.exists(), "a store mode wrote the records file"),
+    }
+    let written = Records::decode(&kept_records(&h).unwrap()).unwrap();
     assert_eq!(written.instances.len(), 1);
     assert_eq!(written.instances[0].pool, "burst");
     // The acquire id carries 128 bits from the operating system's source; the
@@ -126,7 +137,7 @@ async fn a_live_pool_launches_once_and_not_again_after_a_restart() {
         running, scratch, ..
     } = h;
     running.shutdown().await.unwrap();
-    let again = text(&scratch, "live", "resume");
+    let again = text_in(&scratch, "live", "resume", kept);
     let h = start(scratch, &again).await;
     h.ticks.step().await;
     let registry = h.running.registry().unwrap();
@@ -286,13 +297,21 @@ async fn a_host_whose_release_was_under_way_is_marked_when_it_says_hello_again()
 /// writes no file until it has something to record; started again with `resume` and still
 /// no file it is refused, and the refusal names the file and the remedy; a pool in `plan`
 /// mode starts with `resume` and no file; and a live pool with the file present starts with
-/// `resume`. It catches a deleted or moved records file read as an empty memory, which
-/// would launch again for machines in flight and reset the day's spend.
+/// `resume`. It runs with the records in their file and in the state store, where the
+/// refusal names the store's setting and the records key, and the records are put in the
+/// store. It catches a deleted or moved records file (or a missing key) read as an empty
+/// memory, which would launch again for machines in flight and reset the day's spend.
 #[tokio::test]
 async fn a_live_pool_with_no_records_file_starts_only_at_a_first_start() {
-    let scratch = Scratch::new("scaler_missing_records");
+    for kept in Kept::BOTH {
+        starts_without_records_in(kept).await;
+    }
+}
+
+async fn starts_without_records_in(kept: Kept) {
+    let scratch = Scratch::new(&kept.named("scaler_missing_records"));
     account(&scratch);
-    let first = text(&scratch, "live", "initialise");
+    let first = text_in(&scratch, "live", "initialise", kept);
     let h = start(scratch, &first).await;
     h.ticks.step().await;
     let Harness {
@@ -301,22 +320,37 @@ async fn a_live_pool_with_no_records_file_starts_only_at_a_first_start() {
     running.shutdown().await.unwrap();
     let path = records_path(&scratch);
     assert!(!path.exists());
+    if kept == Kept::Store {
+        assert!(open_store(&scratch).get(RECORDS_KEY).unwrap().is_none());
+    }
 
-    let resumed = text(&scratch, "live", "resume");
+    let resumed = text_in(&scratch, "live", "resume", kept);
     let said = start_refused(&scratch, &resumed).await;
-    assert!(said.contains(&path.display().to_string()), "{said}");
+    match kept {
+        Kept::Files => assert!(said.contains(&path.display().to_string()), "{said}"),
+        Kept::Store => assert!(
+            said.starts_with("server.store: acquires/scaler/records is missing from the store"),
+            "{said}"
+        ),
+    }
     assert!(said.contains("is missing"), "{said}");
     assert!(said.contains("--boot initialise"), "{said}");
 
-    let planned = text(&scratch, "plan", "resume");
+    let planned = text_in(&scratch, "plan", "resume", kept);
     let h = start(scratch, &planned).await;
     let Harness {
         running, scratch, ..
     } = h;
     running.shutdown().await.unwrap();
 
-    RecordsFile::new(path).save(&Records::default()).unwrap();
-    let present = text(&scratch, "live", "resume");
+    match kept {
+        Kept::Files => RecordsFile::new(path).save(&Records::default()).unwrap(),
+        Kept::Store => {
+            let text = Records::default().encode().unwrap();
+            put_in_store(&scratch, RECORDS_KEY, &text);
+        }
+    }
+    let present = text_in(&scratch, "live", "resume", kept);
     let h = start(scratch, &present).await;
     assert!(
         h.running

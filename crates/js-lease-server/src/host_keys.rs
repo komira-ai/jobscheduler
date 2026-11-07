@@ -1,6 +1,7 @@
 //! The keys the server keeps its hosts under in the state store (`--store`, `server.store`):
 //! one key per host binding, `hosts/binding/<host id>` ([`crate::agent_state`]), and one per
-//! join token or host credential, `hosts/join/<digest>` ([`crate::join_tokens`]).
+//! join token or host credential, `hosts/join/<digest>` ([`crate::join_tokens`]). The scaler's
+//! two keys (`crate::scaler::kept`) and the first start's import commit through here too.
 //!
 //! A value is a JSON object with a `version` field. A reader takes any version, as the files
 //! are read, and keeps the fields it does not know; the next write of the key writes them
@@ -54,7 +55,7 @@ fn transaction(writes: Writes) -> Txn {
 
 /// A commit's answer as the result of a file write: an error when the store failed or
 /// refused it.
-fn committed(answer: Result<Result<Commit, Conflict>, StoreError>) -> io::Result<()> {
+pub(crate) fn committed(answer: Result<Result<Commit, Conflict>, StoreError>) -> io::Result<()> {
     match answer {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(conflict)) => Err(io::Error::other(format!(

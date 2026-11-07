@@ -624,6 +624,19 @@ impl Kept {
         args
     }
 
+    /// The `[server]` lines of a configuration file in this mode: none for the files, and for
+    /// the store, `store` naming a SQLite store in `scratch` and `allow_sqlite_store`.
+    pub fn keys(self, scratch: &Scratch) -> String {
+        match self {
+            Kept::Files => String::new(),
+            Kept::Store => {
+                let file = store_file(scratch, &sqlite_line(scratch));
+                let file = crate::config_support::quoted(&file);
+                format!("store = {file}\nallow_sqlite_store = true\n")
+            }
+        }
+    }
+
     /// A scratch name of this mode: `name` for the files, with `_store` after it for the
     /// store, so the two runs of a test do not share a name.
     pub fn named(self, name: &str) -> String {

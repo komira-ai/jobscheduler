@@ -1,6 +1,7 @@
 //! The writer lock over a Postgres store: a second server refused, a lost lock that stops the
 //! server, a store fenced by the lock's generation, and refusals that never show the
-//! connection URL.
+//! connection URL; and the state a restart reads back from it, the first start's import of
+//! the files beside the lease file included.
 //!
 //! Each test has a database of its own (`js_state::postgres::test_database`, the state schema
 //! applied), and an advisory lock is scoped to its database, so the tests do not see each
@@ -8,11 +9,13 @@
 //! `coverage` jobs have one; a superuser, to end a backend) and fail, not skip, without it.
 //! The database calls block, so they are made outside the async runtime a server runs on.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::process::Stdio;
 use std::time::Duration;
 
-use js_lease_server::LockLost;
+use js_lease_server::{LockLost, RecordsFile, UnremovedFile};
+use js_scaler::Records;
 use js_state::postgres::{PostgresConfig, TestDatabase, test_database};
 use js_state::{Cond, Store, StoreError, Txn, WriterLock, WriterTarget};
 use rustix::process::{Pid, Signal, kill_process};
@@ -336,6 +339,79 @@ fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
         let file = h.scratch.path(&format!("leases.toml{suffix}"));
         assert!(!file.exists(), "{suffix}");
     }
+    drop(store);
+    let Harness { running, .. } = h;
+    let _ = runtime.block_on(running.shutdown());
+}
+
+/// Asserts the first start's import over Postgres: with a bindings file, a records file and a
+/// file of hosts to remove beside the lease file, the first start leaves the store holding
+/// the binding, the records file's text, the hosts and the marker; a restart writes nothing
+/// to the store (its revision is the same) and still holds them, though the bindings file
+/// was removed in between. It catches an import that the Postgres backend does not commit
+/// whole, and one that runs again at the next start.
+#[test]
+fn the_files_are_imported_once_over_postgres() {
+    let database = test_database();
+    let url = database.url();
+    let scratch = Scratch::new("store_pg_import");
+    let agents = format!(
+        "version = 1\n\n[[host]]\nid = \"burst-9\"\ncredential = \"{}\"\ntaint_reason = \"residue\"\n",
+        "c".repeat(64)
+    );
+    let agents_path = scratch.write("leases.toml.agents", &agents, 0o600);
+    let records = RecordsFile::new(scratch.path("leases.toml.scaler"));
+    records.save(&Records::default()).unwrap();
+    let records_text = fs::read_to_string(scratch.path("leases.toml.scaler")).unwrap();
+    let hosts = BTreeSet::from(["js-ghost".to_owned()]);
+    UnremovedFile::new(scratch.path("leases.toml.scaler.unremoved"))
+        .save(&hosts)
+        .unwrap();
+    let flags = |scratch: &Scratch| {
+        let mut args = agent_args(scratch, false);
+        args.extend(["--store".into(), store_file(scratch, &url).into_os_string()]);
+        args
+    };
+    let args = flags(&scratch);
+    let runtime = Runtime::new().unwrap();
+    let first = runtime.block_on(Harness::with(scratch, args, None));
+    let store = first.running.store().expect("the server holds the store");
+    let keys: Vec<String> = store
+        .scan_prefix("")
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "acquires/scaler/records",
+            "acquires/scaler/unremoved",
+            "hosts/binding/burst-9",
+            "meta/server-state-imported",
+        ]
+    );
+    let stored = store.get("acquires/scaler/records").unwrap().unwrap().value;
+    assert_eq!(String::from_utf8(stored).unwrap(), records_text);
+    let stored = store
+        .get("acquires/scaler/unremoved")
+        .unwrap()
+        .unwrap()
+        .value;
+    assert_eq!(stored, br#"{"version":1,"hosts":["js-ghost"]}"#);
+    drop(store);
+    let Harness {
+        running, scratch, ..
+    } = first;
+    runtime.block_on(running.shutdown()).unwrap();
+    let before = revision(&url);
+
+    fs::remove_file(&agents_path).unwrap();
+    let resumed = replace(flags(&scratch), "--boot", "resume");
+    let h = runtime.block_on(Harness::with(scratch, resumed, None));
+    assert_eq!(revision(&url), before, "the restart wrote nothing");
+    let store = h.running.store().expect("the server holds the store");
+    assert!(store.get("hosts/binding/burst-9").unwrap().is_some());
     drop(store);
     let Harness { running, .. } = h;
     let _ = runtime.block_on(running.shutdown());

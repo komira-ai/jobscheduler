@@ -24,6 +24,7 @@ use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
 use crate::config::{Config, JobListen, Limits, LiveClients, MetricsListen, TlsFiles, Token};
 use crate::error::StartupError;
+use crate::file::Launch;
 use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
 use crate::metrics::{self, Meter, Recorder};
@@ -355,8 +356,16 @@ pub(crate) fn prepare(
     // The store's writer lock before anything else (design 6.7, step 1): before the store or
     // the lease file is read, before the lease file is locked and before any listener.
     let store = store.map(ServerStore::open).transpose()?;
+    // Then, once, the files a server without the setting kept beside the lease file: before
+    // the store is read for them. A live pool not at its first start needs its records.
+    let live = elastic
+        .as_ref()
+        .is_some_and(|plan| plan.launch == Launch::Live);
+    let records_needed = [live, boot != Boot::Initialise]
+        .into_iter()
+        .all(|holds| holds);
     if let Some(store) = &store {
-        store.refuse_elastic(elastic.is_some())?;
+        store.import(&state_file, records_needed)?;
     }
     let bookings =
         read_bookings(&state_file).map_err(|err| StartupError::new("--state-file", err))?;
@@ -393,6 +402,7 @@ pub(crate) fn prepare(
                 agents,
                 clock: clock.clone(),
                 state_file: &state_file,
+                store: store.as_ref(),
                 advertise_url: advertise_url.as_deref(),
                 first_start: boot == Boot::Initialise,
                 health: pool.health.clone(),

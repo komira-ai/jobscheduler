@@ -1,4 +1,7 @@
-//! The hosts the registry refused to remove: `<state file>.scaler.unremoved`.
+//! The hosts the registry refused to remove: `<state file>.scaler.unremoved`, without a store
+//! setting. With one (`--store`, `server.store`) no such file is read or written: the same text
+//! is the key `acquires/scaler/unremoved` of the state store (the `kept` module), and the
+//! file is read once, by the first start over an empty store, which imports it.
 //!
 //! The scaler's shell keeps the hosts of machines that are confirmed gone and that the
 //! registry still holds (a lease is booked on them) and tries to remove them at every
@@ -81,13 +84,13 @@ impl UnremovedFile {
 }
 
 /// The text of a file that lists `hosts`.
-fn encode(hosts: &BTreeSet<String>) -> String {
+pub(super) fn encode(hosts: &BTreeSet<String>) -> String {
     let listed = Value::from_iter(hosts.iter().map(String::as_str));
     format!("{{\"version\":{VERSION},\"hosts\":{listed}}}")
 }
 
 /// The hosts a file's text lists, or what is wrong with it.
-fn decode(text: &str) -> Result<BTreeSet<String>, String> {
+pub(super) fn decode(text: &str) -> Result<BTreeSet<String>, String> {
     let value: Value = serde_json::from_str(text).map_err(|err| err.to_string())?;
     let found = value.get("version").and_then(Value::as_u64);
     if found != Some(VERSION) {

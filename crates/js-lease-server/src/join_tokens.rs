@@ -105,7 +105,8 @@
 //! # Where the tokens are kept
 //!
 //! Without a store setting the tokens are kept in `<state file>.joins`, as above. With one
-//! (`--store`, `server.store`) no file is read or written: each row is the key
+//! (`--store`, `server.store`) no file is written, and the file is read only by the first start
+//! over an empty store, which imports it once (`crate::store`): each row is the key
 //! `hosts/join/<digest>` of the state store ([`crate::host_keys`]), a JSON object with a
 //! `version` and the fields of a file row (all but `hash`, which is the key), read once at
 //! start. Fields of a value that this build does not know are kept and written back. A
@@ -885,6 +886,15 @@ fn load(path: &Path) -> Result<Entries, StartupError> {
         );
         StartupError::new(FLAG, named)
     })
+}
+
+/// The keys the first start over a store imports from the file at `path` (none when there is
+/// no file): each row at `hosts/join/<digest>`, as the store keeps it. The file is read as at
+/// a start without a store, so its refusals stand.
+pub(crate) fn import(path: &Path) -> Result<Vec<(String, Vec<u8>)>, StartupError> {
+    let entries = load(path)?;
+    let value = |(hash, entry): (&String, &Entry)| (format!("{JOINS}{hash}"), stored_value(entry));
+    Ok(entries.iter().map(value).collect())
 }
 
 /// The tokens a file's text holds, or what is wrong with it.

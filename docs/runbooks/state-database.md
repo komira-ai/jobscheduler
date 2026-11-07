@@ -8,15 +8,16 @@ so.
 
 | Store | What it holds | Opened when |
 |---|---|---|
-| The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | The writer lock (a session-level advisory lock) and the writer generation (one row of `writer_generation`). With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) and the digests of the join tokens and host credentials (`hosts/join/<digest>`), in the `kv` table; nothing else of the server's state yet. | The setting is given. The server takes the lock before it reads anything else and before it binds a listener. |
+| The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | The writer lock (a session-level advisory lock) and the writer generation (one row of `writer_generation`). With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) and the digests of the join tokens and host credentials (`hosts/join/<digest>`); with an elastic pool, the scaler's records (`acquires/scaler/records`) and the hosts to remove (`acquires/scaler/unremoved`); and the marker of the first start's import (`meta/server-state-imported`); all in the `kv` table. | The setting is given. The server takes the lock before it reads anything else and before it binds a listener. |
 | The job store, `<state file>.jobs` (SQLite, owner-only) | Every job and every allocation. | The job service is on (`--job-listen`, `server.job_listen`). |
 | The lease file (`--state-file`) and the binding file (`<state file>.agents`) | The leases, the term and the next sequence; which credential and instance each registered host was admitted with. | Always (the binding file, and `<state file>.joins`, with agent registration and no store setting). |
 
 Two limits of the code as built shape everything below:
 
-- **A server with an elastic pool refuses a store setting.** Its start is refused with `--store: store-backed server state is not
-  available yet for a server with an elastic pool; ...`. A server that registers agents otherwise (a `joined` pool or
-  `--agent-pool-config`) starts over the store, which holds its bindings and join tokens; its jobs are still in `<state file>.jobs`.
+- **The store holds the server's state but the leases.** With agent registration or an elastic pool, the server keeps its host
+  bindings, join tokens, scaler records and hosts to remove in the store. Its first start over an empty store imports
+  `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` once (`docs/design/configuration.md`, "The first start"), and
+  leaves them in place; they are stale from then on. The lease file and the job store, `<state file>.jobs`, stay files.
 - **The server creates no schema.** The schema is created and migrated by the installer, which is not in this repository. A database
   without the schema is refused when the lock is taken: `--store: the store's writer lock could not be taken: the state schema has no
   writer generation table (it is older than version 2): run the installer to bring it forward`.
@@ -106,8 +107,9 @@ while the server runs: the library has an online backup (`js_state::sqlite::back
 A file taken while the server runs, by any tool other than SQLite's own backup, is not a backup.
 
 **The lease file and the binding file**, with the server stopped, together with the job store: the three are one state and are
-restored together. With a store setting there is no binding file: the bindings are in the Postgres store, and its backup goes with the
-lease file and the job store.
+restored together. With a store setting there is no binding file (nor join token, scaler records or unremoved file): their state is
+in the Postgres store, and its backup goes with the lease file and the job store. The files the first start imported are left beside
+the lease file, stale; restoring them does not restore the store.
 
 Keep the file mode: the job store and the binding file hold job specs and credentials, and the server makes them owner-only (0600).
 
@@ -176,5 +178,6 @@ The test that restores an older job store under live agents and asserts the stop
 - A server that waits for the writer lock instead of refusing to start, and a readiness route that stays 503 until the lock is taken.
   Until then, during an update cutover or a node reboot, a server refused at the lock stays down until it is started again.
 - The rest of the server state in the Postgres store. Until it moves there, the backup that matters for a server that runs jobs is the
-  job store, the lease file and the binding file (or, with a store setting, the store that holds the bindings).
+  job store, the lease file and the binding file (or, with a store setting, the store that holds the bindings and the scaler's
+  records).
 - A restore verb, a term floor flag and a check of a restored file pair before boot; steps 4 to 6 of section 4 are done by hand.
