@@ -30,7 +30,8 @@ arch = "x86_64"
 "#;
 
 /// The warning `--placement js-sched` leaves.
-const FLAG_WARNING: &str = "--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)";
+const FLAG_WARNING: &str =
+    "--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)";
 
 /// The warning `server.placement = "js-sched"` leaves.
 const KEY_WARNING: &str = "server.placement is deprecated and does nothing: js-sched is the only placement (drop the key)";

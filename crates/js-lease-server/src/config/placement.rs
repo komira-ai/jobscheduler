@@ -36,7 +36,11 @@ impl Placement {
     /// leaves: nothing when it is absent, the warning that `js-sched` is deprecated, or
     /// the refusal of `registry`. Each names the flag or the key to drop.
     pub(crate) fn given(given: Option<Self>, place: &str) -> Result<Option<String>, StartupError> {
-        let drop = if place.starts_with("--") { "flag" } else { "key" };
+        let drop = if place.starts_with("--") {
+            "flag"
+        } else {
+            "key"
+        };
         match given {
             None => Ok(None),
             Some(Self::JsSched) => Ok(Some(format!(

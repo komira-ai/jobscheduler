@@ -413,7 +413,10 @@ async fn hosts_lists_registered_hosts_with_their_state() {
     assert_eq!(host["phase"], "serving");
     assert_eq!(host["agent_version"], "0.1.0");
     assert_eq!(host["labels"], json!({ "rack": "r1" }));
-    assert_eq!(host["capabilities"], json!({ "arch": "x86_64", "isa": "x86-64-v3" }));
+    assert_eq!(
+        host["capabilities"],
+        json!({ "arch": "x86_64", "isa": "x86-64-v3" })
+    );
     assert_eq!(
         host["shape"],
         json!({ "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 1, "gpu_class": "nvidia-a100" })

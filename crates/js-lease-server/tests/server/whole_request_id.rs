@@ -12,7 +12,7 @@ use js_types::RequestId;
 use serde_json::{Value, json};
 
 use crate::agents_support::{POOL, Session, agent_args, beat, beat_preparing, entry, hosts, join};
-use crate::support::{Harness, Reply, Scratch, T0, lease_body, replace};
+use crate::support::{Harness, Reply, Scratch, lease_body, replace};
 
 const ID: &str = "nightly-42";
 

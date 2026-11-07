@@ -7,14 +7,14 @@
 use js_agent_wire::NodeLoad as Wire;
 use js_agent_wire::limits::MAX_MEMORY_BYTES;
 use js_lease::Timestamp;
-use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::HostState;
 use js_sched::LoadConfig;
 use js_types::{LeaseId, Resources};
 
 use super::engine_rig::*;
 use super::place::Fallbacks;
-use super::wiring_tests::{host_of, scratch, sharing_spec, write};
+use super::wiring_tests::{scratch, sharing_spec, write};
 use crate::config::{Cli, Config, CpuSlack};
 
 /// Asserts that 200 starts and 200 ends over 20 hosts build the engine once: the placer
@@ -315,4 +315,3 @@ fn memory_percent_values_outside_1_to_100_are_refused() {
         }
     }
 }
-

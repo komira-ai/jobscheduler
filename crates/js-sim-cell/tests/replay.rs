@@ -554,7 +554,9 @@ fn regenerate_golden_hashes() {
 fn whole_runs() -> Vec<(String, TraceHash)> {
     let scenario = whole_host::fifty_whole_host_requests();
     let runs = scenario.run_seeds(WHOLE_SEEDS).runs;
-    runs.iter().map(|run| (format!("seed-{}", run.seed), run.hash)).collect()
+    runs.iter()
+        .map(|run| (format!("seed-{}", run.seed), run.hash))
+        .collect()
 }
 
 /// Asserts that the hashes of the pinned seeds of the whole-host scenario equal the golden
@@ -570,7 +572,9 @@ fn the_whole_host_scenario_matches_the_golden_file() {
 fn whole_faults_runs() -> Vec<(String, TraceHash)> {
     let scenario = whole_host_cancel::a_cancelled_request();
     let runs = scenario.run_seeds(WHOLE_FAULTS_SEEDS).runs;
-    runs.iter().map(|run| (format!("seed-{}", run.seed), run.hash)).collect()
+    runs.iter()
+        .map(|run| (format!("seed-{}", run.seed), run.hash))
+        .collect()
 }
 
 /// Asserts that the hashes of the pinned seeds of the cancelled whole-host request equal
