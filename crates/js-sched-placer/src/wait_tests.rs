@@ -392,3 +392,47 @@ fn a_rebuild_does_not_queue_again_a_request_that_left() {
     assert!(held(&rebuilt, 300).is_empty());
     assert!(rebuilt.whole_places().is_empty());
 }
+
+/// Catches a failed prepare of a lease the registry committed outside the queue that bars
+/// nothing on the host it held (the request would be placed there again), and a lease the
+/// engine committed from its queue counted twice once the registry reports the commit
+/// too. `n`'s lease `1-1` holds `a` and fails: `a` is barred to `n`, and quiet. `r` is
+/// committed on `a` from the queue, the registry reports it, and its failure counts once.
+#[test]
+fn a_failed_lease_bars_its_host_and_a_queued_commit_counts_once() {
+    let mut e = engine(&[("a", &[1]), ("b", &[])]);
+    pass(&mut e, &[("a", Standing::Live), ("b", Standing::Live)], 0);
+    let failure = PrepareFailure {
+        exclusion: Some(Exclusion::Until(stamp(5_000))),
+        not_ready: NotReady {
+            code: "setup-failed".into(),
+            detail: String::new(),
+        },
+    };
+    let named = RequestKey::Id(id("n"));
+    e.whole_commit(lease(1), &named);
+    assert!(e.prepare_failed(&lease(1), &failure, at(10)));
+    let record = e.whole_record(&named).unwrap();
+    let barred = BTreeMap::from([(host("a"), Exclusion::Until(stamp(5_000)))]);
+    assert_eq!(record.exclusions, barred);
+    // `r` is granted the first quiet host, `a`, and its start commits there from the queue.
+    present(&mut e, "r", 2, true, 20);
+    pass(&mut e, &[("a", Standing::Live), ("b", Standing::Live)], 20);
+    assert_eq!(held(&e, 20), ["r@a*"]);
+    let class = js_types::ResourceClass::whole_node();
+    let asked = Request {
+        class: class.id().clone(),
+        ..request()
+    };
+    let spec = js_provider::StartSpec::new(lease(2), asked, &[class])
+        .unwrap()
+        .with_request_id(id("r"));
+    let open = [candidate("a", &[])];
+    assert_eq!(e.commit_whole(&spec, &open, at(30)), Some(Some(0)));
+    let queued = RequestKey::Id(id("r"));
+    e.whole_commit(lease(2), &queued);
+    assert!(e.whole_held_by_other(&id("r"), &lease(3)));
+    assert!(e.prepare_failed(&lease(2), &failure, at(40)));
+    assert_eq!(e.whole_record(&queued).unwrap().prepare_failures, 1);
+    assert!(!e.prepare_failed(&lease(2), &failure, at(41)));
+}
