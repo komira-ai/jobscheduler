@@ -113,11 +113,6 @@ impl Files {
         self.path("agent-tokens")
     }
 
-    /// The job store the server keeps beside the lease file.
-    pub fn job_store(&self) -> PathBuf {
-        self.path("leases.toml.jobs")
-    }
-
     /// The flags of a start with `--boot boot`.
     fn args(&self, boot: &str) -> Vec<String> {
         let path = |name: &str| self.path(name).display().to_string();
