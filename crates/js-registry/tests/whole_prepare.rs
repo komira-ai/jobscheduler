@@ -19,7 +19,7 @@ use js_lease::{Clock, Timestamp};
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_RESERVE_BACKOFF_MS, Exclusion, NotReady, PoolConfig,
-    RunState, WholeNodeConfig,
+    RequestKey, RunState, WholeNodeConfig,
 };
 use js_types::{ProviderId, Request, RequestId, ResourceClass};
 use support::*;
@@ -384,6 +384,48 @@ fn the_request_fails_not_ready_after_max_replace_failures(engine: Placement) {
     assert!(provider.booked().is_empty());
 }
 
+/// A request read by its key (`RequestKey::Id`) reads what a read by its id reads, at each
+/// step of its record: absent before any failure, open after one, terminal (and not ready,
+/// with the last code) after the second.
+fn a_request_read_by_its_key_reads_what_its_id_reads(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
+    let mut provider = fx.provider.clone();
+    let by_key = |fx: &Fixture| {
+        let key = || RequestKey::Id(rid());
+        (
+            fx.registry.request_record(key()),
+            fx.registry.not_ready(key()),
+        )
+    };
+    let by_id = |fx: &Fixture| {
+        (
+            fx.registry.request_record(&rid()),
+            fx.registry.not_ready(&rid()),
+        )
+    };
+    assert_eq!(by_key(&fx), (None, None));
+    assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
+    refuse(&fx, hosts[0], "1-1", RefusalReason::SetupFailed, "first");
+    let (open, not_ready) = by_key(&fx);
+    assert_eq!(
+        (open.as_ref().map(|r| r.terminal), not_ready),
+        (Some(false), None)
+    );
+    assert_eq!(by_key(&fx), by_id(&fx));
+    assert_eq!(provider.start(whole_spec(2)), StartAck::Unknown);
+    refuse(&fx, hosts[1], "1-2", RefusalReason::NotQuiet, "second");
+    let last = NotReady {
+        code: "not-quiet".into(),
+        detail: "second".into(),
+    };
+    let (terminal, not_ready) = by_key(&fx);
+    assert_eq!(
+        (terminal.map(|r| r.terminal), not_ready),
+        (Some(true), Some(last))
+    );
+    assert_eq!(by_key(&fx), by_id(&fx));
+}
+
 /// The default cap is three: two failures leave the request open, the third ends it, and
 /// a timeout counts as one of them.
 fn the_default_cap_is_three_and_a_timeout_counts(engine: Placement) {
@@ -627,6 +669,7 @@ crate::both!(
     a_silent_agent_and_a_lost_host_end_at_the_deadline,
     the_timeout_is_the_pools_setting,
     the_request_fails_not_ready_after_max_replace_failures,
+    a_request_read_by_its_key_reads_what_its_id_reads,
     the_default_cap_is_three_and_a_timeout_counts,
     the_detail_is_stored_verbatim_and_never_read,
     a_refusal_for_another_lease_or_a_ready_one_is_ignored,
