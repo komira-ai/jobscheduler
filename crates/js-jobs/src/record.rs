@@ -508,8 +508,9 @@ impl HostBooking {
 /// kinds of js-sched's `Bar`, with its ends on the store's clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exclusion {
-    /// The back-off after a hold the job gave up at its deadline, until the instant given
-    /// (exclusive).
+    /// A back-off until the instant given (exclusive): the job marks no host under it, and
+    /// takes it when quiet only if no other host could run it. No hold is given up any
+    /// more, so only a caller's bar or an older row sets one.
     Backoff(StoreTime),
     /// A hard exclusion until the instant given (exclusive).
     Until(StoreTime),
@@ -530,8 +531,8 @@ pub struct MarkRecord {
     pub host: HostId,
     /// When the mark was made.
     pub made: StoreTime,
-    /// When the hold is given up if the host is still busy; raised at boot to at least the
-    /// boot plus [`crate::BOOT_GRACE`] ([`crate::JobStore::raise_at_boot`]).
+    /// When the host is expected to be drained at the latest (reaching it gives nothing
+    /// up); raised at boot to at least the boot plus [`crate::BOOT_GRACE`] ([`crate::JobStore::raise_at_boot`]).
     pub deadline: StoreTime,
     /// The end of the host's tail when the mark was made: when the job is expected to start
     /// there. `None`: not known.
@@ -543,7 +544,7 @@ pub struct MarkRecord {
 }
 
 impl MarkRecord {
-    /// The mark of `job` on `host`, made at `made`, given up at `deadline`, with no tail end
+    /// The mark of `job` on `host`, made at `made`, with its deadline at `deadline`, no tail end
     /// known and no exclusions.
     #[must_use]
     pub fn new(job: JobId, host: HostId, made: StoreTime, deadline: StoreTime) -> MarkRecord {

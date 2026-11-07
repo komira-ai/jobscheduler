@@ -53,9 +53,9 @@ fn request(class: &str, wall_s: u64) -> Request {
     }
 }
 
-/// A server over one registered host, `a`, in a pool that gives up a reserved host after
-/// thirty seconds and keeps a request that is not presented again on its wait list for ten
-/// minutes, so only the drain deadline ends a reservation here.
+/// A server over one registered host, `a`, in a pool whose reservations are due thirty
+/// seconds after they are made (a deadline that gives nothing up) and which keeps a request
+/// that is not presented again on its wait list for ten minutes.
 pub(super) struct Rig {
     pub(super) shared: Arc<Shared>,
     name: String,
@@ -355,11 +355,11 @@ async fn text(reply: Response) -> (StatusCode, String) {
 /// Asserts the renewal answer over the life of a reservation. A lease on a host that is
 /// not reserved renews to a body with only the expiry; when a waiting request reserves
 /// the host the same lease renews, never refused, to a new expiry and `host_reserved`;
-/// when the reservation is given up the field is gone again. It catches a renewal
-/// refused for a reservation, a flag that never shows, a flag that stays after the
-/// give-up, and an expiry that does not move.
+/// the reservation's deadline passes the flag stays, since nothing is given up at the
+/// deadline. It catches a renewal refused for a reservation, a flag that never shows, a
+/// flag that goes at the deadline, and an expiry that does not move.
 #[tokio::test]
-async fn a_renewal_says_when_its_host_is_reserved() {
+async fn a_renewal_says_when_its_host_is_reserved_and_keeps_saying_so_past_its_deadline() {
     let mut rig = Rig::new("renew").await;
     let id = rig.lease().await;
     rig.advance(10);
@@ -382,13 +382,10 @@ async fn a_renewal_says_when_its_host_is_reserved() {
     rig.ask("r1");
     rig.advance(10);
     rig.ask("r1");
-    assert!(
-        rig.registry.reservations().is_empty(),
-        "given up at the deadline"
-    );
+    assert_eq!(rig.registry.reservations().len(), 1, "kept at the deadline");
     let (status, body) = rig.renew(&id).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "{\"expires_at_ms\":1340000}");
+    assert_eq!(body, "{\"expires_at_ms\":1340000,\"host_reserved\":true}");
 }
 
 /// Asserts the host listing with a reserved host: `mark`, the request it is for and the
@@ -451,6 +448,25 @@ impl<'a> MakeWriter<'a> for Lines {
     }
 }
 
+/// Installs, once per process, a global subscriber that takes every line and writes it
+/// nowhere; when another test installed a global subscriber first, that one stays and serves
+/// the same end. A test that captures lines through a thread-scoped subscriber calls it before it
+/// installs its own. While tracing knows of at most one subscriber, it decides whether a log
+/// line is wanted from the default subscriber of whichever thread reaches the line first,
+/// and keeps that answer: a thread with no subscriber, such as another test's or a blocking
+/// task it spawned, settles the line as never wanted, and a capturing test that reaches the
+/// line later never sees it. With this subscriber always known, every answer is worked out
+/// from all the live subscribers, the capturing test's among them.
+pub(crate) fn process_sink() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(io::sink)
+            .try_init();
+    });
+}
+
 impl Lines {
     /// The lines written since the last take.
     pub(crate) fn take(&self) -> String {
@@ -467,6 +483,7 @@ impl Lines {
 #[tokio::test]
 async fn the_tick_logs_the_counts_of_reserved_held_and_queued() {
     let lines = Lines::default();
+    process_sink();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(lines.clone())
         .with_ansi(false)
@@ -506,27 +523,28 @@ async fn the_tick_logs_the_counts_of_reserved_held_and_queued() {
     assert!(line.contains(&said), "{line} vs {said}");
 }
 
-/// Asserts that the tick alone gives up a reservation that reaches its drain deadline
+/// Asserts that the tick gives nothing up when a reservation reaches its drain deadline
 /// with the host still busy: no consumer polls after the deadline, yet after one tick the
-/// counts show no reservation and the host listing shows no mark. It catches a tick that
-/// does not bring the registry's marks up to the clock, which would leave the host listed
-/// as reserved, and counted so, until the next poll.
+/// counts still show the reservation and the host listing still shows the mark, with the
+/// deadline it had. It catches a tick that drops a mark at its deadline.
 #[tokio::test]
-async fn the_tick_alone_gives_up_a_reservation_at_its_deadline() {
+async fn the_tick_keeps_a_reservation_past_its_deadline() {
     // The tick logs; its own subscriber keeps that line out of the other test's.
+    process_sink();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(Lines::default())
         .with_ansi(false)
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
-    let mut rig = Rig::new("tick_giveup").await;
+    let mut rig = Rig::new("tick_keeps").await;
     rig.lease().await;
     rig.ask("r1");
     assert_eq!(rig.registry.whole_counts().reserved, 1);
     rig.advance(31);
     rig.shared.tick().await;
-    assert_eq!(rig.registry.whole_counts().reserved, 0);
+    assert_eq!(rig.registry.whole_counts().reserved, 1);
     let body = rig.hosts().await;
-    assert!(!body.contains("\"mark\""), "{body}");
-    assert!(!body.contains("reserved_for"), "{body}");
+    assert!(body.contains("\"mark\":\"reserved\""), "{body}");
+    assert!(body.contains("\"reserved_for\":\"r1\""), "{body}");
+    assert!(body.contains("\"drain_deadline_ms\":1030000"), "{body}");
 }

@@ -258,19 +258,20 @@ async fn a_restored_waiting_lease_is_cancelled_by_a_release_before_any_tick() {
     assert!(!in_ledger(&rig, "r1"));
 }
 
-/// Asserts that a cancel forgets the request. `r1` gives its host up at the drain deadline
-/// (one give-up, the host excluded for it); a release of its lease leaves no row for `r1`
-/// in the ledger, and an acquire under `r1` again is a new request: a new lease, no
-/// give-up, and the host set aside for it at the next tick. It catches a cancelled
-/// request whose failures a later request under the id inherits.
+/// Asserts that a cancel forgets the request. `r1` is past its drain deadline and still
+/// holds its host (nothing is given up, nothing excluded); a release of its lease leaves
+/// no row for `r1` in the ledger, and an acquire under `r1` again is a new request: a new
+/// lease, no exclusion, and the host set aside for it at the next tick. It catches a
+/// cancelled request whose state a later request under the id inherits.
 #[tokio::test]
-async fn a_cancel_after_a_give_up_leaves_the_id_fresh() {
+async fn a_cancel_past_the_deadline_leaves_the_id_fresh() {
     let (rig, _busy, waiting) = reserved("request_id_give_up").await;
     rig.advance(31);
     rig.shared.tick().await;
     let row = rig.registry.reservation_ledger();
     let row = row.iter().find(|row| row.request_id == "r1").unwrap();
-    assert_eq!((row.give_ups, row.exclusions.len()), (1, 1));
+    assert_eq!((row.give_ups, row.exclusions.len()), (0, 0));
+    assert_eq!(rig.registry.reservations()[0].request, id("r1"));
 
     delete(&rig, &waiting).await;
     assert!(!in_ledger(&rig, "r1"));

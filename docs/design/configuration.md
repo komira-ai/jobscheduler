@@ -160,17 +160,25 @@ file, the job store and the usage file are kept as without it.
   this one succeeds, between ticks too.
 - **What it keeps.** The host bindings (with each host's taint and cordon) and the digests of the join tokens and host credentials:
   `hosts/binding/<host id>` and `hosts/join/<digest>`, each a JSON object with a `version`, whose unknown fields are kept and written
-  back. They are read once at start, after the lock; `<state file>.agents` and `.joins` are then neither read nor written (files left
-  from a server without the setting are not imported). Each change is committed before the server holds it: a hello that uses a token
-  commits the use and the host's binding in one transaction, and a refused hello gives both back in one more; a taint, a cordon or its
-  lift, a mint and a revoke each commit first. A failed commit changes nothing and is answered as the failed file write of the same
-  change is, or with 503 `state-write-failed` where no file write is checked (a hello with a pool token, a heartbeat's taint). A
-  heartbeat that brings no new taint, a known host's hello and the host book make no store call (a known host's hello commits only when
-  its stored binding still holds a cordon that lapsed since the last tick); a host credential's renewed time is committed by the tick.
-  The lease file, the job store and the usage database stay where they are.
-- **Not yet.** Until the scaler's records move into the store, a server with an elastic pool is refused at start with a store setting,
-  after the lock is taken and before any listener is bound: `--store: store-backed server state is not available yet for a server with
-  an elastic pool; ...`.
+  back; and the scaler's records and the hosts the registry refused to remove: `acquires/scaler/records` (the records file's own
+  format, written whole) and `acquires/scaler/unremoved` (`{"version":1,"hosts":[...]}`). They are read once at start, after the lock;
+  `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` are then not written. Each change is committed before the server
+  holds it: a hello that uses a token commits the use and the host's binding in one transaction, and a refused hello gives both back in
+  one more; a taint, a cordon or its lift, a mint and a revoke each commit first; the scaler commits its records before the first
+  provider call of a step, and a commit that fails stops the step as a failed file write does. A failed commit changes nothing and is
+  answered as the failed file write of the same change is, or with 503 `state-write-failed` where no file write is checked (a hello
+  with a pool token, a heartbeat's taint). A heartbeat that brings no new taint, a known host's hello and the host book make no store
+  call (a known host's hello commits only when its stored binding still holds a cordon that lapsed since the last tick); a host
+  credential's renewed time is committed by the tick. A live pool that is not at its first start does not start without the records
+  key, as it does not without the file. The lease file, the job store and the usage database stay where they are.
+- **The first start.** Right after the lock, a start over a store with no `meta/server-state-imported` marker and nothing under
+  `hosts/` or `acquires/` imports the four files once: it reads them with the readers a server without the setting uses (a missing
+  file is empty; a file of a bad version, a damaged file or one others can use is refused at start, naming it, and nothing is
+  written) and writes their bindings, join-token rows, records text and hosts with the marker in one transaction. The marker is written
+  even when there are no files. A start that finds the marker reads none of the files and names each one still there once at info
+  level. A store that holds server state without the marker gets the marker only. The server never deletes or changes the files: they
+  hold what it held at the cutover and go stale from its first write after it, so a rollback to a build without the setting finds
+  them as they were then; an operator removes them. The lease file is not imported.
 
 ```toml
 [server]
@@ -436,7 +444,7 @@ max_whole_node = 2                          # this mixed pool offers whole-node 
 max_draining = 1                            # most hosts reserved and not yet held; default 1
 max_whole_node_per_consumer = 1             # default 1
 keep_for_ordinary = 1                       # hosts kept unmarked for ordinary work; default 1 in a mixed pool; max_whole_node + this <= max_machines
-drain_deadline = "4h"                       # a reservation is given up after this; default the pool's max wall time (whole-node.md, section 4)
+drain_deadline = "4h"                       # when a reserved host is expected to be drained at the latest, shown only; default the request's wall limit; nothing happens at it (whole-node.md, section 4)
 base_images = ["macos15-xcode16-a"]         # what an elastic host of this pool is launched with; the scaler counts a guest constraint as demand only if one of these can meet it
 [pool.capabilities]
 os = "macos"

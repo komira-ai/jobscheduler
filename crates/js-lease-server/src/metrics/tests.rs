@@ -427,6 +427,7 @@ async fn a_failed_read_of_the_job_tables_answers_503() {
     let fixture = fixture("read_fails").await;
     let logged = Logged::default();
     let writer = logged.clone();
+    crate::api::whole_view_tests::process_sink();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(move || writer.clone())
         .with_ansi(false)

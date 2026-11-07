@@ -1,5 +1,6 @@
 //! The real [`Effects`]: the server's registry, job tables and join tokens, the pool's
-//! provider and network mode, and the records file.
+//! provider and network mode, and where the scaler's records are kept (the files, or the
+//! state store).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,7 +16,8 @@ use js_scaler::{AcquirePlan, Health, Records};
 use js_types::{HostId, ProviderId};
 use tracing::warn;
 
-use super::{Call, Effects, JobTables, Launcher, RecordsFile, UnremovedFile};
+use super::kept::ScalerKeeper;
+use super::{Call, Effects, JobTables, Launcher};
 use crate::agents::Agents;
 use crate::checks::Health as Checks;
 use crate::cordon::DEFAULT_CORDON;
@@ -27,8 +29,8 @@ pub(crate) struct Live {
     scheduler: SchedulerId,
     provider: Arc<dyn CapacityProvider>,
     launcher: Launcher,
-    file: RecordsFile,
-    unremoved: UnremovedFile,
+    /// Where the records and the hosts the registry would not remove are saved.
+    kept: ScalerKeeper,
     checks: Arc<Mutex<Checks>>,
     /// What a job that books the whole host asks a machine to bring: the pool's floor.
     whole_host: Demand,
@@ -37,14 +39,14 @@ pub(crate) struct Live {
 impl Live {
     /// The effects for the pool `pool` of `scheduler`: its machines are launched and
     /// released through `provider` and `launcher`, its tokens, hosts and job tables are
-    /// `agents`', its records are kept in `file`, the hosts the registry would not remove in
-    /// `unremoved`, its health and offers are what its `checks` found, and a job that books
+    /// `agents`', its records and the hosts the registry would not remove are kept by `kept`,
+    /// its health and offers are what its `checks` found, and a job that books
     /// the whole host asks for `whole_host`, the pool's floor.
     pub(crate) fn new(
         (agents, pool, scheduler): (Arc<Agents>, ProviderId, SchedulerId),
         provider: Arc<dyn CapacityProvider>,
         launcher: Launcher,
-        (file, unremoved, checks): (RecordsFile, UnremovedFile, Arc<Mutex<Checks>>),
+        (kept, checks): (ScalerKeeper, Arc<Mutex<Checks>>),
         whole_host: Demand,
     ) -> Self {
         Self {
@@ -53,8 +55,7 @@ impl Live {
             scheduler,
             provider,
             launcher,
-            file,
-            unremoved,
+            kept,
             checks,
             whole_host,
         }
@@ -123,14 +124,14 @@ impl Effects for Live {
     }
 
     fn save(&self, records: &Records) -> Result<(), String> {
-        match self.file.save(records) {
+        match self.kept.save(records) {
             Ok(()) => Ok(()),
             Err(err) => Err(err.to_string()),
         }
     }
 
     fn save_unremoved(&self, hosts: &BTreeSet<String>) -> Result<(), String> {
-        match self.unremoved.save(hosts) {
+        match self.kept.save_unremoved(hosts) {
             Ok(()) => Ok(()),
             Err(err) => Err(err.to_string()),
         }
@@ -234,6 +235,7 @@ mod tests {
     use crate::agent_api::job_rig::{placed, spec, tables};
     use crate::job_store::ServerJobs;
     use crate::network::DefaultMode;
+    use crate::scaler::{RecordsFile, UnremovedFile};
 
     /// A provider that answers each call with a fixed word and launches nothing.
     struct Stub;
@@ -372,14 +374,16 @@ mod tests {
                 },
             )]),
         );
-        let file = RecordsFile::new(dir.join("records"));
-        let unremoved = UnremovedFile::new(dir.join("unremoved"));
+        let kept = ScalerKeeper::Files {
+            records: RecordsFile::new(dir.join("records")),
+            unremoved: UnremovedFile::new(dir.join("unremoved")),
+        };
         let checks = Arc::new(Mutex::new(Checks::default()));
         let live = Live::new(
             (agents, pool, scheduler()),
             Arc::new(Stub),
             launcher,
-            (file, unremoved, checks),
+            (kept, checks),
             floor(),
         );
         (live, dir)
@@ -552,8 +556,10 @@ mod tests {
     /// test's own: two tests sharing one scratch directory would remove it under each other.
     fn live_at_missing_dir(name: &str) -> (Live, PathBuf) {
         let (mut live, dir) = live(name);
-        live.file = RecordsFile::new(dir.join("absent").join("records"));
-        live.unremoved = UnremovedFile::new(dir.join("absent").join("unremoved"));
+        live.kept = ScalerKeeper::Files {
+            records: RecordsFile::new(dir.join("absent").join("records")),
+            unremoved: UnremovedFile::new(dir.join("absent").join("unremoved")),
+        };
         (live, dir)
     }
 

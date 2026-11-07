@@ -55,7 +55,7 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   machine being replaced. Not mitigated: a pool that allows host jobs on its only machines.
 - **K38. Draining idles capacity, and a long lease holds a reservation.** A reserved host does no new work but backfill that ends by its tail (whole-node.md section 4) until it is quiet, up to its
   `drain_deadline`, and a consumer that ignores `host_reserved` keeps its lease to its TTL or max wall time (D48). Bounded by `max_draining`,
-  the ceiling and `keep_for_ordinary` (D49), by cost-ordered host choice, by the give-up and back-off, and by acquiring a machine in an
+  the ceiling and `keep_for_ordinary` (D49), by cost-ordered host choice, by the failed-prepare back-off, and by acquiring a machine in an
   elastic pool before draining (D50). Residual: a pool of long leases pays most of a max wall time of idle per whole-node lease.
 - **K39. Quiet is the agent's claim.** The readiness report is the agent's own (K17, K27): a wrong or hostile agent can say it is quiet while
   something runs, and a performance result taken beside it is wrong. The scheduler's own table (no lease, no placed run) and the

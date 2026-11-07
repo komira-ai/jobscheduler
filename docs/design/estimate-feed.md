@@ -78,7 +78,7 @@ The file documents two limits. First, the end of a lease is the time `stop` is c
 | `run_ms` | start to end; absent when the start is not known |
 | `ended_reason` | `released`, `expired`, `lost`, `cancelled-while-waiting`, `failed-to-start` or `stopped-at-wall-limit` |
 | `drain_outcome` | `none`, `no-mark`, `mark-held`, `mark-dropped` or `unknown` |
-| `give_up_outcome` | drain give-ups of a whole-node request; absent for an ordinary lease |
+| `give_up_outcome` | always 0 for a whole-node request (a drain is never given up); absent for an ordinary lease |
 | `estimated_end` | the end the feed gave it, if any |
 | `actual_end` | when it ended: the key's time |
 | `error_ms` | `actual_end` less `estimated_end`; absent without an estimate |
@@ -108,7 +108,7 @@ The rows can be read from the SQLite file with `EndedHistory::range`, but the st
 
 **The setting.** A whole-node request marks host H at time m, with tail T. Backfill is booked on H only while `now + wall + 60 s <= T`. The lease table ends each backfilled lease at its wall, so backfill has left H by T − 60 s. The margin is there to absorb the stop's own delay (design section 5.5). The request commits when H is quiet.
 
-**Late, e > 0, for the lease that sets T.** H is busy until T + e, so the request starts e after the tail it was promised. From T − 60 s to T + e no new start fits on H: the time left is shorter than the margin, and once T has passed a host takes none. H carries only the late lease. If another host would have been quiet before T + e, the request waited up to e longer than it had to, because the drain order chose H on its estimate. If T + e passes the reservation's deadline (the pool's `drain_deadline`, or the request's wall time when none is set: `reserve_deadline`, `crates/js-whole/src/cost.rs`), the mark is also given up and H is excluded for the request for `reserve_backoff` (`crates/js-registry/src/whole/reserve.rs`).
+**Late, e > 0, for the lease that sets T.** H is busy until T + e, so the request starts e after the tail it was promised. From T − 60 s to T + e no new start fits on H: the time left is shorter than the margin, and once T has passed a host takes none. H carries only the late lease. If another host would have been quiet before T + e, the request waited up to e longer than it had to, because the drain order chose H on its estimate. If T + e passes the reservation's deadline (the pool's `drain_deadline`, or the request's wall time when none is set: `WholeNodeConfig::drain_deadline_ms`, `crates/js-whole/src/config.rs`), nothing more happens: the mark is kept on H, no host is excluded and nothing is counted, and the request commits when H is quiet.
 
 **Early, e < 0.** H's tail lease ends at T − |e|. Backfill booked against T ends by T − 60 s, so if no other lease on H is late, the request starts by T at the latest, and the promise holds. The cost is room: backfill was booked against a later tail than the truth. That can hold the request until T − 60 s when it could have started at T − |e|, or leave H idle.
 
@@ -229,4 +229,4 @@ Questions this note could not settle from the code, each with the code that woul
 4. **One key dominating the sample.** Should the rule cap the share of M that one `profile` supplies, since a key's errors are correlated? Settled by the spread of `profile` across E in the first window read.
 5. **Which estimate the row keeps.** Should the row record the end the tail used (`cost::lease_end`, the estimate cut to the bound) beside the raw one? Settled in `hosted_row` (`crates/js-registry/src/registry/history.rs`).
 6. **A stale comment.** The doc comment of `DEFAULT_BACKFILL_MARGIN_MS` (`crates/js-whole/src/cost.rs`) says "Nothing in production uses it yet", but `js_sched::backfill::fits` passes it to `fits_in_tail` on the server's backfill path. That comment needs a correction in its own change.
-7. **The reservation deadline.** How often does a late end turn into a give-up? This also covers a pool with no `drain_deadline`, whose reservation deadline is the request's wall time. Settled by a registry test where a late end passes the reservation deadline (`reserve_deadline`, `crates/js-whole/src/cost.rs`), and by counting whole-node rows with `give_up_outcome` above zero.
+7. **The reservation deadline.** How often does a late end pass the reservation deadline? A pool with no `drain_deadline` has the request's wall limit as deadline (`drain_deadline_ms`, `crates/js-whole/src/config.rs`). Passing it gives nothing up and the mark is kept, so the count of rows that waited past it is read from the drain outcome and the queue wait.

@@ -150,11 +150,11 @@ pub struct Engine {
     whole_jobs: BTreeMap<js_jobs::JobId, OperationId>,
     /// The whole-node settings the scheduler has now, if it has any.
     whole_settings: Option<js_registry::WholeNodeConfig>,
-    /// The give-ups and bars of whole-node requests a rebuild carried over, until each is
-    /// queued again ([`Engine::carry_whole`]).
+    /// The bars of whole-node requests a rebuild carried over, until each is queued again
+    /// ([`Engine::carry_whole`]).
     carried: BTreeMap<RequestId, whole::Carried>,
     /// The whole-node requests a restart's ledger put back ([`Engine::whole_restore`]) and
-    /// not queued since, each with when: their give-ups and bars wait in `carried` until
+    /// not queued since, each with when: their bars wait in `carried` until
     /// the request is queued, or until the registry's idle horizon has passed.
     restored: BTreeMap<RequestId, FarmTime>,
     /// The prepares of the whole-node leases committed from the queue, and the records of

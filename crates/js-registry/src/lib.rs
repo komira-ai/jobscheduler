@@ -102,12 +102,11 @@
 //!   (design `whole-node.md` sections 3, 4 and 6): a quiet host at once, else after
 //!   `drain_after` the host that costs least to drain, which then takes no other
 //!   request's start and no new lease. The request's own next start commits the lease on
-//!   it ([`Registry::reservations`]). Nothing is stopped for a reservation; one that
-//!   reaches its deadline with the host still busy is given up, the host is left out for
-//!   the request for `reserve_backoff`, and after `max_reserve_attempts` give-ups the
-//!   next deadline is the wall time and the reservation commits. Cancelling the request
-//!   or letting it expire drops the reservation at once. The marks, the wait list's order,
-//!   the give-up and failed-prepare counts and the exclusions of requests that carry an id
+//!   it ([`Registry::reservations`]). Nothing is stopped for a reservation; the
+//!   deadline is informational: a reservation that reaches it with the host still busy
+//!   is kept, gives nothing up and counts nothing. Cancelling the request or letting it
+//!   expire drops the reservation at once. The marks, the wait list's order, the
+//!   failed-prepare counts and the exclusions of requests that carry an id
 //!   are handed out as a ledger ([`Registry::reservation_ledger`]) for the caller to keep
 //!   and are put back at a start ([`Registry::restore_reservations`]); see the `ledger`
 //!   module of the registry for what is kept and what is dropped at a restore.

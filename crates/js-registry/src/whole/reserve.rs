@@ -1,6 +1,6 @@
 //! The reservation and drain state machine of a dedicated pool (design `whole-node.md`
-//! sections 3, 4 and 6): which waiting request holds which host, and when it gives that
-//! host up.
+//! sections 3, 4 and 6): which waiting request holds which host. A request never gives
+//! its host up: a drain waits for the host's work to end, however long it runs.
 //!
 //! A [`Mark`] says a host is set aside for one waiting request. A host carries at most one
 //! mark and a request holds at most one ([`Marks::place`] keeps both by construction).
@@ -22,16 +22,14 @@
 //! 2. **Otherwise a reservation**, once the request has waited `drain_after`: the host
 //!    that costs least to drain ([`super::cost::drain_cost`]) among the live hosts that no
 //!    mark and no whole-node lease holds and that are not excluded for the request. The
-//!    deadline is [`super::cost::reserve_deadline`], with the larger of the request's
-//!    wall time and the host's wait as the wall time.
+//!    deadline is `drain_deadline`, or, when none is set, the larger of the request's
+//!    wall time and the host's wait ([`WholeNodeConfig::drain_deadline_ms`]).
 //! 3. **No thrash.** A reserved request keeps its host, except that it takes another
 //!    quiet host if one turns up, and drops the mark it had.
-//! 4. **Give-up.** At its deadline, a reservation whose host is still not quiet is given
-//!    up: the mark goes, the host is excluded for the request for `reserve_backoff`, the
-//!    request's give-up count rises, and the request goes on to the next cheapest host in
-//!    the same pass. A reservation made after `max_reserve_attempts` give-ups is *capped*:
-//!    its deadline is the wall time and it is never given up, since by then every lease on
-//!    the host has ended.
+//! 4. **No give-up.** A reservation whose host is still not quiet at its deadline is kept
+//!    as before: the deadline is when the host is expected to be drained at the latest,
+//!    and reaching it excludes no host and counts nothing. `max_reserve_attempts` is not
+//!    read.
 //! 5. **Caps** ([`super::caps::may_reserve`]) apply to every new mark. The single-token
 //!    service has no consumer identity, so the per-consumer cap never applies here. When
 //!    the ceiling falls, marks beyond it are dropped newest first and a held lease is
@@ -39,18 +37,17 @@
 //!
 //! A mark whose request leaves the wait list (cancelled, expired, committed) is dropped by
 //! the registry at once ([`Marks::retain_waiting`]). A mark on a host that is tainted or
-//! gone is dropped here without counting a give-up.
+//! gone is dropped here.
 //!
 //! # Restart
 //!
-//! The marks, with the wait list and the give-up counts, are kept in the lease file as
+//! The marks, with the wait list, are kept in the lease file as
 //! the registry's reservation ledger (`Registry::reservation_ledger`) and put back at a
 //! start (`Registry::restore_reservations`). A restored mark keeps its host, its request
 //! and the instant it was made; its deadline is what the lease table returns, which
 //! raises it to at least the boot plus the boot grace, so a reservation does not fire
 //! the moment the server is back; whether it drains or waits for a start is as it was.
-//! It is *capped* when the request's give-ups have reached `max_reserve_attempts`, as it
-//! was when it was made. Until the request is presented again the pass does not step it
+//! Until the request is presented again the pass does not step it
 //! (see the wait list), and a restored mark stands while its host has not yet said
 //! hello: `claim_by`, the start plus `regain_grace`, ends that wait, after which a mark
 //! on a host the registry does not know is dropped and counted. Nothing is persisted
@@ -99,7 +96,6 @@ pub(crate) struct Mark {
     at: Timestamp,
     deadline: Timestamp,
     assigned: bool,
-    capped: bool,
     /// The end of the host's tail when the mark was made ([`cost::DrainCost::tail_end`]);
     /// `None` for an assigned mark.
     tail_end: Option<u64>,
@@ -115,9 +111,6 @@ pub(crate) struct Revived {
     pub(crate) at: Timestamp,
     pub(crate) deadline: Timestamp,
     pub(crate) assigned: bool,
-    /// The request had given up `max_reserve_attempts` hosts or more when the mark was
-    /// made.
-    pub(crate) capped: bool,
     pub(crate) tail_end: Option<u64>,
     pub(crate) claim_by: Timestamp,
 }
@@ -132,8 +125,8 @@ pub struct Reservation {
     pub host: HostId,
     /// When the host was set aside.
     pub at: Timestamp,
-    /// When the reservation is given up if the host is still not quiet. Meaningless for an
-    /// `assigned` reservation, which drains nothing.
+    /// When the host is expected to be drained at the latest; reaching it does not give the
+    /// reservation up. Meaningless for an `assigned` reservation, which drains nothing.
     pub deadline: Timestamp,
     /// Whether the host was quiet when it was set aside: it drains nothing and waits for
     /// the request's next start.
@@ -224,7 +217,6 @@ impl Marks {
                 at: taken.at,
                 deadline: taken.deadline,
                 assigned: taken.assigned,
-                capped: false,
                 tail_end: taken.tail_end,
                 claim_by: None,
             };
@@ -259,7 +251,6 @@ impl Marks {
             at: mark.at,
             deadline: mark.deadline,
             assigned: mark.assigned,
-            capped: mark.capped,
             tail_end: mark.tail_end,
             claim_by: Some(mark.claim_by),
         };
@@ -475,18 +466,14 @@ impl Ctx<'_> {
         (wait_ms, tail_end): (u64, Option<u64>),
         at: Timestamp,
     ) -> Mark {
-        let settings = self.pass.settings;
-        let key = RequestKey::from(id);
-        let given_up = self.requests.give_ups(&key);
         let wall = u64::try_from(request.max_wall.as_millis()).unwrap_or(u64::MAX);
         let wall = wall.max(wait_ms);
-        let deadline = cost::reserve_deadline(given_up, settings, wall);
+        let deadline = self.pass.settings.drain_deadline_ms(wall);
         Mark {
             request: id.clone(),
             at,
             deadline: self.pass.now.plus(Duration::from_millis(deadline)),
             assigned: false,
-            capped: given_up >= settings.max_reserve_attempts,
             tail_end,
             claim_by: None,
         }
@@ -510,41 +497,23 @@ impl Ctx<'_> {
 
     fn step(&mut self, id: &RequestId, request: &Request, since: Timestamp) {
         let held = self.marks.of(id);
-        let kept = held.is_some_and(|(host, mark)| self.keep_or_move(id, request, &host, &mark));
-        if !kept {
-            self.place(id, request, since);
+        match held {
+            Some((host, mark)) => self.keep_or_move(id, request, &host, &mark),
+            None => self.place(id, request, since),
         }
     }
 
-    /// A request that holds `host` by `mark`: whether it still does after this pass. It
-    /// keeps a quiet host; it moves to another quiet host if one turns up; it gives the
-    /// host up at the deadline unless the reservation is capped.
-    fn keep_or_move(
-        &mut self,
-        id: &RequestId,
-        request: &Request,
-        host: &HostId,
-        mark: &Mark,
-    ) -> bool {
+    /// A request that holds `host` by `mark` keeps it after this pass: it keeps a quiet
+    /// host, and moves to another quiet host if one turns up while its own is busy. It
+    /// never gives the host up, at its deadline or after.
+    fn keep_or_move(&mut self, id: &RequestId, request: &Request, host: &HostId, mark: &Mark) {
         let fact = self.pass.hosts.iter().find(|fact| fact.id == *host);
         if fact.is_some_and(|fact| fact.open) {
-            return true;
+            return;
         }
         if let Some(quiet) = self.quiet_host(id) {
             self.assign(&quiet, id, request, mark.at);
-            return true;
         }
-        let due = [self.pass.now >= mark.deadline, !mark.capped]
-            .into_iter()
-            .all(|ok| ok);
-        if due {
-            let backoff = Duration::from_millis(self.pass.settings.reserve_backoff_ms);
-            let end = self.pass.now.plus(backoff);
-            self.requests
-                .give_up(RequestKey::from(id), host, (self.pass.now, end));
-            self.marks.drop_request(id);
-        }
-        !due
     }
 
     /// Sets a host aside for `id`, which holds none: a quiet one at once, else after

@@ -29,21 +29,20 @@
 //! 4. Holds the hosts of [`WholeRound::outside`] outside its queue
 //!    ([`Scheduler::reserve_outside`]), with their tails, for backfill.
 //! 5. Queues each newly presented request as a whole-machine operation, in the order of the
-//!    wait list, held to the time it was first presented, with the give-ups it has and the
-//!    mark the registry holds for it ([`Scheduler::restore_whole`]); and bars every request
+//!    wait list, held to the time it was first presented, with the mark the registry holds
+//!    for it ([`Scheduler::restore_whole`]); and bars every request
 //!    from the hosts its failed prepares left out ([`Scheduler::bar_whole`]).
 //! 6. Runs one placement round. A request granted a quiet worker holds a pending lease
 //!    there: the registry shows it as an assigned reservation, and the request's next start
 //!    commits on that host ([`Engine::commit_whole`]). A request that fits nowhere marks the
 //!    worker cheapest to drain once it has waited `drain_after`, and keeps it until it is
-//!    placed, cancelled or gives it up at its deadline.
+//!    placed or cancelled: it is never given up, at its deadline or after.
 //!
 //! A pending grant is a held whole worker to the scheduler, and its drop at the start of a
 //! round never touches one; the registry drops its newest reservations, an assigned one
 //! included, when the ceiling falls. So before each round the engine puts back the newest
 //! pending grants beyond the ceiling ([`Engine::whole_tick`]); a committed lease is never
-//! touched. The holds a request gives up at their deadlines are counted, and kept for its
-//! next presentation when it leaves the wait list ([`Engine::leave`]).
+//! touched.
 //!
 //! The leases of whole-node requests are numbered in their own term ([`WHOLE_TERM`]), at
 //! a round of their own before any other is placed ([`Engine::whole_tick`]): a round that
@@ -55,11 +54,10 @@
 //! The whole-host jobs the engine queues ([`super::whole_jobs`]) are operations of the same
 //! scheduler, in the same term and rounds: the helpers that walk the queue's operations
 //! (the grants put back, the hosts held, the grants a heartbeat lists) walk theirs too. The
-//! reservations shown to the registry, the give-ups it is told of, the ceiling's drop and the
-//! ledger stay those of the registry's requests.
+//! reservations shown to the registry, the ceiling's drop and the ledger stay those of the registry's requests.
 //!
 //! A rebuild of the engine keeps the queue: the last round is handed to the new engine with
-//! the marks, give-ups and bars of the old one ([`Engine::carry_whole`]). A restart keeps it
+//! the marks and bars of the old one ([`Engine::carry_whole`]). A restart keeps it
 //! through the registry's reservation ledger ([`super::ledger`]). It does not carry the
 //! whole-host jobs: the next pass over the job tables queues them again.
 
@@ -84,9 +82,9 @@ use crate::map;
 /// leases ([`TERM`]) and the jobs' ([`super::jobs::JOB_TERM`]).
 pub const WHOLE_TERM: u64 = 3;
 
-/// The give-ups and bars of a whole-node request, carried over a rebuild until the request
-/// is queued again.
-pub(super) type Carried = (u32, BTreeMap<WorkerId, Bar>);
+/// The bars of a whole-node request, carried over a rebuild until the request is queued
+/// again.
+pub(super) type Carried = BTreeMap<WorkerId, Bar>;
 
 /// The reason a tainted host is quarantined in the engine.
 const TAINTED: &str = "tainted in the registry";
@@ -310,12 +308,11 @@ impl Engine {
         };
         self.feed(now, submit);
         self.sched.set_max_wall(operation, waiting.max_wall);
-        let (give_ups, mut bars) = self.carried.remove(&waiting.id).unwrap_or_default();
+        let mut bars = self.carried.remove(&waiting.id).unwrap_or_default();
         self.restored.remove(&waiting.id);
         // A request whose prepare failed is queued again from when it was first queued,
-        // with its give-ups and the bars its failures set ([`super::prepare`]).
-        let (kept_give_ups, kept_bars) = self.prepare.kept(&waiting.id);
-        for (worker, bar) in kept_bars {
+        // with the bars its failures set ([`super::prepare`]).
+        for (worker, bar) in self.prepare.kept(&waiting.id) {
             let carried = bars.get(&worker).copied();
             bars.insert(worker, stronger(carried, bar));
         }
@@ -331,7 +328,6 @@ impl Engine {
         let restored = |mark| RestoredWhole {
             operation,
             queued_at,
-            give_ups: give_ups.max(waiting.give_ups).max(kept_give_ups),
             bars: bars.clone(),
             mark,
         };
@@ -411,21 +407,8 @@ impl Engine {
         here.map(|(lease, _)| lease).collect()
     }
 
-    /// How many holds each whole-node request the engine queues has given up at their
-    /// deadline, those that gave one up ([`Placer::whole_give_ups`]).
-    ///
-    /// [`Placer::whole_give_ups`]: js_registry::Placer::whole_give_ups
-    pub(crate) fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
-        let counted = self.whole.iter().map(|(id, operation)| {
-            let count = self.sched.whole_give_ups(*operation);
-            (id.clone(), count)
-        });
-        counted.filter(|(_, count)| *count > 0).collect()
-    }
-
     /// Puts back the newest pending grants beyond the whole-node ceiling, with the marks
-    /// (their requests are queued again, keeping their queue time, with no give-up and no
-    /// bar), as the registry drops its newest reservations, an assigned one included, when
+    /// (their requests are queued again, keeping their queue time, with no bar), as the registry drops its newest reservations, an assigned one included, when
     /// the ceiling falls; a committed lease is never touched. The scheduler counts a
     /// pending grant as a held whole worker, which its own drop at the round's start never
     /// touches, so the engine drops it here, before the round. A mark among the newest is
@@ -495,7 +478,7 @@ impl Engine {
     }
 
     /// Takes the whole-node queue of `old`, the engine this one is built to replace: the
-    /// numbering of its leases, the give-ups and bars of its requests, and its last round,
+    /// numbering of its leases, the bars of its requests, and its last round,
     /// with the marks it holds now, which queues the requests here again.
     pub(super) fn carry_whole(&mut self, old: &Self, now: FarmTime) {
         self.whole_seq = old.whole_seq;
@@ -504,9 +487,8 @@ impl Engine {
         self.prepare = old.prepare.clone();
         self.wait = old.wait.clone();
         for (id, operation) in &old.whole {
-            let give_ups = old.sched.whole_give_ups(*operation);
             let bars = old.sched.whole_barred(*operation, now);
-            self.carried.insert(id.clone(), (give_ups, bars));
+            self.carried.insert(id.clone(), bars);
         }
         let Some(mut round) = old.round.clone() else {
             return;

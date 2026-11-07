@@ -53,8 +53,8 @@
 //! queued, placed or starting job a deadline floor ([`JobRecord::deadline_floor`]) of at least
 //! the boot plus [`BOOT_GRACE`]: the earliest instant the server's queue wait or start timeout
 //! may end it, so an outage longer than either fails no job at the first tick; and it raises
-//! each mark's deadline to at least the boot plus [`BOOT_GRACE`], so an outage longer than a
-//! hold gives up none at the first round.
+//! each mark's deadline to at least the boot plus [`BOOT_GRACE`], so a mark restored after an
+//! outage does not show a deadline already past (reaching a deadline gives nothing up).
 //!
 //! # Keys
 //!

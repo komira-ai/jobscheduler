@@ -1,8 +1,9 @@
-//! When a blocked whole-machine request holds a worker and when it lets go
+//! When a blocked whole-machine request holds a worker, and that it never lets go
 //! ([`Scheduler::with_whole_node`]): not before `drain_after`, a quiet worker at once, a
-//! deadline on each hold, a give-up that bars the worker for `reserve_backoff`, and the
-//! request's max wall time as the deadline once it has given up `max_reserve_attempts`
-//! times. Every time is farm time fed to the scheduler; nothing waits.
+//! deadline on each hold that is `drain_deadline` or the request's wall limit, and a hold
+//! kept past that deadline until the worker empties, with no worker barred and
+//! `max_reserve_attempts` read nowhere. Every time is farm time fed to the scheduler;
+//! nothing waits.
 
 #[macro_use]
 #[path = "booked/mod.rs"]
@@ -14,7 +15,7 @@ mod digest;
 #[path = "whole_rig/mod.rs"]
 mod whole_rig;
 
-use js_sched::{Event, Scheduler, WholeMark};
+use js_sched::{Bar, Event, Scheduler, WholeMark};
 use js_types::sched::{FarmTime, OperationId};
 use js_whole::WholeNodeConfig;
 
@@ -27,7 +28,7 @@ fn t(ms: u64) -> FarmTime {
 }
 
 /// Whole-node settings: a drain deadline of a minute, a back-off of ten seconds, and
-/// `drain_after_ms` and `attempts` as given.
+/// `drain_after_ms` and the deprecated `attempts` as given.
 fn cfg(drain_after_ms: u64, attempts: u32) -> WholeNodeConfig {
     WholeNodeConfig {
         drain_after_ms,
@@ -80,7 +81,6 @@ fn without_settings_a_blocked_request_holds_at_once_and_has_no_mark() {
     assert_eq!(mark(&f, op), None);
     f.advance(10_000_000);
     assert_eq!(f.held_for(op), Some(&w("a")));
-    assert_eq!(f.s.whole_give_ups(op), 0);
 }
 }
 
@@ -131,89 +131,114 @@ fn a_quiet_worker_is_taken_at_once_whatever_drain_after() {
 }
 
 both_rules! {
-/// Catches: the deadline counted from the wrong time or off by one: the hold is kept a
-/// millisecond before it and given up at it, with one give-up counted, no mark, and, on
-/// the only worker there is, nothing held while its back-off lasts.
-fn the_hold_is_given_up_at_its_deadline() {
-    let mut f = busy(Some(cfg(0, 2)));
+/// Catches: the hold given up at its deadline: the mark is the same a millisecond before
+/// the deadline, at it, and long after (a drain never ends while the worker's work runs),
+/// and the request takes the worker when its lease ends.
+fn a_whole_request_waits_past_the_old_deadline_without_giving_up() {
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::current())
+            .with_whole_node(cfg(0, 2)),
+    );
+    f.worker("a");
+    let lease = f.lease(secs(MAX_WALL));
     f.advance(5_000);
     let op = ask(&mut f);
     let first = mark(&f, op).expect("marked");
     assert_eq!((first.made, first.deadline), (t(5_000), t(65_000)));
-    tick_at(&mut f, 64_999);
-    assert_eq!(mark(&f, op), Some(first));
-    assert_eq!(f.s.whole_give_ups(op), 0);
-    tick_at(&mut f, 65_000);
-    assert_eq!(f.s.whole_give_ups(op), 1);
-    assert_eq!(f.held_for(op), None);
+    for at in [64_999, 65_000, 75_000, 500_000] {
+        tick_at(&mut f, at);
+        assert_eq!(mark(&f, op), Some(first.clone()), "at {at}");
+        assert_eq!(f.held_for(op), Some(&w("a")), "at {at}");
+        assert!(f.s.whole_barred(op, t(at)).is_empty(), "at {at}");
+    }
+    f.finish(&lease);
+    let grants = f.advance(500_001);
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    assert_eq!((grants[0].operation, &grants[0].worker), (op, &w("a")));
     assert_eq!(mark(&f, op), None);
 }
 }
 
 both_rules! {
-/// Catches: the back-off ending early or late, or not binding at all: the worker is barred
-/// until exactly `reserve_backoff` after the give-up, and is held again from then, with a
-/// new mark.
-fn the_given_up_worker_is_barred_until_exactly_the_backoff_ends() {
-    let mut f = busy(Some(cfg(0, 2)));
-    let op = ask(&mut f);
-    tick_at(&mut f, 60_000);
-    tick_at(&mut f, 69_999);
-    assert_eq!(f.held_for(op), None);
-    tick_at(&mut f, 70_000);
-    assert_eq!(f.held_for(op), Some(&w("a")));
-    let again = mark(&f, op).expect("marked again");
-    assert_eq!((again.made, again.deadline), (t(70_000), t(130_000)));
-    assert_eq!(f.s.whole_give_ups(op), 1);
-}
-}
-
-both_rules! {
-/// Catches: no other worker tried after a give-up, or a mark that moves back: `a` is the
-/// cheaper to drain and is held first; given up, the request holds `b` with a deadline
-/// from the give-up, and when `a`'s back-off ends the mark stays on `b` as it was made,
-/// though `a` is still the cheaper.
-fn a_second_worker_is_held_after_a_give_up() {
+/// Catches: a hold past its deadline traded for another worker: `a` is the cheaper to
+/// drain and is held; past the deadline, with `b` as busy as before, the mark stays on
+/// `a` as it was made and `b` is never held.
+fn past_its_deadline_a_mark_is_not_moved_to_another_busy_worker() {
     let mut f = busy(Some(cfg(0, 2)));
     f.worker("b");
     f.lease_on("b", secs(MAX_WALL * 2));
     let op = ask(&mut f);
-    assert_eq!(f.held_for(op), Some(&w("a")));
-    tick_at(&mut f, 60_000);
-    assert_eq!(f.held_for(op), Some(&w("b")));
     let m = mark(&f, op).expect("marked");
-    assert_eq!(
-        (m.worker.clone(), m.made, m.deadline),
-        (w("b"), t(60_000), t(120_000))
-    );
+    assert_eq!((m.worker.clone(), m.deadline), (w("a"), t(60_000)));
+    tick_at(&mut f, 60_000);
     tick_at(&mut f, 70_000);
-    assert_eq!(f.held_for(op), Some(&w("b")));
+    tick_at(&mut f, 300_000);
+    assert_eq!(f.held_for(op), Some(&w("a")));
     assert_eq!(mark(&f, op), Some(m));
 }
 }
 
 both_rules! {
-/// Catches: the attempt cap ignored: with one attempt allowed, after one give-up the next
-/// hold's deadline is the max wall time and it is not given up at the shorter drain
-/// deadline; the worker is taken when its lease ends.
-fn after_the_attempt_cap_the_deadline_is_the_max_wall_time() {
-    let mut f = busy(Some(cfg(0, 1)));
+/// Catches: a marked worker opened to later ordinary work once the deadline has passed: an
+/// action with no estimate, submitted at the deadline, is not placed on the held worker
+/// (it could only backfill, and nothing known ends in the tail), and the request still
+/// holds it.
+fn past_its_deadline_a_marked_worker_takes_no_later_ordinary_work() {
+    let mut f = busy(Some(cfg(0, 2)));
     let op = ask(&mut f);
     tick_at(&mut f, 60_000);
-    tick_at(&mut f, 70_000);
-    let m = mark(&f, op).expect("held again");
-    assert_eq!(m.deadline, t(70_000 + MAX_WALL * 1_000));
-    tick_at(&mut f, 70_000 + 60_000);
-    tick_at(&mut f, 70_000 + 3 * 60_000);
-    assert_eq!(f.s.whole_give_ups(op), 1);
+    f.next_n += 1;
+    f.submit(crate::whole_rig::request(
+        f.next_n,
+        js_types::sched::LeaseKind::Action,
+    ));
+    assert!(f.grants().is_empty());
     assert_eq!(f.held_for(op), Some(&w("a")));
 }
 }
 
 both_rules! {
-/// Catches: a request with no max wall time given up as if it had a short one, or given
-/// none at all: with no drain deadline set either, it is never given up.
-fn a_request_with_no_wall_time_and_no_drain_deadline_is_never_given_up() {
+/// Catches: `max_reserve_attempts` still read: with one attempt or five the mark, its
+/// deadline (the configured one, not the wall limit) and the worker held are the same,
+/// before and long after the deadline.
+fn deprecated_max_reserve_attempts_does_nothing() {
+    let run = |attempts| {
+        let mut f = busy(Some(cfg(0, attempts)));
+        let op = ask(&mut f);
+        let made = mark(&f, op);
+        tick_at(&mut f, 60_000);
+        tick_at(&mut f, 400_000);
+        (made, mark(&f, op), f.held_for(op).cloned())
+    };
+    let one = run(1);
+    assert_eq!(one.0.as_ref().map(|m| m.deadline), Some(t(60_000)));
+    assert_eq!(one.1, one.0);
+    assert_eq!(one.2, Some(w("a")));
+    assert_eq!(run(5), one);
+}
+}
+
+both_rules! {
+/// Catches: an unset drain deadline taken as zero or as a default of its own: the
+/// deadline is the request's wall limit after the mark, and the hold is kept past it.
+fn with_no_drain_deadline_the_deadline_is_the_wall_limit() {
+    let mut c = cfg(0, 2);
+    c.drain_deadline_ms = None;
+    let mut f = busy(Some(c));
+    f.advance(2_000);
+    let op = ask(&mut f);
+    let m = mark(&f, op).expect("marked");
+    assert_eq!(m.deadline, t(2_000 + MAX_WALL * 1_000));
+    tick_at(&mut f, 2_000 + MAX_WALL * 3_000);
+    assert_eq!(mark(&f, op), Some(m));
+}
+}
+
+both_rules! {
+/// Catches: a request with no max wall time given a short deadline: with no drain
+/// deadline set either, its deadline is the end of time.
+fn a_request_with_no_wall_time_and_no_drain_deadline_has_no_end() {
     let mut c = cfg(0, 2);
     c.drain_deadline_ms = None;
     let mut f = busy(Some(c));
@@ -221,7 +246,6 @@ fn a_request_with_no_wall_time_and_no_drain_deadline_is_never_given_up() {
     assert!(f.grants().is_empty());
     assert_eq!(mark(&f, op).map(|m| m.deadline), Some(t(u64::MAX)));
     tick_at(&mut f, 10_000_000);
-    assert_eq!(f.s.whole_give_ups(op), 0);
     assert_eq!(f.held_for(op), Some(&w("a")));
 }
 }
@@ -250,27 +274,29 @@ fn placement_clears_the_mark() {
 }
 
 both_rules! {
-/// Catches: a cancelled request's mark and counters left behind.
-fn a_cancelled_request_has_no_mark_and_no_count() {
+/// Catches: a cancelled request's mark left behind, past its deadline too: the mark goes
+/// with the request, and the next request marks the worker afresh.
+fn a_cancelled_request_has_no_mark() {
     let mut f = busy(Some(cfg(0, 2)));
     let op = ask(&mut f);
     tick_at(&mut f, 60_000);
-    assert_eq!(f.s.whole_give_ups(op), 1);
+    assert!(mark(&f, op).is_some());
     f.s.forget_queued(op).expect("queued");
-    assert_eq!(f.s.whole_give_ups(op), 0);
+    assert_eq!(mark(&f, op), None);
     let op2 = ask(&mut f);
     assert_ne!(op, op2);
-    assert!(mark(&f, op2).is_some());
+    let m = mark(&f, op2).expect("marked");
+    assert_eq!((m.worker, m.made), (w("a"), t(60_000)));
     f.s.forget_queued(op2).expect("queued");
     assert_eq!(mark(&f, op2), None);
 }
 }
 
 both_rules! {
-/// Catches: a worker that cannot be held any more leaving its mark and costing an attempt:
-/// the mark moves to the other worker with the deadline from the move and the time it was
-/// first made, and no give-up is counted.
-fn a_worker_that_goes_away_moves_the_mark_without_a_give_up() {
+/// Catches: a worker that cannot be held any more leaving its mark: the mark moves to the
+/// other worker with the deadline from the move and the time it was first made, and the
+/// worker it left is not barred.
+fn a_worker_that_goes_away_moves_the_mark() {
     let mut f = busy(Some(cfg(0, 2)));
     f.worker("b");
     f.lease_on("b", secs(MAX_WALL * 2));
@@ -286,15 +312,15 @@ fn a_worker_that_goes_away_moves_the_mark_without_a_give_up() {
         mark(&f, op).map(|m| (m.made, m.deadline)),
         Some((t(0), t(80_000)))
     );
-    assert_eq!(f.s.whole_give_ups(op), 0);
+    assert!(f.s.whole_barred(op, t(20_000)).is_empty());
 }
 }
 
 both_rules! {
-/// Catches: a give-up that stops or gives up running work: the round at the deadline
+/// Catches: a deadline that stops or gives up running work: the round at the deadline
 /// proposes nothing, the lease on the held worker is still held and running, and it
 /// finishes as a result as before.
-fn a_give_up_stops_nothing() {
+fn the_deadline_stops_nothing() {
     let mut f = Farm::new(
         Scheduler::new(1)
             .with_load_config(booked::current())
@@ -308,7 +334,7 @@ fn a_give_up_stops_nothing() {
     f.beat();
     let effects = f.feed(Event::Tick);
     assert!(effects.is_empty(), "{effects:?}");
-    assert_eq!(f.s.whole_give_ups(op), 1);
+    assert!(mark(&f, op).is_some());
     assert_eq!(f.s.leases_held(), 1);
     f.finish(&lease);
     assert_eq!(f.s.leases_held(), 0);
@@ -316,10 +342,10 @@ fn a_give_up_stops_nothing() {
 }
 
 both_rules! {
-/// Catches: a worker taken in its back-off because it emptied: `a` is given up and then
-/// its lease ends while another worker is still held, and the request takes it only from
-/// the moment the back-off ends.
-fn a_given_up_worker_that_empties_is_taken_only_after_the_backoff() {
+/// Catches: a worker in a back-off taken because it emptied while another worker could
+/// still run the request: `a` is backed off until 70 s with `bar_whole`, the request holds
+/// `b`, `a`'s lease ends, and the request takes `a` only from the moment the back-off ends.
+fn a_backed_off_worker_that_empties_is_taken_only_after_the_backoff() {
     let mut f = Farm::new(
         Scheduler::new(1)
             .with_load_config(booked::current())
@@ -330,7 +356,9 @@ fn a_given_up_worker_that_empties_is_taken_only_after_the_backoff() {
     f.worker("b");
     f.lease_on("b", secs(MAX_WALL * 2));
     let op = ask(&mut f);
-    tick_at(&mut f, 60_000);
+    assert_eq!(f.held_for(op), Some(&w("a")));
+    assert_eq!(f.s.bar_whole(op, w("a"), Bar::Backoff(t(70_000))), Ok(()));
+    tick_at(&mut f, 1_000);
     assert_eq!(f.held_for(op), Some(&w("b")));
     f.finish(&short);
     tick_at(&mut f, 69_999);
@@ -341,37 +369,10 @@ fn a_given_up_worker_that_empties_is_taken_only_after_the_backoff() {
 }
 
 both_rules! {
-/// Catches: a hold given up at the request's own wall time after the attempt cap, on a worker
-/// whose lease may run longer: `a` ends within the request's wall, `b` holds a lease with
-/// twice it. With one attempt allowed the request gives `a` up once and holds `b` with its
-/// own wall time as the deadline; at that deadline, and long after, the hold stays on `b`
-/// with no second give-up, so the request cannot cycle back to `a`.
-fn a_hold_at_the_attempt_cap_is_not_given_up_at_the_request_wall_time() {
-    let mut f = busy(Some(cfg(0, 1)));
-    f.worker("b");
-    f.lease_on("b", secs(MAX_WALL * 2));
-    let op = ask(&mut f);
-    assert_eq!(f.held_for(op), Some(&w("a")));
-    tick_at(&mut f, 60_000);
-    assert_eq!(f.held_for(op), Some(&w("b")));
-    let m = mark(&f, op).expect("marked");
-    assert_eq!(m.deadline, t(60_000 + MAX_WALL * 1_000));
-    tick_at(&mut f, 60_000 + MAX_WALL * 1_000 - 1);
-    tick_at(&mut f, 60_000 + MAX_WALL * 1_000);
-    tick_at(&mut f, 60_000 + MAX_WALL * 2_000);
-    assert_eq!(f.s.whole_give_ups(op), 1);
-    // The mark stays on `b` as it was made, though `a`'s back-off ended at 70 s and `a` is
-    // the cheaper to drain: a mark is never traded for a cheaper worker.
-    assert_eq!(f.held_for(op), Some(&w("b")));
-    assert_eq!(mark(&f, op), Some(m));
-}
-}
-
-both_rules! {
-/// Catches: a one-host farm that does not hand the host over when it empties during the
-/// back-off: the only worker is given up and its lease ends before the back-off does; the
-/// request holds nothing stale and is placed on the worker at the next round.
-fn the_only_worker_is_taken_when_it_empties_during_the_backoff() {
+/// Catches: a back-off that keeps a request off its only worker when that worker empties:
+/// with `a` backed off until 70 s and no other worker, the request holds nothing, and when
+/// `a`'s lease ends it is granted `a` at once, inside the back-off.
+fn the_only_worker_is_taken_when_it_empties_during_a_backoff() {
     let mut f = Farm::new(
         Scheduler::new(1)
             .with_load_config(booked::current())
@@ -380,39 +381,13 @@ fn the_only_worker_is_taken_when_it_empties_during_the_backoff() {
     f.worker("a");
     let lease = f.lease(secs(MAX_WALL));
     let op = ask(&mut f);
-    tick_at(&mut f, 60_000);
-    assert_eq!(f.s.whole_give_ups(op), 1);
+    assert_eq!(f.s.bar_whole(op, w("a"), Bar::Backoff(t(70_000))), Ok(()));
+    tick_at(&mut f, 1_000);
     assert_eq!(f.held_for(op), None);
     f.finish(&lease);
     let grants = f.advance(65_000);
     assert_eq!(grants.len(), 1, "{grants:?}");
     assert_eq!((grants[0].operation, &grants[0].worker), (op, &w("a")));
     assert_eq!(mark(&f, op), None);
-}
-}
-
-both_rules! {
-/// Catches: the give-up count outliving a finished operation: a request that gave up once
-/// is placed and finishes, and once the finished retention has passed the scheduler no
-/// longer has its count.
-fn a_finished_operations_give_up_count_is_dropped_with_it() {
-    let mut f = Farm::new(
-        Scheduler::new(1)
-            .with_load_config(booked::current())
-            .with_whole_node(cfg(0, 2)),
-    );
-    f.worker("a");
-    let lease = f.lease(secs(MAX_WALL));
-    let op = ask(&mut f);
-    tick_at(&mut f, 60_000);
-    assert_eq!(f.s.whole_give_ups(op), 1);
-    f.finish(&lease);
-    let grants = f.advance(70_000);
-    assert_eq!(grants.len(), 1, "{grants:?}");
-    f.start(&grants[0]);
-    f.finish(&grants[0]);
-    assert_eq!(f.s.whole_give_ups(op), 1);
-    f.advance(70_000 + 61_000);
-    assert_eq!(f.s.whole_give_ups(op), 0);
 }
 }

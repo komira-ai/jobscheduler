@@ -72,7 +72,7 @@ pub(crate) fn engine(hosts: &[(&str, &[u64])]) -> Engine {
 }
 
 /// The settings of the passes: a job waits ten seconds before it marks a busy host, and a
-/// mark is given up after a minute.
+/// mark's deadline is a minute after it is made (reaching it gives nothing up).
 pub(crate) fn settings() -> WholeNodeConfig {
     WholeNodeConfig {
         drain_after_ms: 10_000,
@@ -98,8 +98,8 @@ pub(crate) fn spec_of(needs: Needs, wall_limit_secs: u64) -> JobSpec {
     }
 }
 
-/// A mark of `job` on `host`, made at `made_ms`, given up at `deadline_ms` and ending its tail
-/// at `tail_ms`, with no exclusion.
+/// A mark of `job` on `host`, made at `made_ms`, with its deadline at `deadline_ms`, ending
+/// its tail at `tail_ms`, with no exclusion.
 pub(crate) fn mark(
     job: &JobRecord,
     host_name: &str,

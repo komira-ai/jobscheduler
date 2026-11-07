@@ -1,5 +1,6 @@
 //! Putting the scaler together at start: the pool's plan from the configuration file, the
-//! server's agent side, the pool's checks and network mode, and the records file.
+//! server's agent side, the pool's checks and network mode, and the scaler's records, from
+//! their files or from the state store.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -9,6 +10,7 @@ use js_registry::{Registry, SessionSource, WholeNodeConfig};
 use js_scaler::{LaunchMode, Settings};
 use js_types::ExecMode;
 
+use super::kept::{self, ScalerKeeper};
 use super::{Launcher, Live, RecordsFile, Scaler, UnremovedFile};
 use crate::adapt::SharedClock;
 use crate::agents::{Agents, state_path};
@@ -17,6 +19,7 @@ use crate::checks::Health;
 use crate::error::StartupError;
 use crate::file::{ElasticPlan, Launch};
 use crate::network::{DefaultMode, NetworkError, NetworkMode};
+use crate::store::ServerStore;
 
 /// What the scaler is put together with besides the pool's plan.
 pub(crate) struct Parts<'a> {
@@ -24,8 +27,10 @@ pub(crate) struct Parts<'a> {
     pub(crate) agents: Arc<Agents>,
     /// The server's clock.
     pub(crate) clock: SharedClock,
-    /// The lease file, beside which the records are kept.
+    /// The lease file, beside which the records are kept without a store setting.
     pub(crate) state_file: &'a Path,
+    /// The state store the records are kept in instead, with a store setting.
+    pub(crate) store: Option<&'a ServerStore>,
     /// The address launched hosts are told to dial, when the file gives one.
     pub(crate) advertise_url: Option<&'a str>,
     /// What the pool's checks have found: the scaler launches only while they pass, and
@@ -126,17 +131,36 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
 ///
 /// # Errors
 ///
-/// [`StartupError`] when the records file cannot be read, when it is missing for a live
-/// pool that is not at its first start, or when a live pool's network mode could not be
+/// [`StartupError`] when the records file (or key) cannot be read, when it is missing for a
+/// live pool that is not at its first start, or when a live pool's network mode could not be
 /// built.
 pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, StartupError> {
-    let file = RecordsFile::new(state_path(parts.state_file, ".scaler"));
-    let records = match (plan.launch, parts.first_start) {
-        (Launch::Live, false) => file.load_existing()?,
-        _ => file.load()?,
+    let existing = [plan.launch == Launch::Live, !parts.first_start]
+        .into_iter()
+        .all(|holds| holds);
+    let (kept, records, unremoved) = match parts.store {
+        None => {
+            let file = RecordsFile::new(state_path(parts.state_file, ".scaler"));
+            let records = match existing {
+                true => file.load_existing()?,
+                false => file.load()?,
+            };
+            let unremoved_file =
+                UnremovedFile::new(state_path(parts.state_file, ".scaler.unremoved"));
+            let unremoved = unremoved_file.load()?;
+            let kept = ScalerKeeper::Files {
+                records: file,
+                unremoved: unremoved_file,
+            };
+            (kept, records, unremoved)
+        }
+        Some(server) => {
+            let store = server.store();
+            let read = kept::read(&*store, existing);
+            let (records, unremoved) = read.map_err(|reason| server.refuse(reason))?;
+            (ScalerKeeper::Store(store), records, unremoved)
+        }
     };
-    let unremoved_file = UnremovedFile::new(state_path(parts.state_file, ".scaler.unremoved"));
-    let unremoved = unremoved_file.load()?;
     let mode = network_mode(parts.mode, plan)?;
     let url = parts.advertise_url.unwrap_or_default();
     let launcher = Launcher::new(
@@ -152,7 +176,7 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         (parts.agents, plan.id.clone(), plan.scheduler.clone()),
         Arc::clone(&plan.provider),
         launcher,
-        (file, unremoved_file, parts.health),
+        (kept, parts.health),
         plan.floor_demand.clone(),
     );
     let wiring = (

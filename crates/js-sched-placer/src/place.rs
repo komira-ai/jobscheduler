@@ -444,12 +444,6 @@ impl Placer for SchedPlacer {
         self.engine().whole_sweep(horizon, now);
     }
 
-    /// The holds the engine's whole-node requests have given up at their deadline
-    /// ([`Engine::whole_give_ups`]).
-    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
-        self.engine().whole_give_ups()
-    }
-
     /// The marks and pending grants of the engine's whole-node requests
     /// ([`super::engine::ledger`]).
     fn whole_reservations(&self) -> Option<Vec<Reservation>> {
@@ -505,13 +499,11 @@ impl Placer for SchedPlacer {
     }
 
     fn whole_cancel(&self, id: &RequestId) -> bool {
-        let now = self.now();
-        self.engine().whole_cancel(id, now)
+        self.engine().whole_cancel(id)
     }
 
     fn whole_cancel_lease(&self, lease: &LeaseId) -> Option<RequestId> {
-        let now = self.now();
-        self.engine().whole_cancel_lease(lease, now)
+        self.engine().whole_cancel_lease(lease)
     }
 
     fn whole_bind(&self, id: &RequestId, lease: LeaseId) -> bool {

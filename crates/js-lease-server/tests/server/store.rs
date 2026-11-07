@@ -16,7 +16,7 @@ use rustix::process::{Pid, Signal, kill_process};
 use crate::agents_support::agent_args;
 use crate::binary::launch;
 use crate::config_support::{PoolText, clock, file, kinds, quoted, server};
-use crate::scaler_support::{account, records_path, start_refused, text};
+use crate::scaler_support::{account, records_path, start, text};
 use crate::store_support::{
     run_to_end, sqlite_args_over, sqlite_db, sqlite_line, store_args, store_file, taken_address,
 };
@@ -181,8 +181,9 @@ fn the_store_file_is_refused_when_others_can_read_it() {
 /// line naming the writer lock, and that it took the lock before anything else: it bound no
 /// listener (its listen address is taken, which would have been refused naming `--listen`),
 /// made no lease file, printed no address, and did not open the store (the store's epoch,
-/// bumped by each open, says one server opened it). The first server goes on serving. It
-/// catches a lock that is not taken, taken after the listener or the lease file, or not held.
+/// bumped by each open, says one server opened it, and the store holds one write: the first
+/// server's import marker). The first server goes on serving. It catches a lock that is not
+/// taken, taken after the listener or the lease file, or not held.
 #[tokio::test]
 async fn a_second_process_cannot_take_the_writer_lock_on_sqlite() {
     let first = Scratch::new("store_lock_first");
@@ -222,30 +223,25 @@ async fn a_second_process_cannot_take_the_writer_lock_on_sqlite() {
         "only the first server and this test opened the store"
     );
     let changes = store.changes(Revision::ZERO, 100).unwrap();
-    assert_eq!((changes.rows.len(), changes.cursor), (0, Revision::ZERO));
+    let keys: Vec<&str> = changes.rows.iter().map(|row| row.key.as_str()).collect();
+    assert_eq!(keys, ["meta/server-state-imported"]);
 }
 
-/// Asserts that a store setting beside an elastic pool is refused at start with the message
-/// that store-backed server state is not available yet for it, naming the setting, before any
-/// listener is bound and before the scaler writes anything, and that the writer lock the
-/// refused start took is released with it. It catches a missing guard, which would start a
-/// server whose scaler records are not in the store it holds.
+/// Asserts that a store setting beside an elastic pool starts the server, whose scaler keeps
+/// its records in the store: the server holds the store, and its ticks write no records file
+/// beside the lease file. It catches a guard that still refuses an elastic pool with a store
+/// setting, and a scaler that still writes its file with one.
 #[tokio::test]
-async fn a_store_with_an_elastic_pool_refuses_with_the_not_available_message() {
+async fn a_store_with_an_elastic_pool_starts_and_writes_no_records_file() {
     let scratch = Scratch::new("store_elastic");
     let _account = account(&scratch);
     let path = quoted(&store_file(&scratch, &sqlite_line(&scratch)));
     let keys = format!("[server]\nstore = {path}\nallow_sqlite_store = true\n");
     let text = text(&scratch, "live", "initialise").replacen("[server]\n", &keys, 1);
-    let refused = start_refused(&scratch, &text).await;
-    assert_eq!(
-        refused,
-        "server.store: store-backed server state is not available yet for a server with an elastic pool; start this server without a store setting"
-    );
-    assert!(!records_path(&scratch).exists(), "the scaler wrote nothing");
-    assert!(!scratch.state().exists(), "no lease file was made");
-    let free = WriterLock::acquire(&WriterTarget::Sqlite(sqlite_db(&scratch)));
-    assert!(free.is_ok(), "the refused start released the lock");
+    let h = start(scratch, &text).await;
+    assert!(h.running.store().is_some(), "the server holds the store");
+    h.ticks.step().await;
+    assert!(!records_path(&h.scratch).exists(), "no records file");
 }
 
 /// Asserts that agent registration from the flags, whose bindings and join tokens the store

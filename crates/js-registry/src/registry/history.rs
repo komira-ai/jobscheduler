@@ -38,7 +38,7 @@ use js_usage::{
 use super::record::{Bound, Queue};
 use super::{HostState, Registry, State};
 use crate::lives;
-use crate::whole::requests::{FailedPrepare, RequestKey};
+use crate::whole::requests::FailedPrepare;
 
 /// A record and the log it goes to.
 pub(super) type Ended = Option<(Arc<dyn AllocationLog>, EndedRow)>;
@@ -228,7 +228,7 @@ impl Registry {
 /// The record of `lease` whose whole-node request waits for a host and is cancelled by the
 /// stop at `ended_at`, read from `keeper`'s wait list when a placer keeps it; `None` when no
 /// request of the lease waits. Its mark was dropped if it held one at any time while it
-/// waited, or gave a host up.
+/// waited; it gave no host up.
 fn waiting_row(
     state: &State,
     keeper: Option<&dyn crate::Placer>,
@@ -242,13 +242,13 @@ fn waiting_row(
             crate::Waiter {
                 id: id.clone(),
                 since,
-                give_ups: state.requests.give_ups(&RequestKey::from(id)),
+                give_ups: 0,
                 marked: state.marks.ever_marked(id),
             }
         }
     };
-    let (since, give_ups) = (waiter.since, waiter.give_ups);
-    let drain = match waiter.marked | (give_ups > 0) {
+    let since = waiter.since;
+    let drain = match waiter.marked {
         true => DrainOutcome::MarkDropped,
         false => DrainOutcome::NoMark,
     };
@@ -261,7 +261,7 @@ fn waiting_row(
         run_ms: Some(0),
         ended_reason: EndedReason::CancelledWhileWaiting,
         drain_outcome: drain,
-        give_up_outcome: Some(give_ups),
+        give_up_outcome: Some(0),
         estimated_end: None,
         actual_end: ended_at,
         error_ms: None,
@@ -275,29 +275,23 @@ mod tests {
 
     /// Catches: a whole-node request's wait counted from anything but its first
     /// presentation, a request that never waited given a wait, a mark that held reported as
-    /// dropped (or the reverse), a request with give-ups and no mark of its own reported as
-    /// holding none, and a lease put back after a restart given a whole-node request's queue
-    /// it never kept.
+    /// dropped (or the reverse), a give-up count other than zero, and a lease put back after
+    /// a restart given a whole-node request's queue it never kept.
     #[test]
-    fn a_queue_is_the_wait_the_mark_and_the_give_ups_of_the_request() {
+    fn a_queue_is_the_wait_and_the_mark_of_the_request_with_no_give_up() {
         let now = Timestamp::from_millis(50_000);
         let since = Some(Timestamp::from_millis(10_000));
-        let held = Queue::whole(now, since, (true, true), 2);
+        let held = Queue::whole(now, since, (true, true));
         let expected = Queue {
             queued_ms: Some(40_000),
             drain: DrainOutcome::MarkHeld,
-            give_ups: Some(2),
+            give_ups: Some(0),
         };
         assert_eq!(held, expected);
-        let drain =
-            |held, marked, give_ups| Queue::whole(now, since, (held, marked), give_ups).drain;
-        assert_eq!(drain(false, false, 1), DrainOutcome::MarkDropped);
-        assert_eq!(drain(false, true, 0), DrainOutcome::MarkDropped);
-        assert_eq!(drain(false, false, 0), DrainOutcome::NoMark);
-        assert_eq!(
-            Queue::whole(now, None, (false, false), 0).queued_ms,
-            Some(0)
-        );
+        let drain = |held, marked| Queue::whole(now, since, (held, marked)).drain;
+        assert_eq!(drain(false, true), DrainOutcome::MarkDropped);
+        assert_eq!(drain(false, false), DrainOutcome::NoMark);
+        assert_eq!(Queue::whole(now, None, (false, false)).queued_ms, Some(0));
         assert_eq!(Queue::restored(false), Queue::ORDINARY);
         let restored = (None, DrainOutcome::Unknown, None);
         let whole = Queue::restored(true);
