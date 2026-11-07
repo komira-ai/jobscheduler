@@ -1,8 +1,12 @@
 //! The prepare of a whole-node lease the engine commits from its queue under
 //! `--placement js-sched` ([`Engine::commit_whole`]), and what the engine keeps of a
 //! request whose prepare failed: the rules of `js-registry`'s `whole/exclusive.rs`,
-//! `whole/requests.rs` and `whole/ending.rs` for a request the engine queues, held here
-//! instead of in the registry (design 5.4, `whole-node.md` section 5).
+//! `whole/requests.rs` and `whole/ending.rs`, held here instead of in the registry (design
+//! 5.4, `whole-node.md` section 5). A whole-node lease the registry commits outside the
+//! queue (a start with no request id, told apart by its content, or one never queued) is
+//! kept from the commit the registry tells ([`Engine::whole_commit`]) to its end: its
+//! failure counts toward its request's record as below, and its deadline is the
+//! registry's.
 //!
 //! - **Prepare.** At the commit the engine takes the lease's deadline: the commit time plus
 //!   `prepare_timeout`. The registry asks whether it has passed only as the lease table's
@@ -31,8 +35,7 @@
 //!   terminal refusal is delivered, and when it has had no start and no failure for the
 //!   registry's idle horizon and holds no committed lease ([`Engine::whole_sweep`]): its
 //!   bars for life go with it; and when the request is cancelled while it waits
-//!   ([`Engine::whole_forget`]). The registry keeps the key the request is told apart by and
-//!   the horizon.
+//!   ([`Engine::whole_forget`]). The registry keeps the horizon.
 //!
 //! A lease that ends otherwise (released, expired, lost with its host) counts nothing: its
 //! deadline goes with it ([`Engine::ended`]).
@@ -43,10 +46,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_lease::Timestamp;
-use js_registry::{Exclusion, NotReady, PrepareFailure, RequestRecord};
+use js_registry::{Exclusion, NotReady, PrepareFailure, RequestKey, RequestRecord};
 use js_sched::Bar;
 use js_types::sched::{FarmTime, OperationId, WorkerId};
-use js_types::{LeaseId, RequestId};
+use js_types::{LeaseId, Request, RequestId};
 
 use super::Engine;
 use crate::map;
@@ -100,6 +103,13 @@ pub(super) struct Prepare {
     preparing: BTreeMap<LeaseId, Preparing>,
     /// The records, by request.
     records: BTreeMap<RequestId, Record>,
+    /// The records of the requests told apart by their content (whose start carried no id),
+    /// under a placer that keeps the wait list.
+    content: Vec<(Request, Record)>,
+    /// The whole-node leases the registry committed that the engine did not commit from its
+    /// queue (a start with no id, or one never queued), each with the key of its request,
+    /// until each ends ([`Engine::whole_commit`]).
+    committed: BTreeMap<LeaseId, RequestKey>,
     /// When each request the engine queues was first queued.
     queued_at: BTreeMap<RequestId, FarmTime>,
     /// `prepare_timeout` of the last round's settings.
@@ -177,6 +187,60 @@ impl Prepare {
     /// Lease `lease` ended: its deadline goes, and it counts nothing.
     pub(super) fn end(&mut self, lease: &LeaseId) {
         self.preparing.remove(lease);
+        self.committed.remove(lease);
+    }
+
+    /// The give-ups the record of request `id`, or its committed lease, holds.
+    pub(super) fn give_ups_of(&self, id: &RequestId) -> Option<u32> {
+        let held = self.preparing.values().filter(|held| held.id == *id);
+        let held = held.map(|held| held.give_ups);
+        let recorded = self.records.get(id).map(|record| record.give_ups);
+        held.chain(recorded).max()
+    }
+
+    /// The record under `key`, if there is one.
+    fn record(&self, key: &RequestKey) -> Option<&Record> {
+        match key {
+            RequestKey::Id(id) => self.records.get(id),
+            RequestKey::Content(request) => {
+                let found = self.content.iter().find(|(kept, _)| kept == request);
+                found.map(|(_, record)| record)
+            }
+        }
+    }
+
+    /// The record under `key`, made when there is none (first queued and touched at `now`).
+    fn record_mut(&mut self, key: &RequestKey, now: FarmTime) -> &mut Record {
+        let fresh = || Record {
+            failures: 0,
+            give_ups: 0,
+            bars: BTreeMap::new(),
+            last: None,
+            terminal: false,
+            queued_at: now,
+            touched: now,
+        };
+        match key {
+            RequestKey::Id(id) => self.records.entry(id.clone()).or_insert_with(fresh),
+            RequestKey::Content(request) => {
+                let at = self.content.iter().position(|(kept, _)| kept == request);
+                let at = at.unwrap_or_else(|| {
+                    self.content.push((request.clone(), fresh()));
+                    self.content.len() - 1
+                });
+                &mut self.content[at].1
+            }
+        }
+    }
+
+    /// Drops the record under `key`.
+    fn forget(&mut self, key: &RequestKey) {
+        match key {
+            RequestKey::Id(id) => {
+                self.records.remove(id);
+            }
+            RequestKey::Content(request) => self.content.retain(|(kept, _)| kept != request),
+        }
     }
 }
 
@@ -212,6 +276,10 @@ impl Engine {
     /// The agent reported `lease` ready: its deadline ends, and its request's record (failed
     /// prepares, bars, give-ups) goes. Nothing for a lease the engine did not commit.
     pub fn prepare_ready(&mut self, lease: &LeaseId) {
+        // A lease the registry committed lets its request's record go too.
+        if let Some(key) = self.prepare.committed.get(lease).cloned() {
+            self.prepare.forget(&key);
+        }
         let Some(preparing) = self.prepare.preparing.get_mut(lease) else {
             return;
         };
@@ -242,7 +310,7 @@ impl Engine {
         now: FarmTime,
     ) -> bool {
         let Some(preparing) = self.prepare.preparing.remove(lease) else {
-            return false;
+            return self.committed_failed(lease, failure, now);
         };
         let max_replace = self.prepare.max_replace;
         let record = self.prepare.records.entry(preparing.id.clone());
@@ -272,32 +340,99 @@ impl Engine {
         true
     }
 
-    /// A start of request `id` at `now`: `true` once for a terminal request, whose record
-    /// then goes (the start is refused, and the next one is a fresh request); `false` for any
-    /// other, whose record, if it has one, is marked as in use.
-    pub fn whole_start(&mut self, id: &RequestId, now: FarmTime) -> bool {
-        let Some(record) = self.prepare.records.get_mut(id) else {
+    /// The prepare of `lease`, a lease the registry committed and the engine did not commit
+    /// from its queue ([`Engine::whole_commit`]), failed at `now` as `failure` says: its
+    /// request counts one failure toward `max_replace` and is kept off the host as `failure`
+    /// says, as for a lease of the queue. `false` for a lease the engine knows nothing of.
+    fn committed_failed(
+        &mut self,
+        lease: &LeaseId,
+        failure: &PrepareFailure,
+        now: FarmTime,
+    ) -> bool {
+        let Some(key) = self.prepare.committed.remove(lease) else {
             return false;
         };
+        let host = self
+            .on
+            .iter()
+            .find(|(_, leases)| leases.contains_key(lease));
+        let worker = host.map(|(host, _)| map::worker(host));
+        let max_replace = self.prepare.max_replace;
+        let record = self.prepare.record_mut(&key, now);
+        record.failures = record.failures.saturating_add(1);
+        let barred = worker.zip(failure.exclusion);
+        if let Some((worker, exclusion)) = barred {
+            let bar = bar_of(exclusion);
+            let kept = record.bars.get(&worker).copied();
+            record.bars.insert(worker, stronger(kept, bar));
+        }
+        record.terminal = record.failures >= max_replace;
+        record.last = Some(failure.not_ready.clone());
+        record.touched = now;
+        self.ended(*lease);
+        true
+    }
+
+    /// The registry committed `lease` for the request under `key`: a lease the engine did not
+    /// commit from its queue is kept for the request until it ends, so its failed prepare is
+    /// counted ([`Engine::prepare_failed`]) and its request is held to one host
+    /// ([`Engine::whole_held_by_other`]).
+    pub fn whole_commit(&mut self, lease: LeaseId, key: &RequestKey) {
+        if !self.prepare.preparing.contains_key(&lease) {
+            self.prepare.committed.insert(lease, key.clone());
+        }
+    }
+
+    /// Whether a whole-node lease other than `lease` is committed for request `id`.
+    pub fn whole_held_by_other(&self, id: &RequestId, lease: &LeaseId) -> bool {
+        let key = RequestKey::Id(id.clone());
+        let mut queued = self.prepare.preparing.iter();
+        let queued = queued.any(|(held, preparing)| (preparing.id == *id) & (held != lease));
+        let mut committed = self.prepare.committed.iter();
+        let committed = committed.any(|(held, kept)| (*kept == key) & (held != lease));
+        queued | committed
+    }
+
+    /// A start of the request under `key` at `now`: `true` once for a terminal request, whose
+    /// record then goes (the start is refused, and the next one is a fresh request); `false`
+    /// for any other, whose record, if it has one, is marked as in use.
+    pub fn whole_start(&mut self, key: &RequestKey, now: FarmTime) -> bool {
+        if self.prepare.record(key).is_none() {
+            return false;
+        }
+        let record = self.prepare.record_mut(key, now);
         record.touched = now;
         let terminal = record.terminal;
         if terminal {
-            self.prepare.records.remove(id);
+            self.prepare.forget(key);
         }
         terminal
     }
 
-    /// The record of request `id` as the registry shows it: `None` while none of its
-    /// prepares has failed since it was last placed.
-    pub fn whole_record(&self, id: &RequestId) -> Option<RequestRecord> {
-        let record = self.prepare.records.get(id)?;
+    /// The record of the request under `key` as the registry shows it: its failed prepares,
+    /// bars and last failure, and the holds it gave up; `None` while none of its prepares
+    /// has failed since it was last placed and it has given no hold up.
+    pub fn whole_record(&self, key: &RequestKey) -> Option<RequestRecord> {
+        let give_ups = match key {
+            RequestKey::Id(id) => self.give_ups_of(id),
+            RequestKey::Content(_) => 0,
+        };
+        let Some(record) = self.prepare.record(key) else {
+            // A request that gave a hold up shows the count alone: a give-up's back-off is
+            // the scheduler's soft bar, which keeps the request off no host.
+            return (give_ups > 0).then(|| RequestRecord {
+                give_ups,
+                ..RequestRecord::default()
+            });
+        };
         let exclusions = record.bars.iter().filter_map(|(worker, bar)| {
             let host = map::host_id(worker).ok()?;
             Some((host, exclusion_of(*bar)))
         });
         Some(RequestRecord {
             prepare_failures: record.failures,
-            give_ups: record.give_ups,
+            give_ups: record.give_ups.max(give_ups),
             exclusions: exclusions.collect(),
             last: record.last.clone(),
             terminal: record.terminal,
@@ -307,6 +442,7 @@ impl Engine {
     /// Request `id` was cancelled while it waited: its record, its bars and its operation go
     /// at once, so the id names a fresh request if it is used again.
     pub fn whole_forget(&mut self, id: &RequestId) {
+        self.wait.cancel(id);
         self.prepare.records.remove(id);
         self.prepare.dequeue(id);
         self.carried.remove(id);
@@ -333,12 +469,22 @@ impl Engine {
             self.carried.remove(&id);
         }
         let Prepare {
-            preparing, records, ..
+            preparing,
+            records,
+            content,
+            committed,
+            ..
         } = &mut self.prepare;
-        let committed: BTreeSet<&RequestId> = preparing.values().map(|held| &held.id).collect();
+        let queued: BTreeSet<&RequestId> = preparing.values().map(|held| &held.id).collect();
+        let held = |key: &RequestKey| committed.values().any(|kept| kept == key);
+        let idle = |record: &Record| now.saturating_duration_since(record.touched) < horizon;
         records.retain(|id, record| {
-            let idle = now.saturating_duration_since(record.touched);
-            committed.contains(id) | (idle < horizon)
+            let key = RequestKey::Id(id.clone());
+            queued.contains(id) | held(&key) | idle(record)
+        });
+        content.retain(|(request, record)| {
+            let key = RequestKey::Content(request.clone());
+            held(&key) | idle(record)
         });
     }
 }

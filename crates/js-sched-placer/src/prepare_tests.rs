@@ -44,6 +44,11 @@ fn id(name: &str) -> RequestId {
     RequestId::new(name).unwrap()
 }
 
+/// The key of the request `name`, as the registry asks for its record.
+fn key(name: &str) -> js_registry::RequestKey {
+    js_registry::RequestKey::Id(id(name))
+}
+
 fn lease(seq: u64) -> LeaseId {
     LeaseId::new(1, seq)
 }
@@ -202,14 +207,14 @@ fn a_ready_report_ends_the_deadline_and_the_requests_record() {
     commit(&mut e, ("r", 0, 7), &["a"], 1_000);
     let until = Exclusion::Until(stamp(2_000 + BACKOFF));
     assert!(e.prepare_failed(&lease(7), &failure(Some(until), "not-quiet"), at(2_000)));
-    assert!(e.whole_record(&id("r")).is_some());
+    assert!(e.whole_record(&key("r")).is_some());
     e.ended(lease(1));
     let on = commit(&mut e, ("r", 3_000, 8), &["a", "b"], 3_000);
     assert_eq!(on, host("b"));
     e.prepare_ready(&lease(9));
-    assert!(e.whole_record(&id("r")).is_some());
+    assert!(e.whole_record(&key("r")).is_some());
     e.prepare_ready(&lease(8));
-    assert_eq!(e.whole_record(&id("r")), None);
+    assert_eq!(e.whole_record(&key("r")), None);
     assert_eq!(e.prepare_overdue(&lease(8), at(10 * TIMEOUT)), Some(false));
 }
 
@@ -255,7 +260,7 @@ fn a_failed_prepare_counts_bars_the_host_and_requeues_from_the_first_queue_time(
     let still_held = e.on.get(&host("a")).and_then(|on| on.get(&lease(7)));
     assert!(still_held.is_none());
     assert!(!e.prepare_failed(&lease(7), &failure(Some(until), "setup-failed"), at(12_000)));
-    let record = e.whole_record(&id("r")).unwrap();
+    let record = e.whole_record(&key("r")).unwrap();
     assert_eq!((record.prepare_failures, record.terminal), (1, false));
     assert_eq!(record.exclusions, BTreeMap::from([(host("a"), until)]));
     assert_eq!(record.last.unwrap().code, "setup-failed");
@@ -281,7 +286,7 @@ fn each_exclusion_bars_the_host_as_its_row_says() {
     let mut e = engine(&[("a", &[]), ("b", &[1]), ("c", &[2])]);
     commit(&mut e, ("r", 0, 7), &["a"], 1_000);
     assert!(e.prepare_failed(&lease(7), &failure(None, "host-unsafe"), at(2_000)));
-    assert!(e.whole_record(&id("r")).unwrap().exclusions.is_empty());
+    assert!(e.whole_record(&key("r")).unwrap().exclusions.is_empty());
     commit(&mut e, ("s", 0, 8), &["a"], 3_000);
     let until = Exclusion::Until(stamp(3_000 + BACKOFF));
     assert!(e.prepare_failed(&lease(8), &failure(Some(until), "not-quiet"), at(3_000)));
@@ -289,7 +294,7 @@ fn each_exclusion_bars_the_host_as_its_row_says() {
     commit(&mut e, ("s", after, 9), &["a"], after);
     let life = failure(Some(Exclusion::ForLife), "unsupported");
     assert!(e.prepare_failed(&lease(9), &life, at(after)));
-    let record = e.whole_record(&id("s")).unwrap();
+    let record = e.whole_record(&key("s")).unwrap();
     assert_eq!(
         record.exclusions,
         BTreeMap::from([(host("a"), Exclusion::ForLife)])
@@ -313,17 +318,17 @@ fn max_replace_refuses_the_next_start_once_and_then_starts_afresh() {
     commit(&mut e, ("r", 0, 7), &["a"], 1_000);
     let life = failure(Some(Exclusion::ForLife), "unsupported");
     assert!(e.prepare_failed(&lease(7), &life, at(2_000)));
-    assert!(!e.whole_start(&id("r"), at(2_500)));
-    assert!(!e.whole_record(&id("r")).unwrap().terminal);
+    assert!(!e.whole_start(&key("r"), at(2_500)));
+    assert!(!e.whole_record(&key("r")).unwrap().terminal);
     e.ended(lease(1));
     commit(&mut e, ("r", 3_000, 8), &["a", "b"], 3_000);
     assert!(e.prepare_failed(&lease(8), &failure(None, "host-unsafe"), at(4_000)));
-    let record = e.whole_record(&id("r")).unwrap();
+    let record = e.whole_record(&key("r")).unwrap();
     assert_eq!((record.prepare_failures, record.terminal), (2, true));
     assert_eq!(record.last.unwrap().code, "host-unsafe");
-    assert!(e.whole_start(&id("r"), at(5_000)));
-    assert_eq!(e.whole_record(&id("r")), None);
-    assert!(!e.whole_start(&id("r"), at(6_000)));
+    assert!(e.whole_start(&key("r"), at(5_000)));
+    assert_eq!(e.whole_record(&key("r")), None);
+    assert!(!e.whole_start(&key("r"), at(6_000)));
 }
 
 /// Catches: a record that outlives its consumer (its bars for life would never go), one
@@ -340,12 +345,12 @@ fn an_idle_record_is_dropped_after_the_horizon() {
     assert!(e.prepare_failed(&lease(8), &life, at(3_000)));
     e.ended(lease(1));
     commit(&mut e, ("s", 4_000, 9), &["a", "b"], 4_000);
-    assert!(!e.whole_start(&id("r"), at(10_000)));
+    assert!(!e.whole_start(&key("r"), at(10_000)));
     e.whole_sweep(horizon, at(10_000 + 4 * BACKOFF - 1));
-    assert!(e.whole_record(&id("r")).is_some());
+    assert!(e.whole_record(&key("r")).is_some());
     e.whole_sweep(horizon, at(10_000 + 4 * BACKOFF));
-    assert_eq!(e.whole_record(&id("r")), None);
-    assert!(e.whole_record(&id("s")).is_some());
+    assert_eq!(e.whole_record(&key("r")), None);
+    assert!(e.whole_record(&key("s")).is_some());
 }
 
 /// Catches: a lease that ends without a failure (released, expired) counted as one, or its
@@ -357,7 +362,7 @@ fn a_lease_that_ends_counts_nothing_and_has_no_deadline() {
     e.ended(lease(7));
     assert_eq!(e.prepare_overdue(&lease(7), at(1_000 + TIMEOUT)), None);
     assert!(!e.prepare_failed(&lease(7), &failure(None, "host-unsafe"), at(2_000)));
-    assert_eq!(e.whole_record(&id("r")), None);
+    assert_eq!(e.whole_record(&key("r")), None);
 }
 
 /// Catches: a rebuild of the engine that drops the deadlines of the committed leases or the
@@ -380,8 +385,8 @@ fn a_rebuild_keeps_the_prepares_and_the_records() {
         rebuilt.prepare_overdue(&lease(7), at(1_000 + TIMEOUT)),
         Some(true)
     );
-    assert_eq!(rebuilt.whole_record(&id("s")), e.whole_record(&id("s")));
-    assert!(rebuilt.whole_record(&id("s")).is_some());
+    assert_eq!(rebuilt.whole_record(&key("s")), e.whole_record(&key("s")));
+    assert!(rebuilt.whole_record(&key("s")).is_some());
 }
 
 /// Catches: the placer not handing the registry's calls to its engine. A placer that
@@ -394,11 +399,11 @@ fn the_placer_hands_the_prepare_calls_to_its_engine() {
     placer.prepare_ready(&lease(7));
     placer.prepare_again(&lease(7));
     assert!(!placer.prepare_failed(&lease(7), &failure(None, "host-unsafe")));
-    assert!(!placer.whole_start(&id("r")));
-    assert_eq!(placer.whole_record(&id("r")), None);
+    assert!(!placer.whole_start(&key("r")));
+    assert_eq!(placer.whole_record(&key("r")), None);
     placer.whole_forget(&id("r"));
     placer.whole_sweep(Duration::from_secs(60));
-    assert_eq!(placer.whole_record(&id("r")), None);
+    assert_eq!(placer.whole_record(&key("r")), None);
 }
 
 /// Catches: a cancelled request that keeps its failures, its bars or its queued operation
@@ -412,7 +417,7 @@ fn a_cancelled_request_forgets_its_record() {
     let life = failure(Some(Exclusion::ForLife), "unsupported");
     assert!(e.prepare_failed(&lease(7), &life, at(2_000)));
     e.whole_forget(&id("r"));
-    assert_eq!(e.whole_record(&id("r")), None);
+    assert_eq!(e.whole_record(&key("r")), None);
     commit(&mut e, ("s", 0, 8), &["a"], 3_000);
     assert!(e.prepare_failed(&lease(8), &life, at(4_000)));
     e.heard(&host("a"), None, at(5_000));

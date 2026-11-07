@@ -14,18 +14,23 @@
 //!   reservations to drop when the ceiling falls, and the last-capable-host rule.
 //! - [`reserve`]: the state machine that uses them, marking hosts for waiting requests.
 //!
-//! Which pass marks hosts depends on the placement. With no placer (`--placement registry`,
-//! the default), or a placer that keeps no queue, [`reserve`] runs at every pass. A placer
-//! that keeps the queue ([`crate::Placer::whole_round`]: the engine of `--placement
-//! js-sched`) runs the pass instead: the registry hands it the wait list, how it stands each
-//! host and the expected life of each lease, and takes the marks it answers as its own
-//! ([`reserve::Marks::adopt`]). The wait list, its cap and `regain_grace`, the request
-//! records, the exclusions after failed prepares, the start's gates and the commit stay
-//! the registry's under both. [`reserve`]'s pass is bypassed, not removed, under the engine:
-//! it is removed only with the registry placement.
+//! Who keeps the queue depends on the placement. With no placer (`--placement registry`,
+//! the default), or a placer that keeps no queue, the registry's own machine runs: the wait
+//! list ([`queue`]), the request records ([`requests`]) and the marks and their pass
+//! ([`reserve`]). A placer that keeps only the pass ([`crate::Placer::whole_round`]) runs it
+//! instead over the registry's wait list, how it stands each host and the expected life of
+//! each lease, and the registry takes the marks it answers as its own
+//! ([`reserve::Marks::adopt`]). A placer that keeps the wait list
+//! ([`crate::Placer::keeps_wait_list`]: the engine of `--placement js-sched`) keeps all of it:
+//! the list with its cap and `regain_grace`, the records, the exclusions and the marks, and
+//! the registry calls none of [`queue`], [`requests`] and [`reserve`] (counted by [`calls`]
+//! under the `test-support` feature); the start's gates, the commit of the booking and the
+//! host's prepare state stay the registry's. The machine is bypassed, not removed, under the
+//! engine: it is removed only with the registry placement.
 
 // The pure rules live in js-whole; these keep their old paths inside the registry.
 pub(crate) use js_whole::{caps, cost};
+pub(crate) mod calls;
 pub(crate) mod ending;
 pub(crate) mod exclusive;
 pub(crate) mod placement;

@@ -7,7 +7,7 @@
 //! A marked host takes no other request's start: the registry's start reads the mark, so
 //! a newer request cannot take the host of an older one. The one exception is backfill
 //! under a placer: a start of a class that shares a host, not a probe, is shown the
-//! marked host with the time left until its tail ends ([`Marks::tails_left`]), and the
+//! marked host with the time left until its tail ends, and the
 //! placer books it there only for work that ends by then ([`crate::Placer::pick`]). The
 //! mark is not a lease. The
 //! pass here never commits one and never stops anything (W7); the request's own next
@@ -61,18 +61,22 @@
 //!
 //! # Under a placer that keeps the queue
 //!
-//! With a placer that keeps the whole-node queue ([`crate::Placer::whole_round`], the engine
-//! of `--placement js-sched`) [`advance`] is not run: the placer's pass makes the marks, and
-//! the registry takes them ([`Marks::adopt`]) for the requests it presented, keeping the
-//! marks put back from the ledger of requests not presented since, which it hands the
-//! placer to hold ([`Marks::outside`]), with the caps lowered by them. What reads the marks
-//! here (the start's [`may_start`], the caps' room, backfill, a drain or a retire) reads
-//! them as before; the hosts API, [`crate::Registry::reservations`] and the ledger read each
-//! mark from the placer where it holds the same host for the same request
+//! With a placer that keeps only the pass of the whole-node queue
+//! ([`crate::Placer::whole_round`]) [`advance`] is not run: the placer's pass makes the
+//! marks, and the registry takes them ([`Marks::adopt`]) for the requests it presented,
+//! keeping the marks put back from the ledger of requests not presented since, which it
+//! hands the placer to hold ([`Marks::outside`]), with the caps lowered by them. What reads
+//! the marks (the start's gates, the caps' room, backfill, a drain or a retire) reads them
+//! as before; the hosts API, [`crate::Registry::reservations`] and the ledger read each mark
+//! from the placer where it holds the same host for the same request
 //! ([`crate::Placer::whole_reservations`]). [`Marks::stand`] still drops a put-back mark
 //! whose host never came back, and counts it, before the placer is shown the round; a
 //! request whose put-back mark waits for its host is shown to the placer only once the host
 //! has said hello, or the mark is gone.
+//!
+//! A placer that keeps the wait list ([`crate::Placer::keeps_wait_list`], the engine of
+//! `--placement js-sched`) holds every mark, those put back from the ledger included, and
+//! nothing here is called: every read of the marks is a read of the placer's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -82,6 +86,7 @@ use js_types::{HostId, Request, RequestId};
 
 use crate::whole_config::WholeNodeConfig;
 
+use super::calls::Calls;
 use super::caps::{self, Capability, Counts, Limits};
 use super::cost::{self, HostLoad};
 use super::queue::WaitList;
@@ -139,10 +144,15 @@ pub struct Reservation {
     pub tail_end: Option<u64>,
 }
 
-/// The marks of a pool: host to mark, and the waiting requests that have held a mark (for
-/// the record of how a request's drain went; kept while the request waits).
+/// The marks of a pool: host to mark, the waiting requests that have held a mark (for the
+/// record of how a request's drain went; kept while the request waits), and the calls the
+/// marks have had ([`crate::Registry::machine_calls`]).
 #[derive(Debug, Default)]
-pub(crate) struct Marks(BTreeMap<HostId, Mark>, BTreeSet<RequestId>);
+pub(crate) struct Marks(
+    BTreeMap<HostId, Mark>,
+    BTreeSet<RequestId>,
+    pub(crate) Calls,
+);
 
 impl Marks {
     /// The host and mark of request `id`.
@@ -151,13 +161,9 @@ impl Marks {
         found.map(|(host, mark)| (host.clone(), mark.clone()))
     }
 
-    /// The host set aside for request `id`.
-    pub(crate) fn host_of(&self, id: &RequestId) -> Option<HostId> {
-        self.of(id).map(|(host, _)| host)
-    }
-
     /// The request `host` is set aside for.
     pub(crate) fn holder(&self, host: &HostId) -> Option<&RequestId> {
+        self.2.note();
         self.0.get(host).map(|mark| &mark.request)
     }
 
@@ -165,6 +171,7 @@ impl Marks {
     /// took it: zero once that is past, `None` when it is not known (an assigned mark, or a
     /// host with a lease that had neither an estimate nor a bound).
     pub(crate) fn tails_left(&self, now: Timestamp) -> crate::MarkedTails {
+        self.2.note();
         let left = |end: u64| Duration::from_millis(end.saturating_sub(now.millis()));
         let marks = self.0.iter();
         let tails = marks.map(|(host, mark)| (host.clone(), mark.tail_end.map(left)));
@@ -183,6 +190,7 @@ impl Marks {
 
     /// The mark of request `id`, as an operator sees it.
     pub(crate) fn reservation_of(&self, id: &RequestId) -> Option<Reservation> {
+        self.2.note();
         self.of(id).map(|(host, mark)| reservation(host, &mark))
     }
 
@@ -194,6 +202,7 @@ impl Marks {
         presented: &BTreeSet<RequestId>,
         now: Timestamp,
     ) -> crate::MarkedTails {
+        self.2.note();
         let mut tails = self.tails_left(now);
         tails.retain(|host, _| {
             let holder = self.holder(host);
@@ -207,6 +216,7 @@ impl Marks {
     /// back from the ledger, not presented since) stay. A host keeps one mark and a request
     /// holds one ([`Marks::place`]).
     pub(crate) fn adopt(&mut self, marks: Vec<Reservation>, presented: &BTreeSet<RequestId>) {
+        self.2.note();
         self.0.retain(|_, mark| !presented.contains(&mark.request));
         for taken in marks {
             let mark = Mark {
@@ -225,18 +235,21 @@ impl Marks {
     /// Whether request `id` holds a mark put back from the ledger whose host the registry
     /// has not seen since ([`Marks::stand`] clears the wait once it is).
     pub(crate) fn unclaimed(&self, id: &RequestId) -> bool {
+        self.2.note();
         let mut marks = self.0.values();
         marks.any(|mark| (mark.request == *id) & mark.claim_by.is_some())
     }
 
     /// Whether request `id` has held a mark while it waited, whether or not it holds one now.
     pub(crate) fn ever_marked(&self, id: &RequestId) -> bool {
+        self.2.note();
         self.1.contains(id)
     }
 
     /// Puts back a mark from the ledger on its host: whether it was, which it is not when
     /// the host carries a mark already. The request's earlier mark goes, so it holds one.
     pub(crate) fn revive(&mut self, mark: Revived) -> bool {
+        self.2.note();
         if self.0.contains_key(&mark.host) {
             return false;
         }
@@ -261,6 +274,7 @@ impl Marks {
     /// is known clears the wait. How many put-back marks were dropped for their host
     /// never coming back.
     pub(crate) fn stand(&mut self, pass: &Pass<'_>) -> u64 {
+        self.2.note();
         let mut gone = 0;
         self.0.retain(|host, mark| {
             let fact = pass.hosts.iter().find(|fact| fact.id == *host);
@@ -277,23 +291,27 @@ impl Marks {
 
     /// Drops the mark of request `id`, if it has one.
     pub(crate) fn drop_request(&mut self, id: &RequestId) {
+        self.2.note();
         self.0.retain(|_, mark| mark.request != *id);
     }
 
     /// Drops the mark on `host`, if it has one: the request that held it is set aside for
     /// no host and is placed again at the next pass.
     pub(crate) fn drop_host(&mut self, host: &HostId) {
+        self.2.note();
         self.0.remove(host);
     }
 
     /// Drops every mark whose request is not on the wait list.
     pub(crate) fn retain_waiting(&mut self, waiting: &WaitList) {
+        self.2.note();
         self.0.retain(|_, mark| waiting.holds(&mark.request));
         self.1.retain(|id| waiting.holds(id));
     }
 
     /// The marks, host order.
     pub(crate) fn reservations(&self) -> Vec<Reservation> {
+        self.2.note();
         let marks = self.0.iter();
         let view = marks.map(|(host, mark)| reservation(host.clone(), mark));
         view.collect()
@@ -301,6 +319,7 @@ impl Marks {
 
     /// Whether no host is set aside.
     pub(crate) fn is_empty(&self) -> bool {
+        self.2.note();
         self.0.is_empty()
     }
 
@@ -381,7 +400,7 @@ fn whole(marks: &Marks, pass: &Pass<'_>) -> usize {
 
 /// Whether the caps let one more host be set aside. An assigned host drains nothing, so
 /// it is not held to `max_draining`.
-pub(crate) fn has_room(marks: &Marks, pass: &Pass<'_>, assigning: bool) -> bool {
+fn has_room(marks: &Marks, pass: &Pass<'_>, assigning: bool) -> bool {
     let settings = pass.settings;
     let draining = if assigning { 0 } else { marks.draining() };
     let counts = Counts {
@@ -397,24 +416,6 @@ pub(crate) fn has_room(marks: &Marks, pass: &Pass<'_>, assigning: bool) -> bool 
         per_consumer: None,
     };
     caps::may_reserve(counts, limits).is_ok()
-}
-
-/// Whether a start may book `host`, as the marks leave it. A marked host books only to
-/// the request it is marked for, and only to a whole-node start that names it. An unmarked
-/// host books to any start, except that a whole-node start with a request id books only
-/// the host it was marked, and one without an id needs `room` under the caps.
-pub(crate) fn may_start(
-    holder: Option<&RequestId>,
-    whole: bool,
-    request: Option<&RequestId>,
-    room: bool,
-) -> bool {
-    match (holder, whole, request) {
-        (Some(holder), true, Some(request)) => holder == request,
-        (Some(_), _, _) | (None, true, Some(_)) => false,
-        (None, true, None) => room,
-        (None, false, _) => true,
-    }
 }
 
 struct Ctx<'a> {

@@ -669,7 +669,9 @@ job leaves the queue or the machine can no longer take it; the step then holds t
 on its way or registered, for the job alone, and does not drain the registered host as idle.
 The registry keeps a wait list of whole-node requests that found no host
 (`crates/js-registry/src/whole/queue.rs`: in memory, capped at 1024, an entry lives while
-the consumer presents it again within `regain_grace`). It has no public read. PR 7 adds
+the consumer presents it again within `regain_grace`; under `--placement js-sched` the
+engine keeps it with the same rules, `crates/js-sched-placer/src/wait.rs`, and
+`Registry::waiting` reads it from there). It has no public read. PR 7 adds
 `Registry::waiting() -> Vec<Waiting { id, demand: Demand, since, reserved: Option<HostId> }>`.
 `reserved` is set when the request holds a mark on a host: `whole/reserve.rs` marks a free
 host as assigned, or a busy host as reserved, for one waiting request, and

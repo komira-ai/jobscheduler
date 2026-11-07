@@ -27,15 +27,24 @@
 //! front presents itself again. Giving a freed host to the front request is a later
 //! change; until then a place on the list is not a promise of a host.
 //!
+//! # Under a placer that keeps the wait list
+//!
+//! Under `--placement js-sched` the engine keeps the list ([`crate::Placer::keeps_wait_list`],
+//! `js-sched-placer`'s `engine::wait`) with the same rules, and this one is never called: the
+//! registry hands every presentation, cancel, stop, binding, place and restart to the engine.
+//!
 //! # The size is capped
 //!
 //! The list holds at most [`MAX_WAITING_REQUESTS`] requests, because a new id is looked up by a
-//! scan of the list. A new request past the cap is not entered (it is [`Verdict::Full`])
+//! scan of the list. A new request past the cap is not entered (it is [`Presented::Full`])
 //! and the start is answered `NoCapacity`, as a start without an id is; a request on the
 //! list keeps its place and is never put out by a newcomer.
 
 use js_lease::Timestamp;
 use js_types::{LeaseId, Request, RequestId};
+
+use super::calls::Calls;
+use crate::Presented;
 
 /// The most requests the list holds at once.
 pub const MAX_WAITING_REQUESTS: usize = 1024;
@@ -61,30 +70,19 @@ struct Entry {
     unservable_since: Option<Timestamp>,
 }
 
-/// How the list answers a presentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verdict {
-    /// The request waits, at this place from the front (zero is next).
-    Waiting(usize),
-    /// The list holds [`MAX_WAITING_REQUESTS`] requests and this one is not among them: it is not
-    /// entered.
-    Full,
-    /// The request has no host that could ever serve it and has waited out the grace
-    /// since it was last seen to have one, or never had a place: it is refused and not
-    /// kept.
-    Unservable,
-}
-
 /// The requests that wait for a host, in first-seen order.
 #[derive(Debug, Default)]
 pub(crate) struct WaitList {
     entries: Vec<Entry>,
+    /// The calls the list has had ([`crate::Registry::machine_calls`]).
+    pub(crate) calls: Calls,
 }
 
 impl WaitList {
     /// Drops every entry not presented for `grace_ms` or more at `now`; how many of them
     /// were restored entries the consumer never presented again.
     pub(crate) fn expire(&mut self, now: Timestamp, grace_ms: u64) -> u64 {
+        self.calls.note();
         let mut unclaimed = 0;
         self.entries.retain(|entry| {
             let kept = now.millis().saturating_sub(entry.seen.millis()) < grace_ms;
@@ -100,6 +98,7 @@ impl WaitList {
     /// Called in the order the entries are to wait in, once per id, at a start. The size
     /// cap is not applied: the ledger was written from a list that held it.
     pub(crate) fn restore(&mut self, id: RequestId, since: Timestamp, now: Timestamp) {
+        self.calls.note();
         self.entries.push(Entry {
             id,
             request: None,
@@ -129,11 +128,12 @@ impl WaitList {
         capable: bool,
         now: Timestamp,
         grace_ms: u64,
-    ) -> Verdict {
+    ) -> Presented {
+        self.calls.note();
         let at = self.entries.iter().position(|entry| entry.id == *id);
         let Some(at) = at else {
             return match (capable, self.entries.len() < MAX_WAITING_REQUESTS) {
-                (true, false) => Verdict::Full,
+                (true, false) => Presented::Full,
                 (true, true) => {
                     self.entries.push(Entry {
                         id: id.clone(),
@@ -143,9 +143,9 @@ impl WaitList {
                         seen: now,
                         unservable_since: None,
                     });
-                    Verdict::Waiting(self.entries.len() - 1)
+                    Presented::Waiting(self.entries.len() - 1)
                 }
-                (false, _) => Verdict::Unservable,
+                (false, _) => Presented::Unservable,
             };
         };
         let entry = &mut self.entries[at];
@@ -162,14 +162,15 @@ impl WaitList {
         match spent {
             true => {
                 self.entries.remove(at);
-                Verdict::Unservable
+                Presented::Unservable
             }
-            false => Verdict::Waiting(at),
+            false => Presented::Waiting(at),
         }
     }
 
     /// Removes request `id` at once; whether it was waiting.
     pub(crate) fn cancel(&mut self, id: &RequestId) -> bool {
+        self.calls.note();
         let before = self.entries.len();
         self.entries.retain(|entry| entry.id != *id);
         self.entries.len() < before
@@ -178,12 +179,14 @@ impl WaitList {
     /// Binds the waiting request `id` to `lease`, as if `lease` had presented it, without
     /// a presentation: a stop of `lease` then takes it off the list. Whether `id` waits.
     pub(crate) fn bind(&mut self, id: &RequestId, lease: LeaseId) -> bool {
+        self.calls.note();
         let entry = self.entries.iter_mut().find(|entry| entry.id == *id);
         entry.map(|entry| entry.lease = Some(lease)).is_some()
     }
 
     /// Removes the request lease `lease` presented last, at once; its id, if one waited.
     pub(crate) fn cancel_lease(&mut self, lease: &LeaseId) -> Option<RequestId> {
+        self.calls.note();
         let at = self.position_of(lease)?;
         Some(self.entries.remove(at).id)
     }
@@ -191,12 +194,14 @@ impl WaitList {
     /// The request lease `lease` presented last, if it waits, and when it was first
     /// presented.
     pub(crate) fn presented_by(&self, lease: &LeaseId) -> Option<(&RequestId, Timestamp)> {
+        self.calls.note();
         let entry = &self.entries[self.position_of(lease)?];
         Some((&entry.id, entry.since))
     }
 
     /// Whether a request lease `lease` presented last is waiting.
     pub(crate) fn holds_lease(&self, lease: &LeaseId) -> bool {
+        self.calls.note();
         self.position_of(lease).is_some()
     }
 
@@ -209,6 +214,7 @@ impl WaitList {
     /// for and when it was first presented. A restored entry not presented since is not
     /// among them.
     pub(crate) fn waiting(&self) -> impl Iterator<Item = (&RequestId, &Request, Timestamp)> {
+        self.calls.note();
         let waiting = self.entries.iter();
         waiting.filter_map(|entry| Some((&entry.id, entry.request.as_ref()?, entry.since)))
     }
@@ -216,26 +222,31 @@ impl WaitList {
     /// Every entry, front first, restored or presented: the id and when it was first
     /// presented. The place of an entry is its index here.
     pub(crate) fn queue(&self) -> impl Iterator<Item = (&RequestId, Timestamp)> {
+        self.calls.note();
         self.entries.iter().map(|entry| (&entry.id, entry.since))
     }
 
     /// How many requests wait, restored ones included.
     pub(crate) fn len(&self) -> usize {
+        self.calls.note();
         self.entries.len()
     }
 
     /// Whether no request is waiting.
     pub(crate) fn is_empty(&self) -> bool {
+        self.calls.note();
         self.entries.is_empty()
     }
 
     /// Whether request `id` is waiting.
     pub(crate) fn holds(&self, id: &RequestId) -> bool {
+        self.calls.note();
         self.position(id).is_some()
     }
 
     /// Where request `id` waits from the front, if it does.
     pub(crate) fn position(&self, id: &RequestId) -> Option<usize> {
+        self.calls.note();
         self.entries.iter().position(|entry| entry.id == *id)
     }
 }

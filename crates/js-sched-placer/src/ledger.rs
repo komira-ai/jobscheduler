@@ -20,10 +20,10 @@
 //!   is put back and not queued within the registry's idle horizon goes
 //!   ([`Engine::whole_sweep`]), as the registry's own records do.
 //!
-//! The mark of a request put back is not taken here: the registry keeps it until the request
-//! is presented again and its host has said hello, and hands it over then with the request
-//! ([`js_registry::WaitingWhole::mark`]); until then the engine holds the host outside its
-//! queue ([`js_registry::WholeRound::outside`]).
+//! The place of a request put back and its mark are not taken here: the wait list keeps them
+//! ([`super::wait`]) until the request is presented again and its mark's host has said
+//! hello, and hands the mark to the queue then with the request; until then the engine holds
+//! the host outside its queue ([`js_registry::WholeRound::outside`]).
 
 use std::collections::BTreeMap;
 

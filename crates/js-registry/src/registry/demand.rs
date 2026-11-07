@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use js_elastic::Demand;
 use js_lease::Timestamp;
-use js_types::{HostId, RequestId};
+use js_types::{HostId, Request, RequestId};
 
 use super::{Registry, State};
 
@@ -56,7 +56,7 @@ impl Registry {
     /// that finds no free host, and leaves it when it is placed, cancelled, refused, or
     /// not presented for the pool's `regain_grace` (see [`Registry::queue_position`]).
     pub fn waiting(&self) -> Vec<Waiting> {
-        waiting_rows(&self.lock())
+        self.waiting_rows(&self.lock())
     }
 
     /// Sets, or with `None` removes, the answer to "could a launch serve this request".
@@ -68,14 +68,32 @@ impl Registry {
     }
 }
 
-/// The wait list in `state`, longest waiting first.
-pub(super) fn waiting_rows(state: &State) -> Vec<Waiting> {
-    let waiting = state.waiting.waiting();
-    let rows = waiting.map(|(id, request, since)| Waiting {
-        id: id.clone(),
-        demand: Demand::from_request(request),
-        since,
-        reserved: state.marks.host_of(id),
-    });
-    rows.collect()
+impl Registry {
+    /// The wait list in `state`, longest waiting first: the registry's, or the placer's when
+    /// it keeps it ([`crate::Placer::whole_waiting`]), each with the host set aside for it.
+    pub(super) fn waiting_rows(&self, state: &State) -> Vec<Waiting> {
+        let marks = self.marks_now(state);
+        let reserved = |id: &RequestId| {
+            let mark = marks.iter().find(|mark| mark.request == *id);
+            mark.map(|mark| mark.host.clone())
+        };
+        let row = |id: &RequestId, request: &Request, since: Timestamp| Waiting {
+            id: id.clone(),
+            demand: Demand::from_request(request),
+            since,
+            reserved: reserved(id),
+        };
+        match self.keeper() {
+            Some(keeper) => {
+                let waiting = keeper.whole_waiting().into_iter();
+                waiting.map(|w| row(&w.id, &w.request, w.since)).collect()
+            }
+            None => {
+                let waiting = state.waiting.waiting();
+                waiting
+                    .map(|(id, request, since)| row(id, request, since))
+                    .collect()
+            }
+        }
+    }
 }

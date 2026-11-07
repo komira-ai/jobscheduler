@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The call counters of the registry's reservation machine (`Registry::machine_calls`), which
+# the tests read to show which placement calls it. The crate's own tests turn it on through
+# the `[dev-dependencies]` entry below.
+test-support = []
+
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
@@ -22,6 +28,7 @@ subtle.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+js-registry = { path = ".", features = ["test-support"] }
 # tests/capacity.rs runs the registered set of the machine-provider conformance suite
 # against `StaticCapacity`.
 js-elastic = { path = "../js-elastic", features = ["conformance"] }
