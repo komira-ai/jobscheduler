@@ -12,11 +12,14 @@ use js_jobs::{JobStore, ScriptedIds};
 use js_pool_static::EXAMPLE_CONFIG;
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{ManualClock as StoreClock, SystemClock};
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::agents_support::{JOIN, Session, post, session};
+use crate::agents_support::{JOIN, Session};
+use crate::jobs_support::{
+    beat_with, commands, job_agent as shared_agent, job_of, one_start, running, submit_body,
+};
 use crate::support::{
-    Harness, LogCapture, Reply, Scratch, SharedPool, T0, TOKEN, args_with, base_args, config, ids,
+    Harness, LogCapture, Scratch, SharedPool, T0, TOKEN, args_with, base_args, config, ids,
     lease_body, lease_file, replace, request,
 };
 
@@ -276,17 +279,9 @@ async fn submit(h: &Harness) -> String {
             "wallLimitSeconds": "600",
         }
     });
-    let bytes = body.to_string().into_bytes();
-    let addr = h.running.job_addr().expect("the job service is on");
-    let made = request(addr, "POST", "/v1/jobs", Some(TOKEN), Some(&bytes)).await;
+    let made = submit_body(h, &body).await;
     assert_eq!(made.status, 201, "{}", made.body);
     made.json()["job"]["id"].as_str().unwrap().to_owned()
-}
-
-/// The job service's answer about the job `id`.
-async fn job_of(h: &Harness, id: &str) -> Reply {
-    let addr = h.running.job_addr().expect("the job service is on");
-    request(addr, "GET", &format!("/v1/jobs/{id}"), Some(TOKEN), None).await
 }
 
 /// The hello of `host`, an agent that speaks the per-job messages, admitted.
@@ -299,47 +294,7 @@ async fn job_agent(h: &Harness, host: &str) -> Session {
         "capabilities": { "per-job": "true", "arch": "x86_64" },
         "phase": "serving",
     });
-    session(&post(h, "/v1/agent/hello", Some(JOIN), &hello).await, host)
-}
-
-/// The heartbeat of `agent` listing `jobs` (each a `(job id, state, result)`), answered 200.
-async fn beat_with(h: &Harness, agent: &Session, jobs: &[Value]) -> Value {
-    let mut body = agent.beat();
-    body["jobs"] = json!(jobs);
-    let reply = post(h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    reply.json()
-}
-
-/// A job `id` the agent lists as running.
-fn running(id: &str) -> Value {
-    json!({ "job_id": id, "state": "running" })
-}
-
-/// The `(job id, allocation id)` of each start in `reply`, and the job ids it stops.
-fn commands(reply: &Value) -> (Vec<(String, String)>, Vec<String>) {
-    let mut starts = Vec::new();
-    let mut stops = Vec::new();
-    for command in reply["commands"].as_array().into_iter().flatten() {
-        let job = command["job_id"].as_str().unwrap_or_default().to_owned();
-        match command["type"].as_str() {
-            Some("job_start") => {
-                let allocation = command["allocation_id"].as_str().unwrap().to_owned();
-                starts.push((job, allocation));
-            }
-            Some("job_stop") => stops.push(job),
-            _ => {}
-        }
-    }
-    (starts, stops)
-}
-
-/// The one start `reply` carries.
-fn one_start(reply: &Value) -> (String, String) {
-    let (starts, stops) = commands(reply);
-    assert!(stops.is_empty(), "{reply}");
-    assert_eq!(starts.len(), 1, "{reply}");
-    starts.into_iter().next().unwrap()
+    shared_agent(h, &hello).await
 }
 
 /// Every job of the job store in `file` with its allocation, read after the server stopped,
