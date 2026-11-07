@@ -29,6 +29,9 @@ mod world;
 
 use js_sim_cell::{Scenario, Store};
 
+/// What makes one of the family's scenarios over a store.
+type Of = fn(Store) -> Scenario;
+
 /// The seeds of each scenario over SQLite.
 const SQLITE_SEEDS: u64 = 16;
 
@@ -38,7 +41,7 @@ const POSTGRES_SEEDS: u64 = 8;
 
 /// Runs the scenario `of` makes over SQLite for [`SQLITE_SEEDS`], and with the feature
 /// `postgres` over Postgres for `POSTGRES_SEEDS`; fails at the first seed that fails.
-fn over_every_store(of: fn(Store) -> Scenario) {
+fn over_every_store(of: Of) {
     of(Store::Sqlite).run_seeds(SQLITE_SEEDS);
     #[cfg(feature = "postgres")]
     of(Store::Postgres).run_seeds(POSTGRES_SEEDS);
@@ -81,16 +84,14 @@ fn the_scaler_records_survive_a_restart_and_launch_nothing_twice() {
 fn the_sqlite_and_postgres_stores_give_the_same_trace_hash() {
     use js_sim::golden::GoldenFile;
 
-    let pairs: [(&str, fn(Store) -> Scenario, u64); 5] = [
+    let pairs: [(&str, Of, u64); 5] = [
         ("the restart", world::restart, 0),
         ("the restart", world::restart, 1),
         ("the burst of hellos", world::hellos, 0),
         ("the second server", world::second, 0),
         ("the scaler's crash", world::scaler, 0),
     ];
-    let hash = |of: fn(Store) -> Scenario, store, seed: u64| {
-        of(store).run_seed_range(seed..seed + 1).runs[0].hash
-    };
+    let hash = |of: Of, store, seed: u64| of(store).run_seed_range(seed..seed + 1).runs[0].hash;
     let differ = pairs.iter().filter_map(|&(name, of, seed)| {
         let (sqlite, postgres) = (
             hash(of, Store::Sqlite, seed),

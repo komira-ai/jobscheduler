@@ -125,23 +125,28 @@ impl StoreAt {
             StoreAt::Sqlite(file) => {
                 let clock = Arc::new(StoreClock(clock.clone()));
                 let opened = SqliteStore::open(file, clock, Options::default());
-                let store = opened.map_err(|err| err.to_string())?;
+                let store = opened.map_err(text)?;
                 rows(&store, prefix)
             }
             #[cfg(feature = "postgres")]
             StoreAt::Postgres(database) => {
                 let _ = clock;
-                let config = PostgresConfig::parse(&database.url()).map_err(|e| e.to_string())?;
-                let store = PostgresStore::open(&config).map_err(|err| err.to_string())?;
+                let config = PostgresConfig::parse(&database.url()).map_err(text)?;
+                let store = PostgresStore::open(&config).map_err(text)?;
                 rows(&store, prefix)
             }
         }
     }
 }
 
+/// `err` as text, for a read of the store that failed.
+fn text(err: impl std::fmt::Display) -> String {
+    err.to_string()
+}
+
 /// Every key of `store` under `prefix`, in key order, with its value.
 fn rows(store: &dyn js_state::Store, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let scanned = store.scan_prefix(prefix).map_err(|err| err.to_string())?;
+    let scanned = store.scan_prefix(prefix).map_err(text)?;
     let rows = scanned.into_iter().map(|(key, row)| (key, row.value));
     Ok(rows.collect())
 }

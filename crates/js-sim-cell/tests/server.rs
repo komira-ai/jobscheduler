@@ -463,6 +463,10 @@ fn the_store_choice_opens_the_store_the_server_flag_names() {
         .restart(&spec)
         .expect("starts again over the same store");
     assert!(server.is_up());
+    server.stop();
+    fs::write(path.join(SQLITE_FILE), "not a state store").expect("the file is written");
+    let unread = server.stored("hosts/");
+    assert!(unread.is_err(), "not a store the cell can open: {unread:?}");
 
     #[cfg(feature = "postgres")]
     {
@@ -487,7 +491,9 @@ fn the_store_choice_opens_the_store_the_server_flag_names() {
 /// operator route (a token it did not mint adds no host) and is seated; a stop of the server
 /// reads the store while it is down, the token used by that host and the host bound to it;
 /// a second server is started over the store while the first is down and refused, naming
-/// `--store` and the writer lock, once the first runs again; and a read pairs each used
+/// `--store` and the writer lock, once the first runs again; a stop over a store that
+/// cannot be opened is kept as a read that failed and traced `store unread`; and a read
+/// pairs each used
 /// token with its binding, naming a token used by a host with no binding to it and a host
 /// bound to a token it did not use, and passing a host bound to the pool's shared token.
 /// Catches a mint whose token the agent never gets, a read that misses a row or reads a
@@ -495,7 +501,10 @@ fn the_store_choice_opens_the_store_the_server_flag_names() {
 /// a binding without its token.
 #[test]
 fn a_store_read_pairs_each_used_token_with_its_binding() {
-    let mut cell = cell("store-side", pool(1), 0, Faults::default());
+    let dir = scratch("store-side");
+    let path = dir.path().to_path_buf();
+    let setup = Setup::new(11).with_trace_lines();
+    let mut cell = Cell::new(setup, pool(1), dir, Faults::default()).expect("starts");
     assert!(cell.join(0).is_none(), "no token minted yet");
     cell.mint_join_token();
     assert_eq!(cell.minted(), 1);
@@ -523,6 +532,17 @@ fn a_store_read_pairs_each_used_token_with_its_binding() {
         refused,
     };
     assert_eq!(seconds, [second(2_000, None), second(2_000, Some(refused))]);
+    cell.stop_server();
+    fs::write(path.join(SQLITE_FILE), "not a state store").expect("the file is written");
+    cell.stop_server();
+    let reads = cell.store_reads();
+    assert_eq!(reads.len(), 3);
+    assert!(reads[1].is_ok() && reads[2].is_err(), "{reads:?}");
+    let lines = cell.trace_lines().expect("lines are kept");
+    let unread = lines
+        .iter()
+        .filter(|line| line.ends_with(" cell store unread"));
+    assert_eq!(unread.count(), 1);
 
     let used = |host: &str| format!("{{\"version\":1,\"used_by\":\"{host}\"}}").into_bytes();
     let bound = |digest: &str| format!("{{\"version\":1,\"credential\":\"{digest}\"}}");
