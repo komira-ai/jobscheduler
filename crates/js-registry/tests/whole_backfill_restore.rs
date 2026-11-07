@@ -135,6 +135,31 @@ fn a_restored_mark_is_shown_with_the_time_left_until_its_persisted_tail() {
     assert_eq!(seen, [MarkedTails::from([(host("a"), Some(left))])]);
 }
 
+/// Catches: a ledger written under a placer that keeps no whole-node queue (one that takes
+/// the trait's defaults) without the registry's own mark and place: the record a restart put
+/// back is written again whole, with its tail.
+#[test]
+fn a_placer_that_keeps_no_queue_leaves_the_ledger_to_the_registry() {
+    let (w, _) = restarted(Some(T0 + 3_600_000));
+    let ledger = w.fx.registry.reservation_ledger();
+    assert_eq!(ledger.len(), 1);
+    let row = &ledger[0];
+    assert_eq!(row.request_id, "q");
+    let held = row.held.as_ref().unwrap();
+    assert_eq!(
+        (held.host.as_str(), held.tail_end),
+        ("a", Some(T0 + 3_600_000))
+    );
+    assert_eq!(held.reserved_at, Timestamp::from_millis(T0));
+    let queued = row.queued.unwrap();
+    assert_eq!(
+        (queued.place, queued.since),
+        (0, Timestamp::from_millis(T0))
+    );
+    assert_eq!((row.give_ups, row.prepare_failures), (0, 0));
+    assert!(row.exclusions.is_empty());
+}
+
 /// Catches: a mark restored without a tail read as a free host, or as one ending now: the
 /// start is shown `a` with no known tail, and the placer (which books no marked host)
 /// books nothing on it.
