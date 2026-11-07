@@ -315,17 +315,20 @@ fn is_gone(pid: i32) -> bool {
 /// then exits is refused as `not-quiet` when its output never ends, and that the helper
 /// does not outlive the call: the runner kills the hook's whole process group, not only the
 /// hook. It catches a runner that kills the direct child alone and leaks the helper (and
-/// the thread waiting for the output).
+/// the thread waiting for the output). The script is given to `/bin/sh` to read rather than
+/// executed itself: a file this test binary has just written can still be open for writing
+/// in a process another test thread is starting, and executing it then fails with
+/// `ETXTBSY` before the hook runs at all.
 #[test]
 fn an_overrun_kills_the_helper_the_hook_left_holding_its_output() {
     let dir = Scratch::new("readiness-group");
     let pid_file = dir.path("helper.pid");
     let script = format!(
-        "#!/bin/sh\nsleep 1000000 &\necho $! > {}\nexit 0\n",
+        "sleep 1000000 &\necho $! > {}\nexit 0\n",
         pid_file.display()
     );
-    let path = dir.write("hook", &script, 0o755);
-    let hook = ReadinessHook::new(path.to_str().unwrap(), &[]).unwrap();
+    let path = dir.write("hook", &script, 0o644);
+    let hook = hook(&[path.to_str().unwrap()]);
     let verdict = hook.run(&hook_runner(Duration::from_millis(500)));
     assert_eq!(
         verdict,

@@ -404,9 +404,12 @@ answer from what the commit returned; neither holds anything of its own outside 
    GPU count needs a class, from `gpuClass` or else the accelerator's model, which the alias
    table resolves (an unknown model passes through). The constraints are in the capability
    vocabulary a lease request speaks: `os` `linux` or `macos`, any `arch` (`aarch64` is
-   recorded as `arm64`), an execution mode, an ISA level, and an accelerator that does not
-   contradict the class; the ISA level and the accelerator are recorded among the job's
-   capabilities, where placement reads them. The wall limit is present, above 0 and at most
+   recorded as `arm64`), an execution mode, an ISA level, an accelerator that does not
+   contradict the class, and an isolation (`contained`, or unspecified, which reads as
+   contained, and `host`, which is refused as `no-capable-host` unless a registered host
+   reported that it runs host jobs; an unknown value is refused naming
+   `spec.constraints.isolation`); the ISA level and the accelerator are recorded among the
+   job's capabilities, where placement reads them. The wall limit is present, above 0 and at most
    the ceiling, `--max-job-wall` (30 days unless given). The network level is a known one;
    each port is 1 to 65535 and no host port is given twice (refused naming
    `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's run

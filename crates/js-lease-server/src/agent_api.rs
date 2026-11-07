@@ -18,10 +18,11 @@
 //!   allocation of on this host, and each listed job that ended without the host reporting
 //!   it; then a `job_start` for each job placed on the host that it does not list yet, with
 //!   the allocation's booked resources, the wall limit, the network level and the declared
-//!   ports, keyed by the job id and the allocation id. Each is resent until the listing
-//!   shows it taken; all of them together stay within `MAX_COMMANDS`. A job that books the
-//!   whole host is neither stopped nor started while it is placed (the host prepares), and is
-//!   started once it is starting;
+//!   ports, keyed by the job id and the allocation id, and `isolation: host` for a job that
+//!   runs on the machine itself (sent only to a host that reported `host-jobs`). Each is
+//!   resent until the listing shows it taken; all of them together stay within
+//!   `MAX_COMMANDS`. A job that books the whole host is neither stopped nor started while it
+//!   is placed (the host prepares), and is started once it is starting;
 //! - `exclusive`: the allocation id of the whole-host job the host is to prepare for or
 //!   keep, until its job ends;
 //! - `job_acks`: a verdict on each listed job result (`ACCEPTED` when this beat committed
@@ -87,6 +88,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
+use crate::admit::reports_host_jobs;
 use crate::agent_state::Change;
 use crate::agents::{Agents, Session};
 use crate::api::{BODY_LIMIT, bearer};
@@ -502,6 +504,7 @@ async fn serve_jobs(
     let first = agents.first_listing(&host, session);
     let ceiling =
         js_agent_wire::NetworkCeiling::from_capabilities(claim.capabilities()).unwrap_or_default();
+    let host_jobs = reports_host_jobs(claim.capabilities());
     let jobs = Arc::clone(jobs);
     let listed = heartbeat.jobs.clone();
     let retired = heartbeat.retired_jobs.clone();
@@ -513,6 +516,7 @@ async fn serve_jobs(
         let context = per_job::BeatContext {
             host: &host,
             ceiling: &ceiling,
+            host_jobs,
             shape: Some(&booked),
             logs: logs.as_deref(),
             metrics,
@@ -557,11 +561,14 @@ async fn serve_jobs(
         }
         // What the listing ended or freed, and the load the beat brought, can make room
         // for a queued job: a pass places it, and its start rides on the host's next reply.
-        placing.place_jobs();
-        (host, served)
+        // A host job the pass placed has tainted its host: the taint is kept below.
+        let placed_taints = placing.place_jobs();
+        (host, served, placed_taints)
     })
     .await;
-    match served {
+    let (host, served, placed_taints) = served;
+    agents.keep_taints(placed_taints).await;
+    match (host, served) {
         (host, Ok((served, taint_changed))) => {
             agents.listed(&host, session);
             if taint_changed {

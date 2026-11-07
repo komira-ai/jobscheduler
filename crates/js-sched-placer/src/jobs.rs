@@ -30,11 +30,15 @@
 //!    except as backfill, which the walk below decides.
 //! 4. **Walks the queue** ([`Engine::walk_jobs`]) in the binding order of
 //!    [`js_sched::walk_in_order`], one placement round of the scheduler per job, over the
-//!    hosts the registry would let take a job now ([`open_to_jobs`]), each with the network
-//!    ceiling its hello advertises, read again on every pass. A host is capable of a job only
-//!    if it can run it and its ceiling covers the job's network level and each host port the
-//!    job declares ([`js_sched::ceiling::within_ceiling`]); a host that advertised nothing
-//!    reads as level none and no port. The engine's free capacity on a host is what its
+//!    hosts the registry would let take a job now ([`open_to_jobs`]), each as an [`OpenHost`]:
+//!    the network ceiling its hello advertises and whether it reported that it runs host jobs,
+//!    read again on every pass. A host is capable of a job only if it can run it and its
+//!    ceiling covers the job's network level and each host port the job declares
+//!    ([`js_sched::ceiling::within_ceiling`]); a host that advertised nothing reads as level
+//!    none and no port. A job with host isolation (it runs on the machine itself) is capable
+//!    only on a host that reported it runs host jobs, and a host such a job is placed on is
+//!    open to no job behind it in the same walk, since the host is tainted from the job's
+//!    commit on. The engine's free capacity on a host is what its
 //!    shape leaves after the job allocations and the registry's lease bookings on it, which
 //!    the engine holds side by side, so a job and a lease can never book the same room (row
 //!    25). A host port is a resource of the allocation too: a host where an allocation the
@@ -47,12 +51,16 @@
 //! 5. **Commits each placement** with [`js_jobs::JobStore::place_with`]: in one transaction the
 //!    job becomes placed on the host and its allocation is written as booked, with the host
 //!    ports the job declares and the wall limit of step 4. Only after the store reports the
-//!    commit is the host's start handed on ([`JobStarts`]). A failed commit lets the
-//!    engine's hold go ([`Engine::job_failed`]): nothing is booked, the job stays queued and
-//!    the next pass places it.
+//!    commit is the host's start handed on ([`JobStarts::placed`]), and for a host-isolation
+//!    job the host's taint after it ([`JobStarts::tainted`]); the taint itself is a row of the
+//!    same transaction (written by the job store). A failed commit lets the engine's hold go
+//!    ([`Engine::job_failed`]): nothing is booked, the job stays queued and the next pass
+//!    places it. A job that books the whole host and runs on the host itself is not marked or
+//!    committed by the whole-host pass: it stays queued.
 //!
 //! The start rides on the host's next heartbeat reply, built from the job table
-//! (the server's `per_job`): so the server's [`JobStarts`] is [`NoStarts`], and a placement
+//! (the server's `per_job`): so the server's [`JobStarts`] hands no start on (it only collects
+//! the taints told, see [`NoStarts`] for one that hands nothing on), and a placement
 //! whose start was never delivered (the server stopped after the commit) is started from the
 //! table after a restart all the same.
 //!
@@ -66,8 +74,8 @@ use std::time::Duration;
 
 use js_agent_wire::{NetworkCeiling, Phase};
 use js_jobs::{
-    AllocationRecord, Booked, IdSource, JobId, JobRecord, JobStore, JobStoreError, Needs,
-    NetworkPolicy, Placement,
+    AllocationRecord, Booked, IdSource, Isolation, JobId, JobRecord, JobStore, JobStoreError,
+    Needs, NetworkPolicy, Placement,
 };
 use js_lease::Timestamp;
 use js_registry::{HostState, HostView, WholeNodeConfig};
@@ -125,9 +133,21 @@ pub struct JobHold {
     placed: Placed,
 }
 
+/// A host a pass may place on: the network ceiling its hello advertises and whether it reported
+/// that it runs host jobs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenHost {
+    /// The most network the host's agent gives a job.
+    pub ceiling: NetworkCeiling,
+    /// Whether the host's hello reported `host-jobs`.
+    pub host_jobs: bool,
+}
+
 /// A queued job, as a pass offers it to the engine.
 struct Walker {
     job: JobId,
+    /// Whether the job runs on the machine itself (host isolation).
+    host_isolation: bool,
     request: Request,
     booked: Booked,
     /// The network level the job asks for.
@@ -253,11 +273,11 @@ impl Engine {
     }
 
     /// One walk of `queued`, the queued jobs in queue order, over `open`, the hosts that may take a
-    /// job now with the network ceiling each advertises, at `now`: the placements it decides, each
-    /// as the job, its host, what it books and what else the commit writes (the wall limit of a
-    /// job placed on a host a whole-host job marks), in queue order. Each is held in the engine
-    /// from here on, so it books its host for whatever is placed after it, until its commit
-    /// answers.
+    /// job now with the network ceiling each advertises and whether it runs host jobs, at `now`:
+    /// the placements it decides, each as the job, its host, what it books and what else the
+    /// commit writes (the wall limit of a job placed on a host a whole-host job marks), in queue
+    /// order. Each is held in the engine from here on, so it books its host for whatever is
+    /// placed after it, until its commit answers.
     ///
     /// Each open host the engine knows by a shape it can describe is heard from now, with its
     /// capacity, as at a lease's start; the others are left out. The walk is
@@ -267,20 +287,22 @@ impl Engine {
     /// (its capabilities match and it fits the host's capacity, and the host's ceiling covers the
     /// job's network level and each of its host ports). A host that holds a port a job declares is
     /// capable of it but has no room for it until that allocation is freed: the job waits, and
-    /// closes the host to the jobs behind it as a job waiting for room does. A job that books the
+    /// closes the host to the jobs behind it as a job waiting for room does. A job with host
+    /// isolation is capable only of a host that runs host jobs, and the host it is placed on is
+    /// left out of the room of every job behind it in the walk. A job that books the
     /// whole host is not walked, nor is one whose constraints are no platform requirements
     /// (logged): neither closes a host.
     pub fn walk_jobs(
         &mut self,
         queued: &[JobRecord],
-        open: &BTreeMap<HostId, NetworkCeiling>,
+        open: &BTreeMap<HostId, OpenHost>,
         now: FarmTime,
     ) -> Vec<(JobId, HostId, Booked, Placement)> {
-        let nodes: BTreeMap<HostId, (super::Node, &NetworkCeiling)> = open
+        let nodes: BTreeMap<HostId, (super::Node, &OpenHost)> = open
             .iter()
-            .filter_map(|(host, ceiling)| {
+            .filter_map(|(host, offer)| {
                 let node = self.hosts.get(host).and_then(|shape| map::host(shape).ok());
-                node.map(|node| (host.clone(), (node, ceiling)))
+                node.map(|node| (host.clone(), (node, offer)))
             })
             .collect();
         for (host, ((capacity, caps), _)) in &nodes {
@@ -295,24 +317,34 @@ impl Engine {
         let usable: Vec<BTreeSet<&HostId>> = walkers
             .iter()
             .map(|walker| {
-                let fits =
-                    |(host, ((_, caps), ceiling)): &(&HostId, &(super::Node, &NetworkCeiling))| {
-                        let capacity = self.sched.capacity(&map::worker(host));
-                        let covered = within_ceiling(ceiling, walker.network, &walker.host_ports);
-                        capacity.is_some_and(|capacity| {
-                            walker.request.runnable_on(caps, &capacity) & covered.is_ok()
-                        })
-                    };
+                let fits = |(host, ((_, caps), offer)): &(&HostId, &(super::Node, &OpenHost))| {
+                    let capacity = self.sched.capacity(&map::worker(host));
+                    let ports = &walker.host_ports;
+                    let covered = within_ceiling(&offer.ceiling, walker.network, ports);
+                    let allowed = !walker.host_isolation | offer.host_jobs;
+                    capacity.is_some_and(|capacity| {
+                        walker.request.runnable_on(caps, &capacity) & covered.is_ok() & allowed
+                    })
+                };
                 nodes.iter().filter(fits).map(|(host, _)| host).collect()
             })
             .collect();
         let hosts: BTreeSet<HostId> = nodes.keys().cloned().collect();
         let order: Vec<usize> = (0..walkers.len()).collect();
+        // The hosts a host-isolation job was placed on in this walk: tainted from its commit on,
+        // so open to no job behind it.
+        let mut tainted: BTreeSet<HostId> = BTreeSet::new();
         let placed = js_sched::walk_in_order(
             &order,
             &hosts,
             |at, host| usable[*at].contains(host),
-            |at, room| self.try_job(&walkers[*at], (room, &usable[*at]), now),
+            |at, room| {
+                let walker = &walkers[*at];
+                let room: BTreeSet<HostId> = room.difference(&tainted).cloned().collect();
+                let host = self.try_job(walker, (&room, &usable[*at]), now);
+                tainted.extend(host.clone().filter(|_| walker.host_isolation));
+                host
+            },
         );
         let decided = walkers.into_iter().zip(placed);
         let mut placements = Vec::new();
@@ -397,6 +429,7 @@ fn walker(job: &JobRecord) -> Option<Walker> {
     };
     Some(Walker {
         job: job.id.clone(),
+        host_isolation: job.spec.constraints.isolation == Isolation::Host,
         request,
         booked: Booked::Shape {
             cpu_millis: resources.cpu_millis(),
@@ -463,21 +496,29 @@ fn booking(booked: Booked) -> (js_types::sched::Resources, bool) {
 pub trait JobStarts {
     /// The placement of `job` on `host` is committed.
     fn placed(&self, job: &JobId, host: &HostId);
+    /// The placement of `job` on `host`, called after [`JobStarts::placed`], tainted the host:
+    /// the job runs with host isolation, and its commit also wrote the taint. Not called for a
+    /// contained job.
+    fn tainted(&self, host: &HostId, job: &JobId);
 }
 
-/// The server's [`JobStarts`]: it hands nothing on, since a host's start is built from the
-/// job table on its next heartbeat (the server's `per_job`).
+/// A [`JobStarts`] that hands nothing on and keeps no taint: a host's start is built from the
+/// job table on its next heartbeat (the server's `per_job`), and the server's own
+/// [`JobStarts`] only collects the taints told.
 pub struct NoStarts;
 
 impl JobStarts for NoStarts {
     fn placed(&self, _: &JobId, _: &HostId) {}
+
+    fn tainted(&self, _: &HostId, _: &JobId) {}
 }
 
 /// The hosts a pass places on, as the server reads them from the registry.
 #[derive(Debug, Clone, Copy)]
 pub struct JobHosts<'a> {
-    /// The hosts that may take a job now, each with the network ceiling it advertises.
-    pub open: &'a BTreeMap<HostId, NetworkCeiling>,
+    /// The hosts that may take a job now, each with the network ceiling it advertises and
+    /// whether it runs host jobs.
+    pub open: &'a BTreeMap<HostId, OpenHost>,
     /// The hosts that said hello to this server.
     pub hello: &'a BTreeSet<HostId>,
     /// The pool's whole-node settings, if it has any.
@@ -486,16 +527,16 @@ pub struct JobHosts<'a> {
 
 impl SchedPlacer {
     /// One pass over the queued jobs of `jobs`, on `open`, the hosts that may take a job now,
-    /// each with the network ceiling it advertises: [`SchedPlacer::place_jobs_with`] for a pool
-    /// with no whole-node settings and no host that said hello, so no job that needs the whole
-    /// host is placed.
+    /// each with the network ceiling it advertises and whether it runs host jobs:
+    /// [`SchedPlacer::place_jobs_with`] for a pool with no whole-node settings and no host that
+    /// said hello, so no job that needs the whole host is placed.
     ///
     /// # Errors
     /// As [`SchedPlacer::place_jobs_with`].
     pub fn place_jobs<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
-        open: &BTreeMap<HostId, NetworkCeiling>,
+        open: &BTreeMap<HostId, OpenHost>,
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
         let hello = BTreeSet::new();
@@ -536,8 +577,19 @@ impl SchedPlacer {
         let now = self.now();
         let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
+        // The whole-host engine marks and commits only the jobs that book the whole host and
+        // run contained: it does not yet hold a job to the hosts that run host jobs, so a
+        // whole-host job with host isolation stays queued.
+        let whole: Vec<JobRecord> = queued
+            .iter()
+            .filter(|job| {
+                let needs_whole = matches!(job.spec.needs, Needs::WholeHost);
+                needs_whole & (job.spec.constraints.isolation != Isolation::Host)
+            })
+            .cloned()
+            .collect();
         let input = WholeJobs {
-            queued: &queued,
+            queued: &whole,
             marks: &marks,
             hello: hosts.hello,
             open: &open,
@@ -623,11 +675,14 @@ impl SchedPlacer {
 }
 
 /// Tells `metrics` and `starts` of the placement of the job `record` shows on `host`, which the
-/// store committed.
+/// store committed: its start, and for a job that runs on the host itself the host's taint.
 fn told(record: &JobRecord, host: &HostId, (starts, metrics): (&dyn JobStarts, &dyn PassMetrics)) {
     let at = record.placed_at.unwrap_or(record.submitted_at);
     metrics.job_placed(at.since(record.submitted_at));
     starts.placed(&record.id, host);
+    if record.spec.constraints.isolation == Isolation::Host {
+        starts.tainted(host, &record.id);
+    }
 }
 
 /// Tells `metrics` that a write of the pass failed with `error`. The error again when the store

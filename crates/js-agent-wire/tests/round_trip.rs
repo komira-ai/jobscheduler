@@ -215,24 +215,28 @@ fn job_start_frame() -> impl Strategy<Value = JobStartSpec> {
         ident(),
         proptest::collection::vec("[ -~]{0,30}", 0..6),
         (1..=MAX_CPU_MILLIS, 1..=MAX_MEMORY_BYTES, 1..=MAX_WALL_MS),
+        prop_oneof![Just(Isolation::Contained), Just(Isolation::Host)],
     )
-        .prop_map(|(job_id, allocation_id, command, (cpu, memory, wall))| {
-            let mut spec: JobStartSpec = serde_json::from_value(json!({
-                "job_id": "j",
-                "allocation_id": "a",
-                "image": format!("ubuntu:24.04@sha256:{}", "0123456789abcdef".repeat(4)),
-                "booked": {"cpu_millis": 1, "memory_bytes": 1},
-                "wall_ms": 1,
-            }))
-            .expect("the base start decodes");
-            spec.job_id = job_id;
-            spec.allocation_id = allocation_id;
-            spec.command = command;
-            spec.booked.cpu_millis = cpu;
-            spec.booked.memory_bytes = memory;
-            spec.wall_ms = wall;
-            spec
-        })
+        .prop_map(
+            |(job_id, allocation_id, command, (cpu, memory, wall), isolation)| {
+                let mut spec: JobStartSpec = serde_json::from_value(json!({
+                    "job_id": "j",
+                    "allocation_id": "a",
+                    "image": format!("ubuntu:24.04@sha256:{}", "0123456789abcdef".repeat(4)),
+                    "booked": {"cpu_millis": 1, "memory_bytes": 1},
+                    "wall_ms": 1,
+                }))
+                .expect("the base start decodes");
+                spec.job_id = job_id;
+                spec.allocation_id = allocation_id;
+                spec.command = command;
+                spec.booked.cpu_millis = cpu;
+                spec.booked.memory_bytes = memory;
+                spec.wall_ms = wall;
+                spec.isolation = isolation;
+                spec
+            },
+        )
 }
 
 fn command() -> impl Strategy<Value = Command> {

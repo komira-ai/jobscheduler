@@ -141,6 +141,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let txn = put_job(Txn::new(), Some(&job), &placed, Cond::Version(job_version))?;
         let earlier = earlier.as_ref().map(|(record, _)| record);
         let txn = put_allocation(txn, earlier, &allocation, allocation_cond)?;
+        let txn = super::taints::with_taint(txn, &placed, &allocation.host)?;
         Ok((txn, placed, allocation))
     }
 
