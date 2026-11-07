@@ -288,11 +288,11 @@ fn the_operation_of_a_job_that_left_the_queue_or_was_dropped_is_replaced() {
     run(&mut e, (&[j.clone(), k.clone()], &[]), 5_000);
     let operation = e.whole_jobs[&j.id];
     let other = e.whole_jobs[&k.id];
-    run(&mut e, (&[k.clone()], &[]), 6_000);
+    run(&mut e, (std::slice::from_ref(&k), &[]), 6_000);
     assert_eq!(e.whole_jobs.keys().collect::<Vec<_>>(), [&k.id]);
     assert_eq!(e.sched.state(operation), None);
     let _ = e.sched.cancel_whole(other);
-    run(&mut e, (&[k.clone()], &[]), 7_000);
+    run(&mut e, (std::slice::from_ref(&k), &[]), 7_000);
     assert_ne!(e.whole_jobs[&k.id], other);
     assert_eq!(e.sched.queued_len(), 1);
 }
@@ -369,12 +369,12 @@ fn a_job_without_a_grant_is_left_alone_or_leaves_the_queue_with_no_hold() {
     let tables = Tables::new();
     let j = tables.whole("j");
     let mut marked = engine(&[("a", &[1]), ("b", &[2])]);
-    run(&mut marked, (&[j.clone()], &[]), 20_000);
+    run(&mut marked, (std::slice::from_ref(&j), &[]), 20_000);
     let operation = marked.whole_jobs[&j.id];
     marked.whole_job_failed(&j.id);
     assert!(marked.sched.whole_mark(operation).is_some());
     let mut e = engine(&[("a", &[1]), ("b", &[])]);
-    run(&mut e, (&[j.clone()], &[]), 1_000);
+    run(&mut e, (std::slice::from_ref(&j), &[]), 1_000);
     let operation = e.whole_jobs[&j.id];
     e.host_gone(&host("b"));
     e.whole_job_placed(&j.id, &host("b"), Vec::new());
@@ -457,7 +457,7 @@ fn the_registrys_round_stands_down_only_when_no_job_is_queued_either() {
     let tables = Tables::new();
     let j = tables.whole("j");
     let mut e = engine(&[("a", &[1]), ("b", &[2])]);
-    run(&mut e, (&[j.clone()], &[]), 20_000);
+    run(&mut e, (std::slice::from_ref(&j), &[]), 20_000);
     assert!(e.whole_round(empty_round(), at(21_000)).is_empty());
     assert!(e.round.is_some());
     run(&mut e, (&[], &[]), 22_000);
@@ -474,12 +474,12 @@ fn a_rebuild_does_not_carry_the_whole_host_jobs() {
     let tables = Tables::new();
     let j = tables.whole("j");
     let mut e = engine(&BUSY);
-    run(&mut e, (&[j.clone()], &[]), 20_000);
+    run(&mut e, (std::slice::from_ref(&j), &[]), 20_000);
     let mut rebuilt = e.rebuild(Settings::default(), &every(&BUSY), at(21_000));
     assert!(rebuilt.whole_jobs.is_empty());
     assert_eq!(rebuilt.whole_settings, None);
     assert_eq!(rebuilt.sched.queued_len(), 0);
-    run(&mut rebuilt, (&[j.clone()], &[]), 22_000);
+    run(&mut rebuilt, (std::slice::from_ref(&j), &[]), 22_000);
     assert_eq!(rebuilt.whole_jobs.len(), 1);
     assert_eq!(rebuilt.whole_settings, Some(settings()));
 }

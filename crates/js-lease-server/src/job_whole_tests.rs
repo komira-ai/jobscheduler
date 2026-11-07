@@ -261,12 +261,13 @@ fn the_first_listing_restarts_the_prepare_clock() {
         ready: Some(&ready),
         ..quiet(&host)
     };
+    let hello_at = fixture.now();
     assert_eq!(fixture.serve(&hello, &no_taint()), Ok(false));
     assert_eq!(fixture.commits(), before + 1);
     let restarted = fixture.allocation(&id);
     assert_eq!(
         restarted.prepare_deadline,
-        Some(fixture.now().saturating_add(PREPARE))
+        Some(hello_at.saturating_add(PREPARE))
     );
     assert_ne!(restarted.prepare_deadline, placed_deadline);
     assert_eq!(fixture.job(&id).state, JobState::Placed);

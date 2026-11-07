@@ -141,7 +141,7 @@ fn a_whole_host_job_granted_a_quiet_host_is_committed_in_the_pass() {
     let j = rig.tables.whole("j");
     rig.at(1_000);
     let recorder = Recorder::default();
-    assert_eq!(rig.go(&recorder), [j.id.clone()]);
+    assert_eq!(rig.go(&recorder), std::slice::from_ref(&j.id));
     let job = rig.tables.jobs.get_job(&j.id).unwrap().unwrap();
     assert_eq!(job.state, JobState::Placed);
     assert_eq!(job.host, Some(host("a")));
@@ -257,7 +257,7 @@ fn a_commit_that_fails_leaves_the_job_queued_and_the_next_pass_places_it() {
     assert!(!rig.placer.engine().holds_jobs_on(&host("a")));
     assert_eq!(rig.placer.engine().whole_jobs.len(), 1);
     rig.at(2_000);
-    assert_eq!(rig.go(&recorder), [j.id.clone()]);
+    assert_eq!(rig.go(&recorder), std::slice::from_ref(&j.id));
 }
 
 /// Catches: a store with a newer writer that the pass goes on writing to, and a failed write
@@ -334,7 +334,7 @@ fn an_ordinary_job_is_still_placed_with_no_prepare_deadline_and_no_wall_cut() {
     let big = rig.tables.submit_with("big", Needs::Shape(too_big), 600);
     rig.at(1_000);
     let recorder = Recorder::default();
-    assert_eq!(rig.go(&recorder), [s.id.clone()]);
+    assert_eq!(rig.go(&recorder), std::slice::from_ref(&s.id));
     let allocation = rig.tables.jobs.get_allocation(&s.id).unwrap().unwrap();
     assert!(matches!(allocation.booked, Booked::Shape { .. }));
     assert_eq!(allocation.prepare_deadline, None);
@@ -359,7 +359,7 @@ fn an_ordinary_commit_that_fails_leaves_the_job_queued() {
     assert_eq!(recorder.failures(), 1);
     assert!(!rig.placer.engine().holds_jobs_on(&host("a")));
     rig.at(2_000);
-    assert_eq!(rig.go(&recorder), [s.id.clone()]);
+    assert_eq!(rig.go(&recorder), std::slice::from_ref(&s.id));
 }
 
 /// The wall limit `walk_jobs` gives a share job of `wall_secs` placed on `b`, which a

@@ -117,12 +117,19 @@ pub(super) async fn run_share(rig: &Rig, agent: &mut FakeAgent, id: &str, wall_s
 /// Places the whole-host job `id` on the host of `agent` and has the agent prepare for it: the
 /// job is placed with its allocation, and the agent has been told to prepare.
 pub(super) async fn prepare(rig: &Rig, agent: &mut FakeAgent, id: &str) -> JobId {
+    prepare_timed(rig, agent, id).await.0
+}
+
+/// [`prepare`], with the time of the beat the agent began preparing at: the beat is the host's
+/// first listing since its hello, which restarts the prepare from that time.
+async fn prepare_timed(rig: &Rig, agent: &mut FakeAgent, id: &str) -> (JobId, StoreTime) {
     let job = queue_whole(rig, id, 600);
     place_all(rig);
     assert_eq!(rig.states(&job), (JobState::Placed, AllocationStep::Booked));
+    let at = now(rig);
     beat(rig, agent).await;
     assert_eq!(agent.phase, Phase::Preparing);
-    job
+    (job, at)
 }
 
 /// The allocation id of `job`, as the agent is told it.
@@ -184,13 +191,12 @@ async fn cancel_while_marked_drops_the_mark_and_the_host_serves() {
 #[tokio::test]
 async fn cancel_while_preparing_frees_after_preparing_ends() {
     let (rig, mut agent) = served("whole_cancel_preparing");
-    let job = prepare(&rig, &mut agent, "job-w").await;
+    let (job, prepared_at) = prepare_timed(&rig, &mut agent, "job-w").await;
     let allocation = rig.allocation(&job);
     assert_eq!(allocation.booked, Booked::WholeHost);
-    let placed_at = rig.job(&job).placed_at.unwrap();
     assert_eq!(
         allocation.prepare_deadline,
-        Some(placed_at.saturating_add(PREPARE))
+        Some(prepared_at.saturating_add(PREPARE))
     );
     assert_eq!(agent.exclusive, Some(lease(&rig, &job)));
 
@@ -412,10 +418,9 @@ async fn a_host_unsafe_refusal_taints_the_host() {
 #[tokio::test]
 async fn a_hello_restarts_the_prepare_of_a_placed_whole_host_job() {
     let (mut rig, mut agent) = served("whole_hello_placed");
-    let job = prepare(&rig, &mut agent, "job-w").await;
+    let (job, prepared_at) = prepare_timed(&rig, &mut agent, "job-w").await;
     let placed = rig.allocation(&job);
-    let placed_at = rig.job(&job).placed_at.unwrap();
-    let first_deadline = placed_at.saturating_add(PREPARE);
+    let first_deadline = prepared_at.saturating_add(PREPARE);
     assert_eq!(placed.prepare_deadline, Some(first_deadline));
 
     // The agent restarts: the host is silent past the grace, then says hello.
