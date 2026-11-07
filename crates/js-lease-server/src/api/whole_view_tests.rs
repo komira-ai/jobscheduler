@@ -232,7 +232,7 @@ impl Rig {
         let settings = Settings::new();
         let settings = crate::reservations::with_restart_grace(settings, Some(&whole));
         let table = LeaseTable::open(
-            BoxedPool(Box::new(provider)),
+            BoxedPool::new(Box::new(provider)),
             shared_clock.clone(),
             settings,
             file,

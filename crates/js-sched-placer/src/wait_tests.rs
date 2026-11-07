@@ -6,12 +6,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_lease::Timestamp;
-use js_provider::{Candidate, Held};
 use js_registry::{
     Exclusion, MAX_WAITING_REQUESTS, MarkedTails, NotReady, PrepareFailure, Presented, RequestKey,
     Reservation, Standing, WholeHost, WholeNodeConfig, WholeRound,
 };
+use js_types::Timestamp;
+use js_types::{Candidate, Held};
 use js_types::{ClassId, HostId, LeaseId, Request, RequestId, Resources, Shape};
 
 use crate::engine::{Engine, Settings};
@@ -426,7 +426,7 @@ fn a_failed_lease_bars_its_host_and_a_queued_commit_counts_once() {
         class: class.id().clone(),
         ..request()
     };
-    let spec = js_provider::StartSpec::new(lease(2), asked, &[class])
+    let spec = js_types::StartSpec::new(lease(2), asked, &[class])
         .unwrap()
         .with_request_id(id("r"));
     let open = [candidate("a", &[])];

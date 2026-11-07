@@ -167,7 +167,7 @@ fn bed(name: &str, sink: Option<Arc<FakeSink>>) -> Bed {
     let agents = Agents::over(registry, &server_clock, dir.path()).with_jobs(Arc::new(jobs));
     let settings = Settings::new();
     let table = LeaseTable::open(
-        BoxedPool(Box::new(agents.registry.provider())),
+        BoxedPool::new(Box::new(agents.registry.provider())),
         server_clock.clone(),
         settings,
         dir.path().join("leases.toml"),

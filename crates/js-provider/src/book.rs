@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{HostId, LeaseId, MemoryHeadroom, ResourceClass, Resources, Shape};
+use crate::{Observed, StartAck};
+use js_types::{
+    Candidate, Held, HostCapacity, HostId, LeaseId, MemoryHeadroom, RefusalCode, ResourceClass,
+    Resources, Shape, StartSpec,
+};
 
 /// Why [`HostBook::seat`] booked nothing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -31,30 +34,6 @@ pub enum SeatError {
     /// The host holds no lease, yet is too small for the resources the lease books.
     #[error("host {0} has no room for the lease")]
     NoRoom(HostId),
-}
-
-/// One lease on a host and what it books there.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Held {
-    /// The lease.
-    pub lease: LeaseId,
-    /// What it books on the host: its own resources, or the whole shape for a lease that
-    /// books the whole host.
-    pub resources: Resources,
-    /// Whether the lease books the whole host, whatever its resources add up to.
-    pub whole: bool,
-}
-
-/// A host a start could be booked on: it fits the request, has room for it and is
-/// eligible. [`HostBook::start_by`] shows the candidates to the caller's choice.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Candidate {
-    /// The host.
-    pub host: HostId,
-    /// What the host offers to be booked.
-    pub shape: Shape,
-    /// The leases booked on it, in the order they were booked.
-    pub leases: Vec<Held>,
 }
 
 #[derive(Debug)]

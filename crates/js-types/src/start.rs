@@ -1,4 +1,7 @@
-use js_types::{LabelError, Labels, LeaseId, Request, RequestError, RequestId, ResourceClass};
+//! The start of one attempt: [`StartSpec`], a request already checked against the start
+//! contract, and [`RefusalCode`], why a start was refused.
+
+use crate::{LabelError, Labels, LeaseId, Request, RequestError, RequestId, ResourceClass};
 
 /// A plain, constant code for a refusal. No central code table exists beyond this
 /// enum; a pool may add a code and may never remove a start-contract one.
@@ -31,7 +34,7 @@ pub enum RefusalCode {
     /// A whole-node request that used up its tries to get a host ready: it will not be
     /// placed again.
     ExclusiveNotReady,
-    /// A probe ([`js_types::Request::probe_host`]) the pool cannot place: it places no
+    /// A probe ([`Request::probe_host`]) the pool cannot place: it places no
     /// probe at all (a static pool, whose hosts are never cordoned, or a registry with no
     /// placer to judge one).
     ProbeUnsupported,
@@ -98,11 +101,12 @@ impl From<RequestError> for RefusalCode {
     }
 }
 
-/// Everything a pool needs to start one attempt, already checked.
+/// Everything a pool, or the placement engine, needs to start one attempt, already checked.
 ///
 /// The only constructor, [`StartSpec::new`], runs the wall-time and reserved-label rules
-/// of the start contract of design 5.2 and the class checks, so a pool never sees a
-/// request that broke one of them. The fence and retry rules of 5.2 are not modelled yet.
+/// of the start contract of design 5.2 and the class checks, so a pool or the engine never
+/// sees a request that broke one of them. The fence and retry rules of 5.2 are not modelled
+/// yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartSpec {
     lease: LeaseId,
@@ -181,9 +185,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use js_types::{Capabilities, ClassId, Resources};
-
     use super::*;
+    use crate::{Capabilities, ClassId, Resources};
 
     fn request() -> Request {
         Request {

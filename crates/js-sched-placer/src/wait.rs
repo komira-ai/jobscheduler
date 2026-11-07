@@ -34,11 +34,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_lease::Timestamp;
 use js_registry::{
     MAX_WAITING_REQUESTS, MarkedTails, Presented, Reservation, Standing, Waiter, WaitingRequest,
     WaitingWhole, WholeHost, WholeNodeConfig, WholeRound,
 };
+use js_types::Timestamp;
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Request, RequestId};
 

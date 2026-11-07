@@ -37,7 +37,7 @@ pub(super) fn shared_over(rig: &Rig, dir: &TestDir) -> Arc<Shared> {
     let settings = Settings::new();
     let file = dir.path().join("leases.toml");
     let table = LeaseTable::open(
-        BoxedPool(Box::new(provider)),
+        BoxedPool::new(Box::new(provider)),
         rig.shared.clone(),
         settings,
         file,
