@@ -23,6 +23,5 @@ mod token;
 
 pub use client::{Client, REQUEST_LIMIT, Reply};
 pub use error::ClientError;
-pub use js_agent_wire::LogTail;
 pub use server_url::ServerUrl;
 pub use token::{bearer, bearer_of};
