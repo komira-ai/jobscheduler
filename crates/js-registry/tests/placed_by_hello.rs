@@ -337,3 +337,41 @@ fn the_listing_places_a_host_by_its_hello_only_in_a_pool_that_places_by_it() {
     assert!(!by);
     assert_eq!(placed, floor());
 }
+
+/// Catches: a placer told the pool floor's accelerator in place of the host's validated
+/// one (a host of `nvidia-a100-sxm4-80gb` in a pool whose floor names the family
+/// `nvidia-a100` would be a node of the family with no memory known, and js-sched would
+/// place no request for the variant on it). In a pool that does not place by hello, the
+/// placer is told exactly the shape the book lists: the floor's numbers and `os`, with the
+/// accelerator facts of the hello, 80 GiB per device among them.
+#[test]
+fn the_placer_is_told_the_hosts_accelerator_facts_in_any_pool() {
+    let gpu = Resources::new(4000, 8 << 30, 1, Some("nvidia-a100".into())).unwrap();
+    let name = ProviderId::new("builders").unwrap();
+    let shape = Shape::new(gpu, map(&[("os", "macos")]));
+    let told = Arc::new(Shapes::default());
+    let fx = fixture_of(PoolConfig::new(name, class(), shape, 4));
+    fx.registry.set_placer(told.clone());
+    let a100_80 = "nvidia-a100-sxm4-80gb";
+    let mut said = hello("gpu-1");
+    said.shape.gpus = 1;
+    said.shape.gpu_class = Some(a100_80.into());
+    said.gpu_devices = vec![js_agent_wire::GpuDevice {
+        index: 0,
+        uuid: "GPU-1".into(),
+        model: a100_80.into(),
+        memory_bytes: 80 << 30,
+    }];
+    fx.hello(&said, &cred("t")).unwrap();
+    let listed = fx.provider.capacity().remove(0).shape;
+    let caps: Vec<String> = listed
+        .capabilities()
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    assert!(
+        caps.contains(&"accelerator.memory-gib=80".to_owned()),
+        "{caps:?}"
+    );
+    assert_eq!(told.said(), [format!("up gpu-1 4000 {}", caps.join(","))]);
+}

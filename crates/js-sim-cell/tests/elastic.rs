@@ -12,8 +12,8 @@
 //! or drops, or that the scheduler did not launch.
 //!
 //! Sizes, in agent requests a seed: the scenarios about 19,200 heartbeats
-//! (`cell/elastic.rs`), over [`SEEDS`] seeds each; a cell driven by hand, one or two
-//! machines for at most [`LOOK_AT`].
+//! (`cell/elastic.rs`), over [`SEEDS`] seeds each ([`JS_SCHED_SEEDS`] under js-sched); a
+//! cell driven by hand, one or two machines for at most [`LOOK_AT`].
 
 #[path = "cell/elastic.rs"]
 mod elastic;
@@ -37,6 +37,12 @@ use js_types::sched::FarmTime;
 
 /// How many seeds each scenario runs.
 const SEEDS: u64 = 16;
+
+/// How many seeds each scenario runs under `--placement js-sched`: fewer than [`SEEDS`],
+/// since a seed under js-sched costs about twice one under the registry and the sixteen
+/// seeds of both would double the family. The registry's seeds keep the scenarios' own
+/// statements at size; these prove that js-sched places every run of them.
+const JS_SCHED_SEEDS: u64 = 2;
 
 /// How long a cell driven by hand runs: past the first launch (the second tick, at 10 s),
 /// the machine's boot ([`Knobs::boot`], 120 s, later) and its hello.
@@ -75,7 +81,7 @@ fn a_lambda_like_pool_bills_whole_minutes_and_releases_idle_machines() {
     elastic::a_lambda_like_pool().run_seeds(SEEDS);
 }
 
-/// Proves the EC2-like scenario under `--placement js-sched`, over sixteen seeds, with the
+/// Proves the EC2-like scenario under `--placement js-sched`, over two seeds, with the
 /// same expectations: the pool's floor names no architecture, so each machine becomes a
 /// node of the scheduler by the `arch` its agent reports at hello, and every one of the
 /// hundred whole-host runs, which ask for that `arch`, is placed on one. Red for a server
@@ -86,10 +92,10 @@ fn a_lambda_like_pool_bills_whole_minutes_and_releases_idle_machines() {
 fn an_ec2_like_pool_places_its_runs_under_js_sched() {
     elastic::an_ec2_like_pool()
         .under(Placement::JsSched)
-        .run_seeds(SEEDS);
+        .run_seeds(JS_SCHED_SEEDS);
 }
 
-/// Proves the Lambda-like scenario under `--placement js-sched`, over sixteen seeds, as the
+/// Proves the Lambda-like scenario under `--placement js-sched`, over two seeds, as the
 /// EC2-like one is proven: every run placed on a machine the scheduler knows by the `arch`
 /// its agent reported, every machine released once idle and billed whole minutes. Red as
 /// the EC2-like one under js-sched is.
@@ -97,7 +103,7 @@ fn an_ec2_like_pool_places_its_runs_under_js_sched() {
 fn a_lambda_like_pool_places_its_runs_under_js_sched() {
     elastic::a_lambda_like_pool()
         .under(Placement::JsSched)
-        .run_seeds(SEEDS);
+        .run_seeds(JS_SCHED_SEEDS);
 }
 
 /// A cell of seed `seed` with an elastic pool of at most two machines of `pool`'s kind,

@@ -3,8 +3,9 @@ use js_agent_wire::{
 };
 use js_provider::HostBook;
 use js_types::{
-    ACCEL_KEYS, Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId,
-    ResourceClass, Shape,
+    ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS, ACCEL_MEMORY_GIB_KEY,
+    ACCEL_MODEL_KEY, Admission, Capabilities, ExecMode, HostId, MemoryHeadroom, MemoryPercent,
+    Model, ProviderId, ResourceClass, Resources, Shape,
 };
 
 use crate::WholeNodeConfig;
@@ -393,6 +394,13 @@ impl PoolConfig {
     /// In a pool that places by hello ([`Self::placing_by_hello`]) only the capabilities
     /// the fit shape names count, with the `accelerator.*` ones: the others are the hosts'
     /// to meet, by what their hellos reported.
+    ///
+    /// Every hello is held to the fit shape, so its accelerator is a floor, not each host's:
+    /// unless it pins a variant, a host may be any variant of its family, with its own
+    /// memory per device, form factor and interconnect, and is placed by those
+    /// (`placement_shape`). Such a floor answers only for the vendor, the family and the
+    /// count, so a request it fits on those ([`floor_terms`]) fits the pool, and the hosts
+    /// answer for the rest. A floor that pins a variant answers for all of it.
     pub(crate) fn fits(&self, request: &js_types::Request) -> bool {
         let fit = &self.fit;
         let named = |key: &String| {
@@ -402,7 +410,13 @@ impl PoolConfig {
         if self.by_hello {
             wanted.retain(|key, _| named(key));
         }
-        fit.satisfies(&request.resources, &wanted)
+        let pins = fit
+            .accelerator()
+            .is_some_and(|floor| floor.variant.is_some());
+        let whole = fit.satisfies(&request.resources, &wanted);
+        let terms = floor_terms(&request.resources, &wanted).filter(|_| !pins);
+        let vouched = terms.is_some_and(|(resources, wanted)| fit.satisfies(&resources, &wanted));
+        [whole, vouched].into_iter().any(|fits| fits)
     }
 
     pub(crate) fn max_machines(&self) -> usize {
@@ -421,6 +435,43 @@ impl PoolConfig {
         self.lost_retention_ms
     }
 }
+/// The accelerator keys whose facts only a host states: a floor that pins no variant
+/// cannot answer for them.
+const HOST_STATED: [&str; 3] = [
+    ACCEL_MEMORY_GIB_KEY,
+    ACCEL_FORM_FACTOR_KEY,
+    ACCEL_INTERCONNECT_KEY,
+];
+
+/// What of a request for `resources` and `capabilities` a floor that pins no accelerator
+/// variant answers for: its GPU class and `accelerator.model` read as their family (a name
+/// that is not a model name as written), and none of [`HOST_STATED`]. `None` when the
+/// resources cannot be built again, which a valid request never is.
+fn floor_terms(
+    resources: &Resources,
+    capabilities: &Capabilities,
+) -> Option<(Resources, Capabilities)> {
+    let family = |text: &str| {
+        let parsed = Model::parse(text).map(|model| model.canonical().model.to_string());
+        parsed.unwrap_or(text.to_owned())
+    };
+    let class = resources.gpu_class().map(family);
+    let (cpu, memory, gpus) = (
+        resources.cpu_millis(),
+        resources.memory_bytes(),
+        resources.gpus(),
+    );
+    let disk = resources.disk_bytes();
+    let resources = Resources::new(cpu, memory, gpus, class)
+        .ok()?
+        .with_disk_bytes(disk);
+    let mut capabilities = capabilities.clone();
+    capabilities.retain(|key, _| !HOST_STATED.contains(&key.as_str()));
+    let model = capabilities.get_mut(ACCEL_MODEL_KEY);
+    model.into_iter().for_each(|model| *model = family(model));
+    Some((resources, capabilities))
+}
+
 /// The shape a registered host is placed on: the resources and capabilities the pool books
 /// (`booked`), with its `accelerator.*` capabilities replaced by those of the host's
 /// validated claim, so its real family, variant facts and measured memory are matched while
