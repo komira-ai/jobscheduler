@@ -118,7 +118,7 @@ fn assert_placed(reply: &Reply, why: &str) {
 /// another family, the 40 GiB variant on that host of 80 GiB devices, or the 80 GiB
 /// variant on a host of 40 GiB devices. Catches a class compared as text, which would
 /// leave a family request unplaceable, and one compared as a family only, or by memory at
-/// least, which would place a full spelling on another variant. Under each placement.
+/// least, which would place a full spelling on another variant.
 #[tokio::test]
 async fn todays_full_spelling_requests_still_match() {
     let hello = old_hello(A100_80, 80);
@@ -153,7 +153,7 @@ async fn todays_full_spelling_requests_still_match() {
 /// registers the host, that the host is listed with the shape it sent, and that a lease
 /// whose `resources.accelerator` names the family `nvidia-a100`, 80 GiB per device and a
 /// count is placed on it. Catches a hello that is refused for lacking the new field, and
-/// a host whose accelerator is not derived from its class. Under each placement.
+/// a host whose accelerator is not derived from its class.
 #[tokio::test]
 async fn old_hello_with_gpu_class_still_registers() {
     let h = serve("accel_old_hello", A100_80, &old_hello(A100_80, 80)).await;
@@ -206,8 +206,7 @@ async fn a_count_only_accelerator_is_a_400_naming_accelerator_model() {
 /// (`nvidia-zz9000`, eight devices of 40 GiB) is placed for a `resources.accelerator` of
 /// that model with 40 GiB per device and refused for 41 GiB with a 409, and that a
 /// `nvidia-zz9000` request through `gpus` and `gpu_class` is placed too. Catches the
-/// measured memory of the devices being lost between the hello and placement. Under each
-/// placement.
+/// measured memory of the devices being lost between the hello and placement.
 #[tokio::test]
 async fn the_measured_memory_of_an_unknown_model_decides_placement() {
     let hello = old_hello("nvidia-zz9000", 40);
@@ -231,7 +230,7 @@ async fn the_measured_memory_of_an_unknown_model_decides_placement() {
 /// spelling is placed on it while one for `nvidia-a100-sxm4-40gb` is a 409. Catches a
 /// host placed as the pool floor's family, which would take either variant: under
 /// js-sched, a scheduler told the pool's floor at the hello in place of the shape the
-/// registry lists for the host. Under each placement.
+/// registry lists for the host.
 #[tokio::test]
 async fn a_host_is_placed_as_its_variant_and_not_as_the_pool_floors_family() {
     let hello = old_hello(A100_80, 80);

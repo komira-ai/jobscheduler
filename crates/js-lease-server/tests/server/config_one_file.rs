@@ -144,7 +144,7 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
         ("agent_hello_burst", "60"),
         ("agent_hello_interval", "\"1s\""),
         ("require_host_credential", "false"),
-        ("placement", "\"registry\""),
+        ("placement", "\"js-sched\""),
         ("estimate_feed", "false"),
         ("cpu_slack", "1.1"),
     ] {

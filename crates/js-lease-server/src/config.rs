@@ -522,6 +522,9 @@ impl Config {
             return Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock);
         }
         flags::need_agent_pool(&cli)?;
+        // The deprecated `--placement` first: a removed `registry` is refused before the
+        // pool is read, naming the flag to drop.
+        let mut warnings = Vec::from_iter(Placement::given(cli.placement, "--placement")?);
         let settings = Settings::new();
         let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
@@ -539,7 +542,6 @@ impl Config {
         };
         let usage = usage_setup(keys, &state_file);
         let store = store::from_flags(&cli)?;
-        let mut warnings = Vec::from_iter(Placement::given(cli.placement, "--placement")?);
         let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
             listen: cli.listen,

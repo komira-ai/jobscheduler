@@ -127,8 +127,9 @@ fn placement_js_sched_is_accepted_and_does_nothing_more() {
 /// Asserts that `registry` is refused, by the flag and by the key, with the whole message
 /// naming the flag or key and saying to drop it; that the flag still needs
 /// `--agent-pool-config` (refused naming that first, as every flag of agent registration
-/// is); and that any other value is a usage error or a refusal naming the key, which no
-/// longer lists `registry` as a value.
+/// is); that any other value is a usage error or a refusal naming the key, which no
+/// longer lists `registry` as a value; and that beside a pool refused for want of an
+/// `arch`, `registry` is the refusal named, by the flag and by the key.
 #[test]
 fn placement_registry_is_refused_with_a_clear_message() {
     let scratch = Scratch::new("placement_registry");
@@ -164,6 +165,25 @@ fn placement_registry_is_refused_with_a_clear_message() {
     assert_eq!(
         refusal(&scratch, &text),
         "server.placement: must be js-sched"
+    );
+
+    // Beside a pool that is refused too (no `arch`), `registry` is the refusal named.
+    let bare = POOL.replace("arch = \"x86_64\"", "isa = \"x86-64-v3\"");
+    let said = parsed(args_over(&scratch, &bare, &["--placement", "registry"]))
+        .err()
+        .unwrap();
+    assert_eq!(
+        said,
+        "--placement: the registry placement mode was removed; js-sched is the only placement (drop the flag)"
+    );
+    let text = joined_file(
+        &scratch,
+        "{ isa = \"x86-64-v3\" }",
+        "placement = \"registry\"",
+    );
+    assert_eq!(
+        refusal(&scratch, &text),
+        "server.placement: the registry placement mode was removed; js-sched is the only placement (drop the key)"
     );
 }
 

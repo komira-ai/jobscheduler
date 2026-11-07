@@ -439,16 +439,17 @@ fn with_ceiling(s: &Section, settings: Settings, wall: Duration) -> Result<Setti
         .map_err(|err| s.fail("max_lease_wall", &err.to_string()))
 }
 
-/// `placement`, the deprecated key of `--placement`: `js-sched`, or the removed `registry`
-/// (refused when the configuration is built, as the flag is).
+/// `placement`, the deprecated key of `--placement`: `js-sched`, or the removed `registry`,
+/// refused here, as `[server]` is read and before any pool is, as the flag is.
 fn read_placement(s: &mut Section) -> Result<Option<Placement>, StartupError> {
     let text = s.string("placement")?;
+    let place = format!("{}placement", s.head);
     let named = |text: String| match text.as_str() {
-        "registry" => Ok(Placement::Registry),
-        "js-sched" => Ok(Placement::JsSched),
+        "registry" => Placement::given(Some(Placement::Registry), &place).map(|_| None),
+        "js-sched" => Ok(Some(Placement::JsSched)),
         _ => Err(s.fail("placement", "must be js-sched")),
     };
-    text.map(named).transpose()
+    Ok(text.map(named).transpose()?.flatten())
 }
 
 /// `cpu_slack`, the key of `--cpu-slack`: a number written as the multiplier, such as

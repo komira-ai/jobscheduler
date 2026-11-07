@@ -198,11 +198,10 @@ pub(super) fn host_of(ack: &StartAck) -> Option<&str> {
     }
 }
 
-/// Asserts the default: with no `--placement` flag the scheduler places, as with
-/// `--placement js-sched`: a lease of a class that books part of a host, once refused
-/// `UnsupportedClass` by the registry's own placement, is placed by the scheduler's tie
-/// break on `h2` (where the registry's first host by id was `h1`), and a second one
-/// beside it. It catches a default that leaves the registry placing alone.
+/// Asserts that with no `--placement` flag the scheduler places a lease of a class that
+/// books part of a host: its tie break gives lease 1 to `h2`, and lease 2 goes beside it,
+/// as with `--placement js-sched` (the test below). It catches a default that does not
+/// place with the scheduler, or refuses the class.
 #[test]
 fn with_no_flag_the_scheduler_places_a_sharing_class() {
     let mut served = serving("default", &[]);
@@ -414,8 +413,7 @@ fn with_the_flag_a_probe_is_held_to_the_memory_percent() {
 }
 
 /// Asserts that with no `--placement` flag a probe is placed on its cordoned host, as
-/// under `--placement js-sched`: the registry's own placement, which refused every probe
-/// `probe-unsupported`, is gone. It catches a default that still refuses probes.
+/// under `--placement js-sched`. It catches a default that refuses probes.
 #[test]
 fn with_no_flag_a_probe_lands_on_its_cordoned_host() {
     let mut served = serving("probe_default", &[]);
