@@ -158,8 +158,8 @@ pub use js_whole::{
 pub use lives::ProfileLives;
 pub use load::{BadLease, node_load};
 pub use placer::{
-    MarkedTails, Placer, PrepareFailure, Presented, ProbeHost, Standing, Waiter, WaitingRequest,
-    WaitingWhole, WholeHost, WholeKept, WholeRound,
+    LeaseTimes, MarkedTails, Placer, PrepareFailure, Presented, ProbeHost, SeatedLease, Standing,
+    Waiter, WaitingRequest, WaitingWhole, WholeHost, WholeKept, WholeRound,
 };
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;

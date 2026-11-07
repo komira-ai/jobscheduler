@@ -5,15 +5,17 @@
 //! snapshot per start: a host that says hello is a worker up ([`Engine::host_up`]), with
 //! the capacity and caps its pool's shape gives ([`map::host`]); an accepted heartbeat is
 //! a heartbeat, with the reading the registry vetted and converted ([`Engine::heard`]); a
-//! lease the placer places is booked by the placement itself ([`Engine::grant`]), one
-//! the registry stops is released ([`Engine::ended`]), and a host the registry forgets is
-//! forgotten ([`Engine::host_gone`]).
+//! lease the placer places is booked by the placement itself ([`Engine::grant`]), one the
+//! registry puts back at a start is taken up with the start and bound the lease file
+//! records, when it records them ([`Engine::seat`]), one the registry stops is released ([`Engine::ended`]), and a
+//! host the registry forgets is forgotten ([`Engine::host_gone`]). Each lease's start, wall
+//! time and whole-node standing are kept beside the scheduler ([`kept`]).
 //!
 //! At each start the two pictures are compared on the hosts the start could book
 //! ([`Engine::agrees`]): every one must be a worker of the same shape, holding exactly the
 //! leases the registry books there. When they disagree (a lease the registry booked that
-//! the engine never placed, as one put back after a restart; one the engine gave up for a
-//! silent host; a host it was never told of) the engine is built again from the
+//! the engine does not hold, as one it gave up for a silent host; a host it was never told
+//! of) the engine is built again from the
 //! registry's view of every host it lists, keeping each host's last three readings
 //! ([`Engine::rebuild`]); that is the only way it is ever built again.
 //!
@@ -69,6 +71,8 @@ use crate::map::{self, MapError};
 
 #[path = "jobs.rs"]
 pub mod jobs;
+#[path = "kept.rs"]
+pub mod kept;
 #[path = "ledger.rs"]
 pub mod ledger;
 #[path = "prepare.rs"]
@@ -176,6 +180,9 @@ pub struct Engine {
     /// The expected life of each lease the registry knows one for, which the scheduler
     /// reads as its learned curves.
     lives: Arc<Lives>,
+    /// The start, wall time and whole-node standing of each lease of the registry the engine
+    /// holds, as far as it knows them ([`kept`]).
+    kept: BTreeMap<LeaseId, kept::Kept>,
 }
 
 /// How many readings of a host are kept for a rebuild: two windows, the most the
@@ -230,6 +237,7 @@ impl Engine {
             cordoned: BTreeSet::new(),
             phased: BTreeSet::new(),
             lives,
+            kept: BTreeMap::new(),
         };
         for candidate in every {
             engine.host_up(&candidate.host, &candidate.shape, now);
@@ -246,7 +254,8 @@ impl Engine {
     /// readings are as fresh, or as stale, in the new engine as in this one. The
     /// readings' leases are named as the new engine numbers them. Every host in `every`
     /// is then heard from at `now`, without load: the registry lists it, so it is live,
-    /// whatever the age of its last reading.
+    /// whatever the age of its last reading. Each lease both engines hold keeps the start,
+    /// wall time and whole-node standing this one kept of it ([`kept`]).
     pub fn rebuild(&self, settings: Settings, every: &[Candidate], now: FarmTime) -> Self {
         let listed: BTreeSet<&HostId> = every.iter().map(|candidate| &candidate.host).collect();
         let mut replay: Vec<(FarmTime, &HostId, &NodeLoad)> = self
@@ -258,8 +267,10 @@ impl Engine {
         replay.sort_by_key(|(at, _, _)| *at);
         let start = replay.first().map_or(now, |(at, _, _)| (*at).min(now));
         let mut engine = Self::build(settings, every, start);
-        // The job allocations are not in the registry's books: they are carried over.
+        // The job allocations are not in the registry's books: they are carried over, and
+        // so are the start, wall time and whole-node standing of each lease ([`kept`]).
         engine.take_jobs(&self.jobs);
+        engine.carry_kept(self);
         for (at, host, load) in replay {
             engine.heard(host, Some(load), at);
         }
@@ -326,15 +337,22 @@ impl Engine {
             resources: spec.request().resources.clone(),
             whole: spec.class().admission().books_whole_host(),
         };
+        let placed = self.take_up(&candidate.host, &held);
+        let kept = kept::Kept::started(self.now, spec.request().max_wall, whole_node(spec));
+        self.keep(spec.lease(), placed, kept);
+    }
+
+    /// Takes up `held`, a lease of the registry on `host` the engine did not place, as the
+    /// next lease of term 0, and holds it there: the engine's lease and operation.
+    fn take_up(&mut self, host: &HostId, held: &js_provider::Held) -> Placed {
         let placed = Placed {
             lease: SchedLeaseId::new(0, self.taken),
             operation: self.sched.next_operation(),
         };
         self.taken = self.taken.saturating_add(1);
-        let _ = self
-            .sched
-            .take_in(recovered(placed, &candidate.host, &held));
-        self.hold(&candidate.host, spec.lease(), placed);
+        let _ = self.sched.take_in(recovered(placed, host, held));
+        self.hold(host, held.lease, placed);
+        placed
     }
 
     /// `host` said hello, booked as `shape`: a worker up, of the capacity and caps the
@@ -407,6 +425,7 @@ impl Engine {
     /// nothing ([`prepare`]). A lease the engine does not know changes nothing.
     pub fn ended(&mut self, lease: LeaseId) {
         self.prepare.end(&lease);
+        self.kept.remove(&lease);
         let found = self
             .on
             .iter_mut()
@@ -547,6 +566,8 @@ impl Engine {
                     operation,
                 };
                 self.hold(&open[index].host, lease, placed);
+                let kept = kept::Kept::started(self.now, spec.request().max_wall, whole_node(spec));
+                self.keep(lease, placed, kept);
             }
             None => {
                 let _ = self.sched.forget_queued(operation);
@@ -692,6 +713,13 @@ fn recovered_as(
         losses: 0,
         fate: None,
     }
+}
+
+/// Whether `spec` starts a whole-node lease: one of the whole-node class, which holds its
+/// host whole. A lease of another class that books the whole host does not: a whole-node
+/// request may drain its host.
+pub(super) fn whole_node(spec: &StartSpec) -> bool {
+    matches!(spec.class().admission(), js_types::Admission::Whole)
 }
 
 /// `clock` of the engine's `lease`.

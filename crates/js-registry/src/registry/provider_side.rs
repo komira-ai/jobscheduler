@@ -16,6 +16,7 @@ use js_lease::Timestamp;
 use super::record::{Bound, Queue};
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
+use crate::placer::{LeaseTimes, SeatedLease};
 use crate::whole::exclusive::Exclusive;
 
 impl Registry {
@@ -164,7 +165,9 @@ impl Registry {
     /// agent says hello; `binding` is what that hello must match, or `None` to let the
     /// first hello bind it. `times` is when the lease started and the latest it can end,
     /// as the lease file records them: with a source of lives set they are kept as the
-    /// lease's start and bound. See [`crate::RegisteredProvider::seat_booked`].
+    /// lease's start and bound. A placer is told of the lease put back, with `times`
+    /// whether or not a source of lives is set ([`crate::Placer::seated`]). See
+    /// [`crate::RegisteredProvider::seat_booked`].
     pub(crate) fn seat(
         &self,
         host: &HostId,
@@ -201,12 +204,29 @@ impl Registry {
                 });
             });
         }
+        let whole = matches!(self.shared.config.class().admission(), Admission::Whole);
+        // The placer books the lease as the registry does from now on, as it was started
+        // and bound: it drains by bounds with or without a source of lives.
+        let placer = self.shared.placer.get().filter(|_| seated.is_ok());
+        let told = placer.zip(book.held(&lease)).map(|(placer, held)| {
+            let seated = SeatedLease {
+                host: host.clone(),
+                held: held.clone(),
+                times: times.map(|(started_at, ends_at)| LeaseTimes {
+                    started_at,
+                    ends_at,
+                }),
+                whole_node: whole & held.whole,
+            };
+            (placer, seated)
+        });
+        told.into_iter()
+            .for_each(|(placer, seated)| placer.seated(&seated));
         // A restored whole-node booking is committed and not ready: the agent's
         // preparation is in memory only, so it must report ready for this lease again
         // before the lease reads present, a run is queued or the host books to anyone.
         // A host that lists held runs is ready: only the ready lease could have runs
         // (see `RegisteredProvider::seat` for where that fails).
-        let whole = matches!(self.shared.config.class().admission(), Admission::Whole);
         if let (Ok(()), true) = (&seated, whole) {
             let record = records.get_mut(host);
             record.into_iter().for_each(|record| {
