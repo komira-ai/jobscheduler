@@ -49,7 +49,7 @@ fn over_every_store(of: Of) {
 
 /// The restart over the store; see [`world::restart`].
 #[test]
-fn a_restart_over_the_store_keeps_every_host_binding_and_lease() {
+fn a_restart_over_the_store_keeps_every_host_binding() {
     over_every_store(world::restart);
 }
 

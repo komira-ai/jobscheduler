@@ -19,27 +19,23 @@ const HOSTS: usize = 20;
 const RUNS: u32 = 40;
 const RUN: Duration = Duration::from_secs(120);
 
-/// When the server is stopped and started again over its lease file.
+/// When the server is stopped and started again over its files.
 const RESTART_AT: Duration = Duration::from_secs(60);
 
 /// How long the cell runs after the restart, before the end check.
 const SETTLE: Duration = Duration::from_secs(900);
 
-/// Proves that a restart of the server over the same lease file (`--boot resume`), with
-/// runs in flight on every host, double-books nothing (design section 8, row 3; section
-/// 6.7): no run is launched twice, no host runs more than it holds once the hosts have
-/// said hello again, no lease is booked on two hosts or moves to another host (a lease
-/// is held on the host it was on, or dropped), every item reaches one terminal answer,
-/// and nothing is left booked once the clients are done. What becomes of the runs in
-/// flight is not stated: row 3 is Open (as built, the restarted server has forgotten
-/// them, tells the hosts to cancel them and answers the client `410 run-forgotten`, which
-/// the front reports as `Forgotten`), and both that and a run kept as the design wants it
-/// are terminal. The witness shows the restart reached the hosts: a heartbeat was
-/// answered `unknown-host` by the restarted server. Red for a restarted server that books
-/// a lease on another host than the one it was on (`no-double-booking`), one that lets a
-/// host take a new lease while it still runs a run of before the restart
-/// (`no-double-booking`, `bookings-match-agents`), and one that starts a run again
-/// (`at-most-one-launch`).
+/// Proves that a restart of the server over the same files (`--boot resume`), with jobs
+/// in flight on every host, double-books nothing (design section 8, row 3; section 6.7):
+/// no job is launched twice, no host runs more than it holds once the hosts have said hello
+/// again, no job is booked on two hosts or moves to another host, every item reaches one
+/// terminal answer, and nothing is left booked once the clients are done. What becomes of
+/// the jobs in flight is not stated: row 3 is Open, and every way it ends is terminal. The
+/// witness shows the restart reached the hosts: a heartbeat was answered `unknown-host` by
+/// the restarted server. Red for a restarted server that books a job on another host than
+/// the one it was on (`no-double-booking`), one that lets a host take a new job while it
+/// still runs a job of before the restart (`no-double-booking`, `bookings-match-agents`),
+/// and one that starts a job again (`at-most-one-launch`).
 pub fn a_restart_of_the_server_with_runs_in_flight_double_books_nothing() -> Scenario {
     Scenario::new("a_restart_of_the_server_with_runs_in_flight_double_books_nothing")
         .scratch(env!("CARGO_TARGET_TMPDIR"))

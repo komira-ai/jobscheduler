@@ -2,7 +2,7 @@
 //! when it should: a server node restarted over its own files, and one whose restart is
 //! refused and is down until a restart succeeds; a refused restart in a scenario,
 //! reported as a failure to start; an agent killed for good, which is a host gone and not
-//! a fault; the count of a cut agent that runs a run it never listed; the expectation
+//! a fault; the count of a cut agent that runs a job it never listed; the expectation
 //! that hosts launched work after a time; and the verdicts the agents read, in the cell's
 //! ledger.
 //!
@@ -19,17 +19,20 @@ use js_sim_cell::actions::{agents, partition_agents};
 use js_sim_cell::bus::{CallId, Route, agent_name};
 use js_sim_cell::server::JOIN_TOKEN;
 use js_sim_cell::{
-    Action, AgentNode, Cell, CellNode, Counter, Expect, Msg, RunId, Scenario, ScenarioFailure,
-    ServerNode, ServerSpec, ServerView, Setup, Shape, Verdict, Work,
+    Action, AgentNode, Cell, CellNode, Counter, Expect, Msg, Scenario, ScenarioFailure, ServerNode,
+    ServerSpec, ServerView, Setup, Shape, Verdict, Work,
 };
 use js_types::sched::{FarmTime, StateMachine};
-use serde_json::json;
+use serde_json::Value;
 
-use crate::support::{call, lease, ms, scratch, start_run};
+use crate::support::{call, job, ms, scratch};
 
 /// How long the run of each test lasts, and when the scenarios here settle.
 const RUN_MS: u64 = 10_000;
 const SETTLE: Duration = Duration::from_secs(60);
+
+/// A read of a job no client submitted: 503 from a down server, 404 from one that is up.
+const PROBE: &str = "/v1/jobs/sim-job-0";
 
 /// The flag a server of [`refusing`] is refused on.
 const REFUSED: &str = "--agent-pool-config";
@@ -78,8 +81,9 @@ impl Action for RestartRefused {
 /// machines) names the flag at fault and is down: an agent's call goes unanswered, a
 /// client's call is answered 503 with no body, a tick only arms the next, and the
 /// listing is empty; that a second restart, with the server's own flags, brings it up
-/// again over the same files, answering calls. Catches a restart that loses the
-/// server's directory (the lease file a resumed boot requires), a node that answers while
+/// again over the same files, answering calls (a read of a job it does not hold is
+/// answered 404 `unknown-job`, where a down server answers 503). Catches a restart that loses the
+/// server's directory (the files a resumed boot requires), a node that answers while
 /// down, and one that cannot come back up.
 #[test]
 fn a_server_whose_restart_is_refused_is_down_until_a_restart_succeeds() {
@@ -92,8 +96,8 @@ fn a_server_whose_restart_is_refused_is_down_until_a_restart_succeeds() {
     assert!(!server.is_up());
     assert!(server.server().is_none() && server.registry().is_none());
     assert_eq!(server.view(), ServerView::default());
-    let empty = json!({});
-    let answer = server.client_call(ms(1), support::request("GET", "/v1/leases", &empty));
+    let empty = Value::Null;
+    let answer = server.client_call(ms(1), support::request("GET", PROBE, &empty));
     assert_eq!(
         (answer.status().as_u16(), answer.body().as_str()),
         (503, "")
@@ -121,8 +125,8 @@ fn a_server_whose_restart_is_refused_is_down_until_a_restart_succeeds() {
     let server = node.as_server_mut().expect("the server");
     server.restart(&spec).expect("starts again");
     assert!(server.is_up());
-    let answer = server.client_call(ms(6_000), support::request("GET", "/v1/leases", &empty));
-    assert_eq!(answer.status().as_u16(), 200, "{}", answer.body());
+    let answer = server.client_call(ms(6_000), support::request("GET", PROBE, &empty));
+    assert_eq!(answer.status().as_u16(), 404, "{}", answer.body());
 }
 
 /// Asserts that a restart in a scenario that the server refuses (an action restarts it
@@ -155,7 +159,7 @@ fn a_restart_the_server_refuses_fails_the_seed_as_a_failure_to_start() {
 }
 
 /// Asserts that a restart of the server in a cell keeps the agents, the client and the
-/// ledger: the agent that ran a run before the restart is answered `unknown-host` by the
+/// ledger: the agent that ran a job before the restart is answered `unknown-host` by the
 /// new server, says hello again and is listed live, the run is launched once, the
 /// verdict the agent read on its result is in the cell's ledger, and no restart was
 /// refused. Catches a restart that drops the agents, replays the ledger, or leaves the
@@ -164,22 +168,18 @@ fn a_restart_the_server_refuses_fails_the_seed_as_a_failure_to_start() {
 fn a_restarted_server_keeps_the_agents_and_the_ledger() {
     let mut cell = cell("restart-cell", 1);
     run_to(&mut cell, 10_000);
-    let lease = lease(&mut cell).expect("a lease is granted");
-    let run = start_run(&mut cell, &lease, RUN_MS).expect("a run is queued");
+    let id = job(&mut cell, "sim-job-restart", RUN_MS).expect("a job is accepted");
     run_to(&mut cell, 40_000);
-    let verdicts = cell.ledger().verdicts();
-    let judged: Vec<(RunId, Verdict)> = verdicts
+    let replies = &cell.observations().job_replies;
+    let acks: Vec<(String, Verdict)> = replies
         .iter()
-        .map(|a| (a.run.clone(), a.verdict))
+        .flat_map(|reply| &reply.acks)
+        .map(|(job, verdict)| (job.to_string(), *verdict))
         .collect();
-    assert_eq!(judged, [(RunId::new(run), Verdict::Accepted)]);
-    let (status, _) = call(
-        &mut cell,
-        "DELETE",
-        &format!("/v1/leases/{lease}"),
-        &json!({}),
-    );
-    assert!((200..300).contains(&status), "release answered {status}");
+    assert_eq!(acks, [(id.clone(), Verdict::Accepted)]);
+    let path = format!("/v1/jobs/{id}/result");
+    let (status, result) = call(&mut cell, "GET", &path, &Value::Null);
+    assert_eq!(status, 200, "{result}");
     cell.restart_server();
     assert!(cell.take_refused().is_none());
     assert!(cell.server().is_some_and(ServerNode::is_up));
@@ -222,23 +222,23 @@ fn an_agent_killed_for_good_is_a_host_gone_and_not_a_fault() {
     assert!(cell.observations().fault_active);
 }
 
-/// Asserts that a cut counts `cut_with_unlisted_run` once for an agent that runs a run
+/// Asserts that a cut counts `cut_with_unlisted_run` once for an agent that runs a job
 /// it received after its last heartbeat (no hello or heartbeat of its own listed it), and
 /// not for an agent that runs nothing; and that once the agent has sent a heartbeat
-/// listing the run, it no longer runs a run it never listed. Catches a count that reads
+/// listing the job, it no longer runs a job it never listed. Catches a count that reads
 /// what the server saw rather than what the agent sent, and one bumped for an idle host.
 #[test]
 fn a_cut_agent_that_runs_a_run_it_never_listed_is_counted() {
     let mut cell = cell("cut", 2);
     run_to(&mut cell, 20_000);
-    let lease = lease(&mut cell).expect("a lease is granted");
-    let (_, listing) = call(&mut cell, "GET", "/v1/leases", &json!({}));
-    let host = listing["leases"][0]["host"]
+    let id = job(&mut cell, "sim-job-cut", 60_000).expect("a job is accepted");
+    run_to(&mut cell, 26_000);
+    let (_, read) = call(&mut cell, "GET", &format!("/v1/jobs/{id}"), &Value::Null);
+    let host = read["job"]["hostId"]
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    start_run(&mut cell, &lease, 60_000).expect("a run is queued");
-    run_to(&mut cell, 22_000);
+    run_to(&mut cell, 27_000);
     let index = index_of(&host);
     assert_eq!(cell.agent(index).map(AgentNode::runs_unlisted), Some(true));
     assert_eq!(
@@ -251,7 +251,7 @@ fn a_cut_agent_that_runs_a_run_it_never_listed_is_counted() {
         (cut(&cell, index), cut(&cell, 1 - index)),
         (Some(1), Some(0))
     );
-    run_to(&mut cell, 27_000);
+    run_to(&mut cell, 32_000);
     assert_eq!(cell.agent(index).map(AgentNode::runs_unlisted), Some(false));
 }
 

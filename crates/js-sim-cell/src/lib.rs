@@ -1,5 +1,5 @@
-//! The whole-cell simulation of this repository, built in parts: the real lease server
-//! under the [`js_sim`] kernel, many fake agents (or a few real ones) and a client driver, with properties
+//! The whole-cell simulation of this repository, built in parts: the real server and its
+//! job service under the [`js_sim`] kernel, many fake agents (or a few real ones) and a client driver, with properties
 //! checked after every step, and a builder in which a scenario reads top to bottom.
 //!
 //! How to run, write and read a scenario, and what the cell does not model, is in
@@ -12,8 +12,7 @@
 //!   process ([`AgentTruth`]), the cell's own ledger of launches ([`Launch`]),
 //!   completions ([`Completion`]) and verdicts ([`Acked`]), which outlives any agent
 //!   process, the processes it killed ([`Killed`]), and the server's list of hosts
-//!   ([`ServerView`]), with each booking it showed and for how long ([`Booking`]),
-//!   gathered at one virtual time into [`Observations`]. The ledger also keeps what the
+//!   ([`ServerView`]), gathered at one virtual time into [`Observations`]. The ledger also keeps what the
 //!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
 //!   [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
@@ -56,8 +55,8 @@
 //!   suite's in-process fake, the scale agent a cell runs by the hundred, or the real
 //!   agent lifecycle of `js-agent` over an in-memory runtime, for a handful of hosts.
 //!   Either kind has the node's side of the whole-host handshake, which prepares, reports
-//!   ready, refuses or stays silent as its [`Prepare`] switch says. A fake agent of a
-//!   server of [`ServerSpec::jobs`] also speaks the per-job messages.
+//!   ready, refuses or stays silent as its [`Prepare`] switch says. A fake agent also
+//!   speaks the per-job messages.
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
 //!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock,
 //!   its state in the store `--store` names ([`Store`]: a SQLite file, or with the feature
@@ -65,8 +64,7 @@
 //!   ([`ServerNode::stop`]), started again over its own files and store with `--boot
 //!   resume` ([`ServerNode::restart`]), and with a second server beside it on the same
 //!   store ([`ServerNode::start_beside`]);
-//!   with [`ServerSpec::jobs`], its job service too, its job store minting ids from the
-//!   seed.
+//!   with its job service too, its job store minting ids from the seed.
 //! - [`elastic`]: an elastic pool ([`ElasticPool`]): its cloud ([`Cloud`]), the elastic
 //!   fake on the cell's clock behind a recording wrapper the server's scaler is handed,
 //!   which writes down each acquire, release and list with its arguments, its answer and
@@ -81,9 +79,9 @@
 //!   it.
 //! - [`front`]: the client driver. A [`Front`] turns units of work into calls to the
 //!   server and reports what it hears as [`ClientEvent`]s, and keeps every answer it was
-//!   given raw ([`Answer`]); [`LeaseFront`] does it as `js run` does today, and
-//!   [`JobFront`] submits each unit as a job to the job service. The client is not a bus
-//!   node: the run loop polls it at exact virtual times and its calls are never dropped.
+//!   given raw ([`Answer`]); [`JobFront`] submits each unit as a job to the job service.
+//!   The client is not a bus node: the run loop polls it at exact virtual times and its
+//!   calls are never dropped.
 //! - [`jobs`]: the job front, and what the cell observes of jobs: the server's job and
 //!   allocation tables as it read them ([`JobRead`], [`AllocationRead`]), and what the
 //!   per-job agents sent and read ([`JobBeat`], [`JobReply`], [`ResultMade`]).
@@ -96,15 +94,11 @@
 //! - [`actions`]: what a scenario does at a virtual time, one [`Action`] per file.
 //! - [`scenario`]: the builder ([`Scenario`]): the world, the work, the actions, what is
 //!   expected ([`Expect`], at the end or at a virtual time) and the witnesses that show the
-//!   situation happened, run over seeds. An expectation may also name one of the client's
-//!   calls ([`Call`]) and read its raw answer, or read the server when it is judged: the
-//!   lease list ([`Listed`]), where a lease is booked ([`Booked`], [`HostRef`]), a
-//!   whole-node request's record ([`RecordFact`]), the wait list and the reservations. The smoke family (`tests/smoke.rs`) proves the machine works; the fault
+//!   situation happened, run over seeds. The smoke family (`tests/smoke.rs`) proves the machine works; the fault
 //!   family (`tests/faults.rs`) runs agents that die and return or never return,
 //!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
 //!   restart of the server and a forgotten host, each over sixteen seeds; the whole-host
-//!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run the whole-host
-//!   path, and the ways its handshake fails, under every value of `--placement`; the
+//!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run whole-host jobs; the
 //!   elastic family (`tests/elastic.rs`) runs pools whose machines the scaler launches on
 //!   demand and releases once idle, billed as EC2 and as Lambda bill; the store family
 //!   (`tests/store.rs`) runs the server's state in its store across a restart, a stop in a
@@ -164,7 +158,7 @@ pub use elastic::{
     AcquireAnswer, Cloud, CloudCall, CloudEvent, CloudFacts, ElasticPool, Machine, OfferSpec,
     Payload, ReleaseAnswer, SeededEntropy,
 };
-pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory, LeaseFront, REQUEST_PREFIX};
+pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use jobs::{
     AllocationRead, AllocationRow, JOB_PREFIX, JobBeat, JobFront, JobRead, JobReply, JobStartSeen,
@@ -173,14 +167,11 @@ pub use jobs::{
 pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
 pub use observe::{
-    AgentTruth, Ask, Booking, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
+    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
     Observations, ReadyReport, RunId, Running, RunningJob, ServerHost, ServerView, StartSeen,
     StopCommand, StopSeen, Verdict,
 };
 pub use replay::{Failure, FailureReport, drive, run};
-pub use scenario::{
-    Booked, Call, Expect, HostIs, HostRef, Listed, Passed, RecordFact, Scenario, ScenarioFailure,
-    SeedRun,
-};
+pub use scenario::{Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
 pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, Store, WHOLE_CLASS};
 pub use work::Work;

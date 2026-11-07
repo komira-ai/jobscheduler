@@ -1,6 +1,6 @@
 //! Whether a seed replays: the real server, twenty agents beating every five seconds, one
-//! hand-made lease and run, 10% of the agent wire's messages dropped, and ten agents cut
-//! off for thirty seconds before the cut heals.
+//! hand-made job, 10% of the agent wire's messages dropped, and ten agents cut off for
+//! thirty seconds before the cut heals.
 //!
 //! A run is a function of its seed. These tests decide whether it is: the same seed twice
 //! in one process, two seeds against each other, and pinned seeds against the golden file
@@ -17,19 +17,15 @@
 //! a change to any decision of the client driver, the scenario builder or the server as
 //! the smoke family drives it moves a hash.
 //!
-//! It also pins the first whole-host scenario, family `whole_host`: fifty whole-node
-//! requests over twenty hosts (`cell/whole_host.rs`, about 4,800 agent requests a seed)
-//! over [`WHOLE_SEEDS`] seeds under each value of `--placement`, so a change to the
-//! agents' side of the whole-host handshake, the client's whole-host path or the server's
-//! whole-host decisions under any placement moves a hash; the replay test runs one of its
-//! seeds twice under each placement.
+//! It also pins the first whole-host scenario, family `whole_host`: fifty whole-host
+//! jobs over twenty hosts (`cell/whole_host.rs`, about 4,800 agent requests a seed) over
+//! [`WHOLE_SEEDS`] seeds, so a change to the client's whole-host path or the server's
+//! whole-host decisions moves a hash; the replay test runs one of its seeds twice.
 //!
 //! And one scenario of the whole-host fault family, family `whole_host_faults`: the
-//! cancelled whole-host request (`cell/whole_host_cancel.rs`, one host, about 180 agent
-//! requests a seed) over [`WHOLE_FAULTS_SEEDS`] seeds under each value of `--placement`,
-//! so a change to how the server drops a cancelled request's place or mark, or to the
-//! action that cancels it once it is marked, moves a hash; the replay test runs one of
-//! its seeds twice under each placement.
+//! cancelled whole-host job (`cell/whole_host_cancel.rs`, one host, about 180 agent
+//! requests a seed) over [`WHOLE_FAULTS_SEEDS`] seeds, so a change to how the server drops
+//! a cancelled job's place moves a hash; the replay test runs one of its seeds twice.
 //!
 //! And one scenario with real agents, family `real_agent`: the agreement family's world
 //! without faults (`cell/real_agents.rs`, six real agents, about 1,200 agent requests a
@@ -38,10 +34,10 @@
 //!
 //! And one fault scenario, family `faults`: the restart of the server with runs in flight
 //! (`cell/server_restart.rs`, about 3,840 agent requests a seed) over [`FAULTS_SEEDS`]
-//! seeds, so a restart, which drops the server and opens its lease file again, is shown
-//! to replay from its seed.
+//! seeds, so a restart, which drops the server and opens its files again, is shown to
+//! replay from its seed.
 //!
-//! And one job smoke scenario, family `jobs`: jobs over the job front on a lossy agent wire
+//! And one job smoke scenario, family `jobs`: jobs on a lossy agent wire
 //! (`cell/jobs.rs`, eight hosts, about 960 agent requests a seed) over [`JOBS_SEEDS`] seed,
 //! so a change to a decision of the job front, the per-job agents or the server's job
 //! service and job pass, or a job or allocation id that does not follow the seed, moves a
@@ -81,8 +77,6 @@ mod server_restart;
     reason = "the store scenarios are shared with tests/store.rs, which runs the ones this binary does not pin"
 )]
 mod store;
-#[path = "cell/support.rs"]
-mod support;
 #[path = "cell/whole_host.rs"]
 mod whole_host;
 #[path = "cell/whole_host_cancel.rs"]
@@ -90,22 +84,35 @@ mod whole_host_cancel;
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use clap::ValueEnum;
 use js_jobs::{AllocationId, IdSource};
-use js_lease_server::{Placement, StartupError};
+use js_lease_server::StartupError;
 use js_sim::golden::GoldenFile;
 use js_sim::{Chance, Faults, TraceHash};
 use js_sim_cell::replay::REPORT_LINES;
 use js_sim_cell::server::seeded;
 use js_sim_cell::{
-    Cell, Failure, FailureReport, Invariant, JOB_PREFIX, JobFront, Observations, ServerSpec, Setup,
-    Shape, Side, Store, Violation, Work, run,
+    Cell, Failure, FailureReport, Invariant, JOB_PREFIX, Observations, ServerSpec, Setup, Shape,
+    Side, Store, Violation, Work, run,
 };
+use js_testkit::dir::TestDir;
+use js_types::sched::FarmTime;
 
-use crate::support::{lease, ms, scratch, start_run};
+/// Virtual time `n` milliseconds after the start.
+fn ms(n: u64) -> FarmTime {
+    FarmTime::from_millis(n)
+}
+
+/// A scratch directory of its own for one server, removed when the server is dropped.
+fn scratch(name: &str) -> TestDir {
+    TestDir::under(
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-sim-cell"),
+        name,
+    )
+}
 
 /// How many agents the cell runs.
 const HOSTS: usize = 20;
@@ -122,8 +129,8 @@ const SEEDS: u64 = 16;
 /// The scenario's name, in reports and in the golden file.
 const SCENARIO: &str = "replay";
 
-/// When the client makes its lease and run, and how long the run takes.
-const LEASE_AT_MS: u64 = 20_000;
+/// When the client makes its job, and how long the job takes.
+const JOB_AT_MS: u64 = 20_000;
 const RUN_MS: u64 = 10_000;
 
 /// The agents cut off, and when the cut starts and heals.
@@ -139,13 +146,13 @@ const FAIL_AT_CHECK: u64 = 100;
 const SMOKE_SEEDS: u64 = 4;
 const SMOKE_FAMILY: &str = "smoke";
 
-/// How many seeds of the whole-host scenario the golden file pins under each placement,
-/// and the family they are kept under.
+/// How many seeds of the whole-host scenario the golden file pins, and the family they are
+/// kept under.
 const WHOLE_SEEDS: u64 = 2;
 const WHOLE_FAMILY: &str = "whole_host";
 
-/// How many seeds of the cancelled whole-host request the golden file pins under each
-/// placement, and the family they are kept under.
+/// How many seeds of the cancelled whole-host job the golden file pins, and the family
+/// they are kept under.
 const WHOLE_FAULTS_SEEDS: u64 = 2;
 const WHOLE_FAULTS_FAMILY: &str = "whole_host_faults";
 
@@ -196,10 +203,8 @@ fn build(setup: Setup) -> Result<Cell, StartupError> {
     for _ in 0..HOSTS {
         cell.add_agent().expect("an agent name is a host id");
     }
-    cell.at(ms(LEASE_AT_MS), |cell| {
-        if let Some(lease) = lease(cell) {
-            start_run(cell, &lease, RUN_MS);
-        }
+    cell.at(ms(JOB_AT_MS), |cell| {
+        cell.submit(&Work::run_for(Duration::from_millis(RUN_MS)));
     });
     cell.at(ms(CUT_AT_MS), |cell| cell.partition(&[&CUT]));
     cell.at(ms(HEAL_AT_MS), Cell::heal);
@@ -243,11 +248,10 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 
 /// Asserts that one seed run twice in one process gives one hash, and that a run that
 /// keeps its trace lines gives the same hash as one that keeps only the hash; and that the
-/// run did what the scenario asks (the lease's run launched once, its agent listed live at
+/// run did what the scenario asks (the job launched once, its agent listed live at
 /// the end), so the hash covers a run that reached the server. The same for a seed of the
-/// scenario with real agents, run twice, whose items all succeed, and for one seed of the
-/// whole-host scenario and one of the cancelled whole-host request, each run twice under
-/// each placement, and for one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
+/// whole-host scenario and one of the cancelled whole-host job, each run twice, and for
+/// one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
 /// whose items end alike, and for one seed of the EC2-like elastic scenario
 /// (`cell/elastic.rs`), run twice, whose items end alike, and for one seed of the restart
 /// over a SQLite store (`cell/store.rs`), run twice. Catches a handler path that reads a
@@ -265,7 +269,7 @@ fn a_seed_replays_to_the_same_trace_hash() {
     assert_eq!(kept.trace_hash(), first.trace_hash());
     let lines = kept.trace_lines().expect("lines are kept");
     assert_eq!(lines[0], "kbf-trace-format 1 sim");
-    assert!(lines.iter().any(|line| line.ends_with(" cell launch h000")));
+    assert!(lines.iter().any(|line| line.contains(" cell launch h")));
     assert_eq!(first.ledger().launches().len(), 1);
     let listed = &first.observations().server.hosts;
     assert_eq!(listed.len(), HOSTS);
@@ -273,30 +277,12 @@ fn a_seed_replays_to_the_same_trace_hash() {
         listed.values().all(|host| !host.lost),
         "every host is live at the end"
     );
-    for placement in Placement::value_variants() {
-        let scenario = whole_host::fifty_whole_host_requests(*placement);
-        let once = scenario.run_seeds(1).runs[0].hash;
-        let again = scenario.run_seeds(1).runs[0].hash;
-        assert_eq!(once, again, "{}", whole_host::spelled(*placement));
-        let cancel = whole_host_cancel::a_cancelled_request(*placement);
-        let once = cancel.run_seeds(1).runs[0].hash;
-        let again = cancel.run_seeds(1).runs[0].hash;
-        assert_eq!(once, again, "{}", whole_host::spelled(*placement));
-    }
-
-    let real = real_agents::without_faults(Side::Real);
-    let once = real.run_seeds(1).runs.remove(0);
-    let again = real.run_seeds(1).runs.remove(0);
-    assert_eq!(once.hash, again.hash);
-    assert_eq!(once.outcomes.len(), real_agents::RUNS as usize);
-    let succeeded = Some(js_sim_cell::HowEnded::Succeeded);
-    assert!(
-        once.outcomes
-            .values()
-            .all(|item| item.terminal == succeeded),
-        "{:?}",
-        once.outcomes
-    );
+    let scenario = whole_host::fifty_whole_host_requests();
+    let once = scenario.run_seeds(1).runs[0].hash;
+    assert_eq!(once, scenario.run_seeds(1).runs[0].hash);
+    let cancel = whole_host_cancel::a_cancelled_request();
+    let once = cancel.run_seeds(1).runs[0].hash;
+    assert_eq!(once, cancel.run_seeds(1).runs[0].hash);
 
     let restart = server_restart::a_restart_of_the_server_with_runs_in_flight_double_books_nothing;
     let once = restart().run_seeds(1).runs[0].hash;
@@ -320,13 +306,31 @@ fn a_seed_replays_to_the_same_trace_hash() {
     );
 }
 
+/// Asserts that one seed of the scenario with real agents (`cell/real_agents.rs`), run twice,
+/// gives one hash and ends every item succeeded. Catches a source of nondeterminism in the
+/// real agent lifecycle as the cell runs it.
+#[test]
+fn a_seed_with_real_agents_replays_to_the_same_trace_hash() {
+    let real = real_agents::without_faults(Side::Real);
+    let once = real.run_seeds(1).runs.remove(0);
+    let again = real.run_seeds(1).runs.remove(0);
+    assert_eq!(once.hash, again.hash);
+    assert_eq!(once.outcomes.len(), real_agents::RUNS as usize);
+    let succeeded = Some(js_sim_cell::HowEnded::Succeeded);
+    assert!(
+        once.outcomes
+            .values()
+            .all(|item| item.terminal == succeeded),
+        "{:?}",
+        once.outcomes
+    );
+}
+
 /// The cell whose job and allocation ids are compared, for `setup`: [`JOB_HOSTS`] hosts
-/// and a server with the job service on, and [`JOBS`] jobs submitted at once through the
-/// job front.
+/// and [`JOBS`] jobs submitted at once through the job front.
 fn job_cell(setup: Setup) -> Result<Cell, StartupError> {
-    let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), JOB_HOSTS).jobs();
+    let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), JOB_HOSTS);
     let mut cell = Cell::new(setup, spec, scratch("job-ids"), Faults::default())?;
-    cell.set_front(Box::new(JobFront::new()));
     for _ in 0..JOB_HOSTS {
         cell.add_agent().expect("an agent name is a host id");
     }
@@ -420,9 +424,8 @@ fn real_runs() -> Vec<(String, TraceHash)> {
 /// [`JOB_HOSTS`] hosts, [`BATCH`] jobs at time zero, a restart of the server at
 /// [`RESTART_AT_MS`] and [`BATCH`] more jobs a second after it.
 fn restarted_job_cell(setup: Setup) -> Result<Cell, StartupError> {
-    let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), JOB_HOSTS).jobs();
+    let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), JOB_HOSTS);
     let mut cell = Cell::new(setup, spec, scratch("job-restart"), Faults::default())?;
-    cell.set_front(Box::new(JobFront::new()));
     for _ in 0..JOB_HOSTS {
         cell.add_agent().expect("an agent name is a host id");
     }
@@ -471,7 +474,7 @@ fn a_restarted_server_goes_on_minting_the_seeds_ids() {
 fn jobs_runs() -> Vec<(String, TraceHash)> {
     let passed = jobs::jobs_on_a_lossy_wire().run_seeds(JOBS_SEEDS);
     let each = |run: &js_sim_cell::SeedRun| {
-        let name = format!("jobs_on_a_lossy_wire-jobs/seed-{}", run.seed);
+        let name = format!("jobs_on_a_lossy_wire/seed-{}", run.seed);
         (name, run.hash)
     };
     passed.runs.iter().map(each).collect()
@@ -585,60 +588,52 @@ fn regenerate_golden_hashes() {
     golden_of(WHOLE_FAULTS_FAMILY)
         .regenerate(&whole_faults_runs())
         .unwrap();
-    golden_of(REAL_FAMILY).regenerate(&real_runs()).unwrap();
     golden_of(FAULTS_FAMILY).regenerate(&faults_runs()).unwrap();
     golden_of(JOBS_FAMILY).regenerate(&jobs_runs()).unwrap();
     golden_of(ELASTIC_FAMILY)
         .regenerate(&elastic_runs())
         .unwrap();
     golden_of(store::FAMILY).regenerate(&store_runs()).unwrap();
+    golden_of(REAL_FAMILY).regenerate(&real_runs()).unwrap();
 }
 
-/// The hash of each pinned seed of the whole-host scenario under each placement, which
-/// must pass.
+/// The hash of each pinned seed of the whole-host scenario, which must pass.
 fn whole_runs() -> Vec<(String, TraceHash)> {
-    let mut runs = Vec::new();
-    for placement in Placement::value_variants() {
-        let scenario = whole_host::fifty_whole_host_requests(*placement);
-        let placement = whole_host::spelled(*placement);
-        for run in scenario.run_seeds(WHOLE_SEEDS).runs {
-            runs.push((format!("{placement}/seed-{}", run.seed), run.hash));
-        }
-    }
-    runs
+    let scenario = whole_host::fifty_whole_host_requests();
+    let passed = scenario.run_seeds(WHOLE_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!("fifty_whole_host_requests/seed-{}", run.seed);
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
 }
 
-/// Asserts that the hashes of the pinned seeds of the whole-host scenario, under every
-/// placement, equal the golden file's (family `whole_host`). Catches any change to a
-/// decision of the agents' whole-host handshake, of the client's whole-host path or of
-/// the server's whole-host path under a placement, or to the trace text, and a run that
-/// differs between processes.
+/// Asserts that the hashes of the pinned seeds of the whole-host scenario equal the golden
+/// file's (family `whole_host`). Catches any change to a decision of the client's
+/// whole-host path or of the server's whole-host path, or to the trace text, and a run
+/// that differs between processes.
 #[test]
-fn the_whole_host_scenario_matches_the_golden_file_under_every_placement() {
+fn the_whole_host_scenario_matches_the_golden_file() {
     golden_of(WHOLE_FAMILY).assert_matches(&whole_runs());
 }
 
-/// The hash of each pinned seed of the cancelled whole-host request under each placement,
-/// which must pass.
+/// The hash of each pinned seed of the cancelled whole-host job, which must pass.
 fn whole_faults_runs() -> Vec<(String, TraceHash)> {
-    let mut runs = Vec::new();
-    for placement in Placement::value_variants() {
-        let scenario = whole_host_cancel::a_cancelled_request(*placement);
-        let placement = whole_host::spelled(*placement);
-        for run in scenario.run_seeds(WHOLE_FAULTS_SEEDS).runs {
-            runs.push((format!("{placement}/seed-{}", run.seed), run.hash));
-        }
-    }
-    runs
+    let scenario = whole_host_cancel::a_cancelled_request();
+    let passed = scenario.run_seeds(WHOLE_FAULTS_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!("a_cancelled_whole_host_request/seed-{}", run.seed);
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
 }
 
-/// Asserts that the hashes of the pinned seeds of the cancelled whole-host request, under
-/// every placement, equal the golden file's (family `whole_host_faults`). Catches any
-/// change to how the server drops a cancelled whole-host request's place and mark under
-/// a placement, to the client's cancel of a pending lease, or to the trace text, and a
-/// run that differs between processes.
+/// Asserts that the hashes of the pinned seeds of the cancelled whole-host job equal the
+/// golden file's (family `whole_host_faults`). Catches any change to how the server drops
+/// a cancelled whole-host job's place, to the client's cancel of a queued job, or to the
+/// trace text, and a run that differs between processes.
 #[test]
-fn the_whole_host_fault_scenario_matches_the_golden_file_under_every_placement() {
+fn the_cancelled_whole_host_scenario_matches_the_golden_file() {
     golden_of(WHOLE_FAULTS_FAMILY).assert_matches(&whole_faults_runs());
 }
 
@@ -696,7 +691,7 @@ fn the_run_loop_stops_at_the_first_violation_and_checks_after_every_step() {
     let stopped = cell.now();
     assert_eq!(violation.at, stopped);
     assert!(
-        stopped < ms(LEASE_AT_MS),
+        stopped < ms(JOB_AT_MS),
         "stopped at {}",
         stopped.as_millis()
     );

@@ -41,9 +41,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use clap::ValueEnum;
 use js_conformance::agent::Defect;
-use js_lease_server::{Placement, StartupError};
+use js_lease_server::StartupError;
 use js_sim::text::list;
 use js_sim::{Faults, TraceHash};
 use js_testkit::dir::TestDir;
@@ -53,23 +52,19 @@ use crate::actions::{Action, submit_work};
 use crate::agreement::{self, Outcome};
 use crate::cell::{Cell, Setup};
 use crate::counters::{Counter, Counters};
-use crate::front::{FrontFactory, LeaseFront};
+use crate::front::FrontFactory;
 use crate::jobs::JobFront;
 use crate::observe::ItemId;
 use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
 use crate::server::{ServerSpec, Shape, Store};
 use crate::work::Work;
 
-mod answer;
 mod expect;
-mod facts;
+mod held_after_runs;
 mod launched_on;
-mod tries;
 
-pub use answer::Call;
 pub(crate) use expect::ended;
 pub use expect::{Expect, HostIs};
-pub use facts::{Booked, HostRef, Listed, RecordFact};
 
 /// How long a scenario runs after its last action unless [`Scenario::settle_within`]
 /// says otherwise.
@@ -230,7 +225,7 @@ impl Scenario {
             statements: Vec::new(),
             witnesses: Vec::new(),
             settle_within: DEFAULT_SETTLE,
-            front: LeaseFront::factory(),
+            front: JobFront::factory(),
         }
     }
 
@@ -249,20 +244,6 @@ impl Scenario {
         self
     }
 
-    /// This scenario under the server's `placement` (`--placement`, as
-    /// [`ServerSpec::placement`] sets it), its name followed by `-` and the placement as
-    /// the server's command line spells it, so that the runs of one scenario under each
-    /// placement are named apart in a failure and in the golden file. After
-    /// [`Scenario::server`], which would put the default back.
-    #[must_use]
-    pub fn under(mut self, placement: Placement) -> Self {
-        let spelled = placement.to_possible_value();
-        let spelled = spelled.map(|value| value.get_name().to_owned());
-        self.name = format!("{}-{}", self.name, spelled.unwrap_or_default());
-        self.server = self.server.placement(placement);
-        self
-    }
-
     /// This scenario, its server keeping its state in `store` ([`ServerSpec::store`]), its
     /// name followed by `-` and the store's name ([`Store::name`]), so that the runs of one
     /// scenario over each store are named apart in a failure and in the golden file. After
@@ -271,20 +252,6 @@ impl Scenario {
     pub fn over_store(mut self, store: Store) -> Self {
         self.name = format!("{}-{}", self.name, store.name());
         self.server = self.server.store(store);
-        self
-    }
-
-    /// This scenario over the job service: its server also serves jobs
-    /// ([`ServerSpec::jobs`], which places as `js-sched`), its agents speak the per-job
-    /// messages, and its client is a [`crate::JobFront`], which submits each unit of work as
-    /// a job. Its name is followed by `-jobs`, so its runs are named apart from the same
-    /// scenario's over the lease front. After [`Scenario::server`] and [`Scenario::under`],
-    /// which would put the lease routes' server back.
-    #[must_use]
-    pub fn over_jobs(mut self) -> Self {
-        self.name = format!("{}-jobs", self.name);
-        self.server = self.server.jobs();
-        self.front = JobFront::factory();
         self
     }
 
@@ -391,7 +358,7 @@ impl Scenario {
         self
     }
 
-    /// This scenario, its client made by `front` in place of [`LeaseFront::factory`].
+    /// This scenario, its client made by `front` in place of [`JobFront::factory`].
     #[must_use]
     pub fn front(mut self, front: FrontFactory) -> Self {
         self.front = front;

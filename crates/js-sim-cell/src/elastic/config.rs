@@ -116,6 +116,7 @@ pub(crate) fn text(cloud: &Cloud, files: &Files<'_>, placement: &str) -> String 
          store = {store}\n\
          allow_sqlite_store = {allow_sqlite}\n\
          listen = \"127.0.0.1:0\"\n\
+         job_listen = \"127.0.0.1:0\"\n\
          agent_listen = \"127.0.0.2:0\"\n\
          advertise_url = {advertise}\n\
          max_lease_wall = \"2h\"\n\

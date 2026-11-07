@@ -2,7 +2,7 @@
 //! second [`FakeAgent`], keyed by job id, as their engine.
 //!
 //! A fake agent speaks them when its hello reports [`PER_JOB_CAPABILITY`] (the cell's
-//! agents do for a server of [`crate::ServerSpec::jobs`]). The real agent's node does not:
+//! agents do). The real agent's node does not:
 //! its lifecycle's per-job half is not run here. Every call below goes to the second fake,
 //! so a [`Defect`] of the agent acts on its jobs as it acts on its runs.
 //!
@@ -116,6 +116,8 @@ pub(super) struct PerJob {
     sent: BTreeMap<CallId, Sent>,
     /// Every job whose result a heartbeat sent at least once.
     reported: BTreeSet<JobId>,
+    /// Every job a heartbeat listed as running at least once.
+    listed: BTreeSet<JobId>,
 }
 
 impl PerJob {
@@ -137,6 +139,7 @@ impl PerJob {
             retired: BTreeSet::new(),
             sent: BTreeMap::new(),
             reported: BTreeSet::new(),
+            listed: BTreeSet::new(),
         })
     }
 
@@ -216,6 +219,7 @@ impl PerJob {
             retired_ids,
             ..
         } = listing;
+        self.listed.extend(running.iter().cloned());
         let sent = Sent {
             at: io.now,
             listed: running.clone(),
@@ -228,6 +232,14 @@ impl PerJob {
             results,
             retired: retired_ids,
         });
+    }
+
+    /// Whether the agent runs a job that no heartbeat it sent listed, so the server cannot
+    /// have seen it listed.
+    pub(super) fn runs_unlisted(&self) -> bool {
+        let running = self.fake.observed().running;
+        let mut jobs = self.jobs.keys();
+        jobs.any(|job| running.contains(job.as_str()) && !self.listed.contains(job))
     }
 
     /// The connection dropped: the heartbeat before had no answer when the next was due.

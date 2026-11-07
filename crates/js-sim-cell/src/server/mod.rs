@@ -14,8 +14,8 @@
 //! its next input, so that thread's timing cannot reach a decision.
 //!
 //! [`ServerNode::client_call`] is how a client reaches the server: a call at an exact
-//! virtual time, through the client router, which the bus never drops. A server of
-//! [`ServerSpec::jobs`] also serves the job service, in process ([`JOBS_PATH`]): a client
+//! virtual time, through the client router, which the bus never drops.
+//! Every server also serves the job service, in process ([`JOBS_PATH`]): a client
 //! call whose path is under it goes to the job service's router (its HTTP/JSON gateway),
 //! and every other to the client router.
 //!

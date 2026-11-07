@@ -3,9 +3,9 @@
 //! and once with every agent real ([`crate::Scenario::real_hosts`]), and the client's
 //! outcome of each item compared.
 //!
-//! An item's outcome ([`Outcome`]) is the terminal the client heard. The lease front folds
-//! a run's result into it: an outcome of the run reads `succeeded`, `failed`, or
-//! `cancelled` (a killed run), a run that ended with none reads `lost` (or `cancelled`
+//! An item's outcome ([`Outcome`]) is the terminal the client heard. The job front folds
+//! a job's state into it: `JOB_STATE_SUCCEEDED` reads `succeeded`, `failed`, or
+//! `cancelled`, a job that ended with none reads `lost` (or `cancelled`
 //! after a cancel), so two items whose terminals agree have results that agree as far as
 //! the client can tell. Nothing else is compared: the traces differ by design, since the
 //! two agents send different bodies, and the run ids the server gives are named in a

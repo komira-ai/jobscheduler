@@ -2,7 +2,7 @@
 //! and return, agents that never return, a partition longer than the grace that heals,
 //! a lossy wire, a host that goes silent holding a run the server never saw listed, a
 //! start that arrives after its stop, a restart of the server, and a host forgotten and
-//! seated again. Each runs over sixteen seeds under every invariant of `Invariant::ALL`
+//! seated again. Each runs over sixteen seeds (the 200-host scenario over four) under every invariant of `Invariant::ALL`
 //! (the step invariants after every step, the end invariants once it has settled), and
 //! states in its doc comment the row of the design (sections 7 and 8) it covers.
 //!
@@ -41,9 +41,18 @@ use js_sim_cell::{
     Counter, Expect, HostIs, HowEnded, Invariant, Scenario, ScenarioFailure, ServerSpec, Shape,
     Work,
 };
+use js_types::Resources;
 
 /// Every scenario of the family runs over this many seeds.
 const SEEDS: u64 = 16;
+
+/// A unit of work that runs for `run` and asks for all the cores of a host
+/// ([`Shape::gpu_host`]), so a host runs one at a time and a scenario that counts on one
+/// run per host keeps its count.
+fn one_per_host(run: Duration) -> Work {
+    let host = Resources::new(8_000, 1 << 30, 0, None).unwrap_or_default();
+    Work::run_for(run).needs(host)
+}
 
 /// Agents that die: two hundred hosts beating every 30 s, held lost after 90 s.
 const DIE_HOSTS: usize = 200;
@@ -54,13 +63,15 @@ const DIE_RUN: Duration = Duration::from_secs(300);
 const DIE_GIVE_UP: Duration = Duration::from_secs(2_400);
 /// The ten agents that die, spread over the hosts.
 const DIE_AGENTS: [usize; 10] = [0, 20, 40, 60, 80, 100, 120, 140, 160, 180];
-const DIE_AT: Duration = Duration::from_secs(60);
-const DIE_REPLACE_AT: Duration = Duration::from_secs(80);
-const DIE_SECOND_AT: Duration = Duration::from_secs(120);
+const DIE_AT: Duration = Duration::from_secs(75);
+const DIE_REPLACE_AT: Duration = Duration::from_secs(95);
+const DIE_SECOND_AT: Duration = Duration::from_secs(135);
 const DIE_SECOND_RUNS: u32 = 100;
 const DIE_SETTLE: Duration = Duration::from_secs(1_300);
-/// The 200-host scenario is the family's largest by far: its seeds run on this many
-/// threads, a quarter each.
+/// The 200-host scenario is the family's largest by far, and over the job service a seed
+/// of it costs about four CPU minutes, so it runs [`DIE_SEEDS`] seeds, on this many threads,
+/// a quarter each.
+const DIE_SEEDS: u64 = 4;
 const DIE_THREADS: u64 = 4;
 
 /// Agents killed for good: five of fifty hosts, at the server's default heartbeat.
@@ -159,7 +170,7 @@ fn partition(defect: Option<Defect>) -> Scenario {
         ));
     hosts(scenario, CUT_AGENTS, defect)
         .hosts("burst", CUT_HOSTS - CUT_AGENTS)
-        .work(CUT_RUNS, Work::run_for(CUT_RUN))
+        .work(CUT_RUNS, one_per_host(CUT_RUN))
         .at(CUT_AT, partition_agents(agents(0..CUT_AGENTS), CUT_FOR))
         .expect(Expect::all_items_terminal())
         .expect(Expect::terminal_count(
@@ -185,7 +196,7 @@ fn lossy(defect: Option<Defect>) -> Scenario {
         .server(spec)
         .bus(lossy);
     hosts(scenario, LOSSY_HOSTS, defect)
-        .work(LOSSY_RUNS, Work::run_for(LOSSY_RUN))
+        .work(LOSSY_RUNS, one_per_host(LOSSY_RUN))
         .at(LOSSY_FOR, set_bus_faults(Faults::default()))
         .expect(Expect::all_items_terminal())
         .witness("start_repeated", |c| c.get(Counter::StartRepeated) >= 1)
@@ -202,7 +213,7 @@ fn stale_start(defect: Option<Defect>) -> Scenario {
         reorder: Chance::percent(STALE_REORDER_PERCENT),
         ..Faults::default()
     };
-    let work = Work::run_for(STALE_RUN).give_up_after(STALE_GIVE_UP);
+    let work = one_per_host(STALE_RUN).give_up_after(STALE_GIVE_UP);
     let scenario = Scenario::new("a_stale_start_after_a_stop_does_not_run")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec);
@@ -230,14 +241,16 @@ fn should_fail(scenario: &Scenario, invariant: Invariant) {
 
 /// Covers section 7 ("Lost host": it takes no new work; the agent's state dies with it)
 /// and section 8, row 4 (an agent restart loses its runs: the new process lists none and
-/// the run ends with no result). Two hundred hosts run 400 runs of 300 s; at 60 s ten
+/// the run ends with no result). Two hundred hosts run 400 runs of 300 s; at 75 s ten
 /// agents die with their state, and 20 s later a new process on each of those hosts says
 /// hello holding nothing (the server refuses it while the host is still live, and seats
-/// it once the host is lost). A second batch of a hundred runs is submitted at 120 s.
+/// it once the host is lost). The agents die after the heartbeat that first lists the
+/// jobs, which is about 60 s in: a job's start rides the reply to a heartbeat, and the
+/// heartbeats are 30 s apart. A second batch of a hundred runs is submitted at 135 s.
 /// Proves, with every invariant on, that every item reaches one terminal answer, that
 /// nothing is launched twice, booked past a host's capacity or left booked once the
 /// clients are done, and that the replaced hosts take work again: each of them launches
-/// a run after 120 s (`launched_on`). Red for a server that never seats a replaced host
+/// a run after 135 s (`launched_on`). Red for a server that never seats a replaced host
 /// again or keeps it unbookable (`launched-on`), one that keeps the dead process's runs
 /// booked after the new process listed none (`settles-when-quiet`), and one that runs a
 /// dead process's run again on the new one (`at-most-one-launch`).
@@ -245,7 +258,7 @@ fn should_fail(scenario: &Scenario, invariant: Invariant) {
 fn ten_of_two_hundred_agents_die_mid_run() {
     let parts: Vec<_> = (0..DIE_THREADS)
         .map(|part| {
-            let seeds = part * SEEDS / DIE_THREADS..(part + 1) * SEEDS / DIE_THREADS;
+            let seeds = part * DIE_SEEDS / DIE_THREADS..(part + 1) * DIE_SEEDS / DIE_THREADS;
             std::thread::spawn(move || {
                 let ran = agents_that_die().try_run_seed_range(seeds);
                 ran.map(|_| ()).map_err(|failure| failure.to_string())
@@ -267,7 +280,7 @@ fn agents_that_die() -> Scenario {
     let dead = || Agents::Listed(DIE_AGENTS.to_vec());
     let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), DIE_HOSTS)
         .heartbeat(DIE_INTERVAL, DIE_GRACE);
-    let work = Work::run_for(DIE_RUN).give_up_after(DIE_GIVE_UP);
+    let work = one_per_host(DIE_RUN).give_up_after(DIE_GIVE_UP);
     Scenario::new("ten_of_two_hundred_agents_die_mid_run")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
@@ -283,16 +296,16 @@ fn agents_that_die() -> Scenario {
 
 /// Covers section 8, row 41 (a host silent for good keeps its bookings until they are
 /// stopped) and section 6.3 (a lost host takes no new work). Five of fifty agents die at
-/// 60 s and never return; their hosts read lost, and the clients of the runs on them
-/// give up at their bound and release their leases. Proves, with every invariant on
-/// (among them `no-lease-on-a-lost-host`: no lease is booked on, and no item placed
-/// on, a host the server lists as lost), that once the clients have released nothing
+/// 60 s and never return; their hosts read lost, and the clients of the jobs on them
+/// give up at their bound and cancel them. Proves, with every invariant on
+/// (among them `no-lease-on-a-lost-host`: no item is placed on a host the server lists
+/// as lost), that once the clients have cancelled nothing
 /// stays booked on the dead hosts (`settles-when-quiet`, `bookings-match-agents`), that
 /// every item reaches one terminal answer, that every run not on a dead host succeeds,
-/// and that the dead hosts are still listed, lost. Red for a server that books new
-/// leases on a lost host (`no-lease-on-a-lost-host`, and the count of successes, since
+/// and that the dead hosts are still listed, lost. Red for a server that places new
+/// jobs on a lost host (`no-lease-on-a-lost-host`, and the count of successes, since
 /// such an item can never start), and one that keeps a dead host's booking after its
-/// lease was released (`settles-when-quiet`).
+/// job was cancelled (`settles-when-quiet`).
 #[test]
 fn agents_killed_for_good_leave_no_booking_once_clients_release() {
     let dead = Agents::Listed(GOOD_DEAD.to_vec());
@@ -307,7 +320,7 @@ fn agents_killed_for_good_leave_no_booking_once_clients_release() {
         .hosts("burst", GOOD_HOSTS)
         .work(
             GOOD_RUNS,
-            Work::run_for(GOOD_RUN).give_up_after(GOOD_GIVE_UP),
+            one_per_host(GOOD_RUN).give_up_after(GOOD_GIVE_UP),
         )
         .at(GOOD_KILL_AT, kill_agents_for_good(dead))
         .expect(Expect::all_items_terminal())
@@ -370,7 +383,7 @@ fn a_silent_host_is_never_given_a_second_copy_of_its_run() {
             SILENT_HOSTS,
         ))
         .hosts("burst", SILENT_HOSTS)
-        .work(SILENT_RUNS, Work::run_for(SILENT_RUN))
+        .work(SILENT_RUNS, one_per_host(SILENT_RUN))
         .at(
             SILENT_CUT_AT,
             partition_agents(drawn_agents(SILENT_CUT), SILENT_CUT_FOR),
@@ -409,11 +422,11 @@ fn a_restart_of_the_server_with_runs_in_flight_double_books_nothing() {
 /// longer than the 15 s grace and the pool's `lost_retention` of 120 s together, so the
 /// server forgets them; the cut heals and a run a host is submitted. Proves, with every
 /// invariant on (`no-double-booking` checks at every step that the listing names each
-/// host once and keeps every lease on its first host), that each forgotten host is
+/// host once), that each forgotten host is
 /// seated again, listed live at the end, and takes work again (`launched_on`). The
 /// witness shows the server had forgotten a host: a heartbeat was answered
 /// `unknown-host`. Red for a server that refuses a forgotten host's hello or never books
-/// it again (`host-state`, `launched-on`), and one that moves a lease to another host
+/// it again (`host-state`, `launched-on`), and one that books a job on two hosts
 /// when a host returns (`no-double-booking`).
 #[test]
 fn a_forgotten_host_that_comes_back_is_seated_once() {
@@ -425,11 +438,11 @@ fn a_forgotten_host_that_comes_back_is_seated_once() {
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
         .hosts("burst", FORGET_HOSTS)
-        .work(FORGET_RUNS, Work::run_for(FORGET_RUN))
+        .work(FORGET_RUNS, one_per_host(FORGET_RUN))
         .at(FORGET_CUT_AT, partition_agents(forgotten, FORGET_CUT_FOR))
         .at(
             FORGET_AGAIN_AT,
-            submit_work(FORGET_RUNS, Work::run_for(FORGET_RUN)),
+            submit_work(FORGET_RUNS, one_per_host(FORGET_RUN)),
         )
         .expect(Expect::all_items_terminal())
         .expect(Expect::launched_on(&FORGET_AGENTS, FORGET_AGAIN_AT))
@@ -440,10 +453,10 @@ fn a_forgotten_host_that_comes_back_is_seated_once() {
         .run_seeds(SEEDS);
 }
 
-/// Asserts that the stale-start scenario fails `at-most-one-launch` when its agents do
-/// not retire a stopped run's id (`ForgetsRetiredIds`): the start that arrives after its
-/// stop runs. With `a_stale_start_after_a_stop_does_not_run`, whose witness shows such a
-/// start arrived, it shows the scenario can fail.
+/// Asserts that the stale-start scenario fails `at-most-one-launch` when its agents do not
+/// retire a stopped job's id (`ForgetsRetiredIds`): the start that arrives after its stop
+/// runs. With `a_stale_start_after_a_stop_does_not_run`, whose witness shows such a start
+/// arrived, it shows the scenario can fail.
 #[test]
 fn a_defective_agent_that_forgets_retired_ids_fails_scenario_six() {
     should_fail(
@@ -452,17 +465,16 @@ fn a_defective_agent_that_forgets_retired_ids_fails_scenario_six() {
     );
 }
 
-/// Asserts that the partition scenario fails `no-result-lost` when the cut agents forget
-/// an unacknowledged result when their connection drops (`ForgetsUnackedResult`; the
-/// agent node tells its agent the connection dropped for every heartbeat still
-/// unanswered when the next is due): a run that ended during the cut is never reported,
-/// the server ends it without a result once the host returns without listing it, and its
-/// client hears `lost`.
+/// Asserts that the partition scenario fails `result-kept-until-acknowledged` when the cut
+/// agents forget an unacknowledged result when their connection drops
+/// (`ForgetsUnackedResult`; the agent node tells its agent the connection dropped for every
+/// heartbeat still unanswered when the next is due): a heartbeat leaves without the result
+/// of a job that ended during the cut, which no answer had acknowledged.
 #[test]
 fn a_defective_agent_that_forgets_unacked_results_fails_scenario_three() {
     should_fail(
         &partition(Some(Defect::ForgetsUnackedResult)),
-        Invariant::NoResultLost,
+        Invariant::ResultKeptUntilAcknowledged,
     );
 }
 
