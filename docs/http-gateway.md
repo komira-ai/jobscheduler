@@ -12,8 +12,8 @@ own routes and puts its bearer layer in front. The router matches the whole requ
 it is merged at the root, not nested under a prefix. The gateway itself
 authenticates nothing; an unauthenticated request is the mounting server's 401 with an empty
 body. The server's own routes (`/v1/agent`, `/healthz`, `/status`) are not part of it,
-and its build fails if an option names a path under `/v1/leases` (the prefix of the lease routes the
-server no longer serves) or `/v1/agent`.
+and its build fails if an option's path names `agent` as its resource after `/v1/`, or `leases`
+(the resource of the lease routes, which the server no longer serves).
 
 The lease server has routes of its own under the same resources, with other bodies and
 other authentication: `GET /v1/hosts`, `GET` and `POST /v1/hosts/{target}` (which serves
