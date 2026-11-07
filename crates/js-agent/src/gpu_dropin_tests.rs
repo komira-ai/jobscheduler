@@ -16,11 +16,18 @@ use super::{
 };
 use crate::Cli;
 use crate::crun::{GpuPassthrough, NodeError};
+use crate::flags_file::{FileFacts, expand_with};
 
 /// The packaged crun unit, whose `ExecStart` the drop-in extends.
 const PACKAGED_UNIT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../packaging/js-agent/js-agent-crun.service"
+);
+
+/// The unit hostkeeper's package links, whose `ExecStart` names the operator's flags file.
+const HOSTKEEPER_UNIT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../packaging/js-agent/hostkeeper/units/js-agent-crun.service"
 );
 
 /// The unit most tests extend.
@@ -91,6 +98,8 @@ struct Rig {
     driver: PathBuf,
     unit: PathBuf,
     out: PathBuf,
+    /// The text every `--flags-file` reads as, root's and mode 0600; none is a missing file.
+    flags: Option<&'static str>,
 }
 
 impl Rig {
@@ -115,6 +124,7 @@ impl Rig {
             driver,
             unit,
             out,
+            flags: None,
         }
     }
 
@@ -145,7 +155,21 @@ impl Rig {
         read: fn(&Path) -> Result<DeviceNode, NodeError>,
     ) -> Ran {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let host = Host { smi: &smi, read };
+        let file = |_: &Path| match self.flags {
+            Some(text) => Ok(FileFacts {
+                regular: true,
+                mode: 0o600,
+                uid: 0,
+                bytes: text.as_bytes().to_vec(),
+            }),
+            None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        };
+        let expand = |args: Vec<OsString>| expand_with(args, 0, &file);
+        let host = Host {
+            smi: &smi,
+            read,
+            expand: &expand,
+        };
         let code = run(args, &mut out, &mut err, &host);
         Ran {
             code: format!("{code:?}"),
@@ -738,4 +762,75 @@ fn exec_start_is_read_as_systemd_reads_it() {
         text.ends_with("[Service]\nExecStart=\nExecStart=/x --y\n"),
         "{text}"
     );
+}
+
+/// The unit hostkeeper links names only `--flags-file` and `--token-file`: the server and the
+/// pool are in the operator's flags file. The checks read the file as the agent does, and the
+/// drop-in keeps `--flags-file` as the unit has it, so the agent reads the file at its start.
+#[test]
+fn the_dropin_extends_the_hostkeeper_unit_whose_server_is_in_the_flags_file() {
+    let mut rig = Rig::new("dropin-hostkeeper", &["nvidia0", "nvidiactl"]);
+    rig.flags = Some("--server=https://js.example.com:8443\n--pool=farm\n");
+    let unit = std::fs::read_to_string(HOSTKEEPER_UNIT).unwrap();
+    std::fs::write(&rig.unit, &unit).unwrap();
+    let ran = rig.run_with(&[], absent_smi);
+    assert_eq!(ran.code, status(0), "{}", ran.err);
+    let own = exec_start([unit.as_str()]).unwrap();
+    assert!(own.contains(" --flags-file /etc/js-agent/flags "), "{own}");
+    assert!(!own.contains("--server"), "{own}");
+    let line = rig.written_line(&unit);
+    let mut want = words(&own);
+    want.extend(words(
+        "--gpu-device /dev/nvidia{index} --gpu-device /dev/nvidiactl",
+    ));
+    want.extend(rig.driver_flags());
+    assert_eq!(words(&line), want);
+}
+
+/// A flags file the agent would refuse is refused here too, naming the unit and the file, and
+/// no drop-in is left: the agent's own start then says the same.
+#[test]
+fn a_flags_file_the_agent_refuses_writes_no_dropin() {
+    let mut rig = Rig::new("dropin-flags-refused", &["nvidia0"]);
+    rig.flags = Some("server=https://js.example.com:8443\n");
+    std::fs::write(
+        &rig.unit,
+        "[Service]\nExecStart=/a/js-agent --flags-file /etc/js-agent/flags\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(rig.out.parent().unwrap()).unwrap();
+    std::fs::write(&rig.out, "stale").unwrap();
+    let ran = rig.run_with(&[], absent_smi);
+    assert_eq!(ran.code, status(1));
+    assert_eq!(
+        ran.err,
+        format!(
+            "crun-gpu-dropin: the ExecStart of {}: --flags-file /etc/js-agent/flags: line 1: \
+             not a flag (every line must start with --); no drop-in written\n",
+            rig.unit.display()
+        )
+    );
+    assert!(!rig.out.exists());
+}
+
+/// GPU flags the operator lists in the flags file win as those in the unit do: no drop-in.
+#[test]
+fn gpu_flags_in_the_flags_file_win_over_the_dropin() {
+    let mut rig = Rig::new("dropin-flags-gpu", &["nvidia0"]);
+    rig.flags = Some("--server=https://s.example\n--pool=p\n--gpu-device=/dev/nvidia0\n");
+    std::fs::write(
+        &rig.unit,
+        "[Service]\nExecStart=/a/js-agent --flags-file /etc/js-agent/flags\n",
+    )
+    .unwrap();
+    let ran = rig.run_with(&[], absent_smi);
+    assert_eq!(ran.code, status(0), "{}", ran.err);
+    assert_eq!(
+        ran.out,
+        format!(
+            "crun-gpu-dropin: the ExecStart of {} lists GPU flags already: no drop-in written\n",
+            rig.unit.display()
+        )
+    );
+    assert!(!rig.out.exists());
 }

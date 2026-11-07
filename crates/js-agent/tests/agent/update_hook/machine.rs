@@ -1,5 +1,5 @@
 //! The hook on a machine: the steps over the real lease client, the real agent state, the real
-//! release link and the declaration read from a file. A real lease server runs in the test
+//! release link and the host's flags file read from disk. A real lease server runs in the test
 //! process; the unit manager is the one thing left out (a step that stops or starts a unit is
 //! tested over the fakes), so the steps run here are those that never touch it.
 
@@ -11,8 +11,8 @@ use std::process::Command;
 use js_agent::lifecycle::StateRoot;
 use js_agent::own_host::{Lease, LeaseError};
 use js_agent::update_hook::{
-    Class, ConnectParams, DECLARATION_PATH, Done, Flags, Invocation, Machine, MachineLease,
-    Outcome, Params, Reason, Step, own_host_id, run_step,
+    Class, ConnectParams, Done, Invocation, Machine, MachineLease, Outcome, Params, Reason, Step,
+    own_host_id, run_step,
 };
 use js_agent_wire::Taint;
 
@@ -23,8 +23,8 @@ use crate::support::{FakeFiles, MACHINE_ID, Scratch, linux_host};
 
 const UNIT: &str = "js-agent-crun.service";
 
-/// A tree of one test: the declaration, the state directory of the hook, the staged release
-/// (an agent that prints its version), and a place for the params files.
+/// A tree of one test: the state directory of the hook, the staged release (an agent that prints
+/// its version), the host's flags file and join token, and a place for the params files.
 pub(super) struct Tree {
     pub(super) files: Scratch,
     pub(super) root: PathBuf,
@@ -40,8 +40,10 @@ impl Tree {
         private(&files, "tree/state");
         // The agent is written by a child that has finished before it is run, so that no
         // fork of another test holds its file open for writing.
-        let agent = root.join("releases/1.4.0/js-agent");
-        let script = "printf '#!/bin/sh\\nprintf \"js-agent 1.4.0\\\\nruntimes: crun docker native\\\\n\"\\n'";
+        fs::create_dir_all(root.join("releases/1.4.0/bin")).unwrap();
+        let agent = root.join("releases/1.4.0/bin/js-agent");
+        let script =
+            "printf '#!/bin/sh\nprintf \"js-agent 1.4.0\\nruntimes: crun docker native\\n\"\n'";
         let made = Command::new("/bin/sh")
             .arg("-c")
             .arg(format!("{script} > '{}'", agent.display()))
@@ -49,26 +51,20 @@ impl Tree {
             .unwrap();
         assert!(made.success());
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
-        let tree = Tree { files, root };
-        fs::write(
-            tree.declaration(),
-            format!(
-                concat!(
-                    "state_dir = \"{root}/state\"\n[hook]\nunits = [\"{unit}\"]\n",
-                    "write_paths = [\"{root}/releases\", \"{root}/link\", \"{root}/state\"]\n",
-                    "[hook.timeout_secs]\nprepare = 3900\ncutover = 4320\nverify = 615\n",
-                    "rollback = 8220\ncleanup = 120\n"
-                ),
-                root = tree.root.display(),
-                unit = UNIT,
-            ),
-        )
-        .unwrap();
-        tree
-    }
-
-    pub(super) fn declaration(&self) -> PathBuf {
-        self.root.join("declaration.toml")
+        // The unit each release carries: the same, so the update restarts nothing new.
+        for release in ["releases/1.4.0", "releases/1.3.0"] {
+            fs::create_dir_all(root.join(release).join("units")).unwrap();
+            fs::write(
+                root.join(release).join("units").join(UNIT),
+                "[Service]\nExecStart=/opt/agent\n",
+            )
+            .unwrap();
+        }
+        // The join token a first install needs, as the operator places it.
+        let token = root.join("token");
+        fs::write(&token, "tok-0123456789\n").unwrap();
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+        Tree { files, root }
     }
 
     pub(super) fn staged(&self) -> PathBuf {
@@ -79,12 +75,21 @@ impl Tree {
         self.root.join("state/record.json")
     }
 
+    /// The host's flags file.
+    pub(super) fn flags(&self) -> PathBuf {
+        self.root.join("flags")
+    }
+
     /// The params line that names the tree's own (private) state directory as the state root.
     pub(super) fn state_line(&self) -> String {
         format!("state_root = \"{}\"\n", self.root.join("state").display())
     }
 
-    /// The params of an update from 1.3.0 (or a first install), plus `extra` lines.
+    /// The params of an update from 1.3.0 (or a first install). `extra` is lines of the
+    /// agent's flags the way the old table gave them: `state_root` and `token_file` are params
+    /// keys (the tree's own state root is not there, and its token file is a good one, unless
+    /// they say otherwise), `server`, `ca_cert` and `host_id` go to the tree's flags file, which
+    /// always names the pool, and any other line is put in the table as it is.
     pub(super) fn params(&self, previous: bool, extra: &str) -> Params {
         let previous = if previous {
             format!(
@@ -94,37 +99,66 @@ impl Tree {
         } else {
             String::new()
         };
+        let mut state_root = format!("\"{}\"", self.root.join("no-such-state").display());
+        let mut token_file = format!("\"{}\"", self.root.join("token").display());
+        let mut flags = vec!["--pool=farm".to_owned()];
+        let mut rest = String::new();
+        for line in extra.lines() {
+            match line.split_once(" = ") {
+                Some(("state_root", value)) => state_root = value.to_owned(),
+                Some(("token_file", value)) => token_file = value.to_owned(),
+                Some(("server", value)) => {
+                    flags.push(format!("--server={}", value.trim_matches('"')))
+                }
+                Some(("ca_cert", value)) => {
+                    flags.push(format!("--ca-cert={}", value.trim_matches('"')))
+                }
+                Some(("host_id", value)) => {
+                    flags.push(format!("--host-id={}", value.trim_matches('"')))
+                }
+                _ => rest.push_str(&format!("{line}\n")),
+            }
+        }
+        fs::write(self.flags(), format!("{}\n", flags.join("\n"))).unwrap();
+        fs::set_permissions(self.flags(), fs::Permissions::from_mode(0o600)).unwrap();
         Params::parse(&format!(
             concat!(
                 "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\n",
                 "defer_retry_secs = 300\nrelease_link = \"{root}/link/current\"\n",
+                "unit = \"{unit}\"\nstate_dir = \"{root}/state\"\n",
+                "flags_file = \"{flags}\"\nstate_root = {state_root}\ntoken_file = {token_file}\n",
+                "runtime = \"crun\"\nprepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\n",
+                "verify_timeout_secs = 615\nrollback_timeout_secs = 8220\n",
+                "cleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
                 "\"updater.artifact_digest\" = \"sha256:{digest}\"\n",
                 "\"updater.staged_release\" = \"{staged}\"\n",
-                "\"updater.target_version\" = \"1.4.0\"\n{previous}{extra}"
+                "\"updater.target_version\" = \"1.4.0\"\n{previous}{rest}"
             ),
             root = self.root.display(),
+            unit = UNIT,
+            flags = self.flags().display(),
+            state_root = state_root,
+            token_file = token_file,
             digest = "0123456789abcdef".repeat(4),
             staged = self.staged().display(),
             previous = previous,
-            extra = extra,
+            rest = rest,
         ))
         .unwrap()
     }
 
-    /// Runs `step` on a machine whose id is `own`, with the declaration of the tree.
+    /// Runs `step` on a machine whose id is `own`.
     pub(super) fn run(&self, step: Step, params: &Params, own: Result<&str, &str>) -> Done {
         let invocation = Invocation {
-            flags: Flags::default(),
             step,
             artifact: (step == Step::Prepare).then(|| self.staged()),
             params: PathBuf::from("/unused"),
         };
-        let declaration = self.declaration();
         let own_host_id = || own.map(str::to_owned).map_err(str::to_owned);
         let machine = Machine {
-            declaration: &declaration,
             stat: &as_root,
             own_host_id: &own_host_id,
+            ..Machine::system()
         };
         run_step(&invocation, params, &machine)
     }
@@ -243,25 +277,6 @@ fn a_state_root_that_is_not_private_fails_the_step_and_one_that_is_tainted_halts
 }
 
 #[test]
-fn a_declaration_that_cannot_be_read_ends_the_step_before_it_looks_at_anything() {
-    let tree = Tree::new("hook-machine-no-declaration");
-    fs::remove_file(tree.declaration()).unwrap();
-    for step in Step::ALL {
-        let done = tree.run(step, &tree.params(true, ""), Err("unused"));
-        assert_eq!(done.outcome, Outcome::Failure, "{step}");
-        assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{step}");
-        assert!(
-            done.report
-                .detail
-                .as_deref()
-                .unwrap()
-                .contains("declaration"),
-            "{step}"
-        );
-    }
-}
-
-#[test]
 fn every_step_the_updater_can_ask_for_is_run_by_its_own_body() {
     let tree = Tree::new("hook-machine-dispatch");
     let params = tree.params(true, &tree.state_line());
@@ -357,7 +372,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
                 ca_cert: Some(ca),
                 ..full.clone()
             },
-            "ca_cert: ",
+            "--ca-cert: ",
         ),
         (
             ConnectParams {
@@ -371,7 +386,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
                 host_id: Some("Not:A:Host".to_owned()),
                 ..full
             },
-            "host_id",
+            "--host-id",
         ),
     ];
     for (params, word) in cases {
@@ -419,8 +434,7 @@ fn a_lease_made_from_the_params_reaches_the_server_and_the_join_token_is_not_a_h
 }
 
 #[test]
-fn the_machine_reads_the_declaration_the_updater_installs_and_looks_at_directories_as_root_does() {
-    assert_eq!(Machine::system().declaration, Path::new(DECLARATION_PATH));
+fn the_machine_looks_at_directories_files_and_users_as_the_system_does() {
     let root = File::open("/").unwrap();
     let stat = (Machine::system().stat)(Path::new("/"), std::os::fd::AsFd::as_fd(&root)).unwrap();
     assert!(stat.is_dir && !stat.is_symlink);

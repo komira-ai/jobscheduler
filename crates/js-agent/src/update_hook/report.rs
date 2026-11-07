@@ -16,7 +16,7 @@ pub enum Reason {
     BadParams,
     /// Another step holds the lock of the state directory.
     Locked,
-    /// The state directory, the record or the declaration is not as the hook requires.
+    /// The state directory, the record or the settings are not as the hook requires.
     StateInvalid,
     /// The agent is tainted: no version can repair it (exit 76).
     Tainted,
@@ -36,7 +36,8 @@ pub enum Reason {
     CordonCapReached,
     /// The unit could not be stopped, or did not stop in time.
     StopFailed,
-    /// The release link could not be moved.
+    /// The release link is not where the step needs it (the updater moves it), or cannot be
+    /// read.
     LinkFailed,
     /// The unit could not be started, or did not become active in time.
     StartFailed,
@@ -45,14 +46,19 @@ pub enum Reason {
     CordonUnconfirmed,
     /// `verify` waited out its bound and no new session of the target said hello.
     NoHello,
-    /// `rollback` of a first install that has moved the release link: there is no previous
-    /// release to restore.
+    /// `rollback` of a first install that has begun its cutover: there is no previous release
+    /// to restore.
     NoPreviousRelease,
+    /// A first install, and the join token file is not there as the agent needs it and the
+    /// state root holds no host credential (exit 75).
+    JoinTokenMissing,
+    /// The unit changes, and its cgroup still holds a process after the stop.
+    UnitNotEmpty,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 19] = [
+    pub const ALL: [Reason; 21] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -72,6 +78,8 @@ impl Reason {
         Reason::CordonUnconfirmed,
         Reason::NoHello,
         Reason::NoPreviousRelease,
+        Reason::JoinTokenMissing,
+        Reason::UnitNotEmpty,
     ];
 
     /// The token in the JSON.
@@ -97,6 +105,8 @@ impl Reason {
             Reason::CordonUnconfirmed => "cordon_unconfirmed",
             Reason::NoHello => "no_hello",
             Reason::NoPreviousRelease => "no_previous_release",
+            Reason::JoinTokenMissing => "join_token_missing",
+            Reason::UnitNotEmpty => "unit_not_empty",
         }
     }
 }

@@ -382,7 +382,7 @@ impl Process {
             host_id: spec.host.as_str().to_owned(),
             pool: spec.pool.clone(),
             agent_version: AGENT_VERSION.to_owned(),
-            instance: None,
+            instance: spec.instance.clone(),
             shape: WireShape::from_resources(&spec.capacity),
             capabilities: spec.capabilities.clone(),
             gpu_devices: Vec::new(),
@@ -390,6 +390,7 @@ impl Process {
             phase: self.exclusive.phase(),
             held: self.list(),
             accepts_host_credential: false,
+            identity: None,
         };
         // A wire type always encodes; were it not to, the empty body would be refused.
         let body = serde_json::to_string(&hello).unwrap_or_default();

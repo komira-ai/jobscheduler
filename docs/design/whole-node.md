@@ -179,6 +179,17 @@ request destroy another's results; re-queueing wastes only the drain already spe
    (section 4); the two counters are separate and each is kept with the request (section 3). The request is re-queued on another eligible
    host at once if one is available; otherwise it waits until the exclusion ends (the back-off). After `max_replace` prepare failures the
    request fails `exclusive-not-ready`, and its detail names the last code and detail reported.
+
+   *Under `--placement js-sched`, items 3 and 4 are the engine's for a request it commits from its queue (`js-sched-placer`,
+   `engine::prepare`): it keeps the deadline from the commit, counts the failures toward `max_replace`, keeps the failing host from the
+   request with a hard bar (`Bar::Until` the back-off, or `Bar::ForLife`; a row that taints the host bars nothing of its own), answers the
+   terminal start once and keeps the request's record until a lease of it is ready, the terminal start is refused, the request is
+   cancelled while it waits, or it has gone the registry's idle horizon without a start. The registry keeps the host's state (committed,
+   ready, restoring), checks the deadline only at its tick (so a ready report sent before that tick wins), reads the row of the cause and
+   hands the failure to the engine. A request whose prepare failed is queued again from when it was first queued, so it does not wait out
+   `drain_after` again (the registry's own pass queues it afresh). A start without a request id, and a booking put back after a restart,
+   stay the registry's. Under `--placement js-sched` these counts and bars are not yet in the reservation ledger (D55): they are in the
+   engine's memory until the ledger is exported from it.*
 5. **Environment measurement is the consumer's, and runs inside `preparing`.** Whether the host is *quiet in the scheduler's sense* (no
    lease, no run, no VM, checks clean, not tainted) is all the scheduler's readiness means. Measuring the environment (timer noise, CPU
    frequency, other tenants' traces on a shared machine) is **not** part of it: the scheduler does not read, store or judge any such

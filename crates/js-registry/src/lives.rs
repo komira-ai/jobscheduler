@@ -31,12 +31,18 @@ pub(crate) fn estimate_end(
     profiles: &[ProfileKey],
     lives: &dyn ProfileLives,
 ) -> Option<u64> {
-    let longest = profiles
-        .iter()
-        .filter_map(|key| lives.wall_minutes_p90(key));
-    let minutes = longest.max()?;
+    let minutes = longest_p90(profiles, lives)?;
     let life_ms = u64::from(minutes).saturating_mul(60_000);
     Some(started_at.saturating_add(life_ms))
+}
+
+/// The largest P90 of the wall minutes among `profiles` that have one, `None` while none
+/// has: what a lease whose keyed runs carry `profiles` is expected to last from its start.
+pub(crate) fn longest_p90(profiles: &[ProfileKey], lives: &dyn ProfileLives) -> Option<u32> {
+    let known = profiles
+        .iter()
+        .filter_map(|key| lives.wall_minutes_p90(key));
+    known.max()
 }
 
 /// The `est_ends` of a host, one entry for each lease in `started` (a booked lease and

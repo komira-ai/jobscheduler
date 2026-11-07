@@ -40,6 +40,14 @@
 //! enforces) ends, with a minute to spare, by then ([`js_sched::Scheduler::with_backfill`]).
 //! A start it places elsewhere or nowhere never falls back to a marked host.
 //!
+//! The engine also keeps the registry's whole-node queue ([`Placer::whole_round`],
+//! [`super::engine::whole`]): at each pass the registry hands it the wait list and its view
+//! of the hosts, and shows the marks the engine answers as its reservations. A host one of
+//! the engine's own requests has set aside is held by that request in the engine, not
+//! outside it, and is backfilled by the same rule against the tail the mark was made with;
+//! the hosts held outside are those of requests put back from the ledger and not presented
+//! since. A whole-node request's start books the host of its pending grant.
+//!
 //! The same engine places the queued jobs when the server holds the job tables
 //! ([`super::engine::jobs`]), and holds their allocations beside the leases: a start is
 //! placed only where both leave room.
@@ -58,14 +66,17 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use js_lease::Clock;
 use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
-use js_registry::{MarkedTails, Placer, ProbeHost};
+use js_registry::{
+    MarkedTails, Placer, PrepareFailure, ProbeHost, RequestRecord, Reservation, WholeRound,
+};
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostId, LeaseId, Shape};
+use js_types::{HostId, LeaseId, RequestId, Shape};
 
 use tracing::warn;
 
@@ -270,6 +281,10 @@ impl Placer for SchedPlacer {
     /// declined and logged. A host in `marked` is booked only when the engine places the
     /// start there as backfill.
     ///
+    /// The start of a whole-node request the engine queues ([`Placer::whole_round`]) books
+    /// the host of the request's pending grant when it is among `open`, and none otherwise
+    /// (the request waits); nothing is counted.
+    ///
     /// A probe never falls back: the engine places it on its host, or the start books
     /// none (`NoCapacity`). Its host is cordoned in the engine for that start, as the
     /// registry found it when the probe was admitted there ([`Placer::admit_probe`]).
@@ -283,6 +298,13 @@ impl Placer for SchedPlacer {
         // The registry never asks with no host; there is nothing to place or count.
         if open.is_empty() {
             return None;
+        }
+        // A whole-node request the engine queues books the host of its pending grant, or
+        // none while it has none among `open`: it waits, which is no decline.
+        let now = self.now();
+        let committed = self.engine().commit_whole(spec, open, now);
+        if let Some(committed) = committed {
+            return committed;
         }
         let granted = self.grant(spec, open, marked, every);
         if spec.request().probe_host.is_some() {
@@ -355,6 +377,59 @@ impl Placer for SchedPlacer {
     /// confirmation or the provider's absence frees that allocation (design section 6.3).
     fn holds_work_on(&self, host: &HostId) -> bool {
         self.engine().holds_jobs_on(host)
+    }
+
+    /// The engine keeps the whole-node queue ([`super::engine::whole`]): it runs the pass.
+    fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
+        let now = self.now();
+        Some(self.engine().whole_round(round.clone(), now))
+    }
+
+    /// The engine keeps the deadline of each lease it committed from its whole-node queue
+    /// ([`super::engine::prepare`]).
+    fn prepare_overdue(&self, lease: &LeaseId) -> Option<bool> {
+        let now = self.now();
+        self.engine().prepare_overdue(lease, now)
+    }
+
+    fn prepare_ready(&self, lease: &LeaseId) {
+        self.engine().prepare_ready(lease);
+    }
+
+    fn prepare_again(&self, lease: &LeaseId) {
+        let now = self.now();
+        self.engine().prepare_again(lease, now);
+    }
+
+    /// The engine counts the failure, bars the host and lets the lease go for a lease it
+    /// committed from its queue ([`super::engine::prepare`]).
+    fn prepare_failed(&self, lease: &LeaseId, failure: &PrepareFailure) -> bool {
+        let now = self.now();
+        self.engine().prepare_failed(lease, failure, now)
+    }
+
+    fn whole_start(&self, id: &RequestId) -> bool {
+        let now = self.now();
+        self.engine().whole_start(id, now)
+    }
+
+    fn whole_record(&self, id: &RequestId) -> Option<RequestRecord> {
+        self.engine().whole_record(id)
+    }
+
+    fn whole_forget(&self, id: &RequestId) {
+        self.engine().whole_forget(id);
+    }
+
+    fn whole_sweep(&self, horizon: Duration) {
+        let now = self.now();
+        self.engine().whole_sweep(horizon, now);
+    }
+
+    /// The holds the engine's whole-node requests have given up at their deadline
+    /// ([`Engine::whole_give_ups`]).
+    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
+        self.engine().whole_give_ups()
     }
 }
 
@@ -730,6 +805,59 @@ mod tests {
         assert_eq!(backfilling().pick(&spec(), &open, &none_fit), None);
         let fits = marks(&[("a", Some(100)), ("b", Some(120))]);
         assert_eq!(backfilling().pick(&spec(), &open, &fits), Some(1));
+    }
+
+    /// Catches: the start of a whole-node request the engine queues placed as an ordinary
+    /// start (it would book the first host it is shown, not the one granted to it), or
+    /// counted as a decline while it waits. The placer keeps the queue: `a` is not
+    /// bookable, so `r` is granted the quiet `b`. Shown `a` alone, its start books
+    /// nothing; shown both, it books `b`. Nothing is counted.
+    #[test]
+    fn a_whole_node_start_books_the_host_of_its_pending_grant() {
+        use js_lease::Timestamp;
+        use js_registry::{Standing, WaitingWhole, WholeHost, WholeNodeConfig};
+        let placer = SchedPlacer::default();
+        let open = [host("a", x86(), &[]), host("b", x86(), &[])];
+        for candidate in &open {
+            placer.host_up(&candidate.host, &candidate.shape);
+        }
+        let id = js_types::RequestId::new("r").unwrap();
+        let waiting = WaitingWhole {
+            id: id.clone(),
+            max_wall: Duration::from_secs(600),
+            since: Timestamp::from_millis(0),
+            give_ups: 0,
+            exclusions: BTreeMap::new(),
+            mark: None,
+        };
+        let stand = |name: &str, open: bool| WholeHost {
+            id: HostId::new(name).unwrap(),
+            standing: Standing::Live,
+            open,
+        };
+        let round = WholeRound {
+            settings: WholeNodeConfig::dedicated(2),
+            waiting: vec![waiting],
+            hosts: vec![stand("a", false), stand("b", true)],
+            outside: MarkedTails::new(),
+            lives: BTreeMap::new(),
+        };
+        let marks = placer.whole_round(&round).unwrap();
+        let held: Vec<(String, bool)> = marks
+            .iter()
+            .map(|mark| (mark.host.to_string(), mark.assigned))
+            .collect();
+        assert_eq!(held, [("b".to_owned(), true)]);
+        // A grant gives nothing up: the registry is told of no give-up.
+        assert!(placer.whole_give_ups().is_empty());
+        let start = spec_of(&ResourceClass::whole_node(), 7).with_request_id(id);
+        assert_eq!(placer.pick(&start, &open[..1], &unmarked()), None);
+        assert_eq!(placer.pick(&start, &open, &unmarked()), Some(1));
+        let none = Fallbacks {
+            unmappable: 0,
+            declined: 0,
+        };
+        assert_eq!(placer.fallbacks(), none);
     }
 
     /// Catches: the default placer backfilling: it books no marked host, whatever its

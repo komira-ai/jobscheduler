@@ -1,0 +1,14 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Quota exceeded for quota metric 'Queries' and limit 'Queries per minute' of service 'compute.googleapis.com' for consumer 'project_number:123456789012'.",
+    "errors": [
+      {
+        "message": "Quota exceeded for quota metric 'Queries' and limit 'Queries per minute' of service 'compute.googleapis.com' for consumer 'project_number:123456789012'.",
+        "domain": "usageLimits",
+        "reason": "rateLimitExceeded"
+      }
+    ],
+    "status": "RESOURCE_EXHAUSTED"
+  }
+}

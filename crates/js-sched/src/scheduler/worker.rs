@@ -51,6 +51,8 @@ pub(crate) struct Worker {
     /// worker is silent ([`crate::fence::SESSION_SWITCH_GRACE`] after that phase was
     /// first reported).
     pub(super) switch_ends: FarmTime,
+    /// When the worker's host is taken back, if it is ([`crate::Event::HostEnd`]).
+    pub(crate) ends_at: Option<FarmTime>,
 }
 
 impl Worker {

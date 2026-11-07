@@ -1,6 +1,6 @@
 //! Dispatch: runs the command the line names and prints its JSON.
 
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -18,6 +18,7 @@ fn name_of(cmd: &Cmd) -> &'static str {
         Cmd::ProbeBench(_) => "probe-bench",
         Cmd::Image(_) => "image",
         Cmd::VmRun { .. } => "vm-run",
+        Cmd::Lease { .. } => "lease",
     }
 }
 
@@ -92,6 +93,7 @@ pub fn run(
     cli: Cli,
     sys: Option<&dyn System>,
     timing: Timing,
+    input: &mut (dyn BufRead + Send),
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
@@ -105,6 +107,7 @@ pub fn run(
     };
     let report = match &cli.command {
         Cmd::VmRun { spec } => return vm_run(sys, spec, err),
+        Cmd::Lease { store } => return lease(store, input, out, err),
         Cmd::Probe(args) => probe(sys, args, timing),
         Cmd::ProbeBench(args) => bench_cmd(sys, args, timing),
         Cmd::Image(ImageCmd::Base {
@@ -189,4 +192,37 @@ fn vm_run(sys: &dyn System, spec: &Path, err: &mut dyn Write) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The lease mode: serves the driver of the VMs of `store` (over this machine's own
+/// [`System`], whose VM helper is this binary) until `input` ends.
+#[cfg(target_os = "macos")]
+fn lease(
+    store: &Path,
+    input: &mut (dyn BufRead + Send),
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let real = crate::real::RealSystem::new();
+    let driver = crate::lease_system::SystemDriver::new(real, store.to_owned());
+    match js_vm_lease::protocol::serve(&driver, input, out) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            let _ = writeln!(err, "js-vmm lease: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The lease mode off macOS, reached only with a test's [`System`]: there is no real VM to
+/// serve.
+#[cfg(not(target_os = "macos"))]
+fn lease(
+    _store: &Path,
+    _input: &mut (dyn BufRead + Send),
+    _out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let _ = writeln!(err, "js-vmm lease: VM leases run on macOS only");
+    ExitCode::from(2)
 }

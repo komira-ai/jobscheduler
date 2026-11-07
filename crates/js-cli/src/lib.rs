@@ -1,7 +1,8 @@
 //! `js`: the command-line client of `js-lease-server`. It acquires, renews and releases
 //! leases on whole GPU hosts, and runs a command while it holds one; and it makes the calls
-//! of the job service (`jobscheduler.v1.JobService`), one command per call (see "Job
-//! commands" below).
+//! of the job service (`jobscheduler.v1.JobService`), one command per call, with three
+//! commands written by hand that loop over several calls: `job wait`, `job follow` and
+//! `job run` (see "Job commands" below).
 //!
 //! The library is the program: [`run_with`] takes the arguments, the streams to print
 //! to and the [`Services`] (the waiter, the clock and the signal source), and `main`
@@ -36,7 +37,24 @@
 //! js lease native <id> --program <path|@bundle/entry> [--arg A ...] [--network off|loopback|on]
 //!                 [--bundle name[:tag]@sha256:<digest>] --cpu-millis N --memory-bytes N
 //!                 [--wall <dur>]
+//! js join-token mint --provider NAME --instance-id ID [--ttl <dur>] [--out FILE]
+//! js join-token revoke --provider NAME --instance-id ID
 //! ```
+//!
+//! `join-token mint` asks for a one-time join token (`POST /v1/agent/join-tokens`, behind
+//! the client token like the lease commands) for the machine a provider launched as
+//! `NAME:ID`; the agent that runs there names the same pair in its `--instance-file` and
+//! reads the token from its `--token-file`. `--ttl` is how long the token may be used
+//! (default 30 minutes, at most 24h). Without `--out` the token alone is printed on stdout
+//! (`--json`: `{"token", "expires_at_ms"}`); it is the only command that prints a secret.
+//! With `--out FILE` the file is created new with mode 0600 and holds the token and a
+//! newline, stdout says where it went and when it expires (`expires` is the server's clock
+//! in milliseconds) and never shows the token, and a `FILE` that exists is refused (exit 2)
+//! before the server is asked for anything; a mint that fails leaves no file. Minting again
+//! for an instance replaces its unused tokens. `join-token revoke` drops every token of
+//! the instance, used or not (idempotent). A server that admits no agents has no such route
+//! and answers `join-tokens-unsupported` (exit 3); a provider the pool does not admit, an
+//! id that is not valid or a `--ttl` above a day is exit 4.
 //!
 //! `native` queues a native job (a program run on the host, no image) on a held lease and
 //! prints `run <id> <state>`. The server refuses it (exit 3) when the lease's host does not
@@ -96,6 +114,8 @@
 //! js host list                    js host cordon --host-id ID [--cordon-secs <dur>]
 //! js host uncordon --host-id ID   js pool list     js provider list
 //! js usage [--from-ms N] [--to-ms N] [--host-id ID] [--job-id ID] ...
+//! js job wait --job-id ID         js job follow --job-id ID [--stream stdout|stderr]
+//! js job run <the flags of job submit>
 //! ```
 //!
 //! These commands are not written here: `cargo xtask gen-job-surface` generates their table
@@ -139,6 +159,39 @@
 //! failed first, or the token was refused) is exit 1 (`not-sent`) and changed nothing. A
 //! definite refusal is exit 4 for `INVALID_ARGUMENT` (the request itself, such as a wall
 //! limit of 0) and exit 3 for any other code (`no-capable-host`, an unknown job).
+//!
+//! ## The hand-written job commands
+//!
+//! Three commands of the `job` group are written by hand, not generated (`src/jobs/wait.rs`,
+//! `follow.rs`, `run.rs`), each over a loop of `js_client::jobs` that pauses only through the
+//! injected job waiter ([`Services::with_job_waiter`]; tokio's timer in the program):
+//!
+//! - `job wait --job-id ID` reads the job (`GetJob`) every two seconds until it has ended,
+//!   and a failed job's result (`GetResult`) to tell a wall limit from another failure;
+//!   prints `job <id> <end>` (JSON `{"id", "outcome"}`) and exits with the status of that end
+//!   (the table below: 0, or 10 to 14). A call that fails is not retried, and is exit 15
+//!   (`undetermined`), as is a state this `js` does not know.
+//! - `job follow --job-id ID [--stream stdout|stderr]` writes the stream (stdout unless
+//!   named) to stdout from its first byte to its end, exactly as the job wrote it: each
+//!   `GetLogs` asks the server to wait for new bytes and starts at the offset the last one
+//!   answered, until the server says the job has ended and every byte was read (`eof`).
+//!   Bytes the log store does not hold are said on stderr (`js: stdout bytes 0 to 4 are not
+//!   in the log store`). A pause of one second follows an answer with no data; a follow the
+//!   server refuses as busy is tried again after five seconds, and one whose answer is lost
+//!   (or whose connection failed) after two, three times in a row at most; any other failure
+//!   exits as a job command's does. `job logs --follow true` is one call, one page.
+//! - `job run` takes the flags of `job submit`, and its id as `submit` draws or takes it. The
+//!   submit is sent again with that id, up to three times in all with two seconds between,
+//!   when its answer is lost or its connection failed, so it makes one job at most; a submit
+//!   that fails still exits as `job submit` does (1, 3, 4 or 9). The job's stdout and stderr
+//!   are then written to `js`'s own as `follow` writes them while the job is read as `wait`
+//!   reads it, each on a connection of its own; once both streams are at their end, the end
+//!   is printed on stderr and `js` exits with `wait`'s status for it. A stream that cannot be
+//!   followed is said on stderr and does not change the status. `run` installs its SIGINT,
+//!   SIGTERM and SIGHUP handlers before it submits: the first signal before the job has
+//!   ended is said on stderr and cancels the job (`CancelJob`, once, at the wait's next
+//!   pause), and `js` goes on waiting for the end the job reaches; a second ends `js` at once with 128 plus its number,
+//!   saying the job may still be running.
 //!
 //! # Renewal and the deadline
 //!
@@ -195,7 +248,7 @@
 //!
 //! | status | meaning |
 //! |---|---|
-//! | 0 | held, renewed, freed, listed; for `run`, the command's own status |
+//! | 0 | held, renewed, freed, listed; for `run`, the command's own status; for `job wait` and `job run`, the job succeeded |
 //! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`); a job command whose request was not sent (`not-sent`) |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
 //! | 3 | refused: a job command's definite refusal other than `INVALID_ARGUMENT` (`no-capable-host`, an unknown job); `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `request-id-conflict`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
@@ -204,9 +257,15 @@
 //! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |
 //! | 7 | `run`: the lease was lost (gone from the server, or not renewed before the deadline short of its expiry); the command was stopped |
 //! | 8 | `run`: the release of the lease could not be confirmed after three tries, so it may stay held until its ttl; replaces the command's own status, which is said on stderr |
-//! | 9 | a job command sent its request and read no answer, so the call may have taken effect (`unconfirmed`); for `job submit` the job may exist and the same command with the same `--id` is safe to run again |
+//! | 9 | a job command sent its request and read no answer, so the call may have taken effect (`unconfirmed`); for `job submit` and `job run` the job may exist and the same command with the same `--id` is safe to run again |
+//! | 10 | `job wait`, `job run`: the job failed (a nonzero exit code, or stopped for its memory) |
+//! | 11 | `job wait`, `job run`: the job was cancelled |
+//! | 12 | `job wait`, `job run`: the job timed out (stopped at its wall limit) |
+//! | 13 | `job wait`, `job run`: the job was lost |
+//! | 14 | `job wait`, `job run`: the job failed to start |
+//! | 15 | `job wait`, `job run`: how the job ended could not be told: a call failed, or the job is in a state this `js` does not know (`undetermined`) |
 //! | 127 | `run`: the command could not be started |
-//! | 129, 130, 143 | `run`: SIGHUP, SIGINT or SIGTERM ended `js` while the start was pending (after the command started, the command's own status) |
+//! | 129, 130, 143 | `run`: SIGHUP, SIGINT or SIGTERM ended `js` while the start was pending (after the command started, the command's own status); `job run`: a second signal ended `js` before the job ended (`interrupted`) |
 //!
 //! The reason is on stderr (`js: refused: no-capacity`), and never holds the token.
 
@@ -216,6 +275,7 @@ mod command;
 mod events;
 mod failure;
 pub mod jobs;
+mod join_token;
 mod leases;
 mod render;
 mod renewals;
@@ -294,9 +354,7 @@ fn execute(
 ) -> u8 {
     let render = Render::new(matches.get_flag("json"));
     let done = match jobs::chosen(matches) {
-        Some((command, own)) => {
-            jobs::run(command, matches, own, render, out, err, &services.dialer)
-        }
+        Some(chosen) => jobs::execute(chosen, matches, render, out, err, services),
         None => lease(matches, render, out, err, services),
     };
     match done {
@@ -334,13 +392,27 @@ fn dispatch(
     let server = cli.need_server()?;
     let token_file = cli.need_token_file()?;
     let client = Client::connect(server, token_file, cli.ca_cert.as_deref(), REQUEST_LIMIT)?;
-    let Command::Lease(action) = cli.command;
+    match cli.command {
+        Command::Lease(action) => lease_action(action, &client, render, out, err, services),
+        Command::JoinToken(action) => join_token::run(&client, render, action, out),
+    }
+}
+
+/// Runs a lease command over a connected client.
+fn lease_action(
+    action: Action,
+    client: &Client,
+    render: Render,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    services: Services,
+) -> Result<u8, Failure> {
     match action {
-        Action::Acquire(args) => leases::acquire(&client, render, &args, &*services.waiter, out),
-        Action::Renew(args) => leases::renew(&client, render, &args, out),
-        Action::Release(args) => leases::release(&client, render, &args, out),
-        Action::List => leases::list(&client, render, out),
-        Action::Run(args) => run::run(&client, render, &args, services, err),
-        Action::Native(args) => leases::native(&client, render, &args, out),
+        Action::Acquire(args) => leases::acquire(client, render, &args, &*services.waiter, out),
+        Action::Renew(args) => leases::renew(client, render, &args, out),
+        Action::Release(args) => leases::release(client, render, &args, out),
+        Action::List => leases::list(client, render, out),
+        Action::Run(args) => run::run(client, render, &args, services, err),
+        Action::Native(args) => leases::native(client, render, &args, out),
     }
 }

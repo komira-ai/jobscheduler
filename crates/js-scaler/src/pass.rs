@@ -7,6 +7,7 @@ use js_elastic::{Acquired, Extra, Held, HostStatus, Instant, RefusalCode, Releas
 use js_sched::failover::{AcquireMemory, Refused};
 use js_types::{AcceleratorNeed, Model, RequestId};
 
+use crate::block;
 use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
 use crate::record::{CooldownReason, Phase, Record, Records, StoredOffer};
 use crate::settings::Blocked;
@@ -294,6 +295,7 @@ impl<'a> Pass<'a> {
                 };
                 if moved {
                     self.records.instances[i].cloud_id = Some(held.id.0.clone());
+                    self.records.instances[i].ends_at = block::end_of(held);
                     self.record_extras(i, extras);
                 }
             }
@@ -404,6 +406,7 @@ impl<'a> Pass<'a> {
         self.records.instances[i]
             .cloud_id
             .get_or_insert_with(|| held.id.0.clone());
+        self.records.instances[i].ends_at = block::end_of(held);
         match before {
             Phase::Launching | Phase::Unresolved => {
                 self.go(i, Phase::Booting);
@@ -432,10 +435,14 @@ impl<'a> Pass<'a> {
     /// (`preempted` when it took the machine back) is released. A boot that ended starts the
     /// cooldown. A host the provider took back (a spot preemption) after it booted counts
     /// toward the trip and the next cooldown's length, and starts none: the replacement
-    /// launches at once.
+    /// launches at once. A machine in a block that has ended is released and nothing more:
+    /// the cloud took it back as planned, in whatever phase it was.
     fn on_lost(&mut self, pool: &PoolInput, i: usize, preempted: bool) {
         let before = self.records.instances[i].phase;
         self.start_release(i);
+        if self.records.instances[i].block_ended(self.now) {
+            return;
+        }
         if before == Phase::Booting {
             self.cool(&pool.settings, CooldownReason::BootFailed);
         } else if preempted {
@@ -557,6 +564,7 @@ impl<'a> Pass<'a> {
                 clean_lists: 0,
                 last_clean: None,
                 seen_live: false,
+                ends_at: block::end_of(held),
             });
         }
     }

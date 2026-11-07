@@ -61,8 +61,9 @@ impl Clock for RealClock {
     }
 }
 
-/// A running VM helper process.
-pub trait VmProcess {
+/// A running VM helper process. It is `Send`: the VM driver of a lease keeps it between
+/// calls made from different threads.
+pub trait VmProcess: Send {
     fn pid(&self) -> u32;
     /// The next event, waiting up to `wait`.
     fn poll(&mut self, wait: Duration) -> Poll;

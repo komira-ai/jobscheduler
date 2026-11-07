@@ -1,6 +1,6 @@
 //! Ending a job with its result and retention end, deleting the jobs past their retention
-//! end, deleting the freed allocations past their own window, and raising retention ends and
-//! deadline floors at boot (design sections 3.2, 6.1 and 6.7). Apart from the release of a
+//! end, deleting the freed allocations past their own window, and raising retention ends,
+//! deadline floors and mark deadlines at boot (design sections 3.2, 6.1 and 6.7). Apart from the release of a
 //! booked allocation in the transaction that ends its job, the only allocation rows written
 //! here are the freed ones [`JobStore::tick`] deletes: a freed row is kept for the store's
 //! allocation retention after its free ([`JobStore::with_allocation_retention`]) and then
@@ -288,13 +288,17 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// its files' contents (one ended by a build that kept them) has them replaced by their
     /// digests ([`crate::JobFiles`]), in the same put as its raised retention end when it has
     /// one. Only an ended job has a retention end or contents to replace and only a waiting
-    /// one gets a floor, so no row is put twice. A row a later build wrote is left as it is.
-    /// Returns how many rows it wrote; with none it commits nothing.
+    /// one gets a floor, so no row is put twice. In the same transaction each mark's deadline
+    /// is raised to at least `boot` plus [`BOOT_GRACE`](crate::BOOT_GRACE), at the version read,
+    /// so an outage longer than a hold gives up no hold at the first round; its exclusions keep
+    /// their ends. A row a later build wrote is left as it is. Returns how many rows (jobs and
+    /// marks) it wrote; with none it commits nothing.
     ///
     /// # Errors
     /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Stale`] (naming
-    /// the first job written) when a row changed between its read and the commit, and nothing
-    /// is written; [`JobStoreError::Store`].
+    /// the first job written, or the job of the first mark when no job row is) when a row
+    /// changed between its read and the commit, and nothing is written;
+    /// [`JobStoreError::TooLarge`]; [`JobStoreError::Store`].
     pub fn raise_at_boot(&self, boot: StoreTime) -> Result<usize, JobStoreError> {
         let mut txn = Txn::new();
         let mut first: Option<JobId> = None;
@@ -322,7 +326,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 written += 1;
             }
         }
-        if let Some(first) = first {
+        let (txn, marks) = self.raise_marks_at_boot(txn, boot)?;
+        written += marks.len();
+        if let Some(first) = first.or_else(|| marks.into_iter().next()) {
             self.commit(&first, txn)?;
         }
         Ok(written)

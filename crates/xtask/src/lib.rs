@@ -9,6 +9,11 @@
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
 //!   is released and as which version, setting that version in the CI checkout before the build,
 //!   and laying down the files of each release archive (docs/release.md).
+//! - `release hostkeeper-package --binary <path> --target <triple> --version <version> --out
+//!   <dir>` and `release hostkeeper-index --dir <dir> --version <version>`
+//!   ([`release::hostkeeper_package`], [`release::hostkeeper_index`]): the hostkeeper package of
+//!   js-agent for one platform, the same bytes on every run, and the release index of the three
+//!   packages (packaging/js-agent/hostkeeper/README.md).
 //!
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
@@ -273,6 +278,10 @@ enum ReleaseVerb {
     Stamp(release::stamp::StampArgs),
     /// Lay down the files of one release archive.
     Stage(release::stage::StageArgs),
+    /// Write the hostkeeper package of one platform.
+    HostkeeperPackage(release::hostkeeper_package::PackageArgs),
+    /// Write the release index of the three hostkeeper packages.
+    HostkeeperIndex(release::hostkeeper_index::IndexArgs),
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -351,6 +360,8 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
+            ReleaseVerb::HostkeeperPackage(args) => release::hostkeeper_package::run(&args)?,
+            ReleaseVerb::HostkeeperIndex(args) => release::hostkeeper_index::run(&args)?,
         }),
     }
 }

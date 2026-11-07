@@ -3,13 +3,14 @@ Acquires, renews and releases leases on a lease server, and makes the calls of t
 Usage: js [OPTIONS] <COMMAND>
 
 Commands:
-  lease     Work with leases
-  job       The job calls of the job service
-  host      The host calls of the job service
-  pool      The pool calls of the job service
-  provider  The provider calls of the job service
-  usage     Lists the ended bookings, a page at a time.
-  help      Print this message or the help of the given subcommand(s)
+  lease       Work with leases
+  join-token  Mint and revoke the one-time tokens that admit a launched machine's agent
+  job         The job calls of the job service
+  host        The host calls of the job service
+  pool        The pool calls of the job service
+  provider    The provider calls of the job service
+  usage       Lists the ended bookings, a page at a time.
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
       --server <URL>       The lease server, such as `https://leases.example:7300`. Plain `http://` is accepted for a loopback host only: the bearer token never crosses a network in clear. Required

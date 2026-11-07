@@ -48,6 +48,7 @@ use rusqlite::Connection;
 pub use backup::{Summary, backup, check_backup};
 pub use error::SqliteError;
 pub use guard::StoreLock;
+pub(crate) use guard::recorded_holder;
 pub use restore::{restore, restore_locked};
 pub use schema::SCHEMA_VERSION;
 

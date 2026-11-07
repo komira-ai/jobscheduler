@@ -1,6 +1,8 @@
-//! `cutover` (host-updates design, 4.2): stop the unit, move the release link, start the unit,
+//! `cutover` (host-updates design, 4.2): stop the unit and start it again on the staged release,
 //! each act marked in the record before it is made and each a no-op when its effect is already
-//! there. Once the stop is begun every ending says `reversible: false`. The cordon (whose it
+//! there. The updater has moved the release link to the staged release before the step runs
+//! (`Spy::cutover` does that); the hook only reads it. Once the stop is begun every ending says
+//! `reversible: false`. The cordon (whose it
 //! is, when it is lost) has its tests in steps_cutover_cordon.rs.
 
 use std::path::PathBuf;
@@ -18,8 +20,6 @@ fn start() -> String {
     format!("units.start({UNIT})")
 }
 
-const RELINK: &str = "link.relink";
-
 fn previous(rig: &Rig) -> PathBuf {
     rig.params.previous_release.clone().unwrap()
 }
@@ -34,11 +34,11 @@ fn unit_state(rig: &Rig) -> String {
 }
 
 fn link_target(rig: &Rig) -> Option<PathBuf> {
-    rig.world.target(&rig.link).unwrap()
+    rig.world.resolved_target(&rig.link).unwrap()
 }
 
 #[test]
-fn a_clean_cutover_marks_each_act_before_it_and_stops_links_and_starts_in_that_order() {
+fn a_clean_cutover_marks_each_act_before_it_and_stops_and_starts_in_that_order() {
     let rig = running(Rig::new("hook-cutover-clean"));
     assert_eq!(link_target(&rig), Some(previous(&rig)));
     let spy = Spy::new(&rig);
@@ -61,7 +61,6 @@ fn a_clean_cutover_marks_each_act_before_it_and_stops_links_and_starts_in_that_o
         acts,
         [
             (stop(), [true, false, false]),
-            (RELINK.to_owned(), [true, true, false]),
             (start(), [true, true, true]),
         ]
     );
@@ -98,12 +97,8 @@ fn a_cutover_killed_just_before_each_act_has_its_mark_and_a_rerun_does_that_act_
         .iter()
         .map(|act| (act.call.clone(), act.points))
         .collect();
-    assert_eq!(acts.len(), 3);
-    let expected_marks = [
-        [true, false, false],
-        [true, true, false],
-        [true, true, true],
-    ];
+    assert_eq!(acts.len(), 2);
+    let expected_marks = [[true, false, false], [true, true, true]];
     for (k, (call, points)) in acts.iter().enumerate() {
         let rig = running(Rig::new(&format!("hook-cutover-acts-{k}")));
         rig.kill.arm(*points);
@@ -116,7 +111,6 @@ fn a_cutover_killed_just_before_each_act_has_its_mark_and_a_rerun_does_that_act_
         // The act itself was not made.
         match k {
             0 => assert_eq!(unit_state(&rig), "active running"),
-            1 => assert_eq!(link_target(&rig), Some(previous(&rig))),
             _ => assert_eq!(unit_state(&rig), "inactive dead"),
         }
         let rerun = Spy::new(&rig);
@@ -143,8 +137,8 @@ fn sweep(label: &str, build: fn(&str) -> Rig) {
     );
     let points = baseline.kill.points();
     assert!(
-        points >= 6,
-        "the marks and the three acts pass kill points: {points}"
+        points >= 5,
+        "the marks and the two acts pass kill points: {points}"
     );
     let end = end_state(&baseline);
     let baseline_marks = marks(&baseline);
@@ -199,23 +193,27 @@ fn a_cutover_killed_while_the_unit_stops_waits_for_it_on_the_rerun_and_does_not_
         }
     });
     assert_eq!(rerun.cutover(&rig).outcome, Outcome::Success);
-    assert_eq!(
-        rerun.act_names(),
-        [RELINK.to_owned(), start()],
-        "no second stop"
-    );
+    assert_eq!(rerun.act_names(), [start()], "no second stop");
     assert_eq!(unit_state(&rig), "active running");
 }
 
 #[test]
-fn a_unit_that_is_slow_to_stop_is_waited_for_and_the_link_moves_after_it_is_down() {
+fn a_unit_that_is_slow_to_stop_is_waited_for_and_started_after_it_is_down() {
     let rig = running(Rig::new("hook-cutover-slow-stop"));
     let spy = Spy::new(&rig);
     *spy.stop_leaves.borrow_mut() = Some(("deactivating", "stop-sigterm"));
-    let (link, old) = (rig.link.clone(), previous(&rig));
+    let (link, new) = (rig.link.clone(), staged(&rig));
     spy.on_pause(move |spy, ticks| {
-        // Still on the old release while the unit is stopping.
-        assert_eq!(spy.world.target(&link).unwrap(), Some(old.clone()));
+        // The link is on the staged release throughout: the updater moved it, the hook leaves it.
+        assert_eq!(
+            spy.world
+                .target(&link)
+                .unwrap()
+                .as_deref()
+                .map(|t| t.to_owned())
+                .map(|t| super::fakes::resolve(&link, &t)),
+            Some(new.clone())
+        );
         if ticks == 4 {
             spy.world.seed_unit(UNIT, "failed", "failed");
         }
@@ -223,13 +221,11 @@ fn a_unit_that_is_slow_to_stop_is_waited_for_and_the_link_moves_after_it_is_down
     let done = spy.cutover(&rig);
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(rig.world.ticks(), 4);
-    assert_eq!(spy.act_names(), [stop(), RELINK.to_owned(), start()]);
-    assert_eq!(link_target(&rig), Some(staged(&rig)));
+    assert_eq!(spy.act_names(), [stop(), start()]);
 }
 
 #[test]
-fn a_unit_that_does_not_stop_in_time_fails_the_cutover_as_an_environment_matter_before_the_link_moves()
- {
+fn a_unit_that_does_not_stop_in_time_fails_the_cutover_as_an_environment_matter_before_it_starts() {
     let rig = running(Rig::new("hook-cutover-stuck-stop"));
     let spy = Spy::new(&rig);
     *spy.stop_leaves.borrow_mut() = Some(("deactivating", "stop-sigterm"));
@@ -242,7 +238,6 @@ fn a_unit_that_does_not_stop_in_time_fails_the_cutover_as_an_environment_matter_
     // of 60 s.
     assert_eq!(rig.world.ticks(), 414);
     assert_eq!(marks(&rig), [true, false, false]);
-    assert_eq!(link_target(&rig), Some(previous(&rig)));
     assert_eq!(spy.act_names(), [stop()]);
 }
 
@@ -258,11 +253,10 @@ fn a_failed_stop_is_an_environment_failure_that_is_irreversible_and_a_rerun_goes
     assert_eq!(line(&done)["reversible"], json!(false), "the stop is begun");
     assert_eq!(marks(&rig), [true, false, false]);
     assert_eq!(spy.act_names(), [stop()]);
-    assert_eq!(link_target(&rig), Some(previous(&rig)));
     spy.heal("stop");
     let rerun = Spy::new(&rig);
     assert_eq!(rerun.cutover(&rig).outcome, Outcome::Success);
-    assert_eq!(rerun.act_names(), [stop(), RELINK.to_owned(), start()]);
+    assert_eq!(rerun.act_names(), [stop(), start()]);
 }
 
 #[test]
@@ -281,34 +275,13 @@ fn a_unit_manager_that_cannot_be_read_fails_the_cutover_before_anything_is_marke
 }
 
 #[test]
-fn a_failed_link_move_is_an_environment_failure_with_the_unit_stopped_and_a_rerun_goes_on() {
-    let rig = running(Rig::new("hook-cutover-link-fails"));
-    let spy = Spy::new(&rig);
-    spy.fail("relink");
-    let done = spy.cutover(&rig);
-    assert_eq!(done.outcome, Outcome::Failure);
-    assert_eq!(done.report.reason, Some(Reason::LinkFailed));
-    assert_eq!(done.report.class, Class::Environment);
-    assert_eq!(line(&done)["reversible"], json!(false));
-    assert_eq!(marks(&rig), [true, true, false]);
-    assert_eq!(spy.act_names(), [stop(), RELINK.to_owned()]);
-    assert_eq!(unit_state(&rig), "inactive dead");
-    assert_eq!(link_target(&rig), Some(previous(&rig)));
-    spy.heal("relink");
-    let rerun = Spy::new(&rig);
-    assert_eq!(rerun.cutover(&rig).outcome, Outcome::Success);
-    assert_eq!(rerun.act_names(), [RELINK.to_owned(), start()]);
-    assert_eq!(link_target(&rig), Some(staged(&rig)));
-}
-
-#[test]
 fn a_link_that_cannot_be_read_fails_the_cutover_before_anything_is_marked() {
     let rig = running(Rig::new("hook-cutover-link-unreadable"));
     // A file where the link should be: the port cannot read it as a link.
-    std::fs::remove_file(rig.tmp.path().join("world/link/current")).unwrap();
-    std::fs::write(rig.tmp.path().join("world/link/current"), b"not a link").unwrap();
+    std::fs::remove_file(rig.tmp.path().join("control/link/current")).unwrap();
+    std::fs::write(rig.tmp.path().join("control/link/current"), b"not a link").unwrap();
     let spy = Spy::new(&rig);
-    let done = spy.cutover(&rig);
+    let done = spy.cutover_as_is(&rig);
     assert_eq!(done.outcome, Outcome::Failure);
     assert_eq!(done.report.reason, Some(Reason::LinkFailed));
     assert_eq!(done.report.class, Class::Environment);
@@ -332,7 +305,7 @@ fn a_start_that_fails_with_the_unit_never_run_is_an_environment_failure_and_a_re
     );
     assert_eq!(line(&done)["reversible"], json!(false));
     assert_eq!(marks(&rig), [true, true, true]);
-    assert_eq!(spy.act_names(), [stop(), RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [stop(), start()]);
     assert_eq!(link_target(&rig), Some(staged(&rig)));
     spy.heal("start");
     let rerun = Spy::new(&rig);
@@ -434,40 +407,93 @@ fn a_unit_seen_in_auto_restart_is_a_release_failure_even_if_it_ends_in_start() {
     assert_eq!(done.report.class, Class::Release);
 }
 
+/// The updater moves the release link to the staged release before it runs `cutover`. A link
+/// that is anywhere else (not moved, moved to another release, absent) means the updater did not
+/// do its part: the step fails before it stops anything, reversibly, and the hook moves nothing.
+///
+/// Catches a cutover that stops the agent with the link on the old release (the new agent would
+/// then start from the old release), and one that moves the link itself.
 #[test]
-fn a_link_outside_the_declared_directories_is_refused_and_nothing_is_done() {
-    let cases = [
-        ("absent", None),
-        ("elsewhere", Some("/etc/elsewhere/current")),
-        ("in the state directory", Some("{root}/state/current")),
-        ("the state directory itself", Some("{root}/state")),
-        ("the declared directory itself", Some("{root}/link")),
-        ("not plain", Some("{root}/link/../elsewhere")),
-        ("relative", Some("current")),
-        (
-            "inside the staged release",
-            Some("{root}/releases/1.4.0/current"),
-        ),
-        (
-            "inside the previous release",
-            Some("{root}/releases/1.3.0/current"),
-        ),
-    ];
-    for (n, (what, link)) in cases.into_iter().enumerate() {
-        let mut rig = running(Rig::new(&format!("hook-cutover-link-refused-{n}")));
-        let root = rig.tmp.path().display().to_string();
-        rig.params.release_link = link.map(|text| PathBuf::from(text.replace("{root}", &root)));
+fn a_cutover_with_the_link_not_on_the_staged_release_fails_before_anything_is_stopped() {
+    let cases = ["previous", "foreign", "absent"];
+    for (n, what) in cases.into_iter().enumerate() {
+        let rig = running(Rig::new(&format!("hook-cutover-link-off-{n}")));
+        match what {
+            "previous" => {}
+            "foreign" => rig
+                .world
+                .set_link(&rig.link, &rig.tmp.path().join("releases/9.9.9")),
+            _ => std::fs::remove_file(rig.tmp.path().join("control/link/current")).unwrap(),
+        }
         let before = end_state(&rig);
         let spy = Spy::new(&rig);
-        let done = spy.cutover(&rig);
+        let done = spy.cutover_as_is(&rig);
         assert_eq!(done.outcome, Outcome::Failure, "{what}");
-        assert_eq!(done.report.reason, Some(Reason::BadParams), "{what}");
+        assert_eq!(done.report.reason, Some(Reason::LinkFailed), "{what}");
+        assert_eq!(done.report.class, Class::Environment, "{what}");
         assert!(done.report.reversible, "{what}: nothing was begun");
+        let said = done.report.detail.as_deref().unwrap();
+        assert!(
+            said.contains("is not on the staged release"),
+            "{what}: {said}"
+        );
+        assert!(said.contains("1.4.0"), "{what}: {said}");
         assert_eq!(spy.act_names(), Vec::<String>::new(), "{what}");
         assert_eq!(end_state(&rig), before, "{what}");
         assert!(!rig.record().unwrap().stop_begun, "{what}");
         assert_eq!(rig.world.ticks(), 0, "{what}");
     }
+}
+
+/// The updater writes the link relative to its directory (`current -> 1.4.0`), as hostkeeper
+/// does; a target that resolves to the staged release is on it, however it is spelt: relative
+/// with `..` and `.`, or absolute. One that resolves elsewhere is not.
+///
+/// Catches a comparison of the link's text with the staged path, which would refuse every real
+/// cutover, and a resolution that reads `..` wrong.
+#[test]
+fn a_release_link_is_on_the_staged_release_by_where_it_points_however_it_is_spelt() {
+    let rig = running(Rig::new("hook-cutover-link-spelt"));
+    let link = rig.tmp.path().join("control/link/current");
+    let relative = super::fakes::relative_to_link(&link, &rig.params.staged_release);
+    let staged = rig.params.staged_release.clone();
+    let spellings = [
+        (relative.clone(), true),
+        (std::path::Path::new(".").join(&relative), true),
+        (relative.parent().unwrap().join("./1.4.0"), true),
+        (staged.clone(), true),
+        (relative.parent().unwrap().join("1.3.0"), false),
+        (std::path::PathBuf::from("1.4.0"), false),
+        (staged.join("deeper"), false),
+    ];
+    for (n, (target, on_staged)) in spellings.into_iter().enumerate() {
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let spy = Spy::new(&rig);
+        let done = spy.cutover_as_is(&rig);
+        if on_staged {
+            assert_eq!(done.outcome, Outcome::Success, "{n}: {target:?}: {done:?}");
+            // Back to where the rig started, for the next spelling: a fresh host.
+            return_to_start(&rig);
+        } else {
+            assert_eq!(
+                done.report.reason,
+                Some(Reason::LinkFailed),
+                "{n}: {target:?}"
+            );
+        }
+    }
+}
+
+/// Puts the host back as `prepare` left it: the unit running, the stop and start marks off.
+fn return_to_start(rig: &Rig) {
+    let mut record = rig.record().unwrap();
+    record.stop_begun = false;
+    record.link_moved = false;
+    record.start_issued = false;
+    record.pre_stop_session_ms = None;
+    rig.put_record(&record);
+    rig.world.seed_unit(UNIT, "active", "running");
 }
 
 #[test]
@@ -489,6 +515,7 @@ fn a_record_that_breaks_a_rule_is_refused_and_nothing_is_done() {
     let mut record = rig.record().unwrap();
     record.update.target = "1.5.0".to_owned();
     rig.put_record(&record);
+    rig.updater_links_staged();
     let before = end_state(&rig);
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
@@ -502,6 +529,7 @@ fn a_record_that_breaks_a_rule_is_refused_and_nothing_is_done() {
 fn a_taint_or_an_owed_check_halts_the_cutover_before_anything_is_stopped() {
     let rig = running(Rig::new("hook-cutover-taint"));
     rig.taint();
+    rig.updater_links_staged();
     let before = end_state(&rig);
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
@@ -549,14 +577,14 @@ fn first(name: &str) -> Rig {
 }
 
 #[test]
-fn a_first_install_has_no_cordon_no_host_and_no_stop_and_links_and_starts() {
+fn a_first_install_has_no_cordon_no_host_and_no_stop_and_starts_on_the_link_the_updater_made() {
     let rig = first("hook-cutover-first");
     assert_eq!(link_target(&rig), None);
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
     assert_eq!(done.outcome, Outcome::Success);
     // There is no unit to stop, and no stop is marked.
-    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [start()]);
     assert!(spy.log().iter().all(|call| !call.contains("cordon")));
     assert_eq!(link_target(&rig), Some(staged(&rig)));
     assert_eq!(unit_state(&rig), "active running");
@@ -565,7 +593,7 @@ fn a_first_install_has_no_cordon_no_host_and_no_stop_and_links_and_starts() {
 }
 
 #[test]
-fn a_first_install_is_reversible_until_the_link_moves_and_not_after() {
+fn a_first_install_is_reversible_until_it_marks_its_start_and_not_after() {
     // A taint and an unreadable link end before the first act.
     let rig = first("hook-cutover-first-taint");
     rig.taint();
@@ -574,22 +602,14 @@ fn a_first_install_is_reversible_until_the_link_moves_and_not_after() {
     assert_eq!(line(&done)["reversible"], json!(true));
 
     let rig = first("hook-cutover-first-link-unreadable");
-    std::fs::create_dir_all(rig.tmp.path().join("world/link")).unwrap();
-    std::fs::write(rig.tmp.path().join("world/link/current"), b"not a link").unwrap();
-    let done = Spy::new(&rig).cutover(&rig);
+    std::fs::create_dir_all(rig.tmp.path().join("control/link")).unwrap();
+    std::fs::write(rig.tmp.path().join("control/link/current"), b"not a link").unwrap();
+    let done = Spy::new(&rig).cutover_as_is(&rig);
     assert_eq!(done.report.reason, Some(Reason::LinkFailed));
     assert_eq!(line(&done)["reversible"], json!(true));
     assert_eq!(marks(&rig), [false, false, false]);
 
-    // A failed move is the first act: irreversible from `link_moved` on.
-    let rig = first("hook-cutover-first-relink-fails");
-    let spy = Spy::new(&rig);
-    spy.fail("relink");
-    let done = spy.cutover(&rig);
-    assert_eq!(done.report.reason, Some(Reason::LinkFailed));
-    assert_eq!(line(&done)["reversible"], json!(false));
-    assert_eq!(marks(&rig), [false, true, false]);
-
+    // The mark of the start is the first act: irreversible from `link_moved` on.
     let rig = first("hook-cutover-first-start-fails");
     let spy = Spy::new(&rig);
     spy.fail("start");
@@ -653,12 +673,11 @@ fn a_cutover_rerun_after_the_stop_keeps_the_session_it_recorded_before_it() {
     let baseline = running(Rig::new("hook-cutover-pre-stop-rerun-base"));
     let spy = Spy::new(&baseline);
     assert_eq!(spy.cutover(&baseline).outcome, Outcome::Success);
-    // Killed just before the move of the link: the unit is stopped, the stop mark and the
-    // link mark are on disk.
+    // Killed just before the start: the unit is stopped, the marks are on disk.
     rig.kill.arm(spy.acts.borrow()[1].points);
     assert!(killable(|| Spy::new(&rig).cutover(&rig)).is_none());
     rig.kill.disarm();
-    assert_eq!(marks(&rig), [true, true, false]);
+    assert_eq!(marks(&rig), [true, true, true]);
     assert_eq!(unit_state(&rig), "inactive dead");
     assert_eq!(pre_stop(&rig), before);
     // The server now shows another session (the stopped agent's successor, say).

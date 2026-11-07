@@ -22,8 +22,16 @@ const LEASE: [&[&str]; 7] = [
     &["lease", "native"],
 ];
 
-/// The program and the job commands, whose help is held to `goldens/job_help/`.
-const JOB: [&[&str]; 17] = [
+/// The join-token commands, whose help is held to `goldens/join_token_help/`.
+const JOIN_TOKEN: [&[&str]; 3] = [
+    &["join-token"],
+    &["join-token", "mint"],
+    &["join-token", "revoke"],
+];
+
+/// The program and the job commands, whose help is held to `goldens/job_help/`: the
+/// generated ones, and the hand-written `job wait`, `job follow` and `job run`.
+const JOB: [&[&str]; 20] = [
     &[],
     &["job"],
     &["job", "submit"],
@@ -32,6 +40,9 @@ const JOB: [&[&str]; 17] = [
     &["job", "cancel"],
     &["job", "result"],
     &["job", "logs"],
+    &["job", "wait"],
+    &["job", "follow"],
+    &["job", "run"],
     &["host"],
     &["host", "list"],
     &["host", "cordon"],
@@ -87,6 +98,15 @@ fn lease_help_is_unchanged() {
     assert!(differ.is_empty(), "{}", differ.join("\n"));
 }
 
+/// Asserts that the help of the join-token group and its commands equals the goldens: the
+/// words, the flags with their comments, and the required ones. It catches a flag that
+/// changes its meaning or loses its comment.
+#[test]
+fn join_token_help_text_matches_goldens() {
+    let differ = differing("join_token_help", &JOIN_TOKEN);
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+}
+
 /// Asserts that `js --help` and the help of every job group and command equal their
 /// goldens: the commands' words, each flag with its field's comment, the required flags,
 /// and `--id` in place of `--spec.job-id`. A change to the definition or to the generator's
@@ -112,7 +132,7 @@ fn golden_files_are_named_by_the_command() {
 fn the_public_command_tree_is_the_parsed_one() {
     let tree = js_cli::command();
     assert_eq!(tree.get_name(), "js");
-    for words in LEASE.iter().chain(JOB.iter()) {
+    for words in LEASE.iter().chain(JOIN_TOKEN.iter()).chain(JOB.iter()) {
         let found = words
             .iter()
             .try_fold(&tree, |at, word| at.find_subcommand(word));
@@ -122,7 +142,18 @@ fn the_public_command_tree_is_the_parsed_one() {
         .get_subcommands()
         .map(clap::Command::get_name)
         .collect();
-    assert_eq!(top, ["lease", "job", "host", "pool", "provider", "usage"]);
+    assert_eq!(
+        top,
+        [
+            "lease",
+            "join-token",
+            "job",
+            "host",
+            "pool",
+            "provider",
+            "usage"
+        ]
+    );
     let globals: Vec<&str> = tree
         .get_arguments()
         .filter(|arg| arg.is_global_set())

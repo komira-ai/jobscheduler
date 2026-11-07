@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": 404,
+    "message": "The resource 'projects/example-project/zones/us-central1-a/instances/js-0123456789ab-fedcba987654' was not found",
+    "errors": [
+      {
+        "message": "The resource 'projects/example-project/zones/us-central1-a/instances/js-0123456789ab-fedcba987654' was not found",
+        "domain": "global",
+        "reason": "notFound"
+      }
+    ]
+  }
+}

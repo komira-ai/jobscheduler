@@ -11,7 +11,7 @@ use js_testkit::forked::ForkedChild;
 
 use super::guard::{
     canonical_db, filesystem_type, held, lock_failed, lock_path, network_filesystem, probe_lock,
-    refuse_network_filesystem,
+    recorded, refuse_network_filesystem,
 };
 use super::read::changes_after_head;
 use super::restore::ignore_not_found;
@@ -361,4 +361,17 @@ fn a_page_is_read_from_one_snapshot() {
     );
     assert_eq!(next.cursor, Revision(3));
     drop(store);
+}
+
+// Catches a lock taken although its holder's token could not be written (a full disk): a
+// probe would then call the running writer free. The take fails and names the lock file.
+#[test]
+fn a_lock_whose_token_cannot_be_written_is_not_taken() {
+    let lock = PathBuf::from("state.db.lock");
+    let failed =
+        recorded(Err(io::Error::from(io::ErrorKind::StorageFull)), lock).expect_err("not taken");
+    assert_eq!(
+        failed.to_string(),
+        "could not record the holder in state.db.lock: no storage space"
+    );
 }

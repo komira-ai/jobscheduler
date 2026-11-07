@@ -801,8 +801,9 @@ fn reads_only(action: Action) -> bool {
         | Action::DescribeSpotPriceHistory
         | Action::GetServiceQuota
         | Action::DescribeCapacityBlockOfferings
-        | Action::DescribeInstances => true,
-        Action::RunInstances | Action::TerminateInstances => false,
+        | Action::DescribeInstances
+        | Action::DescribeCapacityReservations => true,
+        Action::RunInstances | Action::TerminateInstances | Action::PurchaseCapacityBlock => false,
     }
 }
 
@@ -819,6 +820,8 @@ fn fake_and_port_are_read_only() {
     assert!(calls.iter().all(|call| reads_only(call.action)));
     assert!(!reads_only(Action::RunInstances));
     assert!(!reads_only(Action::TerminateInstances));
+    assert!(!reads_only(Action::PurchaseCapacityBlock));
+    assert!(reads_only(Action::DescribeCapacityReservations));
     assert_eq!(Action::RunInstances.name(), "RunInstances");
     assert_eq!(Action::DescribeInstances.name(), "DescribeInstances");
     assert_eq!(Action::TerminateInstances.name(), "TerminateInstances");

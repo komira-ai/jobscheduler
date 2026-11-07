@@ -1,0 +1,24 @@
+{
+  "Quota": {
+    "ServiceCode": "ec2",
+    "ServiceName": "Amazon Elastic Compute Cloud (Amazon EC2)",
+    "QuotaArn": "arn:aws:servicequotas:us-east-1:123456789012:ec2/L-1216C47A",
+    "QuotaCode": "L-1216C47A",
+    "QuotaName": "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances",
+    "Value": 640.0,
+    "Unit": "None",
+    "Adjustable": true,
+    "GlobalQuota": false,
+    "UsageMetric": {
+      "MetricNamespace": "AWS/EC2",
+      "MetricName": "vCPU",
+      "MetricDimensions": {
+        "Class": "Standard/OnDemand",
+        "Resource": "vCPU",
+        "Service": "EC2",
+        "Type": "Resource"
+      },
+      "MetricStatisticRecommendation": "Maximum"
+    }
+  }
+}

@@ -40,6 +40,8 @@ prost-types.workspace = true
 js-testkit = { path = "../js-testkit" }
 rustls.workspace = true
 rustls-native-certs.workspace = true
+# `release hostkeeper-package` compresses the packages hostkeeper unpacks.
+ruzstd.workspace = true
 # The runner user's uid and gid, and `uname -m`, for `crun-tests`.
 rustix = { workspace = true, features = ["process", "system"] }
 serde.workspace = true
@@ -64,6 +66,8 @@ js-client = { path = "../js-client" }
 # generator renders for the test definition (tests/job_surface.rs).
 js-cli = { path = "../js-cli" }
 js-elastic = { path = "../js-elastic" }
+# The hook's step bounds, which the lease server's declaration must keep (tests/js_lease_server_declaration.rs).
+js-update-hook = { path = "../js-update-hook" }
 # The plists the package carries must be flags the programs accept (tests/macos_pkg.rs).
 js-mac-provision = { path = "../js-mac-provision" }
 js-mac-session = { path = "../js-mac-session" }
@@ -71,13 +75,11 @@ js-mac-session = { path = "../js-mac-session" }
 # the job service.
 protox.workspace = true
 rcgen.workspace = true
-# The host updater's own validator of a declaration, which the js-agent declaration the release
-# ships must pass (tests/js_agent_declaration.rs).
-# The hook contract's `Step`, which the updater's launch takes (tests/js_agent_declaration_load.rs).
-update-hook.workspace = true
-# `test-support`: `Declared::by_hand`, a loaded declaration made without reading the host's own
-# paths (tests/js_agent_declaration_load.rs).
-update-rights = { workspace = true, features = ["test-support"] }
+# hostkeeper's unpacker, manifest loader, release-index parser and placer: the js-agent packages
+# and their index are read with the code a host runs (tests/hostkeeper_package).
+hostkeeper-config.workspace = true
+hostkeeper-placed.workspace = true
+hostkeeper-unpack.workspace = true
 
 [lints]
 workspace = true

@@ -279,6 +279,7 @@ async fn orphans_records_of_unknown_pools_and_stuck_silent_hosts_are_said_once()
         offer: "a10".to_owned(),
         zone: Some("z1".to_owned()),
         status: js_elastic::HostStatus::Active,
+        ends_unix_seconds: None,
     }];
     let mut finishing = view("js-stuck-alert");
     finishing.state = HostState::Lost;

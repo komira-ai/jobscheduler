@@ -15,10 +15,10 @@ const BUNDLE: &str =
     "toolchain:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// What the recording server read: the request line and the parsed body of each request.
-type Seen = Arc<Mutex<Vec<(String, Value)>>>;
+pub type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// A server that answers every request with `reply` and records what it read.
-fn recording(reply: String) -> (String, Seen) {
+pub fn recording(reply: String) -> (String, Seen) {
     let seen: Seen = Arc::default();
     let log = Arc::clone(&seen);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

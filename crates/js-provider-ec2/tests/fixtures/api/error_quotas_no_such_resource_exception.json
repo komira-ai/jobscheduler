@@ -1,0 +1,4 @@
+{
+  "__type": "com.amazonaws.servicequotas#NoSuchResourceException",
+  "Message": "The quota code L-1216C47A is not available for service ec2 in this account"
+}

@@ -636,6 +636,7 @@ fn the_e3_gate_parses_and_graphics_belongs_to_it_alone() {
         cli,
         Some(&sys),
         crate::probe::Timing::instant(),
+        &mut std::io::empty(),
         &mut out,
         &mut err,
     );
@@ -781,6 +782,7 @@ fn the_command_line_graphics_mode_reaches_the_probe() {
         cli,
         Some(&sys),
         crate::probe::Timing::instant(),
+        &mut std::io::empty(),
         &mut out,
         &mut err,
     );

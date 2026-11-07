@@ -1,23 +1,25 @@
 //! The start path of the registry: the guards a start meets, the pass that places waiting
 //! whole-node requests, and the host facts that pass reads.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use js_elastic::Demand;
 use js_lease::Timestamp;
 use js_provider::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{Admission, Capabilities, HostId, LeaseId, ResourceClass, Resources, Shape};
+use js_types::{
+    Admission, Capabilities, HostId, LeaseId, RequestId, ResourceClass, Resources, Shape,
+};
 
 use super::record::{Bound, Queue};
 use super::{HostState, Registry, State};
 use crate::lives;
-use crate::placer::ProbeHost;
+use crate::placer::{ProbeHost, Standing, WaitingWhole, WholeHost, WholeRound};
 use crate::whole::caps::Capability;
 use crate::whole::cost::HostLoad;
 use crate::whole::exclusive::Exclusive;
 use crate::whole::placement::{self, Asking};
-use crate::whole::requests::{RequestKey, Rules, whole_settings};
+use crate::whole::requests::{Exclusion, RequestKey, Rules, whole_settings};
 use crate::whole::reserve::{self, HostFacts, Pass};
 use crate::whole_config::WholeNodeConfig;
 
@@ -27,6 +29,19 @@ const ENDLESS: Timestamp = Timestamp::MAX;
 
 /// The bound [`js_whole::cost::tail`] reads as none.
 const NO_BOUND: u64 = u64::MAX;
+
+/// How the whole-node queue of a placer stands the host of `record` at `now`
+/// ([`Standing`]): the first that applies of tainted, leaving, lost, cordoned and live.
+fn standing(record: &super::Record, now: Timestamp, grace_ms: u64) -> Standing {
+    let live = record.state(now, grace_ms) == HostState::Live;
+    match (record.taint.is_some(), record.leaving.is_some(), live) {
+        (true, _, _) => Standing::Tainted,
+        (false, true, _) => Standing::Leaving,
+        (false, false, false) => Standing::Lost,
+        (false, false, true) if record.cordoned(now) => Standing::Cordoned,
+        (false, false, true) => Standing::Live,
+    }
+}
 
 /// The hosts that reported a taint: none of them could ever hold a request again.
 fn tainted(state: &State) -> BTreeSet<HostId> {
@@ -104,8 +119,11 @@ impl Registry {
         facts.collect()
     }
 
-    /// Sets hosts aside for the waiting requests, in queue order (see
-    /// [`crate::whole::reserve`]). Gives up and commits nothing else, and stops nothing.
+    /// Sets hosts aside for the waiting requests, in queue order. A placer that keeps the
+    /// whole-node queue ([`crate::Placer::whole_round`], the engine of `--placement
+    /// js-sched`) runs the pass and the registry takes its marks; the registry's own pass
+    /// ([`crate::whole::reserve`]) is then not run, and stays the pass of every other
+    /// placement. Gives up and commits nothing else, and stops nothing.
     pub(super) fn place_waiting(
         &self,
         state: &mut State,
@@ -113,6 +131,33 @@ impl Registry {
         hosts: &[HostFacts],
         now: Timestamp,
     ) {
+        let pass = Pass {
+            now,
+            settings,
+            hosts,
+        };
+        let placer = self.shared.placer.get();
+        let round = placer.map(|placer| (placer, self.round_of(state, &pass)));
+        let placed = round.and_then(|(placer, round)| {
+            let marks = placer.whole_round(&round)?;
+            Some((marks, round, placer.whole_give_ups()))
+        });
+        if let Some((marks, round, give_ups)) = placed {
+            let presented = round.waiting.into_iter().map(|waiting| waiting.id);
+            let presented: BTreeSet<RequestId> = presented.collect();
+            // A mark put back from the ledger whose host never came back, or is tainted,
+            // goes as it does in the registry's own pass.
+            state.dropped += state.marks.stand(&pass);
+            state.marks.adopt(marks, &presented);
+            // The placer's give-ups are counted in the requests' records, as the registry's
+            // own pass counts its own (the placer queues only the requests presented).
+            for (id, count) in give_ups {
+                state
+                    .requests
+                    .raise_give_ups(RequestKey::from(&id), count, now);
+            }
+            return;
+        }
         let State {
             marks,
             waiting,
@@ -120,12 +165,55 @@ impl Registry {
             dropped,
             ..
         } = state;
-        let pass = Pass {
-            now,
-            settings,
-            hosts,
-        };
         *dropped += reserve::advance(marks, waiting, requests, pass);
+    }
+
+    /// What a placer that keeps the whole-node queue reads of the registry's books for one
+    /// pass ([`WholeRound`]).
+    fn round_of(&self, state: &State, pass: &Pass<'_>) -> WholeRound {
+        let (settings, now) = (pass.settings, pass.now);
+        let grace = self.grace_ms();
+        let waiting = state.waiting.waiting().map(|(id, request, since)| {
+            let key = RequestKey::from(id);
+            let record = state.requests.record(&key);
+            WaitingWhole {
+                id: id.clone(),
+                max_wall: request.max_wall,
+                since,
+                give_ups: state.requests.give_ups(&key),
+                exclusions: record.map(|r| r.exclusions.clone()).unwrap_or_default(),
+                mark: state.marks.reservation_of(id),
+            }
+        });
+        let waiting: Vec<WaitingWhole> = waiting.collect();
+        let presented: BTreeSet<RequestId> = waiting.iter().map(|w| w.id.clone()).collect();
+        let open: BTreeSet<&HostId> = pass
+            .hosts
+            .iter()
+            .filter(|f| f.open)
+            .map(|f| &f.id)
+            .collect();
+        let hosts = state.records.iter().map(|(id, record)| WholeHost {
+            id: id.clone(),
+            standing: standing(record, now, grace),
+            open: open.contains(id),
+        });
+        let source = self.shared.lives.get().map(|lives| &**lives);
+        let booked = state.book.leases().into_values().flatten();
+        let lives = source.map_or_else(BTreeMap::new, |source| {
+            let known = booked.filter_map(|lease| {
+                let profiles = state.runs.profiles_of(&lease);
+                Some((lease, lives::longest_p90(&profiles, source)?))
+            });
+            known.collect()
+        });
+        WholeRound {
+            settings: settings.clone(),
+            waiting,
+            hosts: hosts.collect(),
+            outside: state.marks.outside(&presented, now),
+            lives,
+        }
     }
 
     /// Books `spec`'s lease as [`js_provider::HostBook`] does. A `Whole` class is
@@ -177,8 +265,14 @@ impl Registry {
             if id_held & state.requests.held_by_other(&key, &lease) {
                 return StartAck::Refused(RefusalCode::NoCapacity);
             }
-            // A request that used up its tries is not placed again.
-            if state.requests.start(&key, now) {
+            // A request that used up its tries is not placed again: the placer says so of a
+            // request it keeps the record of, the registry of its own.
+            let placer = self.shared.placer.get();
+            let id = spec.request_id();
+            let kept = id
+                .zip(placer)
+                .is_some_and(|(id, placer)| placer.whole_start(id));
+            if state.requests.start(&key, now) | kept {
                 return StartAck::Refused(RefusalCode::ExclusiveNotReady);
             }
         }
@@ -201,11 +295,18 @@ impl Registry {
         // no host could ever be given whole; otherwise it waits, if it has an id.
         let listed = state.book.hosts();
         let tainted = tainted(state);
+        // The hosts a placer that keeps the request bars it from, beside the registry's own.
+        let kept_off = self.placer_exclusions(spec);
+        let for_life = kept_off
+            .iter()
+            .filter(|(_, bar)| **bar == Exclusion::ForLife);
+        let for_life: BTreeSet<HostId> = for_life.map(|(host, _)| host.clone()).collect();
         let asking = Asking {
             spec,
             key: &key,
             hosts: &listed,
             tainted: &tainted,
+            for_life: &for_life,
         };
         // A host that could be launched counts as one that could ever serve the request.
         let launch = state
@@ -273,7 +374,8 @@ impl Registry {
         let eligible = |id: &HostId, _: &Shape| {
             let record = records.get(id);
             // Only a whole-node request is kept off a host its earlier tries failed on.
-            let barred = whole & requests.excluded(&key, id, now);
+            let placer_bar = kept_off.get(id).is_some_and(|bar| bar.holds(now));
+            let barred = whole & (requests.excluded(&key, id, now) | placer_bar);
             let bookable = record.is_some_and(|record| {
                 let beside = |leases: &Vec<LeaseId>| record.clear_beside(runs, id, leases);
                 let quiet = match (shares, occupied.get(id)) {
@@ -372,5 +474,17 @@ impl Registry {
             }
             (other, _, _) => other,
         }
+    }
+
+    /// The hosts a placer that keeps `spec`'s request ([`crate::Placer::whole_record`])
+    /// leaves out of its placements, and until when: none for a start without a request id,
+    /// or with no such placer.
+    fn placer_exclusions(&self, spec: &StartSpec) -> BTreeMap<HostId, Exclusion> {
+        let placer = self.shared.placer.get();
+        let id = spec.request_id();
+        let record = id
+            .zip(placer)
+            .and_then(|(id, placer)| placer.whole_record(id));
+        record.map(|record| record.exclusions).unwrap_or_default()
     }
 }

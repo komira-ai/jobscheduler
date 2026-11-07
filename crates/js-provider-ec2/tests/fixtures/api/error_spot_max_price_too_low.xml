@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>SpotMaxPriceTooLow</Code>
+            <Message>Your Spot request price of 0.01 is lower than the minimum required Spot request fulfillment price of 0.0412.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000025</RequestID>
+</Response>

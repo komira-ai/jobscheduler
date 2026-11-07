@@ -38,16 +38,12 @@ the manifests, so the manifest rules need no network (the transitive walk below 
   relaxes the lints anywhere in its `src/` tree (see Purity), or that reaches a forbidden
   external crate through its resolved normal dependencies (see Purity);
 - a second `js-types` (below);
-- a dependency taken from kbf's repository (a git source naming it, at the root or in a member)
-  other than `update-hook` or `update-rights` as a dev-dependency (`KBF_TEST_CRATES` in
-  `crates/xtask/src/layering.rs`). `update-hook` is kbf's hook-contract crate: js-agent's tests
-  run its conformance harness against the hook (`crates/js-agent/tests/agent/update_hook/
-  conformance.rs`). `update-rights` holds the host updater's rules for a declaration: xtask's
-  tests load the js-agent declaration the release ships with it
-  (`crates/xtask/tests/js_agent_declaration.rs`). Neither depends on another crate of kbf but
-  `update-hook`. Both are pinned by one revision in the root `[workspace.dependencies]`, and
-  `deny.toml` allows kbf's repository as a git source for them alone. They are the one exception
-  to this repository depending on nothing of kbf, and they reach no shipped binary.
+- a dependency taken from kbf's repository, of any kind (normal, build, dev or target-specific;
+  a git source naming it, at the root or in a member, or a root entry a member takes with
+  `workspace = true`). This repository depends on nothing of kbf. `deny.toml` allows hostkeeper's
+  repository as a git source and no other, and `crates/xtask/tests/layering.rs` also reads
+  `Cargo.lock` and fails when a package is named `update-rights` or `update-hook`, or has kbf's
+  repository as its source, which catches a kbf crate that comes back through another dependency.
 
 `deny.toml` also bans kbf's crates by name in the resolved graph (cargo-deny matches exact
 names, so the list is explicit and is refreshed when kbf's crates change; the layering rule

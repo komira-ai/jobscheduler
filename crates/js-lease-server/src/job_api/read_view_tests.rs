@@ -6,15 +6,18 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_jobs::{
-    Constraints, DeclaredPort, JobEnd, JobId, JobSpec, Needs, NetworkPolicy, NewJob, Output,
-    StartFailure,
+    Constraints, DeclaredPort, JobEnd, JobId, JobSpec, JobState, Needs, NetworkPolicy, NewJob,
+    Output, StartFailure,
 };
-use js_proto::v1;
+use js_proto::v1::{self, ListJobsRequest};
 use js_types::{ExecMode, Resources};
 
+use super::read::view;
 use super::read_tests::{
-    BIG, Rig, Step, clock, id, image, over_fake, place, queue, run, running, spec, start, times_of,
+    BIG, Rig, Step, clock, id, image, over_fake, over_sqlite, place, queue, run, running, spec,
+    start, times_of,
 };
+use super::tests::scratch;
 use crate::job_store::ServerJobs;
 
 /// A spec with every field set: a command of two items, a GPU share with disk, constraints
@@ -346,5 +349,252 @@ async fn every_way_a_job_ends_is_shown() {
         };
         assert_eq!(result, expected, "{text}");
         assert_eq!(result.times, shown.times, "{text}");
+    }
+}
+
+/// One job of [`cancel_requested_is_shown_until_the_end_and_on_a_lost_job`]: its id, how far
+/// it is taken, whether its cancel is asked for there, how it then ends (if it does), and the
+/// state and `cancel_requested` that every read shows.
+type CancelCase = (
+    &'static str,
+    Before,
+    bool,
+    Option<JobEnd>,
+    v1::JobState,
+    bool,
+);
+
+/// The jobs of [`cancel_requested_is_shown_until_the_end_and_on_a_lost_job`]: every state a
+/// job is asked to cancel in, every way such a job then ends, and a job never asked beside
+/// each state that can show the flag.
+fn cancel_cases() -> Vec<CancelCase> {
+    let exited = |exit_code| JobEnd::Exited {
+        exit_code,
+        output: quiet(),
+    };
+    vec![
+        (
+            "q-plain",
+            Before::Queued,
+            false,
+            None,
+            v1::JobState::Queued,
+            false,
+        ),
+        (
+            "q-asked",
+            Before::Queued,
+            true,
+            None,
+            v1::JobState::Cancelled,
+            false,
+        ),
+        (
+            "p-asked",
+            Before::Placed,
+            true,
+            None,
+            v1::JobState::Placed,
+            true,
+        ),
+        (
+            "s-asked",
+            Before::Starting,
+            true,
+            None,
+            v1::JobState::Starting,
+            true,
+        ),
+        (
+            "r-plain",
+            Before::Running,
+            false,
+            None,
+            v1::JobState::Running,
+            false,
+        ),
+        (
+            "r-asked",
+            Before::Running,
+            true,
+            None,
+            v1::JobState::Running,
+            true,
+        ),
+        (
+            "r-cancelled",
+            Before::Running,
+            true,
+            Some(JobEnd::Cancelled {
+                exit_code: Some(143),
+                output: quiet(),
+            }),
+            v1::JobState::Cancelled,
+            false,
+        ),
+        (
+            "r-exited",
+            Before::Running,
+            true,
+            Some(exited(0)),
+            v1::JobState::Succeeded,
+            false,
+        ),
+        (
+            "r-failed",
+            Before::Running,
+            true,
+            Some(exited(2)),
+            v1::JobState::Failed,
+            false,
+        ),
+        (
+            "r-wall",
+            Before::Running,
+            true,
+            Some(JobEnd::WallLimit {
+                exit_code: None,
+                output: quiet(),
+            }),
+            v1::JobState::Failed,
+            false,
+        ),
+        (
+            "r-memory",
+            Before::Running,
+            true,
+            Some(JobEnd::Memory {
+                exit_code: Some(137),
+                output: quiet(),
+            }),
+            v1::JobState::Failed,
+            false,
+        ),
+        (
+            "p-timeout",
+            Before::Placed,
+            true,
+            Some(JobEnd::FailedToStart(StartFailure::StartTimeout)),
+            v1::JobState::FailedToStart,
+            false,
+        ),
+        (
+            "p-lost",
+            Before::Placed,
+            true,
+            Some(JobEnd::Lost),
+            v1::JobState::Lost,
+            true,
+        ),
+        (
+            "r-lost",
+            Before::Running,
+            true,
+            Some(JobEnd::Lost),
+            v1::JobState::Lost,
+            true,
+        ),
+        (
+            "r-lost-plain",
+            Before::Running,
+            false,
+            Some(JobEnd::Lost),
+            v1::JobState::Lost,
+            false,
+        ),
+    ]
+}
+
+/// Asserts, over the fake store and the SQLite one, that `GetJob` and `ListJobs` (each over
+/// both transports) show `cancel_requested` as `job.proto` defines it: true while a job asked
+/// to cancel has not ended (placed, starting or running) and on a job that ended lost after
+/// the ask; false on a queued job cancelled at once, on a job asked to cancel that then ended
+/// any other way (cancelled by its host, exited 0 or not, at its wall limit, out of memory,
+/// failed to start), and on any job never asked. Catches a cancelled job that still shows
+/// the flag its record keeps, and a lost job or a job mid-cancel that drops it.
+#[tokio::test]
+async fn cancel_requested_is_shown_until_the_end_and_on_a_lost_job() {
+    let dir = scratch("read_cancel_requested");
+    for name in ["fake", "sqlite"] {
+        let clock = clock();
+        let jobs = match name {
+            "fake" => over_fake(&clock),
+            _ => over_sqlite(&dir, &clock),
+        };
+        let rig = Rig::over(jobs, clock).await;
+        let cases = cancel_cases();
+        for (text, before, asked, end, _, _) in &cases {
+            let job = taken(&rig.jobs, text, *before);
+            if *asked {
+                rig.jobs
+                    .request_cancel(&job)
+                    .expect("the cancel is recorded");
+            }
+            if let Some(end) = end {
+                rig.advance(Duration::from_secs(1));
+                rig.jobs.end_job(&job, end.clone()).expect("the job ends");
+            }
+        }
+        let request = ListJobsRequest {
+            page_size: 1000,
+            ..ListJobsRequest::default()
+        };
+        let listed = rig.list(request).await.expect("a list").jobs;
+        let mut want = Vec::new();
+        for (text, _, _, _, state, flag) in &cases {
+            let shown = rig.get_job(text).await.expect("read");
+            assert_eq!(
+                (shown.state, shown.cancel_requested),
+                (i32::from(*state), *flag),
+                "{name} {text}"
+            );
+            want.push(shown);
+        }
+        want.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(listed, want, "{name}");
+    }
+}
+
+/// Asserts, for a record in each state with the cancel flag set and with it clear, what the
+/// job's `cancel_requested` shows: the flag in each state that has not ended and in lost,
+/// false in every other ended state. A record a store wrote before this rule (a cancelled job
+/// with the flag set, say) shows the same. Catches an ended state that shows the flag, and a
+/// live or lost state that drops it.
+#[test]
+fn cancel_requested_is_the_flag_only_before_the_end_and_when_lost() {
+    let clock = clock();
+    let jobs = over_fake(&clock);
+    let base = jobs
+        .get_job(&queue(&jobs, "base-1", spec(&[])))
+        .expect("read")
+        .expect("recorded");
+    let states = [
+        (JobState::Queued, true),
+        (JobState::Placed, true),
+        (JobState::Starting, true),
+        (JobState::Running, true),
+        (JobState::Lost, true),
+        (JobState::Succeeded, false),
+        (JobState::Failed, false),
+        (JobState::Cancelled, false),
+        (JobState::FailedToStart(StartFailure::NoCapacity), false),
+        (JobState::FailedToStart(StartFailure::StartTimeout), false),
+        (
+            JobState::FailedToStart(StartFailure::ExclusiveNotReady),
+            false,
+        ),
+        (JobState::FailedToStart(StartFailure::AgentRefused), false),
+    ];
+    for (state, shows) in states {
+        for flag in [false, true] {
+            let mut record = base.clone();
+            record.state = state;
+            record.cancel_requested = flag;
+            assert_eq!(
+                view::job(&record).cancel_requested,
+                flag & shows,
+                "{state:?} {flag}"
+            );
+        }
     }
 }

@@ -62,6 +62,11 @@ pub mod label {
     /// When a runtime made the container, in milliseconds since the Unix epoch; a
     /// runtime that can read it back reports a restarted container's age from it.
     pub const CREATED_MS: &str = "jobscheduler.dev/created-ms";
+    /// [`VM_KIND`] on the run of a VM start ([`js_agent_wire::StartKind::Vm`]): the
+    /// runtime runs it in a fresh VM of its own ([`crate::vm`]). Absent on every other run.
+    pub const KIND: &str = "jobscheduler.dev/kind";
+    /// The value of [`KIND`] on the run of a VM start.
+    pub const VM_KIND: &str = "vm";
 }
 
 /// A container's id as the runtime names it. Opaque to the agent.
@@ -408,6 +413,22 @@ pub trait Runtime {
         Err(NativeRefusal {
             code: refusal::NATIVE_UNSUPPORTED,
             why: "this agent runs no native jobs".to_owned(),
+        })
+    }
+
+    /// Whether this runtime runs a VM start ([`js_agent_wire::StartKind::Vm`]) now, asked at
+    /// admission before anything is created for one. The default runs none, which is every
+    /// runtime but the VM one ([`crate::vm::WithVms`]): a VM start is refused
+    /// [`refusal::VM_UNAVAILABLE`]. The VM runtime refuses one when both of its VM slots are
+    /// held ([`refusal::NO_CAPACITY`]).
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_vm(&self) -> Result<(), NativeRefusal> {
+        Err(NativeRefusal {
+            code: refusal::VM_UNAVAILABLE,
+            why: "this agent runs no VMs".to_owned(),
         })
     }
 

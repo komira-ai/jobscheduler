@@ -21,6 +21,7 @@ use js_types::sched::{FarmTime, LeaseKind, NodePhase, Resources, WorkerId};
 use js_whole::cost::DrainCost;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use js_types::sched::LeaseId;
 use js_types::sched::usage::LeaseCost;
@@ -152,6 +153,8 @@ pub(crate) struct Servable {
     /// For each platform request and lease kind seen this round, the indices into
     /// `live` of the workers that serve the kind and satisfy the request.
     memo: Vec<((js_caps::Request, LeaseKind), Vec<usize>)>,
+    /// The max wall time of the request being placed or held for ([`Servable::for_wall`]).
+    wall: Option<Duration>,
 }
 
 /// No bars: what a hold reads, whose bars are already in its `avoid` and `reserved`.
@@ -206,7 +209,15 @@ impl Servable {
             live,
             cordoned,
             memo: Vec::new(),
+            wall: None,
         }
+    }
+
+    /// From now on a worker whose host ends before `wall` has run out is not chosen for
+    /// the request that is next placed or held for ([`Worker::fits_before_end`]); `None`:
+    /// the request has no max wall time.
+    pub(crate) const fn for_wall(&mut self, wall: Option<Duration>) {
+        self.wall = wall;
     }
 
     /// Whether placement may use `worker` this round: live, not cordoned and serving.
@@ -277,7 +288,7 @@ impl Servable {
         attempt: &Attempt<'_>,
     ) -> Fit {
         let request = attempt.request;
-        let now = self.now;
+        let (now, wall) = (self.now, self.wall);
         let pool = self.pool_of(workers, request, attempt.avoid, attempt.barred);
         let by_load = adm.by_load() && request.kind == LeaseKind::Action;
         // A VM is placed by its booking, and under load admission also held to the
@@ -289,6 +300,7 @@ impl Servable {
             .filter(|name| {
                 attempt.may_use(name, now)
                     && workers[*name].has_room(request, by_load)
+                    && workers[*name].fits_before_end(now, wall)
                     && (!attempt.not_whole || !workers[*name].exclusive(request))
                     && (!vm_by_load || Self::vm_within_flat_memory(adm, &workers[*name], attempt))
             })
@@ -610,7 +622,7 @@ impl Servable {
         let request = attempt.request;
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, (attempt.avoid, attempt.barred));
-        let now = self.now;
+        let (now, wall) = (self.now, self.wall);
         self.memo[at]
             .1
             .iter()
@@ -618,6 +630,7 @@ impl Servable {
             .filter(|name| {
                 let w = &workers[*name];
                 !attempt.reserved.contains(*name)
+                    && w.fits_before_end(now, wall)
                     && !skip.contains(*name)
                     && !w.exclusive(request)
                     && w.has_room(request, true)
@@ -743,21 +756,28 @@ impl Servable {
     }
 
     /// The worker to hold for a request that fits nowhere now, with whole-node settings on:
-    /// the first of `drain` (the workers by drain cost, the least tail first) that could
-    /// run it, with no preference for a worker held before. Never one in `reserved`,
-    /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease or an
-    /// action that owns its worker ([`Request::owns_worker`]) holds a worker (the caller
-    /// asks only for one); an action at a worker's whole memory waits until some worker
-    /// has no lease, and nothing reserves one for it.
+    /// `kept` (the worker a whole-machine mark is on) while it still could run it, else the
+    /// first of `drain` (the workers by drain cost, the least tail first) that could. A
+    /// kept worker is never traded for one that has become cheaper to drain: a mark stays
+    /// on its worker until its request is placed, cancelled or gives it up. Never one in
+    /// `reserved`, nor one in `avoid` while [`Servable::fit`] skips it. Only a
+    /// whole-machine lease or an action that owns its worker ([`Request::owns_worker`])
+    /// holds a worker (the caller asks only for one; an action keeps nothing, and passes
+    /// no `kept`); an action at a worker's whole memory waits until some worker has no
+    /// lease, and nothing reserves one for it.
     pub(crate) fn reserve(
         &mut self,
         workers: &BTreeMap<WorkerId, Worker>,
         request: &Request,
         reserved: &BTreeSet<WorkerId>,
         avoid: &BTreeSet<WorkerId>,
+        kept: Option<&WorkerId>,
         drain: &[DrainCost],
     ) -> Option<WorkerId> {
         let candidates = self.holdable(workers, request, reserved, avoid);
+        if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
+            return Some(kept.clone());
+        }
         drain
             .iter()
             .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
@@ -775,12 +795,14 @@ impl Servable {
     ) -> Vec<&WorkerId> {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, (avoid, &NO_BARS));
+        let (now, wall) = (self.now, self.wall);
         self.memo[at]
             .1
             .iter()
             .map(|&i| &self.live[i])
             .filter(|name| {
                 !reserved.contains(*name)
+                    && workers[*name].fits_before_end(now, wall)
                     && !skip.contains(*name)
                     && workers[*name].capacity.fits(&request.demand())
             })

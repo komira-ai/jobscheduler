@@ -738,20 +738,19 @@ fn pure_crates_reach_no_runtime_or_network_crate() {
     assert!(check_closure(&copy.dir, &metadata).is_err());
 }
 
-/// Asserts that only kbf's update-hook contract crate and its declaration rules (update-rights)
-/// may come from kbf's repository, and only as dev-dependencies: either crate as a normal
-/// dependency, another crate from kbf's repository at the root (by a name without `kbf`), and a
-/// member's own git dependency on kbf's repository are each refused, and update-rights as a
-/// dev-dependency of another member is not. Catches this repository taking anything else from
-/// kbf under another name, or shipping either crate in a binary.
+/// Asserts that nothing comes from kbf's repository, as any kind of dependency: the real tree has
+/// none; a root entry whose git source is kbf's repository is refused under any name, and so is
+/// a member that takes it as a normal, a dev or a build dependency (through the root, with
+/// `workspace = true`) or declares its own git dependency on kbf's repository (with or without
+/// `.git`). Catches this repository taking a crate from kbf again, in a binary or only in tests.
 #[test]
-fn only_the_update_hook_contract_crate_may_come_from_kbf_and_only_for_tests() {
+fn nothing_may_come_from_kbf_as_any_kind_of_dependency() {
     let from_kbf = |manifest: &str, package: &str| {
         format!(
-            "{manifest} takes {package} from kbf's repository; only update-hook and update-rights, as dev-dependencies, may come from there"
+            "{manifest} takes {package} from kbf's repository; nothing may come from there, as any kind of dependency"
         )
     };
-    let real = Copy::new("kbf-contract-real");
+    let real = Copy::new("kbf-none-real");
     assert!(
         !real
             .found()
@@ -761,56 +760,32 @@ fn only_the_update_hook_contract_crate_may_come_from_kbf_and_only_for_tests() {
         real.found()
     );
 
-    let copy = Copy::new("kbf-contract-normal");
-    copy.edit(
-        "crates/js-agent/Cargo.toml",
-        "[lints]",
-        "[dependencies.update-hook]\nworkspace = true\n\n[lints]",
-    );
-    assert!(
-        copy.found()
-            .contains(&from_kbf("crates/js-agent/Cargo.toml", "update-hook")),
-        "{:?}",
-        copy.found()
-    );
-
-    let copy = Copy::new("kbf-rights-normal");
-    copy.edit(
-        "crates/xtask/Cargo.toml",
-        "[lints]",
-        "[dependencies.update-rights]\nworkspace = true\n\n[lints]",
-    );
-    assert!(
-        copy.found()
-            .contains(&from_kbf("crates/xtask/Cargo.toml", "update-rights")),
-        "{:?}",
-        copy.found()
-    );
-
-    let copy = Copy::new("kbf-rights-dev-elsewhere");
-    copy.edit(
-        "crates/js-client/Cargo.toml",
-        "[lints]",
-        "[dev-dependencies.update-rights]\nworkspace = true\n\n[lints]",
-    );
-    assert!(
-        !copy
-            .found()
-            .iter()
-            .any(|line| line.contains("kbf's repository")),
-        "{:?}",
-        copy.found()
-    );
-
-    let copy = Copy::new("kbf-contract-other-root");
-    copy.edit(
-        "Cargo.toml",
-        "[workspace.dependencies]",
-        "[workspace.dependencies]\nstep-contract = { git = \"https://github.com/komira-ai/kbf\", rev = \"abc\" }",
-    );
+    let root = "[workspace.dependencies]\nstep-contract = { git = \"https://github.com/komira-ai/kbf\", rev = \"abc\" }";
+    let copy = Copy::new("kbf-none-root");
+    copy.edit("Cargo.toml", "[workspace.dependencies]", root);
     assert_eq!(copy.found(), [from_kbf("Cargo.toml", "step-contract")]);
 
-    let copy = Copy::new("kbf-contract-other-member");
+    for (kind, name) in [
+        ("dependencies", "kbf-none-normal"),
+        ("dev-dependencies", "kbf-none-dev"),
+        ("build-dependencies", "kbf-none-build"),
+    ] {
+        let copy = Copy::new(name);
+        copy.edit("Cargo.toml", "[workspace.dependencies]", root);
+        copy.edit(
+            "crates/js-client/Cargo.toml",
+            "[lints]",
+            &format!("[{kind}.step-contract]\nworkspace = true\n\n[lints]"),
+        );
+        assert!(
+            copy.found()
+                .contains(&from_kbf("crates/js-client/Cargo.toml", "step-contract")),
+            "{kind}: {:?}",
+            copy.found()
+        );
+    }
+
+    let copy = Copy::new("kbf-none-member");
     copy.edit(
         "crates/js-client/Cargo.toml",
         "[lints]",
@@ -819,6 +794,70 @@ fn only_the_update_hook_contract_crate_may_come_from_kbf_and_only_for_tests() {
     assert_eq!(
         copy.found(),
         [from_kbf("crates/js-client/Cargo.toml", "wire-fixtures")]
+    );
+}
+
+/// Asserts that the lockfile resolves nothing from kbf: no package named `update-rights` or
+/// `update-hook`, and no package whose source is kbf's repository. Catches a kbf crate that
+/// returns through a dependency of a dependency, which the manifest check cannot see; it fails
+/// on the lockfile from before the js-agent hook left kbf's updater.
+#[test]
+fn the_lockfile_resolves_nothing_from_kbf() {
+    let lock = std::fs::read_to_string(repo().join("Cargo.lock")).expect("Cargo.lock");
+    assert_eq!(kbf_in_lock(&lock), Vec::<String>::new());
+}
+
+/// The packages of a lockfile that are `update-rights` or `update-hook`, or whose source is
+/// kbf's repository.
+fn kbf_in_lock(lock: &str) -> Vec<String> {
+    let table: toml::Table = lock.parse().expect("a lockfile");
+    let packages = table["package"].as_array().expect("packages");
+    packages
+        .iter()
+        .filter_map(|package| {
+            let name = package["name"].as_str().expect("a name");
+            let source = package.get("source").and_then(toml::Value::as_str);
+            let from_kbf = matches!(name, "update-rights" | "update-hook")
+                || source.is_some_and(|s| s.contains("github.com/komira-ai/kbf"));
+            from_kbf.then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Asserts that the lockfile check names a package called `update-rights`, one called
+/// `update-hook` and one from kbf's repository under another name, and none of a registry package.
+/// Catches a check that looks at one spelling only.
+#[test]
+fn the_lockfile_check_names_each_kind_of_kbf_package() {
+    let lock = r#"
+version = 4
+
+[[package]]
+name = "update-rights"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/kbf?rev=abc#abc"
+
+[[package]]
+name = "update-hook"
+version = "0.1.0"
+
+[[package]]
+name = "step-contract"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/kbf?rev=abc#abc"
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "js-types"
+version = "0.1.0"
+"#;
+    assert_eq!(
+        kbf_in_lock(lock),
+        ["update-rights", "update-hook", "step-contract"]
     );
 }
 

@@ -9,7 +9,7 @@ use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 
 use js_agent::update_hook::{
-    DirStat, Done, Flags, Invocation, Machine, Outcome, Params, Reason, Step, fd_stat, run_step,
+    DirStat, Done, Invocation, Machine, Outcome, Params, Reason, Step, fd_stat, run_step,
 };
 
 use crate::harness::{AGENT, Kv, STRANGER, arg, kv, make_dir, require_root, run_agent, work_dir};
@@ -26,22 +26,9 @@ fn refusal(path: &Path, why: &str) -> String {
     format!("state_root: {}: {why}", path.display())
 }
 
-/// Writes the declaration of a hook whose state directory is `tree/state` (root's, 0700).
+/// Makes the state directory of a hook, `tree/state` (root's, 0700).
 fn hook_tree(tree: &Path) {
     make_dir(&tree.join("state"), 0o700, 0);
-    fs::write(
-        tree.join("declaration.toml"),
-        format!(
-            concat!(
-                "state_dir = \"{root}/state\"\n[hook]\nunits = [\"js-agent-crun.service\"]\n",
-                "write_paths = [\"{root}/state\"]\n",
-                "[hook.timeout_secs]\nprepare = 3900\ncutover = 4320\nverify = 615\n",
-                "rollback = 8220\ncleanup = 120\n"
-            ),
-            root = tree.display(),
-        ),
-    )
-    .unwrap();
 }
 
 /// The params of a first install or of an update from 1.3.0 whose state root is `root`.
@@ -56,6 +43,10 @@ fn params(tree: &Path, root: &Path, update: bool) -> Params {
         concat!(
             "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\n",
             "defer_retry_secs = 300\nrelease_link = \"{tree}/current\"\n",
+            "unit = \"js-agent-crun.service\"\nstate_dir = \"{tree}/state\"\n",
+            "flags_file = \"{tree}/flags\"\ntoken_file = \"{tree}/token\"\nruntime = \"crun\"\n",
+            "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
+            "rollback_timeout_secs = 8220\ncleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
             "\"updater.artifact_digest\" = \"sha256:{digest}\"\n",
             "\"updater.staged_release\" = \"{tree}/releases/1.4.0\"\n",
             "\"updater.target_version\" = \"1.4.0\"\n{previous}state_root = \"{root}\"\n"
@@ -72,17 +63,15 @@ fn real_stat(_: &Path, fd: BorrowedFd<'_>) -> io::Result<DirStat> {
     fd_stat(fd)
 }
 
-/// Runs `step` with the declaration in `tree` and `params`, as the machine does.
+/// Runs `step` with `params`, as the machine does.
 fn run(tree: &Path, step: Step, params: &Params) -> Done {
-    let declaration = tree.join("declaration.toml");
     let own = || Err("unused".to_owned());
     let machine = Machine {
-        declaration: &declaration,
         stat: &real_stat,
         own_host_id: &own,
+        ..Machine::system()
     };
     let invocation = Invocation {
-        flags: Flags::default(),
         step,
         artifact: (step == Step::Prepare).then(|| tree.join("releases/1.4.0")),
         params: PathBuf::from("/unused"),

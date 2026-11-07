@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>InvalidAMIID.NotFound</Code>
+            <Message>The image id '[ami-0123456789abcdef0]' does not exist</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000032</RequestID>
+</Response>

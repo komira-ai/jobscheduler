@@ -402,6 +402,7 @@ fn stray(id: &str, acquire: &str, status: HostStatus) -> Held {
         offer: "a10".to_owned(),
         zone: Some("z1".to_owned()),
         status,
+        ends_unix_seconds: None,
     }
 }
 

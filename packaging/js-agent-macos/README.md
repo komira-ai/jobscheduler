@@ -10,9 +10,9 @@ what the package holds (`crates/xtask/src/macpkg.rs`).
 
 | path | |
 |---|---|
-| `/usr/local/js-agent/releases/<version>/{js-agent,js-mac-session,js-mac-provision,LICENSE}` | one release directory; the update hook stages the next one beside it |
-| `/usr/local/js-agent/link/` | empty; `postinstall` makes `current` in it, once, and the update hook moves it after |
-| `/usr/local/js-agent/share/` | the two plists and the updater declaration, as templates |
+| `/usr/local/js-agent/releases/<version>/{js-agent,js-mac-session,js-mac-provision,LICENSE}` | one release directory |
+| `/usr/local/js-agent/link/` | empty; `postinstall` makes `current` in it, once |
+| `/usr/local/js-agent/share/` | the two plists, as templates |
 | `/Library/Logs/js-agent/` | the daemons' logs |
 | `/var/db/js-agent-update/` | the update hook's state directory, root's, mode 0700 |
 
@@ -130,12 +130,13 @@ Known limits:
 ## Not done yet
 
 - The package is a workflow artifact for seven days, not a release asset: `release.yml` lists
-  its assets by name and attests `*.tar.gz`.
-- The updater declaration is shipped under `share/`; putting it in `/etc/updater.d` belongs to enrolment.
-- The update hook (`js-agent update-hook`) runs its five steps on a Mac, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
-  `print`) and `runtime = "native"` in `updater.toml`, over the lease server's own-host routes
-  and the agent's state root, which `updater.toml` names beside the release link (`server`,
-  `state_root`, `token_file`). The
+  its assets by name and attests `*.tar.gz`, `*.tar.zst` and the index. It no longer carries an
+  update declaration, and nothing in it moves `link/current`: the agent is updated as a
+  hostkeeper package (`hostkeeper/`, a release asset), which runs its own launchd job.
+- The update hook (`js-agent update-hook`) runs its five steps on a Mac as hostkeeper's hook, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
+  `print`) and `runtime = "native"` in the `[params]` of `hostkeeper/manifest.toml.in`, over the lease server's own-host routes
+  and the agent's state root, which the params name beside the release link (`state_root`,
+  `token_file`; the server comes from the flags file). The
   port has run against a fake of `launchctl` only, never against a real launchd: what
   `launchctl print` prints of a daemon that crashed (its `last exit code`), the time a
   `bootstrap` takes to start the daemon, and `bootout` waiting out the agent's `ExitTimeOut`

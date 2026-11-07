@@ -42,6 +42,9 @@ js-treestore = { path = "../js-treestore" }
 js-types = { path = "../js-types" }
 # The update hook's service-independent parts (src/update_hook).
 js-update-hook = { path = "../js-update-hook" }
+# The seam of a VM lease's VM (src/vm) and the protocol of `js-vmm lease`, which runs the real
+# driver: the agent starts that binary and links nothing of it.
+js-vm-lease = { path = "../js-vm-lease" }
 async-trait.workspace = true
 clap.workspace = true
 getrandom.workspace = true
@@ -59,6 +62,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
 tracing.workspace = true
+# The metadata service of `--identity-source` (src/identity), over plain HTTP.
+ureq.workspace = true
 
 # The crun image source and the image config (src/image), and the helper modes this binary
 # answers when a helper container runs it (`main`), are Linux code: js-contain drives `crun`
@@ -67,22 +72,33 @@ tracing.workspace = true
 js-contain = { path = "../js-contain" }
 
 [dev-dependencies]
+# The `js join-token` verb's library entry point mints the join tokens the join round trip
+# starts agents with (tests/agent/join_round_trip.rs).
+js-cli = { path = "../js-cli" }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
+# The STS minter the uploader's tests against the S3-compatible test store take their
+# credentials from (tests/agent/lifecycle/live_logs.rs, tests/crun_stand_in/s3_compat.rs).
+js-logmint = { path = "../js-logmint" }
 # The in-memory log store the uploader's tests put to (src/logs, tests/crun_stand_in).
 js-logstore = { path = "../js-logstore", features = ["fake"] }
 js-provider = { path = "../js-provider" }
+# The providers' verifiers of a signed identity, which the hello of `--identity-source` is
+# checked against (tests/agent/identity.rs).
+js-provider-ec2 = { path = "../js-provider-ec2" }
+js-provider-gce = { path = "../js-provider-gce" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
+# The recording VM driver the VM runtime's tests drive (tests/agent/vm).
+js-vm-lease = { path = "../js-vm-lease", features = ["fake"] }
 clap.workspace = true
 # `net`: a socket bound and never listening, for a server that is down (update_hook/lease_port).
 rustix = { workspace = true, features = ["net", "process", "thread"] }
 tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing-subscriber.workspace = true
-# The hook contract's conformance harness, run against `js-update-hook-fake`
-# (tests/agent/update_hook/conformance.rs).
-update-hook.workspace = true
+# hostkeeper's hook contract and its conformance harness (tests/agent/update_hook/conformance.rs).
+hostkeeper-hook = { workspace = true, features = ["conformance"] }
 
 [lints]
 workspace = true

@@ -208,6 +208,18 @@ pub enum Event {
         /// What it offers from now on.
         caps: NodeCaps,
     },
+    /// A worker's host is taken back at `ends_at` (for example a reserved block of
+    /// capacity that expires): placement puts on it only work whose max wall time
+    /// ([`crate::Scheduler::set_max_wall`]) ends by then, and caps that wall time at the time
+    /// left ([`crate::Scheduler::max_wall`]). `None` clears the end. The end is kept across a
+    /// registration or a change of capacity, and is not part of the log: the caller feeds
+    /// it again after a restart. Ignored for a worker that never registered.
+    HostEnd {
+        /// The worker.
+        worker: WorkerId,
+        /// When its host ends (`None`: it does not).
+        ends_at: Option<FarmTime>,
+    },
     /// A worker's heartbeat arrived on its newest stream, with the leases it holds.
     ///
     /// A committed lease the scheduler holds on the worker that `running` leaves out goes

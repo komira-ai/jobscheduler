@@ -82,6 +82,10 @@
 //! in its hello ([`NetworkCeiling`]: an absent one is `none` with no port), and the server
 //! sends a start that asks for more than `none`, or declares a port, only to a host whose
 //! ceiling covers it.
+//! `JobStartSpec::kind` is one more ([`StartKind`]: an older agent would run a VM start as
+//! an action): a server sends `kind: vm` only to a host whose hello reports `vm.slots`, the
+//! capability an agent with the VM backend sends, and an unknown kind is a decode error
+//! like an unknown `Isolation`.
 //!
 //! # Live logs
 //!
@@ -154,6 +158,7 @@ mod files;
 mod heartbeat;
 mod hello;
 mod image;
+mod kind;
 pub mod limits;
 mod load;
 mod log_sink;
@@ -179,6 +184,10 @@ pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireAccelerator,
     WireShape,
 };
+/// The cloud's signed identity of a machine ([`Hello::identity`]): `js-elastic`'s type,
+/// the one the providers verify.
+pub use js_elastic::SignedIdentity;
+pub use kind::StartKind;
 pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
 pub use log_sink::{LogGrant, LogGrantState, LogReport, LogSink};
 pub use native::{

@@ -312,6 +312,47 @@ fn a_lease_that_cannot_be_removed_is_kept_for_the_next_open() {
     assert!(left_of(&node, &id.0).is_empty());
 }
 
+/// Catches a start-up pass that kills the supervisor of a run that has ended. A supervisor
+/// writes its exit record and then exits, and in a coverage build that exit writes a profile
+/// a kill would cut short. Here the sidecar of an ended run names a stand-in for such a
+/// supervisor: a child of the test, in a group of its own, that is still there. The next
+/// open removes the lease and leaves the process alone, and it then exits by itself.
+#[test]
+fn an_ended_runs_supervisor_that_is_still_exiting_is_not_killed_by_the_sweep() {
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    let node = Node::new("sweep-exiting");
+    let mut dead = node.open();
+    let id = dead
+        .create_and_start(&node.spec("r1-exit"))
+        .expect("started");
+    dead.wait_ended(&id);
+    let mut exiting = std::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("cat");
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", exiting.id())).expect("its stat");
+    let start: u64 = stat
+        .rsplit_once(')')
+        .and_then(|(_, after)| after.split_whitespace().nth(19))
+        .and_then(|field| field.parse().ok())
+        .expect("a start time");
+    let path = sidecar(&node, &id.0);
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    json["supervisor"] = serde_json::json!({ "pid": exiting.id(), "start": start });
+    std::fs::write(&path, json.to_string()).expect("write the sidecar");
+    drop(dead);
+
+    let second = node.open();
+    assert_eq!(second.swept().removed.len(), 1, "{:?}", second.swept());
+    assert!(left_of(&node, &id.0).is_empty());
+    drop(exiting.stdin.take());
+    let status = exiting.wait().expect("reaped");
+    assert_eq!((status.signal(), status.code()), (None, Some(0)));
+}
+
 /// Proves a sidecar the runtime cannot read as its own is left and reported, and the
 /// runtime still opens and sweeps the good one beside it: garbage and a sidecar under
 /// another lease's name stay where they are. Catches a sweep that acts on, or stops at, a

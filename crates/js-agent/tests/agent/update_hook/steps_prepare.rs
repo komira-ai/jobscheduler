@@ -56,7 +56,7 @@ fn a_clean_prepare_records_then_cordons_waits_for_the_drain_and_succeeds() {
     assert!(done.report.reversible);
     assert_eq!(rig.world.ticks(), 5, "one pause per poll that saw a lease");
     // The version check was made through the runner, on the staged agent.
-    let staged = rig.params.staged_release.join("js-agent");
+    let staged = rig.params.staged_release.join("bin/js-agent");
     assert_eq!(spy.log()[0], format!("run({} --version)", staged.display()));
     // The record was durable before the first pause, with the cordon placed and confirmed.
     let seen = seen.borrow();
@@ -310,16 +310,16 @@ fn a_fresh_record_comes_after_the_taint_check_and_never_hashes_the_release() {
     assert_eq!(spy.prepare(&rig).outcome, Outcome::Halt);
     // The record's digest is the updater's, though the staged tree has no agent file at all.
     let rig = Rig::new("hook-prepare-no-rehash");
-    std::fs::remove_file(rig.params.staged_release.join("js-agent")).unwrap();
+    std::fs::remove_file(rig.params.staged_release.join("bin/js-agent")).unwrap();
     let spy = Spy::new(&rig);
     assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
     assert_eq!(rig.record().unwrap().update.artifact_digest, digest());
 }
 
 #[test]
-fn a_declared_prepare_timeout_shorter_than_the_wait_plus_the_margin_is_state_invalid() {
+fn a_prepare_timeout_shorter_than_the_wait_plus_the_margin_is_state_invalid() {
     let mut rig = Rig::new("hook-prepare-timeout");
-    rig.declaration.timeouts.prepare = 3659;
+    rig.params.settings.timeouts.prepare = 3659;
     let spy = Spy::new(&rig);
     let done = spy.prepare(&rig);
     assert_eq!(done.outcome, Outcome::Failure);
@@ -334,7 +334,7 @@ fn a_declared_prepare_timeout_shorter_than_the_wait_plus_the_margin_is_state_inv
     // A record that is there is refused the same way, by any step.
     let mut rig = Rig::new("hook-prepare-timeout-cleanup");
     rig.put_record(&rig.fresh_record());
-    rig.declaration.timeouts.prepare = 3659;
+    rig.params.settings.timeouts.prepare = 3659;
     let spy = Spy::new(&rig);
     let done = spy.cleanup(&rig);
     assert_eq!(done.report.reason, Some(Reason::StateInvalid));
@@ -358,7 +358,7 @@ fn a_retry_of_zero_defers_with_retry_after_zero() {
 const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: docker native\n";
 
 #[test]
-fn a_staged_mac_agent_passes_prepare_under_a_declaration_that_names_the_native_runtime() {
+fn a_staged_mac_agent_passes_prepare_under_params_that_name_the_native_runtime() {
     let rig = Rig::mac("hook-prepare-mac");
     let spy = Spy::new(&rig);
     *spy.version.borrow_mut() = Ok(MAC_VERSION.to_owned());
@@ -366,7 +366,7 @@ fn a_staged_mac_agent_passes_prepare_under_a_declaration_that_names_the_native_r
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(done.report.reason, None);
     let record = rig.record().expect("the record is written");
-    assert_eq!(record.update.unit, "com.komira.js-agent");
+    assert_eq!(record.update.unit, "js-agent");
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn the_first_install_of_a_mac_agent_passes_prepare_too() {
 }
 
 #[test]
-fn a_native_declaration_refuses_a_staged_agent_that_lists_no_native_runtime() {
+fn a_native_runtime_refuses_a_staged_agent_that_lists_no_native_runtime() {
     for (n, printed) in [
         "js-agent 1.4.0\nruntimes: docker crun\n",
         "js-agent 1.4.0\nruntimes: docker\n",
@@ -407,7 +407,7 @@ fn a_native_declaration_refuses_a_staged_agent_that_lists_no_native_runtime() {
 }
 
 #[test]
-fn a_native_declaration_takes_an_agent_that_names_no_runtimes_as_a_crun_one_does() {
+fn a_native_runtime_takes_an_agent_that_names_no_runtimes_as_a_crun_one_does() {
     let rig = Rig::mac("hook-prepare-mac-no-line");
     let spy = Spy::new(&rig);
     *spy.version.borrow_mut() = Ok("js-agent 1.4.0\n".to_owned());
@@ -415,7 +415,7 @@ fn a_native_declaration_takes_an_agent_that_names_no_runtimes_as_a_crun_one_does
 }
 
 #[test]
-fn a_crun_declaration_still_refuses_the_agent_of_a_mac_build() {
+fn a_crun_runtime_still_refuses_the_agent_of_a_mac_build() {
     let rig = Rig::new("hook-prepare-crun-refuses-mac-agent");
     let spy = Spy::new(&rig);
     *spy.version.borrow_mut() = Ok(MAC_VERSION.to_owned());

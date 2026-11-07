@@ -3,7 +3,7 @@
 //! once, keeps the call log and can fail a call or act at a pause.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -14,10 +14,10 @@ use std::time::Duration;
 
 use js_agent::CommandRunner;
 use js_agent::lifecycle::StateRoot;
-use js_agent::update_hook::step::{self, Env};
+use js_agent::update_hook::step::{self, Env, TokenFacts, TokenFn};
 use js_agent::update_hook::{
-    Clock, Cordoned, Declaration, DirStat, Done, Gate, HostReading, Lease, LeaseError, Link,
-    Params, PortError, Ports, Record, StateView, Uncordoned, UnitState, Units, UpdateInfo,
+    Clock, Cordoned, DirStat, Done, Gate, HostReading, Lease, LeaseError, Link, Manager, Params,
+    PortError, Ports, Record, SYSTEMCTL, StateView, Uncordoned, UnitState, Units, UpdateInfo,
 };
 use js_agent_wire::Taint;
 use js_testkit::dir::TestDir;
@@ -26,8 +26,8 @@ use sha2::{Digest, Sha256};
 use super::fakes::{START_MS, World};
 
 pub const UNIT: &str = "js-agent-crun.service";
-/// The launchd label of the agent on a Mac, and what the Mac declaration says it runs.
-pub const MAC_UNIT: &str = "com.komira.js-agent";
+/// The launchd label of the agent on a Mac: the service's name, as hostkeeper requires.
+pub const MAC_UNIT: &str = "js-agent";
 pub const HOST: &str = "burst-1";
 pub const LEASE_SECS: u64 = 300;
 pub const MAX_SECS: u64 = 17_355;
@@ -36,8 +36,17 @@ pub const DRAIN_WAIT_SECS: u64 = 3600;
 pub const POLL_SECS: u64 = 10;
 /// The retry hint a deferred `prepare` gives.
 pub const RETRY_AFTER_SECS: u64 = 300;
-/// What the staged `js-agent` file holds: the digest in the record is the hash of it.
+/// What the staged `bin/js-agent` file holds: the digest in the record is the hash of it.
 pub const BINARY: &[u8] = b"not really an agent";
+/// The unit file the staged and the previous release carry.
+pub const UNIT_TEXT: &str =
+    "[Unit]\nDescription=agent\n\n[Service]\nExecStart=/opt/agent --pool farm\nDelegate=yes\n";
+/// A unit file with another `ExecStart` and a new `DelegateSubgroup`.
+pub const NEW_UNIT_TEXT: &str = "[Unit]\nDescription=agent\n\n[Service]\nExecStart=/opt/agent --pool farm --new\nDelegate=yes\nDelegateSubgroup=supervisor\n";
+/// The plist of the agent's job on a Mac, and a changed one.
+pub const PLIST_TEXT: &str = "<plist><dict><key>Label</key><string>x</string></dict></plist>\n";
+/// See [`PLIST_TEXT`].
+pub const NEW_PLIST_TEXT: &str = "<plist><dict><key>Label</key><string>y</string></dict></plist>\n";
 
 /// A state directory that is as the hook requires, whoever runs the test.
 pub fn as_root(_: &Path, _: BorrowedFd<'_>) -> io::Result<DirStat> {
@@ -97,11 +106,12 @@ pub struct Rig {
     pub tmp: TestDir,
     pub kill: Rc<Kill>,
     pub world: World,
-    pub declaration: Declaration,
     pub params: Params,
     pub link: PathBuf,
-    /// The unit the declaration names.
+    /// The unit the params name.
     pub unit: String,
+    /// The unit manager the unit is under.
+    pub manager: Manager,
 }
 
 impl Rig {
@@ -120,17 +130,10 @@ impl Rig {
         Rig::build(name, true, lease_secs, max_secs)
     }
 
-    /// The same update on a Mac: the launchd label for the unit, the declaration naming the
+    /// The same update on a Mac: the launchd label for the unit, the params naming the
     /// `native` runtime, and an agent whose hello says `sandbox-exec`.
     pub fn mac(name: &str) -> Rig {
         Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT))
-    }
-
-    /// The first update of a host the package installed: the release link points at the
-    /// directory of the package's agent (`usr/bin` of the tree, standing for `/usr/bin`, the
-    /// first target the crun tmpfiles file gives the link), which is the previous release.
-    pub fn from_package(name: &str) -> Rig {
-        Rig::build_from(name, true, LEASE_SECS, MAX_SECS, None, "usr/bin")
     }
 
     /// The first install on a Mac.
@@ -149,42 +152,26 @@ impl Rig {
         max_secs: u64,
         mac: Option<&str>,
     ) -> Rig {
-        Rig::build_from(name, previous, lease_secs, max_secs, mac, "releases/1.3.0")
-    }
-
-    /// [`Rig::build_for`] with the previous release at `old` in the tree.
-    fn build_from(
-        name: &str,
-        previous: bool,
-        lease_secs: u64,
-        max_secs: u64,
-        mac: Option<&str>,
-        old: &str,
-    ) -> Rig {
         let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
         let root = tmp.path().to_owned();
-        let (staged, old) = (root.join("releases/1.4.0"), root.join(old));
-        fs::create_dir_all(&staged).unwrap();
-        fs::write(staged.join("js-agent"), BINARY).unwrap();
-        fs::create_dir_all(root.join("state")).unwrap();
-        let unit = mac.unwrap_or(UNIT);
-        let runtime = if mac.is_some() {
-            "runtime = \"native\"\n"
+        let (staged, old) = (root.join("releases/1.4.0"), root.join("releases/1.3.0"));
+        let manager = if mac.is_some() {
+            Manager::Launchd
         } else {
-            ""
+            Manager::Systemd
         };
-        let declaration = Declaration::parse(&format!(
-            concat!(
-                "state_dir = \"{root}/state\"\n[hook]\nunits = [\"{unit}\"]\n{runtime}",
-                "write_paths = [\"{root}/releases\", \"{root}/link\", \"{root}/state\"]\n",
-                "[hook.timeout_secs]\nprepare = 3900\ncutover = 4320\nverify = 615\n",
-                "rollback = 8220\ncleanup = 120\n"
-            ),
-            root = root.display(),
-            unit = unit,
-            runtime = runtime,
-        ))
-        .unwrap();
+        let unit = mac.unwrap_or(UNIT);
+        let text = if mac.is_some() { PLIST_TEXT } else { UNIT_TEXT };
+        for release in [&staged, &old] {
+            fs::create_dir_all(release.join("bin")).unwrap();
+            fs::create_dir_all(release.join("units")).unwrap();
+            fs::write(release.join("units").join(manager.file_name(unit)), text).unwrap();
+        }
+        fs::write(staged.join("bin/js-agent"), BINARY).unwrap();
+        fs::create_dir_all(root.join("state")).unwrap();
+        let runtime = if mac.is_some() { "native" } else { "crun" };
+        let token = root.join("token");
+        fs::write(&token, "tok-0123456789\n").unwrap();
         let previous = if previous {
             format!(
                 "\"updater.previous_release\" = \"{}\"\n\"updater.previous_version\" = \"1.3.0\"\n",
@@ -193,12 +180,18 @@ impl Rig {
         } else {
             String::new()
         };
-        let link = root.join("link/current");
+        let link = root.join("control/link/current");
         let release_link = format!("\"release_link\" = \"{}\"\n", link.display());
         let params = Params::parse(&format!(
             concat!(
                 "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n{release_link}",
                 "drain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n",
+                "unit = \"{unit}\"\nstate_dir = \"{root}/state\"\nruntime = \"{runtime}\"\n",
+                "flags_file = \"{root}/flags\"\ntoken_file = \"{token}\"\n",
+                "state_root = \"{root}/world/state\"\n",
+                "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\n",
+                "verify_timeout_secs = 615\nrollback_timeout_secs = 8220\n",
+                "cleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
                 "\"updater.artifact_digest\" = \"{digest}\"\n",
                 "\"updater.staged_release\" = \"{staged}\"\n",
                 "\"updater.target_version\" = \"1.4.0\"\n{previous}"
@@ -211,6 +204,10 @@ impl Rig {
             staged = staged.display(),
             previous = previous,
             release_link = release_link,
+            unit = unit,
+            root = root.display(),
+            runtime = runtime,
+            token = token.display(),
         ))
         .unwrap();
         let kill = Rc::new(Kill::default());
@@ -227,15 +224,42 @@ impl Rig {
             tmp,
             kill,
             world,
-            declaration,
             params,
             link,
             unit: unit.to_owned(),
+            manager,
         }
     }
 
     pub fn state_dir(&self) -> PathBuf {
         self.tmp.path().join("state")
+    }
+
+    /// The updater's act before `cutover`: the release link is moved to the staged release.
+    pub fn updater_links_staged(&self) {
+        self.world.set_link(&self.link, &self.params.staged_release);
+    }
+
+    /// The updater's act before `rollback`: the release link is moved back to the previous
+    /// release (an update only; a first install has none).
+    pub fn updater_links_previous(&self) {
+        if let Some(previous) = &self.params.previous_release {
+            self.world.set_link(&self.link, previous);
+        }
+    }
+
+    /// The unit file `release` carries.
+    pub fn unit_file(&self, release: &Path) -> PathBuf {
+        self.manager.path_in(release, &self.unit)
+    }
+
+    /// The staged release carries another unit.
+    pub fn stage_changed_unit(&self) {
+        let text = match self.manager {
+            Manager::Systemd => NEW_UNIT_TEXT,
+            Manager::Launchd => NEW_PLIST_TEXT,
+        };
+        fs::write(self.unit_file(&self.params.staged_release), text).unwrap();
     }
 
     pub fn record_path(&self) -> PathBuf {
@@ -360,12 +384,52 @@ pub struct Spy<'a> {
     pub stop_leaves: RefCell<Option<(&'static str, &'static str)>>,
     /// The unit state a start leaves behind instead of `active`.
     pub start_leaves: RefCell<Option<(&'static str, &'static str)>>,
+    /// What the join token file shows. A good one by default.
+    pub token: Rc<Cell<TokenFile>>,
+    token_fn: Box<TokenFn>,
+    /// What `systemctl show --property=TasksCurrent` prints for the next calls, in order; once
+    /// they are used up it prints `0`.
+    pub tasks: RefCell<VecDeque<Result<String, String>>>,
     record_path: PathBuf,
+}
+
+/// What looking at the join token file shows.
+#[derive(Clone, Copy, Debug)]
+pub enum TokenFile {
+    /// Nothing is there.
+    Missing,
+    /// The file cannot be looked at (permission denied).
+    Unreadable,
+    /// The file is there, as `TokenFacts` say.
+    Facts(TokenFacts),
+}
+
+/// The user the tests run as: who owns the join token file the hook accepts.
+pub fn euid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+/// A join token file as the operator places it: regular, mode 0600, the hook's user's.
+pub fn good_token() -> TokenFacts {
+    TokenFacts {
+        regular: true,
+        mode: 0o600,
+        uid: euid(),
+    }
 }
 
 impl<'a> Spy<'a> {
     pub fn new(rig: &'a Rig) -> Spy<'a> {
+        let token = Rc::new(Cell::new(TokenFile::Facts(good_token())));
+        let seen = Rc::clone(&token);
         Spy {
+            token,
+            token_fn: Box::new(move |_| match seen.get() {
+                TokenFile::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
+                TokenFile::Unreadable => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                TokenFile::Facts(facts) => Ok(facts),
+            }),
+            tasks: RefCell::new(VecDeque::new()),
             world: &rig.world,
             kill: &rig.kill,
             state: rig.world.state_root(),
@@ -466,7 +530,9 @@ impl<'a> Spy<'a> {
                 gate: self.kill,
             },
             runner: self,
-            declaration: &rig.declaration,
+            manager: rig.manager,
+            euid: euid(),
+            token: &*self.token_fn,
             stat,
         }
     }
@@ -479,7 +545,14 @@ impl<'a> Spy<'a> {
         step::cleanup(&self.env(rig, &as_root), &rig.params)
     }
 
+    /// `cutover`, run as hostkeeper runs it: the release link is on the staged release.
     pub fn cutover(&self, rig: &Rig) -> Done {
+        rig.updater_links_staged();
+        self.cutover_as_is(rig)
+    }
+
+    /// `cutover` with the release link wherever it is.
+    pub fn cutover_as_is(&self, rig: &Rig) -> Done {
         step::cutover(&self.env(rig, &as_root), &rig.params)
     }
 
@@ -487,7 +560,15 @@ impl<'a> Spy<'a> {
         step::verify(&self.env(rig, &as_root), &rig.params)
     }
 
+    /// `rollback`, run as hostkeeper runs it: the release link is back on the previous
+    /// release.
     pub fn rollback(&self, rig: &Rig) -> Done {
+        rig.updater_links_previous();
+        self.rollback_as_is(rig)
+    }
+
+    /// `rollback` with the release link wherever it is.
+    pub fn rollback_as_is(&self, rig: &Rig) -> Done {
         step::rollback(&self.env(rig, &as_root), &rig.params)
     }
 }
@@ -535,10 +616,13 @@ impl Link for Spy<'_> {
         self.world.target(link)
     }
 
+    /// The updater moves the release link; the hook never does.
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
-        self.act("link.relink".to_owned());
-        self.port_check("relink")?;
-        self.world.relink(link, target)
+        panic!(
+            "the hook moved the release link {} to {}",
+            link.display(),
+            target.display()
+        );
     }
 }
 
@@ -575,6 +659,10 @@ impl StateView for Spy<'_> {
         }
         StateView::owed(&self.state)
     }
+
+    fn has_credential(&self) -> bool {
+        StateView::has_credential(&self.state)
+    }
 }
 
 impl Clock for Spy<'_> {
@@ -597,6 +685,13 @@ impl Clock for Spy<'_> {
 impl CommandRunner for Spy<'_> {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         self.push(format!("run({program} {})", args.join(" ")));
+        if program == SYSTEMCTL {
+            return self
+                .tasks
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| Ok("0\n".to_owned()));
+        }
         self.version.borrow().clone()
     }
 
@@ -633,7 +728,7 @@ pub fn end_state(rig: &Rig) -> serde_json::Value {
     let unit = rig.world.show(&rig.unit).unwrap();
     let state = serde_json::json!({
         "record": rig.record(),
-        "link": rig.world.target(&rig.link).unwrap(),
+        "link": rig.world.resolved_target(&rig.link).unwrap(),
         "unit": format!("{} {}", unit.active, unit.sub),
         "cordon": rig.cordon_expiry(),
     });

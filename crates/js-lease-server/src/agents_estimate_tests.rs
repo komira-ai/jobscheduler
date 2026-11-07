@@ -327,6 +327,32 @@ fn with_the_flag_the_shorter_estimated_tail_is_reserved_and_without_it_the_short
     }
 }
 
+/// Asserts the A/B case of the feed under `--placement js-sched`, where the placement engine,
+/// not the registry's own pass, marks the host a whole-node request drains: the registry
+/// hands the engine its expected lives of the leases, so with `--estimate-feed` the request
+/// marks `a`, whose lease's keyed run has a learned P90 of one minute, and without it the
+/// request marks `b`, whose lease is bound to end first. It catches an engine that drains by
+/// the bounds alone (it would mark `b` with the feed on) and a feed that reaches the engine
+/// without the flag.
+#[test]
+fn under_js_sched_the_engine_drains_by_the_registrys_lives() {
+    for (name, extra, expected) in [
+        (
+            "engine_feed_on",
+            vec!["--placement", "js-sched", "--estimate-feed"],
+            "a",
+        ),
+        ("engine_feed_off", vec!["--placement", "js-sched"], "b"),
+    ] {
+        let mut served = serving(name, &extra, &[]);
+        assert_eq!(lease_for(&mut served, 1, Duration::from_secs(3600)), "a");
+        assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
+        keyed_run(&served, "a", 1, "r1");
+        let reserved = reserved_for_whole_node(&mut served, 3);
+        assert_eq!(reserved.as_deref(), Some(expected), "{name}");
+    }
+}
+
 /// Asserts the unknown case through the server, with the flag on: `a`'s lease may run for
 /// ever (its end saturates, which with the feed on is no bound) and has no keyed run, so its
 /// tail is unknown and ranks after `b`'s, which is bound to end in ten hours: `b` is reserved

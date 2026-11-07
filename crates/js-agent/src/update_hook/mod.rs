@@ -1,43 +1,48 @@
-//! `js-agent update-hook`: the js-agent's side of the host updater's hook contract (host-updates
-//! design, 4.2).
+//! `js-agent update-hook`: the js-agent's side of the host updater's hook contract, as
+//! hostkeeper runs it.
 //!
 //! ```text
-//! js-agent update-hook [--name=value ...] <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
+//! js-agent update-hook <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
+//! js-agent <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
 //! ```
 //!
-//! The updater runs one step per process and reads two things: the exit status and the last
-//! line of standard output, a JSON object ([`Report`]). Exit 0 is success, 1 failure, 75
-//! deferred (nothing irreversible happened, try later) and 76 halt (no version can repair
-//! this). The verb is answered before the agent's flags are parsed and before any signal
-//! handler is installed: a hook is a short-lived root process of the updater, not an agent.
+//! hostkeeper runs the update steps in the second form and the steps it adds in the first, so
+//! the hook takes both ([`is_hook_word`] routes the program to it). `uninstall` is refused:
+//! the package declares no uninstall bound.
+//!
+//! The updater reads two things: the exit status and the last line of standard output, a JSON
+//! object ([`Report`]). Exit 0 is success, 1 failure, 75 deferred (nothing irreversible
+//! happened, try later) and 76 halt (no version can repair this). The verb is answered before
+//! the agent's flags are parsed and before any signal handler is installed: a hook is a
+//! short-lived root process of the updater, not an agent.
 //!
 //! The five steps have their bodies in [`step`], over the ports. [`Host::system`] runs them over
-//! the machine's: the unit manager, the release link, the lease server's own-host routes and the
-//! agent's state root (see [`machine`](Machine)). Where the lease server is and where the state
-//! root is come from the params table ([`ConnectParams`]) or from the flags before the step
-//! ([`Flags`]), which a declaration whose hook runs as root uses; the declaration is read from
-//! [`DECLARATION_PATH`].
+//! the machine's: the unit manager, the release link (read, never written: hostkeeper points it
+//! at the staged release before `cutover` and back at the previous one before `rollback`), the
+//! lease server's own-host routes and the agent's state root (see [`machine`](Machine)). What the
+//! hook is told comes from the package manifest's `[params]` table ([`KEYS`]); where the lease
+//! server is comes from the host's flags file (`flags_file`), the file `js-agent --flags-file`
+//! reads, so the server and pool of a host stay flags.
 //!
 //! What every service's hook shares (the exit status, the last line's shape, the step names,
-//! the locked state directory, the unit managers, the release link, time and the kill points)
-//! is js-update-hook's; this module re-exports it under the names the agent's steps use, with
-//! the agent's [`Reason`]s and [`Record`].
+//! the locked state directory, the unit managers, the time and the kill points) is
+//! js-update-hook's; this module re-exports it under the names the agent's steps use, with the
+//! agent's [`Reason`]s and [`Record`].
 //!
 //! The hook builds on Linux and macOS and differs between them in two places only: the unit
 //! manager ([`PlatformUnits`]: `systemctl` on Linux, `launchctl` on a Mac) and the runtime the
-//! staged agent must list on `--version` ([`Declaration::runtime`], which the declaration names
-//! or the platform's [`DEFAULT_RUNTIME`] stands for).
+//! staged agent must list on `--version` ([`Settings::runtime`]).
 
 mod args;
-mod declaration;
-mod flags;
 mod launch_units;
 mod machine;
-mod params;
+pub mod params;
 mod ports;
 mod record;
 mod report;
+mod settings;
 pub mod step;
+mod unit_files;
 mod validate;
 
 use std::ffi::OsString;
@@ -47,34 +52,33 @@ use std::process::ExitCode;
 
 pub use js_update_hook::Outcome;
 
-pub use args::{ArgsError, Invocation, Step};
-pub use declaration::{DECLARATION_PATH, DEFAULT_RUNTIME, Declaration, DeclarationError, Timeouts};
-pub use flags::{
-    CA_CERT_FLAG, Flags, HOST_ID_FLAG, RELEASE_LINK_FLAG, SERVER_FLAG, STATE_ROOT_FLAG,
-    TOKEN_FILE_FLAG,
-};
+pub use args::{ArgsError, Invocation, Step, VERB, is_hook_word};
 pub use launch_units::{BOOTOUT_MARGIN, LAUNCHCTL, LaunchUnits, SETTLE_READS, StopRunner};
 pub use machine::{Machine, MachineLease, StatFn, own_host_id, run_step};
 pub use params::{
-    ARTIFACT_DIGEST_KEY, CA_CERT_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY, ConnectParams,
-    DEFER_RETRY_KEY, DRAIN_WAIT_KEY, HOST_ID_KEY, MIN_CORDON_LEASE_SECS, POLL_SECS,
-    PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError,
-    RELEASE_LINK_KEY, SERVER_KEY, STAGED_RELEASE_KEY, STATE_ROOT_KEY, TARGET_VERSION_KEY,
-    TOKEN_FILE_KEY,
+    ARTIFACT_DIGEST_KEY, CLEANUP_TIMEOUT_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY,
+    CUTOVER_TIMEOUT_KEY, ConnectParams, DEFER_RETRY_KEY, DRAIN_WAIT_KEY, FLAGS_FILE_KEY, KEYS,
+    MIN_CORDON_LEASE_SECS, POLL_SECS, PREPARE_TIMEOUT_KEY, PREVIOUS_RELEASE_KEY,
+    PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError, RELEASE_LINK_KEY,
+    ROLLBACK_TIMEOUT_KEY, RUNTIME_KEY, STAGED_RELEASE_KEY, STATE_DIR_KEY, STATE_ROOT_KEY,
+    TARGET_VERSION_KEY, TOKEN_FILE_KEY, UNIT_KEY, VERIFY_DEADLINE_KEY, VERIFY_TIMEOUT_KEY,
 };
 pub use ports::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
     NoGate, PortError, Ports, SYSTEMCTL, StateView, SystemClock, SystemLink, SystemUnits,
-    Uncordoned, UnitState, Units, read_link, swap_link,
+    Uncordoned, UnitState, Units, read_link,
 };
 pub use record::{
     Cordon, DirProblem, DirStat, Held, LOCK_FILE, RECORD_FILE, RECORD_MAX, Record, Rollback,
-    SCHEMA, StateError, TEMP_FILE, UpdateInfo, check_ancestor, check_dir, fd_stat,
+    SCHEMA, StateError, TEMP_FILE, UnitRestart, UpdateInfo, check_ancestor, check_dir, fd_stat,
 };
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
+pub use settings::{Settings, Timeouts};
+pub use unit_files::{INSTALLED_MISSING, Manager, PlanError, plan};
 pub use validate::{
-    CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, PREPARE_MARGIN_SECS,
-    ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, START_WAIT_SECS, VERIFY_MARGIN_SECS, validate,
+    CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_CHANGE_LEN, MAX_CHANGES, MAX_VERSION_LEN,
+    PREPARE_MARGIN_SECS, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, START_WAIT_SECS,
+    VERIFY_MARGIN_SECS, validate,
 };
 
 /// The unit port of the platform the hook is built for.
@@ -84,9 +88,6 @@ pub type PlatformUnits<'a> = LaunchUnits<'a>;
 /// The unit port of the platform the hook is built for.
 #[cfg(not(target_os = "macos"))]
 pub type PlatformUnits<'a> = SystemUnits<'a>;
-
-/// The first argument that selects the verb.
-pub const VERB: &str = "update-hook";
 
 // The updater's exit codes of a step ([`Outcome`]) are NOT `readiness.rs`'s
 // `EXIT_NOISE_OVER_BOUND` (75) and `EXIT_NOT_QUIET` (76), which are the statuses of a consumer's
@@ -108,7 +109,7 @@ pub struct Host<'a> {
     pub step: &'a dyn Fn(&Invocation, &Params) -> Done,
 }
 
-/// This machine's step: the real ports, over the declaration the updater installed.
+/// This machine's step: the real ports.
 fn machine_step(invocation: &Invocation, params: &Params) -> Done {
     run_step(invocation, params, &Machine::system())
 }
@@ -152,10 +153,8 @@ impl Refusal {
 
 /// Reads the command line and the params file and runs the step they name.
 fn step_of(args: &[OsString], host: &Host<'_>) -> Result<Done, Refusal> {
-    let invocation = Invocation::parse(args.iter().skip(2).cloned()).map_err(Refusal::Args)?;
-    let params = Params::read(&invocation.params)
-        .and_then(|params| params.with_flags(&invocation.flags))
-        .map_err(Refusal::Params)?;
+    let invocation = Invocation::parse(args.iter().skip(1).cloned()).map_err(Refusal::Args)?;
+    let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
     // `prepare` is given the staged tree twice, by argument and by the table; they must agree.
     if let Some(given) = invocation
         .artifact
@@ -170,7 +169,7 @@ fn step_of(args: &[OsString], host: &Host<'_>) -> Result<Done, Refusal> {
     Ok((host.step)(&invocation, &params))
 }
 
-/// Runs the verb on `args` (the program name and the verb first): the last line goes to
+/// Runs the hook on `args` (the program name first, then the verb or the step): the last line goes to
 /// `out`, the words for a person to `err`.
 pub fn run(
     args: &[OsString],

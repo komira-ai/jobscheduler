@@ -4,17 +4,15 @@
 //! before it is made; each mark of an observation after it. The cordon, the first install,
 //! the taint and the lease server's outages have their tests in steps_rollback_guards.rs.
 
-use std::path::PathBuf;
-
 use js_agent::update_hook::{
-    Class, Clock, Lease, Link, Outcome, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, Reason,
+    Class, Clock, Lease, Outcome, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, Reason,
     START_WAIT_SECS, Units,
 };
 use serde_json::json;
 
 use super::rollback_entries::{
-    RELINK, assert_restored, deactivating, link_moved, link_target, previous, rb_marks, staged,
-    start, start_failed, stop, stopped, unit_state, verified, verify_failed,
+    assert_restored, deactivating, link_moved, link_target, previous, rb_marks, start,
+    start_failed, stop, stopped, unit_state, verified, verify_failed,
 };
 use super::step_rig::{LEASE_SECS, Rig, Spy, UNIT, end_state, killable, line, running};
 
@@ -23,7 +21,7 @@ fn uncordons(spy: &Spy<'_>) -> usize {
 }
 
 #[test]
-fn rollback_after_the_link_moved_relinks_starts_and_waits_for_the_previous_agent() {
+fn rollback_after_the_link_moved_starts_and_waits_for_the_previous_agent() {
     let rig = link_moved("hook-rollback-link-moved");
     let old_session = rig.host().session_started_ms;
     let spy = Spy::new(&rig);
@@ -36,7 +34,7 @@ fn rollback_after_the_link_moved_relinks_starts_and_waits_for_the_previous_agent
         "the runs stopped at the cutover are not brought back"
     );
     // The agent is down already: there is nothing to drain or stop.
-    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [start()]);
     assert_restored(&rig);
     assert_ne!(rig.host().session_started_ms, old_session, "a new session");
     // The cordon of this update is lifted last, after the hello.
@@ -45,7 +43,7 @@ fn rollback_after_the_link_moved_relinks_starts_and_waits_for_the_previous_agent
 }
 
 #[test]
-fn rollback_when_the_stopped_unit_is_still_linked_to_the_previous_release_only_starts() {
+fn rollback_when_the_unit_is_stopped_before_the_start_was_issued_only_starts() {
     let rig = stopped("hook-rollback-stopped");
     let spy = Spy::new(&rig);
     let done = spy.rollback(&rig);
@@ -53,42 +51,38 @@ fn rollback_when_the_stopped_unit_is_still_linked_to_the_previous_release_only_s
     assert_eq!(
         spy.act_names(),
         [start()],
-        "the link already names the previous release: the record's mark is not proof"
+        "the unit is down and the link is the updater's: the start is all that is left"
     );
     assert_restored(&rig);
 }
 
 #[test]
-fn rollback_after_the_start_was_issued_and_failed_relinks_and_starts_the_failed_unit() {
+fn rollback_after_the_start_was_issued_and_failed_starts_the_failed_unit() {
     let rig = start_failed("hook-rollback-start-failed");
     let spy = Spy::new(&rig);
     let done = spy.rollback(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(
-        spy.act_names(),
-        [RELINK.to_owned(), start()],
-        "a failed unit is not stopped"
-    );
+    assert_eq!(spy.act_names(), [start()], "a failed unit is not stopped");
     assert_restored(&rig);
 }
 
 /// The acts of a rollback that drains and stops the new agent, with the `rb` marks on disk
-/// when each was made: drained and stop_begun, then link_restored, then start_issued.
-fn assert_stopped_relinked_started(spy: &Spy<'_>) {
+/// when each was made: drained and stop_begun, then (with link_restored, the mark that the link
+/// the updater moved back was found on the previous release) start_issued.
+fn assert_stopped_and_started(spy: &Spy<'_>) {
     let acts = spy.acts.borrow();
     let seen: Vec<(String, [bool; 5])> = acts.iter().map(|a| (a.call.clone(), a.rb)).collect();
     assert_eq!(
         seen,
         [
             (stop(), [true, true, false, false, false]),
-            (RELINK.to_owned(), [true, true, true, false, false]),
             (start(), [true, true, true, true, false]),
         ]
     );
 }
 
 #[test]
-fn rollback_after_a_failed_verify_drains_stops_relinks_and_starts_marking_each_act_first() {
+fn rollback_after_a_failed_verify_drains_stops_and_starts_marking_each_act_first() {
     let rig = verify_failed("hook-rollback-verify-failed");
     assert!(
         rig.cordon_expiry().is_none(),
@@ -98,7 +92,7 @@ fn rollback_after_a_failed_verify_drains_stops_relinks_and_starts_marking_each_a
     let spy = Spy::new(&rig);
     let done = spy.rollback(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_stopped_relinked_started(&spy);
+    assert_stopped_and_started(&spy);
     assert_restored(&rig);
     assert_ne!(rig.host().session_started_ms, new_session);
     // The cordon that lapsed was put back before the agent was stopped, and lifted last.
@@ -120,7 +114,7 @@ fn rollback_after_a_successful_verify_does_the_same() {
     let spy = Spy::new(&rig);
     let done = spy.rollback(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_stopped_relinked_started(&spy);
+    assert_stopped_and_started(&spy);
     assert_restored(&rig);
     assert_eq!(uncordons(&spy), 1);
     assert_eq!(line(&done)["reversible"], json!(false));
@@ -135,7 +129,7 @@ fn a_new_agent_that_crash_loops_is_stopped_and_replaced_by_the_previous_one() {
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         spy.act_names(),
-        [stop(), RELINK.to_owned(), start()],
+        [stop(), start()],
         "a unit waiting to restart is the new release running"
     );
     assert_restored(&rig);
@@ -151,7 +145,7 @@ fn a_previous_agent_that_crash_loops_after_its_start_is_a_release_failure() {
     assert_eq!(done.report.reason, Some(Reason::StartFailed));
     assert_eq!(done.report.class, Class::Release, "the binary ran and died");
     assert!(!done.report.reversible);
-    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [start()]);
     assert!(!rb_marks(&rig)[4], "no hello, no mark");
     assert_eq!(
         uncordons(&spy),
@@ -174,33 +168,12 @@ fn a_previous_agent_that_cannot_be_started_fails_the_rollback_and_a_rerun_only_s
     let rerun = Spy::new(&rig);
     let done = rerun.rollback(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(rerun.act_names(), [start()], "the link is not moved twice");
+    assert_eq!(rerun.act_names(), [start()], "the marks are kept");
     assert_restored(&rig);
 }
 
 #[test]
-fn a_link_that_cannot_be_moved_back_fails_the_rollback_before_the_start() {
-    let rig = link_moved("hook-rollback-relink-refused");
-    let spy = Spy::new(&rig);
-    spy.fail("relink");
-    let done = spy.rollback(&rig);
-    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
-    assert_eq!(done.report.reason, Some(Reason::LinkFailed));
-    assert_eq!(done.report.class, Class::Environment);
-    assert!(!done.report.reversible);
-    assert_eq!(spy.act_names(), [RELINK.to_owned()]);
-    assert_eq!(
-        unit_state(&rig),
-        "inactive dead",
-        "nothing starts on the staged release"
-    );
-    let rerun = Spy::new(&rig);
-    assert_eq!(rerun.rollback(&rig).outcome, Outcome::Success);
-    assert_restored(&rig);
-}
-
-#[test]
-fn a_unit_that_does_not_stop_in_time_fails_the_rollback_before_the_link_moves() {
+fn a_unit_that_does_not_stop_in_time_fails_the_rollback_before_the_previous_agent_starts() {
     let rig = verified("hook-rollback-stop-stuck");
     let spy = Spy::new(&rig);
     *spy.stop_leaves.borrow_mut() = Some(("deactivating", "stop-sigterm"));
@@ -211,7 +184,7 @@ fn a_unit_that_does_not_stop_in_time_fails_the_rollback_before_the_link_moves() 
     assert_eq!(done.report.class, Class::Environment);
     assert!(!done.report.reversible);
     assert_eq!(spy.act_names(), [stop()]);
-    let declared = rig.declaration.timeouts.rollback;
+    let declared = rig.params.settings.timeouts.rollback;
     let bound = declared
         - rig.params.drain_wait_secs
         - START_WAIT_SECS
@@ -222,17 +195,21 @@ fn a_unit_that_does_not_stop_in_time_fails_the_rollback_before_the_link_moves() 
         usize::try_from(bound / 10).unwrap(),
         "the wait for the stop ends before the declared bound by the other waits and a margin"
     );
-    assert_eq!(link_target(&rig), Some(staged(&rig)));
+    assert_eq!(
+        link_target(&rig),
+        Some(previous(&rig)),
+        "the updater's move back"
+    );
     // The unit is down on a rerun: it is not signalled a second time.
     rig.world.seed_unit(UNIT, "inactive", "dead");
     let rerun = Spy::new(&rig);
     assert_eq!(rerun.rollback(&rig).outcome, Outcome::Success);
-    assert_eq!(rerun.act_names(), [RELINK.to_owned(), start()]);
+    assert_eq!(rerun.act_names(), [start()]);
 }
 
 #[test]
 fn a_unit_still_stopping_when_rollback_starts_is_waited_for_and_not_stopped_again() {
-    // A cutover killed while the unit stops: the link is still the previous release's.
+    // A cutover killed while the unit stops.
     let rig = running(Rig::new("hook-rollback-deactivating"));
     let killed = Spy::new(&rig);
     *killed.stop_leaves.borrow_mut() = Some(("deactivating", "stop-sigterm"));
@@ -277,32 +254,39 @@ fn a_previous_agent_that_still_runs_on_the_previous_release_needs_no_act_only_it
     assert_eq!(uncordons(&spy), 1);
 }
 
+/// The updater moves the release link back to the previous release before it runs `rollback`. A
+/// link that is anywhere else means the updater did not do its part: the step fails before it
+/// touches the unit or the record, and the hook moves nothing.
+///
+/// Catches a rollback that goes on with the link on the new release (the previous agent would
+/// start from it), and one that moves the link itself.
 #[test]
-fn a_unit_up_on_a_link_that_is_neither_release_is_refused_and_nothing_is_done() {
-    let rig = verified("hook-rollback-foreign-link");
-    let foreign = rig.tmp.path().join("releases/9.9.9");
-    rig.world.relink(&rig.link, &foreign).unwrap();
-    let before = rig.record_bytes();
-    let spy = Spy::new(&rig);
-    let done = spy.rollback(&rig);
-    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
-    assert_eq!(done.report.reason, Some(Reason::StateInvalid));
-    assert_eq!(spy.act_names(), Vec::<String>::new());
-    assert_eq!(rig.record_bytes(), before);
-    assert_eq!(link_target(&rig), Some(foreign));
-}
-
-#[test]
-fn a_rollback_without_the_release_link_in_the_params_is_refused_before_the_machine_is_touched() {
-    let rig = verified("hook-rollback-no-link-param");
-    let mut params = rig.params.clone();
-    params.release_link = None;
-    let spy = Spy::new(&rig);
-    let done =
-        js_agent::update_hook::step::rollback(&spy.env(&rig, &super::step_rig::as_root), &params);
-    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
-    assert_eq!(done.report.reason, Some(Reason::BadParams));
-    assert_eq!(spy.act_names(), Vec::<String>::new());
+fn a_rollback_with_the_link_not_on_the_previous_release_fails_and_nothing_is_done() {
+    for (n, what) in ["staged", "foreign", "absent"].into_iter().enumerate() {
+        let rig = verified(&format!("hook-rollback-link-off-{n}"));
+        match what {
+            "staged" => {}
+            "foreign" => rig
+                .world
+                .set_link(&rig.link, &rig.tmp.path().join("releases/9.9.9")),
+            _ => std::fs::remove_file(rig.tmp.path().join("control/link/current")).unwrap(),
+        }
+        let before = rig.record_bytes();
+        let unit = unit_state(&rig);
+        let spy = Spy::new(&rig);
+        let done = spy.rollback_as_is(&rig);
+        assert_eq!(done.outcome, Outcome::Failure, "{what}: {done:?}");
+        assert_eq!(done.report.reason, Some(Reason::LinkFailed), "{what}");
+        assert_eq!(done.report.class, Class::Environment, "{what}");
+        let said = done.report.detail.as_deref().unwrap();
+        assert!(
+            said.contains("is not on the previous release"),
+            "{what}: {said}"
+        );
+        assert_eq!(spy.act_names(), Vec::<String>::new(), "{what}");
+        assert_eq!(rig.record_bytes(), before, "{what}");
+        assert_eq!(unit_state(&rig), unit, "{what}");
+    }
 }
 
 // The previous agent's hello is the proof, not the unit being active.
@@ -319,7 +303,7 @@ fn the_session_the_server_showed_before_the_start_is_not_proof_even_of_the_previ
     assert_eq!(done.report.reason, Some(Reason::NoHello));
     assert_eq!(done.report.class, Class::Release);
     assert!(!done.report.reversible);
-    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [start()]);
     assert!(
         !rig.record().unwrap().rb.hello_ok,
         "the mark follows the observation"
@@ -450,7 +434,7 @@ fn agent_says_hello(
     if spy.world.show(UNIT).unwrap().active == "deactivating" {
         spy.world.seed_unit(UNIT, "inactive", "dead");
     }
-    let linked = spy.world.target(link).unwrap().as_deref() == Some(previous);
+    let linked = spy.world.resolved_target(link).unwrap().as_deref() == Some(previous);
     let said = spy.world.host().unwrap().session_started_ms != old_session;
     if linked && !said && spy.world.is_active(UNIT).unwrap() {
         spy.world.hello("1.3.0").unwrap();
@@ -643,7 +627,7 @@ fn a_lease_after_the_drain_bound_fails_the_rollback_and_stops_nothing_and_a_reru
     rig.set_leases(0);
     let rerun = Spy::new(&rig);
     assert_eq!(rerun.rollback(&rig).outcome, Outcome::Success);
-    assert_eq!(rerun.act_names(), [stop(), RELINK.to_owned(), start()]);
+    assert_eq!(rerun.act_names(), [stop(), start()]);
     assert_restored(&rig);
 }
 
@@ -666,7 +650,7 @@ fn a_lease_that_ends_during_the_drain_lets_the_rollback_go_on_and_the_cordon_is_
     assert_eq!(rig.world.ticks() - base, 40);
     // 400 s of drain are more than the cordon's 300 s lease: it was renewed.
     assert!(spy.log().iter().any(|call| call.starts_with("cordon(")));
-    assert_stopped_relinked_started(&spy);
+    assert_stopped_and_started(&spy);
 }
 
 #[test]
@@ -682,7 +666,7 @@ fn a_resumed_rollback_does_not_drain_again_once_the_drain_was_seen() {
     let done = spy.rollback(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(rig.world.ticks(), ticks, "no wait");
-    assert_eq!(spy.act_names(), [stop(), RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [stop(), start()]);
 }
 
 #[test]
@@ -704,15 +688,6 @@ fn a_lapsed_cordon_that_the_cap_leaves_no_time_for_fails_the_rollback_before_the
 }
 
 #[test]
-fn the_previous_release_directory_is_what_the_link_goes_back_to() {
-    let rig = verified("hook-rollback-link-target");
-    let want: PathBuf = previous(&rig);
-    assert_ne!(link_target(&rig), Some(want.clone()));
-    assert_eq!(Spy::new(&rig).rollback(&rig).outcome, Outcome::Success);
-    assert_eq!(link_target(&rig), Some(want));
-}
-
-#[test]
 fn a_unit_that_cannot_be_signalled_fails_the_rollback_with_the_stop_marked_and_a_rerun_signals_it_again()
  {
     let rig = verified("hook-rollback-stop-refused");
@@ -726,7 +701,7 @@ fn a_unit_that_cannot_be_signalled_fails_the_rollback_with_the_stop_marked_and_a
     assert_eq!(rb_marks(&rig), [true, true, false, false, false]);
     let rerun = Spy::new(&rig);
     assert_eq!(rerun.rollback(&rig).outcome, Outcome::Success);
-    assert_eq!(rerun.act_names(), [stop(), RELINK.to_owned(), start()]);
+    assert_eq!(rerun.act_names(), [stop(), start()]);
     assert_restored(&rig);
 }
 
@@ -827,11 +802,11 @@ fn a_unit_manager_that_cannot_be_read_fails_the_rollback_before_anything_is_mark
 #[test]
 fn a_release_link_that_cannot_be_read_fails_the_rollback_before_anything_is_marked() {
     let rig = link_moved("hook-rollback-link-unreadable");
-    std::fs::remove_file(rig.tmp.path().join("world/link/current")).unwrap();
-    std::fs::write(rig.tmp.path().join("world/link/current"), b"not a link").unwrap();
+    std::fs::remove_file(rig.tmp.path().join("control/link/current")).unwrap();
+    std::fs::write(rig.tmp.path().join("control/link/current"), b"not a link").unwrap();
     let before = rig.record_bytes();
     let spy = Spy::new(&rig);
-    let done = spy.rollback(&rig);
+    let done = spy.rollback_as_is(&rig);
     assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
     assert_eq!(done.report.reason, Some(Reason::LinkFailed));
     assert_eq!(spy.act_names(), Vec::<String>::new());

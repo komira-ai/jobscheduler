@@ -1,7 +1,8 @@
 //! The provider side of the registry: the booking, stop and observation calls the lease
 //! table makes through [`crate::RegisteredProvider`], and what the placer is told of the
 //! books between starts ([`crate::Placer::host_up`], [`crate::Placer::heard`],
-//! [`crate::Placer::ended`], [`crate::Placer::host_gone`]).
+//! [`crate::Placer::ended`], [`crate::Placer::host_gone`]) and of the prepares of
+//! whole-node leases ([`crate::Placer::prepare_ready`], [`crate::Placer::prepare_again`]).
 
 use std::collections::BTreeMap;
 
@@ -46,9 +47,13 @@ impl Registry {
         // A cancelled request leaves no trace: no mark, and no record of its failures, so
         // the id names a fresh request if it is used again.
         let cancelled = waiting.cancel_lease(lease);
+        let placer = self.shared.placer.get();
         cancelled.iter().for_each(|id| {
             marks.drop_request(id);
             requests.forget(id);
+            placer
+                .into_iter()
+                .for_each(|placer| placer.whole_forget(id));
         });
         runs.stop_lease(lease);
         requests.release(lease);
@@ -216,6 +221,22 @@ impl Registry {
     pub(super) fn tell_heard(&self, host: &HostId, reading: Option<&NodeLoad>) {
         if let Some(placer) = self.shared.placer.get() {
             placer.heard(host, reading);
+        }
+    }
+
+    /// Tells the placer, if there is one, that the agent reported `lease` ready on a clean
+    /// host committed to it ([`crate::Placer::prepare_ready`]).
+    pub(super) fn tell_ready(&self, lease: &LeaseId) {
+        if let Some(placer) = self.shared.placer.get() {
+            placer.prepare_ready(lease);
+        }
+    }
+
+    /// Tells the placer, if there is one, that the host of `lease`, ready, said hello again,
+    /// so the lease waits for ready again ([`crate::Placer::prepare_again`]).
+    pub(super) fn tell_again(&self, lease: &LeaseId) {
+        if let Some(placer) = self.shared.placer.get() {
+            placer.prepare_again(lease);
         }
     }
 }

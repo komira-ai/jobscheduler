@@ -164,6 +164,7 @@ fn hello() -> Hello {
         phase: Phase::Serving,
         held: Vec::new(),
         accepts_host_credential: false,
+        identity: None,
     }
 }
 

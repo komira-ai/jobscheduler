@@ -68,6 +68,9 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # This builds the live conformance targets of the three machine providers, which no other
+      # job builds and nothing in CI runs; they spend money only when a person runs them.
+      - run: cargo clippy --locked -p js-provider-ec2 -p js-provider-gce -p js-provider-lambdalabs --features js-provider-ec2/live,js-provider-gce/live,js-provider-lambdalabs/live --all-targets -- -D warnings
       # The decoders' cargo-fuzz packages are packages of their own, outside the workspace,
       # so the steps above do not build them: these check that each still compiles against
       # its crate. No fuzzing runs here; a campaign is `cargo +nightly fuzz run <target>`.
@@ -111,6 +114,18 @@ jobs:
   # js-state's Postgres tests run here too (a test that needs the server fails, and does
   # not skip, when KBF_TEST_POSTGRES_URL is unset), against a service container pinned by
   # digest.
+  #
+  # So do the live-log tests against an S3-compatible store with STS (js_testkit::s3): the
+  # store client and the STS minter (js-logstore's s3_compat), the agent's uploader
+  # (js-agent's live_logs::s3_compat and crun_stand_in's s3_compat) and GetLogs over what the
+  # uploader put (js-lease-server's logs_round_trip). They are #[ignore]d, so the workspace
+  # run skips them; the step after it runs them, and only them, with --ignored. The store is
+  # MinIO as Bitnami packages it: it starts from its environment alone (a service container
+  # takes no command), creates the bucket, and checks the region of every signature against
+  # its own. Its root password is a throwaway for this container, which lives only for this
+  # job; its port on the runner is whichever Docker gave, read from the job's context. GitHub
+  # waits for the health check (the store's own liveness endpoint) before the first step, and
+  # fails the job when it has not passed after 30 tries.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -125,6 +140,16 @@ jobs:
         ports:
           - 5432:5432
         options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+      s3:
+        image: docker.io/bitnamilegacy/minio@sha256:a340369228a43597f0540c3f5f7b76ed3324bb38c1d0ecf272f96fc7bf193753
+        env:
+          MINIO_ROOT_USER: jsciroot
+          MINIO_ROOT_PASSWORD: js-ci-throwaway
+          MINIO_SITE_REGION: js-test-1
+          MINIO_DEFAULT_BUCKETS: js-live-logs
+        ports:
+          - 9000
+        options: --health-cmd "curl -fsS http://127.0.0.1:9000/minio/health/live" --health-interval 2s --health-timeout 5s --health-retries 30
     env:
       KBF_TEST_POSTGRES_URL: postgres://postgres:js-ci-throwaway@127.0.0.1:5432/postgres
     steps:
@@ -145,6 +170,14 @@ jobs:
       # the first test binary that fails, so the tests commit of a pull request shows each
       # of its reds.
       - run: cargo test --workspace --locked --no-fail-fast
+      # `--tests` builds what the run above built, so nothing is compiled again; the filters
+      # pick the live-log tests against the store out of every test binary.
+      - name: Live logs against the S3-compatible store
+        if: ${{ !cancelled() }}
+        env:
+          JS_TEST_S3_URL: http://jsciroot:js-ci-throwaway@127.0.0.1:${{ job.services.s3.ports['9000'] }}/js-live-logs
+          JS_TEST_S3_REGION: js-test-1
+        run: 'cargo test --workspace --locked --no-fail-fast --tests -- --ignored s3_compat:: logs_round_trip::'
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
@@ -734,14 +767,20 @@ jobs:
       # `[profile.dev.package.*]` override in Cargo.toml would leak into it and inline
       # away lines the report then counts as missed (crates/xtask/tests/profile_overrides.rs
       # fails on any package override outside `test`).
+      # The tests and the report are two steps, so the lcov is written (and uploaded
+      # below) even when a test fails.
       - name: Run the workspace tests under coverage
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --workspace --locked --no-fail-fast --profile coverage --branch --no-report
+      - name: Write the lcov report
+        if: ${{ !cancelled() }}
         env:
           LLVM_COV_FLAGS: -skip-functions
-        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --workspace --locked --no-fail-fast --profile coverage --branch --lcov --output-path target/coverage/lcov.info
-      # When every failure is coverage that improved, the step prints (and puts in the
-      # job summary) the `js-coverage tighten` command that downloads this run's
-      # `coverage` artifact and lowers coverage-baseline; --artifact must name the
-      # upload below.
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --branch --lcov --output-path target/coverage/lcov.info
+      # For each crate that misses more than its line in coverage-baseline, the step
+      # prints (and puts in the job summary) the file:line of each uncovered line and
+      # branch, up to 50 of each. When every failure is coverage that improved, it
+      # prints the `js-coverage tighten` command that downloads this run's `coverage`
+      # artifact and lowers coverage-baseline; --artifact must name the upload below.
       - name: Per-crate table and ratchet
         run: cargo "+$COVERAGE_TOOLCHAIN" run -p js-coverage --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --baseline coverage-baseline --write-baseline target/coverage/coverage-baseline.measured --summary-file "$GITHUB_STEP_SUMMARY" --run-id "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --artifact coverage
       # A pull request may not raise any count above the base branch's file, and a new
@@ -761,6 +800,9 @@ jobs:
             : > target/coverage/base-baseline
           fi
           cargo "+$COVERAGE_TOOLCHAIN" run -q -p js-coverage --locked -- against-base --base target/coverage/base-baseline --head coverage-baseline
+      # The lcov the ratchet read, for finding a miss without a local coverage run,
+      # and the measured baseline `tighten` reads. Kept a week: long enough to act on a
+      # failure.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
@@ -769,6 +811,7 @@ jobs:
             target/coverage/lcov.info
             target/coverage/coverage-baseline.measured
           if-no-files-found: error
+          retention-days: 7
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

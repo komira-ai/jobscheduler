@@ -126,6 +126,7 @@ fn start(job_id: &str, prefix: Option<String>) -> JobStartSpec {
             prefix,
             path_style: true,
         }),
+        kind: Default::default(),
     }
 }
 

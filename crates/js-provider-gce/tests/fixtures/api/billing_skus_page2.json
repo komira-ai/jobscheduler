@@ -1,0 +1,372 @@
+{
+  "skus": [
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0008",
+      "skuId": "0000-0000-0008",
+      "description": "Nvidia Tesla T4 GPU running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "GPU",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "startUsageAmount": 0,
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 350000000
+                }
+              },
+              {
+                "startUsageAmount": 1000,
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 300000000
+                }
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0009",
+      "skuId": "0000-0000-0009",
+      "description": "Spot Preemptible Nvidia Tesla T4 GPU running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "GPU",
+        "usageType": "Preemptible"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 110000000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0010",
+      "skuId": "0000-0000-0010",
+      "description": "A2 Instance Core running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "A2",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 33174000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0011",
+      "skuId": "0000-0000-0011",
+      "description": "A2 Instance Ram running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "A2",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "GiBy.h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 4446000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "gibibyte hour",
+            "baseUnit": "By.s",
+            "baseUnitDescription": "byte second",
+            "baseUnitConversionFactor": 3865470566400.0
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0012",
+      "skuId": "0000-0000-0012",
+      "description": "Spot Preemptible A2 Instance Core running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "A2",
+        "usageType": "Preemptible"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 9952000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0013",
+      "skuId": "0000-0000-0013",
+      "description": "Spot Preemptible A2 Instance Ram running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "A2",
+        "usageType": "Preemptible"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "GiBy.h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 1334000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "gibibyte hour",
+            "baseUnit": "By.s",
+            "baseUnitDescription": "byte second",
+            "baseUnitConversionFactor": 3865470566400.0
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0014",
+      "skuId": "0000-0000-0014",
+      "description": "Nvidia Tesla A100 GPU running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "GPU",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "units": "2",
+                  "nanos": 933908000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0015",
+      "skuId": "0000-0000-0015",
+      "description": "Spot Preemptible Nvidia Tesla A100 GPU running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "GPU",
+        "usageType": "Preemptible"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "units": "1",
+                  "nanos": 100000000
+                }
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    }
+  ]
+}

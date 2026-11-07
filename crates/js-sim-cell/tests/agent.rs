@@ -68,6 +68,7 @@ fn spec() -> AgentSpec {
         labels: BTreeMap::from([("rack".to_owned(), "r1".to_owned())]),
         hello_interval: INTERVAL,
         kind: AgentKind::Fake(None),
+        instance: None,
     }
 }
 

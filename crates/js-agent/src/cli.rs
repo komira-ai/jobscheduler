@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, ValueEnum};
 
 use crate::facts::Platform;
+use crate::identity::IdentityFlags;
 
 /// What `--version` prints after the version: the runtimes this build can run jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
@@ -36,6 +37,14 @@ pub struct Cli {
     /// clear.
     #[arg(long, value_name = "URL")]
     pub server: String,
+    /// A file of more flags, one argument word per line (`--server=https://leases.example:7300`;
+    /// empty lines and lines that start with `#` are skipped), read in place of this flag
+    /// before the other flags are parsed. A regular file owned by the user running the agent
+    /// or by root, not writable by group or others, at most 64 KiB; given once, and not
+    /// inside a flags file. For a unit or job that is the same on every host and so cannot
+    /// name the host's server and pool.
+    #[arg(long, value_name = "PATH")]
+    pub flags_file: Option<PathBuf>,
     /// A file holding the pool's join token, or the one-time token minted for this
     /// instance: a regular file owned by the user running the agent, mode 0600 or 0400.
     /// The token is sent only in the `Authorization` header. Without `--state-root` a
@@ -54,6 +63,10 @@ pub struct Cli {
     /// refuses a hello that names another instance or none. The file is not secret.
     #[arg(long, value_name = "PATH")]
     pub instance_file: Option<PathBuf>,
+    /// The cloud's signed identity of this machine, sent in the hello (see
+    /// [`crate::identity`]).
+    #[command(flatten)]
+    pub identity: IdentityFlags,
     /// A PEM file with the certificate to trust for `https://` (the server's, or the
     /// authority that issued it); only those certificates are trusted then. Optional:
     /// without it an `https://` server is verified against the public roots bundled in the
@@ -346,6 +359,18 @@ pub struct Cli {
     /// the flag `--runtime docker` exits 2; the flag without `--runtime docker` exits 2.
     #[arg(long)]
     pub allow_container_engine: bool,
+    /// Turns the VM backend on (macOS, beside `--native-helper-socket`): the absolute path of
+    /// the signed `js-vmm` binary, started as `js-vmm lease` for each VM. A VM start then runs
+    /// in a fresh VM cloned from the base image and destroyed when it ends, at most two at
+    /// once, and the hello
+    /// reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`. Without it a VM start is
+    /// refused `vm-unavailable`. Needs `--vm-store`.
+    #[arg(long, value_name = "PATH")]
+    pub vm_driver: Option<PathBuf>,
+    /// The directory of the VM backend: the base image in `base` and each run's clone under
+    /// `runs/`, on one APFS volume so a clone is a copy-on-write copy. Needs `--vm-driver`.
+    #[arg(long, value_name = "DIR")]
+    pub vm_store: Option<PathBuf>,
     /// The `crun` program of `--runtime crun`, by absolute path; by default
     /// `/usr/bin/crun`. It must be the distribution's own file at that path: the
     /// distribution's AppArmor profile for `crun` (the one that allows it a user

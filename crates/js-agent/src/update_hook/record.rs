@@ -41,6 +41,17 @@ pub struct UpdateInfo {
     pub artifact_digest: String,
 }
 
+/// The plan to restart the unit on a new layout: the staged release carries a unit that
+/// differs from the installed one, so `cutover` waits, after the stop, for the unit's cgroup to
+/// hold no process before it starts the agent (see `cutover`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnitRestart {
+    /// What differs, each as `Section.Key` of a systemd unit (`Service.ExecStart`), the name of
+    /// the plist file of a launchd job, or [`INSTALLED_MISSING`](super::INSTALLED_MISSING).
+    pub changed: Vec<String>,
+}
+
 /// The cordon this update placed on the host, if it did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +100,11 @@ pub struct Record {
     /// The stop is begun: written and synced before `cutover` signals the unit, so a
     /// `cutover` killed at any later point leaves it set.
     pub stop_begun: bool,
+    /// The unit the staged release carries differs from the installed one; `None` when the
+    /// two are the same (and in every record written before the field existed). Written by
+    /// `prepare` with the record, left out of the file when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_restart: Option<UnitRestart>,
     /// The `session_started_ms` the lease server showed for the host in the reading `cutover`
     /// took last before it marked the stop, on the server's clock; `None` on a first install
     /// and when the server showed no session. Written in the same save as `stop_begun`, never
@@ -126,6 +142,7 @@ impl Record {
             schema: SCHEMA,
             update,
             cordon: Cordon::default(),
+            unit_restart: None,
             stop_begun: false,
             pre_stop_session_ms: None,
             link_moved: false,
@@ -150,5 +167,5 @@ impl Document for Record {
 pub type Held = js_update_hook::Held<Record>;
 
 /// Why the state could not be used: `locked` for a second holder, `state_invalid` for
-/// everything else, and [`Invalid`] for a record that breaks a rule of the declaration.
+/// everything else, and [`Invalid`] for a record that breaks a rule of the settings.
 pub type StateError = js_update_hook::StateError<Record>;

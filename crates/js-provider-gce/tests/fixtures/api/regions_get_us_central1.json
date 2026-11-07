@@ -1,0 +1,58 @@
+{
+  "kind": "compute#region",
+  "id": "1000",
+  "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+  "name": "us-central1",
+  "description": "us-central1",
+  "status": "UP",
+  "zones": [
+    "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a",
+    "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-b",
+    "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-c",
+    "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-f"
+  ],
+  "quotas": [
+    {
+      "metric": "CPUS",
+      "limit": 24.0,
+      "usage": 4.0
+    },
+    {
+      "metric": "PREEMPTIBLE_CPUS",
+      "limit": 0.0,
+      "usage": 0.0
+    },
+    {
+      "metric": "DISKS_TOTAL_GB",
+      "limit": 4096.0,
+      "usage": 100.0
+    },
+    {
+      "metric": "N2_CPUS",
+      "limit": 24.0,
+      "usage": 0.0
+    },
+    {
+      "metric": "NVIDIA_T4_GPUS",
+      "limit": 4.0,
+      "usage": 0.0
+    },
+    {
+      "metric": "PREEMPTIBLE_NVIDIA_T4_GPUS",
+      "limit": 2.0,
+      "usage": 0.0
+    },
+    {
+      "metric": "NVIDIA_A100_GPUS",
+      "limit": 8.0,
+      "usage": 1.0
+    },
+    {
+      "metric": "PREEMPTIBLE_NVIDIA_A100_GPUS",
+      "limit": 16.0,
+      "usage": 0.0
+    }
+  ],
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/regions/us-central1",
+  "supportsPzs": false
+}

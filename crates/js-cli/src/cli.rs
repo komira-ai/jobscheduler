@@ -52,7 +52,7 @@ pub struct Cli {
 /// The whole command line: the lease commands of [`Cli`] and the job commands generated
 /// from the job service ([`crate::jobs::commands`]).
 pub(crate) fn command() -> clap::Command {
-    Cli::command().subcommands(crate::jobs::commands(crate::jobs::surface()))
+    Cli::command().subcommands(crate::jobs::tree())
 }
 
 impl Cli {
@@ -75,6 +75,70 @@ pub(crate) enum Command {
     /// Work with leases.
     #[command(subcommand)]
     Lease(Action),
+    /// Mint and revoke the one-time tokens that admit a launched machine's agent.
+    #[command(subcommand, name = "join-token")]
+    JoinToken(JoinTokenAction),
+}
+
+/// What to do with join tokens.
+#[derive(Debug, Subcommand)]
+pub(crate) enum JoinTokenAction {
+    /// Mint a one-time join token for an instance.
+    ///
+    /// The token admits the agent that names this provider and instance in its hello,
+    /// once, before it expires (the agent's `--instance-file` holds `PROVIDER:INSTANCE_ID`
+    /// and its `--token-file` the token). Without --out the token alone is printed on
+    /// stdout; with --out it is written to that file, created new with mode 0600 (a path
+    /// that exists is refused before anything is asked of the server) and not printed.
+    /// Minting again for the instance replaces its unused tokens.
+    Mint(MintArgs),
+    /// Drop every token of an instance, used or not (idempotent).
+    Revoke(InstanceArgs),
+}
+
+/// The instance a join token is bound to.
+#[derive(Debug, Args)]
+pub(crate) struct InstanceArgs {
+    /// The provider the instance belongs to; a pool that admits one provider accepts its
+    /// own name only.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) provider: String,
+    /// The instance's id, as the agent's `--instance-file` names it.
+    #[arg(long, value_name = "ID")]
+    pub(crate) instance_id: String,
+}
+
+impl InstanceArgs {
+    /// The body of `DELETE /v1/agent/join-tokens`.
+    pub(crate) fn body(&self) -> Value {
+        json!({ "provider": self.provider, "instance_id": self.instance_id })
+    }
+}
+
+/// `join-token mint`: the instance, how long the token lasts and where it goes.
+#[derive(Debug, Args)]
+pub(crate) struct MintArgs {
+    #[command(flatten)]
+    pub(crate) instance: InstanceArgs,
+    /// How long the token may be used (the server's default, 30 minutes, when absent; at
+    /// most 24h).
+    #[arg(long, value_parser = parse_duration)]
+    pub(crate) ttl: Option<Duration>,
+    /// Write the token to this new file (mode 0600, the token and a newline) instead of
+    /// printing it.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) out: Option<PathBuf>,
+}
+
+impl MintArgs {
+    /// The body of `POST /v1/agent/join-tokens`; the ttl is sent only when given.
+    pub(crate) fn body(&self) -> Value {
+        let mut body = self.instance.body();
+        if let Some(ttl) = self.ttl {
+            body["ttl_seconds"] = json!(ttl.as_secs());
+        }
+        body
+    }
 }
 
 /// What to do with leases.

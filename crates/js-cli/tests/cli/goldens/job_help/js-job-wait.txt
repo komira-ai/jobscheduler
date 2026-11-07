@@ -1,0 +1,32 @@
+Waits for a job to end, and exits with a status that says how it ended. Reads the job (GetJob) every two seconds until it has ended, and a failed job's result (GetResult) to tell a job stopped at its wall limit from one that failed otherwise; then prints `job <id> <end>` (with --json, `{"id": .., "outcome": ..}`). A call that fails is not retried: the status is then 15. Written by hand, not generated from the job service.
+
+Usage: js job wait [OPTIONS] --job-id <TEXT>
+
+Options:
+      --server <URL>
+          The lease server, such as `https://leases.example:7300`. Plain `http://` is accepted for a loopback host only: the bearer token never crosses a network in clear. Required
+
+      --token-file <PATH>
+          A file holding the bearer token: a regular file owned by you, mode 0600 or 0400. Required
+
+      --ca-cert <PATH>
+          A PEM file with the certificate to trust for `https://` (the server's, or the authority that issued it); only those certificates are trusted then. Optional: without it an `https://` server is verified against the public roots bundled in the binary, never the platform's store, because the places it is found can be redirected by the environment
+
+      --json
+          Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
+
+      --job-id <TEXT>
+          The id of the job to wait for.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Exit status:
+  0             the job succeeded: it exited with code 0
+  10            the job failed: it exited with another code, or was stopped for its memory
+  11            the job was cancelled
+  12            the job timed out: it was stopped at its wall limit
+  13            the job was lost: its container is gone and no result exists
+  14            the job failed to start
+  15            how the job ended could not be told: a call failed (js does not retry it), or the job is in a state this js does not know
+  2             a flag is wrong

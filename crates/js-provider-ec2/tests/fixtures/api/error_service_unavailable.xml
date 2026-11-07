@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>ServiceUnavailable</Code>
+            <Message>The request has failed due to a temporary failure of the server.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000036</RequestID>
+</Response>

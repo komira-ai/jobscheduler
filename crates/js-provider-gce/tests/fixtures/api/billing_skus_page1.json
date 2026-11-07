@@ -1,0 +1,321 @@
+{
+  "skus": [
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0001",
+      "skuId": "0000-0000-0001",
+      "description": "N1 Predefined Instance Core running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "N1Standard",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 31611000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0002",
+      "skuId": "0000-0000-0002",
+      "description": "N1 Predefined Instance Ram running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "N1Standard",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "GiBy.h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 4237000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "gibibyte hour",
+            "baseUnit": "By.s",
+            "baseUnitDescription": "byte second",
+            "baseUnitConversionFactor": 3865470566400.0
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0003",
+      "skuId": "0000-0000-0003",
+      "description": "Spot Preemptible N1 Predefined Instance Core running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "N1Standard",
+        "usageType": "Preemptible"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 6655000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0004",
+      "skuId": "0000-0000-0004",
+      "description": "Spot Preemptible N1 Predefined Instance Ram running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "N1Standard",
+        "usageType": "Preemptible"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "GiBy.h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 892000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "gibibyte hour",
+            "baseUnit": "By.s",
+            "baseUnitDescription": "byte second",
+            "baseUnitConversionFactor": 3865470566400.0
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0005",
+      "skuId": "0000-0000-0005",
+      "description": "N1 Predefined Instance Core running in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "N1Standard",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-east1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "units": "1",
+                  "nanos": 0
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-east1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0006",
+      "skuId": "0000-0000-0006",
+      "description": "Commitment v1: Cpu in Americas for 1 Year",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Compute",
+        "resourceGroup": "CPU",
+        "usageType": "Commit1Yr"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "h",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 21000000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "hour",
+            "baseUnit": "s",
+            "baseUnitDescription": "second",
+            "baseUnitConversionFactor": 3600
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    },
+    {
+      "name": "services/6F81-5844-456A/skus/0000-0000-0007",
+      "skuId": "0000-0000-0007",
+      "description": "Storage PD Capacity in Americas",
+      "category": {
+        "serviceDisplayName": "Compute Engine",
+        "resourceFamily": "Storage",
+        "resourceGroup": "PDStandard",
+        "usageType": "OnDemand"
+      },
+      "serviceRegions": [
+        "us-central1"
+      ],
+      "pricingInfo": [
+        {
+          "summary": "",
+          "pricingExpression": {
+            "usageUnit": "GiBy.mo",
+            "displayQuantity": 1,
+            "tieredRates": [
+              {
+                "unitPrice": {
+                  "currencyCode": "USD",
+                  "nanos": 40000000
+                },
+                "startUsageAmount": 0
+              }
+            ],
+            "usageUnitDescription": "gibibyte month",
+            "baseUnit": "By.s",
+            "baseUnitDescription": "byte second",
+            "baseUnitConversionFactor": 2780000000000000.0
+          },
+          "currencyConversionRate": 1,
+          "effectiveTime": "2026-11-05T00:00:00.000Z"
+        }
+      ],
+      "serviceProviderName": "Google",
+      "geoTaxonomy": {
+        "type": "REGIONAL",
+        "regions": [
+          "us-central1"
+        ]
+      }
+    }
+  ],
+  "nextPageToken": "EXAMPLE-PAGE-TOKEN-2"
+}

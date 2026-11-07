@@ -19,6 +19,10 @@ pub const ACQUIRE_TAG: &str = "js-acquire-id";
 /// The tag that holds the host name; the console shows it as the instance's name.
 pub const NAME_TAG: &str = "Name";
 
+/// The tag that holds the end of the Capacity Block an instance runs in, in seconds since
+/// the Unix epoch. Only an instance launched into a block carries it.
+pub const BLOCK_END_TAG: &str = "js-block-end";
+
 /// The prefix of the key of a tag made from a label.
 pub const LABEL_PREFIX: &str = "js-label:";
 
@@ -142,6 +146,131 @@ impl InstanceState {
     }
 }
 
+/// The id of a capacity reservation, which a purchased Capacity Block is: `cr-` and 17
+/// lower-case hexadecimal digits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CapacityReservationId(String);
+
+impl CapacityReservationId {
+    /// The id `text`, or `None` when it is not a capacity reservation id.
+    pub fn new(text: &str) -> Option<Self> {
+        hex_after(text, "cr-", |len| len == 17).map(Self)
+    }
+
+    /// The id of the `n`th reservation the fake cloud makes: `cr-` and 17 hexadecimal
+    /// digits.
+    pub(crate) fn numbered(n: u64) -> Self {
+        Self(format!("cr-{n:017x}"))
+    }
+
+    /// The id as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CapacityReservationId {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str(&self.0)
+    }
+}
+
+/// The state of a capacity reservation, as `state` of `DescribeCapacityReservations` and
+/// `PurchaseCapacityBlock` spells it. Only an active reservation can be launched into.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReservationState {
+    /// `active`: the capacity is there to launch into.
+    Active,
+    /// `expired`: the reservation ended.
+    Expired,
+    /// `cancelled`.
+    Cancelled,
+    /// `pending`: the request is being handled.
+    Pending,
+    /// `failed`.
+    Failed,
+    /// `scheduled`: the reservation starts later.
+    Scheduled,
+    /// `payment-pending`.
+    PaymentPending,
+    /// `payment-failed`.
+    PaymentFailed,
+    /// `assessing`.
+    Assessing,
+    /// `delayed`.
+    Delayed,
+    /// `unsupported`.
+    Unsupported,
+    /// A name this release does not know, as the cloud spelled it.
+    Other(String),
+}
+
+/// Every state the cloud documents, in the order it documents them.
+const RESERVATION_STATES: [ReservationState; 11] = [
+    ReservationState::Active,
+    ReservationState::Expired,
+    ReservationState::Cancelled,
+    ReservationState::Pending,
+    ReservationState::Failed,
+    ReservationState::Scheduled,
+    ReservationState::PaymentPending,
+    ReservationState::PaymentFailed,
+    ReservationState::Assessing,
+    ReservationState::Delayed,
+    ReservationState::Unsupported,
+];
+
+impl ReservationState {
+    /// The state the cloud calls `text`; a name this release does not know is
+    /// [`ReservationState::Other`], so a new state is read and refused, not unreadable.
+    pub fn parse(text: &str) -> Self {
+        RESERVATION_STATES
+            .into_iter()
+            .find(|state| state.name() == text)
+            .unwrap_or_else(|| Self::Other(text.to_owned()))
+    }
+
+    /// The state as the cloud spells it.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Active => "active",
+            Self::Expired => "expired",
+            Self::Cancelled => "cancelled",
+            Self::Pending => "pending",
+            Self::Failed => "failed",
+            Self::Scheduled => "scheduled",
+            Self::PaymentPending => "payment-pending",
+            Self::PaymentFailed => "payment-failed",
+            Self::Assessing => "assessing",
+            Self::Delayed => "delayed",
+            Self::Unsupported => "unsupported",
+            Self::Other(name) => name,
+        }
+    }
+}
+
+/// One capacity reservation, as `PurchaseCapacityBlock` and `DescribeCapacityReservations`
+/// state it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapacityReservation {
+    /// `capacityReservationId`.
+    pub id: CapacityReservationId,
+    /// `state`.
+    pub state: ReservationState,
+    /// `endDate`, in seconds since the Unix epoch (UTC).
+    pub end_unix_seconds: u64,
+}
+
+/// One purchase of a Capacity Block: `PurchaseCapacityBlock` for a Linux block. The call
+/// has no client token, so a repeat of it buys a second block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockPurchase {
+    /// The offering bought (`CapacityBlockOfferingId`).
+    pub offering: String,
+    /// The tags the reservation is created with.
+    pub tags: Vec<Tag>,
+}
+
 /// One tag of an instance.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tag {
@@ -179,12 +308,15 @@ impl Instance {
 }
 
 /// How an instance is bought, among the ways this provider launches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchPurchase {
     /// On demand.
     OnDemand,
     /// Spot, at the market price (no maximum price is set).
     Spot,
+    /// Into the Capacity Block already bought, the reservation of which is named: the
+    /// launch cannot be made without it.
+    CapacityBlock(CapacityReservationId),
 }
 
 /// The token that makes a repeated `RunInstances` the same launch: the cloud answers the
@@ -448,5 +580,57 @@ mod tests {
             DescribeFilter::Ids(Vec::new())
         );
         assert_ne!(LaunchPurchase::Spot, LaunchPurchase::OnDemand);
+    }
+
+    /// Asserts that a capacity reservation id is `cr-` and exactly 17 lower-case
+    /// hexadecimal digits, that every other text is refused, and that the id reads back as
+    /// given and as a display.
+    #[test]
+    fn a_capacity_reservation_id_is_cr_and_17_hex_digits() {
+        let good = "cr-0123456789abcdef0";
+        let id = CapacityReservationId::new(good).unwrap();
+        assert_eq!(id.as_str(), good);
+        assert_eq!(id.to_string(), good);
+        assert_eq!(
+            CapacityReservationId::numbered(255),
+            CapacityReservationId::new("cr-000000000000000ff").unwrap()
+        );
+        for bad in [
+            "",
+            "cr-",
+            "cr-0123456789abcdef",
+            "cr-0123456789abcdef01",
+            "cr-0123456789abcdeF0",
+            "i-0123456789abcdef0",
+        ] {
+            assert_eq!(CapacityReservationId::new(bad), None, "{bad:?}");
+        }
+    }
+
+    /// Asserts that every documented reservation state parses from the name the cloud
+    /// gives it and names itself the same, and that a name this release does not know is
+    /// kept as it was spelled and names itself the same.
+    #[test]
+    fn reservation_states_parse_and_name_themselves() {
+        let table = [
+            ("active", ReservationState::Active),
+            ("expired", ReservationState::Expired),
+            ("cancelled", ReservationState::Cancelled),
+            ("pending", ReservationState::Pending),
+            ("failed", ReservationState::Failed),
+            ("scheduled", ReservationState::Scheduled),
+            ("payment-pending", ReservationState::PaymentPending),
+            ("payment-failed", ReservationState::PaymentFailed),
+            ("assessing", ReservationState::Assessing),
+            ("delayed", ReservationState::Delayed),
+            ("unsupported", ReservationState::Unsupported),
+        ];
+        for (name, state) in table {
+            assert_eq!(ReservationState::parse(name), state);
+            assert_eq!(state.name(), name);
+        }
+        let unknown = ReservationState::parse("Active");
+        assert_eq!(unknown, ReservationState::Other("Active".to_owned()));
+        assert_eq!(unknown.name(), "Active");
     }
 }

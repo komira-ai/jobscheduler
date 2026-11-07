@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>InvalidParameterValue</Code>
+            <Message>Value (nosuch.type) for parameter instanceType is invalid.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000031</RequestID>
+</Response>

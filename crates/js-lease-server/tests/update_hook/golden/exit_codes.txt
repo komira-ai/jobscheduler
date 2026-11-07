@@ -1,0 +1,19 @@
+prepare_ok prepare 0 {"class":"release","promotion_pending":false,"reversible":true}
+prepare_store_unreachable prepare 75 {"class":"environment","detail":"the store could not be reached","promotion_pending":false,"reason":"store_unreachable","retry_after_secs":60,"reversible":true}
+prepare_schema_missing prepare 1 {"class":"release","detail":"the store holds no schema","promotion_pending":false,"reason":"schema_unsupported","reversible":true}
+prepare_link_outside prepare 76 {"class":"release","detail":"<root>/link/current points outside the release directory <root>/releases","promotion_pending":false,"reason":"state_invalid","reversible":true}
+prepare_after_cutover_began prepare 1 {"class":"release","detail":"the record says cutover has begun: run rollback","promotion_pending":false,"reason":"state_invalid","reversible":true}
+cutover_without_record cutover 1 {"class":"release","detail":"there is no record: prepare has not run","promotion_pending":false,"reason":"state_invalid","reversible":true}
+cutover_ok cutover 0 {"class":"release","promotion_pending":false,"reversible":false}
+cutover_lock_held cutover 1 {"class":"environment","detail":"the unit is down and old still holds the store's writer lock after 30 s","promotion_pending":false,"reason":"lock_not_released","reversible":false}
+verify_ok verify 0 {"class":"release","promotion_pending":false,"reversible":true}
+verify_no_new_lock verify 1 {"class":"release","detail":"no new process took the store's writer lock in 285 s","promotion_pending":false,"reason":"no_lock","reversible":true}
+verify_not_serving verify 1 {"class":"release","detail":"a new process holds the store's writer lock and is not serving: /healthz answered 503","promotion_pending":false,"reason":"not_serving","reversible":true}
+verify_unit_died verify 1 {"class":"release","detail":"js-lease-server.service is not running during verify","promotion_pending":false,"reason":"start_failed","reversible":true}
+rollback_never_stopped rollback 0 {"class":"release","promotion_pending":false,"reversible":true}
+rollback_ok rollback 0 {"class":"release","promotion_pending":false,"reversible":false}
+rollback_unknown_release rollback 76 {"class":"release","detail":"js-lease-server.service is not down, and <root>/link/current is on neither release of the update","promotion_pending":false,"reason":"state_invalid","reversible":false}
+cleanup_not_verified cleanup 1 {"class":"release","detail":"the record does not say that verify succeeded","promotion_pending":false,"reason":"not_verified","reversible":true}
+cleanup_ok cleanup 0 {"class":"release","promotion_pending":false,"reversible":true}
+cleanup_after_cleanup cleanup 0 {"class":"release","detail":"there is no record: cleanup has finished","promotion_pending":false,"reversible":true}
+rollback_first_install_moved rollback 1 {"class":"release","detail":"a first install has no previous release to restore: nothing was changed","promotion_pending":false,"reason":"no_previous_release","reversible":false}

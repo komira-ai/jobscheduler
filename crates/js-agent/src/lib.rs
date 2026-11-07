@@ -36,6 +36,13 @@
 //! unit's `ExecStart`, after checking them as the agent's start does; it writes none on a host
 //! without a GPU node; see `gpu_dropin` and docs/runbooks/crun-host-setup.md.
 //!
+//! `js-agent prepare|cutover|verify|rollback|cleanup [<artifact>] --params <file>` (Linux and
+//! macOS, run as root by hostkeeper), also written `js-agent update-hook <step> ...`, is the
+//! agent's side of hostkeeper's hook contract: it cordons the host, stops the agent and starts
+//! the staged release, and says how it ended in one JSON line. It reads the package manifest's
+//! `[params]` table from the file and the host's `--flags-file` for the lease server; see
+//! [`update_hook`].
+//!
 //! # Flags
 //!
 //! Configuration is flags only: `js-agent` reads no environment variable.
@@ -48,7 +55,7 @@
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle`, `bundle-root`, `per-job`, `egress` and `egress-ports` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle`, `bundle-root`, `per-job`, `egress`, `egress-ports`, `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -72,6 +79,8 @@
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
+//! | `--vm-driver <path>` | turns the VM backend on (see [`vm`]): the absolute path of the signed `js-vmm` binary, started as `js-vmm lease` (one process for each VM, through the disclaiming spawner) to make and drive the VMs; a VM start (`kind: vm`) then runs in a fresh VM cloned from the base image and destroyed when it ends, at most two at once (a third is refused `no-capacity`), and the hello reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`; without it a VM start is refused `vm-unavailable`; macOS only; needs `--vm-store` and `--native-helper-socket` |
+//! | `--vm-store <dir>` | the directory of the VM backend: the base image in `base` and each run's clone under `runs/`, on one APFS volume; needs `--vm-driver` |
 //! | `--native-tool-root <path>` | a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-helper-socket` |
 //! | `--native-deny-read <path>` | a path no native run may read, beside the agent's roots, token, instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable; name the helper's `--state-dir`; must exist; needs `--native-helper-socket` |
 //! | `--native-max-file-mib <n>` | the most MiB any one file a native run writes may reach, its output included (the run's `RLIMIT_FSIZE`); by default 4096; a run that writes more is ended by `SIGXFSZ`; needs `--native-helper-socket` |
@@ -238,6 +247,14 @@
 //! VM check of the design is a later change. [`Hooked`] is the same hook rule as a wrapper
 //! around any [`Quiesce`], for a host driven in-thread.
 //!
+//! # Flags in a file
+//!
+//! `--flags-file <PATH>` (or `--flags-file=<PATH>`) is replaced, before the other flags are
+//! read, by the words of the file, one flag per line; see [`flags_file`] for the rules of the
+//! file (owner, mode, size, form). It is for a package unit that is the same on every host
+//! and takes the host's `--server` and `--pool` from `/etc/js-agent/flags`. The flag may be
+//! given once, and a flags file may not name another.
+//!
 //! # Secrets
 //!
 //! The join token is read from its file by `js-client`, held there, and sent in the
@@ -267,9 +284,11 @@ pub mod disk;
 pub mod egress;
 mod exclusive;
 mod facts;
+pub mod flags_file;
 #[cfg(target_os = "linux")]
 mod gpu_dropin;
 mod host;
+mod identity;
 #[cfg(target_os = "linux")]
 pub mod image;
 pub mod integrity;
@@ -289,6 +308,7 @@ mod transport;
 mod trusted_file;
 pub mod update_hook;
 pub mod usage;
+pub mod vm;
 mod worker;
 
 use std::ffi::OsString;
@@ -313,6 +333,7 @@ pub use facts::{
     Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, StoreView, offer};
+pub use identity::{IdentityFlags, IdentitySourceKind};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
@@ -547,14 +568,16 @@ pub fn main_with(
         let host = gpu_dropin::Host {
             smi: &smi,
             read: crun::read_node,
+            expand: &flags_file::expand,
         };
         return gpu_dropin::run(&args, out, err, &host);
     }
     // The updater's hook is answered here too, before `install()`: it is a short-lived
-    // step of another program, and installs no signal handler.
+    // step of another program, and installs no signal handler. hostkeeper runs an update step as
+    // the bare word (`js-agent prepare ...`) and its other steps behind the verb.
     if args
         .get(1)
-        .is_some_and(|verb| verb.to_str() == Some(update_hook::VERB))
+        .is_some_and(|word| update_hook::is_hook_word(word))
     {
         return update_hook::run(&args, out, err, &update_hook::Host::system());
     }
@@ -633,6 +656,9 @@ fn execute(
     err: &mut dyn Write,
     services: &mut Services<'_>,
 ) -> Result<(), Failure> {
+    // `--flags-file PATH` is replaced by the file's words before anything else reads the
+    // arguments, so every later check sees the flags the file holds. Clap never sees the flag.
+    let args = flags_file::expand(args).map_err(|why| Failure::Usage(why.to_string()))?;
     // A removed flag is refused by name with what replaces it, before clap would call it
     // unknown, and before anything is read or the agent registers.
     if let Some(refusal) = cli::removed_flag(&args) {
@@ -729,6 +755,8 @@ fn execute(
         .native
         .take()
         .map(|native| native.with_log_file_cap(cap));
+    local.vm =
+        vm::VmSettings::from_cli(&cli, platform, local.native.is_some()).map_err(Failure::Usage)?;
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
@@ -847,6 +875,9 @@ fn execute(
         )),
         (false, None) => None,
     };
+    if local.vm.is_some() {
+        vm::report(&mut offer.hello);
+    }
     if let Some(found) = reported {
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");

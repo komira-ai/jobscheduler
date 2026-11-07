@@ -8,13 +8,10 @@ use std::process::{Command, Stdio};
 
 use js_testkit::dir::TestDir;
 
-use super::fakes::harness::{CONTROL_VAR, STATE_DIR_VAR, WORLD_VAR};
+use super::fakes::harness::{self, CONTROL_VAR, STATE_DIR_VAR, WORLD_VAR};
 
 const BIN: &str = env!("CARGO_BIN_EXE_js-update-hook-fake");
-const PARAMS: &str = concat!(
-    "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
-    "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
-    "release_link = \"/opt/js-agent/current\"\n",
+const RESERVED: &str = concat!(
     "\"updater.artifact_digest\" = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
     "\"updater.staged_release\" = \"/staged\"\n",
     "\"updater.target_version\" = \"1.4.0\"\n",
@@ -49,7 +46,11 @@ struct Dirs {
 fn rig(name: &str) -> Dirs {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
     let path = |leaf: &str| tmp.path().join(leaf).to_str().unwrap().to_owned();
-    std::fs::write(tmp.path().join("params.toml"), PARAMS).unwrap();
+    std::fs::write(
+        tmp.path().join("params.toml"),
+        format!("{}{RESERVED}", harness::params_text()),
+    )
+    .unwrap();
     std::fs::create_dir_all(tmp.path().join("state")).unwrap();
     Dirs {
         world: path("world"),
@@ -115,7 +116,7 @@ fn the_directories_may_come_from_the_variables_of_the_test_binary() {
 }
 
 #[test]
-fn a_state_directory_the_declaration_refuses_fails_the_step_before_it_runs() {
+fn a_state_directory_that_is_not_plain_fails_the_step_before_it_runs() {
     let dirs = rig("hook-fake-bin-relative");
     let (code, out, _) = run(
         &[
@@ -139,7 +140,7 @@ fn a_state_directory_the_declaration_refuses_fails_the_step_before_it_runs() {
         line["detail"]
             .as_str()
             .unwrap()
-            .contains("absolute paths of plain components"),
+            .contains("is not an absolute path of plain components"),
         "{line}"
     );
 }

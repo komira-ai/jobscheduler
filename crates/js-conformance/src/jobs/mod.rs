@@ -26,8 +26,10 @@
 //!   `ALREADY_EXISTS` carrying the refusal `JOB_ID_CONFLICT`.
 //! - A job moves queued, placed, starting, running, then succeeded (exit code 0) or failed
 //!   (any other code). A cancel ends a queued job as cancelled at once and only marks a
-//!   later one (`cancel_requested`). A move the state machine has no edge for is refused
-//!   and leaves the job as it was.
+//!   later one (`cancel_requested`). The mark means asked and not yet ended: a job that has
+//!   ended shows it false, a queued job cancelled at once and a marked job that then exits
+//!   alike. A move the state machine has no edge for is refused and leaves the job as it
+//!   was.
 //! - `GetResult` of a job that has not ended answers `FAILED_PRECONDITION` `not-finished`;
 //!   after the end it answers the recorded result.
 //! - An ended job's result is readable until its retention ends; from then `GetResult`

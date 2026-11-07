@@ -26,6 +26,7 @@
 //! | caps frame | [`MAX_CAPS_BUNDLES`] digests, [`MAX_CAPS_XCODES`] Xcode builds of [`MAX_XCODE_BUILD_LEN`] bytes |
 //! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
 //! | exclusive refusal `detail` | [`MAX_REFUSAL_DETAIL`] bytes, no control or format character |
+//! | signed identity of a hello (`identity`) | `document` 1 to [`MAX_IDENTITY_DOCUMENT_LEN`] bytes, `signature` at most [`MAX_IDENTITY_SIGNATURE_LEN`] bytes, any text |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
 //! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, jobs, retired job ids or retired acks, [`MAX_RESULTS`] results, run acks or job acks, [`MAX_COMMANDS`] commands |
 //! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes |
@@ -128,6 +129,12 @@ pub fn capability_value_max(key: &str) -> usize {
 pub const MAX_SESSION_LEN: usize = 128;
 /// Longest `agent_version` text, in bytes.
 pub const MAX_VERSION_LEN: usize = 64;
+/// Longest identity `document` of a hello, in bytes. An EC2 instance identity document is
+/// under 1 KiB and a Compute Engine identity token (`format=full`) under 2 KiB.
+pub const MAX_IDENTITY_DOCUMENT_LEN: usize = 16 * 1024;
+/// Longest identity `signature` of a hello, in bytes: an EC2 signature is about 180 bytes
+/// of base64.
+pub const MAX_IDENTITY_SIGNATURE_LEN: usize = 4 * 1024;
 /// Longest taint reason or check text, in bytes.
 pub const MAX_TAINT_TEXT_LEN: usize = 256;
 /// Longest result `detail` text, in bytes.

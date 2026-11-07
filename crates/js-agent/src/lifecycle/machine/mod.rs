@@ -15,6 +15,7 @@ mod prepare;
 mod silence;
 mod slots;
 mod tails;
+mod vm;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -394,11 +395,7 @@ impl Lifecycle {
 
     /// Whether a start may run now, and its mounts resolved when it may. `env` is the
     /// environment of a job start, empty for a run start.
-    fn admit(
-        &self,
-        spec: &JobSpec,
-        env: &[(String, String)],
-    ) -> Result<Vec<ResolvedMount>, Refusal> {
+    fn admit(&self, spec: &JobSpec, given: &Given) -> Result<Vec<ResolvedMount>, Refusal> {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
@@ -409,46 +406,12 @@ impl Lifecycle {
         if spec.bundle.is_some() {
             self.admit_bundle(spec)?;
         }
-        // The runtime must carry the job's environment; asked before the image and the body,
-        // so a runtime that carries none answers for the environment (`env-unsupported`).
-        self.runtime
-            .check_env(env)
-            .map_err(|refused| (refused.code, refused.why))?;
-        // The native body of the start: the legacy `native` one, or the `run` of a start
-        // named by its image on a runtime that runs those (the Mac one, by the bundle the
-        // image resolves to).
-        let image_run = spec.native.is_none() && self.runtime.runs_image_runs();
-        let body = match (&spec.native, &spec.run) {
-            (Some(native), _) => Some(native.clone()),
-            (None, Some(run)) if image_run => Some(NativeSpec::from(run.clone())),
-            _ => None,
+        // A VM start runs its command in a guest of its own, so the checks of a body on the
+        // host do not apply to it; the VM ones do (`vm`).
+        let body = match given.vm {
+            true => self.admit_vm(spec).map(|()| None)?,
+            false => self.admit_body(spec, &given.env)?,
         };
-        // A start named by its image that the runtime cannot run (no `run`, or no store) is
-        // refused, and a `run` where no runtime runs it is refused rather than dropped.
-        if spec.native.is_none() && body.is_none() {
-            self.runtime
-                .check_image()
-                .map_err(|refused| (refused.code, refused.why))?;
-            if spec.run.is_some() {
-                return Err(no(
-                    refusal::RUN_UNSUPPORTED,
-                    "this agent runs an image's own command and no run body yet",
-                ));
-            }
-        }
-        // A native start with files is admitted like a container's: below, it needs this
-        // agent's files root, and the runtime gives the run's directory to the run's user.
-        if let Some(native) = &body {
-            self.runtime
-                .check_native(native)
-                .map_err(|refused| (refused.code, refused.why))?;
-        }
-        // An image start is a bundle start: the image is the bundle's name. It is admitted
-        // after the checks above so that a start the runtime refuses begins no fetch. (A
-        // start with a `bundle` and no `native` body never gets here: the wire refuses it.)
-        if image_run {
-            self.admit_bundle(spec)?;
-        }
         if let Some(why) = self.quota_health.why() {
             return Err(no(
                 refusal::QUOTA_UNAVAILABLE,
@@ -530,11 +493,64 @@ impl Lifecycle {
         // own check (a Mac pool is limited by a packet filter, not a container network).
         let egress = match &body {
             Some(native) => self.runtime.check_native_egress(native),
-            None if spec.isolation == Isolation::Contained => self.runtime.check_egress(),
+            None if spec.isolation == Isolation::Contained && !given.vm => {
+                self.runtime.check_egress()
+            }
             None => Ok(()),
         };
         egress.map_err(|why| (detail::EGRESS_UNCHECKED, why.to_string()))?;
         Ok(mounts)
+    }
+
+    /// The checks of a start's body on the host, for every start but a VM one: the runtime
+    /// must carry its environment and run its image or native body. The native body, if any.
+    fn admit_body(
+        &self,
+        spec: &JobSpec,
+        env: &[(String, String)],
+    ) -> Result<Option<NativeSpec>, Refusal> {
+        let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
+        // The runtime must carry the job's environment; asked before the image and the body,
+        // so a runtime that carries none answers for the environment (`env-unsupported`).
+        self.runtime
+            .check_env(env)
+            .map_err(|refused| (refused.code, refused.why))?;
+        // The native body of the start: the legacy `native` one, or the `run` of a start
+        // named by its image on a runtime that runs those (the Mac one, by the bundle the
+        // image resolves to).
+        let image_run = spec.native.is_none() && self.runtime.runs_image_runs();
+        let body = match (&spec.native, &spec.run) {
+            (Some(native), _) => Some(native.clone()),
+            (None, Some(run)) if image_run => Some(NativeSpec::from(run.clone())),
+            _ => None,
+        };
+        // A start named by its image that the runtime cannot run (no `run`, or no store) is
+        // refused, and a `run` where no runtime runs it is refused rather than dropped.
+        if spec.native.is_none() && body.is_none() {
+            self.runtime
+                .check_image()
+                .map_err(|refused| (refused.code, refused.why))?;
+            if spec.run.is_some() {
+                return Err(no(
+                    refusal::RUN_UNSUPPORTED,
+                    "this agent runs an image's own command and no run body yet",
+                ));
+            }
+        }
+        // A native start with files is admitted like a container's: below, it needs this
+        // agent's files root, and the runtime gives the run's directory to the run's user.
+        if let Some(native) = &body {
+            self.runtime
+                .check_native(native)
+                .map_err(|refused| (refused.code, refused.why))?;
+        }
+        // An image start is a bundle start: the image is the bundle's name. It is admitted
+        // after the checks above so that a start the runtime refuses begins no fetch. (A
+        // start with a `bundle` and no `native` body never gets here: the wire refuses it.)
+        if image_run {
+            self.admit_bundle(spec)?;
+        }
+        Ok(body)
     }
 
     /// The bundle of a start, by the agent's bundle rules; a host without a store refuses.
@@ -767,7 +783,7 @@ impl Lifecycle {
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
         let admitted = self
-            .admit(spec, &given.env)
+            .admit(spec, given)
             .and_then(|mounts| self.taint_host_job(spec, events).map(|()| mounts));
         let mounts = match admitted {
             Ok(mounts) => mounts,
@@ -803,9 +819,10 @@ impl Lifecycle {
         // create, as it always did): it is never asked about one. (A start with no image
         // is refused as `invalid-image`, and a native one as `native-unsupported`, before
         // this point.)
-        let prepared = match spec.isolation {
-            Isolation::Host => Prepared::Ready,
-            Isolation::Contained => self.runtime.prepare(&spec.image, None),
+        // A VM start boots the agent's base image, never an image of the store.
+        let prepared = match (spec.isolation, given.vm) {
+            (Isolation::Host, _) | (_, true) => Prepared::Ready,
+            (Isolation::Contained, false) => self.runtime.prepare(&spec.image, None),
         };
         match prepared {
             Prepared::Pending(ticket) => {

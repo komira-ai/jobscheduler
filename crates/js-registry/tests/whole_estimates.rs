@@ -1,7 +1,12 @@
 //! The estimate feed: a lease's expected end, from the start of the lease and the P90 of
 //! the profiles of its keyed runs, reaches the drain cost, so the host reserved for a
 //! whole-node request is the one that empties first by estimate. The registry is driven
-//! on a manual clock; the profile lives are a fixed table.
+//! on a manual clock; the profile lives are a fixed table. Each test runs under both
+//! placements, `--placement registry` (`registry::NAME`) and `--placement js-sched`
+//! (`js_sched::NAME`), with the same assertions, except the three of a lease put back
+//! from the lease file, which run under `--placement registry` alone
+//! (`registry_only::NAME`): js-sched's engine is not told of a lease put back at a
+//! restart yet (komira-ai/jobscheduler#778).
 
 mod support;
 
@@ -33,8 +38,8 @@ fn table() -> Arc<Table> {
 }
 
 /// Hosts `a` and `b` with the table of lives set.
-fn world() -> World {
-    let w = World::new(&["a", "b"], plain);
+fn world(p: Placement) -> World {
+    let w = World::new_in(p, &["a", "b"], plain);
     w.fx.registry.set_lives(table());
     w
 }
@@ -50,9 +55,8 @@ fn keyed(w: &World, on: &str, sequence: u64, run: &str, key: &str) {
 /// Catches: no estimate fed: `a`'s lease may run 900 s but its keyed run takes a minute
 /// at the P90, so `a` empties before `b` (600 s) and is the host reserved; by bounds
 /// alone it would be `b`.
-#[test]
-fn a_short_estimate_makes_the_host_cheaper_than_a_shorter_bound() {
-    let mut w = world();
+fn a_short_estimate_makes_the_host_cheaper_than_a_shorter_bound(p: Placement) {
+    let mut w = world(p);
     w.share(1, 900);
     w.share(2, 600);
     keyed(&w, "a", 1, "r1", "fast");
@@ -62,9 +66,8 @@ fn a_short_estimate_makes_the_host_cheaper_than_a_shorter_bound() {
 
 /// Catches: the order changed for a lease with no keyed run: it is costed at its bound,
 /// so `b` (600 s) is reserved over `a` (900 s).
-#[test]
-fn a_lease_with_no_keyed_run_is_costed_at_its_bound() {
-    let mut w = world();
+fn a_lease_with_no_keyed_run_is_costed_at_its_bound(p: Placement) {
+    let mut w = world(p);
     w.share(1, 900);
     w.share(2, 600);
     w.ask(3, "q");
@@ -73,9 +76,8 @@ fn a_lease_with_no_keyed_run_is_costed_at_its_bound() {
 
 /// Catches: a key with no P90 read as an instant end: `a`'s run names a profile the table
 /// does not know, so `a` is costed at its 900 s bound and `b` is reserved.
-#[test]
-fn a_key_with_no_p90_leaves_the_lease_at_its_bound() {
-    let mut w = world();
+fn a_key_with_no_p90_leaves_the_lease_at_its_bound(p: Placement) {
+    let mut w = world(p);
     w.share(1, 900);
     w.share(2, 600);
     keyed(&w, "a", 1, "r1", "unseen");
@@ -85,9 +87,8 @@ fn a_key_with_no_p90_leaves_the_lease_at_its_bound() {
 
 /// Catches: the smallest or the first P90 taken in place of the largest: `a` runs a one
 /// minute profile and an eight minute one, so it ends at 480 s, after `b` (300 s).
-#[test]
-fn several_keyed_runs_cost_the_lease_at_the_largest_p90() {
-    let mut w = world();
+fn several_keyed_runs_cost_the_lease_at_the_largest_p90(p: Placement) {
+    let mut w = world(p);
     w.share(1, 900);
     w.share(2, 300);
     keyed(&w, "a", 1, "r1", "fast");
@@ -98,9 +99,8 @@ fn several_keyed_runs_cost_the_lease_at_the_largest_p90() {
 
 /// Catches: an estimate past the bound taking the lease past its max wall: `a`'s profile
 /// takes 600 minutes but the lease may run 300 s, so it ends at 300 s, before `b` (400 s).
-#[test]
-fn an_estimate_beyond_the_bound_is_cut_to_the_bound() {
-    let mut w = world();
+fn an_estimate_beyond_the_bound_is_cut_to_the_bound(p: Placement) {
+    let mut w = world(p);
     w.share(1, 300);
     w.share(2, 400);
     keyed(&w, "a", 1, "r1", "long");
@@ -112,9 +112,8 @@ fn an_estimate_beyond_the_bound_is_cut_to_the_bound() {
 /// start of the lease: both leases start together, `a`'s run is queued two minutes on
 /// and takes three, so `a` ends at 180 s, before `b` (250 s); counted from the queueing
 /// it would end at 300 s, after it.
-#[test]
-fn the_estimate_counts_from_the_start_of_the_lease() {
-    let mut w = world();
+fn the_estimate_counts_from_the_start_of_the_lease(p: Placement) {
+    let mut w = world(p);
     w.share(1, 900);
     w.share(2, 250);
     w.step(120_000);
@@ -125,9 +124,8 @@ fn the_estimate_counts_from_the_start_of_the_lease() {
 
 /// Catches: keyed runs costed without any source of lives set: the registry falls back to
 /// the bounds, so `b` (600 s) is reserved over `a` (900 s).
-#[test]
-fn with_no_source_of_lives_a_keyed_run_changes_nothing() {
-    let mut w = World::new(&["a", "b"], plain);
+fn with_no_source_of_lives_a_keyed_run_changes_nothing(p: Placement) {
+    let mut w = World::new_in(p, &["a", "b"], plain);
     w.share(1, 900);
     w.share(2, 600);
     keyed(&w, "a", 1, "r1", "fast");
@@ -144,9 +142,10 @@ const NO_WALL_S: u64 = u64::MAX / 1000;
 /// `a` ranks after `b`, whose lease is bound to end in ten hours, and alone it is reserved
 /// with no tail. Once a keyed run gives the lease a one minute estimate, `a` is known, ends
 /// a minute after the lease's start and empties first.
-#[test]
-fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known_tail() {
-    let mut w = world();
+fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known_tail(
+    p: Placement,
+) {
+    let mut w = world(p);
     let start = w.now().millis();
     w.share(1, NO_WALL_S);
     w.share(2, 36_000);
@@ -159,7 +158,7 @@ fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known
     assert_eq!(w.reserved_host("q2"), Some("a".to_string()));
     assert_eq!(tail_of(&w, "q2"), Some(start + 60_000));
 
-    let mut alone = World::new(&["a"], plain);
+    let mut alone = World::new_in(p, &["a"], plain);
     alone.fx.registry.set_lives(table());
     alone.share(1, NO_WALL_S);
     alone.ask(3, "q");
@@ -168,14 +167,20 @@ fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known
 }
 
 /// Catches: the flag-off state changing for a lease whose end saturates. With no source of
-/// lives such a lease keeps its saturated end as a far, known bound, as before the feed.
-#[test]
-fn without_a_source_of_lives_a_saturated_end_stays_a_far_bound() {
-    let mut w = World::new(&["a"], plain);
+/// lives the registry's pass keeps such a lease's saturated end as a far, known bound, as
+/// before the feed. js-sched's engine has no flag-off state: it costs the lease by its
+/// start and wall time, whose end saturates, and a saturated end is an unknown tail, as
+/// with the feed on (the `alone` case above).
+fn without_a_source_of_lives_a_saturated_end_stays_a_far_bound(p: Placement) {
+    let mut w = World::new_in(p, &["a"], plain);
     w.share(1, NO_WALL_S);
     w.ask(3, "q");
     assert_eq!(w.reserved_host("q"), Some("a".to_string()));
-    assert_eq!(tail_of(&w, "q"), Some(js_lease::Timestamp::MAX.millis()));
+    let tail = match p {
+        Placement::Registry => Some(js_lease::Timestamp::MAX.millis()),
+        Placement::JsSched => None,
+    };
+    assert_eq!(tail_of(&w, "q"), tail);
 }
 
 /// The tail request `name` was reserved with.
@@ -185,8 +190,8 @@ fn tail_of(w: &World, name: &str) -> Option<u64> {
 
 /// Hosts `a` and `b` in a pool that books whole hosts, so a lease put back is a plain
 /// booking, with the table of lives set when `lives` is.
-fn restored_world(lives: bool) -> World {
-    let w = World::of(config(4), &["a", "b"]);
+fn restored_world(p: Placement, lives: bool) -> World {
+    let w = World::of_in(p, world_config(4), &["a", "b"]);
     if lives {
         w.fx.registry.set_lives(table());
     }
@@ -205,9 +210,8 @@ fn restore(w: &World, on: &str, sequence: u64, ago_ms: u64, wall_ms: u64) {
 /// ending now. `a`'s lease started two minutes before the restart and its keyed run takes
 /// three, so it ends in a minute, before `b`'s lease (two minutes); counted from the
 /// restart it would end in three, after `b`.
-#[test]
-fn a_restored_lease_is_costed_from_the_start_the_lease_file_records() {
-    let mut w = restored_world(true);
+fn a_restored_lease_is_costed_from_the_start_the_lease_file_records(p: Placement) {
+    let mut w = restored_world(p, true);
     restore(&w, "a", 1, 120_000, 900_000);
     w.share(2, 120);
     keyed(&w, "a", 1, "r1", "three");
@@ -218,9 +222,8 @@ fn a_restored_lease_is_costed_from_the_start_the_lease_file_records() {
 /// Catches: a lease put back with no bound, which would count as ending now. `a`'s lease
 /// has no keyed run and is bound to end 900 s after its start, so it falls back to that
 /// bound and `b` (600 s) is reserved.
-#[test]
-fn a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound() {
-    let mut w = restored_world(true);
+fn a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound(p: Placement) {
+    let mut w = restored_world(p, true);
     restore(&w, "a", 1, 0, 900_000);
     w.share(2, 600);
     w.ask(3, "q");
@@ -231,9 +234,8 @@ fn a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound() {
 /// Without a source of lives a lease put back has no bound, as it always had, and counts
 /// as ending now, so `a` is reserved over `b` (600 s) whatever the file records, and its
 /// stop counts nothing.
-#[test]
-fn without_a_source_of_lives_a_restored_lease_counts_as_ending_now() {
-    let mut w = restored_world(false);
+fn without_a_source_of_lives_a_restored_lease_counts_as_ending_now(p: Placement) {
+    let mut w = restored_world(p, false);
     restore(&w, "a", 1, 0, 900_000);
     w.share(2, 600);
     w.ask(3, "q");
@@ -246,12 +248,50 @@ fn without_a_source_of_lives_a_restored_lease_counts_as_ending_now() {
 /// Catches: a lease put back twice holding two bounds, which would count its stop twice.
 /// With the feed on, the stop of a restored lease with no keyed run counts once as ended
 /// with no estimate.
-#[test]
-fn a_lease_put_back_twice_keeps_one_bound_and_its_stop_counts_once() {
-    let mut w = restored_world(true);
+fn a_lease_put_back_twice_keeps_one_bound_and_its_stop_counts_once(p: Placement) {
+    let mut w = restored_world(p, true);
     restore(&w, "a", 1, 0, 900_000);
     restore(&w, "a", 1, 0, 900_000);
     w.provider.stop(&lease(1));
     let counted = w.fx.registry.tail_counters();
     assert_eq!((counted.ended_estimated, counted.ended_unestimated), (0, 1));
+}
+
+crate::both!(
+    a_short_estimate_makes_the_host_cheaper_than_a_shorter_bound,
+    a_lease_with_no_keyed_run_is_costed_at_its_bound,
+    a_key_with_no_p90_leaves_the_lease_at_its_bound,
+    several_keyed_runs_cost_the_lease_at_the_largest_p90,
+    an_estimate_beyond_the_bound_is_cut_to_the_bound,
+    the_estimate_counts_from_the_start_of_the_lease,
+    with_no_source_of_lives_a_keyed_run_changes_nothing,
+    a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known_tail,
+    without_a_source_of_lives_a_saturated_end_stays_a_far_bound,
+    a_lease_put_back_twice_keeps_one_bound_and_its_stop_counts_once,
+);
+
+/// The tests of the drain cost of a lease put back from the lease file, under
+/// `--placement registry` alone until js-sched's engine is told of such a lease
+/// (komira-ai/jobscheduler#778).
+mod registry_only {
+    use super::support::Placement;
+
+    #[test]
+    fn a_restored_lease_is_costed_from_the_start_the_lease_file_records() {
+        super::a_restored_lease_is_costed_from_the_start_the_lease_file_records(
+            Placement::Registry,
+        );
+    }
+
+    #[test]
+    fn a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound() {
+        super::a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound(
+            Placement::Registry,
+        );
+    }
+
+    #[test]
+    fn without_a_source_of_lives_a_restored_lease_counts_as_ending_now() {
+        super::without_a_source_of_lives_a_restored_lease_counts_as_ending_now(Placement::Registry);
+    }
 }

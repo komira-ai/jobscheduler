@@ -14,9 +14,10 @@
 use js_agent_wire::Taint;
 pub use js_update_hook::{
     Clock, Gate, Link, NoGate, PortError, SYSTEMCTL, SystemClock, SystemLink, SystemUnits,
-    UnitState, Units, read_link, swap_link,
+    UnitState, Units, read_link,
 };
 
+use crate::CredentialFile;
 use crate::lifecycle::StateRoot;
 
 // The lease server's own-host routes are not the hook's alone: `js-agent cordon` calls them too,
@@ -25,7 +26,8 @@ pub use crate::own_host::{
     CordonView, Cordoned, HostReading, Lease, LeaseError, MAX_CORDON_SECS, Uncordoned,
 };
 
-/// The agent's state root, read only: the taint marker and the records of owed checks.
+/// The agent's state root, read only: the taint marker, the records of owed checks and whether
+/// it holds a host credential.
 ///
 /// The agent runs as root on the crun unit, so the root hook can open its state root.
 pub trait StateView {
@@ -37,6 +39,11 @@ pub trait StateView {
     /// # Errors
     /// The state root could not be listed.
     fn owed(&self) -> Result<Vec<String>, PortError>;
+
+    /// Whether the state root holds a usable `host-credential`: the agent sends it in place of
+    /// a join token, so a host that has one needs no token file. A credential file that cannot
+    /// be read, or holds no credential, is not one.
+    fn has_credential(&self) -> bool;
 }
 
 impl StateView for StateRoot {
@@ -46,6 +53,12 @@ impl StateView for StateRoot {
 
     fn owed(&self) -> Result<Vec<String>, PortError> {
         StateRoot::owed(self).map_err(PortError::from)
+    }
+
+    fn has_credential(&self) -> bool {
+        CredentialFile::in_dir(self.path())
+            .load()
+            .is_ok_and(|loaded| loaded.is_some())
     }
 }
 

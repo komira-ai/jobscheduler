@@ -101,7 +101,7 @@ jobs:
           target/release/js-mac-provision agent-plist --server SET-THE-SERVER --pool default > inputs/agent.plist
           target/release/js-mac-provision session-plist --daemon-requirement SET-THE-DAEMON-REQUIREMENT --socket-group SET-THE-SOCKET-GROUP > inputs/session.plist
           plutil -lint inputs/agent.plist inputs/session.plist
-          cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --declaration packaging/js-agent-macos/updater.toml --out stage
+          cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --out stage
       - name: Build the package
         run: |
           set -euo pipefail

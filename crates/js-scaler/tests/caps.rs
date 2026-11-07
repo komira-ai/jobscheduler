@@ -34,6 +34,7 @@ fn orphan(id: &str) -> Held {
         offer: "a10".to_owned(),
         zone: Some("z1".to_owned()),
         status: HostStatus::Active,
+        ends_unix_seconds: None,
     }
 }
 

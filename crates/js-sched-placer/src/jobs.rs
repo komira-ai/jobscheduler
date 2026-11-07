@@ -307,6 +307,8 @@ impl Engine {
         (room, capable): (&BTreeSet<HostId>, &BTreeSet<&HostId>),
         now: FarmTime,
     ) -> Option<HostId> {
+        // The whole-node requests are placed first, numbered in their own term.
+        self.whole_tick(now);
         let operation = self.sched.next_operation();
         self.sched
             .recover(JOB_TERM, operation, operation.0, Vec::new());

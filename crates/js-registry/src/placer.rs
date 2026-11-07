@@ -4,10 +4,15 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::Phase;
+use js_lease::Timestamp;
 use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostId, LeaseId, Shape};
+use js_types::{HostId, LeaseId, RequestId, Shape};
+
+use crate::WholeNodeConfig;
+use crate::whole::requests::{Exclusion, NotReady, RequestRecord};
+use crate::whole::reserve::Reservation;
 
 /// What the registry knows of the host a probe ([`js_types::Request::probe_host`]) names,
 /// for [`Placer::admit_probe`]. Facts only: the rule that judges them is the placer's.
@@ -29,6 +34,92 @@ pub struct ProbeHost {
 /// The hosts a waiting whole-node request has set aside, each with how long until the end
 /// of its tail as the mark took it: zero once that is past, `None` when it is not known.
 pub type MarkedTails = BTreeMap<HostId, Option<Duration>>;
+
+/// How the registry stands a host for the whole-node queue ([`WholeHost`]), the first that
+/// applies in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// It reported a taint: it holds no request until an operator deals with it.
+    Tainted,
+    /// It is being scaled away: it holds no request.
+    Leaving,
+    /// It has not been heard within the pool's grace (or never, since it was seated): it
+    /// may come back, and holds no request until it does.
+    Lost,
+    /// It is live and an operator's cordon has not lapsed: it takes no start until then,
+    /// and may still be set aside for a request, as a busy host may.
+    Cordoned,
+    /// It is live: it may hold a request.
+    Live,
+}
+
+/// A host the registry lists, as the whole-node queue reads it ([`WholeRound`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WholeHost {
+    /// The host.
+    pub id: HostId,
+    /// How the registry stands it.
+    pub standing: Standing,
+    /// Whether the registry would book a whole-node lease on it now: live, serving, clean,
+    /// not cordoned, staying, clear of any whole-node lease, and with no lease or run on it.
+    pub open: bool,
+}
+
+/// A whole-node request on the registry's wait list that has been presented since the
+/// registry started, as the whole-node queue reads it ([`WholeRound`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingWhole {
+    /// The request.
+    pub id: RequestId,
+    /// The longest its lease may run.
+    pub max_wall: Duration,
+    /// When it was first presented: its place on the wait list and the start of its
+    /// `drain_after`.
+    pub since: Timestamp,
+    /// The drain give-ups the registry holds for it (put back from the ledger).
+    pub give_ups: u32,
+    /// The hosts left out of its placements after failed prepares, and until when.
+    pub exclusions: BTreeMap<HostId, Exclusion>,
+    /// The host the registry holds set aside for it now: the mark the last round left, or
+    /// one put back from the ledger.
+    pub mark: Option<Reservation>,
+}
+
+/// What the registry hands a placer that runs the whole-node queue, once per pass
+/// ([`Placer::whole_round`]). Built under the registry's lock from its own books.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WholeRound {
+    /// The pool's whole-node settings.
+    pub settings: WholeNodeConfig,
+    /// The presented requests of the wait list, in its order: first presentation first.
+    pub waiting: Vec<WaitingWhole>,
+    /// Every host the registry lists, in host id order.
+    pub hosts: Vec<WholeHost>,
+    /// The hosts set aside for requests on the wait list that have not been presented since
+    /// a restart (marks put back from the ledger), with the time left until each one's
+    /// tail ends: no other request may take them.
+    pub outside: MarkedTails,
+    /// For each lease booked now that has one, the P90 of the wall minutes of the profile
+    /// of its keyed runs that lasts longest (the registry's source of lives,
+    /// [`crate::Registry::set_lives`]): what the lease is expected to last from its start.
+    /// Empty when no source is set.
+    pub lives: BTreeMap<LeaseId, u32>,
+}
+
+/// A committed whole-node lease whose prepare failed, as the registry hands it to a placer
+/// that keeps the whole-node queue ([`Placer::prepare_failed`]): what the row of the cause
+/// (`whole/reasons.rs`) does to the host for the request, and what its terminal refusal
+/// would name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareFailure {
+    /// How long the host is left out of the request's placements: until `reserve_backoff`
+    /// after the failure, or for the request's life. `None` when the row taints the host
+    /// instead, which keeps it from every request.
+    pub exclusion: Option<Exclusion>,
+    /// The code (`prepare-timeout` for a deadline that passed) and the agent's detail, as
+    /// received.
+    pub not_ready: NotReady,
+}
 
 /// Picks the host a start books among the hosts that could take it.
 ///
@@ -143,5 +234,107 @@ pub trait Placer: Send + Sync {
     fn holds_work_on(&self, host: &HostId) -> bool {
         let _ = host;
         false
+    }
+
+    /// Runs one pass of the whole-node queue in place of the registry's own, for a placer
+    /// that keeps the queue itself: the hosts set aside for the presented requests of
+    /// `round` after the pass, each with when it was set aside, its deadline, whether it
+    /// was quiet (`assigned`) and the end of its tail. The registry shows them as its
+    /// reservations and holds each host for its request alone (a start of a class that
+    /// shares a host is still shown it, as backfill), keeping the marks of requests not yet
+    /// presented as they are. A request's next start is then shown the host set aside for
+    /// it, and the placer books it there ([`Placer::pick`]) once the host is quiet. A
+    /// request that has left the wait list is not in `round`: the placer lets it go.
+    /// Asked under the registry's lock at every pass: each tick and each start.
+    ///
+    /// The default, `None`, keeps no queue: the registry runs its own pass.
+    fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
+        let _ = round;
+        None
+    }
+
+    /// Whether the prepare of `lease`, a whole-node lease committed on its host and not
+    /// reported ready, has passed its deadline: `Some` for a lease the placer committed
+    /// from its whole-node queue (it keeps the commit time and `prepare_timeout`), `None`
+    /// for any other, whose deadline the registry keeps. Asked under the registry's lock
+    /// as the lease table's tick reads the pending leases, never at a heartbeat, so a ready
+    /// report that arrives before that tick wins. The default, `None`, keeps no deadline.
+    fn prepare_overdue(&self, lease: &LeaseId) -> Option<bool> {
+        let _ = lease;
+        None
+    }
+
+    /// The agent reported `lease` ready on a clean host committed to it: the lease's
+    /// request is placed, so its failed prepares, bars and give-ups are let go. Told under
+    /// the registry's lock, at every heartbeat that carries the report. The default does
+    /// nothing.
+    fn prepare_ready(&self, lease: &LeaseId) {
+        let _ = lease;
+    }
+
+    /// The host of `lease`, ready, said hello again: its preparation is void, and the agent
+    /// has a whole `prepare_timeout` from now to report it ready again (the registry's
+    /// `Ready` turned `Committed`). Told under the registry's lock. The default does
+    /// nothing.
+    fn prepare_again(&self, lease: &LeaseId) {
+        let _ = lease;
+    }
+
+    /// The prepare of `lease`, committed and not ready, failed as `failure` says (a typed
+    /// refusal of the agent, or the deadline passed). `true` when the placer keeps the
+    /// lease's request: it counts the failure toward `max_replace`, keeps the host from the
+    /// request as `failure` says, and lets the lease go; the registry then counts nothing
+    /// itself. `false` for a lease it does not keep, which the registry counts. Either way
+    /// the registry ends the lease (its runs, the host's restore and taint, the book).
+    /// Told under the registry's lock. The default, `false`, keeps no request.
+    fn prepare_failed(&self, lease: &LeaseId, failure: &PrepareFailure) -> bool {
+        let _ = (lease, failure);
+        false
+    }
+
+    /// A whole-node start of request `id`: `true` once for a request that used up
+    /// `max_replace` (its start is then refused `ExclusiveNotReady`, and its record and
+    /// bars are let go, so the start after it is a fresh request); `false` for any other,
+    /// whose record, if it has one, is marked as in use now. Asked under the registry's
+    /// lock before the request is presented. The default, `false`, keeps no record.
+    fn whole_start(&self, id: &RequestId) -> bool {
+        let _ = id;
+        false
+    }
+
+    /// What the placer keeps of request `id` between its placements: its failed prepares,
+    /// give-ups, the hosts left out of its placements, the last failure and whether it is
+    /// terminal. `None` for a request it keeps no record of. The default keeps none.
+    fn whole_record(&self, id: &RequestId) -> Option<RequestRecord> {
+        let _ = id;
+        None
+    }
+
+    /// Request `id` was cancelled while it waited (the lease that presented it was stopped):
+    /// it leaves no trace, so the id names a fresh request if it is used again; its record
+    /// and bars go. Told under the registry's lock. The default does nothing.
+    fn whole_forget(&self, id: &RequestId) {
+        let _ = id;
+    }
+
+    /// Drops the records of the requests that have no committed lease and have not
+    /// started or failed for `horizon` (the registry's idle horizon), with their bars,
+    /// those for life included. Told under the registry's lock whenever it locks. The
+    /// default does nothing.
+    fn whole_sweep(&self, horizon: Duration) {
+        let _ = horizon;
+    }
+
+    /// How many holds each request of the whole-node queue this placer keeps
+    /// ([`Placer::whole_round`]) has given up at their deadline; a request that gave none
+    /// up may be left out. The registry raises its record of each request to that count
+    /// (what [`crate::Registry::request_record`], the history of the request and the
+    /// reservation ledger read), as its own pass counts the give-ups it makes. The hosts a
+    /// give-up backs the request off stay the placer's. Asked under the registry's lock,
+    /// right after [`Placer::whole_round`] answered.
+    ///
+    /// The default, empty, is a placer that gives nothing up.
+    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
+        BTreeMap::new()
     }
 }

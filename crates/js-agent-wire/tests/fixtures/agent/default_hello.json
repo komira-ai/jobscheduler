@@ -1,0 +1,30 @@
+{
+  "agent_version": "0.1.0",
+  "capabilities": {
+    "arch": "arm64",
+    "os": "macos"
+  },
+  "gpu_devices": [],
+  "held": [],
+  "host_id": "build-1",
+  "labels": {
+    "rack": "r1"
+  },
+  "phase": "serving",
+  "pool": "macs",
+  "protocol": {
+    "max": 1,
+    "min": 1
+  },
+  "shape": {
+    "accelerator": {
+      "count": 1,
+      "model": "apple-m",
+      "vendor": "apple"
+    },
+    "cpu_millis": 10000,
+    "gpu_class": "apple-m",
+    "gpus": 1,
+    "memory_bytes": 17179869184
+  }
+}

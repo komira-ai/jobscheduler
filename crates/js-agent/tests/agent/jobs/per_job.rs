@@ -43,6 +43,7 @@ fn job_starts(jobs: &[&str]) -> HeartbeatReply {
                 network: Default::default(),
                 ports: Vec::new(),
                 log_sink: None,
+                kind: Default::default(),
             }))
         })
         .collect();

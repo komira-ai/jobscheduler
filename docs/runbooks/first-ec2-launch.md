@@ -34,7 +34,7 @@ images = { arm64 = "<ami id>", x86_64 = "<ami id>" }     # at least one architec
 
 The kind refuses a key it does not know, so a mistyped key stops the start. There is no key for a
 credential: a `secret_access_key`, `api_key` or the like is refused naming the key. **CI**
-(`kind_ec2_builds_and_gce_is_still_refused`). An image id is `ami-` followed by 8 to 17 lower-case
+(`kind_ec2_builds_and_refuses_an_unknown_key`). An image id is `ami-` followed by 8 to 17 lower-case
 hexadecimal digits; `aarch64` is accepted as another spelling of `arm64`. **CI** (the `images_config_is_validated_at_parse`
 test of `js-provider-ec2`).
 
@@ -71,6 +71,8 @@ The credential is allowed these actions and nothing else on the account:
 the volume); give them for the one image and the one subnet of the run. **LIVE**.
 
 ### 1.4 Pre-checks
+
+**LIVE**, the provider alone: `docs/runbooks/live-conformance.md` runs the provider's live conformance suite (a dry run by default; it spends only with `--spend --plan-hash <hash>`, which needs the same go as the launch below) and refreshes the provider's response fixtures from what the cloud answered. Run its dry run before the pre-checks below.
 
 | # | item | pass criterion | mark |
 |---|---|---|---|
@@ -145,5 +147,6 @@ that is not `terminated`, `/v1/pools` shows `instances.n` 0, and `orphans` and `
 
 One instance of one type in one region and one zone. It does not prove spot or a Capacity Block, the second
 architecture, a launch against the quota edge, a restart of the scheduler while the instance is up
-(**CI** only, with fakes), or the signed instance identity: the agent sends none yet, so a host is matched
-by its name and instance id.
+(**CI** only, with fakes), or the signed instance identity: an agent sends one only when started with
+`--identity-source aws`, and the lease server does not check it at the hello yet, so a host is matched by its
+name and instance id.

@@ -371,10 +371,9 @@ fn beside(scratch: &Scratch, table: &str) -> String {
 }
 
 /// Asserts that each platform kind that is planned and not built is refused as `not
-/// built` naming the platform, and each such machine provider kind likewise; that a kind
-/// that is neither is refused as `unknown` with the known kinds; and that the two words
-/// never stand for each other. It catches a kind silently accepted, and unknown and
-/// unbuilt conflated.
+/// built` naming the platform; that a platform or machine provider kind that is not a kind
+/// is refused as `unknown` with the known kinds; and that the two words never stand for
+/// each other. It catches a kind silently accepted, and unknown and unbuilt conflated.
 #[test]
 fn a_platform_kind_not_built_is_refused() {
     let scratch = Scratch::new("platform_kinds");
@@ -385,11 +384,6 @@ fn a_platform_kind_not_built_is_refused() {
             format!("platform \"later\": kind: {kind:?} is not built in this version")
         );
     }
-    let table = "[[machine_provider]]\nname = \"cloud\"\nkind = \"gce\"\n";
-    assert_eq!(
-        refused(&scratch, &beside(&scratch, table)),
-        "machine_provider \"cloud\": kind: \"gce\" is not built in this version"
-    );
     let table = "[[platform]]\nname = \"later\"\nkind = \"nonsense\"\n";
     assert_eq!(
         refused(&scratch, &beside(&scratch, table)),
@@ -398,7 +392,7 @@ fn a_platform_kind_not_built_is_refused() {
     let table = "[[machine_provider]]\nname = \"cloud\"\nkind = \"nonsense\"\n";
     assert_eq!(
         refused(&scratch, &beside(&scratch, table)),
-        "machine_provider \"cloud\": kind: unknown machine provider kind \"nonsense\"; known: any-mode, broken-floor, ec2, lambdalabs, listed, static"
+        "machine_provider \"cloud\": kind: unknown machine provider kind \"nonsense\"; known: any-mode, broken-floor, ec2, gce, lambdalabs, listed, static"
     );
 }
 
@@ -449,11 +443,11 @@ fn through_standard_kinds(scratch: &Scratch, tables: &[String]) -> Result<Resolv
 
 /// Asserts that a `[[machine_provider]]` of kind `ec2` with a region and an image is built
 /// by the kinds the server ships and launches machines, that a key the kind does not know
-/// (a credential among them) is refused naming the key and the known ones, and that `gce`
-/// is still refused as not built. It catches an `ec2` kind that is not registered, or one
-/// still on the list of kinds not built, and a credential key that is read as nothing.
+/// (a credential among them) is refused naming the key and the known ones. It catches an
+/// `ec2` kind that is not registered, or one still on the list of kinds not built, and a
+/// credential key that is read as nothing.
 #[test]
-fn kind_ec2_builds_and_gce_is_still_refused() {
+fn kind_ec2_builds_and_refuses_an_unknown_key() {
     let scratch = Scratch::new("platform_ec2");
     let built = match through_standard_kinds(&scratch, &ec2_tables("")) {
         Ok(resolved) => resolved,
@@ -474,18 +468,86 @@ fn kind_ec2_builds_and_gce_is_still_refused() {
         said,
         "machine_provider \"cloud\": secret_access_key: unknown field; known: region, purchase, images, allowed_instance_types, capacity_block_hours"
     );
-    let gce = vec![
+}
+
+/// The `gce` machine provider `cloud` with the project, the zones, the network, the
+/// subnetwork and the one image the kind needs, then the platform `ours` naming `rack` and
+/// it.
+fn gce_tables(extra: &str) -> Vec<String> {
+    vec![
         rack(),
-        "[[machine_provider]]\nname = \"cloud\"\nkind = \"gce\"\n".to_owned(),
+        format!(
+            "[[machine_provider]]\nname = \"cloud\"\nkind = \"gce\"\nproject = \"sample-project\"\n\
+             zones = [\"region-one-a\"]\nnetwork = \"global/networks/sample-net\"\n\
+             subnetwork = \"regions/region-one/subnetworks/sample-subnet\"\n\
+             images = {{ x86_64 = \"projects/sample-project/global/images/sample-image\" }}\n{extra}"
+        ),
         platform("ours", &["rack", "cloud"]),
-    ];
+    ]
+}
+
+/// Asserts that a `[[machine_provider]]` of kind `gce` with a project, zones, a network, a
+/// subnetwork and an image is built by the kinds the server ships and launches machines,
+/// that a key the kind does not know (a credential among them) is refused naming the key
+/// and the known ones, and that `kubernetes`, `cloud_run` and `ecs` are still refused as
+/// not built. Building the kind through the standard kinds makes the real client, whose
+/// constructor reads `GOOGLE_APPLICATION_CREDENTIALS` and, when it is unset, takes the
+/// metadata server's credential without a call, as the `ec2` kind's test reads `AWS_*`. It
+/// catches a `gce` kind that is not registered, or one still on the list of kinds not
+/// built, and a credential key that is read as nothing.
+#[test]
+fn kind_gce_builds_and_only_the_platform_kinds_are_refused() {
+    let scratch = Scratch::new("platform_gce");
+    let built = match through_standard_kinds(&scratch, &gce_tables("")) {
+        Ok(resolved) => resolved,
+        Err(err) => panic!("the gce kind should build: {err}"),
+    };
+    let cloud = &built.machine_providers[1];
+    assert_eq!((cloud.name.as_str(), cloud.kind.as_str()), ("cloud", "gce"));
+    assert!(cloud.launches());
     assert_eq!(
-        through_standard_kinds(&scratch, &gce)
+        built.pool("gpu").unwrap().platforms,
+        vec![PlatformId::new("ours")]
+    );
+    let said = through_standard_kinds(&scratch, &gce_tables("private_key = \"x\"\n"))
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        said,
+        "machine_provider \"cloud\": private_key: unknown field; known: project, zones, purchase, network, subnetwork, images, allowed_machine_types"
+    );
+    for kind in ["kubernetes", "cloud_run", "ecs"] {
+        let table = format!("[[platform]]\nname = \"later\"\nkind = {}\n", quote(kind));
+        assert_eq!(
+            refused(&scratch, &beside(&scratch, &table)),
+            format!("platform \"later\": kind: {kind:?} is not built in this version")
+        );
+    }
+}
+
+/// Asserts that a pool on a `gce` machine provider is refused without `idle`, `max_age` and
+/// `min_host_lifetime`, as a pool with GPUs is, though the kind's floor reports no GPU. It
+/// catches a `gce` pool that can launch GPU instances with no bound on how long a host
+/// lives.
+#[test]
+fn gce_pool_needs_the_lifetime_keys() {
+    let scratch = Scratch::new("platform_gce_lifetime");
+    for key in ["idle", "max_age", "min_host_lifetime"] {
+        let pool = on(&["ours"], &scratch).without(key);
+        let text = doc(&scratch, &gce_tables(""), &[&pool]);
+        let path = scratch.write("js.toml", &text, 0o644);
+        let said = Config::resolve_file(&path, &Kinds::standard(), &OwnerOnlyFiles, clock())
             .err()
             .unwrap()
-            .to_string(),
-        "machine_provider \"cloud\": kind: \"gce\" is not built in this version"
-    );
+            .to_string();
+        assert_eq!(
+            said,
+            format!(
+                "pool \"gpu\": {key}: required of a pool with accelerators: an idle host costs money by the hour, so the file names how long it may live"
+            )
+        );
+    }
 }
 
 /// Asserts the names and the other keys of the two tables: a name missing, outside the

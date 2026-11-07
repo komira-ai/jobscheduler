@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>Unsupported</Code>
+            <Message>The requested configuration is currently not supported. Please check the documentation for supported configurations.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000033</RequestID>
+</Response>

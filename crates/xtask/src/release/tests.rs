@@ -201,8 +201,15 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         ".cargo/config.toml",
         ".cargo/config",
         ".cargo/other",
-        // The js-agent archive carries the host updater's declaration as it is.
-        "packaging/js-agent/updater.d/js-agent.toml",
+        // The js-lease-server archives carry the host updater's declaration as it is.
+        "packaging/js-lease-server/updater.d/js-lease-server.toml",
+        // The files the hostkeeper packages of js-agent are made of are compiled into xtask.
+        "packaging/js-agent/hostkeeper/manifest.toml.in",
+        "packaging/js-agent/hostkeeper/units/js-agent-crun.service",
+        "packaging/js-agent/hostkeeper/units/js-agent-crun-gpu.service",
+        "packaging/js-agent/hostkeeper/files/tmpfiles.conf",
+        "packaging/js-agent-macos/hostkeeper/manifest.toml.in",
+        "packaging/js-agent-macos/hostkeeper/units/js-agent.plist",
     ] {
         assert!(is_shipped(path, &shipped), "{path} ships");
     }
@@ -224,8 +231,16 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "coverage-baseline",
         "deny.toml",
         "packaging/js-agent/js-agent-crun.service",
+        "packaging/js-agent/updater.d/js-agent.toml",
         "packaging/js-agent-macos/updater.toml",
         "packaging/js-agent/updater.d/other.toml",
+        "packaging/js-lease-server/updater.d/js-agent.toml",
+        // Markdown beside the package files is not compiled in; a directory that only starts
+        // like theirs is not theirs.
+        "packaging/js-agent/hostkeeper/README.md",
+        "packaging/js-agent-macos/hostkeeper/README.md",
+        "packaging/js-agent/hostkeeper-notes/manifest.toml.in",
+        "packaging/js-agent/hostkeeper",
         "crates/js-cli/Cargo.lock",
     ] {
         assert!(!is_shipped(path, &shipped), "{path} does not ship");
@@ -537,7 +552,7 @@ fn every_workspace_package_in_the_lock_has_the_workspace_version() {
     }
     // And a stamp leaves no workspace package behind at the old version, and every package
     // from a source as it was: a git dependency that happens to be at the workspace's version
-    // (the update-hook dev-dependency) is not the workspace's to stamp.
+    // (a hostkeeper crate pinned by git) is not the workspace's to stamp.
     let stamped = set_lock_version(&lock, version, v(99, 0, 0));
     let packages = |lock: &str| -> (Vec<String>, Vec<String>) {
         lock.split("[[package]]")

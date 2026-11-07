@@ -13,14 +13,48 @@ js-elastic = { path = "../js-elastic" }
 # `ExecMode`, which an offer states, is defined in js-types and re-exported by neither
 # js-caps nor js-elastic.
 js-types = { path = "../js-types" }
+# The signature of an identity token and of a service-account assertion is base64url, and
+# a service-account key's PEM body is base64.
+base64.workspace = true
+# The HTTPS transport of the port and the wall clock, shared with the object store and the
+# EC2 provider.
+js-logstore = { path = "../js-logstore" }
+# Signs the service-account assertion and verifies the RS256 signature of an identity
+# token.
+ring.workspace = true
+# The JSON answers and requests of the Compute Engine and Cloud Billing APIs.
+serde_json.workspace = true
+# The request id of an insert and a long label value are hashes of the scheduler and the
+# acquire.
+sha2.workspace = true
 thiserror.workspace = true
-# The warnings of a type that passes through or has no offer.
+# The catalog runs its blocking calls on tokio's blocking pool.
+tokio = { workspace = true, features = ["rt"] }
+# The `gce` kind's table.
+toml.workspace = true
+# The warnings of a type that passes through or has no offer, and of the launch side.
 tracing.workspace = true
 
 [dev-dependencies]
+# The provider contract's conformance suite (tests/offline/conformance.rs).
+js-elastic = { path = "../js-elastic", features = ["conformance"] }
+# The catalog future is driven on a multi-thread runtime.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 # The tests install a subscriber that takes every event, so the fields of each log line
 # are evaluated under test.
 tracing-subscriber.workspace = true
+
+[features]
+# Only builds the live conformance target (`tests/live.rs`). It enables no code in the
+# library: the target is run by hand against the real cloud (docs/runbooks/live-conformance.md)
+# and is never part of a default build or test run.
+live = []
+
+[[test]]
+name = "live"
+path = "tests/live.rs"
+harness = false
+required-features = ["live"]
 
 [lints]
 workspace = true

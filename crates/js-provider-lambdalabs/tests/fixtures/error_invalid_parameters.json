@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/invalid-parameters",
+    "message": "Invalid parameters. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-invalid_parameters"
+  }
+}

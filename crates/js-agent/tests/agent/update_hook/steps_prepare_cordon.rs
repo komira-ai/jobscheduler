@@ -103,7 +103,7 @@ fn a_renewal_never_runs_past_the_cap_and_stops_when_the_cap_is_reached() {
             expires_ms: START + 25_000
         }
     );
-    assert_eq!(validate(&record, &rig.declaration, &rig.params), Ok(()));
+    assert_eq!(validate(&record, &rig.params), Ok(()));
 }
 
 #[test]
@@ -327,7 +327,7 @@ fn a_blip_on_the_final_uncordon_leaves_the_recorded_cordon_with_its_expiry() {
     assert!(record.cordon.placed && !record.cordon.provisional);
     assert_eq!(record.cordon.first_ms, START);
     assert_eq!(Some(record.cordon.expires_ms), rig.cordon_expiry());
-    assert_eq!(validate(&record, &rig.declaration, &rig.params), Ok(()));
+    assert_eq!(validate(&record, &rig.params), Ok(()));
 }
 
 #[test]

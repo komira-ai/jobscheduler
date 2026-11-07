@@ -82,6 +82,7 @@ fn held(machine: &Machine) -> Held {
         offer: String::new(),
         zone: None,
         status: HostStatus::Active,
+        ends_unix_seconds: None,
     }
 }
 
@@ -147,6 +148,7 @@ impl CapacityProvider for Registered {
                     offer: request.offer.id.clone(),
                     zone: None,
                     status: HostStatus::Booting,
+                    ends_unix_seconds: None,
                 },
                 extras: Vec::new(),
             },

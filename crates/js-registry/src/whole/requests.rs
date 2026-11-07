@@ -24,6 +24,12 @@
 //! has none) and the records of requests without an id, which are told apart by their
 //! content and forgotten by a restart.
 //!
+//! Under `--placement js-sched` the engine keeps all of this for a request with an id that it
+//! commits from its queue (`js-sched-placer`'s `engine::prepare`), through
+//! [`crate::Placer::prepare_failed`] and its siblings: the registry then keeps only the lease
+//! that holds the request's key here, and the horizon. The engine's counts and bars are in
+//! its memory only, not in the ledger, so a restart under that placement forgets them.
+//!
 //! [`Registry::not_ready`]: crate::Registry::not_ready
 
 use std::collections::BTreeMap;
@@ -80,7 +86,8 @@ pub enum Exclusion {
 }
 
 impl Exclusion {
-    fn holds(&self, now: Timestamp) -> bool {
+    /// Whether the host is still left out at `now`.
+    pub(crate) fn holds(&self, now: Timestamp) -> bool {
         match self {
             Self::Until(end) => now < *end,
             Self::ForLife => true,
@@ -294,6 +301,16 @@ impl Requests {
         record.exclude(host, Exclusion::Until(backoff_end));
     }
 
+    /// Raises the drain give-ups counted for the request under `key` to `count` at `now`,
+    /// when that is more than are counted: the give-ups of a placer that keeps the
+    /// whole-node queue ([`crate::Placer::whole_give_ups`]). No host is excluded here: a
+    /// give-up's back-off stays the placer's.
+    pub(crate) fn raise_give_ups(&mut self, key: RequestKey, count: u32, now: Timestamp) {
+        if count > self.give_ups(&key) {
+            self.entry(key, now).give_ups = count;
+        }
+    }
+
     /// The drain give-ups counted for the request under `key`.
     pub(crate) fn give_ups(&self, key: &RequestKey) -> u32 {
         self.record(key).map_or(0, |record| record.give_ups)
@@ -313,12 +330,7 @@ impl Requests {
                 record.prepare_failures = record.prepare_failures.saturating_add(1);
             }
         }
-        let barred = match row.host {
-            HostEffect::ExcludeForBackoff => Some(Exclusion::Until(ctx.backoff_end)),
-            HostEffect::ExcludeForLife => Some(Exclusion::ForLife),
-            HostEffect::Taint => None,
-        };
-        barred
+        exclusion(cause, ctx.backoff_end)
             .into_iter()
             .for_each(|exclusion| record.exclude(ctx.host, exclusion));
         record.terminal = record.prepare_failures >= ctx.max_replace;
@@ -326,6 +338,17 @@ impl Requests {
             code: cause.code(),
             detail: detail.to_string(),
         });
+    }
+}
+
+/// How long the row of `cause` leaves the failing host out of the request's placements, a
+/// back-off ending at `backoff_end` or the request's life; `None` for a row that taints the
+/// host instead.
+pub(crate) fn exclusion(cause: Cause, backoff_end: Timestamp) -> Option<Exclusion> {
+    match cause.row().host {
+        HostEffect::ExcludeForBackoff => Some(Exclusion::Until(backoff_end)),
+        HostEffect::ExcludeForLife => Some(Exclusion::ForLife),
+        HostEffect::Taint => None,
     }
 }
 

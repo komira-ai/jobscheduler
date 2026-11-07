@@ -40,6 +40,7 @@ fn spec(kind: AgentKind, per_job: Option<&str>) -> AgentSpec {
         labels: BTreeMap::new(),
         hello_interval: Duration::from_secs(1),
         kind,
+        instance: None,
     }
 }
 
@@ -84,6 +85,7 @@ fn start_of(job: &str, allocation: &str, command: &[&str]) -> Command {
         network: Default::default(),
         ports: Vec::new(),
         log_sink: None,
+        kind: Default::default(),
     }))
 }
 
