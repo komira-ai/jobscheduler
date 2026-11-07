@@ -71,7 +71,9 @@ struct State {
     entered: u32,
     /// The calls, in order: `create r1`, `stop r1`, `remove r1`, `list`.
     log: Vec<String>,
-    /// The run id and isolation of each create, in order.
+    /// The run id and isolation of each create, in order. Kept on Linux only: its one
+    /// reader, `crun_gpu_hello`, is a Linux-only module.
+    #[cfg(target_os = "linux")]
     isolations: Vec<(String, js_agent_wire::Isolation)>,
     /// The call that panics, once.
     panic_at: Option<&'static str>,
@@ -125,8 +127,8 @@ impl World {
         self.lock().containers.len()
     }
 
-    /// The run id and isolation of each create, in order. Read by the crun tests alone
-    /// (crun_gpu_hello.rs), which are Linux only.
+    /// The run id and isolation of each create, in order. Linux only, like its caller
+    /// `crun_gpu_hello`.
     #[cfg(target_os = "linux")]
     pub fn isolations(&self) -> Vec<(String, js_agent_wire::Isolation)> {
         self.lock().isolations.clone()
@@ -291,6 +293,7 @@ impl Runtime for WorldRuntime {
             }
         }
         state.log.push(format!("create {}", spec.run_id));
+        #[cfg(target_os = "linux")]
         state.isolations.push((spec.run_id.clone(), spec.isolation));
         if state.fails("create") {
             return Err(failed("create"));
