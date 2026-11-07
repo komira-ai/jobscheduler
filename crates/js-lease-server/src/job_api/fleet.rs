@@ -11,8 +11,8 @@
 //! service holds no lease table or registry of its own:
 //!
 //! - [`Hosts`], over the server's shared state ([`Shared`]): the listing that
-//!   `GET /v1/hosts` writes ([`hosts::listing`], the table's lock taken and dropped before the
-//!   registry's), and the registry's cordon of a host, saved before it is acknowledged.
+//!   `GET /v1/hosts` writes ([`hosts::listing`], which reads the pool's hosts without the
+//!   table's lock: the pool's lock taken and dropped before the registry's), and the registry's cordon of a host, saved before it is acknowledged.
 //! - [`Pools`], over the status of the pools ([`PoolStatus`]): what `GET /v1/pools` writes,
 //!   mapped here field by field, so nothing but the fields named below leaves the server.
 //! - [`History`], twice: over the usage sink ([`SinkHistory`]), the ended bookings of leases
@@ -45,8 +45,8 @@ use js_proto::v1::{
     ListHostsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
     ListProvidersResponse, UncordonHostRequest, UncordonHostResponse,
 };
-use js_provider::Held;
 use js_registry::{HostMark, HostState};
+use js_types::Held;
 use js_types::HostId;
 use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use tonic::{Request, Response, Status};

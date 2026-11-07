@@ -1,6 +1,4 @@
-use js_types::{HostId, LeaseId, MemoryHeadroom, Shape};
-
-use crate::RefusalCode;
+use js_types::{HostId, RefusalCode};
 
 /// The pool calls that can answer Unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -60,25 +58,6 @@ pub enum StopAck {
     },
     /// No answer. The stop may or may not have taken effect.
     Unknown,
-}
-
-/// One host of a pool's capacity and who holds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostCapacity {
-    /// The host.
-    pub host: HostId,
-    /// What the host offers to be booked: its memory is already cut to the pool's
-    /// `memory_schedulable_percent`.
-    pub shape: Shape,
-    /// The memory the operator configured for the host, the percent of it that is booked
-    /// and what that comes to (the memory of `shape`).
-    pub memory: MemoryHeadroom,
-    /// The lease booked first on the host, or `None` when it is free. A host that books
-    /// many leases has more: read [`HostCapacity::leases`] to see them all.
-    pub leased_to: Option<LeaseId>,
-    /// Every lease booked on the host, in the order they were booked. Empty when the host
-    /// is free; `leased_to` is the first of them.
-    pub leases: Vec<LeaseId>,
 }
 
 #[cfg(test)]

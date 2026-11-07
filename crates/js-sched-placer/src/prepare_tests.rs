@@ -7,16 +7,16 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_lease::{ManualClock, Timestamp};
-use js_provider::{Candidate, Held, StartSpec};
 use js_registry::{
     Exclusion, MarkedTails, NotReady, Placer, PrepareFailure, Reservation, Standing, WaitingWhole,
     WholeHost, WholeNodeConfig, WholeRound,
 };
 use js_types::sched::FarmTime;
+use js_types::{Candidate, Held, StartSpec};
 use js_types::{
     HostId, LeaseId, Request as HostRequest, RequestId, ResourceClass, Resources, Shape,
 };
+use js_types::{ManualClock, Timestamp};
 
 use crate::engine::{Engine, Settings};
 use crate::place::SchedPlacer;

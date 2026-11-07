@@ -4,13 +4,13 @@ use js_provider::{Pool, StartSpec};
 use js_types::{LeaseId, Request, RequestId};
 
 use crate::book::{self, Book, Presented, Seen, Step};
-use crate::clock::{Clock, Monotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, SaveError};
 use crate::state::LeaseState;
 use crate::timings::Timings;
 use crate::types::{
     Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, ReservationRecord, Settings, TickReport,
 };
+use crate::{Clock, Monotonic, Timestamp};
 
 /// The lease table over one provider. See the crate docs for the rules.
 ///

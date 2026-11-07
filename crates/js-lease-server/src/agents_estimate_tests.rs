@@ -482,7 +482,7 @@ fn started(
         assemble(config.hosts, config.usage, clock, &config.state_file, None).unwrap();
     let seated = source.provider(&bookings).unwrap();
     assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
-    let provider = BoxedPool(seated.provider);
+    let provider = BoxedPool::new(seated.provider);
     let table = LeaseTable::open(
         provider,
         clock.clone(),

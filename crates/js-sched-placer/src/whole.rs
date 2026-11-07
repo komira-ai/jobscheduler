@@ -63,11 +63,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_lease::Timestamp;
-use js_provider::Candidate;
-use js_provider::StartSpec;
 use js_registry::{Reservation, Standing, WaitingWhole, WholeNodeConfig, WholeRound};
 use js_sched::{Bar, Event, NodePhase, OpState, Request, RestoredMark, RestoredWhole, Scheduler};
+use js_types::Candidate;
+use js_types::StartSpec;
+use js_types::Timestamp;
 use js_types::sched::{
     FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, Resources, WaiterId, WorkKey,
     WorkerId,
