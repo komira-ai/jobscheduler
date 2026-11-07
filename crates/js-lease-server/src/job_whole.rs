@@ -120,6 +120,10 @@ fn deadline(rules: &WholeNodeConfig, now: StoreTime) -> StoreTime {
     now.saturating_add(Duration::from_millis(rules.prepare_timeout_ms))
 }
 
+/// What taints a host in the registry for a refused prepare, answering whether that changed
+/// its taint ([`serve`]).
+pub(crate) type Taints<'a> = dyn Fn(&HostId) -> bool + 'a;
+
 /// Applies what the heartbeat `beat` of a host says to the placed whole-host jobs the host
 /// holds (the rules of the module docs) at `now`, under `rules`. A terminal failed prepare is
 /// told to `metrics`. `taint` taints a host in the registry and answers whether that changed
@@ -128,15 +132,14 @@ fn deadline(rules: &WholeNodeConfig, now: StoreTime) -> StoreTime {
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
-/// the agent reports again.
-/// A job that moved between the read and the commit (a commit answered
+/// the agent reports again. A job that moved between the read and the commit (a commit answered
 /// [`JobStoreError::Stale`]) is such an error too: the heartbeat is answered 500, which writes
 /// nothing more, and the agent's next report is judged against the job as it is then.
 pub(crate) fn serve(
     jobs: &ServerJobs,
     beat: &Beat<'_>,
     (rules, now): (&WholeNodeConfig, StoreTime),
-    (metrics, taint): (&dyn MetricsSink, &dyn Fn(&HostId) -> bool),
+    (metrics, taint): (&dyn MetricsSink, &Taints<'_>),
 ) -> Result<bool, JobStoreError> {
     let mut tainted = false;
     for (allocation, job) in jobs.live_on(beat.host)? {

@@ -211,7 +211,9 @@ fn a_stored_mark_waits_for_its_hello_until_the_server_start_plus_the_grace() {
     let k = heard.tables.whole("k");
     let held = mark(&k, "a", (5_000, 65_000), None);
     let kept = heard.tables.jobs.put_mark(held).unwrap();
-    heard.at(10_000);
+    // Past `drain_after` from the submit (the fake store's clock moves with each commit), and
+    // before `claim_by`.
+    heard.at(12_000);
     heard.pass(Some(&whole), &["a"], &recorder).unwrap();
     assert_eq!(heard.tables.jobs.get_mark(&k.id).unwrap(), Some(kept));
     assert_eq!(heard.placer.engine().whole_jobs.len(), 1);

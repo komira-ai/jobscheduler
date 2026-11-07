@@ -249,7 +249,8 @@ fn the_first_listing_restarts_the_prepare_clock() {
     let fixture = Fixture::new();
     let id = fixture.place("job-w");
     let placed_deadline = fixture.allocation(&id).prepare_deadline;
-    assert_eq!(placed_deadline, Some(fixture.now().saturating_add(PREPARE)));
+    let placed_at = fixture.job(&id).placed_at.unwrap();
+    assert_eq!(placed_deadline, Some(placed_at.saturating_add(PREPARE)));
     fixture.advance(100 * SECOND);
     let host = host();
     let ready = lease(&fixture, &id);

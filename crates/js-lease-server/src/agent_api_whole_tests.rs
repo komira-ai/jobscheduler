@@ -187,9 +187,10 @@ async fn cancel_while_preparing_frees_after_preparing_ends() {
     let job = prepare(&rig, &mut agent, "job-w").await;
     let allocation = rig.allocation(&job);
     assert_eq!(allocation.booked, Booked::WholeHost);
+    let placed_at = rig.job(&job).placed_at.unwrap();
     assert_eq!(
         allocation.prepare_deadline,
-        Some(now(&rig).saturating_add(PREPARE))
+        Some(placed_at.saturating_add(PREPARE))
     );
     assert_eq!(agent.exclusive, Some(lease(&rig, &job)));
 
@@ -413,7 +414,8 @@ async fn a_hello_restarts_the_prepare_of_a_placed_whole_host_job() {
     let (mut rig, mut agent) = served("whole_hello_placed");
     let job = prepare(&rig, &mut agent, "job-w").await;
     let placed = rig.allocation(&job);
-    let first_deadline = now(&rig).saturating_add(PREPARE);
+    let placed_at = rig.job(&job).placed_at.unwrap();
+    let first_deadline = placed_at.saturating_add(PREPARE);
     assert_eq!(placed.prepare_deadline, Some(first_deadline));
 
     // The agent restarts: the host is silent past the grace, then says hello.
