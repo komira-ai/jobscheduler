@@ -37,8 +37,8 @@ use js_scaler::{
     Brake, Cooldown, HelloDimension, LaunchMode, Millis, Phase, Record, Records,
     State as ScalerState,
 };
-use js_sched::failover::PassedOver;
-use js_types::{ExecMode, RequestId};
+use js_sched::failover::{AcquireMemory, PassedOver};
+use js_types::{ExecMode, ProviderId, RequestId};
 use serde::Serialize;
 
 use crate::adapt::SharedClock;
@@ -486,32 +486,60 @@ impl Status {
         now: Millis,
     ) -> ProviderState {
         let id = pool.provider_id();
-        let at = Instant::from_millis(now.as_millis());
         let catalogs = self.catalogs.as_ref();
-        let memory = scaled.map(ScalerState::failover);
-        let passed = memory.into_iter().flat_map(|memory| memory.passed_over(at));
-        let passed = passed.filter(|(key, _)| key.provider == id);
-        let declined = memory.into_iter().flat_map(|memory| memory.declined());
-        let declined = declined.filter(|(_, key, _)| key.provider == id);
-        let records = scaled.map(|seen| &seen.records);
-        let cooldown = records.and_then(|records| records.cooldowns.get(&pool.name));
-        let out = self.scaler.iter().flat_map(Scaler::in_flight);
-        ProviderState {
-            now_ms: now.as_millis(),
+        let seen = scaled.map(|seen| (seen.failover(), &seen.records));
+        let held = Held {
             catalog: catalogs.and_then(|catalogs| catalogs.fetched(&id)),
-            passed_over: passed.map(|(key, until)| (key.clone(), until)).collect(),
-            declined: declined
-                .map(|(request, key, when)| (request.clone(), key.clone(), when))
-                .collect(),
-            brake: records.and_then(|records| records.brake.get(&pool.name).copied()),
-            cooldown: cooldown.copied().filter(|cooldown| cooldown.until > now),
-            in_flight: out.filter(|flight| flight.pool == pool.name).collect(),
-        }
+            seen,
+            out: self.scaler.iter().flat_map(Scaler::in_flight).collect(),
+        };
+        held.of((&id, &pool.name), now)
     }
 
     /// The time the status is read at, for the page.
     pub(crate) fn now(&self) -> Timestamp {
         self.clock.now()
+    }
+}
+
+/// What the status reads for `ListProviders` before it keeps a pool's own: the cached
+/// catalog of the pool's provider, the scaler's failover memory and records as its last
+/// tick left them (`None` without a scaler), and the scaler's launches out.
+struct Held<'a> {
+    catalog: Option<(Instant, usize)>,
+    seen: Option<(&'a AcquireMemory, &'a Records)>,
+    out: Vec<InFlight>,
+}
+
+impl Held<'_> {
+    /// The provider state of the provider `id` of the pool `pool` at `now`: the pass-overs
+    /// and declines of that provider only (the pass-overs that hold at `now`), the brake
+    /// and cool-down of that pool only (the cool-down only while it runs), and the launches
+    /// out for that pool only.
+    fn of(self, (id, pool): (&ProviderId, &str), now: Millis) -> ProviderState {
+        let at = Instant::from_millis(now.as_millis());
+        let memory = self.seen.map(|(memory, _)| memory);
+        let passed = memory.into_iter().flat_map(|memory| memory.passed_over(at));
+        let passed = passed.filter(|(key, _)| key.provider == *id);
+        let declined = memory.into_iter().flat_map(|memory| memory.declined());
+        let declined = declined.filter(|(_, key, _)| key.provider == *id);
+        let records = self.seen.map(|(_, records)| records);
+        let cooldown = records.and_then(|records| records.cooldowns.get(pool));
+        ProviderState {
+            now_ms: now.as_millis(),
+            catalog: self.catalog,
+            passed_over: passed.map(|(key, until)| (key.clone(), until)).collect(),
+            declined: declined
+                .map(|(request, key, when)| (request.clone(), key.clone(), when))
+                .collect(),
+            brake: records.and_then(|records| records.brake.get(pool).copied()),
+            cooldown: cooldown.copied().filter(|cooldown| cooldown.until > now),
+            in_flight: self
+                .out
+                .into_iter()
+                .filter(|flight| flight.pool == pool)
+                .collect(),
+        }
     }
 }
 
@@ -688,5 +716,139 @@ mod tests {
             "&lt;a href=&quot;x&quot;&gt;&amp;&#39;y&#39;&lt;/a&gt;"
         );
         assert_eq!(escape("plain 123 é"), "plain 123 é");
+    }
+
+    /// An offer `id` in `zone`, of no particular shape.
+    fn offer(id: &str, zone: &str) -> js_elastic::Offer {
+        js_elastic::Offer {
+            zone: Some(zone.to_owned()),
+            ..js_scaler::StoredOffer::nothing(id, None).to_offer(100)
+        }
+    }
+
+    /// A failover memory holding, for the provider `own` and for `foreign`, one offer
+    /// declined for capacity at 10 ms (request `r1`) and one instance type passed over for
+    /// quota at 20 ms for an hour.
+    fn memory(own: &ProviderId, foreign: &ProviderId) -> AcquireMemory {
+        let refused = |code| {
+            js_elastic::Acquired::Refused(js_elastic::Refusal {
+                code,
+                reason: js_elastic::Reason::Api("scripted".to_owned()),
+            })
+        };
+        let request = RequestId::new("r1").unwrap();
+        let mut memory = AcquireMemory::new();
+        let hour = std::time::Duration::from_secs(3600);
+        for (n, provider) in [own, foreign].into_iter().enumerate() {
+            let (cap, quota) = (format!("acq-c{n}"), format!("acq-q{n}"));
+            let cap = js_elastic::AcquireId::new(&cap).unwrap();
+            let quota = js_elastic::AcquireId::new(&quota).unwrap();
+            let capacity = js_elastic::RefusalCode::Capacity;
+            memory.launched(&request, &cap);
+            let declined = offer(&format!("{provider}-x"), "z1");
+            memory.answered(
+                &cap,
+                (provider, &declined),
+                &refused(capacity),
+                at(10),
+                hour,
+            );
+            memory.launched(&request, &quota);
+            let passed = offer(&format!("{provider}-y"), "z2");
+            let code = js_elastic::RefusalCode::Quota;
+            memory.answered(&quota, (provider, &passed), &refused(code), at(20), hour);
+        }
+        memory
+    }
+
+    fn at(millis: u64) -> Instant {
+        Instant::from_millis(millis)
+    }
+
+    /// Records with a brake and a cool-down for the pool `pool` (the cool-down ending at
+    /// `until`) and another of each for the pool `other`.
+    fn records(pool: &str, other: &str, until: u64) -> Records {
+        let mut records = Records::default();
+        let brake = |failures| Brake {
+            failures,
+            tripped_at: Some(Millis::new(5)),
+        };
+        records.brake.insert(pool.to_owned(), brake(2));
+        records.brake.insert(other.to_owned(), brake(7));
+        let cooldown = |until| Cooldown {
+            until: Millis::new(until),
+            reason: js_scaler::CooldownReason::BootFailed,
+        };
+        records.cooldowns.insert(pool.to_owned(), cooldown(until));
+        records
+            .cooldowns
+            .insert(other.to_owned(), cooldown(u64::MAX));
+        records
+    }
+
+    /// A launch out for `pool`.
+    fn out(pool: &str, host: &str) -> InFlight {
+        InFlight {
+            pool: pool.to_owned(),
+            host: host.to_owned(),
+            offer: "x".to_owned(),
+            zone: None,
+            since: Millis::new(30),
+        }
+    }
+
+    /// Asserts that the provider state of a pool keeps only its own: the declines and
+    /// pass-overs of its provider and not of another provider the memory also holds, the
+    /// brake and cool-down of its pool and not another pool's, the launches out for its pool
+    /// and not another's; that a pass-over is left out at its end; that a cool-down is kept
+    /// while it runs and left out at its end; and that a status with no scaler holds none of
+    /// them but its catalog. Catches a filter dropped, which would show one provider's or
+    /// pool's state on another, and an ended pass-over or cool-down still shown.
+    #[test]
+    fn a_provider_state_keeps_its_own_provider_and_pool_and_what_still_holds() {
+        let own = ProviderId::known("own-cloud");
+        let foreign = ProviderId::known("other-cloud");
+        let memory = memory(&own, &foreign);
+        let records = records("burst", "other", 1000);
+        let held = |now: u64| {
+            Held {
+                catalog: Some((at(1), 4)),
+                seen: Some((&memory, &records)),
+                out: vec![out("burst", "js-1"), out("other", "js-2")],
+            }
+            .of((&own, "burst"), Millis::new(now))
+        };
+
+        let state = held(999);
+        let request = RequestId::new("r1").unwrap();
+        let declined_key = js_elastic::OfferKey::of(&own, &offer("own-cloud-x", "z1"));
+        assert_eq!(state.declined, [(request, declined_key, at(10))]);
+        let passed = PassedOver {
+            provider: own.clone(),
+            instance_type: "own-cloud-y".to_owned(),
+            region: Some("z2".to_owned()),
+        };
+        let until = at(20).saturating_add(std::time::Duration::from_secs(3600));
+        assert_eq!(state.passed_over, [(passed, until)]);
+        assert_eq!(state.brake.map(|brake| brake.failures), Some(2));
+        assert_eq!(state.cooldown.map(|c| c.until), Some(Millis::new(1000)));
+        assert_eq!(state.in_flight, [out("burst", "js-1")]);
+        assert_eq!((state.now_ms, state.catalog), (999, Some((at(1), 4))));
+
+        assert_eq!(held(1000).cooldown, None);
+        assert!(held(until.millis()).passed_over.is_empty());
+
+        let alone = Held {
+            catalog: Some((at(1), 4)),
+            seen: None,
+            out: Vec::new(),
+        }
+        .of((&own, "burst"), Millis::new(999));
+        let expected = ProviderState {
+            now_ms: 999,
+            catalog: Some((at(1), 4)),
+            ..ProviderState::default()
+        };
+        assert_eq!(alone, expected);
     }
 }

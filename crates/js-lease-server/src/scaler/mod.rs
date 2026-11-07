@@ -27,7 +27,8 @@
 //! - the queued jobs set aside for the machines launched for them (the `jobs` module), in
 //!   memory only;
 //! - the launches whose call to the provider is out (the `in_flight` module), each only while
-//!   its call is out, so a reader sees a launch the tick's copy of the memory still holds;
+//!   its call is out, so a reader sees a launch that the memory, swapped in only at the end
+//!   of the tick, does not hold yet;
 //! - the hosts the registry refused to remove (`unremoved`), tried again at every tick. The
 //!   set is kept in its own file ([`UnremovedFile`]), or with a store setting in its own key
 //!   (the `kept` module), and is a write-ahead: a host is added
