@@ -7,7 +7,7 @@ use std::time::Duration;
 use js_agent_wire::DEFAULT_GRACE_MS;
 use js_provider::{Observed, Pool, StartAck, StartSpec};
 use js_registry::{PoolConfig, WholeNodeConfig};
-use js_types::{ProviderId, Request, ResourceClass};
+use js_types::{ProviderId, Request, RequestId, ResourceClass};
 use support::*;
 
 const TIMEOUT: u64 = 120_000;
@@ -24,12 +24,18 @@ fn request_of(seconds: u64) -> Request {
     }
 }
 
-fn spec_of(sequence: u64, seconds: u64) -> StartSpec {
-    StartSpec::new(lease(sequence), request_of(seconds), &[whole()]).unwrap()
+fn id() -> RequestId {
+    RequestId::new("r").unwrap()
 }
 
-fn recorded(fx: &Fixture, seconds: u64) -> bool {
-    fx.registry.request_record(&request_of(seconds)).is_some()
+fn spec_of(sequence: u64, seconds: u64) -> StartSpec {
+    StartSpec::new(lease(sequence), request_of(seconds), &[whole()])
+        .unwrap()
+        .with_request_id(id())
+}
+
+fn recorded(fx: &Fixture) -> bool {
+    fx.registry.request_record(&id()).is_some()
 }
 
 fn wait(fx: &Fixture, hosts: &[(&str, u64)], ms: u64) {
@@ -42,19 +48,19 @@ fn wait(fx: &Fixture, hosts: &[(&str, u64)], ms: u64) {
     }
 }
 
-fn pool(names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
+fn pool(names: &[&'static str], engine: Placement) -> (Fixture, Vec<(&'static str, u64)>) {
     let name = ProviderId::new("builders").unwrap();
     let settings = WholeNodeConfig {
         prepare_timeout_ms: TIMEOUT,
         ..WholeNodeConfig::dedicated(4)
     };
-    let config = PoolConfig::new(name, whole(), pool_shape(), 4)
+    let config = PoolConfig::new(name, whole(), world_shape(), 4)
         .with_whole_node(settings)
         .unwrap();
-    let fx = fixture_of(config);
+    let fx = fixture_in(config, engine);
     let hosts = names
         .iter()
-        .map(|name| (*name, fx.join(name, "t")))
+        .map(|name| (*name, fx.join_world(name)))
         .collect();
     (fx, hosts)
 }
@@ -62,9 +68,8 @@ fn pool(names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
 /// A lease in use whose agent restarts and says hello after the lost window gets a whole
 /// prepare timeout from the hello: one millisecond short of it the lease is kept and no
 /// failure is counted, at it the lease is overdue.
-#[test]
-fn a_hello_gives_the_agent_a_whole_prepare_timeout() {
-    let (fx, hosts) = pool(&["a"]);
+fn a_hello_gives_the_agent_a_whole_prepare_timeout(engine: Placement) {
+    let (fx, hosts) = pool(&["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
     let mut ready = fx.heartbeat("a", hosts[0].1);
@@ -75,41 +80,45 @@ fn a_hello_gives_the_agent_a_whole_prepare_timeout() {
     // In use for longer than a prepare timeout, then the agent goes away and comes back.
     wait(&fx, &hosts, 2 * TIMEOUT);
     fx.pass_grace();
-    fx.hello(&hello("a"), &cred("t")).unwrap();
+    fx.hello(&world_hello("a"), &cred("t")).unwrap();
     assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
     fx.registry.advance();
     assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    assert!(!recorded(&fx, 600));
+    assert!(!recorded(&fx));
     fx.clock.advance(Duration::from_millis(TIMEOUT - 1));
     fx.registry.advance();
     assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    assert!(!recorded(&fx, 600));
+    assert!(!recorded(&fx));
     fx.clock.advance(Duration::from_millis(1));
     fx.registry.advance();
     assert_eq!(provider.observe(&lease(1)), Observed::Absent);
-    let kept = fx.registry.request_record(&request_of(600)).unwrap();
+    let kept = fx.registry.request_record(&id()).unwrap();
     assert_eq!(kept.prepare_failures, 1);
 }
 
 /// A hello from a host whose lease is committed but not yet ready leaves the commit time
 /// alone, so an agent that keeps restarting cannot postpone the prepare deadline.
-#[test]
-fn a_hello_on_a_committed_host_keeps_the_commit_time() {
-    let (fx, _) = pool(&["a"]);
+fn a_hello_on_a_committed_host_keeps_the_commit_time(engine: Placement) {
+    let (fx, _) = pool(&["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
     // The agent goes silent past the grace period and comes back.
     fx.pass_grace();
-    let epoch = fx.join("a", "t");
+    let epoch = fx.join_world("a");
     assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
     let gone = DEFAULT_GRACE_MS + 1;
     wait(&fx, &[("a", epoch)], TIMEOUT - gone - 1);
     fx.registry.advance();
     assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    assert!(!recorded(&fx, 600));
+    assert!(!recorded(&fx));
     fx.clock.advance(Duration::from_millis(1));
     fx.registry.advance();
     assert_eq!(provider.observe(&lease(1)), Observed::Absent);
-    let kept = fx.registry.request_record(&request_of(600)).unwrap();
+    let kept = fx.registry.request_record(&id()).unwrap();
     assert_eq!(kept.prepare_failures, 1);
 }
+
+crate::both!(
+    a_hello_gives_the_agent_a_whole_prepare_timeout,
+    a_hello_on_a_committed_host_keeps_the_commit_time,
+);

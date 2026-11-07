@@ -1,8 +1,11 @@
 //! What the registry does when a committed whole-node lease does not become ready: a
 //! typed refusal, the `prepare_timeout`, the host and request effects of each reason, and
 //! the cap on tries. The registry is driven directly, on a manual clock, with
-//! hand-built heartbeats. The starts carry no request id, so a request is its content: the
-//! tests place the same `whole_request()` under a new lease id each time.
+//! hand-built heartbeats, and every test runs over both placement engines (the registry's
+//! own pass and js-sched's) with the same assertions. Every start carries a request id, so
+//! a request is its id: the tests place the same request under a new lease id each time,
+//! and read its record by that id. A start that finds no free host while some host could
+//! ever hold the request waits (`Unknown`, nothing booked).
 
 mod support;
 
@@ -18,7 +21,7 @@ use js_registry::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_RESERVE_BACKOFF_MS, Exclusion, NotReady, PoolConfig,
     RunState, WholeNodeConfig,
 };
-use js_types::{ProviderId, Request, ResourceClass};
+use js_types::{ProviderId, Request, RequestId, ResourceClass};
 use support::*;
 
 const BACKOFF: u64 = 60_000;
@@ -30,7 +33,7 @@ fn whole() -> ResourceClass {
 
 fn plain_config() -> PoolConfig {
     let name = ProviderId::new("builders").unwrap();
-    PoolConfig::new(name, whole(), pool_shape(), 4)
+    PoolConfig::new(name, whole(), world_shape(), 4)
 }
 
 /// Short settings, so a test walks the whole deadline in a few steps: a prepare timeout
@@ -52,24 +55,39 @@ fn whole_request() -> Request {
     }
 }
 
-fn whole_spec(sequence: u64) -> StartSpec {
-    StartSpec::new(lease(sequence), whole_request(), &[whole()]).unwrap()
+/// The id of the request every test places.
+fn rid() -> RequestId {
+    RequestId::new("r").unwrap()
 }
 
-fn no_capacity() -> StartAck {
-    StartAck::Refused(RefusalCode::NoCapacity)
+fn whole_spec(sequence: u64) -> StartSpec {
+    let spec = StartSpec::new(lease(sequence), whole_request(), &[whole()]).unwrap();
+    spec.with_request_id(rid())
+}
+
+/// A start of a different request (another id, another max wall) than [`whole_spec`]'s.
+fn other_spec(sequence: u64) -> StartSpec {
+    let mut other = whole_request();
+    other.max_wall = Duration::from_secs(1);
+    let spec = StartSpec::new(lease(sequence), other, &[whole()]).unwrap();
+    spec.with_request_id(RequestId::new("other").unwrap())
 }
 
 fn exclusive_not_ready() -> StartAck {
     StartAck::Refused(RefusalCode::ExclusiveNotReady)
 }
 
-/// A pool of `config` with every host in `names` joined, and the epochs they got.
-fn pool(config: PoolConfig, names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
-    let fx = fixture_of(config);
+/// A pool of `config` placed by `engine` with every host in `names` joined, and the epochs
+/// they got.
+fn pool(
+    config: PoolConfig,
+    names: &[&'static str],
+    engine: Placement,
+) -> (Fixture, Vec<(&'static str, u64)>) {
+    let fx = fixture_in(config, engine);
     let hosts = names
         .iter()
-        .map(|name| (*name, fx.join(name, "t")))
+        .map(|name| (*name, fx.join_world(name)))
         .collect();
     (fx, hosts)
 }
@@ -115,7 +133,7 @@ fn after(at: Timestamp, ms: u64) -> Timestamp {
 }
 
 fn record(fx: &Fixture) -> js_registry::RequestRecord {
-    fx.registry.request_record(&whole_request()).unwrap()
+    fx.registry.request_record(&rid()).unwrap()
 }
 
 fn exclusions(pairs: &[(&str, Exclusion)]) -> BTreeMap<js_types::HostId, Exclusion> {
@@ -125,10 +143,11 @@ fn exclusions(pairs: &[(&str, Exclusion)]) -> BTreeMap<js_types::HostId, Exclusi
 /// Asserts both effects of a row that excludes the host for `reserve_backoff` and
 /// re-queues the request: the lease reads `Absent` at once (long before the prepare
 /// timeout), the host holds nothing, the request has one prepare failure and no give-up
-/// and is not terminal, the host is not tainted, and the same request is turned away
-/// from that host (the only one) until exactly `reserve_backoff` after the refusal.
-fn backoff_row(code: RefusalReason) {
-    let (fx, hosts) = pool(short_config(), &["a"]);
+/// and is not terminal, the host is not tainted, and the same request waits (`Unknown`,
+/// nothing booked) rather than take that host (the only one) until exactly
+/// `reserve_backoff` after the refusal.
+fn backoff_row(code: RefusalReason, engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     wait(&fx, &hosts, 5_000);
@@ -144,34 +163,32 @@ fn backoff_row(code: RefusalReason) {
     assert_eq!(kept.exclusions, exclusions(&[("a", until)]));
     restore(&fx, &hosts);
     wait(&fx, &hosts, BACKOFF - 1);
-    assert_eq!(provider.start(whole_spec(2)), no_capacity());
+    assert_eq!(provider.start(whole_spec(2)), StartAck::Unknown);
+    assert!(provider.booked().is_empty());
     wait(&fx, &hosts, 1);
     assert_eq!(provider.start(whole_spec(3)), StartAck::Unknown);
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(3)));
 }
 
-#[test]
-fn not_quiet_excludes_the_host_for_the_backoff_and_requeues() {
-    backoff_row(RefusalReason::NotQuiet);
+fn not_quiet_excludes_the_host_for_the_backoff_and_requeues(engine: Placement) {
+    backoff_row(RefusalReason::NotQuiet, engine);
 }
 
-#[test]
-fn noise_over_bound_excludes_the_host_for_the_backoff_and_requeues() {
-    backoff_row(RefusalReason::NoiseOverBound);
+fn noise_over_bound_excludes_the_host_for_the_backoff_and_requeues(engine: Placement) {
+    backoff_row(RefusalReason::NoiseOverBound, engine);
 }
 
-#[test]
-fn setup_failed_excludes_the_host_for_the_backoff_and_requeues() {
-    backoff_row(RefusalReason::SetupFailed);
+fn setup_failed_excludes_the_host_for_the_backoff_and_requeues(engine: Placement) {
+    backoff_row(RefusalReason::SetupFailed, engine);
 }
 
 /// Asserts the `host-unsafe` row: the host is tainted (as by a finding) and takes no
 /// lease however long it waits, the request counts one failure and gets no exclusion of
 /// its own (the taint is the host's effect), and it is placed again on another host at
-/// once.
-#[test]
-fn host_unsafe_taints_the_host_and_requeues_on_another() {
-    let (fx, hosts) = pool(short_config(), &["a", "b"]);
+/// once. Another request then waits and books nothing: the tainted host takes no lease
+/// however long it waits.
+fn host_unsafe_taints_the_host_and_requeues_on_another(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::HostUnsafe, "a finding");
@@ -189,19 +206,18 @@ fn host_unsafe_taints_the_host_and_requeues_on_another() {
     fx.registry.heartbeat(&ready, &cred("t")).unwrap();
     restore(&fx, &hosts);
     wait(&fx, &hosts, 10 * BACKOFF);
-    // `b` is held; `a` is restored, but tainted: another request finds nothing.
-    let mut other = whole_request();
-    other.max_wall = Duration::from_secs(1);
-    let spec = StartSpec::new(lease(3), other, &[whole()]).unwrap();
-    assert_eq!(provider.start(spec), no_capacity());
+    // `b` is held; `a` is restored, but tainted: another request waits (`b` could
+    // free) and books nothing.
+    assert_eq!(provider.start(other_spec(3)), StartAck::Unknown);
+    assert_eq!(provider.booked().len(), 1);
+    assert_eq!(provider.booked().get(&host("b")), Some(&lease(2)));
 }
 
 /// Asserts the `unsupported` row: the host is left out for the rest of the request's
 /// life (two back-offs later it is still refused, and another request takes it), and the
 /// request counts one failure and goes to another host at once.
-#[test]
-fn unsupported_excludes_the_host_for_good_and_requeues_on_another() {
-    let (fx, hosts) = pool(short_config(), &["a", "b"]);
+fn unsupported_excludes_the_host_for_good_and_requeues_on_another(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::Unsupported, "no hook");
@@ -217,19 +233,15 @@ fn unsupported_excludes_the_host_for_good_and_requeues_on_another() {
     wait(&fx, &hosts, 2 * BACKOFF);
     assert_eq!(provider.start(whole_spec(3)), StartAck::Unknown);
     assert_eq!(provider.booked().get(&host("b")), Some(&lease(3)));
-    let mut other = whole_request();
-    other.max_wall = Duration::from_secs(1);
-    let free = StartSpec::new(lease(4), other, &[whole()]).unwrap();
-    assert_eq!(provider.start(free), StartAck::Unknown);
+    assert_eq!(provider.start(other_spec(4)), StartAck::Unknown);
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(4)));
 }
 
 /// Asserts that a refusal puts the request on another host at once: with host `a`
 /// restored and free (and first by id) the same request still goes to `b`, and the
 /// lease it left is `Absent` at once, not at the prepare timeout.
-#[test]
-fn a_refused_request_is_placed_on_another_host_at_once() {
-    let (fx, hosts) = pool(short_config(), &["a", "b"]);
+fn a_refused_request_is_placed_on_another_host_at_once(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
@@ -244,9 +256,8 @@ fn a_refused_request_is_placed_on_another_host_at_once() {
 /// A code the wire does not know decodes as `setup-failed` and acts as that row: the
 /// host is excluded for the back-off, not for good and not tainted, and a terminal
 /// failure names `setup-failed`.
-#[test]
-fn an_unknown_code_acts_as_setup_failed() {
-    let (fx, hosts) = pool(short_config(), &["a"]);
+fn an_unknown_code_acts_as_setup_failed(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     let refused_at = fx.clock.now();
@@ -268,7 +279,7 @@ fn an_unknown_code_acts_as_setup_failed() {
             ..refusal
         },
     );
-    let last = fx.registry.not_ready(&whole_request()).unwrap();
+    let last = fx.registry.not_ready(&rid()).unwrap();
     assert_eq!(last.code, "setup-failed");
 }
 
@@ -278,15 +289,14 @@ fn an_unknown_code_acts_as_setup_failed() {
 /// is released to restore, the request counts one failure and none toward give-ups, and
 /// the host is excluded for `reserve_backoff` counted from the deadline. The last code
 /// is `prepare-timeout` with no detail.
-#[test]
-fn the_lease_ends_exactly_at_prepare_timeout() {
-    let (fx, hosts) = pool(plain_config(), &["a"]);
+fn the_lease_ends_exactly_at_prepare_timeout(engine: Placement) {
+    let (fx, hosts) = pool(plain_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     wait(&fx, &hosts, DEFAULT_PREPARE_TIMEOUT_MS - 1);
     assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
     assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
-    assert!(fx.registry.request_record(&whole_request()).is_none());
+    assert!(fx.registry.request_record(&rid()).is_none());
     wait(&fx, &hosts, 1);
     let deadline = fx.clock.now();
     assert_eq!(provider.observe(&lease(1)), Observed::Absent);
@@ -311,10 +321,9 @@ fn the_lease_ends_exactly_at_prepare_timeout() {
 /// The silent agent (it never beats again after the commit, so the host goes lost) and
 /// the host that goes lost in the interval end at the same deadline, whether the clock is
 /// read by `advance` or by the lease table's observe.
-#[test]
-fn a_silent_agent_and_a_lost_host_end_at_the_deadline() {
+fn a_silent_agent_and_a_lost_host_end_at_the_deadline(engine: Placement) {
     for beating_for in [0, TIMEOUT - 30_000] {
-        let (fx, hosts) = pool(short_config(), &["a"]);
+        let (fx, hosts) = pool(short_config(), &["a"], engine);
         let mut provider = fx.provider.clone();
         assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
         wait(&fx, &hosts, beating_for);
@@ -323,7 +332,7 @@ fn a_silent_agent_and_a_lost_host_end_at_the_deadline() {
         fx.registry.advance();
         assert_eq!(fx.registry.hosts()[0].state, js_registry::HostState::Lost);
         assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
-        assert!(fx.registry.request_record(&whole_request()).is_none());
+        assert!(fx.registry.request_record(&rid()).is_none());
         fx.clock.advance(Duration::from_millis(1));
         fx.registry.advance();
         assert_eq!(fx.registry.hosts()[0].lease, None);
@@ -334,9 +343,8 @@ fn a_silent_agent_and_a_lost_host_end_at_the_deadline() {
 
 /// The timeout reads the pool's own settings: with a two-minute timeout the lease
 /// survives one minute and ends at two.
-#[test]
-fn the_timeout_is_the_pools_setting() {
-    let (fx, hosts) = pool(short_config(), &["a"]);
+fn the_timeout_is_the_pools_setting(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     wait(&fx, &hosts, TIMEOUT / 2);
@@ -348,13 +356,12 @@ fn the_timeout_is_the_pools_setting() {
 /// Asserts the cap: with `max_replace` of two, one failure leaves the request open and
 /// the second makes it terminal, naming the last code and detail (the code of the
 /// second, not the first); a terminal request is placed nowhere, though a host is free.
-#[test]
-fn the_request_fails_not_ready_after_max_replace_failures() {
-    let (fx, hosts) = pool(short_config(), &["a", "b", "c"]);
+fn the_request_fails_not_ready_after_max_replace_failures(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a", "b", "c"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::SetupFailed, "first");
-    assert_eq!(fx.registry.not_ready(&whole_request()), None);
+    assert_eq!(fx.registry.not_ready(&rid()), None);
     assert!(!record(&fx).terminal);
     assert_eq!(provider.start(whole_spec(2)), StartAck::Unknown);
     assert_eq!(provider.booked().get(&host("b")), Some(&lease(2)));
@@ -369,7 +376,7 @@ fn the_request_fails_not_ready_after_max_replace_failures() {
         code: "noise-over-bound".into(),
         detail: "second".into(),
     };
-    assert_eq!(fx.registry.not_ready(&whole_request()), Some(last));
+    assert_eq!(fx.registry.not_ready(&rid()), Some(last));
     let kept = record(&fx);
     assert_eq!((kept.prepare_failures, kept.give_ups), (2, 0));
     assert!(kept.terminal);
@@ -379,20 +386,19 @@ fn the_request_fails_not_ready_after_max_replace_failures() {
 
 /// The default cap is three: two failures leave the request open, the third ends it, and
 /// a timeout counts as one of them.
-#[test]
-fn the_default_cap_is_three_and_a_timeout_counts() {
+fn the_default_cap_is_three_and_a_timeout_counts(engine: Placement) {
     let config = plain_config();
-    let (fx, hosts) = pool(config, &["a", "b", "c"]);
+    let (fx, hosts) = pool(config, &["a", "b", "c"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::NotQuiet, "");
     assert_eq!(provider.start(whole_spec(2)), StartAck::Unknown);
     refuse(&fx, hosts[1], "1-2", RefusalReason::NotQuiet, "");
-    assert_eq!(fx.registry.not_ready(&whole_request()), None);
+    assert_eq!(fx.registry.not_ready(&rid()), None);
     assert_eq!(provider.start(whole_spec(3)), StartAck::Unknown);
     wait(&fx, &hosts, DEFAULT_PREPARE_TIMEOUT_MS);
     fx.registry.advance();
-    let last = fx.registry.not_ready(&whole_request()).unwrap();
+    let last = fx.registry.not_ready(&rid()).unwrap();
     assert_eq!(last.code, "prepare-timeout");
     assert_eq!(record(&fx).prepare_failures, 3);
 }
@@ -400,9 +406,8 @@ fn the_default_cap_is_three_and_a_timeout_counts() {
 /// A detail of the longest the wire allows, 256 bytes, is stored as received; and the
 /// scheduler reads no detail: a `not-quiet` refusal whose text names the other codes
 /// is still only a back-off exclusion.
-#[test]
-fn the_detail_is_stored_verbatim_and_never_read() {
-    let (fx, hosts) = pool(short_config(), &["a", "b"]);
+fn the_detail_is_stored_verbatim_and_never_read(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     let detail = "host-unsafe unsupported taint ".repeat(9)[..256].to_string();
@@ -416,7 +421,7 @@ fn the_detail_is_stored_verbatim_and_never_read() {
     assert_eq!(fx.registry.hosts()[0].taint, None);
     assert_eq!(provider.start(whole_spec(2)), StartAck::Unknown);
     refuse(&fx, hosts[1], "1-2", RefusalReason::SetupFailed, &detail);
-    let last = fx.registry.not_ready(&whole_request()).unwrap();
+    let last = fx.registry.not_ready(&rid()).unwrap();
     assert_eq!(
         (last.code.as_str(), last.detail.as_str()),
         ("setup-failed", detail.as_str())
@@ -425,14 +430,13 @@ fn the_detail_is_stored_verbatim_and_never_read() {
 
 /// A refusal names a lease: one for another lease, and one for a lease already reported
 /// ready, change nothing.
-#[test]
-fn a_refusal_for_another_lease_or_a_ready_one_is_ignored() {
-    let (fx, hosts) = pool(short_config(), &["a"]);
+fn a_refusal_for_another_lease_or_a_ready_one_is_ignored(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-9", RefusalReason::NotQuiet, "other");
     assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
-    assert!(fx.registry.request_record(&whole_request()).is_none());
+    assert!(fx.registry.request_record(&rid()).is_none());
     let mut message = fx.heartbeat("a", hosts[0].1);
     message.exclusive_ready = Some("1-1".into());
     fx.registry.heartbeat(&message, &cred("t")).unwrap();
@@ -446,9 +450,8 @@ fn a_refusal_for_another_lease_or_a_ready_one_is_ignored() {
 
 /// A request that failed once and is then reported ready loses its record, and a lease
 /// its consumer stops is no failure.
-#[test]
-fn a_granted_request_forgets_its_failures_and_a_stop_counts_none() {
-    let (fx, hosts) = pool(short_config(), &["a", "b"]);
+fn a_granted_request_forgets_its_failures_and_a_stop_counts_none(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::NotQuiet, "");
@@ -457,25 +460,24 @@ fn a_granted_request_forgets_its_failures_and_a_stop_counts_none() {
     let mut message = fx.heartbeat("b", hosts[1].1);
     message.exclusive_ready = Some("1-2".into());
     fx.registry.heartbeat(&message, &cred("t")).unwrap();
-    assert!(fx.registry.request_record(&whole_request()).is_none());
+    assert!(fx.registry.request_record(&rid()).is_none());
 
-    let (fx, _hosts) = pool(short_config(), &["a"]);
+    let (fx, _hosts) = pool(short_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     provider.stop(&lease(1));
-    assert!(fx.registry.request_record(&whole_request()).is_none());
+    assert!(fx.registry.request_record(&rid()).is_none());
 }
 
 /// A whole-node booking put back after a restart has no request in memory: its lease
 /// still ends at the deadline, and no request is charged for it.
-#[test]
-fn a_restored_booking_times_out_without_charging_a_request() {
-    let (fx, hosts) = pool(short_config(), &["a"]);
+fn a_restored_booking_times_out_without_charging_a_request(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     provider.seat(&host("b"), lease(7), None).unwrap();
     wait(&fx, &hosts, TIMEOUT);
     assert_eq!(provider.observe(&lease(7)), Observed::Absent);
-    assert!(fx.registry.request_record(&whole_request()).is_none());
+    assert!(fx.registry.request_record(&rid()).is_none());
     assert_eq!(provider.booked().get(&host("b")), None);
 }
 
@@ -511,8 +513,9 @@ fn job(run: &str) -> JobSpec {
     }
 }
 
-/// Takes lease 1 to ready on host `a`, queues a run, and has the host say hello again still listing the run:
-/// the preparation is void, the lease is committed once more with its run still queued.
+/// Takes lease 1 to ready on host `a`, queues a run, and has the host say hello again
+/// still listing the run: the preparation is void, the lease is committed once more with
+/// its run still queued.
 /// Returns the host with the epoch of its new session.
 fn committed_again_with_a_run(fx: &Fixture, epoch: u64) -> (&'static str, u64) {
     let mut ready = fx.heartbeat("a", epoch);
@@ -521,7 +524,7 @@ fn committed_again_with_a_run(fx: &Fixture, epoch: u64) -> (&'static str, u64) {
     let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
     assert_eq!(queued.unwrap().state, RunState::Queued);
     fx.pass_grace();
-    let mut again = hello("a");
+    let mut again = world_hello("a");
     again.held = vec![HeldRun {
         run_id: "r1".into(),
         state: HeldState::Running,
@@ -552,9 +555,8 @@ fn stop_r1() -> Vec<Command> {
 /// A refused prepare asks the runs of the committed lease to stop: the host that still
 /// lists the run is told to stop it, on the heartbeat after the refusal. It catches a
 /// failed prepare that ends the lease and leaves its container running.
-#[test]
-fn a_refused_prepare_asks_the_leases_runs_to_stop() {
-    let (fx, hosts) = pool(short_config(), &["a"]);
+fn a_refused_prepare_asks_the_leases_runs_to_stop(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     let (_, epoch) = committed_again_with_a_run(&fx, hosts[0].1);
@@ -575,9 +577,8 @@ fn a_refused_prepare_asks_the_leases_runs_to_stop() {
 
 /// A prepare that times out asks the runs of the committed lease to stop, as a refusal
 /// does: nothing is sent a millisecond before the deadline, the stop from the deadline.
-#[test]
-fn a_prepare_timeout_asks_the_leases_runs_to_stop() {
-    let (fx, hosts) = pool(short_config(), &["a"]);
+fn a_prepare_timeout_asks_the_leases_runs_to_stop(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a"], engine);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     let (_, epoch) = committed_again_with_a_run(&fx, hosts[0].1);
@@ -595,9 +596,8 @@ fn a_prepare_timeout_asks_the_leases_runs_to_stop() {
 
 /// A booking restored on a host that lists live runs is ready already: it is not
 /// overdue however long it waits, and no request is charged.
-#[test]
-fn a_restored_booking_with_live_runs_never_times_out() {
-    let (fx, hosts) = pool(short_config(), &["a"]);
+fn a_restored_booking_with_live_runs_never_times_out(engine: Placement) {
+    let (fx, hosts) = pool(short_config(), &["a"], engine);
     let mut message = fx.heartbeat("a", hosts[0].1);
     message.held = vec![HeldRun {
         run_id: "r1".into(),
@@ -612,5 +612,27 @@ fn a_restored_booking_with_live_runs_never_times_out() {
         Observed::Present { host: host("a") }
     );
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(7)));
-    assert!(fx.registry.request_record(&whole_request()).is_none());
+    assert!(fx.registry.request_record(&rid()).is_none());
 }
+
+crate::both!(
+    not_quiet_excludes_the_host_for_the_backoff_and_requeues,
+    noise_over_bound_excludes_the_host_for_the_backoff_and_requeues,
+    setup_failed_excludes_the_host_for_the_backoff_and_requeues,
+    host_unsafe_taints_the_host_and_requeues_on_another,
+    unsupported_excludes_the_host_for_good_and_requeues_on_another,
+    a_refused_request_is_placed_on_another_host_at_once,
+    an_unknown_code_acts_as_setup_failed,
+    the_lease_ends_exactly_at_prepare_timeout,
+    a_silent_agent_and_a_lost_host_end_at_the_deadline,
+    the_timeout_is_the_pools_setting,
+    the_request_fails_not_ready_after_max_replace_failures,
+    the_default_cap_is_three_and_a_timeout_counts,
+    the_detail_is_stored_verbatim_and_never_read,
+    a_refusal_for_another_lease_or_a_ready_one_is_ignored,
+    a_granted_request_forgets_its_failures_and_a_stop_counts_none,
+    a_restored_booking_times_out_without_charging_a_request,
+    a_refused_prepare_asks_the_leases_runs_to_stop,
+    a_prepare_timeout_asks_the_leases_runs_to_stop,
+    a_restored_booking_with_live_runs_never_times_out,
+);

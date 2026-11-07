@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use super::*;
-use js_agent_wire::{Command, Isolation, JobSpec, Limits, Taint};
+use js_agent_wire::{Command, ExclusiveRefusal, Isolation, JobSpec, Limits, RefusalReason, Taint};
 use js_lease::{Clock, Timestamp};
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, RegisteredProvider, Reservation, WholeNodeConfig};
@@ -296,6 +296,31 @@ impl World {
         }
         self.seen_booked = booked;
         self.seen_marks = marks;
+    }
+
+    /// The consumer stops polling the start of lease `sequence`.
+    pub fn drop_ask(&mut self, sequence: u64) {
+        self.asks.retain(|(asked, _, _)| *asked != sequence);
+    }
+
+    /// `name`'s agent reports `held` ready in a heartbeat of its own.
+    pub fn ready(&mut self, name: &str, held: &LeaseId) {
+        let mut message = self.fx.heartbeat(name, self.epochs[name]);
+        message.exclusive_ready = Some(held.to_string());
+        self.fx.registry.heartbeat(&message, &cred("t")).unwrap();
+        self.check();
+    }
+
+    /// `name`'s agent refuses to prepare `held` with `code`, in a heartbeat of its own.
+    pub fn refuse(&mut self, name: &str, held: &LeaseId, code: RefusalReason) {
+        let mut message = self.fx.heartbeat(name, self.epochs[name]);
+        message.exclusive_refused = Some(ExclusiveRefusal {
+            lease_id: held.to_string(),
+            code,
+            detail: format!("{code:?} on {name}"),
+        });
+        self.fx.registry.heartbeat(&message, &cred("t")).unwrap();
+        self.check();
     }
 
     pub fn taint(&mut self, name: &str) {

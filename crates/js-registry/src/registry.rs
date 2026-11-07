@@ -20,9 +20,7 @@ use crate::whole::ending::Ending;
 use crate::whole::exclusive::Exclusive;
 use crate::whole::queue::WaitList;
 use crate::whole::reasons::Cause;
-use crate::whole::requests::{
-    NotReady, RequestKey, RequestRecord, Requests, Rules, whole_settings,
-};
+use crate::whole::requests::{Requests, Rules, whole_settings};
 use crate::whole::reserve::{Marks, Reservation};
 
 mod beat;
@@ -33,6 +31,7 @@ mod ledger;
 mod marks;
 mod provider_side;
 mod record;
+mod records;
 mod start;
 mod view;
 
@@ -344,6 +343,10 @@ impl Registry {
         forgotten.iter().for_each(|host| self.tell_gone(host));
         let horizon = Rules::of(config).idle_horizon_ms();
         state.requests.sweep(now, horizon);
+        let idle = std::time::Duration::from_millis(horizon);
+        placer
+            .into_iter()
+            .for_each(|placer| placer.whole_sweep(idle));
         let unclaimed = state.waiting.expire(now, Rules::of(config).regain_grace_ms);
         state.dropped += unclaimed;
         let State { marks, waiting, .. } = &mut *state;
@@ -369,7 +372,8 @@ impl Registry {
             placer: self.shared.placer.get().map(|placer| &**placer),
         };
         for (host, record) in records.iter_mut() {
-            let overdue = record.exclusive.overdue(now, rules.prepare_timeout_ms);
+            let timeout = rules.prepare_timeout_ms;
+            let overdue = record.exclusive.overdue_with(now, timeout, ending.placer);
             if let Some(lease) = overdue {
                 ending.fail(
                     (&mut record.taint, &mut record.exclusive),
@@ -387,31 +391,6 @@ impl Registry {
         let settings = whole_settings(&self.shared.config);
         let hosts = self.host_facts(state, now);
         self.place_waiting(state, &settings, &hosts, now);
-    }
-
-    /// The record of a whole-node request: its failed prepares, the hosts left out of its
-    /// placements and the last failure. `None` for a request that has failed none, or
-    /// was placed since. Ask by the request id (`&RequestId`); a request whose start
-    /// carried no id is kept under its content (`&Request`), so equal requests share a
-    /// record.
-    pub fn request_record(&self, key: impl Into<RequestKey>) -> Option<RequestRecord> {
-        self.lock().requests.record(&key.into()).cloned()
-    }
-
-    /// Why a request will not be placed: the last code and detail reported, once it has
-    /// used up `max_replace` prepare failures; `None` before, and after the refusal has
-    /// been delivered to a start (the record is then removed, see the `requests` module)
-    /// or the record has gone idle. A start of such a request answers
-    /// `Refused(ExclusiveNotReady)`, which the consumer sees as the typed
-    /// `exclusive-not-ready` refusal (wire 409). A restart puts the counts back from the ledger
-    /// ([`Registry::restore_reservations`]) but not this text, so `max_replace` holds
-    /// across restarts and a restored terminal request reads `None` here. Ask as
-    /// [`Registry::request_record`] does.
-    pub fn not_ready(&self, key: impl Into<RequestKey>) -> Option<NotReady> {
-        let record = self.request_record(key);
-        record
-            .filter(|record| record.terminal)
-            .and_then(|record| record.last)
     }
 
     /// Where whole-node request `id` waits for a host, from the front (zero is next), or
@@ -561,6 +540,8 @@ impl Registry {
         let kept_cordon = known.and_then(|record| record.cordon);
         let kept_exclusive =
             known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
+        // A ready lease waits for ready again: the placer that keeps its deadline restarts it.
+        let again = known.and_then(|record| record.exclusive.ready_lease());
         let kept_bounds = known.map(|record| record.bounds.clone());
         let kept_leaving = known.and_then(|record| record.leaving);
         let kept_leaving = match state.ending.contains(&host) {
@@ -659,6 +640,7 @@ impl Registry {
         );
         state.runs.sync(&host, &hello.held, true);
         self.tell_up(&host);
+        again.iter().for_each(|lease| self.tell_again(lease));
         Ok(Welcome {
             protocol,
             epoch,
@@ -751,7 +733,10 @@ impl Registry {
         record.exclusive = plan.exclusive;
         if heartbeat.exclusive_ready.is_some() {
             let granted = record.exclusive.ready_lease();
-            granted.iter().for_each(|lease| requests.granted(lease));
+            granted.iter().for_each(|lease| {
+                requests.granted(lease);
+                self.tell_ready(lease);
+            });
         }
         if let Some((lease, cause, detail)) = plan.refused {
             let rules = Rules::of(&self.shared.config);
