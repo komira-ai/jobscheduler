@@ -38,8 +38,9 @@
 //!
 //! The engine is given no learned curves: each lease is charged what it books, and each
 //! host by its load readings when it has fresh ones. Under whole-node settings the engine
-//! also keeps the registry's whole-node queue: it marks, grants and cancels the pool's
-//! whole-node requests ([`whole`]), and its drain cost reads the registry's expected lives
+//! also keeps the registry's whole-node queue: the wait list of the pool's whole-node
+//! requests ([`wait`]) and their records ([`prepare`]), and it marks, grants and cancels
+//! them ([`whole`]); its drain cost reads the registry's expected lives
 //! of its leases through the scheduler's curve source ([`crate::lives::Lives`]), which
 //! gives no curve.
 
@@ -66,8 +67,12 @@ use crate::map::{self, MapError};
 
 #[path = "jobs.rs"]
 pub mod jobs;
+#[path = "ledger.rs"]
+pub mod ledger;
 #[path = "prepare.rs"]
 pub mod prepare;
+#[path = "wait.rs"]
+pub mod wait;
 #[path = "whole.rs"]
 pub mod whole;
 
@@ -132,9 +137,15 @@ pub struct Engine {
     /// The give-ups and bars of whole-node requests a rebuild carried over, until each is
     /// queued again ([`Engine::carry_whole`]).
     carried: BTreeMap<RequestId, whole::Carried>,
+    /// The whole-node requests a restart's ledger put back ([`Engine::whole_restore`]) and
+    /// not queued since, each with when: their give-ups and bars wait in `carried` until
+    /// the request is queued, or until the registry's idle horizon has passed.
+    restored: BTreeMap<RequestId, FarmTime>,
     /// The prepares of the whole-node leases committed from the queue, and the records of
     /// the requests whose prepare failed ([`prepare`]).
     prepare: prepare::Prepare,
+    /// The wait list of the registry's whole-node requests ([`wait`]).
+    wait: wait::WaitList,
     /// The last pass of the whole-node queue the registry handed over, which a rebuild
     /// hands to the new engine; it also holds the whole-node settings the scheduler has.
     round: Option<js_registry::WholeRound>,
@@ -193,7 +204,9 @@ impl Engine {
             jobs: BTreeMap::new(),
             whole: BTreeMap::new(),
             carried: BTreeMap::new(),
+            restored: BTreeMap::new(),
             prepare: prepare::Prepare::default(),
+            wait: wait::WaitList::default(),
             round: None,
             whole_seq: 0,
             cordoned: BTreeSet::new(),

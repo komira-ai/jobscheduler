@@ -2,18 +2,20 @@
 //! ([`Engine::whole_round`]): the engine, not the registry's own pass, marks, commits and
 //! cancels the pool's whole-node requests.
 //!
-//! At each pass of the queue (each tick and each start) the registry hands over
-//! [`WholeRound`]: its wait list (first presentation first), how it stands each host, the
-//! hosts held for requests not presented since a restart, and the expected life of each
-//! lease. While no request waits and the engine queues none, the round is not taken: the
+//! At each pass of the queue (each tick and each start) the registry hands over how it
+//! stands each host and the expected life of each lease ([`Engine::whole_pass`]); the engine
+//! adds the presented requests of its own wait list (first presentation first) and the hosts
+//! held for requests put back by a restart and not queued since ([`super::wait`]), and
+//! takes the [`WholeRound`] that makes. While no request waits and the engine queues none, the round is not taken: the
 //! engine lets go of the cordons and phases it set for the queue and places as it does for a
 //! pool with no whole-node request. Otherwise it:
 //!
 //! 1. Takes the pool's whole-node settings ([`Scheduler::with_whole_node`]) and the lives,
 //!    as learned curves under the work key of each lease ([`crate::lives::Lives`]), so the
 //!    drain cost reads the registry's tails.
-//! 2. Cancels the request of every operation whose request has left the wait list
-//!    (cancelled, a `DELETE` of its pending lease, not presented within `regain_grace`):
+//! 2. Cancels the request of every operation whose request is not in the round: one that
+//!    left the wait list (cancelled, a `DELETE` of its pending lease, not presented within
+//!    `regain_grace`) is cancelled when it leaves ([`Engine::leave`]), and
 //!    [`Scheduler::cancel_whole`] drops its mark, or its pending grant, at once.
 //! 3. Follows how the registry stands each host: a tainted host is quarantined and a
 //!    leaving one draining in the engine, and a lost one is cordoned, so none is marked or
@@ -39,8 +41,8 @@
 //! round never touches one; the registry drops its newest reservations, an assigned one
 //! included, when the ceiling falls. So before each round the engine puts back the newest
 //! pending grants beyond the ceiling ([`Engine::whole_tick`]); a committed lease is never
-//! touched. The holds a request gives up at their deadlines are counted, and the registry
-//! keeps that count in its record of the request ([`Engine::whole_give_ups`]).
+//! touched. The holds a request gives up at their deadlines are counted, and kept for its
+//! next presentation when it leaves the wait list ([`Engine::leave`]).
 //!
 //! The leases of whole-node requests are numbered in their own term ([`WHOLE_TERM`]), at
 //! a round of their own before any other is placed ([`Engine::whole_tick`]): a round that
@@ -50,7 +52,8 @@
 //! [`Scheduler::cancel_whole`].
 //!
 //! A rebuild of the engine keeps the queue: the last round is handed to the new engine with
-//! the marks, give-ups and bars of the old one ([`Engine::carry_whole`]).
+//! the marks, give-ups and bars of the old one ([`Engine::carry_whole`]). A restart keeps it
+//! through the registry's reservation ledger ([`super::ledger`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,6 +89,11 @@ impl Engine {
     /// registry shows them: a pending grant as an assigned reservation, a mark with its
     /// deadline and the end of its tail.
     pub fn whole_round(&mut self, round: WholeRound, now: FarmTime) -> Vec<Reservation> {
+        // The rules of a failed prepare are taken whether or not anything waits: a lease the
+        // registry committed outside the queue may fail before any request queues.
+        let rules = &round.settings;
+        self.prepare
+            .take_rules(rules.prepare_timeout_ms, rules.max_replace);
         // Nothing waits and nothing is queued: the engine takes nothing of the round, and
         // places as it does for a pool with no whole-node request.
         if round.waiting.is_empty() & self.whole.is_empty() {
@@ -286,6 +294,7 @@ impl Engine {
         self.feed(now, submit);
         self.sched.set_max_wall(operation, waiting.max_wall);
         let (give_ups, mut bars) = self.carried.remove(&waiting.id).unwrap_or_default();
+        self.restored.remove(&waiting.id);
         // A request whose prepare failed is queued again from when it was first queued,
         // with its give-ups and the bars its failures set ([`super::prepare`]).
         let (kept_give_ups, kept_bars) = self.prepare.kept(&waiting.id);
@@ -433,7 +442,7 @@ impl Engine {
     }
 
     /// The reservations of the requests the engine queues, as the registry shows them.
-    fn reservations(&self, now: FarmTime) -> Vec<Reservation> {
+    pub(super) fn reservations(&self, now: FarmTime) -> Vec<Reservation> {
         let waiting = self.round.iter().flat_map(|round| round.waiting.iter());
         let earlier: BTreeMap<&RequestId, &Reservation> = waiting
             .filter_map(|waiting| Some((&waiting.id, waiting.mark.as_ref()?)))
@@ -470,7 +479,9 @@ impl Engine {
     pub(super) fn carry_whole(&mut self, old: &Self, now: FarmTime) {
         self.whole_seq = old.whole_seq;
         self.carried = old.carried.clone();
+        self.restored = old.restored.clone();
         self.prepare = old.prepare.clone();
+        self.wait = old.wait.clone();
         for (id, operation) in &old.whole {
             let give_ups = old.sched.whole_give_ups(*operation);
             let bars = old.sched.whole_barred(*operation, now);
@@ -480,6 +491,11 @@ impl Engine {
             return;
         };
         let held = old.reservations(now);
+        // A request that left the queue since that round (it left the wait list, or was
+        // committed) is not queued again.
+        round
+            .waiting
+            .retain(|waiting| old.whole.contains_key(&waiting.id));
         for waiting in &mut round.waiting {
             let mark = held.iter().find(|mark| mark.request == waiting.id);
             waiting.mark = mark.cloned();
@@ -489,7 +505,7 @@ impl Engine {
 }
 
 /// `at` on the registry's clock as farm time: the same milliseconds.
-fn farm(at: Timestamp) -> FarmTime {
+pub(super) fn farm(at: Timestamp) -> FarmTime {
     FarmTime::from_millis(at.millis())
 }
 

@@ -34,6 +34,7 @@ impl Registry {
         // Read once: the record of the end and the tail counters see the same estimate.
         let estimate = self.estimate_of(&guard, lease);
         let ended = self.ended_row(&guard, lease, (ended_at, estimate));
+        let keeper = self.keeper();
         let State {
             book,
             records,
@@ -45,18 +46,27 @@ impl Registry {
             ..
         } = &mut *guard;
         // A cancelled request leaves no trace: no mark, and no record of its failures, so
-        // the id names a fresh request if it is used again.
-        let cancelled = waiting.cancel_lease(lease);
+        // the id names a fresh request if it is used again. A placer that keeps the wait
+        // list takes it off its own, and forgets it with the rest.
+        let cancelled = match keeper {
+            Some(keeper) => keeper.whole_cancel_lease(lease),
+            None => waiting.cancel_lease(lease),
+        };
         let placer = self.shared.placer.get();
         cancelled.iter().for_each(|id| {
-            marks.drop_request(id);
-            requests.forget(id);
+            if keeper.is_none() {
+                marks.drop_request(id);
+                requests.forget(id);
+            }
             placer
                 .into_iter()
                 .for_each(|placer| placer.whole_forget(id));
         });
         runs.stop_lease(lease);
-        requests.release(lease);
+        // A placer that keeps the records lets the lease go when it is told of its end.
+        if keeper.is_none() {
+            requests.release(lease);
+        }
         if let Observed::Present { host } = book.read(lease) {
             let record = records.get_mut(&host);
             record.into_iter().for_each(|record| {
@@ -86,16 +96,22 @@ impl Registry {
     /// that is not waiting is left alone. How many were bound.
     pub fn bind_waiting(&self, held: &[(LeaseId, RequestId)]) -> usize {
         let mut state = self.lock();
-        let bound = held
-            .iter()
-            .filter(|(lease, id)| state.waiting.bind(id, *lease));
+        let keeper = self.keeper();
+        let bound = held.iter().filter(|(lease, id)| match keeper {
+            Some(keeper) => keeper.whole_bind(id, *lease),
+            None => state.waiting.bind(id, *lease),
+        });
         bound.count()
     }
 
     /// Whether the whole-node request lease `lease` presented last waits for a host
     /// (see [`js_provider::Pool::waits`]).
     pub(crate) fn waits(&self, lease: &LeaseId) -> bool {
-        self.lock().waiting.holds_lease(lease)
+        let state = self.lock();
+        match self.keeper() {
+            Some(keeper) => keeper.whole_waiter_of(lease).is_some(),
+            None => state.waiting.holds_lease(lease),
+        }
     }
 
     /// Ends every committed whole-node lease that was not reported ready within

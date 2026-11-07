@@ -131,7 +131,7 @@ impl Registry {
                 };
                 self.hosted_row(state, lease, host, ending)
             }
-            None => waiting_row(state, lease, ended_at)?,
+            None => waiting_row(state, self.keeper(), lease, ended_at)?,
         };
         Some((log, row))
     }
@@ -145,7 +145,7 @@ impl Registry {
     /// held. Every call that can fail a prepare (an advance, a heartbeat) releases its lock
     /// through here.
     pub(super) fn release(&self, mut state: MutexGuard<'_, State>) {
-        let failed = state.requests.take_failed();
+        let failed = std::mem::take(&mut state.failed);
         let rows: Vec<EndedRow> = failed
             .iter()
             .map(|failed| self.failed_row(&state, failed))
@@ -226,12 +226,29 @@ impl Registry {
 }
 
 /// The record of `lease` whose whole-node request waits for a host and is cancelled by the
-/// stop at `ended_at`; `None` when no request of the lease waits. Its mark was dropped if it
-/// held one at any time while it waited, or gave a host up.
-fn waiting_row(state: &State, lease: &LeaseId, ended_at: u64) -> Option<EndedRow> {
-    let (id, since) = state.waiting.presented_by(lease)?;
-    let give_ups = state.requests.give_ups(&RequestKey::from(id));
-    let drain = match state.marks.ever_marked(id) | (give_ups > 0) {
+/// stop at `ended_at`, read from `keeper`'s wait list when a placer keeps it; `None` when no
+/// request of the lease waits. Its mark was dropped if it held one at any time while it
+/// waited, or gave a host up.
+fn waiting_row(
+    state: &State,
+    keeper: Option<&dyn crate::Placer>,
+    lease: &LeaseId,
+    ended_at: u64,
+) -> Option<EndedRow> {
+    let waiter = match keeper {
+        Some(keeper) => keeper.whole_waiter_of(lease)?,
+        None => {
+            let (id, since) = state.waiting.presented_by(lease)?;
+            crate::Waiter {
+                id: id.clone(),
+                since,
+                give_ups: state.requests.give_ups(&RequestKey::from(id)),
+                marked: state.marks.ever_marked(id),
+            }
+        }
+    };
+    let (since, give_ups) = (waiter.since, waiter.give_ups);
+    let drain = match waiter.marked | (give_ups > 0) {
         true => DrainOutcome::MarkDropped,
         false => DrainOutcome::NoMark,
     };

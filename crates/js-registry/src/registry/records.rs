@@ -20,10 +20,15 @@ impl Registry {
             RequestKey::Id(id) => Some(id),
             RequestKey::Content(_) => None,
         };
+        // A placer that keeps the records answers for every request; another one only for
+        // a request with an id it keeps.
+        if let Some(keeper) = self.keeper() {
+            return keeper.whole_record(&key);
+        }
         let placer = self.shared.placer.get();
         let kept = id
             .zip(placer)
-            .and_then(|(id, placer)| placer.whole_record(id));
+            .and_then(|(_, placer)| placer.whole_record(&key));
         kept.or_else(|| state.requests.record(&key).cloned())
     }
 
@@ -35,8 +40,9 @@ impl Registry {
     /// `exclusive-not-ready` refusal (wire 409). Under the registry's own placement a restart
     /// puts the counts back from the ledger ([`Registry::restore_reservations`]) but not this
     /// text, so `max_replace` holds across restarts and a restored terminal request reads
-    /// `None` here; a placer that keeps the request (`--placement js-sched`) keeps its counts
-    /// in memory only, and a restart forgets them. Ask as [`Registry::request_record`] does.
+    /// `None` here; a placer that keeps the request (`--placement js-sched`) writes its counts
+    /// to the same ledger and takes them back, without the text, so the same holds there.
+    /// Ask as [`Registry::request_record`] does.
     pub fn not_ready(&self, key: impl Into<RequestKey>) -> Option<NotReady> {
         let record = self.request_record(key);
         record

@@ -335,3 +335,72 @@ fn a_placer_that_keeps_no_prepare_leaves_it_to_the_registry() {
     w.stop(4);
     assert_eq!(w.fx.registry.request_record(&id("r")), None);
 }
+
+/// A placer that keeps only the pass of the queue and, beside it, the marks as it holds
+/// them, the holds its requests gave up, and the prepares of the leases committed from it.
+#[derive(Default)]
+struct Keeping {
+    queue: Queue,
+    /// The marks as the placer holds them now.
+    held: Mutex<Vec<Reservation>>,
+    /// The holds each request gave up.
+    give_ups: Mutex<BTreeMap<RequestId, u32>>,
+}
+
+impl Placer for Keeping {
+    fn pick(&self, spec: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
+        self.queue.pick(spec, open, marked)
+    }
+
+    fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
+        self.queue.whole_round(round)
+    }
+
+    fn whole_reservations(&self) -> Option<Vec<Reservation>> {
+        Some(self.held.lock().unwrap().clone())
+    }
+
+    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
+        self.give_ups.lock().unwrap().clone()
+    }
+
+    fn prepare_failed(&self, _: &js_types::LeaseId, _: &js_registry::PrepareFailure) -> bool {
+        true
+    }
+}
+
+/// Catches a placer that keeps only the pass read as one that keeps the wait list (the
+/// registry would drop its own marks and records), a mark read from the registry where the
+/// placer holds the same host for the same request (its deadline would be the registry's),
+/// a placer's give-ups not raised in the request's record, and a failed prepare the placer
+/// keeps counted by the registry as well. `r` is marked on the cordoned `a`: the registry
+/// shows the placer's deadline for it, not for a mark the placer holds on another host,
+/// and the record counts the two holds the placer gave up. Then `s` is committed on the
+/// quiet `b` and refused: the registry counts no failure of its own.
+#[test]
+fn a_placer_that_keeps_only_the_pass_is_read_for_its_marks_give_ups_and_failures() {
+    let mut w = World::new(&["a", "b"], plain);
+    let placer = Arc::new(Keeping::default());
+    w.fx.registry.set_placer(placer.clone());
+    cordon(&w, "a");
+    let now = w.now().millis();
+    let drain = mark("r", "a", now, false);
+    placer.queue.answer(drain.clone());
+    let later = Reservation {
+        deadline: Timestamp::from_millis(now + 90_000),
+        ..drain.clone()
+    };
+    *placer.held.lock().unwrap() = vec![later.clone(), mark("q", "b", now, false)];
+    placer.give_ups.lock().unwrap().insert(id("r"), 2);
+    assert_eq!(w.ask(2, "r"), StartAck::Unknown);
+    assert_eq!(w.reservations(), [later]);
+    assert_eq!(w.fx.registry.request_record(&id("r")).unwrap().give_ups, 2);
+    placer.held.lock().unwrap().clear();
+    assert_eq!(w.reservations(), [drain]);
+    placer.queue.answer(mark("s", "b", w.now().millis(), true));
+    assert_eq!(w.ask(3, "s"), StartAck::Unknown);
+    assert_eq!(w.lease_on("b"), Some(lease(3)));
+    w.refuse("b", &lease(3), RefusalReason::NotQuiet);
+    assert_eq!(w.lease_on("b"), None);
+    assert_eq!(w.fx.registry.request_record(&id("s")), None);
+}

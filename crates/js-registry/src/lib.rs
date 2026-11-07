@@ -158,7 +158,8 @@ pub use js_whole::{
 pub use lives::ProfileLives;
 pub use load::{BadLease, node_load};
 pub use placer::{
-    MarkedTails, Placer, PrepareFailure, ProbeHost, Standing, WaitingWhole, WholeHost, WholeRound,
+    MarkedTails, Placer, PrepareFailure, Presented, ProbeHost, Standing, Waiter, WaitingRequest,
+    WaitingWhole, WholeHost, WholeKept, WholeRound,
 };
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
@@ -169,6 +170,8 @@ pub use registry::{
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
 pub use tail_counters::{ERROR_EDGES_MS, TailCounters};
+#[cfg(feature = "test-support")]
+pub use whole::calls::MachineCalls;
 pub use whole::queue::MAX_WAITING_REQUESTS;
 pub use whole::requests::{Exclusion, NotReady, RequestKey, RequestRecord};
 pub use whole::reserve::Reservation;

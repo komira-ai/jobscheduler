@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Phase, Taint, Welcome, WireShape};
 use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, RUNTIME, SCRATCH_QUOTA};
@@ -16,12 +16,12 @@ use crate::load;
 use crate::refusal::Refusal;
 use crate::runs::{RunRefusal, RunView, Runs, Standing, quota_default, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
+use crate::whole::calls::Calls;
 use crate::whole::ending::Ending;
 use crate::whole::exclusive::Exclusive;
 use crate::whole::queue::WaitList;
-use crate::whole::reasons::Cause;
-use crate::whole::requests::{Requests, Rules, whole_settings};
-use crate::whole::reserve::{Marks, Reservation};
+use crate::whole::requests::{FailedPrepare, Requests, Rules};
+use crate::whole::reserve::Marks;
 
 mod beat;
 mod cordon;
@@ -34,12 +34,12 @@ mod record;
 mod records;
 mod start;
 mod view;
+mod waiting;
 
 use record::Record;
 
 pub use beat::HeartbeatCheck;
 pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
-use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
 pub use ledger::Restored;
 pub use marks::Busy;
@@ -166,6 +166,11 @@ struct State {
     waiting: WaitList,
     /// The hosts set aside for waiting requests.
     marks: Marks,
+    /// The committed whole-node leases whose prepare failed since the lock was last released,
+    /// for the record of each one's end ([`Registry::release`]).
+    failed: Vec<FailedPrepare>,
+    /// The passes of the registry's own over the wait list ([`Registry::machine_calls`]).
+    passes: Calls,
     /// How many restored reservations were dropped: a request not presented again within
     /// the regain grace, a mark on a host that never came back, a record that could not
     /// stand ([`Registry::dropped_reservations`]).
@@ -272,6 +277,8 @@ impl Registry {
             requests: Requests::default(),
             waiting: WaitList::default(),
             marks: Marks::default(),
+            failed: Vec::new(),
+            passes: Calls::default(),
             dropped: 0,
             launchable: None,
             ending: BTreeSet::new(),
@@ -326,105 +333,6 @@ impl Registry {
         }
     }
 
-    /// The registry's state as of `now`: hosts lost for longer than the retention, with
-    /// no booking, are forgotten first, so no call sees or counts one. Every call but
-    /// [`Registry::check_heartbeat`] (which answers as if they were forgotten) locks here.
-    fn lock_at(&self, now: Timestamp) -> MutexGuard<'_, State> {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let config = &self.shared.config;
-        let placer = self.shared.placer.get();
-        let held = |host: &HostId| placer.is_some_and(|placer| placer.holds_work_on(host));
-        let timing = (now, config.grace_ms(), config.lost_retention_ms());
-        let forgotten = state.forget_lost(timing, &held);
-        forgotten.iter().for_each(|host| self.tell_gone(host));
-        let horizon = Rules::of(config).idle_horizon_ms();
-        state.requests.sweep(now, horizon);
-        let idle = std::time::Duration::from_millis(horizon);
-        placer
-            .into_iter()
-            .for_each(|placer| placer.whole_sweep(idle));
-        let unclaimed = state.waiting.expire(now, Rules::of(config).regain_grace_ms);
-        state.dropped += unclaimed;
-        let State { marks, waiting, .. } = &mut *state;
-        marks.retain_waiting(waiting);
-        state
-    }
-
-    fn advance_at(&self, state: &mut State, now: Timestamp) {
-        let State {
-            book,
-            records,
-            runs,
-            requests,
-            ..
-        } = state;
-        let rules = Rules::of(&self.shared.config);
-        let mut ending = Ending {
-            book,
-            runs,
-            requests,
-            rules,
-            now,
-            placer: self.shared.placer.get().map(|placer| &**placer),
-        };
-        for (host, record) in records.iter_mut() {
-            let timeout = rules.prepare_timeout_ms;
-            let overdue = record.exclusive.overdue_with(now, timeout, ending.placer);
-            if let Some(lease) = overdue {
-                ending.fail(
-                    (&mut record.taint, &mut record.exclusive),
-                    host,
-                    lease,
-                    (Cause::Timeout, ""),
-                );
-            }
-        }
-        // Nothing waits or is set aside: nothing to place or drop (a placer that keeps the
-        // queue is still asked, so it lets go of the requests that left the wait list).
-        if state.waiting.is_empty() & state.marks.is_empty() & self.shared.placer.get().is_none() {
-            return;
-        }
-        let settings = whole_settings(&self.shared.config);
-        let hosts = self.host_facts(state, now);
-        self.place_waiting(state, &settings, &hosts, now);
-    }
-
-    /// Where whole-node request `id` waits for a host, from the front (zero is next), or
-    /// `None` if it is not waiting. A request waits from the first start that finds a
-    /// capable host but none free, in the order such starts were first seen; a repeat of
-    /// the start is a poll and keeps its place. It stops waiting when it is placed, is
-    /// cancelled, is refused, or is not presented for the pool's `regain_grace`.
-    ///
-    /// The order is advisory: a start places on any eligible host without asking whether
-    /// others wait, so a later waiter, or a request not yet on the list, can take a host
-    /// that freed before the request at the front presents itself again. The list holds
-    /// at most [`crate::MAX_WAITING_REQUESTS`]; a new request past that is answered
-    /// `NoCapacity` and not entered.
-    pub fn queue_position(&self, id: &RequestId) -> Option<usize> {
-        self.lock().waiting.position(id)
-    }
-
-    /// Takes whole-node request `id` off the wait list at once; whether it was waiting.
-    pub fn cancel_request(&self, id: &RequestId) -> bool {
-        self.lock().waiting.cancel(id)
-    }
-
-    /// The hosts set aside for waiting whole-node requests, in host order. A host is set
-    /// aside for one request and a request holds one host. A request's next start commits
-    /// its lease on the host it holds; until then the host takes no other start.
-    pub fn reservations(&self) -> Vec<Reservation> {
-        self.lock().marks.reservations()
-    }
-
-    /// Whether `host` is set aside for a waiting request.
-    pub fn is_reserved(&self, host: &HostId) -> bool {
-        self.lock().marks.holder(host).is_some()
-    }
-
     /// The host `lease` is booked on, if it is booked on one.
     pub fn host_of(&self, lease: &LeaseId) -> Option<HostId> {
         match self.lock().book.read(lease) {
@@ -438,20 +346,6 @@ impl Registry {
     /// estimated for each lease that ended. In memory only.
     pub fn tail_counters(&self) -> crate::TailCounters {
         self.lock().tail
-    }
-
-    /// The hosts reserved and held, and the requests waiting, now.
-    pub fn whole_counts(&self) -> WholeCounts {
-        let state = self.lock();
-        let held = state
-            .records
-            .values()
-            .filter(|r| r.exclusive.held_since().is_some());
-        WholeCounts {
-            reserved: state.marks.reservations().len(),
-            held: held.count(),
-            queued: state.waiting.len(),
-        }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -708,11 +602,13 @@ impl Registry {
         let host = beat::parse(heartbeat)?;
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
+        let keeps = self.keeper().is_some();
         let State {
             book,
             records,
             runs,
             requests,
+            failed,
             ..
         } = &mut *guard;
         let record = beat::admitted(records.get_mut(&host), heartbeat, credential)?;
@@ -734,7 +630,10 @@ impl Registry {
         if heartbeat.exclusive_ready.is_some() {
             let granted = record.exclusive.ready_lease();
             granted.iter().for_each(|lease| {
-                requests.granted(lease);
+                // A placer that keeps the records lets the request's go itself.
+                if !keeps {
+                    requests.granted(lease);
+                }
                 self.tell_ready(lease);
             });
         }
@@ -743,7 +642,8 @@ impl Registry {
             let mut ending = Ending {
                 book: &mut *book,
                 runs: &mut *runs,
-                requests: &mut *requests,
+                requests: (!keeps).then_some(&mut *requests),
+                failed: &mut *failed,
                 rules,
                 now,
                 placer: self.shared.placer.get().map(|placer| &**placer),
@@ -978,6 +878,6 @@ impl Registry {
     pub fn snapshot(&self) -> (Vec<HostView>, Vec<Waiting>) {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
-        (self.host_views(&state, now), waiting_rows(&state))
+        (self.host_views(&state, now), self.waiting_rows(&state))
     }
 }

@@ -12,7 +12,7 @@ use super::record::Record;
 use super::{HostMark, HostState, HostView, Registry, State};
 use crate::config::placement_shape;
 use crate::runs::Runs;
-use crate::whole::reserve::Marks;
+use crate::whole::reserve::Reservation;
 
 impl HostView {
     /// The shape the registry places the host on: the pool's booked [`Self::shape`], with
@@ -50,8 +50,46 @@ impl Registry {
         record.silent_since(now, self.grace_ms())
     }
 
+    /// The hosts set aside for waiting whole-node requests now, in host order
+    /// ([`Registry::reservations`]): the registry's marks, each read from a placer that keeps
+    /// the queue ([`crate::Placer::whole_reservations`]) when it holds the same host for the
+    /// same request; a placer that keeps the wait list ([`crate::Placer::keeps_wait_list`])
+    /// holds every mark, and they are its.
+    pub(super) fn marks_now(&self, state: &State) -> Vec<Reservation> {
+        // A placer that keeps the wait list holds the marks: they are its alone.
+        if let Some(keeper) = self.keeper() {
+            let mut marks = keeper.whole_reservations().unwrap_or_default();
+            marks.sort_by(|a, b| a.host.cmp(&b.host));
+            return marks;
+        }
+        self.engine_marks(state.marks.reservations())
+    }
+
+    /// `own`, the registry's marks, each replaced by the placer's mark of the same request on
+    /// the same host when the placer keeps the queue and has one that drains: its instant,
+    /// deadline and tail. The registry says which hosts are held: it takes the placer's
+    /// marks at each pass, and lets a host go at once when it is retired or its request is
+    /// stopped; a mark put back from the ledger for a request not presented since is the
+    /// registry's alone. A quiet host granted carries no instant of its own in the placer,
+    /// so the registry's (the pass that took it) is kept.
+    fn engine_marks(&self, own: Vec<Reservation>) -> Vec<Reservation> {
+        let placer = self.shared.placer.get();
+        let Some(engine) = placer.and_then(|placer| placer.whole_reservations()) else {
+            return own;
+        };
+        let read = own.into_iter().map(|mark| {
+            let pair = (&mark.request, &mark.host);
+            let held = engine
+                .iter()
+                .find(|held| (&held.request, &held.host) == pair);
+            let drains = held.filter(|held| !held.assigned);
+            drains.cloned().unwrap_or(mark)
+        });
+        read.collect()
+    }
+
     pub(super) fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
-        let view = self.viewer((&state.book, &state.runs, &state.marks), now);
+        let view = self.viewer((&state.book, &state.runs, self.marks_now(state)), now);
         state
             .records
             .iter()
@@ -59,18 +97,18 @@ impl Registry {
             .collect()
     }
 
-    /// The listing's view of one host, given the parts of the state that it reads. The
-    /// reads that are the same for every host are made once, here.
+    /// The listing's view of one host, given the parts of the state that it reads and the
+    /// hosts set aside now ([`Registry::marks_now`]). The reads that are the same for every
+    /// host are made once, here.
     pub(super) fn viewer<'a>(
         &'a self,
-        (book, runs, marks): (&'a HostBook, &'a Runs, &'a Marks),
+        (book, runs, marks): (&'a HostBook, &'a Runs, Vec<Reservation>),
         now: Timestamp,
     ) -> impl Fn(&HostId, &Record) -> HostView + 'a {
         let booked = book.booked();
         let every = book.leases();
         let shape = self.shared.config.fit();
         let memory = self.shared.config.memory_headroom();
-        let marks = marks.reservations();
         move |id, record| {
             let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
             HostView {

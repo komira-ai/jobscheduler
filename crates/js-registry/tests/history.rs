@@ -735,9 +735,11 @@ fn the_profile_of_a_lease_outlives_its_runs() {
 /// presented within the regain grace) recorded as a cancellation, and a request put back
 /// from the ledger and cancelled before its consumer presented it again recorded with no
 /// wait, or not at all.
-#[test]
-fn waiting_requests_dropped_or_put_back_before_the_stop() {
-    let mut l = Logged::new(World::new(&["a"], plain), fake());
+///
+/// Runs under both placements: under `--placement js-sched` the engine's wait list says
+/// how the request waited.
+fn waiting_requests_dropped_or_put_back_before_the_stop(p: Placement) {
+    let mut l = Logged::new(World::new_in(p, &["a"], plain), fake());
     l.w.share(1, HOUR_S);
     l.w.ask(2, "q");
     l.w.asks.clear();
@@ -746,12 +748,12 @@ fn waiting_requests_dropped_or_put_back_before_the_stop() {
     l.w.stop(2);
     assert_eq!(l.hub.write_history(), None);
 
-    let mut first = World::new(&["a"], plain);
+    let mut first = World::new_in(p, &["a"], plain);
     first.share(1, HOUR_S);
     let asked = first.now().millis();
     first.ask(2, "q");
     let ledger = first.fx.registry.reservation_ledger();
-    let mut l = Logged::new(World::new(&["a"], plain), fake());
+    let mut l = Logged::new(World::new_in(p, &["a"], plain), fake());
     l.w.share(1, HOUR_S);
     l.w.step(10_000);
     assert_eq!(l.w.fx.registry.restore_reservations(&ledger).resumed, 1);
@@ -764,3 +766,5 @@ fn waiting_requests_dropped_or_put_back_before_the_stop() {
     let outcome = (row.drain_outcome, row.give_up_outcome);
     assert_eq!(outcome, (DrainOutcome::MarkDropped, Some(0)));
 }
+
+crate::both!(waiting_requests_dropped_or_put_back_before_the_stop);
