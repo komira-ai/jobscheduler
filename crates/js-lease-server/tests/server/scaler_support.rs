@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use js_elastic::{
@@ -22,6 +22,8 @@ use js_provider_lambdalabs::{
     Architecture, ElasticConfig, FakeLambda, InstanceTypeOffer, LambdaProvider, ManualClock,
     OptionTable, Region,
 };
+use js_state::sqlite::{Options, SqliteStore};
+use js_state::{Cond, Store, SystemClock, Txn};
 use js_types::{
     Capabilities, ClassId, ExecMode, LeaseId, Model, Request, RequestId, ResourceClass, Resources,
 };
@@ -29,7 +31,14 @@ use serde_json::{Value, json};
 
 use crate::agents_support::{Session, hello_body, session};
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
-use crate::support::{Harness, Reply, Scratch, request};
+use crate::store_support::sqlite_db;
+use crate::support::{Harness, Kept, Reply, Scratch, request};
+
+/// The key of the scaler's records in the state store.
+pub const RECORDS_KEY: &str = "acquires/scaler/records";
+
+/// The key of the hosts the registry refused to remove, in the state store.
+pub const UNREMOVED_KEY: &str = "acquires/scaler/unremoved";
 
 /// The accounts in memory, by the path of the key file that names them: a kind is a plain
 /// function and holds nothing, so a test leaves the account here for it to find.
@@ -235,6 +244,116 @@ impl CapacityProvider for PanicOnList {
     }
 }
 
+/// The key files whose pool's provider reads the store before each launch ([`Peek`]).
+static PEEKS: Mutex<BTreeMap<String, Arc<Peek>>> = Mutex::new(BTreeMap::new());
+
+/// What the provider of a pool saw of the scaler's records in the state store at each launch,
+/// read through a handle of its own the moment the scaler called it: the value of
+/// [`RECORDS_KEY`], or `None` when the store held none.
+#[derive(Default)]
+pub struct Peek {
+    store: OnceLock<Arc<dyn Store>>,
+    seen: Mutex<Vec<Option<String>>>,
+}
+
+impl Peek {
+    /// Reads `store` at every launch from now on.
+    pub fn watch(&self, store: Arc<dyn Store>) {
+        assert!(self.store.set(store).is_ok(), "one store per peek");
+    }
+
+    /// What each launch saw, in order.
+    pub fn seen(&self) -> Vec<Option<String>> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn look(&self) {
+        let store = self.store.get().expect("the test gave the store");
+        let row = store.get(RECORDS_KEY).unwrap();
+        let text = row.map(|row| String::from_utf8(row.value).unwrap());
+        self.seen.lock().unwrap().push(text);
+    }
+}
+
+/// Makes the provider of the pool whose key file `scratch` makes read the store before each
+/// launch, as the returned [`Peek`] says.
+pub fn peek(scratch: &Scratch) -> Arc<Peek> {
+    let key = scratch.path("api-key").display().to_string();
+    let peek = Arc::new(Peek::default());
+    PEEKS.lock().unwrap().insert(key, Arc::clone(&peek));
+    peek
+}
+
+/// A provider that is another one in every call, and reads the store before a launch.
+struct Peeking(Box<dyn CapacityProvider>, Arc<Peek>);
+
+impl CapacityProvider for Peeking {
+    fn catalog(&self) -> CatalogFuture<'_> {
+        self.0.catalog()
+    }
+
+    fn checks(&self) -> Vec<js_elastic::CheckResult> {
+        self.0.checks()
+    }
+
+    fn host_prep(&self, offer: &Offer) -> Vec<BootStep> {
+        self.0.host_prep(offer)
+    }
+
+    fn payload_limit(&self) -> usize {
+        self.0.payload_limit()
+    }
+
+    fn acquire(&self, request: &AcquireRequest) -> Acquired {
+        self.1.look();
+        self.0.acquire(request)
+    }
+
+    fn list(&self) -> Result<Vec<Held>, ProviderError> {
+        self.0.list()
+    }
+
+    fn release(&self, id: &HostRef) -> Released {
+        self.0.release(id)
+    }
+
+    fn unresolved(&self) -> Vec<AcquireId> {
+        self.0.unresolved()
+    }
+
+    fn is_gone(&self, id: &HostRef) -> bool {
+        self.0.is_gone(id)
+    }
+
+    fn id(&self) -> js_types::ProviderId {
+        self.0.id()
+    }
+
+    fn can_launch(&self) -> bool {
+        self.0.can_launch()
+    }
+
+    fn capabilities(&self) -> js_elastic::ProviderCaps {
+        self.0.capabilities()
+    }
+
+    fn capacity(&self) -> js_elastic::Capacity {
+        self.0.capacity()
+    }
+
+    fn observe(&self, id: &HostRef) -> js_elastic::Observed {
+        self.0.observe(id)
+    }
+
+    fn verify_instance(&self, hello: &js_elastic::Hello) -> Option<HostRef> {
+        self.0.verify_instance(hello)
+    }
+
+    fn events(&self) -> Option<EventStream> {
+        self.0.events()
+    }
+}
+
 /// The one instance type of the fake account.
 const OPTIONS: &str = r#"
 [[option]]
@@ -300,6 +419,11 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
     let provider: Box<dyn CapacityProvider> = match panicky {
         true => Box::new(PanicOnList(Box::new(provider))),
         false => Box::new(provider),
+    };
+    let peek = PEEKS.lock().unwrap().get(path.unwrap_or_default()).cloned();
+    let provider: Box<dyn CapacityProvider> = match peek {
+        Some(peek) => Box::new(Peeking(provider, peek)),
+        None => provider,
     };
     Ok(Built::Elastic(ElasticBuilt {
         provider,
@@ -381,6 +505,13 @@ pub fn text_with(scratch: &Scratch, launch: &str, boot: &str, more: &[(&str, &st
                  advertise_url = \"https://sched.example.org:7301\"";
     let head = server(scratch, extra).replace("\"initialise\"", &quote(boot));
     file(&head, &[&pool])
+}
+
+/// [`text`], with the `[server]` keys of `kept` ([`Kept::keys`]): with the store, the state is
+/// kept in a SQLite store of `scratch`.
+pub fn text_in(scratch: &Scratch, launch: &str, boot: &str, kept: Kept) -> String {
+    let keys = format!("[server]\n{}", kept.keys(scratch));
+    text(scratch, launch, boot).replacen("[server]\n", &keys, 1)
 }
 
 /// A server on `text`, read with the fake cloud's kinds, whose pool has had its first
@@ -500,4 +631,40 @@ pub fn unremoved_path(scratch: &Scratch) -> std::path::PathBuf {
     let mut name = records_path(scratch).into_os_string();
     name.push(".unremoved");
     std::path::PathBuf::from(name)
+}
+
+/// What `h` keeps at `key` of the state store, or, without a store, in the file at `path`:
+/// none when there is neither.
+fn kept_at(h: &Harness, path: std::path::PathBuf, key: &str) -> Option<String> {
+    match h.running.store() {
+        None => std::fs::read_to_string(path).ok(),
+        Some(store) => {
+            let row = store.get(key).unwrap();
+            row.map(|row| String::from_utf8(row.value).unwrap())
+        }
+    }
+}
+
+/// The text of the scaler's records `h` keeps: the file beside the lease file, or the value
+/// of [`RECORDS_KEY`].
+pub fn kept_records(h: &Harness) -> Option<String> {
+    kept_at(h, records_path(&h.scratch), RECORDS_KEY)
+}
+
+/// The text of the hosts to remove `h` keeps: the file beside the lease file, or the value of
+/// [`UNREMOVED_KEY`].
+pub fn kept_unremoved(h: &Harness) -> Option<String> {
+    kept_at(h, unremoved_path(&h.scratch), UNREMOVED_KEY)
+}
+
+/// The SQLite store of `scratch`, opened by the test while no server holds it.
+pub fn open_store(scratch: &Scratch) -> SqliteStore {
+    let clock = Arc::new(SystemClock::default());
+    SqliteStore::open(&sqlite_db(scratch), clock, Options::default()).unwrap()
+}
+
+/// Puts `text` at `key` of the SQLite store of `scratch`, which no server holds.
+pub fn put_in_store(scratch: &Scratch, key: &str, text: &str) {
+    let txn = Txn::new().put(key, text, Cond::Any);
+    open_store(scratch).txn(txn).unwrap().unwrap();
 }

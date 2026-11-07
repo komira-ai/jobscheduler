@@ -1,4 +1,7 @@
-//! The scaler's records file: `<state file>.scaler`.
+//! The scaler's records file: `<state file>.scaler`, without a store setting. With one
+//! (`--store`, `server.store`) no such file is read or written: the records are the key
+//! `acquires/scaler/records` of the state store, in the same format (the `kept` module), and
+//! the file is read once, by the first start over an empty store, which imports its text.
 //!
 //! The file holds all of [`Records`] ([`Records::encode`] is its format: JSON, versioned),
 //! and the shell writes all of it, as one file, before it runs the first call a step
@@ -64,6 +67,11 @@ impl RecordsFile {
     }
 
     fn read(&self) -> Result<Option<Records>, StartupError> {
+        Ok(self.checked()?.map(|(records, _)| records))
+    }
+
+    /// The records in the file and the text they were read from; none when there is no file.
+    fn checked(&self) -> Result<Option<(Records, String)>, StartupError> {
         let Some(bytes) = read_if_present(&self.path)? else {
             return Ok(None);
         };
@@ -72,8 +80,20 @@ impl RecordsFile {
             Err(_) => return Err(self.refused("it is not text")),
         };
         match Records::decode(&text) {
-            Ok(records) => Ok(Some(records)),
+            Ok(records) => Ok(Some((records, text))),
             Err(err) => Err(self.refused(err)),
+        }
+    }
+
+    /// The file's text, read and checked as [`RecordsFile::load`] reads it, for the import of
+    /// the first start over a store: none when there is no file, unless `existing` (a live
+    /// pool not at its first start), when a missing file is refused as
+    /// [`RecordsFile::load_existing`] refuses it.
+    pub(crate) fn import_text(&self, existing: bool) -> Result<Option<String>, StartupError> {
+        match (self.checked()?, existing) {
+            (Some((_, text)), _) => Ok(Some(text)),
+            (None, true) => Err(self.missing()),
+            (None, false) => Ok(None),
         }
     }
 

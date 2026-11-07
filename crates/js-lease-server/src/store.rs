@@ -18,10 +18,14 @@
 //!   ([`SqliteStore::open_locked`]), so a lock this process holds cannot be lost to another.
 //!
 //! What the store keeps: the host bindings, with their taints and cordons, and the join
-//! tokens' digests ([`crate::host_keys`]), read once at start after the lock is taken. The
-//! scaler's records are not kept in the store yet, so a server with an elastic pool is
-//! refused at start, after the lock is taken and before any listener is bound. The lease
-//! file, the job store and the usage database are where they are without the setting.
+//! tokens' digests ([`crate::host_keys`]), and the scaler's records and the hosts the
+//! registry refused to remove (`acquires/scaler/records`, `acquires/scaler/unremoved`), read
+//! once at start after the lock is taken. The lease file, the job store and the usage
+//! database are where they are without the setting.
+//!
+//! The first start over a store imports the four files a server without the setting keeps
+//! beside the lease file (`.agents`, `.joins`, `.scaler`, `.scaler.unremoved`) once, right
+//! after the lock is taken and before anything is read from the store ([`ServerStore::import`]).
 
 use std::fs::{OpenOptions, Permissions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -38,8 +42,7 @@ use crate::config::{StoreNames, StoreSetting};
 use crate::error::StartupError;
 use crate::util::or_pending;
 
-/// What a start with a store setting refuses until the scaler's records are kept in the store.
-const NOT_AVAILABLE: &str = "store-backed server state is not available yet for a server with an elastic pool; start this server without a store setting";
+mod import;
 
 /// The store, opened under the writer lock the server holds for its life.
 pub(crate) struct ServerStore {
@@ -84,13 +87,22 @@ impl ServerStore {
         Ok(Self { store, lock, names })
     }
 
-    /// Refuses the start of a server with an elastic pool: the scaler's records are not kept
-    /// in the store yet (see the module docs).
-    pub(crate) fn refuse_elastic(&self, elastic: bool) -> Result<(), StartupError> {
-        match elastic {
-            true => Err(self.refuse(NOT_AVAILABLE)),
-            false => Ok(()),
-        }
+    /// The first start's import of the files beside the lease file at `state_file`, once,
+    /// and a no-op at every later start (see the `import` module). `records_needed` is true
+    /// for a live elastic pool that is not at its first start, which does not start without
+    /// its records.
+    ///
+    /// # Errors
+    ///
+    /// A file's refusal, naming the file, or the store could not be read or written, naming
+    /// the store's setting: nothing was imported.
+    pub(crate) fn import(
+        &self,
+        state_file: &Path,
+        records_needed: bool,
+    ) -> Result<(), StartupError> {
+        let refuse = |reason: String| self.refuse(reason);
+        import::run(&*self.store, state_file, records_needed, &refuse)
     }
 
     /// A refusal of the start for `reason`, naming the store's flag or key: what the store

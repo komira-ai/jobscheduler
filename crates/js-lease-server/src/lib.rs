@@ -23,8 +23,8 @@
 //!   order, and keeps the pool's records in `<state file>.scaler` ([`RecordsFile`]), owner
 //!   only and written whole before the call a record describes, and the hosts the registry
 //!   refused to remove in `<state file>.scaler.unremoved` ([`UnremovedFile`]), written the
-//!   same way and before the registry is asked to remove a host, so that a restart tries
-//!   them again.
+//!   same way before the registry is asked to remove a host; with `--store`, in two keys of
+//!   the store instead (see "The store"). A restart reads them back and tries the hosts.
 //! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`], [`Ticker`]) so a test steps both.
 //!
 //! # Flags
@@ -374,15 +374,15 @@
 //! store's next writer generation and every commit checks it, so once another process takes
 //! the lock no commit of this one succeeds, between ticks too.
 //!
-//! With the setting, the host bindings (with their taints and cordons) and the join tokens'
-//! digests are kept in the store, under `hosts/binding/<host id>` and `hosts/join/<digest>`,
-//! instead of `<state file>.agents` and `.joins`, which are then neither read nor written.
-//! Each change is committed before it is held in memory; a heartbeat with no new taint, a
-//! known host's hello and the host book use no store. The lease file, the job store and the
-//! usage file are kept as without the setting. With an elastic pool a store setting is
-//! refused at start, after the lock is taken and before any listener is bound, with
-//! `--store: store-backed server state is not available yet ...`, until the scaler's records
-//! move. Without the setting nothing is opened and the server is as it was.
+//! With the setting, the host bindings (with their taints and cordons), the join tokens'
+//! digests, the scaler's records and its hosts to remove are kept in the store, under
+//! `hosts/binding/<host id>`, `hosts/join/<digest>`, `acquires/scaler/records` and
+//! `acquires/scaler/unremoved`, instead of `<state file>.agents`, `.joins`, `.scaler` and
+//! `.scaler.unremoved`. Each change is committed before it is held in memory (the scaler's
+//! before the call it records); a heartbeat with no new taint, a known host's hello and the
+//! host book use no store. The first start over an empty store imports the four files once,
+//! in one transaction with the marker `meta/server-state-imported`, and never changes them.
+//! The lease file, the job store and the usage file are kept as without the setting.
 //!
 //! # Who may do what
 //!

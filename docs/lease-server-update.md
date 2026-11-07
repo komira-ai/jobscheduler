@@ -23,8 +23,9 @@ the process. At this release:
   cancel it, and its work is lost; `GET` and `DELETE` of its run id answer 410 `run-forgotten`.
 
 So an update ends every run in flight. It will end none once runs are kept in the store; until
-then, update when no run you care about is in flight. The store (`--store`) holds nothing of the
-server's state yet: the hook uses it only for its writer lock (below).
+then, update when no run you care about is in flight. The store (`--store`) holds the host bindings,
+the join tokens and the scaler's records, not the leases or the runs; the hook uses it for its writer
+lock (below).
 
 ## What the hook needs
 
