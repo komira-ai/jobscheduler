@@ -374,12 +374,15 @@
 //! store's next writer generation and every commit checks it, so once another process takes
 //! the lock no commit of this one succeeds, between ticks too.
 //!
-//! Nothing of the server's state is kept in the store yet: the lease file, the files beside
-//! it and the usage file are kept as without the setting. Until they move, a server that
-//! registers agents (`--agent-pool-config`, or an elastic pool) is refused at start with a
-//! store setting, after the lock is taken and before any listener is bound, with
-//! `--store: store-backed server state is not available yet ...`. Without the setting
-//! nothing is opened and the server is as it was.
+//! With the setting, the host bindings (with their taints and cordons) and the join tokens'
+//! digests are kept in the store, under `hosts/binding/<host id>` and `hosts/join/<digest>`,
+//! instead of `<state file>.agents` and `.joins`, which are then neither read nor written.
+//! Each change is committed before it is held in memory; a heartbeat with no new taint, a
+//! known host's hello and the host book use no store. The lease file, the job store and the
+//! usage file are kept as without the setting. With an elastic pool a store setting is
+//! refused at start, after the lock is taken and before any listener is bound, with
+//! `--store: store-backed server state is not available yet ...`, until the scaler's records
+//! move. Without the setting nothing is opened and the server is as it was.
 //!
 //! # Who may do what
 //!
@@ -532,8 +535,8 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable` |
-//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack}` (see "Runs" and "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
+//! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable`, or `state-write-failed` when, with a store setting, the host's binding could not be committed |
+//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack}` (see "Runs" and "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
 //! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; body optional, `{"lease_secs": n}` (default 300, cut to 3600); 400 `invalid-cordon`; 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
 //! | `POST /v1/hosts/{id}:uncordon` | as the cordon, with no body: 200 the host, plus `lifted`; 200 also when it was not cordoned |
 //! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, mark?, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}`; `mark` is `reserved`, `held`, `draining` or `releasing` as in the `mark` of `GET /v1/hosts`, and absent for a host that is not set aside (a host is idle when `lease` is absent, `leases` is 0, `releasing` is false and `mark` is absent) |
@@ -552,10 +555,9 @@
 //! it placed (the server does not tell who placed one, and an uncordon lifts any cordon, so a
 //! requester uncordons only after a cordon whose reply said `already_cordoned: false`). There is no
 //! total cap on a cordon that is renewed; a requester that dies leaves it to lapse within its last
-//! `lease_secs`, at most an hour. A cordon is written to the agent
-//! state file before it is acknowledged and survives a restart; an uncordon is written the
-//! same way. The routes are served by the agent routes' listener (`agent_listen`, when
-//! there is one).
+//! `lease_secs`, at most an hour. A cordon is written to the agent state file (with a store setting,
+//! committed to the store) before it is acknowledged and survives a restart; an uncordon is written
+//! the same way. The routes are served by the agent routes' listener (`agent_listen`, if any).
 //!
 //! A leasing client asks for a lease as ever and is given a static host first, a
 //! registered one when the static pool has none; it cannot tell which it got except by
@@ -602,11 +604,11 @@
 //! no new run (409 `host-tainted`), takes no new lease (a request only it could serve is
 //! `no-capacity`; a lease already on it is untouched until it ends), still counts toward
 //! `max_machines`, is never forgotten for being silent, and keeps its
-//! taint across its own hello and a server restart (the `.agents` file holds it, see
-//! "Restart"). The runs it already holds finish: their stops are sent, their results are
+//! taint across its own hello and a server restart (the `.agents` file or the store holds
+//! it, see "Restart"). The runs it already holds finish: their stops are sent, their results are
 //! acknowledged, and the budget returns when the host stops listing them. Nothing clears a
 //! taint: an operator stops the server and removes the `taint_` keys of the host's entry
-//! in the `.agents` file.
+//! in the `.agents` file (or of its value in the store).
 //!
 //! **Not built.** Clearing a taint, the agent's side of the runs below, several pools, a
 //! deny list of host ids.
@@ -713,43 +715,40 @@
 //! That hello is admitted as any other and the lease then observes `Present`. An awaiting
 //! host whose lease has ended and whose agent has not returned is forgotten, binding
 //! included, once the grace period and `lost_retention` have passed since the restart
-//! that seated it; the next tick writes the file of bindings without it. An agent
-//! whose heartbeat reaches a restarted server is answered 409 `unknown-host` and says
-//! hello.
+//! that seated it; the next tick writes the file of bindings (or the store) without it.
+//! An agent whose heartbeat reaches a restarted server is answered 409 `unknown-host` and
+//! says hello.
 //!
 //! What would otherwise let any join-token holder take such a lease with the first hello
 //! after the restart is the binding of the host id to the credential and instance it was
-//! admitted with. The server keeps the bindings in a file of its own beside the lease
-//! file, `<state file>.agents` (TOML, mode 0600, replaced whole, keys it does not know
-//! ignored), written when a hello admits a host and again at a tick when it differs, and
-//! reads it at start. It holds SHA-256 digests of join tokens, not tokens, and the taint of
-//! each host that reported one: such a host is put back at start as an awaiting host (and
-//! counts toward `max_machines`) whether or not it holds a lease. The file is
-//! not part of the lease file, so the lease file's format and the static-only start are
-//! unchanged. A file that is present and unreadable, or not private, is a refused start
+//! admitted with. The server keeps the bindings (in the store with a store setting, see
+//! "The store") in a file of its own beside the lease file, `<state file>.agents` (TOML,
+//! mode 0600, replaced whole, keys it does not know ignored), written when a hello admits a
+//! host and again at a tick when it differs, and reads it at start. It holds SHA-256
+//! digests of join tokens, not tokens, and the taint of each host that reported one: such a
+//! host is put back at start as an awaiting host (and counts toward `max_machines`) whether
+//! or not it holds a lease. The file is not part of the lease file, so the lease file's
+//! format and the static-only start are unchanged. A file that is present and unreadable, or not private, is a refused start
 //! naming `--state-file`. A missing file means no bindings: a lease on a registered host
 //! then restores without one, and the first hello binds the id. If the file cannot be
 //! written (the failure is logged and counted) a lease granted meanwhile survives a
 //! restart without its binding until a later tick writes it.
 //!
-//! The whole-node reservations of the registry (the host set aside for a waiting request,
-//! the wait list's order, the give-up and failed-prepare counts, the hosts a request is
-//! kept off and until when) are kept in the lease file, as the table's reservation
-//! ledger: each tick hands the table the registry's ledger when it changed and the table
-//! writes it in the same replace as the leases, so the file is at most one tick behind and
-//! the final tick of a shutdown brings it level. With `--boot resume` the registry is
-//! given the ledger before any agent says hello. A restored mark stands while its host has
-//! not yet said hello, a restored request waits in its place until its consumer presents
-//! the same request id again (the file does not hold what the request asks for), and a
-//! reservation whose deadline had passed, or would pass sooner, gets the boot plus
-//! [`RESERVATION_BOOT_GRACE`] (two minutes) to drain instead of being given up at once.
-//! What is not presented again, or not heard from again, within the pool's `regain_grace`
-//! is dropped and counted ([`js_registry::Registry::dropped_reservations`]); the count
-//! of failed prepares and give-ups is kept, so a restart does not reset
-//! `max_reserve_attempts` or `max_replace`. Estimates are not kept. The format is
-//! additive: the rows and their keys are read past by a build that does not know them.
-//! A queued whole-host job's mark is not in this file: it is a row of the job store, which
-//! the engine puts back after a restart (`docs/design/whole-node.md`, section 5, item 7).
+//! The whole-node reservations of the registry (the host set aside for a waiting request, the wait
+//! list's order, the give-up and failed-prepare counts, the hosts a request is kept off and until
+//! when) are kept in the lease file, as the table's reservation ledger: each tick hands the table
+//! the registry's ledger when it changed and the table writes it in the same replace as the leases,
+//! so the file is at most one tick behind and the final tick of a shutdown brings it level. With
+//! `--boot resume` the registry is given the ledger before any agent says hello. A restored mark
+//! stands while its host has not yet said hello, a restored request waits in its place until its
+//! consumer presents the same request id again (the file does not hold what the request asks for),
+//! and a reservation whose deadline had passed, or would pass sooner, gets the boot plus
+//! [`RESERVATION_BOOT_GRACE`] (two minutes) to drain instead of being given up at once. What is not
+//! presented again, or not heard from again, within the pool's `regain_grace` is dropped and
+//! counted ([`js_registry::Registry::dropped_reservations`]); the count of failed prepares and
+//! give-ups is kept, so a restart does not reset `max_reserve_attempts` or `max_replace`. Estimates
+//! are not kept. The format is additive: the rows and their keys are read past by a build that does
+//! not know them.
 //! A reservation is made through `POST /v1/leases` with a `request_id` (see "Request ids"
 //! above). The lease file keeps that lease's request with it, so after a `--boot resume`
 //! the first tick presents the pending lease's request again under its id: that is the
@@ -842,6 +841,7 @@ mod fence;
 mod file;
 mod file_checks;
 mod flags;
+mod host_keys;
 mod hosts;
 #[cfg(feature = "in-process")]
 pub mod in_process;

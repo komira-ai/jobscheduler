@@ -4,6 +4,7 @@
 //! requester sets and renews, that the server caps and lets lapse, and that a restart keeps.
 
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use js_lease_server::BODY_LIMIT;
@@ -11,10 +12,10 @@ use serde_json::{Value, json};
 
 use crate::agents_support::{
     JOIN, POOL, Session, agent_args, entry, hello_body, hosts, post, restarted, session,
-    start_agents,
+    start_agents, start_agents_in,
 };
 use crate::joins::{beat_with, code, hello, minted};
-use crate::support::{Harness, Reply, Scratch, T0, lease_body, request};
+use crate::support::{Harness, Kept, Reply, Scratch, T0, kept_bindings, lease_body, request};
 
 /// The default length of a cordon asked for with no length, and the longest one a request
 /// can ask for, in seconds.
@@ -56,6 +57,13 @@ fn path(host: &str, verb: Option<&str>) -> String {
         Some(verb) => format!("/v1/hosts/{host}:{verb}"),
         None => format!("/v1/hosts/{host}"),
     }
+}
+
+/// The path of the file a server in file mode keeps its host bindings in.
+fn agents_file(h: &Harness) -> PathBuf {
+    let mut file = h.scratch.state().into_os_string();
+    file.push(".agents");
+    PathBuf::from(file)
 }
 
 /// A call of an own-host route with `secret` as the bearer.
@@ -383,19 +391,32 @@ async fn a_path_that_names_no_action_is_not_found() {
     assert!(show(&h, "burst-1", &me).await.get("cordon").is_none());
 }
 
-/// Asserts that a cordon is kept in the agent state file and survives a restart: after it
+/// Asserts that a cordon is kept with the host bindings and survives a restart: after it
 /// the host (which holds no lease) is read with the same expiry, still awaiting its agent,
 /// takes no lease once the agent says hello again, and is lifted at the expiry as before.
-/// It catches a cordon held in memory only, and one a hello forgets.
+/// It runs with the bindings in the agent state file and in the state store. It catches a
+/// cordon held in memory only, and one a hello forgets; in the store it also catches a
+/// cordon not written to the host's binding key, and a server that still writes the file.
 #[tokio::test]
 async fn a_cordon_survives_a_restart() {
-    let first = start_agents("cordon_restart", false).await;
+    for kept in Kept::BOTH {
+        a_cordon_survives_a_restart_in(kept).await;
+    }
+}
+
+async fn a_cordon_survives_a_restart_in(kept: Kept) {
+    let first = start_agents_in("cordon_restart", false, kept).await;
     let me = enrolled(&first, "burst-1", "i-1").await;
     assert_eq!(cordon(&first, "burst-1", &me, 120).await.status, 200);
-    let mut file = first.scratch.state().into_os_string();
-    file.push(".agents");
-    let text = fs::read_to_string(&file).unwrap();
-    assert!(text.contains("cordon_until_ms = 1120000"), "{text}");
+    let text = kept_bindings(&first);
+    match kept {
+        Kept::Files => assert!(text.contains("cordon_until_ms = 1120000"), "{text}"),
+        Kept::Store => {
+            assert!(text.contains("hosts/binding/burst-1 "), "{text}");
+            assert!(text.contains("\"cordon_until_ms\":1120000"), "{text}");
+            assert!(!agents_file(&first).exists());
+        }
+    }
 
     let h = restarted(first, false).await;
     let read = show(&h, "burst-1", &me).await;
@@ -418,18 +439,34 @@ async fn a_cordon_survives_a_restart() {
     live_for(&h, &me, 125).await;
     assert!(show(&h, "burst-1", &me).await.get("cordon").is_none());
     assert_eq!(lease(&h).await.json()["host"], "burst-1");
+    if kept == Kept::Store {
+        assert!(!agents_file(&h).exists());
+    }
 }
 
 /// Asserts that a lifted cordon is not brought back by a restart, and that a host the
 /// registry does not hold (its server restarted, it holds no lease, is not tainted and
 /// is not cordoned) is 409 `unknown-host` on all three routes until its agent says hello
-/// again. It catches an uncordon that leaves the row, and a route that makes up a host.
+/// again. It runs with the bindings in the agent state file and in the state store. It
+/// catches an uncordon that leaves the row, and a route that makes up a host; in the store
+/// it also catches an uncordon that leaves the cordon in the host's binding key.
 #[tokio::test]
 async fn a_lifted_cordon_stays_lifted_and_an_unknown_host_is_not_found() {
-    let first = start_agents("cordon_lifted_restart", false).await;
+    for kept in Kept::BOTH {
+        a_lifted_cordon_stays_lifted_in(kept).await;
+    }
+}
+
+async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
+    let first = start_agents_in("cordon_lifted_restart", false, kept).await;
     let me = enrolled(&first, "burst-1", "i-1").await;
     assert_eq!(cordon(&first, "burst-1", &me, 120).await.status, 200);
     assert_eq!(uncordon(&first, "burst-1", &me).await.status, 200);
+    let text = kept_bindings(&first);
+    assert!(!text.contains("cordon_until_ms"), "{text}");
+    if kept == Kept::Store {
+        assert!(!agents_file(&first).exists());
+    }
     let h = restarted(first, false).await;
     for reply in [
         own(&h, "GET", "burst-1", None, &me.credential, None).await,

@@ -11,9 +11,11 @@ use js_lease_server::{SharedClock, channel_ticker};
 
 use crate::agents_support::{
     JOIN, Session, agent_args, hello_body, hello_with, hosts, listed, post, restarted, session,
-    start_agents,
+    start_agents, start_agents_in,
 };
-use crate::support::{Harness, LogCapture, Reply, TOKEN, config, replace, request, start};
+use crate::support::{
+    Harness, Kept, LogCapture, Reply, TOKEN, config, kept_joins, replace, request, start,
+};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -296,13 +298,23 @@ async fn a_new_token_for_an_instance_replaces_the_unused_one() {
 /// Asserts what a restart keeps: the token that was not used admits its host, the one
 /// that was used still refuses another host and still lets its own host say hello again.
 /// It catches a restart that gives a used token back (a second host registers) and one
-/// that drops a token nobody used yet.
+/// that drops a token nobody used yet. It runs with the tokens in the file and in the
+/// state store; in the store it also catches a token kept in the file beside the lease
+/// file instead (none is written) and a store row that names no user for the used token.
 #[tokio::test]
 async fn a_restart_keeps_an_unused_token_and_a_used_one() {
-    let first = start_agents("joins_restart", false).await;
+    for kept in Kept::BOTH {
+        a_restart_keeps_an_unused_token_and_a_used_one_in(kept).await;
+    }
+}
+
+async fn a_restart_keeps_an_unused_token_and_a_used_one_in(kept: Kept) {
+    let first = start_agents_in("joins_restart", false, kept).await;
     let used = minted(&first, "i-1").await;
     let unused = minted(&first, "i-2").await;
     assert_eq!(hello(&first, &used, "burst-1", "i-1").await.status, 200);
+    let kept_text = kept_joins(&first);
+    assert_eq!(kept_text.matches("burst-1").count(), 1, "{kept_text}");
 
     let h = restarted(first, false).await;
     let stolen = hello(&h, &used, "burst-2", "i-1").await;
@@ -314,6 +326,11 @@ async fn a_restart_keeps_an_unused_token_and_a_used_one() {
     assert_eq!(own.status, 200, "{}", own.body);
     let late = hello(&h, &unused, "burst-2", "i-2").await;
     assert_eq!(late.status, 200, "{}", late.body);
+    if kept == Kept::Store {
+        let mut joins = h.scratch.state().into_os_string();
+        joins.push(".joins");
+        assert!(!std::path::Path::new(&joins).exists());
+    }
 }
 
 /// Asserts that of two hellos racing for one unused token, for two host ids, exactly one
