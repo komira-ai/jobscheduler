@@ -173,10 +173,7 @@ async fn old_hello_with_gpu_class_still_registers() {
     let body = lease(json!({
         "accelerator": { "model": "nvidia-a100", "memory_per_device_gib": 80, "count": 4 },
     }));
-    assert_placed(
-        &acquire(&h, &body).await,
-        &format!("accelerator object"),
-    );
+    assert_placed(&acquire(&h, &body).await, &format!("accelerator object"));
 }
 
 /// Asserts that a count with no model is refused through the route as a 400 whose reason

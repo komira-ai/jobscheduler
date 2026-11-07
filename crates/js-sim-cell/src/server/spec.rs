@@ -163,14 +163,14 @@ impl ServerSpec {
     /// elastic pool beats at the registry's defaults (5 s, with a grace of 15 s), which an
     /// elastic pool does not set: [`ServerSpec::heartbeat`] and the whole-node keys do not
     /// apply to it. The client asks for `shape`'s capabilities, and the pool's floor has
-    /// none, so a scenario gives a shape without any, and `shape` is kept as given (no
-    /// [`ARCH`] is added): each machine is placed by the `arch` its agent reports at hello.
+    /// none, so a scenario gives a shape without any. The pool's floor names no
+    /// architecture either: `shape` is given [`ARCH`], which the cell's agents report at
+    /// hello, and each machine is placed by it.
     #[must_use]
     pub fn elastic_pool(pool: ElasticPool, shape: Shape) -> Self {
         let name = pool.name().to_owned();
         Self {
             elastic: Some(pool),
-            shape: shape.clone(),
             ..Self::whole_node_pool(&name, shape, 0)
         }
     }

@@ -492,10 +492,9 @@ async fn an_offer_outside_the_pool_limits_does_not_count() {
 }
 
 /// Starts a whole-node pool with a `path_grace` of one second and one host, `h1`; queues a
-/// whole-node request `r1` behind `r0`, which holds `h1` (and, pending until its host is
-/// ready, keeps its own place ahead of `r1`); ends `r0`; and removes `h1` from the host
-/// table, as when its machine is given back. The next tick finds no capable host for `r1`,
-/// which is still waiting, first in the queue.
+/// whole-node request `r1` behind `r0`, which holds `h1`; ends `r0`; and removes `h1` from
+/// the host table, as when its machine is given back. The next tick finds no capable host
+/// for `r1`, which is still waiting, first in the queue.
 async fn host_gone(name: &str) -> (Harness, String) {
     let grace = [("path_grace", "\"1s\"")];
     let (h, _cloud) = elastic(name, "whole-node", &grace).await;
@@ -504,7 +503,7 @@ async fn host_gone(name: &str) -> (Harness, String) {
     let waiting = pending(&post(&h, &whole("r1")).await);
     let registry = h.running.registry().unwrap();
     let r1 = RequestId::new("r1").unwrap();
-    assert_eq!(registry.queue_position(&r1), Some(1));
+    assert_eq!(registry.queue_position(&r1), Some(0));
     let freed = h.call("DELETE", &format!("/v1/leases/{held}"), None).await;
     assert_eq!(freed.status, 200, "{}", freed.body);
     let h1 = HostId::new("h1").unwrap();

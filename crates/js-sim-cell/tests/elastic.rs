@@ -38,7 +38,6 @@ use js_types::sched::FarmTime;
 /// How many seeds each scenario runs.
 const SEEDS: u64 = 16;
 
-
 /// How long a cell driven by hand runs: past the first launch (the second tick, at 10 s),
 /// the machine's boot ([`Knobs::boot`], 120 s, later) and its hello.
 const LOOK_AT: FarmTime = FarmTime::from_millis(200_000);
