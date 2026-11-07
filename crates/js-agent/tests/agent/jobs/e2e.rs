@@ -2,6 +2,10 @@
 //! of their own, over a container runtime in memory and a clock the test moves. The agent's
 //! waits are opened one at a time by the test, so each test reads as the order of events
 //! it asserts: nothing here waits for a time to pass.
+//!
+//! The runs here are queued through the lease API (`/v1/leases`). The drain that lets a
+//! running job finish is also asserted over the v1 job API, with the server's own binary and
+//! the crun runtime, in js-lease-server's `v1_acceptance` target.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
