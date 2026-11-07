@@ -55,12 +55,10 @@ js-registry                 0      0
 js-scaler                   0      0
 js-sched                    0      0
 js-sched-placer             0      0
-js-server-core              0      0
 js-sim                      0      0
 js-sim-cell                 0      0
 js-sizing                   0      0
 js-state                    0      0
-js-store                    0      0
 js-testkit                  0      0
 js-treestore                0      0
 js-types                    0      0
