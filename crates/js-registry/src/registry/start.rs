@@ -43,6 +43,31 @@ fn standing(record: &super::Record, now: Timestamp, grace_ms: u64) -> Standing {
     }
 }
 
+/// `settings` with the caps lowered by the marks of `marks` whose request is not in
+/// `presented`: the hosts a placer that keeps the queue holds outside it
+/// ([`WholeRound::outside`]), which count toward the caps as the registry's own pass counts
+/// them. Each is one host whole less under `max_whole_node` and one more kept from the
+/// ceiling's share of the capable hosts, and each that drains a busy host (not assigned) is
+/// one less under `max_draining`, so the placer's own marks and grants stay within what the
+/// pool allows with the hosts held outside.
+fn outside_caps(
+    settings: &WholeNodeConfig,
+    marks: &[crate::Reservation],
+    presented: &BTreeSet<RequestId>,
+) -> WholeNodeConfig {
+    let held = marks
+        .iter()
+        .filter(|mark| !presented.contains(&mark.request));
+    let held: Vec<&crate::Reservation> = held.collect();
+    let draining = held.iter().filter(|mark| !mark.assigned).count();
+    WholeNodeConfig {
+        max_whole_node: settings.max_whole_node.saturating_sub(held.len()),
+        keep_for_ordinary: settings.keep_for_ordinary.saturating_add(held.len()),
+        max_draining: settings.max_draining.saturating_sub(draining),
+        ..settings.clone()
+    }
+}
+
 /// The hosts that reported a taint: none of them could ever hold a request again.
 fn tainted(state: &State) -> BTreeSet<HostId> {
     state
@@ -137,6 +162,13 @@ impl Registry {
             hosts,
         };
         let placer = self.shared.placer.get();
+        // A mark put back from the ledger whose host never came back, or is tainted, goes
+        // as it does in the registry's own pass, before the placer is shown the round: a
+        // host that has said hello since hands the mark to the placer with its request.
+        // The registry's own pass, if it runs, finds nothing more to drop.
+        if placer.is_some() {
+            state.dropped += state.marks.stand(&pass);
+        }
         let round = placer.map(|placer| (placer, self.round_of(state, &pass)));
         let placed = round.and_then(|(placer, round)| {
             let marks = placer.whole_round(&round)?;
@@ -145,9 +177,6 @@ impl Registry {
         if let Some((marks, round, give_ups)) = placed {
             let presented = round.waiting.into_iter().map(|waiting| waiting.id);
             let presented: BTreeSet<RequestId> = presented.collect();
-            // A mark put back from the ledger whose host never came back, or is tainted,
-            // goes as it does in the registry's own pass.
-            state.dropped += state.marks.stand(&pass);
             state.marks.adopt(marks, &presented);
             // The placer's give-ups are counted in the requests' records, as the registry's
             // own pass counts its own (the placer queues only the requests presented).
@@ -173,7 +202,14 @@ impl Registry {
     fn round_of(&self, state: &State, pass: &Pass<'_>) -> WholeRound {
         let (settings, now) = (pass.settings, pass.now);
         let grace = self.grace_ms();
-        let waiting = state.waiting.waiting().map(|(id, request, since)| {
+        // A request whose mark was put back from the ledger and whose host has not said
+        // hello since is not shown yet: the placer could not hold that host for it, and
+        // would mark another. Its host is held outside the queue until the host says hello
+        // (the request is then shown with the mark) or the claim lapses (the mark goes and
+        // the request is shown without it).
+        let presented = state.waiting.waiting();
+        let shown = presented.filter(|(id, _, _)| !state.marks.unclaimed(id));
+        let waiting = shown.map(|(id, request, since)| {
             let key = RequestKey::from(id);
             let record = state.requests.record(&key);
             WaitingWhole {
@@ -208,7 +244,7 @@ impl Registry {
             known.collect()
         });
         WholeRound {
-            settings: settings.clone(),
+            settings: outside_caps(settings, &state.marks.reservations(), &presented),
             waiting,
             hosts: hosts.collect(),
             outside: state.marks.outside(&presented, now),

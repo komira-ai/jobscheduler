@@ -27,8 +27,9 @@
 //! Under `--placement js-sched` the engine keeps all of this for a request with an id that it
 //! commits from its queue (`js-sched-placer`'s `engine::prepare`), through
 //! [`crate::Placer::prepare_failed`] and its siblings: the registry then keeps only the lease
-//! that holds the request's key here, and the horizon. The engine's counts and bars are in
-//! its memory only, not in the ledger, so a restart under that placement forgets them.
+//! that holds the request's key here, and the horizon. The engine hands its counts and bars
+//! to the ledger and takes them back at a start ([`crate::Placer::whole_ledger`],
+//! [`crate::Placer::whole_restore`]), so a restart under that placement keeps them too.
 //!
 //! [`Registry::not_ready`]: crate::Registry::not_ready
 

@@ -89,7 +89,10 @@ pub struct WaitingWhole {
 /// ([`Placer::whole_round`]). Built under the registry's lock from its own books.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WholeRound {
-    /// The pool's whole-node settings.
+    /// The pool's whole-node settings, with the caps lowered by the hosts of
+    /// [`WholeRound::outside`]: each is one host whole less under `max_whole_node` and one
+    /// more under `keep_for_ordinary`, and each that drains a busy host one less under
+    /// `max_draining`.
     pub settings: WholeNodeConfig,
     /// The presented requests of the wait list, in its order: first presentation first.
     pub waiting: Vec<WaitingWhole>,
@@ -104,6 +107,35 @@ pub struct WholeRound {
     /// [`crate::Registry::set_lives`]): what the lease is expected to last from its start.
     /// Empty when no source is set.
     pub lives: BTreeMap<LeaseId, u32>,
+}
+
+/// What a placer that keeps the whole-node queue keeps of one request between its
+/// placements, as the reservation ledger writes it ([`Placer::whole_ledger`]) and puts it
+/// back ([`Placer::whole_restore`]): the drain give-ups, the failed prepares and the hosts
+/// left out of its placements.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WholeKept {
+    /// The holds the request gave up at their deadline.
+    pub give_ups: u32,
+    /// The prepares of its leases that failed.
+    pub prepare_failures: u32,
+    /// The hosts it is kept off, each until when: the back-off of a give-up and the bars
+    /// of failed prepares, those that have not ended.
+    pub exclusions: BTreeMap<HostId, Exclusion>,
+}
+
+impl WholeKept {
+    /// Whether nothing is kept: no give-up, no failed prepare, no host left out.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        [
+            self.give_ups == 0,
+            self.prepare_failures == 0,
+            self.exclusions.is_empty(),
+        ]
+        .into_iter()
+        .all(|none| none)
+    }
 }
 
 /// A committed whole-node lease whose prepare failed, as the registry hands it to a placer
@@ -336,5 +368,48 @@ pub trait Placer: Send + Sync {
     /// The default, empty, is a placer that gives nothing up.
     fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
         BTreeMap::new()
+    }
+
+    /// The hosts the requests this placer queues ([`Placer::whole_round`]) hold now, as the
+    /// registry shows them: a quiet host granted, as an assigned reservation, and a mark
+    /// with its deadline and the end of its tail. The registry reads them for its
+    /// reservations, the hosts listing and the ledger, for each host it still holds for the
+    /// same request (a retire or a stop lets a host go at once). Asked under the registry's
+    /// lock.
+    ///
+    /// The default, `None`, is a placer that keeps no queue: the registry's own marks are
+    /// read.
+    fn whole_reservations(&self) -> Option<Vec<Reservation>> {
+        None
+    }
+
+    /// What this placer keeps of each whole-node request for the reservation ledger
+    /// ([`crate::Registry::reservation_ledger`]), those it keeps anything of: the requests
+    /// it queues, those whose prepare failed, and those put back by
+    /// [`Placer::whole_restore`] and not queued since. The registry writes each beside its
+    /// own counts, the larger of each count and every host either keeps the request off.
+    /// Asked under the registry's lock. The default keeps none.
+    fn whole_ledger(&self) -> BTreeMap<RequestId, WholeKept> {
+        BTreeMap::new()
+    }
+
+    /// Puts back what a restart's ledger kept of request `id`
+    /// ([`crate::Registry::restore_reservations`]): `kept`, the request first presented at
+    /// `since`, and `terminal` when its failed prepares reached `max_replace`. `true` when
+    /// the placer keeps it: it queues the request with its give-ups and bars when it is
+    /// presented again, and answers its failed prepares and terminal start at once
+    /// ([`Placer::whole_record`], [`Placer::whole_start`]); the registry then keeps only
+    /// the give-up count. Told under the registry's lock, before any host says hello.
+    ///
+    /// The default, `false`, keeps nothing: the registry puts the record back itself.
+    fn whole_restore(
+        &self,
+        id: &RequestId,
+        kept: &WholeKept,
+        terminal: bool,
+        since: Timestamp,
+    ) -> bool {
+        let _ = (id, kept, terminal, since);
+        false
     }
 }

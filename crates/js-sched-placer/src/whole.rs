@@ -50,7 +50,8 @@
 //! [`Scheduler::cancel_whole`].
 //!
 //! A rebuild of the engine keeps the queue: the last round is handed to the new engine with
-//! the marks, give-ups and bars of the old one ([`Engine::carry_whole`]).
+//! the marks, give-ups and bars of the old one ([`Engine::carry_whole`]). A restart keeps it
+//! through the registry's reservation ledger ([`super::ledger`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -286,6 +287,7 @@ impl Engine {
         self.feed(now, submit);
         self.sched.set_max_wall(operation, waiting.max_wall);
         let (give_ups, mut bars) = self.carried.remove(&waiting.id).unwrap_or_default();
+        self.restored.remove(&waiting.id);
         // A request whose prepare failed is queued again from when it was first queued,
         // with its give-ups and the bars its failures set ([`super::prepare`]).
         let (kept_give_ups, kept_bars) = self.prepare.kept(&waiting.id);
@@ -433,7 +435,7 @@ impl Engine {
     }
 
     /// The reservations of the requests the engine queues, as the registry shows them.
-    fn reservations(&self, now: FarmTime) -> Vec<Reservation> {
+    pub(super) fn reservations(&self, now: FarmTime) -> Vec<Reservation> {
         let waiting = self.round.iter().flat_map(|round| round.waiting.iter());
         let earlier: BTreeMap<&RequestId, &Reservation> = waiting
             .filter_map(|waiting| Some((&waiting.id, waiting.mark.as_ref()?)))
@@ -470,6 +472,7 @@ impl Engine {
     pub(super) fn carry_whole(&mut self, old: &Self, now: FarmTime) {
         self.whole_seq = old.whole_seq;
         self.carried = old.carried.clone();
+        self.restored = old.restored.clone();
         self.prepare = old.prepare.clone();
         for (id, operation) in &old.whole {
             let give_ups = old.sched.whole_give_ups(*operation);
@@ -489,7 +492,7 @@ impl Engine {
 }
 
 /// `at` on the registry's clock as farm time: the same milliseconds.
-fn farm(at: Timestamp) -> FarmTime {
+pub(super) fn farm(at: Timestamp) -> FarmTime {
     FarmTime::from_millis(at.millis())
 }
 

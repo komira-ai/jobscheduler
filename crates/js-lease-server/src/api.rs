@@ -606,6 +606,8 @@ mod status_logs_tests;
 #[cfg(test)]
 mod whole_restart_tests;
 #[cfg(test)]
+mod whole_sched_tests;
+#[cfg(test)]
 pub(crate) mod whole_view_tests;
 
 #[cfg(test)]

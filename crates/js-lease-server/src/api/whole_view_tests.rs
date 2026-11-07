@@ -29,6 +29,7 @@ use crate::adapt::BoxedPool;
 use crate::agents::Agents;
 use crate::config::parse_token;
 use crate::logs::LogGrants;
+use js_sched_placer::place::SchedPlacer;
 
 pub(super) const T0: u64 = 1_000_000;
 
@@ -61,6 +62,11 @@ pub(super) struct Rig {
     clock: ManualClock,
     asker: js_registry::RegisteredProvider,
     pub(super) registry: Registry,
+    /// Whether the registry's queue is decided by js-sched's engine (`--placement
+    /// js-sched`), as [`Rig::sched`] builds it.
+    sched: bool,
+    /// The epoch and session of the host's last hello, for its heartbeats ([`Rig::beat`]).
+    agent: Option<(u64, String)>,
 }
 
 /// How a rig starts: over an empty directory, or over the directory of an earlier rig, on
@@ -76,18 +82,26 @@ enum Start {
 
 impl Rig {
     pub(super) async fn new(name: &str) -> Self {
-        Self::build(name, false, Start::Fresh, None).await
+        Self::build(name, false, Start::Fresh, None, false).await
+    }
+
+    /// A rig whose registry is set up as the server sets it up for `--placement js-sched`:
+    /// it books each host's whole memory and js-sched's engine, on the rig's clock, keeps its
+    /// whole-node queue. The pool's shape and the host name an `arch`, so the engine can
+    /// describe the host.
+    pub(super) async fn sched(name: &str) -> Self {
+        Self::build(name, false, Start::Fresh, None, true).await
     }
 
     /// A rig whose server serves the status routes (to private peers).
     pub(super) async fn serving_status(name: &str) -> Self {
-        Self::build(name, true, Start::Fresh, None).await
+        Self::build(name, true, Start::Fresh, None, false).await
     }
 
     /// A rig whose server serves the status routes (to private peers), with the counters of
     /// the host credentials of live logs that `logs` holds.
     pub(super) async fn serving_status_with_logs(name: &str, logs: Arc<LogGrants>) -> Self {
-        Self::build(name, true, Start::Fresh, Some(logs)).await
+        Self::build(name, true, Start::Fresh, Some(logs), false).await
     }
 
     /// The server started again over the files of this one, on the same clock, with
@@ -95,14 +109,19 @@ impl Rig {
     /// file. With `host_back` the host `a` says hello again holding the lease it held;
     /// without it the host never returns.
     pub(super) async fn restart(self, host_back: bool) -> Self {
-        let (name, clock) = (self.name.clone(), self.clock.clone());
+        let (name, clock, sched) = (self.name.clone(), self.clock.clone(), self.sched);
         drop(self);
-        Self::build(&name, false, Start::Again { clock, host_back }, None).await
+        Self::build(&name, false, Start::Again { clock, host_back }, None, sched).await
     }
 
     /// A server resumed over a lease file whose text is `text`, on a fresh clock, with
     /// the host `a` back.
     pub(super) async fn over_file(name: &str, text: &str) -> Self {
+        Self::over_file_in(name, text, false).await
+    }
+
+    /// [`Rig::over_file`], under `--placement js-sched` when `sched` ([`Rig::sched`]).
+    pub(super) async fn over_file_in(name: &str, text: &str, sched: bool) -> Self {
         let dir = Self::dir(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -112,7 +131,7 @@ impl Rig {
             clock,
             host_back: true,
         };
-        Self::build(name, false, start, None).await
+        Self::build(name, false, start, None, sched).await
     }
 
     fn dir(name: &str) -> std::path::PathBuf {
@@ -121,7 +140,13 @@ impl Rig {
             .join(name)
     }
 
-    async fn build(name: &str, status: bool, start: Start, logs: Option<Arc<LogGrants>>) -> Self {
+    async fn build(
+        name: &str,
+        status: bool,
+        start: Start,
+        logs: Option<Arc<LogGrants>>,
+        sched: bool,
+    ) -> Self {
         let dir = Self::dir(name);
         let (clock, boot, host_back) = match start {
             Start::Fresh => {
@@ -134,7 +159,11 @@ impl Rig {
         };
         let shared_clock = SharedClock::new(clock.clone());
         let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
-        let shape = Shape::new(resources, caps());
+        let mut host_caps = caps();
+        if sched {
+            host_caps.insert("arch".to_string(), "arm64".to_string());
+        }
+        let shape = Shape::new(resources, host_caps.clone());
         let pool = PoolConfig::new(
             ProviderId::new("builders").unwrap(),
             ResourceClass::whole_node(),
@@ -148,7 +177,17 @@ impl Rig {
             ..WholeNodeConfig::dedicated(1)
         };
         let pool = pool.with_whole_node(whole.clone()).unwrap();
+        let pool = if sched {
+            pool.booking_whole_memory()
+        } else {
+            pool
+        };
         let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
+        if sched {
+            let placer =
+                SchedPlacer::new(js_sched_placer::engine::Settings::default(), clock.clone());
+            registry.set_placer(Arc::new(placer));
+        }
         let hello = Hello {
             protocol: ProtocolRange { min: 1, max: 1 },
             host_id: "a".into(),
@@ -164,7 +203,7 @@ impl Rig {
                 max_leases: None,
                 accelerator: None,
             },
-            capabilities: caps(),
+            capabilities: host_caps,
             gpu_devices: Vec::new(),
             labels: Default::default(),
             phase: Phase::Serving,
@@ -181,8 +220,10 @@ impl Rig {
         // `seat` would book it as a committed whole-node lease, the class of the pool,
         // which with a reservation on the same host is over the pool's ceiling).
         let early = host_back && boot == Boot::Resume;
+        let mut agent = None;
         if early {
-            registry.hello(&hello, &Credential::of_token("t")).unwrap();
+            let welcome = registry.hello(&hello, &Credential::of_token("t")).unwrap();
+            agent = Some((welcome.epoch, welcome.session));
             for booking in read_bookings(&file).unwrap() {
                 let spec = StartSpec::new(booking.lease, request("share", 600), &classes);
                 asker.start(spec.unwrap());
@@ -203,7 +244,8 @@ impl Rig {
         let shared = Shared::new(table, token, Some(Arc::new(agents)));
         // The agent's hello comes after the server is up, as it does in the program.
         if host_back && !early {
-            registry.hello(&hello, &Credential::of_token("t")).unwrap();
+            let welcome = registry.hello(&hello, &Credential::of_token("t")).unwrap();
+            agent = Some((welcome.epoch, welcome.session));
         }
         let served = status.then(|| {
             let status = Status::new(None, None, None, Vec::new(), shared_clock.clone());
@@ -216,6 +258,50 @@ impl Rig {
             clock,
             asker,
             registry,
+            sched,
+            agent,
+        }
+    }
+
+    /// The host `a` beats, carrying nothing new, as its agent does every few seconds; a host
+    /// that has not said hello does not.
+    pub(super) fn beat(&self) {
+        let Some((epoch, session)) = self.agent.clone() else {
+            return;
+        };
+        let beat = js_agent_wire::Heartbeat {
+            host_id: "a".into(),
+            epoch,
+            session,
+            phase: Phase::Serving,
+            held: Vec::new(),
+            results: Vec::new(),
+            taint: None,
+            exclusive_ready: None,
+            exclusive_refused: None,
+            load: None,
+            disk_gib: None,
+            jobs: Vec::new(),
+            retired_jobs: Vec::new(),
+            log_grant_state: None,
+        };
+        self.registry
+            .heartbeat(&beat, &Credential::of_token("t"))
+            .unwrap();
+    }
+
+    /// Moves the clock `seconds` on, five at a time; at each step the host beats and the
+    /// consumer polls each of `asks`, as they do in the program.
+    pub(super) fn pass(&mut self, seconds: u64, asks: &[&str]) {
+        let mut left = seconds;
+        while left > 0 {
+            let step = left.min(5);
+            left -= step;
+            self.advance(step);
+            self.beat();
+            for name in asks {
+                self.ask(name);
+            }
         }
     }
 
@@ -255,7 +341,7 @@ impl Rig {
         text(reply.unwrap()).await
     }
 
-    async fn hosts(&self) -> String {
+    pub(super) async fn hosts(&self) -> String {
         text(hosts(State(self.shared.clone())).await).await.1
     }
 }
@@ -337,7 +423,7 @@ async fn a_committed_host_lists_as_held() {
     assert!(!body.contains("reserved_for") && !body.contains("drain_deadline_ms"));
 }
 
-const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","lease":"1-1","shape":{"cpu_millis":4000,"memory_bytes":8589934592,"gpus":0},"memory":{"configured_bytes":8589934592,"schedulable_percent":100,"bookable_bytes":8589934592},"capabilities":{"os":"macos"},"labels":{},"agent_version":"0.1.0","releasing":false,"mark":"reserved","reserved_for":"r1","drain_deadline_ms":1030000}]}"#;
+pub(super) const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","lease":"1-1","shape":{"cpu_millis":4000,"memory_bytes":8589934592,"gpus":0},"memory":{"configured_bytes":8589934592,"schedulable_percent":100,"bookable_bytes":8589934592},"capabilities":{"os":"macos"},"labels":{},"agent_version":"0.1.0","releasing":false,"mark":"reserved","reserved_for":"r1","drain_deadline_ms":1030000}]}"#;
 
 /// A writer the log lines of a test go to.
 #[derive(Clone, Default)]

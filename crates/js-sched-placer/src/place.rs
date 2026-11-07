@@ -68,11 +68,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use js_lease::Clock;
+use js_lease::{Clock, Timestamp};
 use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
 use js_registry::{
-    MarkedTails, Placer, PrepareFailure, ProbeHost, RequestRecord, Reservation, WholeRound,
+    MarkedTails, Placer, PrepareFailure, ProbeHost, RequestRecord, Reservation, WholeKept,
+    WholeRound,
 };
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
@@ -430,6 +431,35 @@ impl Placer for SchedPlacer {
     /// ([`Engine::whole_give_ups`]).
     fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
         self.engine().whole_give_ups()
+    }
+
+    /// The marks and pending grants of the engine's whole-node requests
+    /// ([`super::engine::ledger`]).
+    fn whole_reservations(&self) -> Option<Vec<Reservation>> {
+        let now = self.now();
+        Some(self.engine().whole_reservations(now))
+    }
+
+    /// What the engine keeps of its whole-node requests for the reservation ledger
+    /// ([`super::engine::ledger`]).
+    fn whole_ledger(&self) -> BTreeMap<RequestId, WholeKept> {
+        let now = self.now();
+        self.engine().whole_ledger(now)
+    }
+
+    /// The engine keeps what a restart's ledger kept of a request
+    /// ([`super::engine::ledger`]).
+    fn whole_restore(
+        &self,
+        id: &RequestId,
+        kept: &WholeKept,
+        terminal: bool,
+        since: Timestamp,
+    ) -> bool {
+        let now = self.now();
+        self.engine()
+            .whole_restore(id, kept, (terminal, since), now);
+        true
     }
 }
 

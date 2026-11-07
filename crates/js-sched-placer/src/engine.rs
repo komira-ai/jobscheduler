@@ -66,6 +66,8 @@ use crate::map::{self, MapError};
 
 #[path = "jobs.rs"]
 pub mod jobs;
+#[path = "ledger.rs"]
+pub mod ledger;
 #[path = "prepare.rs"]
 pub mod prepare;
 #[path = "whole.rs"]
@@ -132,6 +134,10 @@ pub struct Engine {
     /// The give-ups and bars of whole-node requests a rebuild carried over, until each is
     /// queued again ([`Engine::carry_whole`]).
     carried: BTreeMap<RequestId, whole::Carried>,
+    /// The whole-node requests a restart's ledger put back ([`Engine::whole_restore`]) and
+    /// not queued since, each with when: their give-ups and bars wait in `carried` until
+    /// the request is queued, or until the registry's idle horizon has passed.
+    restored: BTreeMap<RequestId, FarmTime>,
     /// The prepares of the whole-node leases committed from the queue, and the records of
     /// the requests whose prepare failed ([`prepare`]).
     prepare: prepare::Prepare,
@@ -193,6 +199,7 @@ impl Engine {
             jobs: BTreeMap::new(),
             whole: BTreeMap::new(),
             carried: BTreeMap::new(),
+            restored: BTreeMap::new(),
             prepare: prepare::Prepare::default(),
             round: None,
             whole_seq: 0,

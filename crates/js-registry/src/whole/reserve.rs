@@ -65,10 +65,14 @@
 //! of `--placement js-sched`) [`advance`] is not run: the placer's pass makes the marks, and
 //! the registry takes them ([`Marks::adopt`]) for the requests it presented, keeping the
 //! marks put back from the ledger of requests not presented since, which it hands the
-//! placer to hold ([`Marks::outside`]). What reads the marks here (the start's
-//! [`may_start`], the caps' room, backfill, the hosts API, the ledger, a drain or a retire)
-//! reads them as before. [`Marks::stand`] still drops a put-back mark whose host never came
-//! back, and counts it.
+//! placer to hold ([`Marks::outside`]), with the caps lowered by them. What reads the marks
+//! here (the start's [`may_start`], the caps' room, backfill, a drain or a retire) reads
+//! them as before; the hosts API, [`crate::Registry::reservations`] and the ledger read each
+//! mark from the placer where it holds the same host for the same request
+//! ([`crate::Placer::whole_reservations`]). [`Marks::stand`] still drops a put-back mark
+//! whose host never came back, and counts it, before the placer is shown the round; a
+//! request whose put-back mark waits for its host is shown to the placer only once the host
+//! has said hello, or the mark is gone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -216,6 +220,13 @@ impl Marks {
             };
             self.place(taken.host, mark);
         }
+    }
+
+    /// Whether request `id` holds a mark put back from the ledger whose host the registry
+    /// has not seen since ([`Marks::stand`] clears the wait once it is).
+    pub(crate) fn unclaimed(&self, id: &RequestId) -> bool {
+        let mut marks = self.0.values();
+        marks.any(|mark| (mark.request == *id) & mark.claim_by.is_some())
     }
 
     /// Whether request `id` has held a mark while it waited, whether or not it holds one now.
