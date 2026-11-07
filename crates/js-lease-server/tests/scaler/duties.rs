@@ -36,6 +36,14 @@ fn times(needle: &str) -> usize {
     logged().matches(needle).count()
 }
 
+/// How many logged lines hold both `needle` and `host`: a count no other test of this
+/// binary, which logs into the same capture, can add to.
+fn times_on(host: &str, needle: &str) -> usize {
+    let lines = logged();
+    let own = lines.lines().filter(|line| line.contains(host));
+    own.filter(|line| line.contains(needle)).count()
+}
+
 /// Asserts that a failed save carries out no later action, whatever the action is: a
 /// machine past its boot timeout would be marked ending, revoked and released, and with
 /// the disk full none of it is, not the mark, not the revoke, not the release. The failure
@@ -389,14 +397,18 @@ async fn a_machine_is_not_released_while_a_job_allocation_is_on_its_host() {
 /// nothing an operator can see.
 #[tokio::test]
 async fn a_release_the_provider_does_not_confirm_is_said() {
+    let host = "js-stuck-release";
     let stuck = Record {
         since: Millis::new(crate::fakes::START),
-        ..record("js-stuck-release", Phase::Releasing)
+        ..record(host, Phase::Releasing)
     };
     let rig = rig(records(vec![stuck]), live());
     rig.world().release_answer = Some(Released::Refused(Claim::Foreign));
     rig.scaler.tick().await;
-    assert_eq!(times("the provider refused to release the machine"), 1);
+    assert_eq!(
+        times_on(host, "the provider refused to release the machine"),
+        1
+    );
     assert!(rig.scaler.alerts().is_empty());
 
     rig.world().release_answer = Some(Released::Unknown);
@@ -404,9 +416,9 @@ async fn a_release_the_provider_does_not_confirm_is_said() {
     for _ in 0..2 {
         rig.scaler.tick().await;
     }
-    assert!(times("the provider gave no answer to a release") >= 2);
+    assert!(times_on(host, "the provider gave no answer to a release") >= 2);
     let alert = "a machine whose release the provider does not confirm";
-    assert_eq!(times(alert), 1);
+    assert_eq!(times_on(host, alert), 1);
     assert_eq!(rig.scaler.alerts().len(), 1);
 }
 
