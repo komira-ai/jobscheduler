@@ -77,6 +77,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
+use crate::agent_state::Change;
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
 use crate::fence::STATE_FENCED;
@@ -235,19 +236,7 @@ async fn serve_hello(
     let mut welcome = match agents.registry.hello(&hello, &who) {
         Ok(welcome) => welcome,
         Err(refusal) => {
-            // The compensation: the use of the token and the binding go back in one
-            // transaction. When it fails both stay, as the store holds them.
-            let undo = change.undo.clone();
-            let given_back = match fresh_use {
-                Some(presented) => {
-                    let host = hello.host_id.clone();
-                    agents.release_join(presented, host, undo).await
-                }
-                None => agents.commit_hosts(undo).await.is_ok(),
-            };
-            if given_back {
-                agents.undone(&change);
-            }
+            give_back(agents, fresh_use, &hello.host_id, &change).await;
             warn!(code = refusal.code(), "agent hello refused");
             return Err(Refused::of(&refusal));
         }
@@ -303,11 +292,29 @@ async fn take_hello(
         warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
         Refused::join(refusal)
     })?;
-    let fresh = match admitted.admission {
-        Admission::Fresh => Some(presented.clone()),
-        _ => None,
-    };
+    let fresh = (admitted.admission == Admission::Fresh).then(|| presented.clone());
     Ok((fresh, admitted.issued))
+}
+
+/// The compensation of a hello the registry refused after [`take_hello`]: the fresh use of
+/// the token, when there was one, and the host's binding `change` go back in one
+/// transaction. When it fails both stay, as the store holds them. Apart from
+/// [`serve_hello`], so that the route has no arm that only one kind of token takes: every
+/// test binary runs the same code of it.
+async fn give_back(
+    agents: &Arc<Agents>,
+    fresh_use: Option<Credential>,
+    host: &str,
+    change: &Change,
+) {
+    let undo = change.undo.clone();
+    let given_back = match fresh_use {
+        Some(presented) => agents.release_join(presented, host.to_owned(), undo).await,
+        None => agents.commit_hosts(undo).await.is_ok(),
+    };
+    if given_back {
+        agents.undone(change);
+    }
 }
 
 async fn heartbeat(
