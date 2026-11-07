@@ -67,7 +67,6 @@ mod pools_policy;
 mod pools_provider_checks;
 mod pools_status;
 mod pools_support;
-mod registry_placement_golden;
 mod restart;
 mod routes;
 mod runs;

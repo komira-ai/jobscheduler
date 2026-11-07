@@ -129,7 +129,7 @@ pub struct JoinedPool {
     /// The file of the shared pool token, when the pool has one.
     pub join_token_file: Option<PathBuf>,
     /// A class that books part of a host, served beside `class` so that its leases share a
-    /// host with room (`server.placement = "js-sched"` only), when the pool has one.
+    /// host with room, when the pool has one.
     pub share_class: Option<String>,
 }
 

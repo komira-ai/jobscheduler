@@ -25,7 +25,7 @@
 --max-job-wall default=none required=false
 --max-requests default=100 required=false
 --metrics-listen default=none required=false
---placement default=registry required=false values=registry|js-sched
+--placement default=none required=false values=registry|js-sched
 --pool-config default=none required=false
 --profile-store-bytes default=268435456 required=false
 --read-timeout default=30s required=false

@@ -54,7 +54,7 @@ lease 1-1 freed
       <li><h3>A lease is a host for a bounded time</h3><p>A client posts to <code>/v1/leases</code> with a class and a maximum wall time, and releases the lease when it is done. Nothing a client does keeps a lease alive: the lease ends at its maximum wall time at the latest.</p></li>
       <li><h3>An agent on every host</h3><p><code>js-agent</code> offers the host's CPU, memory and GPUs, heartbeats, and runs container jobs on Linux (through Docker, Podman or crun) and native jobs on a Mac.</p></li>
       <li><h3>A whole node, quiet, when asked</h3><p>A <code>whole-node</code> lease books every dimension of one host, and its client gets the host only when nothing else is on it. A request that names a request id is queued, and one host is reserved and drained for it.</p></li>
-      <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits a lease to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The lease server calls it only under <code>--placement js-sched</code>, to pick among the hosts with room by the hosts' load readings, then by how tightly a lease fits.</p></li>
+      <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits a lease to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The lease server calls it for every lease on a host that registered itself, to pick among the hosts with room by the hosts' load readings, then by how tightly a lease fits.</p></li>
     </ul>
     <p><a href="concepts.html">The concepts page</a> says how each of these works and where it stops.</p>
   </div>
@@ -72,8 +72,8 @@ lease 1-1 freed
     <tr><td>Pools of class <code>whole-node</code> or <code>gpu-host</code></td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>The reservation and drain of a whole node for a queued request</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">for an acquire that names a <code>request_id</code></span></td></tr>
     <tr><td>An elastic pool on Lambda Labs</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">launches nothing until the pool file says <code>live</code></span></td></tr>
-    <tr><td><code>js-sched</code> picking the host of a lease</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">only under <code>--placement js-sched</code>; the default is <code>registry</code></span></td></tr>
-    <tr><td>Placement by load, in the <code>js-sched</code> crate</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">used by the lease server only under <code>--placement js-sched</code></span></td></tr>
+    <tr><td><code>js-sched</code> picking the host of a lease</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the only placement; <code>--placement</code> is deprecated and does nothing</span></td></tr>
+    <tr><td>Placement by load, in the <code>js-sched</code> crate</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">used by the lease server for every lease on a registered host</span></td></tr>
     <tr><td>A pool that books part of a host</td><td><span class="tag tag-planned">not built: refused when the pool file loads</span></td></tr>
     <tr><td>One token for each tenant</td><td><span class="tag tag-planned">not built: one shared token</span></td></tr>
     <tr><td>An idempotency key on acquire</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the <code>request_id</code> of <code>POST /v1/leases</code></span></td></tr>
