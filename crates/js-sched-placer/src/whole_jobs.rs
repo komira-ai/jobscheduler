@@ -42,11 +42,11 @@ use std::time::Duration;
 
 use js_agent_wire::RefusalReason;
 use js_jobs::{Booked, Exclusion, FailedPrepare, JobId, JobRecord, MarkRecord, Needs};
-use js_lease::Timestamp;
 use js_registry::{WholeNodeConfig, prepare_exclusion};
 use js_sched::{Bar, Event, Request, RestoredMark, RestoredWhole};
 use js_state::StoreTime;
 use js_types::HostId;
+use js_types::Timestamp;
 use js_types::sched::{
     FarmTime, LeaseKind, OperationId, Qos, Resources, WaiterId, WorkKey, WorkerId,
 };

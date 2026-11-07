@@ -5,15 +5,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// The largest count of milliseconds an instant holds: the largest a signed 64-bit
-/// integer holds, which is what a lease clock's timestamp (`js_lease::Timestamp`) and a
-/// TOML file hold. A larger count saturates to it, so an instant converts to the lease
-/// clock's without overflow.
+/// integer holds, which is what a clock's timestamp (`js_types::Timestamp`) and a
+/// TOML file hold. A larger count saturates to it, so an instant converts to the
+/// timestamp without overflow.
 const MAX_MILLIS: u64 = i64::MAX as u64;
 
 /// An instant: milliseconds since the Unix epoch, as the caller's clock reads them. The
 /// scaler reads no clock; the caller passes one in, so a records file means the same moment
 /// after a restart and a test moves time by building a later value. Saturates at the
-/// largest instant `js_lease::Timestamp` holds, in the constructor, in arithmetic and when
+/// largest instant `js_types::Timestamp` holds, in the constructor, in arithmetic and when
 /// a file is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(from = "u64", into = "u64")]

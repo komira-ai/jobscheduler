@@ -7,7 +7,7 @@ use std::path::Path;
 
 use js_types::HostId;
 
-use crate::clock::Timestamp;
+use crate::Timestamp;
 use crate::error::OpenError;
 use crate::store::{self, Document, StoredExclusion, StoredReservation};
 use crate::types::{Exclusion, ExclusionEnd, Held, Queued, ReservationRecord, Settings};

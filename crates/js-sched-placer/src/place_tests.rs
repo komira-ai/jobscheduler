@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_provider::Held;
 use js_sched::Backfill;
+use js_types::Held;
 use js_types::{Admission, ClassId, HostId, LeaseId, Request as HostRequest};
 use js_types::{ResourceClass, Resources, Shape};
 
@@ -292,7 +292,7 @@ fn backfilling() -> SchedPlacer {
         backfill: Backfill::enforced(Duration::MAX),
         ..Settings::default()
     };
-    let clock = js_lease::ManualClock::new(js_lease::Timestamp::from_millis(0));
+    let clock = js_types::ManualClock::new(js_types::Timestamp::from_millis(0));
     SchedPlacer::new(settings, clock)
 }
 

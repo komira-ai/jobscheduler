@@ -11,11 +11,11 @@ use js_jobs::{
     Constraints, JobFiles, JobId, JobRecord, JobSpec, JobStore, MarkRecord, Needs, NetworkPolicy,
     NewJob, RandomIds,
 };
-use js_provider::{Candidate, Held};
 use js_registry::WholeNodeConfig;
 use js_state::fake::{Fake, Flaw};
 use js_state::{Clock, ManualClock as StoreClock, StoreTime};
 use js_types::sched::FarmTime;
+use js_types::{Candidate, Held};
 use js_types::{HostId, ImageDigestRef, Labels, LeaseId, Resources, Shape};
 
 use super::whole_jobs::{WholeJobStep, WholeJobs};

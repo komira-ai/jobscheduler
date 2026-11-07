@@ -101,7 +101,7 @@ impl Rig {
         let provider = registry.provider().with_classes(vec![share()]);
         let settings = Settings::new();
         let table = LeaseTable::open(
-            BoxedPool(Box::new(provider)),
+            BoxedPool::new(Box::new(provider)),
             shared_clock.clone(),
             settings,
             dir.path().join("leases.toml"),

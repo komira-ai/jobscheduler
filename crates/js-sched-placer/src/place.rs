@@ -73,16 +73,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use js_lease::{Clock, Timestamp};
-use js_provider::Candidate;
-use js_provider::{RefusalCode, StartSpec};
 use js_registry::{
     MarkedTails, Placer, PrepareFailure, Presented, ProbeHost, RequestKey, RequestRecord,
     Reservation, Waiter, WaitingRequest, WholeKept, WholeRound,
 };
+use js_types::Candidate;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
+use js_types::{Clock, Timestamp};
 use js_types::{HostId, LeaseId, Request, RequestId, Shape};
+use js_types::{RefusalCode, StartSpec};
 
 use tracing::warn;
 
@@ -265,7 +265,7 @@ impl SchedPlacer {
 impl Default for SchedPlacer {
     /// A placer with the default settings on a clock that stands still at zero.
     fn default() -> Self {
-        let clock = js_lease::ManualClock::new(js_lease::Timestamp::from_millis(0));
+        let clock = js_types::ManualClock::new(js_types::Timestamp::from_millis(0));
         Self::new(Settings::default(), clock)
     }
 }

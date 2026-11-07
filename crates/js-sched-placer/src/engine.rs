@@ -50,14 +50,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use js_caps::NodeCaps;
-use js_provider::Candidate;
-use js_provider::StartSpec;
 use js_registry::MarkedTails;
 use js_sched::harness::feed;
 use js_sched::{
     Backfill, DaemonInstance, Event, LoadConfig, MemoryPercent, OpState, Prediction, Recovered,
     RecoveredLease, Request, Scheduler,
 };
+use js_types::Candidate;
+use js_types::StartSpec;
 use js_types::sched::usage::{LeaseClock, LeaseCost, LeaseMinute, NodeLoad};
 use js_types::sched::{
     Effect, FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WaiterId, WorkKey,
@@ -321,7 +321,7 @@ impl Engine {
     /// there as a lease recovered after a restart is, booking what the registry books.
     pub fn adopt(&mut self, candidate: &Candidate, spec: &StartSpec) {
         // A lease that books the whole host is taken up as a request that owns its worker.
-        let held = js_provider::Held {
+        let held = js_types::Held {
             lease: spec.lease(),
             resources: spec.request().resources.clone(),
             whole: spec.class().admission().books_whole_host(),
@@ -645,7 +645,7 @@ impl Engine {
 
 /// The recovered operation that stands for the lease `held` on `host`, numbered as
 /// `placed` says: charged its CPU and memory as it books them.
-fn recovered(placed: Placed, host: &HostId, held: &js_provider::Held) -> Recovered {
+fn recovered(placed: Placed, host: &HostId, held: &js_types::Held) -> Recovered {
     let key = WorkKey::new("held", held.lease.to_string());
     let booked = map::booking(&held.resources);
     recovered_as(placed, host, key, (booked, held.whole))
@@ -711,7 +711,7 @@ fn millis(duration: std::time::Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use js_provider::Held;
+    use js_types::Held;
     use js_types::sched::WorkerId;
     use js_types::sched::usage::{LeaseClock, LeaseMinute};
     use js_types::{Resources, Shape};

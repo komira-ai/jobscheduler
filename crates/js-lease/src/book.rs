@@ -12,7 +12,6 @@ use js_types::{
     ResourceClass, Resources,
 };
 
-use crate::clock::{Monotonic, SystemMonotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, SaveError};
 use crate::reservations;
 use crate::state::LeaseState;
@@ -21,6 +20,7 @@ use crate::store::{
 };
 use crate::timings::Timings;
 use crate::types::{Booking, Boot, Lease, LeaseInfo, ReservationRecord, Settings};
+use crate::{Monotonic, SystemMonotonic, Timestamp};
 
 /// What a tick does with one lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

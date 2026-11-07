@@ -136,7 +136,7 @@ impl Rig {
             js_lease::Boot::Initialise => Vec::new(),
         };
         let seated = self.source.provider(&bookings).unwrap();
-        let provider = crate::adapt::BoxedPool(seated.provider);
+        let provider = crate::adapt::BoxedPool::new(seated.provider);
         let clock = SharedClock::new(self.clock.clone());
         js_lease::LeaseTable::open(provider, clock, settings, &file, boot).unwrap()
     }

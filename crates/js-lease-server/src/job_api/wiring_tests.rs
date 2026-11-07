@@ -63,7 +63,7 @@ fn bare_state(
     let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
     let settings = Settings::new();
     let table = LeaseTable::open(
-        BoxedPool(Box::new(registry.provider())),
+        BoxedPool::new(Box::new(registry.provider())),
         clock.clone(),
         settings,
         dir.path().join("leases.toml"),

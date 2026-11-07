@@ -44,7 +44,7 @@ fn shared_over(rig: &Rig, dir: &TestDir) -> Arc<Shared> {
 fn shared_with(rig: &Rig, dir: &TestDir, agents: Option<Arc<Agents>>) -> Arc<Shared> {
     let settings = Settings::new();
     let table = LeaseTable::open(
-        BoxedPool(Box::new(rig.agents.registry.provider())),
+        BoxedPool::new(Box::new(rig.agents.registry.provider())),
         rig.shared.clone(),
         settings,
         dir.path().join("leases.toml"),

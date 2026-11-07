@@ -9,9 +9,9 @@
 //! one that calls a network.
 //!
 //! The wall-time and reserved-label rules of the start contract of design 5.2, and the
-//! class checks this crate adds to it, live in [`StartSpec::new`], the one constructor of
-//! the only value [`Pool::start`] accepts. A request that breaks one of them cannot reach
-//! a pool, and a pool cannot relax it. Two rules of 5.2 are not modelled yet: the fence
+//! class checks added to it, live in [`StartSpec::new`] (defined in `js-types` and
+//! re-exported here), the one constructor of the only value [`Pool::start`] accepts. A
+//! request that breaks one of them cannot reach a pool, and a pool cannot relax it. Two rules of 5.2 are not modelled yet: the fence
 //! must be stated, and retries are never passed to a pool. `Request` has no fence or retry
 //! field, so nothing checks either.
 //!
@@ -28,11 +28,13 @@
 
 mod ack;
 mod book;
-mod spec;
 
-pub use ack::{Call, HostCapacity, Observed, StartAck, StopAck};
-pub use book::{Candidate, ChooseOver, Held, HostBook, SeatError};
-pub use spec::{RefusalCode, StartSpec};
+pub use ack::{Call, Observed, StartAck, StopAck};
+pub use book::{ChooseOver, HostBook, SeatError};
+// The values a start and a booking are made of. They are defined in `js-types`, which the
+// placement engine reads them from, and re-exported here so the pool's paths stay as they
+// were.
+pub use js_types::{Candidate, Held, HostCapacity, RefusalCode, StartSpec};
 
 use js_types::{LeaseId, ProviderId, ResourceClass};
 
