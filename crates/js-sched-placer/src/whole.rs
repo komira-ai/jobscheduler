@@ -72,7 +72,7 @@ use js_types::sched::{
     FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, Resources, WaiterId, WorkKey,
     WorkerId,
 };
-use js_types::{Admission, HostId, RequestId};
+use js_types::{HostId, RequestId};
 
 use super::prepare::{bar_of, stronger};
 use super::{Engine, Placed, TERM};
@@ -123,7 +123,7 @@ impl Engine {
         open: &[Candidate],
         now: FarmTime,
     ) -> Option<Option<usize>> {
-        let whole = matches!(spec.class().admission(), Admission::Whole);
+        let whole = super::whole_node(spec);
         let id = spec.request_id().filter(|_| whole)?;
         let operation = *self.whole.get(id)?;
         self.whole_tick(now);
@@ -136,6 +136,14 @@ impl Engine {
             self.whole.remove(id);
             let placed = Placed { lease, operation };
             self.hold(&open[*index].host, spec.lease(), placed);
+            // Its start is the scheduler's grant, which the engine does not read: a rebuild
+            // takes the lease up as started at the rebuild, with this wall time.
+            let kept = super::kept::Kept {
+                start: None,
+                max_wall: spec.request().max_wall,
+                whole_node: true,
+            };
+            self.keep(spec.lease(), placed, kept);
         });
         Some(committed)
     }
