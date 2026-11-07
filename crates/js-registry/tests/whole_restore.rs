@@ -5,9 +5,7 @@
 //! both placements, `--placement registry` (`registry::NAME`) and `--placement js-sched`
 //! (`js_sched::NAME`), with the same assertions; where the two keep a count or an exclusion
 //! in different places (the registry's record, or the engine) the test reads it from the
-//! ledger, which writes both. One assertion is decided differently: the end of the tail a
-//! mark is made with, which the registry reads from the lease's bound and js-sched's engine,
-//! given no lives, does not know (`the_ledger_holds_marks_places_counters_and_exclusions`).
+//! ledger, which writes both.
 
 mod support;
 
@@ -134,15 +132,10 @@ fn the_ledger_holds_marks_places_counters_and_exclusions(p: Placement) {
         }],
         ..record("r1")
     };
-    // The host's one lease ends at its bound, an hour after its start at T0; js-sched's
-    // engine, given no lives, knows no end of the tail.
-    let tail_end = match p {
-        Placement::Registry => Some(T0 + 3_600_000),
-        Placement::JsSched => None,
-    };
     let second = ReservationRecord {
+        // The host's one lease ends at its bound, an hour after its start at T0.
         held: Some(Held {
-            tail_end,
+            tail_end: Some(T0 + 3_600_000),
             ..held("a", T0 + 30_000, T0 + 60_000)
         }),
         queued: queued(1),
