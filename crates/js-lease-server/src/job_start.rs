@@ -2,26 +2,31 @@
 //! its allocation booked and its id ([`start_of`]), and the job's log sink when the host
 //! uploads live logs.
 //!
-//! A start the wire cannot carry is not sent ([`Unsendable`]): the job then waits as placed,
-//! and the start timeout ends it. Nothing here guesses a value the records do not hold: a GPU
-//! device index, a network level the host's agent does not report it can give, a job id or a
-//! file the wire's grammar refuses.
+//! A start the wire cannot carry is not sent ([`Unsendable`]): the job then waits as placed
+//! (or, for a whole-host job, as starting), and the start timeout ends it. Nothing here
+//! guesses a value the records do not hold: a GPU device index, a network level the host's
+//! agent does not report it can give, a job id or a file the wire's grammar refuses.
+//!
+//! An allocation that books the whole host books what the registry books for the host: its
+//! CPU, memory and disk ([`BeatContext::shape`]). The wall limit is the allocation's own when
+//! it records one (a job backfilled on a marked host is cut to the time left in the tail),
+//! else the job's.
 
 use js_agent_wire::{BookedResources, JobStartSpec, RunFile};
 use js_jobs::{AllocationRecord, Booked, JobRecord};
-use js_types::PortMap;
+use js_types::{PortMap, Resources};
 
 use crate::per_job::BeatContext;
 
 /// Why a placement's start cannot be sent.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum Unsendable {
-    /// The allocation books the whole host; whole-host jobs are started from `preparing`,
-    /// which this path does not serve.
-    #[error("the allocation books the whole host")]
-    WholeHost,
-    /// The allocation books GPUs by count, and a start names each device by its index, which
-    /// no record holds yet.
+    /// The allocation books the whole host and the registry's shape of the host is not known
+    /// to the beat, so what the start books is not known.
+    #[error("the allocation books the whole host and the host's shape is not known")]
+    NoHostShape,
+    /// The allocation books GPUs by count (or the whole host, which has them), and a start
+    /// names each device by its index, which no record holds yet.
     #[error("the allocation books {0} GPUs and no record names their device indices")]
     GpuIndices(u64),
     /// The job asks for more network, or a port, than the host's agent reports it gives; an
@@ -72,7 +77,7 @@ pub(crate) fn start_of(
     let ceiling = context.ceiling;
     let spec = &job.spec;
     let booked = match allocation.booked {
-        Booked::WholeHost => return Err(Unsendable::WholeHost),
+        Booked::WholeHost => whole_host(context.shape)?,
         Booked::Shape {
             accelerators: gpus @ 1..,
             ..
@@ -116,8 +121,9 @@ pub(crate) fn start_of(
                 .map_err(|_| Unsendable::FileNotText(name.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let wall_ms = spec
+    let wall_ms = allocation
         .wall_limit_secs
+        .unwrap_or(spec.wall_limit_secs)
         .checked_mul(1000)
         .ok_or(Unsendable::WallLimit)?;
     let log_sink = context
@@ -150,6 +156,22 @@ pub(crate) fn start_of(
             field: error.field(),
         })?;
     Ok(start)
+}
+
+/// What an allocation of the whole host books: the CPU, memory and disk of `shape`, the
+/// registry's shape of the host. A host with GPUs cannot be started on: a start names each
+/// device by its index.
+fn whole_host(shape: Option<&Resources>) -> Result<BookedResources, Unsendable> {
+    let shape = shape.ok_or(Unsendable::NoHostShape)?;
+    match shape.gpus() {
+        0 => Ok(BookedResources {
+            cpu_millis: shape.cpu_millis(),
+            memory_bytes: shape.memory_bytes(),
+            disk_bytes: (shape.disk_bytes() > 0).then_some(shape.disk_bytes()),
+            gpu_indices: Vec::new(),
+        }),
+        gpus => Err(Unsendable::GpuIndices(gpus)),
+    }
 }
 
 #[cfg(test)]

@@ -53,6 +53,9 @@
 //! The same engine places the queued jobs when the server holds the job tables
 //! ([`super::engine::jobs`]), and holds their allocations beside the leases: a start is
 //! placed only where both leave room.
+//! A job that needs the whole host is queued, marked and committed by the same engine
+//! ([`super::engine::whole_jobs`]), from what the job tables hold, with the server's start
+//! ([`SchedPlacer::boot`]) deciding how long a stored mark waits for its host to say hello.
 //!
 //! A host the registry removes is told to the engine and also recorded for the job pass of
 //! the tick, which reads it absent and settles the job allocations left on it
@@ -90,6 +93,9 @@ use super::engine::{Engine, Settings};
 pub struct SchedPlacer {
     settings: Settings,
     clock: Arc<dyn Clock + Send + Sync>,
+    /// The placer's clock when it was made: the server's start, which the marks of the
+    /// whole-host jobs the store held then wait from for their hosts' hellos.
+    boot: FarmTime,
     engine: Mutex<Engine>,
     /// Held for each pass over the queued jobs, so two passes never decide at once
     /// ([`super::engine::jobs`]); taken before the engine's lock, never under it.
@@ -129,6 +135,7 @@ impl SchedPlacer {
             engine: Mutex::new(Engine::build(settings, &[], now)),
             passes: Mutex::new(()),
             clock,
+            boot: now,
             unmappable: AtomicU64::new(0),
             declined: AtomicU64::new(0),
             resynced: AtomicU64::new(0),
@@ -147,6 +154,11 @@ impl SchedPlacer {
     /// The lock of one pass over the queued jobs.
     pub(super) fn pass(&self) -> MutexGuard<'_, ()> {
         self.passes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The farm time of the placer's clock when the placer was made: the server's start.
+    pub fn boot(&self) -> FarmTime {
+        self.boot
     }
 
     /// The farm time of the placer's clock now.

@@ -7,7 +7,9 @@ use std::time::Duration;
 use js_state::StoreTime;
 use js_types::{ExecMode, HostId, Labels};
 
+use super::whole_fields::job_whole_tag;
 use super::*;
+use crate::record::Exclusion;
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::suite::{full_spec, whole_host_spec};
 
@@ -60,6 +62,14 @@ pub(super) fn full_job() -> JobRecord {
         retention_ends: Some(at(6)),
         deadline_floor: Some(at(7)),
         client: Some(ClientName::parse("ci-1").expect("a client name")),
+        failed_prepares: 2,
+        prepare_bars: BTreeMap::from([
+            (
+                HostId::new("host-b").expect("a host"),
+                Exclusion::Until(at(8)),
+            ),
+            (HostId::new("host-c").expect("a host"), Exclusion::ForLife),
+        ]),
         carried: Carried::default(),
     }
 }
@@ -91,6 +101,8 @@ pub(super) fn bare_job() -> JobRecord {
         retention_ends: None,
         deadline_floor: None,
         client: None,
+        failed_prepares: 0,
+        prepare_bars: BTreeMap::new(),
         carried: Carried::default(),
     }
 }
@@ -106,6 +118,8 @@ pub(super) fn allocation(booked: Booked) -> AllocationRecord {
         created_at: at(1),
         freed_at: Some(at(2)),
         end_reason: Some(EndReason::Exited),
+        prepare_deadline: None,
+        wall_limit_secs: None,
         carried: Carried::default(),
     }
 }
@@ -363,6 +377,8 @@ fn literal_row(fields: &[(u16, Vec<u8>)]) -> Vec<u8> {
 // renumbering done consistently in the encoder and decoder still fails.
 #[test]
 fn the_layout_is_pinned_byte_for_byte() {
+    let until = [vec![1], seconds(8)].concat();
+    let bars = framed(&[b"host-b", &until, b"host-c", &[2]]);
     let job = literal_row(&[
         (1, b"full-1".to_vec()),
         (
@@ -418,6 +434,8 @@ fn the_layout_is_pinned_byte_for_byte() {
                 .flat_map(|word| word.to_be_bytes())
                 .collect(),
         ),
+        (45, 2u32.to_be_bytes().to_vec()),
+        (46, bars),
     ]);
     assert_eq!(job_row(&full_job()), job);
     assert_eq!(decode_job(&job), Ok(full_job()));
@@ -471,6 +489,26 @@ fn the_layout_is_pinned_byte_for_byte() {
     assert_eq!(allocation_row(&ported), ported_row);
     assert_eq!(decode_allocation(&ported_row), Ok(ported));
 
+    let waiting = AllocationRecord {
+        prepare_deadline: Some(at(9)),
+        wall_limit_secs: Some(1800),
+        ..allocation(Booked::WholeHost)
+    };
+    let waiting_row = literal_row(&[
+        (1, b"full-1".to_vec()),
+        (2, vec![7; 16]),
+        (3, b"host-a".to_vec()),
+        (4, Vec::new()),
+        (9, vec![2]),
+        (10, seconds(1)),
+        (11, seconds(2)),
+        (12, vec![0]),
+        (14, seconds(9)),
+        (15, 1800u64.to_be_bytes().to_vec()),
+    ]);
+    assert_eq!(allocation_row(&waiting), waiting_row);
+    assert_eq!(decode_allocation(&waiting_row), Ok(waiting));
+
     let bare = job_row(&bare_job());
     assert_eq!(
         field_of(&bare, 18),
@@ -478,6 +516,8 @@ fn the_layout_is_pinned_byte_for_byte() {
         "an empty list is written empty"
     );
     assert_eq!(field_of(&bare, 24), None, "None is not written");
+    assert_eq!(field_of(&bare, 45), None, "a count of zero is not written");
+    assert_eq!(field_of(&bare, 46), None, "no bars are not written");
     assert_eq!(field_of(&bare, 6), Some(Vec::new()), "a marker is empty");
     for tag in (31..=40).chain([job_tag::RESULT_LOGS]) {
         assert_eq!(
@@ -571,12 +611,16 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::DEADLINE_FLOOR,
         job_tag::CLIENT,
         job_tag::RESULT_LOGS,
+        job_whole_tag::FAILED_PREPARES,
+        job_whole_tag::PREPARE_BARS,
     ] {
         row = without(&row, tag);
     }
     let job = decode_job(&row).expect("reads");
     assert_eq!(job.deadline_floor, None, "a row before floors has none");
     assert_eq!(job.client, None, "a row before clients were named has none");
+    assert_eq!(job.failed_prepares, 0, "a row before prepares were counted");
+    assert_eq!(job.prepare_bars, BTreeMap::new(), "and before they barred");
     assert_eq!(
         job.result,
         Some(JobResult {

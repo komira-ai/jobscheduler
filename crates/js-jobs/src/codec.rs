@@ -42,13 +42,14 @@ use crate::record::{
 mod file_fields;
 mod mark_fields;
 mod result_fields;
+mod whole_fields;
 
 pub(crate) use mark_fields::{decode_mark, encode_mark};
 
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
-/// The tags of a job row.
+/// The tags of a job row (the whole-host tags 45 and 46 are in `whole_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -145,7 +146,7 @@ pub(crate) mod job_tag {
     pub const FILE_DIGESTS: u16 = 44;
 }
 
-/// The tags of an allocation row.
+/// The tags of an allocation row (the whole-host tags 14 and 15 are in `whole_fields`).
 pub(crate) mod alloc_tag {
     /// The job (text).
     pub const JOB: u16 = 1;
@@ -375,6 +376,7 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
         t::CLIENT,
         job.client.as_ref().map(|name| text(name.as_str())),
     );
+    whole_fields::put_job(&mut row, job);
     row.finish(&job.carried)
 }
 
@@ -421,6 +423,7 @@ pub(crate) fn encode_allocation(allocation: &AllocationRecord) -> Result<Vec<u8>
             .end_reason
             .map(|reason| vec![reason_code(reason)]),
     );
+    whole_fields::put_allocation(&mut row, allocation);
     row.finish(&allocation.carried)
 }
 
@@ -889,6 +892,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let result = result_fields::take_result(&mut fields)?;
     let deadline_floor = fields.opt(t::DEADLINE_FLOOR, time_of)?;
     let client = fields.opt(t::CLIENT, client_of)?;
+    let (failed_prepares, prepare_bars) = whole_fields::take_job(&mut fields)?;
     Ok(JobRecord {
         id,
         spec,
@@ -905,6 +909,8 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         retention_ends,
         deadline_floor,
         client,
+        failed_prepares,
+        prepare_bars,
         carried: fields.carried(),
     })
 }
@@ -936,6 +942,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
     let created_at = fields.need(t::CREATED_AT, time_of)?;
     let freed_at = fields.opt(t::FREED_AT, time_of)?;
     let end_reason = fields.opt(t::END_REASON, reason_of)?;
+    let (prepare_deadline, wall_limit_secs) = whole_fields::take_allocation(&mut fields)?;
     Ok(AllocationRecord {
         job,
         allocation_id,
@@ -946,6 +953,8 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
         created_at,
         freed_at,
         end_reason,
+        prepare_deadline,
+        wall_limit_secs,
         carried: fields.carried(),
     })
 }

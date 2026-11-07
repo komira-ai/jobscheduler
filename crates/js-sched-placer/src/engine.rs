@@ -34,7 +34,9 @@
 //! ([`jobs`]): a pass over the queued jobs brings them to the table and places queued jobs.
 //! A heartbeat lists them as running, a rebuild carries them over, and a host the registry
 //! forgets is kept while it holds one, so the room a lease is offered is what the host's
-//! shape leaves after both.
+//! shape leaves after both. A queued job that needs the whole host is queued in the engine
+//! as a whole-machine request of the same scheduler ([`whole_jobs`]): the pass marks, grants
+//! and cancels it from what the job tables hold, and a rebuild does not carry it.
 //!
 //! The engine is given no learned curves: each lease is charged what it books, and each
 //! host by its load readings when it has fresh ones. Under whole-node settings the engine
@@ -75,6 +77,14 @@ pub mod prepare;
 pub mod wait;
 #[path = "whole.rs"]
 pub mod whole;
+#[path = "whole_jobs.rs"]
+pub mod whole_jobs;
+
+/// What the whole-host job tests share: the job tables on the in-memory fake, an engine over
+/// hosts, and the settings of the rounds.
+#[cfg(test)]
+#[path = "whole_jobs_rig.rs"]
+mod rig;
 
 /// The term the engine grants the registry's starts in. A start it places is numbered
 /// `TERM-<seq>`, with the sequence of the registry's lease, so the tie-break between equal
@@ -134,6 +144,12 @@ pub struct Engine {
     /// The operation of each whole-node request the engine queues for the registry, until
     /// the registry commits its lease ([`whole`]).
     whole: BTreeMap<RequestId, OperationId>,
+    /// The operation of each queued whole-host job the engine queues, until the job is
+    /// placed, cancelled or ended ([`whole_jobs`]). A rebuild does not carry it: the next
+    /// pass over the job tables queues the jobs again.
+    whole_jobs: BTreeMap<js_jobs::JobId, OperationId>,
+    /// The whole-node settings the scheduler has now, if it has any.
+    whole_settings: Option<js_registry::WholeNodeConfig>,
     /// The give-ups and bars of whole-node requests a rebuild carried over, until each is
     /// queued again ([`Engine::carry_whole`]).
     carried: BTreeMap<RequestId, whole::Carried>,
@@ -203,6 +219,8 @@ impl Engine {
             readings: BTreeMap::new(),
             jobs: BTreeMap::new(),
             whole: BTreeMap::new(),
+            whole_jobs: BTreeMap::new(),
+            whole_settings: None,
             carried: BTreeMap::new(),
             restored: BTreeMap::new(),
             prepare: prepare::Prepare::default(),
