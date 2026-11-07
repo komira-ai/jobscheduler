@@ -71,6 +71,7 @@ fn pool_view(state: State, failing: bool) -> PoolView {
             },
         ],
         orphans: Vec::new(),
+        offer_cooldowns: Vec::new(),
         alerts: Vec::new(),
         last_tick_ms: Some(T0 + 3),
         scaler: true,

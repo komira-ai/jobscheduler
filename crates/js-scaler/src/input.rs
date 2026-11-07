@@ -74,7 +74,7 @@ pub struct HostFacts {
     /// ([`Offer::fit`]) judges a host and an offer alike. Its price and availability are
     /// not read. `None` when the shell does not know it: a host the registry put back after
     /// a restart (`Awaiting`) has not announced one since. The shell passes `None` then and
-    /// never a stand-in such as the pool floor, which would read as a hello below the offer.
+    /// never a stand-in such as the pool floor, which would read as a hello that does not match the offer.
     /// A host with no shape covers no request, and its first hello is registered without
     /// being judged against the offer: nothing is condemned and no cooldown starts.
     pub shape: Option<Offer>,

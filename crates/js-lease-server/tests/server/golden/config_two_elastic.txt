@@ -4,5 +4,5 @@ machine_provider lambda-b: kind lambdalabs; keys api_key_file
 platform east: kind default; hosts yes; machine_providers rack, lambda-a
 platform west: kind default; hosts yes; machine_providers rack, lambda-b
 pool gpu: platforms east; max_machines 4; max_queue_wait 30m; start_timeout 90s; path_grace 250ms
-pool gpu: provider_limits lambda-a: allowed_instance_types gpu_1x_a10, gpu_8x_h100; max_price_cents_per_hour 5000; max_machines 3; max_spot_machines 2; quota_backoff 1h; acquire_retry 1m; catalog_refresh 30m; offer_cooldown 1h
+pool gpu: provider_limits lambda-a: allowed_instance_types gpu_1x_a10, gpu_8x_h100; max_price_cents_per_hour 5000; max_machines 3; max_spot_machines 2; quota_backoff 1h; acquire_retry 1m; catalog_refresh 30m; offer_cooldown 1h; size_tolerance_percent 10
 pool cpu: platforms west; max_machines 2; max_queue_wait 1h; start_timeout 15m; path_grace 15s

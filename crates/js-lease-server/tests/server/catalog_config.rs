@@ -241,3 +241,62 @@ fn unparsable_acquire_retry_names_the_provider() {
         "pool \"gpu\": provider_limits.lambda.acquire_retry: must be a positive duration such as 600s, 10m or 1h"
     );
 }
+
+/// The `size_tolerance_percent` the file gives the provider `lambda` of the pool `gpu`, as
+/// the limits read it, and the tolerance and the offer cool-down the scaler settings of the
+/// plan carry.
+fn tolerance(scratch: &Scratch, limits: &str) -> (u8, u8, Duration) {
+    let resolved = match resolve(scratch, &limited(scratch, limits)) {
+        Ok(resolved) => resolved,
+        Err(err) => panic!("the file should resolve: {err}"),
+    };
+    let read = resolved.pool("gpu").unwrap().provider_limits["lambda"].size_tolerance_percent;
+    let config = load(scratch, &limited(scratch, limits)).unwrap();
+    let settings = config.elastic_pool().unwrap().scaler_settings(&registry());
+    (
+        read,
+        settings.size_tolerance_percent,
+        settings.offer_cooldown,
+    )
+}
+
+/// Asserts `size_tolerance_percent`: 10 when the table does not give it, the value it gives
+/// from 0 to 50 (both edges included) in the limits and in the scaler settings; and a value
+/// above 50, a negative one, a fraction or a text is refused naming the pool, the provider and
+/// the key, with the full message. Asserts too that the scaler settings carry the
+/// `offer_cooldown` of the provider's table (one hour when not given), which is where the
+/// length of an offer's cool-down after a mismatched hello comes from. Catches a bad value
+/// accepted, a default that is not 10, and a cool-down length read from anywhere else.
+#[test]
+fn config_key_is_validated() {
+    let scratch = Scratch::new("catalog_config_size_tolerance");
+    let hour = Duration::from_secs(3600);
+    assert_eq!(
+        tolerance(&scratch, "{ lambda = { max_machines = 2 } }"),
+        (10, 10, hour)
+    );
+    for given in [0, 25, 50] {
+        let limits = format!("{{ lambda = {{ size_tolerance_percent = {given} }} }}");
+        assert_eq!(tolerance(&scratch, &limits), (given, given, hour));
+    }
+    let both = "{ lambda = { size_tolerance_percent = 5, offer_cooldown = \"20m\" } }";
+    assert_eq!(
+        tolerance(&scratch, both),
+        (5, 5, Duration::from_secs(20 * 60))
+    );
+    let head = "pool \"gpu\": provider_limits.lambda.size_tolerance_percent: ";
+    for (value, reason) in [
+        ("51", "must be from 0 to 50"),
+        ("1000", "must be from 0 to 50"),
+        ("-1", "must not be negative"),
+        ("10.5", "must be an integer"),
+        ("\"10\"", "must be an integer"),
+    ] {
+        let limits = format!("{{ lambda = {{ size_tolerance_percent = {value} }} }}");
+        assert_eq!(
+            refused(&scratch, &limited(&scratch, &limits)),
+            format!("{head}{reason}"),
+            "{value}"
+        );
+    }
+}

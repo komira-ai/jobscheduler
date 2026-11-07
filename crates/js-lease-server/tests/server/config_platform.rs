@@ -691,7 +691,7 @@ fn limited_beside(scratch: &Scratch, limits: &str, more: &[String]) -> String {
 /// one the pool's platforms do not reach, and for a `static` one; `max_machines` above the
 /// pool's; `max_spot_machines` above `max_machines`; a repeated, empty, missing or
 /// mistyped instance type; a zero price or share; an entry or a table that is not a table;
-/// and an unknown key (`catalog_ttl`; the message lists `quota_backoff`, `acquire_retry`, `catalog_refresh` and `offer_cooldown` among the known ones). It catches a
+/// and an unknown key (`catalog_ttl`; the message lists `quota_backoff`, `acquire_retry`, `catalog_refresh`, `offer_cooldown` and `size_tolerance_percent` among the known ones). It catches a
 /// limit that is not checked against the pool, or a key read as nothing.
 #[test]
 fn provider_limits_are_validated() {
@@ -760,7 +760,7 @@ fn provider_limits_are_validated() {
         ("{ lambda = 3 }", "lambda: must be a table"),
         (
             "{ lambda = { catalog_ttl = \"1h\" } }",
-            "lambda.catalog_ttl: unknown field; known: allowed_instance_types, max_price_cents_per_hour, max_machines, max_spot_machines, quota_backoff, acquire_retry, catalog_refresh, offer_cooldown",
+            "lambda.catalog_ttl: unknown field; known: allowed_instance_types, max_price_cents_per_hour, max_machines, max_spot_machines, quota_backoff, acquire_retry, catalog_refresh, offer_cooldown, size_tolerance_percent",
         ),
     ];
     for (limits, message) in cases {

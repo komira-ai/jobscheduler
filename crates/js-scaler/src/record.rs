@@ -4,11 +4,12 @@
 
 use std::collections::BTreeMap;
 
-use js_elastic::{AcquireId, Offer, PriceUnit};
-use js_types::{Accelerator, ExecMode, Model, accelerator_of, normalise_arch};
+use js_elastic::{AcquireId, Cooldowns, Instant, Offer, OfferKey, PriceUnit};
+use js_types::{Accelerator, ExecMode, Model, ProviderId, accelerator_of, normalise_arch};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::time::Millis;
+use crate::verify::HelloDimension;
 
 /// Where one machine is in its life (section 6.2 of the design).
 ///
@@ -183,6 +184,15 @@ impl StoredOffer {
         stored
     }
 
+    /// Whether this shape is an offer that was recorded, and not [`StoredOffer::nothing`]
+    /// (the stand-in for a machine found with no offer to read it from). A hello is judged
+    /// against a recorded offer only: a shape that offers nothing would read every hello as
+    /// "more than the offer" and say nothing about the machine.
+    #[must_use]
+    pub fn is_recorded(&self) -> bool {
+        *self != Self::nothing(&self.id, self.zone.clone())
+    }
+
     /// A shape that offers nothing, for a machine found with no offer to read it from.
     #[must_use]
     pub fn nothing(id: &str, zone: Option<String>) -> Self {
@@ -306,8 +316,10 @@ pub struct Record {
     pub gone_at: Option<Millis>,
     /// Whether its agent said hello.
     pub registered: bool,
-    /// Whether its hello was below its offer: it is drained and released as soon as it is
-    /// quiet and is never taken back for a request.
+    /// Whether its hello did not match its offer (design 5.6.1, step 6): the machine is
+    /// released at the step that judged the hello, and the host is never taken back for a
+    /// request. A record an earlier release condemned while leaving it registered is drained
+    /// and released as soon as its host is quiet.
     pub condemned: bool,
     /// For `Failed` and `Orphan`: how many clean lists have shown no instance of it. A list
     /// that shows an orphan starts the count over.
@@ -425,6 +437,51 @@ pub struct Brake {
     pub tripped_at: Option<Millis>,
 }
 
+/// An offer cooling down because the hello of a machine acquired for it did not match it
+/// (design 5.6.1, step 6), keyed by (provider, instance type, zone). Written with the
+/// release of that machine, in the same records, so a restart keeps it; the step drops it
+/// once `until` has come. [`Records::offer_cooldowns`] gives the held ones as the catalog's
+/// cool-down store ([`Cooldowns`]) reads them.
+///
+/// Read tolerantly, as [`Brake`] is: a field a newer release adds to an entry is ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfferCooldown {
+    /// The provider of the offer ([`Settings::provider`](crate::Settings::provider)).
+    pub provider: String,
+    /// The provider's instance type: the offer's id.
+    pub offer: String,
+    /// The zone of the offer.
+    pub zone: Option<String>,
+    /// The first instant the offer is no longer cooling down.
+    pub until: Millis,
+    /// The pool whose machine's hello failed.
+    pub pool: String,
+    /// The name of the host whose hello failed.
+    pub host: String,
+    /// Every dimension the hello failed.
+    pub failed: Vec<HelloDimension>,
+}
+
+impl OfferCooldown {
+    /// The key of the offer as the catalog's cool-down store knows it; `None` when the
+    /// provider is not a provider id (a records file edited by hand), which no catalog has.
+    #[must_use]
+    pub fn key(&self) -> Option<OfferKey> {
+        let provider = ProviderId::new(&self.provider).ok()?;
+        Some(OfferKey {
+            provider,
+            offer: self.offer.clone(),
+            zone: self.zone.clone(),
+        })
+    }
+
+    /// Whether this cools the same offer as `other`: the same provider, instance type and
+    /// zone.
+    fn same_offer(&self, other: &Self) -> bool {
+        (&self.provider, &self.offer, &self.zone) == (&other.provider, &other.offer, &other.zone)
+    }
+}
+
 /// The version of the records file this writer writes. Version 2 added the silent and
 /// missing times and the time of the last write.
 pub const VERSION: u32 = 2;
@@ -484,6 +541,11 @@ pub struct Records {
     /// taking a tripped pool out of the file and putting it back does not clear the trip.
     /// Absent in files written before it existed, which read it empty.
     pub brake: BTreeMap<String, Brake>,
+    /// The offers cooling down after a hello that did not match them ([`OfferCooldown`]), one
+    /// per (provider, instance type, zone), in the order they were first cooled. Written only
+    /// while one is held, so a file with none is the file the release before this one wrote
+    /// and reads; absent in files written before it existed, which read it empty.
+    pub cooled_offers: Vec<OfferCooldown>,
 }
 
 #[derive(Serialize)]
@@ -500,6 +562,8 @@ struct WireOut<'a> {
     pool_kinds: &'a BTreeMap<String, String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     brake: &'a BTreeMap<String, Brake>,
+    #[serde(skip_serializing_if = "<[OfferCooldown]>::is_empty")]
+    cooled_offers: &'a [OfferCooldown],
 }
 
 /// Version 2.
@@ -520,6 +584,8 @@ struct WireIn {
     pool_kinds: BTreeMap<String, String>,
     #[serde(default)]
     brake: BTreeMap<String, Brake>,
+    #[serde(default)]
+    cooled_offers: Vec<OfferCooldown>,
 }
 
 /// Version 1: the same without the two times.
@@ -568,6 +634,7 @@ impl Records {
             go: &self.go,
             pool_kinds: &self.pool_kinds,
             brake: &self.brake,
+            cooled_offers: &self.cooled_offers,
         };
         Ok(serde_json::to_string_pretty(&wire)?)
     }
@@ -604,7 +671,44 @@ impl Records {
                 go: wire.go,
                 pool_kinds: wire.pool_kinds,
                 brake: wire.brake,
+                cooled_offers: wire.cooled_offers,
             })
         }
+    }
+
+    /// Cools the offer of `entry` down: a new entry is added, and one already held for the
+    /// same provider, instance type and zone takes `entry`'s host and dimensions and keeps the
+    /// later of the two ends, so a cool-down is never shortened.
+    pub(crate) fn cool_offer(&mut self, entry: OfferCooldown) {
+        match self
+            .cooled_offers
+            .iter_mut()
+            .find(|held| held.same_offer(&entry))
+        {
+            Some(held) => {
+                let until = held.until.max(entry.until);
+                *held = OfferCooldown { until, ..entry };
+            }
+            None => self.cooled_offers.push(entry),
+        }
+    }
+
+    /// Drops the offer cool-downs that have ended at `now`: an end at `now` has ended.
+    pub(crate) fn forget_cooled_offers(&mut self, now: Millis) {
+        self.cooled_offers.retain(|held| now < held.until);
+    }
+
+    /// The offer cool-downs these records hold, as the catalog's cool-down store holds them:
+    /// each until its end, on the clock the scaler's [`Millis`] read (the server's). An entry
+    /// whose provider is not a provider id is left out.
+    #[must_use]
+    pub fn offer_cooldowns(&self) -> Cooldowns {
+        let mut cooldowns = Cooldowns::new();
+        for held in &self.cooled_offers {
+            if let Some(key) = held.key() {
+                cooldowns.hold_until(key, Instant::from_millis(held.until.as_millis()));
+            }
+        }
+        cooldowns
     }
 }
