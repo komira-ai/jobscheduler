@@ -451,6 +451,25 @@ impl<'a> MakeWriter<'a> for Lines {
     }
 }
 
+/// Installs, once per process, a global subscriber that takes every line and writes it
+/// nowhere; when another test installed a global subscriber first, that one stays and serves
+/// the same end. A test that captures lines through a thread-scoped subscriber calls it before it
+/// installs its own. While tracing knows of at most one subscriber, it decides whether a log
+/// line is wanted from the default subscriber of whichever thread reaches the line first,
+/// and keeps that answer: a thread with no subscriber, such as another test's or a blocking
+/// task it spawned, settles the line as never wanted, and a capturing test that reaches the
+/// line later never sees it. With this subscriber always known, every answer is worked out
+/// from all the live subscribers, the capturing test's among them.
+pub(crate) fn process_sink() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(io::sink)
+            .try_init();
+    });
+}
+
 impl Lines {
     /// The lines written since the last take.
     pub(crate) fn take(&self) -> String {
@@ -467,6 +486,7 @@ impl Lines {
 #[tokio::test]
 async fn the_tick_logs_the_counts_of_reserved_held_and_queued() {
     let lines = Lines::default();
+    process_sink();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(lines.clone())
         .with_ansi(false)
@@ -514,6 +534,7 @@ async fn the_tick_logs_the_counts_of_reserved_held_and_queued() {
 #[tokio::test]
 async fn the_tick_alone_gives_up_a_reservation_at_its_deadline() {
     // The tick logs; its own subscriber keeps that line out of the other test's.
+    process_sink();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(Lines::default())
         .with_ansi(false)
