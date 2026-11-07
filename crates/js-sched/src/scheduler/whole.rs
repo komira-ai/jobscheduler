@@ -17,7 +17,10 @@
 //! worker that has become cheaper to drain, nor taken by another request's hold or mark
 //! ([`Scheduler::hold_whole`]). It moves only when its worker can no longer hold the
 //! request (gone, cordoned, barred to it). A worker a whole-machine lease holds is never
-//! marked: no request waits behind another one's whole-machine lease.
+//! marked: no request waits behind another one's whole-machine lease. Nor is a worker a
+//! whole holder holds: an operation of another kind the caller names as holding its worker
+//! whole ([`Scheduler::set_whole_holder`]), as a whole-node lease placed as an action that
+//! owns its worker is.
 //!
 //! The whole-node state of each operation is kept in memory only: its queue time, its
 //! mark (the worker, when it was made, its deadline and the end of the tail the worker
@@ -91,12 +94,15 @@ pub struct WholeMark {
     pub tail_end: Option<FarmTime>,
 }
 
-/// The drain state of the whole-node requests: marks and bars, kept in memory only. Empty
-/// unless whole-node settings are on.
+/// The drain state of the whole-node requests: marks and bars, kept in memory only, empty
+/// unless whole-node settings are on; and the whole holders the caller named, whether or not
+/// they are.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Drain {
     /// The mark of each request that holds a worker, as of the last placement round.
     pub(super) marks: BTreeMap<OperationId, WholeMark>,
+    /// The operations named as holding their worker whole ([`Scheduler::set_whole_holder`]).
+    holders: BTreeSet<OperationId>,
     /// The workers each request is barred from, and how ([`Bar`]).
     bars: BTreeMap<OperationId, BTreeMap<WorkerId, Bar>>,
     /// Why each request without a mark waits, as of the last placement round.
@@ -250,6 +256,7 @@ impl Drain {
         self.marks.remove(&operation);
         self.bars.remove(&operation);
         self.waits.remove(&operation);
+        self.holders.remove(&operation);
     }
 }
 
@@ -340,6 +347,26 @@ impl Scheduler {
     /// time is cut to the time left ([`Scheduler::max_wall`]).
     pub fn set_max_wall(&mut self, operation: OperationId, max_wall: Duration) {
         self.max_walls.insert(operation, max_wall);
+    }
+
+    /// Names `lease`, taken up after a restart ([`Scheduler::recover`],
+    /// [`Scheduler::take_in`]), as started at `at`, which the caller knows from outside (its
+    /// own record of the lease): its end bound and its estimated end count from there, not
+    /// from the recovery. A lease whose start was reported since keeps that; a lease the
+    /// scheduler does not hold is left alone.
+    pub fn restore_start(&mut self, lease: LeaseId, at: FarmTime) {
+        if let Some(held) = self.held.get_mut(&lease) {
+            held.started_at.get_or_insert(at);
+        }
+    }
+
+    /// Names `operation` as holding its worker whole while it holds one, though its kind is
+    /// not [`LeaseKind::WholeMachine`] (a whole-node lease the caller places as an action
+    /// that owns its worker): such a worker is whole already, as one a whole-machine lease
+    /// holds is. It is never marked for a whole-machine request, and the caps count it once,
+    /// as held. Dropped with the operation.
+    pub fn set_whole_holder(&mut self, operation: OperationId) {
+        self.drain.holders.insert(operation);
     }
 
     /// The registered workers by drain cost, cheapest first: by the least tail, whether or
@@ -435,11 +462,16 @@ impl Scheduler {
 }
 
 impl Scheduler {
-    /// The workers a whole-machine lease holds, with the time it was granted.
+    /// The workers a whole-machine lease or a whole holder ([`Scheduler::set_whole_holder`])
+    /// holds, with the time it was granted.
     fn whole_held(&self) -> BTreeMap<&WorkerId, FarmTime> {
+        let whole = |operation: &OperationId| {
+            let kind = self.ops[operation].request.kind;
+            (kind == LeaseKind::WholeMachine) | self.drain.holders.contains(operation)
+        };
         self.held
             .values()
-            .filter(|h| self.ops[&h.operation].request.kind == LeaseKind::WholeMachine)
+            .filter(|h| whole(&h.operation))
             .filter_map(|h| {
                 let (_, worker) = self.ops[&h.operation].state.holding()?;
                 Some((worker, h.granted_at))
@@ -817,5 +849,52 @@ mod tests {
         let ends = s.lease_ends(&[(op, placed)]);
         let expected = BTreeMap::from([(LeaseId::new(1, 0), Some(105_000))]);
         assert_eq!(ends, expected);
+    }
+
+    /// Catches: a lease taken up after a restart counted from the take-up though the caller
+    /// named its start, a second named start taken over the first, and a start named for a
+    /// lease the scheduler does not hold booked anyway. Taken up at 50 s with a wall time
+    /// of 100 s it ends at 150 s; named as started at 10 s it ends at 110 s, and stays so.
+    #[test]
+    fn a_lease_taken_up_ends_its_wall_time_after_the_start_named() {
+        use crate::{Event, Input, Recovered, RecoveredLease, Request};
+        use js_types::sched::{Qos, Resources, StateMachine, WaiterId, WorkKey};
+        let mut s = Scheduler::new(1);
+        s.apply(Input::new(FarmTime::from_millis(50_000), Event::Tick));
+        let op = OperationId(1);
+        let lease = LeaseId::new(0, 1);
+        let request = Request {
+            key: WorkKey::new("held", "1"),
+            qos: Qos::Batch,
+            kind: LeaseKind::Action,
+            resources: Resources::new(1_000, 1 << 30),
+            hermetic: false,
+            do_not_cache: true,
+            whole_worker: false,
+            pin: None,
+            needs: js_caps::Request::default(),
+        };
+        let recovered = Recovered {
+            operation: op,
+            request,
+            waiter: WaiterId(1),
+            lease: Some(RecoveredLease {
+                lease,
+                worker: WorkerId::new("a"),
+                cost: None,
+            }),
+            losses: 0,
+            fate: None,
+        };
+        s.recover(1, OperationId(2), 2, vec![recovered]);
+        s.set_max_wall(op, Duration::from_secs(100));
+        let ends = |s: &Scheduler| s.lease_ends(&[])[&lease];
+        assert_eq!(ends(&s), Some(150_000));
+        s.restore_start(lease, FarmTime::from_millis(10_000));
+        assert_eq!(ends(&s), Some(110_000));
+        s.restore_start(lease, FarmTime::from_millis(0));
+        assert_eq!(ends(&s), Some(110_000));
+        s.restore_start(LeaseId::new(0, 9), FarmTime::from_millis(0));
+        assert_eq!(s.lease_ends(&[]).len(), 1);
     }
 }
