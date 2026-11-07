@@ -12,7 +12,7 @@ use js_types::{HostId, ProviderId, Resources, Shape};
 use serde_json::json;
 
 use crate::support::{
-    Gate, Harness, Scratch, SharedPool, T0, TOKEN, args_with, base_args, ids, lease_body, request,
+    Gate, Harness, Scratch, SharedPool, T0, TOKEN, base_args, ids, lease_body, request,
 };
 
 fn secs(n: u64) -> Duration {
@@ -42,24 +42,21 @@ async fn scripted(name: &str, script: Vec<(Call, bool)>) -> Harness {
     Harness::with(scratch, args, Some(Box::new(Scripted(script)))).await
 }
 
-/// Asserts that a lease past its ttl stays listed (and cannot be renewed) until a tick,
-/// that the tick frees it, and that its host is free for the next lease.
+/// Asserts that a lease past its wall end stays listed until a tick, that the tick frees
+/// it, and that its host is free for the next lease. It catches a lease freed before its
+/// wall end, one freed without a tick, and one that outlives its wall end.
 #[tokio::test]
-async fn a_tick_expires_a_lease_after_its_ttl() {
-    let scratch = Scratch::new("expire");
-    let args = args_with(&scratch, &["--default-ttl", "60s"]);
-    let h = Harness::with(scratch, args, None).await;
+async fn a_tick_ends_a_lease_at_its_wall_end() {
+    let h = Harness::new("expire").await;
     let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.json()["expires_at_ms"], T0 + 60_000);
+    assert_eq!(granted.json()["ends_at_ms"], T0 + 7_200_000);
 
-    h.clock.advance(secs(59));
+    h.clock.advance(secs(7199));
     h.ticks.step().await;
     assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), vec!["1-1"]);
 
     h.clock.advance(secs(2));
     assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), vec!["1-1"]);
-    let late = h.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(late.json(), json!({ "error": "expired" }));
 
     h.ticks.step().await;
     assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
@@ -67,8 +64,8 @@ async fn a_tick_expires_a_lease_after_its_ttl() {
     assert_eq!(next.json()["host"], "gpu-01");
 }
 
-/// Asserts that a start the provider did not answer is a 202 with the lease pending,
-/// that it cannot be renewed meanwhile, and that a tick resolves it to held.
+/// Asserts that a start the provider did not answer is a 202 with the lease pending
+/// and that a tick resolves it to held.
 #[tokio::test]
 async fn a_pending_start_resolves_on_a_tick() {
     let h = scripted("pending", vec![(Call::Start, true)]).await;
@@ -79,9 +76,6 @@ async fn a_pending_start_resolves_on_a_tick() {
     let listed = h.call("GET", "/v1/leases", None).await.json();
     assert_eq!(listed["leases"][0]["state"], "pending");
     assert!(listed["leases"][0].get("host").is_none());
-    let renew = h.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(renew.status, 409);
-    assert_eq!(renew.json(), json!({ "error": "not-held" }));
 
     h.ticks.step().await;
     let listed = h.call("GET", "/v1/leases", None).await.json();
@@ -127,7 +121,7 @@ async fn save_errors_are_counted() {
 
     let blocker = h.scratch.path("leases.toml.tmp");
     std::fs::create_dir(&blocker).unwrap();
-    h.clock.advance(secs(601));
+    h.clock.advance(secs(7201));
     h.ticks.step().await;
     assert_eq!(h.running.save_errors(), 1);
     assert!(
@@ -146,13 +140,13 @@ async fn save_errors_are_counted() {
     );
 }
 
-/// Asserts that shutdown ticks the table once more: a lease that fell due since the
+/// Asserts that shutdown ticks the table once more: a lease that reached its end since the
 /// last tick is stopped and gone from the file when the server has stopped.
 #[tokio::test]
 async fn shutdown_ticks_once_more() {
     let h = Harness::new("shutdown_tick").await;
     h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    h.clock.advance(secs(601));
+    h.clock.advance(secs(7201));
     let state = h.scratch.state();
     assert!(
         std::fs::read_to_string(&state)
@@ -275,7 +269,7 @@ async fn a_final_save_that_fails_is_an_error() {
     let h = Harness::new("final_save").await;
     h.call("POST", "/v1/leases", Some(&lease_body())).await;
     std::fs::create_dir(h.scratch.path("leases.toml.tmp")).unwrap();
-    h.clock.advance(secs(601));
+    h.clock.advance(secs(7201));
 
     let named = format!(
         "the final tick could not write the lease file {}: ",

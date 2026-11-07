@@ -20,26 +20,19 @@ impl Render {
         Self { json }
     }
 
-    /// A lease that is held.
+    /// A lease that is held: `lease <id> host <host> ends <ms>`, `ends` being the server's
+    /// clock in milliseconds when the lease reaches its maximum wall time.
     pub(crate) fn held(&self, lease: &Lease) -> String {
         match self.json {
             true => line(&json!({
                 "id": lease.id,
                 "host": lease.host,
-                "expires_at_ms": lease.expires_at_ms,
+                "ends_at_ms": lease.ends_at_ms,
             })),
             false => format!(
-                "lease {} host {} expires {}\n",
-                lease.id, lease.host, lease.expires_at_ms
+                "lease {} host {} ends {}\n",
+                lease.id, lease.host, lease.ends_at_ms
             ),
-        }
-    }
-
-    /// A lease that was renewed.
-    pub(crate) fn renewed(&self, id: &str, expires_at_ms: u64) -> String {
-        match self.json {
-            true => line(&json!({ "id": id, "expires_at_ms": expires_at_ms })),
-            false => format!("lease {id} expires {expires_at_ms}\n"),
         }
     }
 
@@ -111,8 +104,8 @@ impl Render {
         let lines = entries.iter().map(|entry| {
             let host = entry.host.as_deref().unwrap_or("-");
             format!(
-                "{} {} host {host} expires {}\n",
-                entry.id, entry.state, entry.expires_at_ms
+                "{} {} host {host} ends {}\n",
+                entry.id, entry.state, entry.ends_at_ms
             )
         });
         match self.json {

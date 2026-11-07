@@ -1,4 +1,4 @@
-Acquires, renews and releases leases on a lease server, and makes the calls of the job service
+Acquires and releases leases on a lease server, and makes the calls of the job service
 
 Usage: js [OPTIONS] <COMMAND>
 

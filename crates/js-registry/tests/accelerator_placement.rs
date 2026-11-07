@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{GpuDevice, Hello};
-use js_provider::{Pool, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::PoolConfig;
 use js_types::{Capabilities, ClassId, ProviderId, Request, Resources, Shape};
 use support::*;
@@ -127,5 +127,108 @@ fn reported_accelerator_capabilities_do_not_change_where_a_host_is_placed() {
             expected,
             "{model} {gib}"
         );
+    }
+}
+
+/// A fixture of [`gpu_fixture`]'s pool under `placement`, whose floor and host also name
+/// `arch` (js-sched describes a host by it), with one host of `hello` registered.
+fn gpu_fixture_in(floor_class: &str, hello: &Hello, placement: Placement) -> Fixture {
+    let resources = Resources::new(4000, 8 << 30, 1, Some(floor_class.into())).unwrap();
+    let shape = Shape::new(resources, map(&[("os", "macos"), ("arch", "x86_64")]));
+    let name = ProviderId::new("builders").unwrap();
+    let fx = fixture_in(PoolConfig::new(name, class(), shape, 4), placement);
+    let mut said = hello.clone();
+    said.capabilities.insert("arch".into(), "x86_64".into());
+    fx.hello(&said, &cred("t")).unwrap();
+    fx
+}
+
+/// What a start of `request` on `fx` answers.
+fn start(fx: &Fixture, request: Request) -> StartAck {
+    let spec = StartSpec::new(lease(1), request, &[class()]).unwrap();
+    fx.provider.clone().start(spec)
+}
+
+/// Asserts, under each placement, that a pool whose floor names the family `nvidia-a100`
+/// places a request for `nvidia-a100-sxm4-80gb` on its host of that variant, and refuses
+/// one for `nvidia-a100-sxm4-40gb` `no-capacity`: the floor answers for the family, not
+/// the variant, so a host of the 40 GiB variant could still join. Catches a pool-fit gate
+/// that holds a request to the floor's family alone (the floor fits no variant spelling,
+/// so under js-sched the placer was never asked and the start was `no-fit`), and a host
+/// placed as the floor's family.
+#[test]
+fn a_variant_request_is_placed_on_its_variant_under_each_placement() {
+    let hello = old_gpu_hello("nvidia-a100-sxm4-80gb", 80);
+    for placement in [Placement::Registry, Placement::JsSched] {
+        let fx = gpu_fixture_in("nvidia-a100", &hello, placement);
+        let ack = start(&fx, gpu_request("nvidia-a100-sxm4-80gb", &[]));
+        assert_eq!(started_on(&ack), Some("gpu-1"), "{placement:?}");
+        let fx = gpu_fixture_in("nvidia-a100", &hello, placement);
+        let ack = start(&fx, gpu_request("nvidia-a100-sxm4-40gb", &[]));
+        assert_eq!(
+            ack,
+            StartAck::Refused(RefusalCode::NoCapacity),
+            "{placement:?}"
+        );
+    }
+}
+
+/// Asserts, under each placement, that a host of a model the alias table does not know,
+/// whose devices measure 40 GiB, takes a request for that model with 40 GiB per device,
+/// and that one for 41 GiB is refused `no-capacity` (the floor knows no memory, so a
+/// larger host could join). Catches the measured memory of the host lost before js-sched
+/// places, and a gate that holds the request to the floor, which states no memory.
+#[test]
+fn a_measured_memory_decides_placement_under_each_placement() {
+    let hello = old_gpu_hello("nvidia-zz9000", 40);
+    let ask = |gib: &str| {
+        let caps = [
+            ("accelerator.model", "nvidia-zz9000"),
+            ("accelerator.memory-gib", gib),
+        ];
+        gpu_request("nvidia-zz9000", &caps)
+    };
+    for placement in [Placement::Registry, Placement::JsSched] {
+        let fx = gpu_fixture_in("nvidia-zz9000", &hello, placement);
+        assert_eq!(
+            started_on(&start(&fx, ask("40"))),
+            Some("gpu-1"),
+            "{placement:?}"
+        );
+        let fx = gpu_fixture_in("nvidia-zz9000", &hello, placement);
+        let over = start(&fx, ask("41"));
+        assert_eq!(
+            over,
+            StartAck::Refused(RefusalCode::NoCapacity),
+            "{placement:?}"
+        );
+    }
+}
+
+/// Asserts, under each placement, that a pool whose floor pins the variant
+/// `nvidia-a100-sxm4-80gb` refuses a request for `nvidia-a100-sxm4-40gb` `no-fit`: every
+/// host is held to the floor's variant, so none ever serves another, and a client must not
+/// be told to retry. A request for 81 GiB per device is refused `no-fit` too, and the
+/// floor's own variant is placed. Catches a gate that leaves a floor's variant to the
+/// hosts, as it leaves a family's.
+#[test]
+fn a_floor_that_pins_a_variant_answers_for_it_under_each_placement() {
+    let a100_80 = "nvidia-a100-sxm4-80gb";
+    let hello = old_gpu_hello(a100_80, 80);
+    for placement in [Placement::Registry, Placement::JsSched] {
+        let fx = gpu_fixture_in(a100_80, &hello, placement);
+        let other = start(&fx, gpu_request("nvidia-a100-sxm4-40gb", &[]));
+        assert_eq!(
+            other,
+            StartAck::Refused(RefusalCode::NoFit),
+            "{placement:?}"
+        );
+        let more = start(
+            &fx,
+            gpu_request(a100_80, &[("accelerator.memory-gib", "81")]),
+        );
+        assert_eq!(more, StartAck::Refused(RefusalCode::NoFit), "{placement:?}");
+        let own = start(&fx, gpu_request(a100_80, &[]));
+        assert_eq!(started_on(&own), Some("gpu-1"), "{placement:?}");
     }
 }

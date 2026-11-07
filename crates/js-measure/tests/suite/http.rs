@@ -120,7 +120,7 @@ fn a_lease_request_and_its_three_answers() {
     let held = Canned::serve(vec![(
         "POST /v1/leases",
         201,
-        r#"{"id":"1-1","host":"gpu-01","expires_at_ms":5}"#,
+        r#"{"id":"1-1","host":"gpu-01","ends_at_ms":5}"#,
     )]);
     let (_dir, farm) = farm_at(&held.url);
     assert_eq!(
@@ -171,9 +171,9 @@ fn a_lease_is_looked_up_in_the_list() {
         "GET /v1/leases",
         200,
         r#"{"leases":[
-          {"id":"1-1","state":"held","host":"h1","acquired_at_ms":1,"expires_at_ms":2,"ends_at_ms":3,"labels":{}},
-          {"id":"1-2","state":"pending","acquired_at_ms":1,"expires_at_ms":2,"ends_at_ms":3,"labels":{}},
-          {"id":"1-3","state":"releasing","host":"h2","acquired_at_ms":1,"expires_at_ms":2,"ends_at_ms":3,"labels":{}}]}"#,
+          {"id":"1-1","state":"held","host":"h1","acquired_at_ms":1,"ends_at_ms":3,"labels":{}},
+          {"id":"1-2","state":"pending","acquired_at_ms":1,"ends_at_ms":3,"labels":{}},
+          {"id":"1-3","state":"releasing","host":"h2","acquired_at_ms":1,"ends_at_ms":3,"labels":{}}]}"#,
     )]);
     let (_dir, farm) = farm_at(&server.url);
     assert_eq!(

@@ -13,13 +13,13 @@ fn millis(n: u64) -> Duration {
 
 /// Asserts that when the guard's bound is hit, the panic names the labelled tasks that
 /// have not finished and does not name the one that has, and then prints what the
-/// timings saw: here one `renew` of 500 ms on a clock that moves a fixed step per
+/// timings saw: here one `release` of 500 ms on a clock that moves a fixed step per
 /// reading, in the message asserted below. Time is paused, so the bound passes without waiting. It catches a guard that
 /// reports only that it timed out, and one that leaves the timings out.
 #[tokio::test(start_paused = true)]
 async fn a_guard_that_fires_names_the_unfinished_tasks_and_the_timings() {
     let saves = Timings::new(Stepping::of(millis(500)));
-    saves.begin("renew").finish();
+    saves.begin("release").finish();
     let done = tokio::spawn(async {});
     let stuck = tokio::spawn(std::future::pending::<()>());
     let also = tokio::spawn(async { tokio::time::sleep(Duration::from_secs(3600)).await });
@@ -36,20 +36,20 @@ async fn a_guard_that_fires_names_the_unfinished_tasks_and_the_timings() {
     assert_eq!(
         message,
         "still waiting after 30s: unfinished tasks: [\"stuck-one\", \"slow-one\"]; \
-         lease steps: renew: 1 timed, 0 over 1 s, longest 500 ms"
+         lease steps: release: 1 timed, 0 over 1 s, longest 500 ms"
     );
 }
 
 /// Asserts that a step that began and never finished at the moment the guard fires is in
 /// the message as in flight, beside a finished one of the same operation: here a
-/// `wait-renew` that took 1500 ms and a second one still waiting, so the message is
+/// `wait-release` that took 1500 ms and a second one still waiting, so the message is
 /// exactly the one asserted below. It catches a report that shows only finished steps,
 /// which says nothing about the step the hang is in.
 #[tokio::test(start_paused = true)]
 async fn a_guard_that_fires_shows_the_step_still_in_flight() {
     let timings = Timings::new(Stepping::of(millis(1500)));
-    timings.begin("wait-renew").finish();
-    let stuck_step = timings.begin("wait-renew");
+    timings.begin("wait-release").finish();
+    let stuck_step = timings.begin("wait-release");
     let stuck = tokio::spawn(std::future::pending::<()>());
     let waiting = tokio::spawn(async move {
         guard_tasks(vec![("lease-calls", stuck)], &timings).await;
@@ -59,7 +59,7 @@ async fn a_guard_that_fires_shows_the_step_still_in_flight() {
     assert_eq!(
         message,
         "still waiting after 30s: unfinished tasks: [\"lease-calls\"]; \
-         lease steps: wait-renew: 1 timed, 1 over 1 s, longest 1500 ms, 1 in flight"
+         lease steps: wait-release: 1 timed, 1 over 1 s, longest 1500 ms, 1 in flight"
     );
     drop(stuck_step);
 }

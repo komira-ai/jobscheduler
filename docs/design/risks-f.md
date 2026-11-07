@@ -15,7 +15,7 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
 - **K25. Boot cost per run.** A boot for every run, since no VM is reused. Bounded by the size choice of D26; a warm pool is future work.
 - **K26. Wire growth.** Facts add bytes to every hello; new limits bound them and an agent over them is refused as any other (13.6).
 - **K27. Advertised facts are unverified claims.** A registered agent can claim any fact, `sandbox=vm` isolation included. Bounded: facts never override pool selection by class and labels, the lease token still binds one consumer, and a lie costs queueing, misplacement or refusal and the agent its taint and deny-file path; a consumer needing isolation leases from a pool whose operator it trusts (Trust, capabilities.md).
-- **K28. One pod is one point of outage.** A crash, a pod deletion or a node loss stops new leases, renewals and scaling until the pod is back:
+- **K28. One pod is one point of outage.** A crash, a pod deletion or a node loss stops new leases and scaling until the pod is back:
   seconds for a restart, minutes for a node loss (the volume must detach first), and a restore from a snapshot for a lost zone. Mitigated by
   durable state written before every answer, agents that re-hello, the boot grace (D34), placed work that does not depend on the service
   (D22), and a disruption budget that keeps automated drains from restarting it unseen. Not mitigated: the outage itself; an external
@@ -54,7 +54,7 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   lease. Mitigated by host jobs off by default and needing four consents, by GPU and performance runs being `contained`, and by an elastic
   machine being replaced. Not mitigated: a pool that allows host jobs on its only machines.
 - **K38. Draining idles capacity, and a long lease holds a reservation.** A reserved host does no new work but backfill that ends by its tail (whole-node.md section 4) until it is quiet, up to its
-  `drain_deadline`, and a consumer that ignores `host_reserved` keeps its lease to its TTL or max wall time (D48). Bounded by `max_draining`,
+  `drain_deadline`, and a consumer that ignores the reservation keeps its lease to its max wall time (D48). Bounded by `max_draining`,
   the ceiling and `keep_for_ordinary` (D49), by cost-ordered host choice, by the failed-prepare back-off, and by acquiring a machine in an
   elastic pool before draining (D50). Residual: a pool of long leases pays most of a max wall time of idle per whole-node lease.
 - **K39. Quiet is the agent's claim.** The readiness report is the agent's own (K17, K27): a wrong or hostile agent can say it is quiet while

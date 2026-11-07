@@ -64,7 +64,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
     assert_eq!(
         refused_server("config_unknown_server", "status_token_file = \"/x\""),
         "server.status_token_file: unknown field; known: listen, agent_listen, advertise_url, \
-         scheduler_id, state_file, boot, client_token_file, tls_cert, tls_key, tick, default_ttl, max_ttl, \
+         scheduler_id, state_file, boot, client_token_file, tls_cert, tls_key, tick, \
          max_lease_wall, max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
          max_requests, drain_timeout, agent_hello_burst, agent_hello_interval, \
          require_host_credential, placement, estimate_feed, cpu_slack, usage_db, usage_off, profile_store_bytes, \
@@ -169,8 +169,6 @@ fn the_server_table_is_checked_key_by_key() {
         refusal(&scratch, &file(&later, &[&pool])),
         "server.boot: must be initialise or resume"
     );
-    let said = refused_server("config_ttl", "default_ttl = \"2h\"\nmax_ttl = \"1h\"");
-    assert!(said.starts_with("server.default_ttl: "), "{said}");
 }
 
 /// Asserts the client token file: it is read owner-only like `--token-file`, so a

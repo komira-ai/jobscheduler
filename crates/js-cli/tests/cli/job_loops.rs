@@ -128,13 +128,9 @@ fn js(
     source: SignalSource,
     words: &[&str],
 ) -> Outcome {
-    let services = js_cli::Services::new(
-        Arc::new(Never),
-        Arc::new(crate::support::FixedClock(0)),
-        source,
-    )
-    .with_dialer(fake.dialer())
-    .with_job_waiter(paces.clone());
+    let services = js_cli::Services::new(Arc::new(Never), source)
+        .with_dialer(fake.dialer())
+        .with_job_waiter(paces.clone());
     crate::support::run(args(scratch, words), services)
 }
 

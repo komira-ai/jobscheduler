@@ -8,10 +8,11 @@ lease always ends: the wall time is the deadline of the attempt, and the fence (
 Checked at submit, as part of the start contract (5.2), and refused there. A refusal carries a plain constant code; no central code table
 is introduced until a second consumer needs one.
 
-**Lease TTL and the reaper.** A held lease also has a TTL: the client renews it before it lapses, and a renewal never extends it past
-its acquisition plus the max wall time. The reaper is a periodic tick, the only place time acts: it stops and frees every lease whose
-TTL has passed, and retries a start, a stop, an acquire or a release whose outcome was unknown, freeing a lease only when the provider is
-observed without it (5.6). So a client that disappears loses its lease at the end of its TTL, never later than its max wall time. The
+**Lease end and the reaper.** A lease has no time to live: nothing a client does keeps it alive. A lease ends in exactly three ways: the client
+releases it, its max wall time (`ends_at`, the acquisition plus the max wall time) passes, or, for a pending whole-node lease, its prepare
+deadline passes before the host is ready. The reaper is a periodic tick, the only place time acts: it stops and frees every lease that has
+reached its end, and retries a start, a stop, an acquire or a release whose outcome was unknown, freeing a lease only when the provider is
+observed without it (5.6). So a client that disappears keeps its lease until its max wall time, never longer. The
 lease table in this repository (`js-lease`) implements this.
 
 The reaper also owns the machines. In the same tick it (a) releases an elastic host that has been idle past its pool's `idle_timeout` (5.10) (a registered `default` host is never

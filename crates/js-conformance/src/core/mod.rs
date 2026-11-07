@@ -25,9 +25,9 @@
 //! [`js_state::fake::Fake`]. It is test code, and it is the executable spec of the suite
 //! as `FakeAgent` is of the agent suite: it shows that each scenario can pass, and each
 //! [`Defect`] (the same loop with one rule broken) shows that each can fail. It is not the
-//! server's core. When the real core (`js-server-core`) plugs into [`CoreHarness`], the
-//! suite decides: where the two disagree, the model is fixed or deleted, and the model must
-//! not grow features to keep up with the real one. The harness names (`Stream`, `Released`)
+//! server's core. When a server's loop plugs into [`CoreHarness`], the suite decides:
+//! where the two disagree, the model is fixed or deleted, and the model must not grow
+//! features to keep up with the real one. The harness names (`Stream`, `Released`)
 //! are the test harness's; they are not a session type for a server to adopt.
 //!
 //! # What a harness adapter maps

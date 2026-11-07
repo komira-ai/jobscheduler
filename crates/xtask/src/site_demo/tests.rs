@@ -86,16 +86,16 @@ fn the_host_file_is_one_host_and_the_token_is_long_enough() {
 #[test]
 fn the_lease_id_is_the_word_after_lease_on_the_acquire_line() {
     assert_eq!(
-        lease_id("lease 4-2 host gpu-01 expires 17\n").as_deref(),
+        lease_id("lease 4-2 host gpu-01 ends 17\n").as_deref(),
         Some("4-2")
     );
     assert_eq!(
-        lease_id("noise\nlease 5-1 host h expires 1\n").as_deref(),
+        lease_id("noise\nlease 5-1 host h ends 1\n").as_deref(),
         Some("5-1")
     );
     for text in [
         "",
-        "4-2 held host gpu-01 expires 17\n",
+        "4-2 held host gpu-01 ends 17\n",
         "lease 4-2 freed\n",
         "lease\n",
         "lease 4-2\n",

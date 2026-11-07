@@ -71,6 +71,14 @@ in-process = []
 
 [dev-dependencies]
 js-agent = { path = "../js-agent" }
+# The output tails of the v1 acceptance target's jobs, which the job service's JSON carries
+# as base64 (tests/v1_acceptance/rig.rs).
+base64.workspace = true
+# The command line the v1 acceptance target submits jobs through (tests/v1_acceptance/cli.rs).
+js-cli = { path = "../js-cli" }
+# The helper modes the v1 acceptance binary answers as each container's supervisor
+# (tests/v1_acceptance.rs).
+js-contain = { path = "../js-contain" }
 # The job-service conformance suite, run against the real service (src/job_api/conformance_tests.rs).
 js-conformance = { path = "../js-conformance" }
 # The in-process server, for tests/in_process.rs.
@@ -107,6 +115,14 @@ prost-reflect = { workspace = true, features = ["serde"] }
 tonic = { workspace = true, features = ["transport"] }
 tonic-prost.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
+
+# The v1 job path over the real server binary, an agent and the command line
+# (tests/v1_acceptance.rs). It has no libtest harness: the binary is also each container's
+# supervisor, and answers that helper mode in its own `main` before it runs a case.
+[[test]]
+name = "v1_acceptance"
+path = "tests/v1_acceptance.rs"
+harness = false
 
 [lints]
 workspace = true

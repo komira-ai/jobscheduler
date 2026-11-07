@@ -102,6 +102,8 @@ pub struct Fixture {
     pub registry: Registry,
     pub provider: RegisteredProvider,
     pub clock: ManualClock,
+    /// The placer of [`Placement::JsSched`]; `None` under [`Placement::Registry`].
+    pub placer: Option<Arc<SchedPlacer>>,
     sessions: Mutex<BTreeMap<String, String>>,
 }
 
@@ -128,19 +130,22 @@ pub fn fixture_in(config: PoolConfig, placement: Placement) -> Fixture {
     };
     let percent = u32::from(config.memory_percent().get());
     let registry = Registry::with_sessions(config, clock.clone(), SequentialSessions::new());
-    if placement == Placement::JsSched {
+    let placer = (placement == Placement::JsSched).then(|| {
         let settings = Settings {
             backfill: Backfill::enforced(Duration::MAX),
             load: LoadConfig::default(),
             memory: MemoryPercent::clamped(percent),
         };
-        registry.set_placer(Arc::new(SchedPlacer::new(settings, clock.clone())));
-    }
+        let placer = Arc::new(SchedPlacer::new(settings, clock.clone()));
+        registry.set_placer(placer.clone());
+        placer
+    });
     let provider = registry.provider();
     Fixture {
         registry,
         provider,
         clock,
+        placer,
         sessions: Mutex::new(BTreeMap::new()),
     }
 }

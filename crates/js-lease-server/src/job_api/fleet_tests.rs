@@ -1,8 +1,8 @@
 //! The fleet calls over the server's own state: a registry on a manual clock with hosts
 //! that said hello, the lease table over it, the agent side that saves the bindings into a
 //! scratch directory, and the job tables over the in-memory store on a manual clock of its
-//! own. The pools and the history come from the server's own status and usage sink, or
-//! from fakes where a test needs a view the server would take a provider to make. Nothing
+//! own. The pools and the history come from the server's own status, usage sink and job
+//! store, or from fakes where a test needs a view the server would take a provider to make. Nothing
 //! here opens a socket or sleeps: gRPC runs over an in-memory stream.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,7 +91,7 @@ fn server(name: &str, agents: bool) -> Server {
         4,
     );
     let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
-    let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+    let settings = Settings::new();
     let table = LeaseTable::open(
         BoxedPool(Box::new(registry.provider())),
         shared_clock.clone(),
@@ -106,6 +106,7 @@ fn server(name: &str, agents: bool) -> Server {
         Flaw::None,
     )));
     let dynamic: Arc<dyn Store> = store.clone();
+    let job_history: Arc<dyn History> = Arc::new(StoreHistory(dynamic.clone()));
     let jobs =
         Arc::new(JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap());
     let side = Agents::over(registry.clone(), &shared_clock, dir.path()).with_jobs(jobs.clone());
@@ -122,7 +123,8 @@ fn server(name: &str, agents: bool) -> Server {
         shared_clock.clone(),
     );
     let history: Arc<dyn History> = Arc::new(SinkHistory(sink.clone()));
-    let fleet = Ctx::served(shared.clone(), Arc::new(status), Some(history));
+    let fleet = Ctx::served(shared.clone(), Arc::new(status), Some(history))
+        .with_job_history(Some(job_history));
     let api = JobApi::new(jobs.clone(), shared_clock).with_fleet(fleet);
     Server {
         shared,

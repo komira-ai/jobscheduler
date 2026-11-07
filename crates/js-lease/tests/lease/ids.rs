@@ -26,12 +26,12 @@ fn the_last_sequence_is_issued_and_the_next_is_refused() {
     fs::write(scratch.file(), head(1, LARGEST - 1)).unwrap();
     let mut table = open_with(fake(), &scratch);
 
-    let last = table.acquire(request(3600), None).unwrap();
+    let last = table.acquire(request(3600)).unwrap();
     assert_eq!(last.id, LeaseId::new(2, LARGEST - 1));
     let written = fs::read_to_string(scratch.file()).unwrap();
     assert!(written.contains(&format!("next_sequence = {LARGEST}\n")));
 
-    let err = table.acquire(request(3600), None).unwrap_err();
+    let err = table.acquire(request(3600)).unwrap_err();
     assert!(matches!(err, AcquireError::IdsExhausted), "{err}");
     assert_eq!(states(&table), vec![(last.id, LeaseState::Held)]);
     assert_eq!(table.provider().booked().len(), 1);
@@ -43,7 +43,7 @@ fn the_last_sequence_is_issued_and_the_next_is_refused() {
     for edited in [LARGEST, LARGEST + 1, u64::MAX] {
         fs::write(scratch.file(), head(1, edited)).unwrap();
         let mut table = open_with(fake(), &scratch);
-        let err = table.acquire(request(3600), None).unwrap_err();
+        let err = table.acquire(request(3600)).unwrap_err();
         assert!(matches!(err, AcquireError::IdsExhausted), "{err}");
         assert!(table.list().is_empty());
         assert!(table.provider().booked().is_empty());
@@ -78,7 +78,7 @@ fn the_last_term_is_taken_and_the_next_boot_is_refused() {
     let scratch = Scratch::new("term_limit");
     fs::write(scratch.file(), head(LARGEST - 1, 1)).unwrap();
     let mut table = open_with(fake(), &scratch);
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     assert_eq!(lease.id, LeaseId::new(LARGEST, 1));
     let provider = table.into_provider();
     let written = fs::read_to_string(scratch.file()).unwrap();

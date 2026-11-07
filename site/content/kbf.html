@@ -8,11 +8,10 @@
 <p>The pieces a scheduler server is built from are here:</p>
 <ul>
   <li><code>js-sched</code>, the pure scheduler core, including admission by load (see <a href="concepts.html#placement">placement</a>);</li>
-  <li><code>js-server-core</code>, the loop around it that carries its effects out: a record is committed before anything that depends on it happens, and several frontends may share one store;</li>
   <li><code>js-sizing</code>, the estimator that predicts an action's CPU and memory from earlier runs;</li>
   <li><code>js-agent</code>, which the design documents call the generic half of the kbf daemon.</li>
 </ul>
-<p class="source-note">Sources: <code>docs/layering.md</code> ("Depending on the crates by git revision" and "Moving a crate in from another repository"), the module documentation of <code>crates/js-server-core/src/lib.rs</code> and <code>crates/js-sizing/src/lib.rs</code>, and <code>docs/design.md</code>, decisions 1 and 2 of the summary.</p>
+<p class="source-note">Sources: <code>docs/layering.md</code> ("Depending on the crates by git revision" and "Moving a crate in from another repository"), the module documentation of <code>crates/js-sizing/src/lib.rs</code>, and <code>docs/design.md</code>, decisions 1 and 2 of the summary.</p>
 
 <h2 id="running">What kbf runs today</h2>
 <p>According to <code>docs/design/kbf-today.md</code>, checked against the kbf revision it names, kbf has two scheduler cores selected by <code>--scheduler-core</code>, and only the <code>legacy</code> one is built into a running server; <code>js</code> is refused at start unless a test-only feature is built. The same document says that nothing in kbf runs <code>js-agent</code>, and that no lease client of jobscheduler was in use.</p>

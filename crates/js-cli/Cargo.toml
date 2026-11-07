@@ -19,7 +19,6 @@ clap.workspace = true
 getrandom.workspace = true
 prost.workspace = true
 prost-reflect = { workspace = true, features = ["serde", "text-format"] }
-rustix = { workspace = true, features = ["process"] }
 serde_json.workspace = true
 thiserror.workspace = true
 # `macros` and `sync`: `job run` waits and follows at once, and reads the signals as it waits.
@@ -38,7 +37,8 @@ js-provider-fake = { path = "../js-provider-fake" }
 js-testkit = { path = "../js-testkit" }
 js-types = { path = "../js-types" }
 rcgen.workspace = true
-rustix = { workspace = true, features = ["event"] }
+# `signals`: the test sends the process the signal its handlers are installed for.
+rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tonic = { workspace = true, features = ["transport"] }
 

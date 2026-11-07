@@ -26,7 +26,7 @@ use serde_json::json;
 
 use crate::support::{
     Cell, JOIN, Listening, Reply, Scratch, Stepping, T0, TOKEN, beat_body, clock, config,
-    hello_body, ids, lease_body, routed,
+    hello_body, ids, lease_body, lease_body_with_wall, routed,
 };
 
 fn secs(n: u64) -> Duration {
@@ -79,7 +79,7 @@ async fn an_in_process_server_answers_a_hello_and_a_heartbeat_with_no_socket() {
     assert_eq!(cell.server.agent_errors(), 0);
 }
 
-/// Asserts that a lease granted through the client router expires at its ttl by the
+/// Asserts that a lease granted through the client router ends at its wall end by the
 /// injected clock and only at a tick: one second before its end a tick keeps it, past its end
 /// it is still listed until `tick()`, and the tick frees it; that no tick failed to write the
 /// lease file; and that the table's steps were timed on the monotonic clock the caller gave
@@ -87,7 +87,7 @@ async fn an_in_process_server_answers_a_hello_and_a_heartbeat_with_no_socket() {
 /// that reads another clock than the one given, one whose `tick()` does not tick the table,
 /// and one that times the table on the system's clock.
 #[tokio::test]
-async fn an_in_process_tick_expires_a_lease_past_its_ttl_on_the_injected_clock() {
+async fn an_in_process_tick_ends_a_lease_past_its_wall_end_on_the_injected_clock() {
     let scratch = Scratch::new("expire");
     let (clock, shared) = clock();
     let monotonic = Stepping::of(Duration::from_millis(1500));
@@ -99,11 +99,11 @@ async fn an_in_process_tick_expires_a_lease_past_its_ttl_on_the_injected_clock()
         "POST",
         "/v1/leases",
         Some(TOKEN),
-        Some(&lease_body()),
+        Some(&lease_body_with_wall(60)),
     )
     .await;
     assert_eq!(granted.status, 201, "{:?}", granted.body);
-    assert_eq!(granted.body["expires_at_ms"], T0 + 60_000);
+    assert_eq!(granted.body["ends_at_ms"], T0 + 60_000);
     let list = || routed(&client, "GET", "/v1/leases", Some(TOKEN), None);
 
     clock.advance(secs(59));
@@ -157,6 +157,16 @@ async fn an_in_process_tick_runs_the_registry_so_a_silent_host_reads_lost() {
     cell.server.tick().await;
     assert_eq!(state(), (HostState::Lost, Some("1-3".to_owned())));
     assert_eq!(cell.server.agent_errors(), 0);
+}
+
+/// A lease request with a maximum wall time of 60 s.
+fn wall_of_60() -> serde_json::Value {
+    lease_body_with_wall(60)
+}
+
+/// A lease request with a maximum wall time of 70 s.
+fn wall_of_70() -> serde_json::Value {
+    lease_body_with_wall(70)
 }
 
 /// The inputs both servers of the comparison get, in order.
@@ -257,27 +267,26 @@ async fn through_the_seam(inputs: &[Input]) -> Vec<Listing> {
 
 /// Asserts that the tick loop and the seam, over equal (fresh) lease files, equal clocks and
 /// equal inputs, list equal leases and equal hosts after every one of five ticks. The inputs
-/// fill the shipped pool's two hosts and the registered one, renew one lease, let the others
-/// expire, lease a freed host again, let the renewed lease expire too, and let the registered host go silent past its
-/// grace, so the listings change at every tick: a lease is placed, renewed, expired and
-/// freed, and the host goes from live to lost. It catches a seam whose tick does less, more,
+/// fill the shipped pool's two hosts and the registered one (one lease with a longer wall
+/// time than the others), let the others end, lease a freed host again, let the longer
+/// lease end too, and let the registered host go silent past its grace, so the listings
+/// change at every tick: a lease is placed, ended and freed, and the host goes from live to lost. It catches a seam whose tick does less, more,
 /// or another thing than the tick loop's (a part of `Shared::tick` skipped or done twice),
 /// and routers that answer otherwise than the listener.
 #[tokio::test]
 async fn the_tick_loop_and_the_seam_leave_equal_lease_listings_after_equal_ticks() {
     use Input::{Advance, Beat, Client, Hello, Tick};
-    let acquire = Client("POST", "/v1/leases", Some(lease_body));
-    let renew = Client("POST", "/v1/leases/1-1/renew", None);
+    let acquire = Client("POST", "/v1/leases", Some(wall_of_60));
+    let longer = Client("POST", "/v1/leases", Some(wall_of_70));
     let inputs = [
         Hello,
-        acquire,
+        longer,
         acquire,
         Tick,
         acquire,
         Advance(10),
         Beat,
         Tick,
-        renew,
         Advance(40),
         Beat,
         Tick,

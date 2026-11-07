@@ -1,11 +1,11 @@
-//! Acquiring: the grant, the ttl bounds, refusals and the answers a start can give; and the plain value types.
+//! Acquiring: the grant, refusals and the answers a start can give; and the plain value types.
 
 use std::fs;
 use std::time::Duration;
 
 use js_lease::{
     AcquireError, Boot, Clock, LeaseState, LeaseTable, ManualClock, ReleaseError, ReleaseOutcome,
-    RenewError, Settings, SettingsError, SystemClock, Timestamp,
+    Settings, SettingsError, SystemClock, Timestamp,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::{Call, HostCapacity, Pool, RefusalCode};
@@ -27,10 +27,10 @@ fn two_acquires_never_share_a_host_on_the_pool() {
         resources: Resources::new(1000, 1, 1, Some("nvidia-a100".into())).unwrap(),
         ..gpu_host_request(3600)
     };
-    let a = table.acquire(wanted(), None).unwrap();
-    let b = table.acquire(wanted(), None).unwrap();
+    let a = table.acquire(wanted()).unwrap();
+    let b = table.acquire(wanted()).unwrap();
     assert_eq!((a.host.as_str(), b.host.as_str()), ("gpu-01", "gpu-02"));
-    let third = table.acquire(wanted(), None).unwrap_err();
+    let third = table.acquire(wanted()).unwrap_err();
     assert!(matches!(
         third,
         AcquireError::Refused(RefusalCode::NoCapacity)
@@ -38,46 +38,42 @@ fn two_acquires_never_share_a_host_on_the_pool() {
     assert_eq!(table.provider().booked().len(), 2);
 
     assert_eq!(table.release(&a.id).unwrap(), ReleaseOutcome::Freed);
-    let again = table.acquire(wanted(), None).unwrap();
+    let again = table.acquire(wanted()).unwrap();
     assert_eq!(again.host.as_str(), "gpu-01");
     assert_eq!(again.id, LeaseId::new(1, 4));
     let capacity: Vec<HostCapacity> = table.provider().capacity();
     assert!(capacity.iter().all(|c| c.leased_to.is_some()));
 }
 
-/// Asserts that a short max wall time caps the first expiry too, that a ttl above the
-/// maximum is clamped to it, and that a zero ttl is refused on acquire and on renew.
+/// Asserts that a lease ends at its maximum wall time, whatever that is: a short and a
+/// long request each report `ends_at` as the acquire time plus their own wall time, with no
+/// other bound applied. It catches a grant that still clamps the end to a default or
+/// longest time to live.
 #[test]
-fn ttl_is_clamped_and_must_be_positive() {
-    let (mut table, _clock, _scratch) = fresh("ttl");
-    let short = table.acquire(request(10), None).unwrap();
-    assert_eq!(short.expires_at, at(T0 + 10_000));
-    let long = table.acquire(request(3600), Some(secs(1000))).unwrap();
-    assert_eq!(long.expires_at, at(T0 + 120_000));
-    let zero = table
-        .acquire(request(3600), Some(Duration::ZERO))
-        .unwrap_err();
-    assert!(matches!(zero, AcquireError::TtlNotPositive));
-    let zero = table.renew(&long.id, Some(Duration::ZERO)).unwrap_err();
-    assert!(matches!(zero, RenewError::TtlNotPositive));
+fn a_lease_ends_at_its_maximum_wall_time() {
+    let (mut table, _clock, _scratch) = fresh("ends");
+    let short = table.acquire(request(10)).unwrap();
+    assert_eq!(short.ends_at, at(T0 + 10_000));
+    let long = table.acquire(request(3600)).unwrap();
+    assert_eq!(long.ends_at, at(T0 + 3_600_000));
     assert_eq!(table.list().len(), 2);
 }
 
 /// Asserts that a refusal, by the start contract or by the provider, records nothing
-/// and that a renew or release of an id the table never held is an unknown-id error.
+/// and that a release of an id the table never held is an unknown-id error.
 #[test]
 fn refusal_records_nothing() {
     let (mut table, _clock, scratch) = fresh("refusal");
     let mut bad = request(3600);
     bad.class = ClassId::new("other").unwrap();
-    let err = table.acquire(bad, None).unwrap_err();
+    let err = table.acquire(bad).unwrap_err();
     assert!(matches!(
         err,
         AcquireError::Refused(RefusalCode::UnknownClass)
     ));
     let mut wide = request(3600);
     wide.resources = Resources::new(99_000, 1, 1, Some("g".into())).unwrap();
-    let err = table.acquire(wide, None).unwrap_err();
+    let err = table.acquire(wide).unwrap_err();
     assert!(matches!(err, AcquireError::Refused(RefusalCode::NoFit)));
     assert!(table.list().is_empty());
     assert!(table.provider().booked().is_empty());
@@ -85,10 +81,6 @@ fn refusal_records_nothing() {
     assert!(!text.contains("[[lease]]"));
 
     let nobody = LeaseId::new(7, 7);
-    assert!(matches!(
-        table.renew(&nobody, None),
-        Err(RenewError::Unknown(_))
-    ));
     assert!(matches!(
         table.release(&nobody),
         Err(ReleaseError::Unknown(_))
@@ -101,14 +93,10 @@ fn refusal_records_nothing() {
 fn unknown_start_that_landed_resolves_to_held() {
     let (mut table, _clock, _scratch) = fresh("unknown_landed");
     table.provider_mut().script_unknown(Call::Start, true);
-    let err = table.acquire(request(3600), None).unwrap_err();
+    let err = table.acquire(request(3600)).unwrap_err();
     let id = LeaseId::new(1, 1);
     assert!(matches!(err, AcquireError::Unconfirmed(got) if got == id));
     assert_eq!(states(&table), vec![(id, LeaseState::Pending)]);
-    assert!(matches!(
-        table.renew(&id, None),
-        Err(RenewError::NotHeld { .. })
-    ));
 
     let report = table.tick();
     assert_eq!(report.confirmed, vec![id]);
@@ -127,7 +115,7 @@ fn unknown_start_that_landed_resolves_to_held() {
 fn unknown_start_that_did_not_land_is_dropped() {
     let (mut table, _clock, _scratch) = fresh("unknown_lost");
     table.provider_mut().script_unknown(Call::Start, false);
-    table.acquire(request(3600), None).unwrap_err();
+    table.acquire(request(3600)).unwrap_err();
     table.provider_mut().script_unknown(Call::Observe, false);
     let unsure = table.tick();
     assert_eq!((unsure.pending, unsure.changed()), (1, false));
@@ -139,27 +127,44 @@ fn unknown_start_that_did_not_land_is_dropped() {
     assert!(table.provider().booked().is_empty());
 }
 
-/// Asserts that settings refuse a zero default and a default above the maximum, and
-/// that the bounds read back.
+/// Asserts that the default settings have a prepare timeout of ten minutes, no ceiling on
+/// the wall time and no restart grace, that `Default` is the same, that the `with_`
+/// methods change one bound each, and that a zero prepare timeout or ceiling is refused
+/// with a stable message.
 #[test]
 fn settings_are_checked() {
+    let plain = Settings::new();
+    assert_eq!(plain, Settings::default());
+    assert_eq!(plain.prepare_timeout(), secs(600));
+    assert_eq!(plain.max_wall(), None);
     assert_eq!(
-        Settings::new(Duration::ZERO, secs(1)),
-        Err(SettingsError::DefaultNotPositive)
+        (plain.boot_grace(), plain.regain_grace()),
+        (Duration::ZERO, Duration::ZERO)
+    );
+    let set = plain
+        .with_prepare_timeout(secs(5))
+        .unwrap()
+        .with_max_wall(secs(7))
+        .unwrap()
+        .with_restart_grace(secs(1), secs(2));
+    assert_eq!(set.prepare_timeout(), secs(5));
+    assert_eq!(set.max_wall(), Some(secs(7)));
+    assert_eq!((set.boot_grace(), set.regain_grace()), (secs(1), secs(2)));
+    assert_eq!(
+        Settings::new().with_prepare_timeout(Duration::ZERO),
+        Err(SettingsError::PrepareNotPositive)
     );
     assert_eq!(
-        Settings::new(secs(2), secs(1)),
-        Err(SettingsError::DefaultAboveMax)
-    );
-    let ok = Settings::new(secs(1), secs(1)).unwrap();
-    assert_eq!((ok.default_ttl(), ok.max_ttl()), (secs(1), secs(1)));
-    assert_eq!(
-        SettingsError::DefaultNotPositive.to_string(),
-        "the default ttl must be positive"
+        Settings::new().with_max_wall(Duration::ZERO),
+        Err(SettingsError::MaxWallNotPositive)
     );
     assert_eq!(
-        SettingsError::DefaultAboveMax.to_string(),
-        "the default ttl must not exceed the maximum ttl"
+        SettingsError::PrepareNotPositive.to_string(),
+        "the prepare timeout must be positive"
+    );
+    assert_eq!(
+        SettingsError::MaxWallNotPositive.to_string(),
+        "the ceiling on the maximum wall time must be positive"
     );
 }
 
@@ -187,24 +192,6 @@ fn clocks_and_timestamps() {
 #[test]
 fn messages_are_stable() {
     let id = LeaseId::new(2, 3);
-    let held = RenewError::NotHeld {
-        id,
-        state: LeaseState::Pending,
-    };
-    assert_eq!(held.to_string(), "lease 2-3 is pending, not held");
-    assert_eq!(
-        RenewError::Unknown(id).to_string(),
-        "lease 2-3 is not known"
-    );
-    assert_eq!(RenewError::Expired(id).to_string(), "lease 2-3 has expired");
-    assert_eq!(
-        RenewError::TtlNotPositive.to_string(),
-        "the ttl must be positive"
-    );
-    assert_eq!(
-        AcquireError::TtlNotPositive.to_string(),
-        "the ttl must be positive"
-    );
     assert_eq!(
         AcquireError::Refused(RefusalCode::NoFit).to_string(),
         "the start was refused: no-fit"

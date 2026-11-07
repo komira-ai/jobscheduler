@@ -1,11 +1,11 @@
-//! `js`: the command-line client of `js-lease-server`. It acquires, renews and releases
-//! leases on whole GPU hosts, and runs a command while it holds one; and it makes the calls
+//! `js`: the command-line client of `js-lease-server`. It acquires and releases leases on
+//! whole GPU hosts; and it makes the calls
 //! of the job service (`jobscheduler.v1.JobService`), one command per call, with three
 //! commands written by hand that loop over several calls: `job wait`, `job follow` and
 //! `job run` (see "Job commands" below).
 //!
 //! The library is the program: [`run_with`] takes the arguments, the streams to print
-//! to and the [`Services`] (the waiter, the clock and the signal source), and `main`
+//! to and the [`Services`] (the waiter and the signal source), and `main`
 //! calls [`main`], which supplies the program's own.
 //!
 //! # Flags
@@ -27,19 +27,21 @@
 //!
 //! ```text
 //! js lease acquire --class gpu-host [--gpus N --gpu-class X --cpu-millis N --memory-bytes N]
-//!                  --max-wall <dur> [--ttl <dur>] [--label k=v ...] [--validation-run ID]
+//!                  --max-wall <dur> [--label k=v ...] [--validation-run ID]
 //!                  [--probe-host HOST] [--request-id ID] [--wait-pending <dur>]
-//! js lease renew <id> [--ttl <dur>]
 //! js lease release <id>
 //! js lease list
-//! js lease run  <the flags of acquire> [--renew-every <dur>] [--stop-grace <dur>]
-//!               -- <command> [args...]
 //! js lease native <id> --program <path|@bundle/entry> [--arg A ...] [--network off|loopback|on]
 //!                 [--bundle name[:tag]@sha256:<digest>] --cpu-millis N --memory-bytes N
 //!                 [--wall <dur>]
 //! js join-token mint --provider NAME --instance-id ID [--ttl <dur>] [--out FILE]
 //! js join-token revoke --provider NAME --instance-id ID
 //! ```
+//!
+//! A lease has no time to live: nothing a client does keeps it alive, and it ends when it
+//! is released or at its maximum wall time (`--max-wall`). `js lease acquire --ttl` and
+//! `js lease run` are refused (exit 2) with a message saying they were removed; nothing is
+//! sent to the server. `--ttl` of `join-token mint` is another thing, below.
 //!
 //! `join-token mint` asks for a one-time join token (`POST /v1/agent/join-tokens`, behind
 //! the client token like the lease commands) for the machine a provider launched as
@@ -73,35 +75,26 @@
 //! your choosing). An `acquire` repeated with the same id and the same flags is answered
 //! with the lease the first one made (held, or still pending) and takes no second host,
 //! for as long as that lease is on the server; the same id with another request (any flag
-//! but `--ttl` and `--wait-pending` changed) is refused `request-id-conflict` (exit 3). A `whole-node` start with an id waits on the server for
+//! but `--wait-pending` changed) is refused `request-id-conflict` (exit 3). A `whole-node` start with an id waits on the server for
 //! a host instead of being refused `no-capacity`: it is pending until a host is set aside,
 //! drained and prepared for it, so give `--wait-pending` as long as you mean to wait (the
-//! pending lease is released when it runs out, which cancels the request). On `run` the id
-//! does not make a repeat safe, since every `run` adds its own random label (below), which
-//! the server compares: a second `run` under the id while the first run's lease is on the
-//! server is refused `request-id-conflict`. The flag is sent only when given.
+//! pending lease is released when it runs out, which cancels the request). The flag is
+//! sent only when given.
 //!
 //! Durations are whole seconds: `90`, `90s`, `15m`, `2h`. `acquire` prints
-//! `lease <id> host <host> expires <ms>` (`expires` is the server's clock in
-//! milliseconds). A start the provider has not confirmed (202) is looked at in the
+//! `lease <id> host <host> ends <ms>` (`ends` is the server's clock, in milliseconds, when
+//! the lease reaches its maximum wall time; `--json` has it as `ends_at_ms`, and `list`
+//! prints `<id> <state> host <host> ends <ms>`). A start the provider has not confirmed (202) is looked at in the
 //! list every two seconds until it is held or gone, for at most `--wait-pending`
 //! (default 60s); the pause is asked of the [`Waiter`], the only thing that lets time
 //! pass. A lease still pending then is released, so it is not held later with nobody to
-//! renew it.
+//! release it.
 //!
 //! A start is sent once. When its answer is lost (the connection fails, the server
 //! answers 5xx or something this client does not know, or the body is unusable) the
 //! lease may exist, and `js` exits 1 saying so and telling you to run `js lease list`
 //! before trying again (the JSON kind is `acquire-unconfirmed`); an `acquire` that gave
 //! `--request-id` can instead be run again as it was. `acquire` does no more.
-//!
-//! `run` acquires like `acquire`, with one more label, `js-run=<128 random bits in hex>`,
-//! and starts the command as a child process with `JS_LEASE_ID` and `JS_LEASE_HOST` set
-//! in its environment. Those are outputs of `js` to the command; `js` itself reads no
-//! environment variable. When the answer to its start is lost, `run` lists the leases,
-//! releases the one that has its label, says so on stderr and exits 1 as `acquire` does
-//! (once: it does not retry the list, so a start the server only finishes afterwards
-//! stays held until its ttl).
 //!
 //! # Job commands
 //!
@@ -193,54 +186,6 @@
 //!   pause), and `js` goes on waiting for the end the job reaches; a second ends `js` at once with 128 plus its number,
 //!   saying the job may still be running.
 //!
-//! # Renewal and the deadline
-//!
-//! `run` knows how long the lease lasts from the server's answers, not from what was
-//! asked for: every answer to a start or a renewal carries the expiry (`expires_at_ms`),
-//! and the time left is that less the [`Clock`] (the system's wall clock, which is
-//! assumed to agree with the server's to within a few seconds). A renewal is tried when
-//! a third of the time left has passed (`--renew-every`, when given, is the longest
-//! wait), so a ttl the server clamps or defaults is followed. The renewal runs on a
-//! thread of its own: a slow one blocks neither a signal nor the command's exit. A
-//! renewal that fails for a reason other than the server saying the lease is gone (404 or
-//! 409) is reported on stderr and tried again after a sixth of the period (at least one
-//! second), as often as a try ends before the deadline, until one succeeds; a refusal is
-//! the loss of the lease at once. The lease is given up at the deadline, one
-//! such period before the server would expire it, and the command is stopped (below)
-//! while the lease is still the server's to release. A request is limited to 30 seconds,
-//! and a renewal to the time left before the deadline when that is shorter.
-//!
-//! # Signals and what the command leaves behind
-//!
-//! `run` installs its SIGINT, SIGTERM and SIGHUP handlers before it asks for the lease.
-//! A signal while a start is pending releases the pending lease and ends `js` with 128
-//! plus the signal's number, without starting the command; once the lease is held, a
-//! signal is forwarded to the command, which ends the run the usual way. The command
-//! runs in a process group of its own, so a forwarded signal reaches what it started as
-//! well, and a command that reads a terminal is not in the terminal's foreground group
-//! (use `acquire` and `release` around an interactive program).
-//!
-//! However the run ends (the command exits, a signal ends it, the lease is lost) `js`
-//! then ends the whole process group before it releases the lease, so that nothing the
-//! command started keeps running on a host the server may lease again: if any process of
-//! the group is left, it is sent SIGTERM, and SIGKILL when one is still there
-//! `--stop-grace` later (default 30s, looked at in steps of 100ms, every step asked of
-//! the waiter like every other pause; a signal sent to `js` meanwhile ends the wait at
-//! once). A lost lease sends the group SIGTERM at once, and SIGKILL after the grace
-//! period when the command is still running; `js` then exits 7, and signals sent to it
-//! meanwhile are still forwarded. On Linux the command is also killed (SIGKILL) if `js`
-//! itself is killed, as it could not forward a SIGKILL (`PR_SET_PDEATHSIG`: it takes the
-//! command only, not what the command started, and holds for as long as the thread that
-//! started the command lives). If a status poll of a pending start fails, that lease is
-//! released too. A panic of `js` kills the command's group and releases the lease. A
-//! command that cannot be started gives exit 127, and the lease is released.
-//!
-//! The release is tried up to three times, with 3 seconds (asked of the waiter) between
-//! tries, when the server cannot be reached or fails; a refusal ("not held", the lease
-//! has expired) is the answer and is not tried again, and a 202 (the server retries the
-//! stop) is reported and kept. If no try is answered, `run` says so, and what the
-//! command's status was, and exits 8 in its place: the lease may stay held until its ttl.
-//!
 //! Text the server sends in an error or a reason is printed without its control
 //! characters.
 //!
@@ -248,15 +193,13 @@
 //!
 //! | status | meaning |
 //! |---|---|
-//! | 0 | held, renewed, freed, listed; for `run`, the command's own status; for `job wait` and `job run`, the job succeeded |
+//! | 0 | held, freed, listed; for `job wait` and `job run`, the job succeeded |
 //! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`); a job command whose request was not sent (`not-sent`) |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
-//! | 3 | refused: a job command's definite refusal other than `INVALID_ARGUMENT` (`no-capable-host`, an unknown job); `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `request-id-conflict`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
+//! | 3 | refused: a job command's definite refusal other than `INVALID_ARGUMENT` (`no-capable-host`, an unknown job); `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `request-id-conflict`, `unknown-lease`, `not-held`, or a pending start that was dropped (`pending-dropped`) |
 //! | 4 | the request itself was refused: a job command answered `INVALID_ARGUMENT`; a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
 //! | 5 | a pending start was not confirmed within `--wait-pending` |
 //! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |
-//! | 7 | `run`: the lease was lost (gone from the server, or not renewed before the deadline short of its expiry); the command was stopped |
-//! | 8 | `run`: the release of the lease could not be confirmed after three tries, so it may stay held until its ttl; replaces the command's own status, which is said on stderr |
 //! | 9 | a job command sent its request and read no answer, so the call may have taken effect (`unconfirmed`); for `job submit` and `job run` the job may exist and the same command with the same `--id` is safe to run again |
 //! | 10 | `job wait`, `job run`: the job failed (a nonzero exit code, or stopped for its memory) |
 //! | 11 | `job wait`, `job run`: the job was cancelled |
@@ -264,24 +207,19 @@
 //! | 13 | `job wait`, `job run`: the job was lost |
 //! | 14 | `job wait`, `job run`: the job failed to start |
 //! | 15 | `job wait`, `job run`: how the job ended could not be told: a call failed, or the job is in a state this `js` does not know (`undetermined`) |
-//! | 127 | `run`: the command could not be started |
-//! | 129, 130, 143 | `run`: SIGHUP, SIGINT or SIGTERM ended `js` while the start was pending (after the command started, the command's own status); `job run`: a second signal ended `js` before the job ended (`interrupted`) |
+//! | 129, 130, 143 | `job run`: a second SIGHUP, SIGINT or SIGTERM ended `js` before the job ended (`interrupted`) |
 //!
 //! The reason is on stderr (`js: refused: no-capacity`), and never holds the token.
 
 mod api;
 mod cli;
-mod command;
 mod events;
 mod failure;
 pub mod jobs;
 mod join_token;
 mod leases;
 mod render;
-mod renewals;
-mod run;
 mod signals;
-mod tag;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -294,9 +232,7 @@ use failure::Failure;
 use js_client::{Client, REQUEST_LIMIT};
 use render::Render;
 
-pub use events::{
-    Clock, ForwardedSignal, Services, SignalSource, Signaller, SystemClock, ThreadWaiter, Waiter,
-};
+pub use events::{ForwardedSignal, Services, SignalSource, Signaller, ThreadWaiter, Waiter};
 pub use failure::exit;
 
 /// The whole command line of `js`, as it parses: the lease commands, the job commands
@@ -321,8 +257,7 @@ pub fn main() -> ExitCode {
 }
 
 /// Runs the command line `args` (the program name first). Results go to `out`, usage
-/// text for `--help` and `--version` too; failures, and for `lease run` the held-lease
-/// line, go to `err`. Returns the exit status documented in the crate docs.
+/// text for `--help` and `--version` too; failures go to `err`. Returns the exit status documented in the crate docs.
 pub fn run_with(
     args: Vec<OsString>,
     out: &mut dyn Write,
@@ -355,7 +290,7 @@ fn execute(
     let render = Render::new(matches.get_flag("json"));
     let done = match jobs::chosen(matches) {
         Some(chosen) => jobs::execute(chosen, matches, render, out, err, services),
-        None => lease(matches, render, out, err, services),
+        None => lease(matches, render, out, services),
     };
     match done {
         Ok(code) => code,
@@ -371,7 +306,6 @@ fn lease(
     matches: &ArgMatches,
     render: Render,
     out: &mut dyn Write,
-    err: &mut dyn Write,
     services: Services,
 ) -> Result<u8, Failure> {
     // clap already checked `matches` against these commands, so this does not fail; its
@@ -379,21 +313,20 @@ fn lease(
     let cli = Cli::from_arg_matches(matches)
         .ok()
         .ok_or(Failure::Usage("not a lease command".to_owned()))?;
-    dispatch(cli, render, out, err, services)
+    dispatch(cli, render, out, services)
 }
 
 fn dispatch(
     cli: Cli,
     render: Render,
     out: &mut dyn Write,
-    err: &mut dyn Write,
     services: Services,
 ) -> Result<u8, Failure> {
     let server = cli.need_server()?;
     let token_file = cli.need_token_file()?;
     let client = Client::connect(server, token_file, cli.ca_cert.as_deref(), REQUEST_LIMIT)?;
     match cli.command {
-        Command::Lease(action) => lease_action(action, &client, render, out, err, services),
+        Command::Lease(action) => lease_action(action, &client, render, out, &services),
         Command::JoinToken(action) => join_token::run(&client, render, action, out),
     }
 }
@@ -404,15 +337,13 @@ fn lease_action(
     client: &Client,
     render: Render,
     out: &mut dyn Write,
-    err: &mut dyn Write,
-    services: Services,
+    services: &Services,
 ) -> Result<u8, Failure> {
     match action {
         Action::Acquire(args) => leases::acquire(client, render, &args, &*services.waiter, out),
-        Action::Renew(args) => leases::renew(client, render, &args, out),
         Action::Release(args) => leases::release(client, render, &args, out),
         Action::List => leases::list(client, render, out),
-        Action::Run(args) => run::run(client, render, &args, services, err),
+        Action::Run { .. } => Err(Failure::Usage(cli::RUN_REMOVED.to_owned())),
         Action::Native(args) => leases::native(client, render, &args, out),
     }
 }

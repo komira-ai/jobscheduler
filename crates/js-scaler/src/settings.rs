@@ -82,8 +82,8 @@ pub struct Settings {
     pub max_age: Option<Duration>,
     /// The least a machine lives before `idle` may drain it, counted from its launch. It
     /// bounds the churn of a short `idle` against a billed boot: every machine launched
-    /// serves at least this long. It does not hold back a drain for `max_age` or for a
-    /// host that came up below its offer.
+    /// serves at least this long. It does not hold back a drain for `max_age`, nor the
+    /// release of a machine whose hello did not match its offer.
     pub min_host_lifetime: Duration,
     /// When the pool's go expires, if it does. At and after this instant the pool is in
     /// `Plan` mode whatever `launch` says ([`Settings::mode`]), so a forgotten `launch =
@@ -128,6 +128,16 @@ pub struct Settings {
     /// refresh of the pool ([`crate::PoolInput::catalog_refreshed`]) ends the wait at once.
     /// [`ACQUIRE_RETRY`] by default.
     pub acquire_retry: Duration,
+    /// How far below the offer's CPU, memory and disk, in percent of each, the shape a
+    /// machine's hello announces may be and still match the offer (its `provider_limits`
+    /// `size_tolerance_percent`; design 5.6.1, step 6): an agent measures a little less than
+    /// the nominal size. The server's file allows 0 to 50. [`SIZE_TOLERANCE_PERCENT`] by
+    /// default.
+    pub size_tolerance_percent: u8,
+    /// How long an offer is cooled down, keyed by (provider, instance type, zone), after the
+    /// hello of a machine acquired for it did not match it (its `provider_limits`
+    /// `offer_cooldown`). [`OFFER_COOLDOWN`] by default.
+    pub offer_cooldown: Duration,
 }
 
 /// The default of [`Settings::provider`], for settings no server has named a provider in.
@@ -138,6 +148,12 @@ pub const QUOTA_BACKOFF: Duration = Duration::from_secs(3600);
 
 /// The default of [`Settings::acquire_retry`]: 60 seconds.
 pub const ACQUIRE_RETRY: Duration = Duration::from_secs(60);
+
+/// The default of [`Settings::size_tolerance_percent`]: 10 percent.
+pub const SIZE_TOLERANCE_PERCENT: u8 = 10;
+
+/// The default of [`Settings::offer_cooldown`]: one hour.
+pub const OFFER_COOLDOWN: Duration = Duration::from_secs(3600);
 
 /// The default of [`Settings::lifetime_margin`]: 10 minutes.
 const LIFETIME_MARGIN: Duration = Duration::from_secs(10 * 60);
@@ -157,8 +173,9 @@ pub const BOOT_FAIL_TRIP_AFTER: u32 = 3;
 impl Settings {
     /// A pool in `Plan` mode with the design's defaults: `idle` 10 minutes, `boot_timeout`
     /// 15 minutes, `token_margin` 5 minutes (a token lives 20), `boot_fail_cooldown` 10
-    /// minutes, `unknown_hold` 30 minutes, `max_step` 1, `quota_backoff` one hour and
-    /// `acquire_retry` 60 seconds; [`UNNAMED_PROVIDER`], with no
+    /// minutes, `unknown_hold` 30 minutes, `max_step` 1, `quota_backoff` one hour,
+    /// `acquire_retry` 60 seconds, `size_tolerance_percent` 10 and `offer_cooldown` one
+    /// hour; [`UNNAMED_PROVIDER`], with no
     /// share and no `provider_limits` on its offers.
     #[must_use]
     pub fn new(
@@ -195,6 +212,8 @@ impl Settings {
             max_price_cents_per_hour: None,
             quota_backoff: QUOTA_BACKOFF,
             acquire_retry: ACQUIRE_RETRY,
+            size_tolerance_percent: SIZE_TOLERANCE_PERCENT,
+            offer_cooldown: OFFER_COOLDOWN,
         }
     }
 }

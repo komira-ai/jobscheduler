@@ -185,8 +185,8 @@ fn refused_hello_is_fatal_per_code() {
 
 /// Asserts that after the server restarts (a new process over the same files) the agent's
 /// next heartbeat is refused as an unknown host, it says hello again at once and is
-/// admitted, and the lease it held before the restart is still on the host, renewable,
-/// with the host live again. It catches an agent that heartbeats a dead session for ever,
+/// admitted, and the lease it held before the restart is still on the host and listed
+/// held, with the host live again. It catches an agent that heartbeats a dead session for ever,
 /// and a restart that loses the lease.
 #[test]
 fn server_restart_agent_reregisters_and_lease_resumes() {
@@ -217,8 +217,17 @@ fn server_restart_agent_reregisters_and_lease_resumes() {
     let host = server.host("mac-1");
     assert_eq!(host["state"], "live");
     assert_eq!(host["lease"], id.as_str());
-    let renewed = server.post(&format!("/v1/leases/{id}/renew"));
-    assert_eq!(renewed.status, 200, "{}", renewed.body);
+    let leases = server.get("/v1/leases");
+    let held = leases["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == id.as_str());
+    assert_eq!(
+        held.map(|l| l["state"].clone()),
+        Some(json!("held")),
+        "{leases}"
+    );
     agent.elapse();
     assert_eq!(agent.next_wait(), secs(5));
     let ran = agent.stop();

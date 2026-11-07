@@ -1,9 +1,8 @@
 //! The routes of the lease server, as calls that return what the answer means.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use js_client::{Client, Reply};
 
@@ -14,7 +13,8 @@ use crate::failure::Failure;
 pub(crate) struct Lease {
     pub(crate) id: String,
     pub(crate) host: String,
-    pub(crate) expires_at_ms: u64,
+    /// When the lease ends at the latest: its maximum wall time, on the server's clock.
+    pub(crate) ends_at_ms: u64,
 }
 
 /// The answer to a start.
@@ -52,7 +52,7 @@ pub(crate) struct Entry {
     pub(crate) id: String,
     pub(crate) state: String,
     pub(crate) host: Option<String>,
-    pub(crate) expires_at_ms: u64,
+    pub(crate) ends_at_ms: u64,
     pub(crate) labels: BTreeMap<String, String>,
 }
 
@@ -63,7 +63,7 @@ impl Entry {
             "held" => Standing::Held(Lease {
                 id: self.id,
                 host: self.host.unwrap_or_default(),
-                expires_at_ms: self.expires_at_ms,
+                ends_at_ms: self.ends_at_ms,
             }),
             _ => Standing::Gone,
         }
@@ -77,17 +77,6 @@ pub(crate) trait Routes {
     /// says so ([`Failure::Unconfirmed`]); a refusal the server meant (400, 401, 404, 409,
     /// 422) created nothing.
     fn acquire(&self, body: &Value) -> Result<Granted, Failure>;
-
-    /// `POST /v1/leases/{id}/renew`: the new expiry in milliseconds.
-    fn renew(&self, id: &str, ttl: Option<Duration>) -> Result<u64, Failure>;
-
-    /// `POST /v1/leases/{id}/renew` that must be answered within `limit`.
-    fn renew_within(
-        &self,
-        id: &str,
-        ttl: Option<Duration>,
-        limit: Duration,
-    ) -> Result<u64, Failure>;
 
     /// `DELETE /v1/leases/{id}`.
     fn release(&self, id: &str) -> Result<Freed, Failure>;
@@ -147,25 +136,6 @@ impl Routes for Client {
                 .map_err(unconfirmed),
             400 | 401 | 404 | 409 | 422 => Err(refusal(&reply)),
             _ => Err(Failure::Unconfirmed(unexpected(&reply))),
-        }
-    }
-
-    fn renew(&self, id: &str, ttl: Option<Duration>) -> Result<u64, Failure> {
-        self.renew_within(id, ttl, Duration::MAX)
-    }
-
-    fn renew_within(
-        &self,
-        id: &str,
-        ttl: Option<Duration>,
-        limit: Duration,
-    ) -> Result<u64, Failure> {
-        let body = json!({ "ttl_seconds": ttl.map(|ttl| ttl.as_secs()) });
-        let path = format!("/v1/leases/{id}/renew");
-        let reply = self.post_within(&path, &body, limit)?;
-        match reply.status {
-            200 => number(&reply.body, "expires_at_ms"),
-            _ => Err(refusal(&reply)),
         }
     }
 
@@ -235,7 +205,7 @@ pub(crate) fn entries(body: &Value) -> Result<Vec<Entry>, Failure> {
                 id: text(lease, "id")?,
                 state: text(lease, "state")?,
                 host: lease["host"].as_str().map(str::to_owned),
-                expires_at_ms: number(lease, "expires_at_ms")?,
+                ends_at_ms: number(lease, "ends_at_ms")?,
                 labels: lease["labels"]
                     .as_object()
                     .into_iter()
@@ -254,7 +224,7 @@ fn held(body: &Value) -> Result<Lease, Failure> {
     Ok(Lease {
         id: text(body, "id")?,
         host: text(body, "host")?,
-        expires_at_ms: number(body, "expires_at_ms")?,
+        ends_at_ms: number(body, "ends_at_ms")?,
     })
 }
 

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use js_elastic::AcquireId;
 use js_lease_server::RecordsFile;
 use js_provider::Pool;
-use js_scaler::{Millis, Phase, Record, Records, StoredOffer};
+use js_scaler::{HelloDimension, Millis, OfferCooldown, Phase, Record, Records, StoredOffer};
 use serde_json::{Value, json};
 
 use crate::scaler_support::{account, records_path, spec, start, text, text_with, token_in};
@@ -299,4 +299,68 @@ fn iso(ms: u64) -> String {
         rest % 3600 / 60,
         rest % 60
     )
+}
+
+/// Asserts that an offer cooled down after a hello that did not match it, read back from the
+/// records at a restart, is on the status as JSON (`offer_cooldowns`: the provider, the
+/// instance type, the zone, the end, the host and the dimensions that failed, and nothing
+/// else) and as a page row, and is an alert that names the offer and what failed; and that
+/// a pool with no cool-down leaves the field out, so its reply is as it was. It catches a
+/// cool-down an operator cannot see, and one a restart loses.
+#[tokio::test]
+async fn an_offer_cooled_down_on_a_mismatch_is_on_the_status() {
+    let scratch = Scratch::new("scaler_status_offer_cooldown");
+    account(&scratch);
+    let first = text(&scratch, "live", "initialise");
+    let h = start(scratch, &first).await;
+    let (none, _) = pool(&h).await;
+    assert!(none.get("offer_cooldowns").is_none(), "{none}");
+    let Harness {
+        running, scratch, ..
+    } = h;
+    running.shutdown().await.unwrap();
+    let until = T0 + 3_600_000;
+    let records = Records {
+        cooled_offers: vec![OfferCooldown {
+            provider: "lambdalabs".to_owned(),
+            offer: "gpu_1x_a100".to_owned(),
+            zone: Some("us-west-1".to_owned()),
+            until: Millis::new(until),
+            pool: "burst".to_owned(),
+            host: "js-wrong".to_owned(),
+            failed: vec![HelloDimension::AcceleratorModel, HelloDimension::Memory],
+        }],
+        ..Default::default()
+    };
+    RecordsFile::new(records_path(&scratch))
+        .save(&records)
+        .unwrap();
+
+    let again = text(&scratch, "live", "resume");
+    let h = start(scratch, &again).await;
+    h.ticks.step().await;
+    let (view, body) = pool(&h).await;
+    let cooled = json!([{
+        "provider": "lambdalabs", "offer": "gpu_1x_a100", "zone": "us-west-1",
+        "until_ms": until, "host": "js-wrong", "failed": ["accelerator_model", "memory"]
+    }]);
+    assert_eq!(view["offer_cooldowns"], cooled, "{body}");
+    let alerts: Vec<&str> = view["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|alert| alert.contains("is cooled down"))
+        .collect();
+    assert_eq!(alerts.len(), 1, "{body}");
+    assert!(alerts[0].contains("\"gpu_1x_a100\""), "{body}");
+    assert!(alerts[0].contains("accelerator_model, memory"), "{body}");
+    let page = h.call("GET", "/status", None).await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        page.body
+            .contains("<th align=\"left\">offer cooled down</th>"),
+        "{}",
+        page.body
+    );
 }

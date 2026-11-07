@@ -1,12 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use js_provider::{Pool, StartSpec};
 use js_types::{LeaseId, Request, RequestId};
 
 use crate::book::{self, Book, Presented, Seen, Step};
 use crate::clock::{Clock, Monotonic, Timestamp};
-use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
+use crate::error::{AcquireError, OpenError, ReleaseError, SaveError};
 use crate::state::LeaseState;
 use crate::timings::Timings;
 use crate::types::{
@@ -57,25 +56,20 @@ impl<P: Pool, C: Clock> LeaseTable<P, C> {
         Ok(table)
     }
 
-    /// Acquires a lease for `request` on the provider, for `ttl` (the default when
-    /// `None`, at most the maximum, never zero).
+    /// Acquires a lease for `request` on the provider.
     ///
     /// The lease is written to the file before the provider is called. A refusal, by
     /// the start contract or the provider, records nothing. An Unknown answer leaves
     /// the lease pending and is an [`AcquireError::Unconfirmed`]; [`Self::tick`]
-    /// resolves it. The lease expires at the earlier of `now + ttl` and `now` plus the
-    /// request's maximum wall time.
+    /// resolves it. The lease has no time to live: it lasts until it is released or
+    /// until `now` plus the request's maximum wall time, when a tick ends it.
     ///
     /// A lease of a whole-node class (admission `Whole`) is different while it waits:
-    /// pending, it expires after the settings' prepare timeout (600 s unless set), and its ttl and maximum
-    /// wall time count from the moment the provider is seen to have it ready (a start
-    /// answered `Started`, or a later observation of `Present`), not from this call.
-    pub fn acquire(
-        &mut self,
-        request: Request,
-        ttl: Option<Duration>,
-    ) -> Result<Lease, AcquireError> {
-        self.begin(request, ttl, None)
+    /// pending, it ends after the settings' prepare timeout (600 s unless set), and its
+    /// maximum wall time counts from the moment the provider is seen to have it ready (a
+    /// start answered `Started`, or a later observation of `Present`), not from this call.
+    pub fn acquire(&mut self, request: Request) -> Result<Lease, AcquireError> {
+        self.begin(request, None)
     }
 
     /// Acquires a lease for `request` as [`Self::acquire`] does, under the consumer's
@@ -84,10 +78,10 @@ impl<P: Pool, C: Clock> LeaseTable<P, C> {
     ///
     /// The id is kept with the lease, in the file, for as long as the lease is in the
     /// table: pending, held or releasing. While it is, an acquire under the same id asks
-    /// the provider nothing and answers from the lease: held, the lease (its expiry as it
+    /// the provider nothing and answers from the lease: held, the lease (its end as it
     /// stands); pending, [`AcquireError::Unconfirmed`] with its id; releasing, refused
-    /// `LeaseEnded`. One that asks for another request (anything but the ttl differs) is
-    /// an [`AcquireError::RequestIdConflict`]. Once the lease is gone (released, expired,
+    /// `LeaseEnded`. One that asks for another request is an
+    /// [`AcquireError::RequestIdConflict`]. Once the lease is gone (released, expired,
     /// dropped or refused) the id names nothing and an acquire under it is a new lease.
     ///
     /// The provider sees the id on the start ([`StartSpec::with_request_id`]). When it
@@ -99,21 +93,18 @@ impl<P: Pool, C: Clock> LeaseTable<P, C> {
         &mut self,
         id: RequestId,
         request: Request,
-        ttl: Option<Duration>,
     ) -> Result<Lease, AcquireError> {
         match self.book.repeat(&id, &request) {
             Some(answer) => answer,
-            None => self.begin(request, ttl, Some(id)),
+            None => self.begin(request, Some(id)),
         }
     }
 
     fn begin(
         &mut self,
         request: Request,
-        ttl: Option<Duration>,
         request_id: Option<RequestId>,
     ) -> Result<Lease, AcquireError> {
-        let ttl = self.book.grant(ttl).ok_or(AcquireError::TtlNotPositive)?;
         if let Some(ceiling) = self
             .book
             .max_wall()
@@ -129,7 +120,7 @@ impl<P: Pool, C: Clock> LeaseTable<P, C> {
             Some(request_id) => spec.with_request_id(request_id),
             None => spec,
         };
-        let record = self.book.insert_pending(&spec, now, ttl);
+        let record = self.book.insert_pending(&spec, now);
         self.save("acquire")?;
         let ack = self.provider.start(spec);
         let settled = self.book.settle_start(record, ack);
@@ -150,17 +141,6 @@ impl<P: Pool, C: Clock> LeaseTable<P, C> {
     /// keeps the handle and reads [`Timings::report`] whenever it wants.
     pub fn timings(&self) -> Timings {
         self.book.timings()
-    }
-
-    /// Extends a held lease and returns its new expiry: `now + ttl` clamped as in
-    /// [`Self::acquire`], never past the lease's maximum wall time and never earlier
-    /// than the expiry it has. A lease that is unknown, pending, releasing or past its
-    /// expiry is an error and is not extended.
-    pub fn renew(&mut self, id: &LeaseId, ttl: Option<Duration>) -> Result<Timestamp, RenewError> {
-        let now = self.clock.now();
-        let expires_at = self.book.renew(id, ttl, now)?;
-        self.save("renew")?;
-        Ok(expires_at)
     }
 
     /// Releases a lease: marks it releasing, stops it on the provider and, when the
@@ -201,9 +181,9 @@ impl<P: Pool, C: Clock> LeaseTable<P, C> {
     }
 
     /// The one place time acts. For every lease: a releasing one is stopped again, and
-    /// observed when the stop does not free it; a pending or held one whose expiry has
-    /// passed is marked releasing and stopped as a release does, except that a pending
-    /// whole lease at its prepare deadline is observed first, so the provider can end it
+    /// observed when the stop does not free it; a pending or held one whose maximum wall
+    /// time has ended is marked releasing and stopped as a release does, and so is a
+    /// pending whole lease at its prepare deadline, except that it is observed first, so the provider can end it
     /// as a failed prepare, and is expired only if that observation still has no answer;
     /// a pending one still in time is observed (present makes it held, absent drops it,
     /// unknown keeps it). A pending lease whose request waits on the provider's wait list

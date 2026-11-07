@@ -1,6 +1,9 @@
 //! The real lease server with real agents in the cell: registration through the real
-//! hello and its limiter, loss and forgetting by the real registry, and a lease and a run
-//! made through the client router, started, ended and acknowledged on the real wire.
+//! hello and its limiter, loss and forgetting by the real registry, a lease and a run
+//! made through the client router, started, ended and acknowledged on the real wire, and
+//! the store the server keeps its state in (`--store`): the file the cell hands it, a host
+//! joined with a minted token, a read of the store while the server is down, and a second
+//! server on the same store.
 //!
 //! Each scenario names its host count, horizon and heartbeat interval below. The bus
 //! takes 1 to 10 ms a message unless a scenario says otherwise, and drops nothing.
@@ -8,17 +11,25 @@
 #[path = "cell/support.rs"]
 mod support;
 
+use std::ffi::OsString;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use js_conformance::agent::Defect;
+use js_lease::{ManualClock, Timestamp};
 use js_registry::HostState;
 use js_sim::{Event, Faults, Node, NodeInput};
 use js_sim_cell::bus::{agent_name, trace_msg};
-use js_sim_cell::server::CLIENT_TOKEN;
+use js_sim_cell::server::{CLIENT_TOKEN, SQLITE_FILE, STORE_LINE_FILE};
 use js_sim_cell::{
-    AgentNode, AgentSpec, CallId, Cell, CellNode, Checker, Counter, Invariant, Ledger, Msg, Route,
-    RunId, ServerNode, ServerSpec, Setup, Shape, Verdict,
+    AgentNode, AgentSpec, CallId, Cell, CellNode, Checker, Counter, EPOCH_MS, Invariant, Ledger,
+    Msg, Route, RunId, SecondServer, ServerNode, ServerSpec, Setup, Shape, Store, StoreRead,
+    Verdict,
 };
+#[cfg(feature = "postgres")]
+use js_testkit::database::{server_url, with_database};
 use js_types::sched::{FarmTime, StateMachine};
 use serde_json::json;
 
@@ -402,4 +413,187 @@ fn the_server_node_ticks_on_its_period_and_answers_only_calls() {
     let mut plain = cell("plain", pool(1), 0, Faults::default());
     assert!(plain.trace_lines().is_none());
     assert_eq!(Setup::new(11).seed(), 11);
+}
+
+/// Asserts that the cell hands its server the store as the server documents `--store`: a
+/// SQLite spec, the default, passes `--store` naming an owner-only file in the server's
+/// directory that holds the one line `sqlite:<dir>/state.db`, with `--allow-sqlite-store`,
+/// and the server's own parser and configuration take both; a started server makes the
+/// file the line names; the cell reads the store only while the server is down (refused
+/// while it is up, an empty store once it is stopped), and a restart opens it again. With
+/// the feature `postgres`: a Postgres spec's flags are refused, naming `--store`, without
+/// the node that makes its database, and a node's store file holds the URL of a database of
+/// its own and no SQLite file is made. Catches a store file the server would refuse (another
+/// spelling, a relative path, a file others can read), a SQLite store without its gate, a
+/// server whose store is not where the file says, and a read of the store beside a running
+/// server.
+#[test]
+fn the_store_choice_opens_the_store_the_server_flag_names() {
+    let spec = pool(1);
+    assert_eq!(spec.kept_in(), Store::Sqlite, "SQLite is the default");
+    let files = scratch("store-flags");
+    let args = spec.args(files.path()).expect("the files are written");
+    let at = args.iter().position(|arg| arg == "--store");
+    let file = PathBuf::from(&args[at.expect("--store is passed") + 1]);
+    assert_eq!(file, files.path().join(STORE_LINE_FILE));
+    let line = fs::read_to_string(&file).expect("the store file is written");
+    let db = files.path().join(SQLITE_FILE);
+    assert_eq!(line, format!("sqlite:{}\n", db.display()));
+    let mode = fs::metadata(&file)
+        .expect("the store file")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "owner-only, as the server demands");
+    assert!(args.contains(&OsString::from("--allow-sqlite-store")));
+    let clock = ManualClock::new(Timestamp::from_millis(EPOCH_MS));
+    let taken = spec.config(files.path(), &clock);
+    assert!(taken.is_ok(), "{:?}", taken.err());
+
+    let dir = scratch("store-node");
+    let path = dir.path().to_path_buf();
+    let mut server = ServerNode::start(&spec, dir).expect("starts");
+    assert!(path.join(SQLITE_FILE).is_file(), "the store the file names");
+    let up = server.stored("hosts/");
+    assert_eq!(up, Err("the server is up, and holds its store".to_owned()));
+    server.stop();
+    server.stop();
+    assert!(!server.is_up());
+    assert_eq!(server.stored("hosts/"), Ok(Vec::new()));
+    server
+        .restart(&spec)
+        .expect("starts again over the same store");
+    assert!(server.is_up());
+    server.stop();
+    fs::write(path.join(SQLITE_FILE), "not a state store").expect("the file is written");
+    let unread = server.stored("hosts/");
+    assert!(unread.is_err(), "not a store the cell can open: {unread:?}");
+
+    #[cfg(feature = "postgres")]
+    {
+        let postgres = pool(1).store(Store::Postgres);
+        assert_eq!(postgres.kept_in(), Store::Postgres);
+        let refused = postgres.args(scratch("store-pg-flags").path());
+        assert_eq!(
+            refused.expect_err("the node makes the database").flag(),
+            "--store"
+        );
+        let dir = scratch("store-pg-node");
+        let path = dir.path().to_path_buf();
+        let server = ServerNode::start(&postgres, dir).expect("starts over its database");
+        let name = server.database().expect("a database of its own");
+        let line = fs::read_to_string(path.join(STORE_LINE_FILE)).expect("the store file");
+        assert_eq!(line, format!("{}\n", with_database(&server_url(), name)));
+        assert!(!path.join(SQLITE_FILE).exists());
+    }
+}
+
+/// Asserts the store side of a cell: a host joins with a token the cell minted through the
+/// operator route (a token it did not mint adds no host) and is seated; a stop of the server
+/// reads the store while it is down, the token used by that host and the host bound to it;
+/// a second server is started over the store while the first is down and refused, naming
+/// `--store` and the writer lock, once the first runs again; a stop over a store that
+/// cannot be opened is kept as a read that failed and traced `store unread`; and a read
+/// pairs each used
+/// token with its binding, naming a token used by a host with no binding to it and a host
+/// bound to a token it did not use, and passing a host bound to the pool's shared token.
+/// Catches a mint whose token the agent never gets, a read that misses a row or reads a
+/// field the server does not write, and a judge that passes a token without its binding or
+/// a binding without its token.
+#[test]
+fn a_store_read_pairs_each_used_token_with_its_binding() {
+    let dir = scratch("store-side");
+    let path = dir.path().to_path_buf();
+    let setup = Setup::new(11).with_trace_lines();
+    let mut cell = Cell::new(setup, pool(1), dir, Faults::default()).expect("starts");
+    assert!(cell.join(0).is_none(), "no token minted yet");
+    cell.mint_join_token();
+    assert_eq!(cell.minted(), 1);
+    let host = cell.join(0).expect("a host of its own token");
+    assert_eq!(host.as_str(), "h000");
+    run_to(&mut cell, 2_000);
+    assert_eq!(listed(&cell), [("h000".to_owned(), HostState::Live)]);
+    cell.stop_server();
+    let read = cell.store_reads()[0].clone().expect("the store is read");
+    assert_eq!(read.at, ms(2_000));
+    assert_eq!(
+        read.joins.values().collect::<Vec<_>>(),
+        [&Some("h000".to_owned())]
+    );
+    let bound = read.bindings.get("h000").expect("h000 is bound");
+    assert!(read.joins.contains_key(bound), "to the token it used");
+    assert!(read.unpaired().is_empty(), "{:?}", read.unpaired());
+    cell.start_second_server();
+    cell.restart_server();
+    cell.start_second_server();
+    let seconds = cell.second_servers();
+    let refused = "--store: another process holds the store's writer lock".to_owned();
+    let second = |at, refused| SecondServer {
+        at: ms(at),
+        refused,
+    };
+    assert_eq!(seconds, [second(2_000, None), second(2_000, Some(refused))]);
+    cell.stop_server();
+    fs::write(path.join(SQLITE_FILE), "not a state store").expect("the file is written");
+    cell.stop_server();
+    let reads = cell.store_reads();
+    assert_eq!(reads.len(), 3);
+    assert!(reads[1].is_ok() && reads[2].is_err(), "{reads:?}");
+    let lines = cell.trace_lines().expect("lines are kept");
+    let unread = lines
+        .iter()
+        .filter(|line| line.ends_with(" cell store unread"));
+    assert_eq!(unread.count(), 1);
+
+    let used = |host: &str| format!("{{\"version\":1,\"used_by\":\"{host}\"}}").into_bytes();
+    let bound = |digest: &str| format!("{{\"version\":1,\"credential\":\"{digest}\"}}");
+    let row = |key: &str, value: Vec<u8>| (key.to_owned(), value);
+    let joins = vec![
+        row("hosts/join/aa", used("h000")),
+        row("hosts/join/bb", b"{\"version\":1}".to_vec()),
+        row("hosts/join/cc", used("h002")),
+    ];
+    let bindings = vec![
+        row("hosts/binding/h000", bound("aa").into_bytes()),
+        row("hosts/binding/h001", bound("bb").into_bytes()),
+        row("hosts/binding/h003", bound("pool").into_bytes()),
+        row("hosts/binding/h004", b"not json".to_vec()),
+    ];
+    let read = StoreRead::from_rows(ms(5), joins, bindings);
+    assert_eq!(read.joins.get("bb"), Some(&None), "unused");
+    assert_eq!(read.bindings.get("h004"), Some(&String::new()));
+    assert_eq!(
+        read.unpaired(),
+        [
+            "a token used by h002, which has no binding to it",
+            "h001 is bound to a token it did not use",
+        ]
+    );
+}
+
+/// Asserts that a run's Postgres database is there while its cell runs and dropped when the
+/// cell is: a store opens on it during the run and is refused once the cell is gone. Catches
+/// a database left behind by every run, and one dropped while its server still runs on it.
+#[cfg(feature = "postgres")]
+#[test]
+fn the_postgres_database_of_a_scenario_is_dropped_when_the_run_ends() {
+    use js_state::postgres::{PostgresConfig, PostgresStore};
+
+    let spec = pool(1).store(Store::Postgres);
+    let mut cell = cell("store-pg-drop", spec, 1, Faults::default());
+    cell.settle(Duration::from_secs(20)).expect("settles");
+    let name = cell
+        .server()
+        .and_then(ServerNode::database)
+        .map(str::to_owned);
+    let url = with_database(&server_url(), &name.expect("a database of its own"));
+    let config = PostgresConfig::parse(&url).expect("the URL parses");
+    assert!(
+        PostgresStore::open(&config).is_ok(),
+        "there while the run runs"
+    );
+    drop(cell);
+    assert!(
+        PostgresStore::open(&config).is_err(),
+        "dropped with the run"
+    );
 }

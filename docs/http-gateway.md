@@ -473,13 +473,16 @@ generated paragraph above.
   pool answers empty lists. Both are served whatever the listen address: unlike
   `GET /v1/pools`, which takes no token and is served only on a private address, they take a
   client's token.
-- `GetUsage` reads the ended bookings of the usage store (see `usage-store.md`), oldest end
-  first, from `from_ms` included to `to_ms` excluded, of one host or one job when asked. A page
-  holds `page_size` records (100 when 0, at most 1000); the filters apply before the page is
-  cut. `next_page_token` is the key of the page's last record: the next page starts right after
-  it, so no record is read twice or skipped while records are written; it is empty on the last
-  page. A token no answer gave is `INVALID_ARGUMENT` `invalid-page-token`. A server started
-  with `--usage-off` answers an empty page.
+- `GetUsage` reads the ended bookings of leases in the usage store and of jobs in the job
+  store (see `usage-store.md`) as one listing, oldest end first (then by id, a lease's record
+  before a job's with the same end and id), from `from_ms` included to `to_ms` excluded, of one
+  host or one job when asked; a job's record carries the job id in `job_id`. A page holds
+  `page_size` records (100 when 0, at most 1000); the filters apply before the page is cut.
+  `next_page_token` names the page's last record, its key and which store it came from: the
+  next page starts right after it, so no record is read twice or skipped while records are
+  written; it is empty on the last page. A token no answer gave is `INVALID_ARGUMENT`
+  `invalid-page-token`. A server started with `--usage-off` lists the job store's records
+  alone. When either store cannot be read the call is `UNAVAILABLE` `usage-unavailable`.
 
 Over the gateway, a fleet call's `INVALID_ARGUMENT` is 400 `invalid-argument` as for any call,
 but the gateway's error table does not name the fleet calls' other refusals yet: `unknown-host`

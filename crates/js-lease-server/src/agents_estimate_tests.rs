@@ -432,7 +432,7 @@ fn with_the_flag_and_a_sink_with_no_curves_a_restored_lease_keeps_its_bound() {
 /// bound to end 15 minutes after that.
 const FILE: &str = "version = 1\nterm = 1\nnext_sequence = 2\nlease_count = 1\n\n\
     [[lease]]\nterm = 1\nsequence = 1\nstate = \"held\"\nhost = \"a\"\n\
-    acquired_at_ms = 880000\nexpires_at_ms = 940000\nends_at_ms = 1780000\n";
+    acquired_at_ms = 880000\nexpires_at_ms = 1780000\nends_at_ms = 1780000\n";
 
 /// Asserts that a start read from an actual lease file reaches the drain cost through the
 /// server's startup path (`read_bookings`, the layered source, the registry). Lease 1 on
@@ -453,6 +453,86 @@ fn a_start_read_from_the_lease_file_reaches_the_drain_cost() {
         keyed_run_of(&served, "a", 1, "r1", THREE);
         let reserved = reserved_with_tail(&mut served, 3);
         assert_eq!(reserved, (Some("a".to_string()), expected), "{name}");
+    }
+}
+
+/// The flags of `--placement js-sched`, with `--estimate-feed` when `feed` says so.
+fn js_sched(feed: bool) -> Vec<&'static str> {
+    let mut flags = vec!["--placement", "js-sched"];
+    flags.extend(feed.then_some("--estimate-feed"));
+    flags
+}
+
+/// Lease 1, held on `a`, started at [`T0`] and bound to end an hour later.
+fn restored_for_an_hour() -> Booking {
+    Booking {
+        lease: LeaseId::new(1, 1),
+        host: host("a"),
+        state: LeaseState::Held,
+        shares: None,
+        started_at: Timestamp::from_millis(T0),
+        ends_at: Timestamp::from_millis(T0 + 3_600_000),
+    }
+}
+
+/// Asserts, under `--placement js-sched`, that a lease put back from the lease file keeps
+/// its recorded bound in the engine's drain cost, with the flag and without it (the engine
+/// drains by bounds either way). Lease 1 on `a` is restored bound to end in an hour; lease 2
+/// on `b` starts here with ten minutes: `b` is reserved, with its bound as the tail. It
+/// catches a restored lease the engine does not hold (`a` would read empty and be reserved
+/// with no wait), and one it holds with no bound.
+#[test]
+fn under_js_sched_a_restored_lease_keeps_its_recorded_bound() {
+    let restored = restored_for_an_hour();
+    for (name, feed) in [("engine_restored_on", true), ("engine_restored_off", false)] {
+        let mut served = serving(name, &js_sched(feed), std::slice::from_ref(&restored));
+        assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
+        let reserved = reserved_with_tail(&mut served, 3);
+        assert_eq!(
+            reserved,
+            (Some("b".to_string()), Some(T0 + 600_000)),
+            "{name}"
+        );
+    }
+}
+
+/// As [`with_the_flag_and_a_sink_with_no_curves_a_restored_lease_keeps_its_bound`], under
+/// `--placement js-sched`: the engine is handed no lives, the restored lease keeps its bound
+/// of an hour, and `b` (ten minutes) is reserved with its own bound as the tail. It catches
+/// an engine that loses the restored bound when the sink keeps no curves.
+#[test]
+fn under_js_sched_with_a_sink_with_no_curves_a_restored_lease_keeps_its_bound() {
+    let restored = restored_for_an_hour();
+    let given = Restored::Given(std::slice::from_ref(&restored));
+    let sink: Arc<dyn UsageSink> = Arc::new(NoUsage);
+    let flags = js_sched(true);
+    let mut served = serving_with("engine_no_curves", &flags, given, Some(sink));
+    assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
+    keyed_run(&served, "a", 1, "r1");
+    let reserved = reserved_with_tail(&mut served, 3);
+    assert_eq!(reserved, (Some("b".to_string()), Some(T0 + 600_000)));
+}
+
+/// As [`a_start_read_from_the_lease_file_reaches_the_drain_cost`], under `--placement
+/// js-sched`: with the flag, lease 1 on `a`, started two minutes before the restart with a
+/// keyed run of three, ends a minute after now, before lease 2 on `b` (two minutes), and
+/// `a` is reserved with that tail. Without the flag the engine costs `a` at its recorded
+/// bound (13 minutes from now) and reserves `b`, with its bound of two minutes as the tail.
+/// It catches the recorded start replaced by the restart (`a` would end three minutes from
+/// now and `b` be reserved with the flag), and the recorded bound dropped (`a` would read
+/// as ending at the latest time there is, or empty).
+#[test]
+fn under_js_sched_a_start_read_from_the_lease_file_reaches_the_drain_cost() {
+    for (name, feed, expected) in [
+        ("engine_file_on", true, ("a", T0 + 60_000)),
+        ("engine_file_off", false, ("b", T0 + 120_000)),
+    ] {
+        let mut served = serving_with(name, &js_sched(feed), Restored::File(FILE), None);
+        assert_eq!(lease_for(&mut served, 2, Duration::from_secs(120)), "b");
+        keyed_run_of(&served, "a", 1, "r1", THREE);
+        let reserved = reserved_with_tail(&mut served, 3);
+        let (on, tail) = expected;
+        assert_eq!(reserved, (Some(on.to_string()), Some(tail)), "{name}");
     }
 }
 
@@ -510,7 +590,7 @@ fn with_the_flag_a_restart_puts_back_a_held_lease_on_its_host() {
         let credential = Credential::of_token(JOIN);
         agents.registry.hello(&hello("a"), &credential).unwrap();
         let class = ResourceClass::new(ClassId::new("burst-host").unwrap(), Admission::BookAll, 0);
-        let lease = table.acquire(request(&class, Duration::from_secs(600)), None);
+        let lease = table.acquire(request(&class, Duration::from_secs(600)));
         let lease = lease.unwrap();
         assert_eq!(lease.host, host("a"), "{name}");
         drop(table);

@@ -52,12 +52,13 @@ fn the_engine_is_built_once_across_many_starts() {
     assert_eq!(r.counted(), (NONE, 0, 1));
 }
 
-/// Asserts that a lease the registry books without the engine (put back as a restart
-/// does) makes the next start that meets its host rebuild the engine once, counted as
-/// `resynced`, and that the next 50 starts and ends add no rebuild. It catches a
-/// disagreement left in place (the engine placing past a booking it does not know) and a
-/// rebuild that does not take the registry's books, which would rebuild again at every
-/// start.
+/// Asserts that a lease the registry books and the engine does not hold (put back as a
+/// restart does, which the engine is told of, then lost by the engine, as a lease it gives
+/// up for a silent host is) makes the next start that meets its host rebuild the engine
+/// once, counted as `resynced`, and that the next 50 starts and ends add no rebuild. It
+/// catches a disagreement left in place (the engine placing past a booking it does not
+/// hold) and a rebuild that does not take the registry's books, which would rebuild again
+/// at every start.
 #[test]
 fn a_disagreement_rebuilds_once_and_is_counted() {
     let hosts = ["h1", "h2"];
@@ -80,6 +81,7 @@ fn a_disagreement_rebuilds_once_and_is_counted() {
         ends_at: Timestamp::from_millis(T0 + 600_000),
     };
     r.provider.seat_booked(&booking, None).unwrap();
+    r.placer().engine().ended(LeaseId::new(9, 1));
     assert!(r.start(sharing_spec(2)).is_some());
     assert_eq!(r.counted(), (NONE, 1, 2));
     for sequence in 3..=52 {

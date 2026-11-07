@@ -34,7 +34,7 @@ const TOKEN: [u8; 40] = [b'q'; 40];
 /// A server over the job rig `rig`'s agent side, its lease table on the registry's hosts.
 pub(super) fn shared_over(rig: &Rig, dir: &TestDir) -> Arc<Shared> {
     let provider = rig.agents.registry.provider();
-    let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+    let settings = Settings::new();
     let file = dir.path().join("leases.toml");
     let table = LeaseTable::open(
         BoxedPool(Box::new(provider)),
@@ -109,7 +109,7 @@ async fn fixture(name: &str) -> Fixture {
         validation_run: None,
         probe_host: None,
     };
-    let lease = shared.table().lock().await.acquire(lease, None).unwrap();
+    let lease = shared.table().lock().await.acquire(lease).unwrap();
     let jobs = &rig.jobs;
     let queued = queue(&rig, "alpha-queued");
     let placed_job = placed(jobs, "bravo-placed", "host-a", spec(), BOOKED).0.id;

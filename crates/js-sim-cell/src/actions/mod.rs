@@ -16,13 +16,18 @@ mod agent_refuses_prepare;
 mod agent_silent_on_prepare;
 mod cancel_when_set_aside;
 mod cancel_work;
+mod crash_at_next_acquire;
+mod join_agents;
 mod kill_agents;
 mod kill_agents_for_good;
+mod mint_join_token;
 mod partition_agents;
 mod replace_agents;
 mod request_whole_host;
 mod restart_server;
 mod set_bus_faults;
+mod start_second_server;
+mod stop_server;
 mod submit_work;
 
 pub use agent_prepare_delay::{AgentPrepareDelay, agent_prepare_delay};
@@ -30,13 +35,18 @@ pub use agent_refuses_prepare::{AgentRefusesPrepare, REFUSAL_REASONS, agent_refu
 pub use agent_silent_on_prepare::{AgentSilentOnPrepare, agent_silent_on_prepare};
 pub use cancel_when_set_aside::{CancelWhenSetAside, cancel_when_set_aside};
 pub use cancel_work::{CancelWork, cancel_work};
+pub use crash_at_next_acquire::{CrashAtNextAcquire, crash_at_next_acquire};
+pub use join_agents::{JoinAgents, join_agents};
 pub use kill_agents::{KillAgents, kill_agents};
 pub use kill_agents_for_good::{KillAgentsForGood, kill_agents_for_good};
+pub use mint_join_token::{MintJoinToken, mint_join_token};
 pub use partition_agents::{PartitionAgents, partition_agents};
 pub use replace_agents::{ReplaceAgents, replace_agents};
 pub use request_whole_host::{RequestWholeHost, request_whole_host};
 pub use restart_server::{RestartServer, restart_server};
 pub use set_bus_faults::{SetBusFaults, set_bus_faults};
+pub use start_second_server::{StartSecondServer, start_second_server};
+pub use stop_server::{StopServer, stop_server};
 pub use submit_work::{SubmitWork, submit_work};
 
 /// A change a scenario makes to the cell at a virtual time. The builder runs it once in

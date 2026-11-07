@@ -14,13 +14,11 @@ fn help_version_and_usage_errors() {
     let help = h.js.go(&["--help"]);
     assert_eq!(help.code, 0);
     assert!(
-        help.out.contains("Acquires, renews and releases leases"),
+        help.out.contains("Acquires and releases leases"),
         "{}",
         help.out
     );
     assert!(help.out.contains("--token-file"), "{}", help.out);
-    let run_help = h.js.go(&["lease", "run", "--help"]);
-    assert!(run_help.out.contains("JS_LEASE_ID"), "{}", run_help.out);
     let version = h.js.go(&["--version"]);
     assert_eq!((version.code, version.out.starts_with("js ")), (0, true));
 
@@ -29,7 +27,6 @@ fn help_version_and_usage_errors() {
         vec!["lease"],
         vec!["--no-such-flag", "lease", "list"],
         vec!["lease", "acquire", "--class", "gpu-host"],
-        vec!["lease", "run", "--class", "gpu-host", "--max-wall", "1h"],
     ] {
         let got = h.js.go(&words);
         assert_eq!(got.code, 2, "{words:?}: {}", got.err);
@@ -78,7 +75,6 @@ fn durations_and_labels_are_checked() {
         ["--max-wall", "soon"],
         ["--max-wall", "5x"],
         ["--max-wall", "99999999999999999999h"],
-        ["--ttl", "-5s"],
         ["--wait-pending", "0s"],
         ["--label", "novalue"],
         ["--label", "=x"],
@@ -88,8 +84,7 @@ fn durations_and_labels_are_checked() {
         let got = h.js.go(&words);
         assert_eq!(got.code, 2, "{extra:?}: {}", got.err);
     }
-    let units =
-        h.js.go(&acquire_words(&["--ttl", "1m", "--wait-pending", "1h"]));
+    let units = h.js.go(&acquire_words(&["--wait-pending", "1h"]));
     assert_eq!(units.code, 0, "{}", units.err);
 }
 
@@ -183,7 +178,6 @@ fn a_bad_token_file_is_refused() {
         let js = Js {
             server: h.js.server.clone(),
             token_file: path.clone(),
-            ..h.js.clone()
         };
         let got = js.go(&["lease", "list"]);
         assert_eq!(got.code, 2, "{path:?}: {}", got.err);
@@ -206,7 +200,6 @@ fn a_linked_or_read_only_token_file_works() {
     let js = Js {
         server: h.js.server.clone(),
         token_file: link,
-        ..h.js.clone()
     };
     assert_eq!(js.go(&["lease", "list"]).code, 0);
 }
@@ -220,7 +213,6 @@ fn a_wrong_token_is_a_server_failure() {
     let js = Js {
         server: h.js.server.clone(),
         token_file: other,
-        ..h.js.clone()
     };
     let got = js.go(&["lease", "list"]);
     assert_eq!(
