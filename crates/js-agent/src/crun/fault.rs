@@ -10,8 +10,12 @@ use crate::image::ConfigError;
 /// Why a run could not be made into a container.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum Fault {
-    #[error("this runtime runs contained jobs only")]
+    #[error("a host job is refused: this agent was started without --allow-host-jobs")]
     NotContained,
+    #[error("a host job is given no mount and no run files: it sees the host's own paths")]
+    HostMounts,
+    #[error("a host job books no GPU: it sees every device of the host")]
+    HostGpus,
     #[error(transparent)]
     Gpu(gpu::StartError),
     #[error("this runtime runs container jobs only")]

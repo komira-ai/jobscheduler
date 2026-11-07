@@ -71,6 +71,8 @@ struct State {
     entered: u32,
     /// The calls, in order: `create r1`, `stop r1`, `remove r1`, `list`.
     log: Vec<String>,
+    /// The run id and isolation of each create, in order.
+    isolations: Vec<(String, js_agent_wire::Isolation)>,
     /// The call that panics, once.
     panic_at: Option<&'static str>,
     /// The directory every container is in, as `<dir>/docker-<run>.scope`.
@@ -121,6 +123,11 @@ impl World {
     /// How many containers exist.
     pub fn alive(&self) -> usize {
         self.lock().containers.len()
+    }
+
+    /// The run id and isolation of each create, in order.
+    pub fn isolations(&self) -> Vec<(String, js_agent_wire::Isolation)> {
+        self.lock().isolations.clone()
     }
 
     /// The run ids of the containers that were created, in order.
@@ -282,6 +289,7 @@ impl Runtime for WorldRuntime {
             }
         }
         state.log.push(format!("create {}", spec.run_id));
+        state.isolations.push((spec.run_id.clone(), spec.isolation));
         if state.fails("create") {
             return Err(failed("create"));
         }

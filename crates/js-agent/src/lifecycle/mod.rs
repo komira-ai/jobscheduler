@@ -196,12 +196,13 @@
 //! - **A user-namespace remapping engine is not supported.** The container user would be
 //!   another uid on the host, and the check for a job's leftover processes compares the
 //!   host's uid with `--container-user`.
-//! - **Host jobs are not available.** `--allow-host-jobs` is refused at start in every
-//!   configuration, because no runtime launches a host job yet ([`Local::from_cli`]), so the
-//!   agent never reports `host-jobs` and a server never taints a host for a job it cannot
-//!   start. [`Config::allow_host_jobs`] is the switch the lifecycle honours once a runtime
-//!   can launch one; it already refuses a host start without it and taints the host when
-//!   such a job starts.
+//! - **Host jobs need `--runtime crun`.** Only the crun runtime launches a host job (an OCI
+//!   container in the host's namespaces, in a cgroup of its own below its lease's; the
+//!   module [`crate::crun`]), so `--allow-host-jobs` is refused at start on every other
+//!   runtime ([`HOST_JOBS_NEED_CRUN`]), and only an agent that took it reports `host-jobs`:
+//!   a server never taints a host for a job it cannot start. [`Config::allow_host_jobs`] is
+//!   the switch the lifecycle honours: it refuses a host start without it and taints the
+//!   host when such a job starts.
 //!
 //! # The threading contract of the runtime seam
 //!
@@ -515,6 +516,9 @@ pub struct Local {
     /// The VM backend, when `--vm-driver` turned it on; the agent sets it after the checks
     /// here ([`crate::vm::VmSettings::from_cli`]).
     pub vm: Option<crate::vm::VmSettings>,
+    /// `--allow-host-jobs`, which only `--runtime crun` takes: the one runtime that launches
+    /// a host job. The agent reports `host-jobs` only with it.
+    pub allow_host_jobs: bool,
 }
 
 /// The file in the state root that holds the native agent's lease journal.
@@ -535,8 +539,8 @@ fn seconds(flag: &str, given: Option<u64>, default: Duration) -> Result<Duration
 }
 
 impl Local {
-    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (no runtime launches a
-    /// host job yet), every mount root exists and is canonicalised,
+    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused unless the runtime is
+    /// `crun` ([`HOST_JOBS_NEED_CRUN`]), every mount root exists and is canonicalised,
     /// the scratch root and the state root are private to the user running the agent, the
     /// container runtime is an absolute path to an executable file, containers need a state
     /// root (the taint marker is kept there) that is not, and does not lie in, a mount root
@@ -590,13 +594,10 @@ impl Local {
             Some(_) => DirLayout::Searchable,
             None => DirLayout::Private,
         };
-        if cli.allow_host_jobs {
-            return Err(
-                "--allow-host-jobs: no runtime of this agent launches a host job yet: \
-                        crun and docker run contained jobs only"
-                    .to_owned(),
-            );
+        if cli.allow_host_jobs && crun.is_none() {
+            return Err(HOST_JOBS_NEED_CRUN.to_owned());
         }
+        let crun = crun.map(|settings| settings.with_host_jobs(cli.allow_host_jobs));
         let egress = egress_of(cli, crun.is_some())?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
         let scratch = cli
@@ -790,9 +791,14 @@ impl Local {
             egress,
             silence_stop,
             vm: None,
+            allow_host_jobs: cli.allow_host_jobs,
         })
     }
 }
+
+/// Why `--allow-host-jobs` is refused at start on an agent whose runtime is not `crun`.
+pub const HOST_JOBS_NEED_CRUN: &str = "--allow-host-jobs: only --runtime crun launches a host \
+     job; the container engine (--container-bin) and native runtimes run contained jobs only";
 
 /// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. Only
 /// `crun` enforces a ceiling, so a ceiling above none on another runtime is refused rather

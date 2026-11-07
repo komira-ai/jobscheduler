@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use js_agent_wire::LogTail;
+use js_contain::Isolation;
 use js_contain::cgroup::{LeaseCgroup, OomOutcome};
 use js_contain::container::{ContainerLimits, ContainerSpec, Ended, HostMount};
 use js_contain::oci::image::PinnedImage;
@@ -90,6 +91,7 @@ pub(super) fn container_spec(
         image_digest: image.digest.clone(),
         dir: lease.dir.clone(),
         cgroup_parent: cgroup_parent.to_owned(),
+        isolation: Isolation::Contained,
         exec_root: EXEC_ROOT.to_owned(),
         input_root: lease.root.clone(),
         upper: lease.upper.clone(),
@@ -108,6 +110,26 @@ pub(super) fn container_spec(
     }
 }
 
+/// The host container of `run` named `name` ([`Isolation::Host`]): the same as
+/// [`container_spec`]'s but for what js-contain's host config reads differently. The job
+/// starts in the run's scratch directory on the host (its exec root), and it is given no
+/// mount: it sees the host's own paths, its scratch directory among them. The image's
+/// config still gives the program and the environment; its root is not used.
+pub(super) fn host_spec(
+    name: &str,
+    run: &RunSpec,
+    image: &PinnedImage,
+    lease: &LeaseDirs,
+    cgroup_parent: &str,
+) -> ContainerSpec {
+    ContainerSpec {
+        isolation: Isolation::Host,
+        exec_root: run.scratch.to_string_lossy().into_owned(),
+        mounts: Vec::new(),
+        ..container_spec(name, run, image, lease, cgroup_parent)
+    }
+}
+
 /// Sets the job's environment (`env`, [`RunSpec::env`]) in `container`, whose image config
 /// is applied: the image's variables stay, and a job variable replaces every image
 /// variable of its name. The job's follow the image's, in the order given. Called after
@@ -123,7 +145,9 @@ pub(super) fn job_env(container: &mut ContainerSpec, env: &[(String, String)]) {
 /// The container of an adopted run, rebuilt from what its sidecar records: what a stop, an
 /// end, the pid ask and the image collection read of it (its name, directory, image digest
 /// and cgroup). The bundle exists already and the container is never made again, so the rest
-/// is empty.
+/// is empty, and the isolation, which only the bundle and the start read, is left contained:
+/// the calls by the lease's name follow the owner of its directory
+/// ([`Oci::lease_user`](js_contain::Oci::lease_user)), a host lease's being the agent's.
 pub(super) fn adopted_spec(
     name: &str,
     image_digest: &str,
@@ -136,6 +160,7 @@ pub(super) fn adopted_spec(
         image_digest: image_digest.to_owned(),
         dir: lease.dir.clone(),
         cgroup_parent: cgroup_parent.to_owned(),
+        isolation: Isolation::Contained,
         exec_root: EXEC_ROOT.to_owned(),
         input_root: lease.root.clone(),
         upper: lease.upper.clone(),
