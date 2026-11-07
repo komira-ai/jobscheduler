@@ -640,6 +640,7 @@ async fn a_store_that_is_down_is_unavailable_and_leaks_nothing() {
     ];
     for (passing, failure, line) in cases {
         let lines = Lines::default();
+        crate::api::whole_view_tests::process_sink();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(lines.clone())
             .with_ansi(false)
