@@ -1,6 +1,7 @@
 //! One elastic pool's cloud in the cell: the elastic fake, on the cell's clock, behind a
 //! recording [`CapacityProvider`] that the server's scaler is handed.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -25,12 +26,22 @@ use crate::server::{EPOCH_MS, Shape, virtual_time};
 /// before every input of the server it is advanced to the input's virtual time
 /// ([`Cloud::advance_to`]), so the server and the cloud read one clock, and a call is
 /// recorded at the virtual time of the step it happened in.
+///
+/// [`Cloud::crash_at_next_acquire`] makes the next acquire crash the server: the call
+/// reaches the fake, which launches the machine, and the server is answered as for a call
+/// whose answer was lost (`Acquired::Unknown`) and stopped at the end of the tick, before a
+/// later tick acts on anything ([`CloudEvent::Crash`]). What survives is what the scaler
+/// had written before the call and in the rest of that tick.
 #[derive(Clone)]
 pub struct Cloud {
     pool: ElasticPool,
     shape: Shape,
     fake: ElasticFake,
     record: Arc<Mutex<Vec<CloudCall>>>,
+    /// Whether the next acquire crashes the server.
+    armed: Arc<AtomicBool>,
+    /// Whether an acquire crashed the server since the node last asked.
+    crashed: Arc<AtomicBool>,
 }
 
 impl Cloud {
@@ -47,7 +58,21 @@ impl Cloud {
             shape: shape.clone(),
             fake,
             record: Arc::default(),
+            armed: Arc::default(),
+            crashed: Arc::default(),
         }
+    }
+
+    /// Makes the next acquire the server makes crash it, as a process that dies after the
+    /// call left and before it read the answer (see the type's doc).
+    pub fn crash_at_next_acquire(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether an acquire crashed the server since the last call, which the server node
+    /// makes after every tick and then stops its server.
+    pub(crate) fn take_crashed(&self) -> bool {
+        self.crashed.swap(false, Ordering::SeqCst)
     }
 
     /// What every machine of the cloud is: the server's shape.
@@ -175,6 +200,12 @@ impl CapacityProvider for Recording {
             acquire: request.acquire.as_str().to_owned(),
             answer: AcquireAnswer::of(&answer),
         });
+        let crash = self.0.armed.swap(false, Ordering::SeqCst);
+        if crash {
+            self.0.crashed.store(true, Ordering::SeqCst);
+            self.0.note(CloudEvent::Crash);
+            return Acquired::Unknown;
+        }
         answer
     }
 

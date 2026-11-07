@@ -88,6 +88,8 @@ impl Indices {
             CloudEvent::Brake { tripped: false } | CloudEvent::BrakeReset => {
                 self.tripped = None;
             }
+            // The acquire it follows was checked when it was read.
+            CloudEvent::Crash => {}
         }
     }
 

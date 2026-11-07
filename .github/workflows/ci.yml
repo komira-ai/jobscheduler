@@ -309,8 +309,10 @@ jobs:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # js-state's Postgres backend against a real server: its conformance suite, the schema
-  # and boot tests, js-jobs's job store suite on it (tests/postgres_jobs.rs), and clippy
-  # with the feature on. The server is a service container
+  # and boot tests, js-jobs's job store suite on it (tests/postgres_jobs.rs), the
+  # simulation cell's store family and store tests over it (js-sim-cell's tests/store.rs and
+  # tests/server.rs; the cell's other families run in the `test` job), and clippy with the
+  # features on. The server is a service container
   # pinned by digest; its password is a throwaway for this container, which lives only for
   # this job. The tests read the server's URL from KBF_TEST_POSTGRES_URL (the name the code
   # has; a rename is a later change to the code). The in-memory fake and its deliberately
@@ -345,9 +347,10 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo clippy -p js-state -p js-jobs -p js-usage --features js-state/postgres,js-jobs/postgres,js-usage/postgres --all-targets --locked -- -D warnings
+      - run: cargo clippy -p js-state -p js-jobs -p js-usage -p js-sim-cell --features js-state/postgres,js-jobs/postgres,js-usage/postgres,js-sim-cell/postgres --all-targets --locked -- -D warnings
       # The write-rate measurement (tests/postgres_write_rate.rs) is read by a person, not a gate.
       - run: cargo test -p js-state -p js-jobs -p js-usage --features js-state/postgres,js-jobs/postgres,js-usage/postgres --locked -- --include-ignored --skip the_write_rate_of_one_two_and_three_frontends
+      - run: cargo test -p js-sim-cell --features js-sim-cell/postgres --locked --test store --test server
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
