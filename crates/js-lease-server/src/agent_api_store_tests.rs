@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path as FilePath;
 
 use js_agent_wire::InstanceIdentity;
-use js_jobs::interfere::Interfere;
+use js_jobs::interfere::{INJECTED, Interfere};
 use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
 use js_registry::{Binding, PoolConfig, Registry, SequentialSessions};
 use js_state::fake::{Fake, Flaw};
@@ -16,11 +16,13 @@ use js_testkit::dir::TestDir;
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use serde_json::{Value, json};
 
+use super::log_tests::capture;
 use super::*;
 use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_state::BindingStore;
 use crate::agents::CordonFault;
 use crate::api::Shared;
+use crate::api::whole_view_tests::Lines;
 use crate::config::parse_token;
 use crate::join_tokens::JoinTokens;
 
@@ -85,6 +87,17 @@ fn quiet_logs() {
             .try_init();
     });
     tracing::callsite::rebuild_interest_cache();
+}
+
+/// Asserts that `lines` holds exactly one line that says `message`, at `level`, with the
+/// injected failure.
+fn logged(lines: &Lines, level: &str, message: &str) {
+    let text = lines.take();
+    let said: Vec<&str> = text.lines().filter(|line| line.contains(message)).collect();
+    assert_eq!(said.len(), 1, "{text}");
+    for part in [level, INJECTED] {
+        assert!(said[0].contains(part), "{text}");
+    }
 }
 
 fn rig(name: &str) -> Rig {
@@ -328,22 +341,26 @@ async fn a_failed_compensation_leaves_the_binding_and_the_consumed_token() {
 
 /// Asserts that a heartbeat that brings a taint has it committed with the host's binding
 /// before the registry records it: when the commit fails the heartbeat is answered 503
-/// `state-write-failed`, the registry holds no taint and the store none; the beat repeated
-/// is acknowledged, and both then hold the taint. It catches a taint acknowledged before it
-/// is durable (the agent stops reporting it, and a restart would make the host clean) and
-/// a failed commit that leaves the taint in memory.
+/// `state-write-failed` with a warning naming the failure, the registry holds no taint and
+/// the store none; the beat repeated is acknowledged, and both then hold the taint. It
+/// catches a taint acknowledged before it is durable (the agent stops reporting it, and a
+/// restart would make the host clean) and a failed commit that leaves the taint in memory.
 #[tokio::test]
 async fn a_heartbeat_taint_is_committed_before_it_is_acknowledged() {
     let rig = rig("taint");
     let welcome = rig.pooled("host-a", "burst").await.unwrap();
     let taint = json!({ "reason": "residue", "check": "tmp-files" });
     rig.store.fail_next();
+    let lines = Lines::default();
+    let capture = capture(&lines);
     let failed = rig.beat((&rig.pool, None), "host-a", &welcome, taint.clone());
     let failed = failed.await.expect_err("the commit fails");
+    drop(capture);
     assert_eq!(
         (failed.status.as_u16(), failed.error),
         (503, "state-write-failed")
     );
+    logged(&lines, "WARN", "a heartbeat's taint could not be committed");
     assert!(rig.held("host-a").unwrap().taint().is_none());
     assert_eq!(rig.binding("host-a")["taint_reason"], Value::Null);
 
@@ -360,11 +377,12 @@ async fn a_heartbeat_taint_is_committed_before_it_is_acknowledged() {
 }
 
 /// Asserts that a cordon and its lift are committed before the registry takes them: a
-/// cordon whose commit fails is `Unsaved` and leaves the host uncordoned in the registry and
-/// in the store; one that commits holds in both, until the lease's end on the clock; a lift
-/// whose commit fails leaves the cordon in both, and one that commits lifts it in both. A
-/// host the registry does not hold is `NotHeld` either way. It catches a cordon or a lift
-/// that takes effect before it is durable, so a restart would undo it.
+/// cordon whose commit fails is `Unsaved`, logged as an error naming the failure, and
+/// leaves the host uncordoned in the registry and in the store; one that commits holds in
+/// both, until the lease's end on the clock; a lift whose commit fails leaves the cordon in
+/// both, and one that commits lifts it in both. A host the registry does not hold is
+/// `NotHeld` either way. It catches a cordon or a lift that takes effect before it is
+/// durable, so a restart would undo it.
 #[tokio::test]
 async fn cordon_and_uncordon_commit_before_they_take_effect() {
     let rig = rig("cordon");
@@ -373,8 +391,12 @@ async fn cordon_and_uncordon_commit_before_they_take_effect() {
     let lease = Duration::from_secs(60);
     let cordon_until = |rig: &Rig| rig.agents.registry.own_host(&host).unwrap().cordon_until;
     rig.store.fail_next();
+    let lines = Lines::default();
+    let capture = capture(&lines);
     let failed = rig.agents.cordon(&host, lease).await;
+    drop(capture);
     assert_eq!(failed.err(), Some(CordonFault::Unsaved));
+    logged(&lines, "ERROR", "cannot commit the cordon of a host");
     assert_eq!(cordon_until(&rig), None);
     assert_eq!(rig.binding("host-a")["cordon_until_ms"], Value::Null);
 
@@ -479,21 +501,26 @@ async fn concurrent_hellos_with_one_token_admit_exactly_one() {
 }
 
 /// Asserts that a hello with the pool's token commits the host's binding alone before the
-/// registry is asked: when the commit fails it is refused 503 `state-write-failed` and the
-/// registry holds nothing; a hello the registry refuses takes its binding back in a second
-/// commit; an admitted one leaves the binding to the pool token's digest. It catches a pool
-/// token's binding left to the file-mode save after the hello (a crash in between would
-/// lose it) and a binding kept for a host the registry refused.
+/// registry is asked: when the commit fails it is refused 503 `state-write-failed`, with a
+/// warning naming the failure, and the registry holds nothing; a hello the registry refuses
+/// takes its binding back in a second commit; an admitted one leaves the binding to the
+/// pool token's digest. It catches a pool token's binding left to the file-mode save after
+/// the hello (a crash in between would lose it) and a binding kept for a host the registry
+/// refused.
 #[tokio::test]
 async fn a_pool_token_hello_commits_the_binding_first_and_takes_it_back_when_refused() {
     let rig = rig("pooled");
     rig.store.fail_next();
+    let lines = Lines::default();
+    let capture = capture(&lines);
     let failed = rig.pooled("host-a", "burst").await;
+    drop(capture);
     let failed = failed.expect_err("the commit fails");
     assert_eq!(
         (failed.status.as_u16(), failed.error),
         (503, "state-write-failed")
     );
+    logged(&lines, "WARN", "agent hello refused: the binding could not be committed");
     assert!(rig.held("host-a").is_none());
 
     let before = rig.commits();
