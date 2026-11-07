@@ -40,7 +40,10 @@ impl PassMetrics for Recorder {
 
 impl JobStarts for Recorder {
     fn placed(&self, job: &JobId, host: &HostId) {
-        self.started.lock().unwrap().push((job.clone(), host.clone()));
+        self.started
+            .lock()
+            .unwrap()
+            .push((job.clone(), host.clone()));
     }
 }
 

@@ -101,7 +101,12 @@ fn step_of(job: &JobRecord, allocation: &AllocationRecord, beat: &Beat<'_>) -> S
     let refused = beat.refused.filter(|refusal| refusal.lease_id == id);
     let left = (beat.phase != Phase::Preparing) | ready | refused.is_some();
     let refusal = refused.map_or(Step::Wait, |refusal| Step::Fail(refusal.code));
-    match (job.cancel_requested, left, beat.first, ready & !beat.tainted) {
+    match (
+        job.cancel_requested,
+        left,
+        beat.first,
+        ready & !beat.tainted,
+    ) {
         (true, true, ..) => Step::Release,
         (true, false, ..) => Step::Wait,
         (false, _, true, _) => Step::Restart,
@@ -124,6 +129,9 @@ fn deadline(rules: &WholeNodeConfig, now: StoreTime) -> StoreTime {
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
 /// the agent reports again.
+/// A job that moved between the read and the commit (a commit answered
+/// [`JobStoreError::Stale`]) is such an error too: the heartbeat is answered 500, which writes
+/// nothing more, and the agent's next report is judged against the job as it is then.
 pub(crate) fn serve(
     jobs: &ServerJobs,
     beat: &Beat<'_>,

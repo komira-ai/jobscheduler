@@ -64,7 +64,10 @@ pub(super) fn full_job() -> JobRecord {
         client: Some(ClientName::parse("ci-1").expect("a client name")),
         failed_prepares: 2,
         prepare_bars: BTreeMap::from([
-            (HostId::new("host-b").expect("a host"), Exclusion::Until(at(8))),
+            (
+                HostId::new("host-b").expect("a host"),
+                Exclusion::Until(at(8)),
+            ),
             (HostId::new("host-c").expect("a host"), Exclusion::ForLife),
         ]),
         carried: Carried::default(),

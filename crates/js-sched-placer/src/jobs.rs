@@ -624,11 +624,7 @@ impl SchedPlacer {
 
 /// Tells `metrics` and `starts` of the placement of the job `record` shows on `host`, which the
 /// store committed.
-fn told(
-    record: &JobRecord,
-    host: &HostId,
-    (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
-) {
+fn told(record: &JobRecord, host: &HostId, (starts, metrics): (&dyn JobStarts, &dyn PassMetrics)) {
     let at = record.placed_at.unwrap_or(record.submitted_at);
     metrics.job_placed(at.since(record.submitted_at));
     starts.placed(&record.id, host);

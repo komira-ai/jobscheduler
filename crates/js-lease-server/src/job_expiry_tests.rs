@@ -7,7 +7,7 @@ use js_jobs::{
     Booked, JobEnd, JobId, JobRecord, JobSpec, JobState, JobStoreError, MarkRecord, Needs, NewJob,
     Placement, Retention, StartFailure,
 };
-use js_state::{ManualClock, StoreError, StoreTime};
+use js_state::{ManualClock, Store, StoreError, StoreTime};
 
 use super::{JobLimits, deadline, due, expire};
 use crate::agent_api::job_rig::{BOOKED, spec, tables_on};

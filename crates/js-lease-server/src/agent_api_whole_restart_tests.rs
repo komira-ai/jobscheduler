@@ -311,8 +311,6 @@ async fn a_backfilled_job_cannot_hold_the_marked_host_past_margin_plus_grace() {
     beat(&rig, &mut agent).await;
     place_all(&rig);
     assert_eq!(rig.job(&whole).state, JobState::Placed);
-    assert!(
-        rig.job(&whole).placed_at.unwrap() <= tail.saturating_add(margin)
-    );
+    assert!(rig.job(&whole).placed_at.unwrap() <= tail.saturating_add(margin));
     assert_eq!(rig.job(&long).state, JobState::Queued);
 }

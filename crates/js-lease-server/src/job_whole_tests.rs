@@ -12,7 +12,7 @@ use js_jobs::{
 };
 use js_registry::WholeNodeConfig;
 use js_state::fake::Fake;
-use js_state::{ManualClock, StoreError, StoreTime};
+use js_state::{ManualClock, Store, StoreError, StoreTime};
 use js_types::HostId;
 
 use super::{Beat, expire_prepares, serve};

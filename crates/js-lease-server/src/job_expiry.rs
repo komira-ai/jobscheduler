@@ -1,7 +1,8 @@
 //! The time rules of the job pass (design sections 3.2, "What bounds a job", and 6.1, step
 //! 1): a queued job that waits past its pool's `max_queue_wait` fails to start with
 //! `no-capacity`, and a placed or starting job that has not started within its pool's
-//! `start_timeout` fails to start with `start-timeout`.
+//! `start_timeout` fails to start with `start-timeout`, except a placed whole-host job, which
+//! its prepare deadline bounds instead (see the table below).
 //!
 //! Each limit is counted from an instant the job's record stores, never from the boot or from
 //! the last pass: the queue wait from when the job was queued, the start timeout from its

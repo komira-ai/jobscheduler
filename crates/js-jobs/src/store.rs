@@ -361,7 +361,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         host: HostId,
         booked: Booked,
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
-        let (txn, placed, allocation) = self.placement_txn(id, host, booked, Placement::default())?;
+        let (txn, placed, allocation) =
+            self.placement_txn(id, host, booked, Placement::default())?;
         self.commit(id, txn)?;
         Ok((placed, allocation))
     }

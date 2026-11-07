@@ -86,9 +86,9 @@ fn a_partial_transaction_breaks_an_atomic_end_and_unmark() {
     expected = "a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark: the job was placed without its mark's delete"
 )]
 fn a_partial_transaction_breaks_an_atomic_placement_that_drops_a_mark() {
-    suite::a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark(&FakeBackend::new(
-        Flaw::PartialTxn,
-    ));
+    suite::a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark(
+        &FakeBackend::new(Flaw::PartialTxn),
+    );
 }
 
 // Catches a failed prepare whose job and allocation are written in separate steps: the job goes

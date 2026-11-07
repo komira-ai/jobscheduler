@@ -184,7 +184,11 @@ fn a_failed_prepare_field_that_is_not_valid_is_refused_by_tag() {
 fn an_allocation_row_round_trips_its_prepare_deadline_and_wall_limit() {
     let record = waiting();
     let row = allocation_row(&record);
-    assert_eq!(field_of(&row, 14), Some(seconds(9)), "the deadline is a time");
+    assert_eq!(
+        field_of(&row, 14),
+        Some(seconds(9)),
+        "the deadline is a time"
+    );
     assert_eq!(
         field_of(&row, 15),
         Some(1800u64.to_be_bytes().to_vec()),

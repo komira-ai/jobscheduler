@@ -288,7 +288,11 @@ pub fn a_failed_prepare_refuses_what_the_requeue_refuses<B: Backend>(backend: &B
     rig.jobs
         .fail_prepare_with(&ready, requeue_with(&rig, 1), beside)
         .expect("a placed whole-host job fails its prepare");
-    assert_eq!(asked.get(), 1, "{name}: a failed prepare asked for its rows");
+    assert_eq!(
+        asked.get(),
+        1,
+        "{name}: a failed prepare asked for its rows"
+    );
 }
 
 /// A failed prepare whose commit fails writes nothing; one whose job or allocation another
@@ -605,4 +609,3 @@ where
         "{name}: the other writer's allocation row was written over"
     );
 }
-

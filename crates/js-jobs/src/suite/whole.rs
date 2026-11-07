@@ -148,7 +148,11 @@ pub fn place_with_writes_the_prepare_deadline_and_drops_the_mark<B: Backend>(bac
         (None, None),
         "{name}: a placement with no timeout and no limit wrote one"
     );
-    assert_eq!(rig.raw(&keys::mark(&plain)), None, "{name}: a mark was made");
+    assert_eq!(
+        rig.raw(&keys::mark(&plain)),
+        None,
+        "{name}: a mark was made"
+    );
 
     let (kept, mark) = marked(&rig, "pw-kept");
     let (_, shared) = rig
@@ -349,7 +353,11 @@ where
         (commits + 1, JobState::Cancelled),
         "{name}: the cancel of an unmarked job took other than one commit"
     );
-    assert_eq!(rig.raw(&keys::mark(&plain)), None, "{name}: a mark was made");
+    assert_eq!(
+        rig.raw(&keys::mark(&plain)),
+        None,
+        "{name}: a mark was made"
+    );
 
     let late = rig.queue_spec("cm-late", whole_host_spec());
     let other = rig.other();
