@@ -72,7 +72,10 @@ struct Rig {
 }
 
 /// A process-wide subscriber that takes every event and writes it nowhere, so the code of
-/// each log line on a failure path runs, on whichever thread reaches it.
+/// each log line on a failure path runs, on whichever thread reaches it. The interest of
+/// every log line is then worked out again, at each call: a line another test reached while
+/// that subscriber was being installed, beside the thread-scoped subscribers of other tests,
+/// can have kept an interest of never, and would then be skipped here.
 fn quiet_logs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -81,6 +84,7 @@ fn quiet_logs() {
             .with_writer(std::io::sink)
             .try_init();
     });
+    tracing::callsite::rebuild_interest_cache();
 }
 
 fn rig(name: &str) -> Rig {
