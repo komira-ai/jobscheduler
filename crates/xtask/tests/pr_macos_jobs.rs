@@ -797,10 +797,10 @@ fn every_pull_request_runs_the_two_macos_checks_whatever_it_changes() {
             "branches: [main]",
         ]
     );
-    // It runs the workspace's tests, all but the two Linux-only crates.
+    // It runs the workspace's tests, all but the three Linux-only crates.
     let text = read("ci.yml");
     assert!(text.contains(
-        "      - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step\n"
+        "      - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step --exclude js-mdm\n"
     ));
     // The package build: a pull request trigger with no paths, a job with no condition, and the
     // check name the branch protection requires.

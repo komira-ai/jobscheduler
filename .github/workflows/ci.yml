@@ -194,8 +194,10 @@ jobs:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # The workspace builds and passes its tests on Apple silicon, on every pull request and every
-  # push to main, but for the two crates that are Linux code and are not built for macOS:
-  # js-contain (the crun runtime, cgroups) and js-host-step (the Linux host steps). Tests that
+  # push to main, but for the three crates that are Linux code and are not built for macOS:
+  # js-contain (the crun runtime, cgroups), js-host-step (the Linux host steps) and js-mdm
+  # (which applies its rendering to a Linux host through js-host-step; the rendering,
+  # js-mdm-core, is tested here). Tests that
   # need Linux (pidfds, /proc, crun) are cfg-gated, not removed; the coverage and the Postgres
   # tests stay on Linux. js-mac-pool's Seatbelt profile builder also runs its generated profile
   # under the real `sandbox-exec` here (tests/runner.rs), and xtask's macOS package tests build
@@ -240,7 +242,7 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step
+      - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step --exclude js-mdm
       - name: Check the minimum macOS of the built binaries
         run: |
           set -euo pipefail
@@ -258,7 +260,7 @@ jobs:
           done
           [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
       # --no-fail-fast: a red run names every failing test, as in the Linux `test` job.
-      - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step
+      - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step --exclude js-mdm
       - name: Build, stage and package the release's macOS binaries
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
