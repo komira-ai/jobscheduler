@@ -82,7 +82,7 @@ The decisions, in one place:
     run, and a lease may hold several runs. Many VMs and containers share one host under the caps (5.14, 5.15, 5.18).
 17. **GPUs only on the GPU pool.** GPUs exist only on the Mac Studio machines of the GPU pool (`gpu_class` `apple-m`); a GPU request is
     satisfiable only there, as a whole-node lease (D32, 5.17, [design/capabilities.md](design/capabilities.md)).
-18. **One service in Kubernetes.** The target is one jobscheduler service (scheduler, lease API, agent API) with a single writer on a
+18. **One service in Kubernetes.** The target is one jobscheduler service (scheduler, job API, agent API) with a single writer on a
     volume; kbf is a client and `js-agent` registers with it. The single-host `js-lease-server` is the stepping stone (5.16, D33).
 19. **The operator-listed pool is for testing; a request no host could ever serve is refused.** Production hosts register. A request
     that no registered host (and no elastic provider) could ever satisfy is refused with `no-capable-host`; one a busy host could serve
@@ -510,7 +510,7 @@ macOS VM sizing question (fixed size classes or sizing per run; the boot cost pe
 
 ### 5.16 Deployment: one service in Kubernetes
 Text in [design/deployment.md](design/deployment.md). The target is one jobscheduler service in a Kubernetes cluster: the scheduler, the
-lease API and the agent API in one process. The kbf frontend is a client that asks it for capacity; `js-agent`, the generic half of the
+job API and the agent API in one process. The kbf frontend is a client that asks it for capacity; `js-agent`, the generic half of the
 kbf daemons, registers with it from every machine. Today's single-host `js-lease-server` is the stepping stone and the same binary. It
 runs as a `Deployment` of one replica under `Recreate`, with the lease file and the binding file on a volume that only one pod can use
 (D33), secrets and configuration as mounted files and TLS end to end. Durable, not highly available: a restart or a node loss is a bounded

@@ -54,7 +54,7 @@ second rule:
 
 An operator who installs or updates js-agent on a host proves it with one job on that host while the host stays cordoned for ordinary
 work. That job is a **probe**: a request that names one host (`probe_host` on `POST /v1/leases`, `js lease acquire --probe-host HOST`;
-`Request::pin` in `js-sched`). It runs on that host and nowhere else, and it is the only new work a cordoned host takes.
+`Request::pin` in `js-sched`). It runs on that host and nowhere else, and it is the only new work a cordoned host takes. (The lease routes and `js lease` named here are removed; the job API is the client API.)
 
 **The rule** is one function, `js_sched::admit_probe`, and both placement engines call it: the scheduler's round for every queued probe,
 over the workers it holds, and the lease server's placer (`--placement js-sched`) for every probe lease, over the facts its registry keeps

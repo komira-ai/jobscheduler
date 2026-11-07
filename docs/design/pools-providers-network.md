@@ -148,7 +148,7 @@ the rest from the capabilities it requires. `os` and `arch` are read from `os` a
 `disk_bytes` from `disk-gib` (whole GiB, at least the amount; `0` asks for nothing) and `exec` from
 `exec` (`container` or `sandbox-exec`); a request that names a key it does not need leaves
 the field `None`, which is "any". A `disk-gib` that is not a whole number of GiB, or an `exec`
-that names no mode, is a 400 on `POST /v1/leases` and is refused by `Request::validate`. `Offer::fit`
+that names no mode, was a 400 on `POST /v1/leases` (since removed) and is refused by `Request::validate`. `Offer::fit`
 refuses an offer whose os or arch differs, whose mode differs, or whose disk is below the
 request's, naming `Dimension::Os`, `Arch`, `Exec` or `DiskBytes` (PR 11 lifted the earlier
 deviation from requirements 1 and 4). A job never contains an AMI, a cloud name or an instance
