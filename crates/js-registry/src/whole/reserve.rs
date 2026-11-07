@@ -225,7 +225,7 @@ impl Marks {
     /// Whether request `id` holds a mark put back from the ledger whose host the registry
     /// has not seen since ([`Marks::stand`] clears the wait once it is).
     pub(crate) fn unclaimed(&self, id: &RequestId) -> bool {
-        let marks = self.0.values();
+        let mut marks = self.0.values();
         marks.any(|mark| (mark.request == *id) & mark.claim_by.is_some())
     }
 
