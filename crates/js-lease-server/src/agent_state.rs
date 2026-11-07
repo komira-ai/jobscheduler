@@ -1,14 +1,24 @@
-//! The file of host bindings beside the lease file.
+//! The host bindings, kept in a file beside the lease file or, with a store setting, in the
+//! state store.
 //!
 //! A lease on a registered host survives a restart because the lease file names the
 //! host; what it cannot hold is which credential and instance the host id was bound to
 //! when the host was admitted. Without that, the first hello for the id after a restart
-//! would take the lease from anyone holding a join token. The server writes the
-//! bindings to a file of its own, `<state file>.agents`, and hands them back to the
-//! registry when it seats the lease file's bookings.
+//! would take the lease from anyone holding a join token. The server keeps the bindings
+//! itself and hands them back to the registry when it seats the lease file's bookings.
 //!
-//! The format is TOML, written whole through a temporary file and renamed, like the
-//! lease file, and readers ignore keys they do not know:
+//! A taint is kept so that a restart does not make a host that reported one clean: nothing
+//! in the server clears a taint, and a tainted host's binding is kept until an operator
+//! stops the server and removes the three `taint_` fields of its entry. A cordon is kept so
+//! that a restart does not lift it; it is written only while it is in force, so it leaves
+//! the entry at the first save after it lapses or is lifted. An entry from before the field
+//! is read as no cordon.
+//!
+//! # Without a store setting: the file
+//!
+//! The bindings are kept in a file of their own, `<state file>.agents`. The format is
+//! TOML, written whole through a temporary file and renamed, like the lease file, and
+//! readers ignore keys they do not know:
 //!
 //! ```toml
 //! version = 1
@@ -24,27 +34,39 @@
 //! cordon_until_ms = 1760000000000 # when the host is cordoned: when the cordon lapses
 //! ```
 //!
-//! A taint is kept here so that a restart does not make a host that reported one clean. A
-//! host with a taint stays in the file, and the server keeps it, until an operator stops
-//! the server and removes the three `taint_` keys of its entry: nothing in the server
-//! clears a taint. A cordon is kept so that a restart does not lift it; it is written only
-//! while it is in force, so the key leaves the file at the first save after it lapses or
-//! is lifted. A file from before the key is read as no cordon.
+//! The file is written after the registry changed: the save after a hello, a taint report,
+//! a cordon or its lift, and the save of each tick, which also retries a failed one.
+//!
+//! # With a store setting
+//!
+//! With `--store` (or `server.store`) no file is read or written. Each host's binding is
+//! the key `hosts/binding/<host id>` of the store ([`crate::host_keys`]): a JSON object
+//! with a `version` and the fields of a file entry (all but `id`, which is the key). The
+//! keys are read once at start, and nothing on the hot path reads the store. A change the
+//! server makes itself (a hello that binds a host, a taint, a cordon or its lift) is
+//! committed before the registry holds it ([`BindingStore::change`]), and a failed commit
+//! leaves memory as it was. The save of each tick then makes the store hold what the
+//! registry has bound ([`BindingStore::save`]), in one transaction: it drops the binding
+//! of a host the registry forgot, and a cordon that lapsed. Fields of a value that this
+//! build does not know are kept and written back.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_registry::{Binding, Credential};
+use js_state::Store;
 use js_types::HostId;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::config::read_private;
 use crate::error::StartupError;
+use crate::host_keys::{self, BINDINGS, Extra, Writes};
 
 /// The flag the refusals name: the file lives beside the lease file.
 const FLAG: &str = "--state-file";
@@ -119,6 +141,66 @@ impl Entry {
     }
 }
 
+/// A binding as the store holds it under `hosts/binding/<host id>`: the fields of a file
+/// entry but the id, and the fields this build does not know.
+#[derive(Debug, Serialize, Deserialize)]
+struct Stored {
+    version: u32,
+    credential: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taint_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taint_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taint_check: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cordon_until_ms: Option<u64>,
+    #[serde(flatten)]
+    extra: Extra,
+}
+
+impl Stored {
+    /// The binding of the host `id` this value holds, checked as a file entry is, and the
+    /// fields kept with it.
+    fn into_binding(self, id: String) -> Result<(HostId, Binding, Extra), String> {
+        let entry = Entry {
+            id,
+            credential: self.credential,
+            instance_provider: self.instance_provider,
+            instance_id: self.instance_id,
+            taint_reason: self.taint_reason,
+            taint_run_id: self.taint_run_id,
+            taint_check: self.taint_check,
+            cordon_until_ms: self.cordon_until_ms,
+        };
+        let (host, binding) = entry.into_binding()?;
+        Ok((host, binding, self.extra))
+    }
+}
+
+/// The value of `host`'s key that holds `binding`, over the fields `extra` kept.
+fn stored_value(host: &HostId, binding: &Binding, extra: &Extra) -> Vec<u8> {
+    let entry = Entry::of(host, binding);
+    let mut fields = Map::new();
+    fields.insert("credential".to_owned(), Value::from(entry.credential));
+    host_keys::field(&mut fields, "instance_provider", entry.instance_provider);
+    host_keys::field(&mut fields, "instance_id", entry.instance_id);
+    host_keys::field(&mut fields, "taint_reason", entry.taint_reason);
+    host_keys::field(&mut fields, "taint_run_id", entry.taint_run_id);
+    host_keys::field(&mut fields, "taint_check", entry.taint_check);
+    host_keys::field(&mut fields, "cordon_until_ms", entry.cordon_until_ms);
+    host_keys::encode(fields, extra)
+}
+
+/// The key of `host`'s binding.
+fn key(host: &HostId) -> String {
+    format!("{BINDINGS}{host}")
+}
+
 /// Reads the bindings of the file at `path`; none when there is no file. The file must
 /// be private like the token files (it names what each host is bound to), and one that
 /// cannot be read as written is a refusal rather than a start with no bindings, which
@@ -164,38 +246,202 @@ fn parse(text: &str) -> Result<BTreeMap<HostId, Binding>, String> {
     Ok(bindings)
 }
 
-/// Writes the bindings when they differ from what the file holds.
+/// Where the bindings are kept: the file beside the lease file, or the state store.
+enum Keeper {
+    File(PathBuf),
+    Store(Arc<dyn Store>),
+}
+
+/// The bindings the file or the store holds, and the fields of each stored value that this
+/// build does not know (none in the file, whose reader drops them).
+#[derive(Default)]
+struct Held {
+    bindings: BTreeMap<HostId, Binding>,
+    extra: BTreeMap<HostId, Extra>,
+}
+
+impl Held {
+    /// The write that makes the store hold `binding` for `host`, or no binding.
+    fn write(&self, host: &HostId, binding: Option<&Binding>) -> (String, Option<Vec<u8>>) {
+        let extra = self.extra.get(host).cloned().unwrap_or_default();
+        let value = binding.map(|binding| stored_value(host, binding, &extra));
+        (key(host), value)
+    }
+
+    /// The writes that make the store hold `bindings` instead of these.
+    fn writes_to(&self, bindings: &BTreeMap<HostId, Binding>) -> Writes {
+        let gone = self
+            .bindings
+            .keys()
+            .filter(|host| !bindings.contains_key(*host));
+        let gone = gone.map(|host| self.write(host, None));
+        let changed = bindings
+            .iter()
+            .filter(|(host, binding)| self.bindings.get(*host) != Some(*binding));
+        let changed = changed.map(|(host, binding)| self.write(host, Some(binding)));
+        gone.chain(changed).collect()
+    }
+
+    /// Holds `binding` for `host`, or no binding and nothing kept for it.
+    fn hold(&mut self, host: &HostId, binding: Option<&Binding>) {
+        match binding {
+            Some(binding) => {
+                self.bindings.insert(host.clone(), binding.clone());
+            }
+            None => {
+                self.bindings.remove(host);
+                self.extra.remove(host);
+            }
+        }
+    }
+}
+
+/// One host's binding as a commit is to leave it, worked out before the commit, with the
+/// writes that commit it and the writes that put the binding before it back.
+pub(crate) struct Change {
+    host: HostId,
+    before: Option<Binding>,
+    after: Binding,
+    /// What the commit writes: nothing in file mode (the save after it writes the file), and
+    /// nothing when the store holds `after` already.
+    pub(crate) writes: Writes,
+    /// What a compensating commit writes to put `before` back.
+    pub(crate) undo: Writes,
+}
+
+/// Writes the bindings when they differ from what the file or the store holds.
 pub(crate) struct BindingStore {
-    path: PathBuf,
-    written: Mutex<BTreeMap<HostId, Binding>>,
+    keeper: Keeper,
+    written: Mutex<Held>,
 }
 
 impl BindingStore {
-    /// A store over `path`, whose file holds `current` (what [`load`] read).
+    /// A store over the file at `path`, which holds `current` (what [`load`] read).
     pub(crate) fn new(path: PathBuf, current: BTreeMap<HostId, Binding>) -> Self {
+        let held = Held {
+            bindings: current,
+            extra: BTreeMap::new(),
+        };
         Self {
-            path,
-            written: Mutex::new(current),
+            keeper: Keeper::File(path),
+            written: Mutex::new(held),
         }
     }
 
-    /// Makes the file hold what `current` returns, which is called with the store's lock
-    /// held so that the last save to write has read the newest bindings. Nothing is
-    /// written when the file already holds them; a failed
-    /// write leaves the old file and is retried by the next call, which finds the
-    /// bindings still different.
+    /// The bindings `store` holds under `hosts/binding/`, read once at start, and a store
+    /// over them. A value that cannot be read as written is a refusal, as a damaged file is.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be read, or a value is not a binding (the reason names its key).
+    pub(crate) fn in_store(
+        store: Arc<dyn Store>,
+    ) -> Result<(Self, BTreeMap<HostId, Binding>), String> {
+        let mut held = Held::default();
+        for (id, bytes) in host_keys::scan(&*store, BINDINGS)? {
+            let named = format!("{BINDINGS}{id}");
+            let stored: Stored = host_keys::decode(&named, &bytes)?;
+            let read = stored.into_binding(id);
+            let (host, binding, extra) = read.map_err(|reason| format!("{named}: {reason}"))?;
+            held.extra.insert(host.clone(), extra);
+            held.bindings.insert(host, binding);
+        }
+        let bindings = held.bindings.clone();
+        let kept = Self {
+            keeper: Keeper::Store(store),
+            written: Mutex::new(held),
+        };
+        Ok((kept, bindings))
+    }
+
+    /// Whether the bindings are kept in the file (no store setting).
+    pub(crate) fn in_file(&self) -> bool {
+        matches!(self.keeper, Keeper::File(_))
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Held> {
+        self.written.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Makes the file or the store hold what `current` returns, which is called with the
+    /// store's lock held so that the last save to write has read the newest bindings.
+    /// Nothing is written when they hold it already; a failed write leaves them as they
+    /// were and is retried by the next call, which finds the bindings still different. The
+    /// store is written in one transaction: a put for each binding that changed, a delete
+    /// for each host that has none any more.
     pub(crate) fn save<F>(&self, current: F) -> io::Result<()>
     where
         F: FnOnce() -> BTreeMap<HostId, Binding>,
     {
-        let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut written = self.lock();
         let bindings = current();
-        if *written == bindings {
+        if written.bindings == bindings {
             return Ok(());
         }
-        replace(&self.path, render(&bindings)?.as_bytes())?;
-        *written = bindings;
+        match &self.keeper {
+            Keeper::File(path) => replace(path, render(&bindings)?.as_bytes())?,
+            Keeper::Store(store) => host_keys::commit(&**store, written.writes_to(&bindings))?,
+        }
+        let Held {
+            bindings: held,
+            extra,
+        } = &mut *written;
+        extra.retain(|host, _| bindings.contains_key(host));
+        *held = bindings;
         Ok(())
+    }
+
+    /// The change that makes `host`'s binding `after`. Its writes are empty in file mode and
+    /// when the store holds `after` already; otherwise they put `after`, and its undo puts
+    /// back what the store holds now.
+    pub(crate) fn change(&self, host: &HostId, after: Binding) -> Change {
+        let written = self.lock();
+        let before = written.bindings.get(host).cloned();
+        let stored = matches!(self.keeper, Keeper::Store(_));
+        let (writes, undo) = match stored && before.as_ref() != Some(&after) {
+            true => (
+                vec![written.write(host, Some(&after))],
+                vec![written.write(host, before.as_ref())],
+            ),
+            false => (Writes::new(), Writes::new()),
+        };
+        Change {
+            host: host.clone(),
+            before,
+            after,
+            writes,
+            undo,
+        }
+    }
+
+    /// Commits `writes` to the store in one transaction. A file keeps nothing here (its
+    /// writes are empty): the save after the change writes it.
+    ///
+    /// # Errors
+    ///
+    /// The store failed or refused the transaction: nothing was written.
+    pub(crate) fn commit(&self, writes: Writes) -> io::Result<()> {
+        match &self.keeper {
+            Keeper::File(_) => Ok(()),
+            Keeper::Store(store) => host_keys::commit(&**store, writes),
+        }
+    }
+
+    /// Holds `change` as the store holds it once its writes are committed. Nothing in file
+    /// mode, where what the file holds changes only when [`BindingStore::save`] writes it.
+    pub(crate) fn applied(&self, change: &Change) {
+        self.hold(&change.host, Some(&change.after));
+    }
+
+    /// Holds the binding before `change` once its undo is committed. Nothing in file mode.
+    pub(crate) fn undone(&self, change: &Change) {
+        self.hold(&change.host, change.before.as_ref());
+    }
+
+    fn hold(&self, host: &HostId, binding: Option<&Binding>) {
+        if let Keeper::Store(_) = self.keeper {
+            self.lock().hold(host, binding);
+        }
     }
 }
 

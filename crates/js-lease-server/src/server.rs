@@ -17,14 +17,12 @@ use tracing::{error, info, warn};
 
 use crate::adapt::{BoxedPool, SharedClock};
 use crate::admit::{Admit, Launching};
-use crate::agents::{Agents, assemble};
+use crate::agents::{Agents, assemble_in};
 use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
 use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
-use crate::config::{
-    Config, Hosts, JobListen, Limits, LiveClients, MetricsListen, TlsFiles, Token,
-};
+use crate::config::{Config, JobListen, Limits, LiveClients, MetricsListen, TlsFiles, Token};
 use crate::error::StartupError;
 use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
@@ -358,12 +356,13 @@ pub(crate) fn prepare(
     // the lease file is read, before the lease file is locked and before any listener.
     let store = store.map(ServerStore::open).transpose()?;
     if let Some(store) = &store {
-        store.refuse_agents(matches!(hosts, Hosts::Layered { .. }))?;
+        store.refuse_elastic(elastic.is_some())?;
     }
     let bookings =
         read_bookings(&state_file).map_err(|err| StartupError::new("--state-file", err))?;
     let logs = crate::logs::from_config(&logs, clock);
-    let (source, agents) = assemble(hosts, usage, clock, &state_file, logs)?;
+    let kept = (state_file.as_path(), store.as_ref());
+    let (source, agents) = assemble_in(hosts, usage, clock, kept, logs)?;
     let launching = elastic.iter().map(|plan| Launching {
         provider: Arc::clone(&plan.provider),
         share: plan.share,
@@ -796,8 +795,10 @@ impl Running {
     }
 
     /// How many times the agent side could not read or write one of its files since the
-    /// server started: the join token file that could not be read again at a tick, and
-    /// the file of bindings that could not be written. Always 0 without agent flags.
+    /// server started: the join token file that could not be read again at a tick, the
+    /// file of bindings (or, with a store setting, the store) that could not be written, and
+    /// the credential times a tick could not commit to the store. Always 0 without agent
+    /// flags.
     pub fn agent_errors(&self) -> u64 {
         self.shared.agent_errors()
     }

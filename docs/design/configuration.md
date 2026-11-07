@@ -134,8 +134,8 @@ engine's rule instead: the registry's book takes each host's whole `[shape]` mem
 
 `--store <path>` (`server.store`) is the `store` setting of the design ([jobscheduler-design.md](jobscheduler-design.md), section 4.1:
 "The Postgres connection, as a path to a file that holds it. SQLite is accepted only for tests and single-node development."). It is
-optional for now, and nothing of the server's state is kept in the store yet: the lease file, the files beside it and the usage file
-are kept as without it.
+optional for now. With it the host bindings and the join tokens' digests are kept in the store (see "What it keeps" below); the lease
+file, the job store and the usage file are kept as without it.
 
 - **The file.** One line: `postgres://...` or `postgresql://...` for Postgres, or `sqlite:<absolute path>` for SQLite. Blank lines and
   the whitespace around the line are ignored; anything else (two lines, another scheme, a relative path) is refused. The file must be
@@ -158,9 +158,19 @@ are kept as without it.
   nothing more (there is no final tick), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. Taking the
   lock also takes the store's next writer generation, and every commit checks it: once another process takes the lock, no commit of
   this one succeeds, between ticks too.
-- **Not yet.** Until the server's state moves into the store, a server that registers agents (an elastic pool, a `joined` pool or
-  `--agent-pool-config`) is refused at start with a store setting, after the lock is taken and before any listener is bound:
-  `--store: store-backed server state is not available yet for a server that registers agents ...`.
+- **What it keeps.** The host bindings (with each host's taint and cordon) and the digests of the join tokens and host credentials:
+  `hosts/binding/<host id>` and `hosts/join/<digest>`, each a JSON object with a `version`, whose unknown fields are kept and written
+  back. They are read once at start, after the lock; `<state file>.agents` and `.joins` are then neither read nor written (files left
+  from a server without the setting are not imported). Each change is committed before the server holds it: a hello that uses a token
+  commits the use and the host's binding in one transaction, and a refused hello gives both back in one more; a taint, a cordon or its
+  lift, a mint and a revoke each commit first. A failed commit changes nothing and is answered as the failed file write of the same
+  change is, or with 503 `state-write-failed` where no file write is checked (a hello with a pool token, a heartbeat's taint). A
+  heartbeat that brings no new taint, a known host's hello and the host book make no store call (a known host's hello commits only when
+  its stored binding still holds a cordon that lapsed since the last tick); a host credential's renewed time is committed by the tick.
+  The lease file, the job store and the usage database stay where they are.
+- **Not yet.** Until the scaler's records move into the store, a server with an elastic pool is refused at start with a store setting,
+  after the lock is taken and before any listener is bound: `--store: store-backed server state is not available yet for a server with
+  an elastic pool; ...`.
 
 ```toml
 [server]

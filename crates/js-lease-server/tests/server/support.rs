@@ -15,11 +15,14 @@ use js_lease_server::{
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::Pool;
+use js_state::Store;
 use js_testkit::dir::TestDir;
 use js_types::ProviderId;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+use crate::store_support::{sqlite_line, store_file};
 
 /// The wall time every test clock starts at.
 pub const T0: u64 = 1_000_000;
@@ -587,4 +590,72 @@ fn scratch_directories_of_one_name_differ() {
     assert_ne!(first.dir, second.dir);
     first.write("mine", "x", 0o600);
     assert!(!second.path("mine").exists());
+}
+
+/// Where a server keeps its host bindings and join tokens: in the files beside the lease
+/// file, or in a SQLite state store with the dev flag (`--store`, `--allow-sqlite-store`).
+/// A restart test that touches them runs in both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    Files,
+    Store,
+}
+
+impl Kept {
+    /// Both, the files first.
+    pub const BOTH: [Kept; 2] = [Kept::Files, Kept::Store];
+
+    /// Where the server `h` keeps them.
+    pub fn of(h: &Harness) -> Kept {
+        match h.running.store() {
+            Some(_) => Kept::Store,
+            None => Kept::Files,
+        }
+    }
+
+    /// `args` with, in the store, `--store` naming a SQLite store in `scratch` and the dev
+    /// flag.
+    pub fn args(self, scratch: &Scratch, mut args: Vec<OsString>) -> Vec<OsString> {
+        if self == Kept::Store {
+            let file = store_file(scratch, &sqlite_line(scratch));
+            args.extend(["--store".into(), file.into_os_string()]);
+            args.push("--allow-sqlite-store".into());
+        }
+        args
+    }
+
+    /// A scratch name of this mode: `name` for the files, with `_store` after it for the
+    /// store, so the two runs of a test do not share a name.
+    pub fn named(self, name: &str) -> String {
+        match self {
+            Kept::Files => name.to_owned(),
+            Kept::Store => format!("{name}_store"),
+        }
+    }
+}
+
+/// What `h` keeps of its host bindings, as text: the file `<state file>.agents` (empty when
+/// there is none), or, with a store, each key under `hosts/binding/` and its value, one per
+/// line. A test reads it for a host id, a digest or a field.
+pub fn kept_bindings(h: &Harness) -> String {
+    kept(h, ".agents", "hosts/binding/")
+}
+
+/// What `h` keeps of its join tokens, as [`kept_bindings`] reads the bindings: the file
+/// `<state file>.joins`, or the keys under `hosts/join/` and their values.
+pub fn kept_joins(h: &Harness) -> String {
+    kept(h, ".joins", "hosts/join/")
+}
+
+fn kept(h: &Harness, suffix: &str, prefix: &str) -> String {
+    let Some(store) = h.running.store() else {
+        let mut path = h.scratch.state().into_os_string();
+        path.push(suffix);
+        return fs::read_to_string(PathBuf::from(path)).unwrap_or_default();
+    };
+    let rows = store.scan_prefix(prefix).unwrap().into_iter();
+    let line = |(key, row): (String, js_state::Versioned)| {
+        format!("{key} {}\n", String::from_utf8_lossy(&row.value))
+    };
+    rows.map(line).collect()
 }

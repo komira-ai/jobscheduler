@@ -1,4 +1,11 @@
-//! The hello route with a one-time token, when two hellos of one host interleave.
+//! The hello route with a one-time token, when what a second hello does lands in the seam
+//! of the first, between the token's use and the registry's answer.
+//!
+//! Through the route that cannot happen any more: the route takes its hellos one at a time
+//! ([`Agents::host_writes`], see `agent_api_store_tests.rs` for the test of that). These
+//! tests run the second hello's steps in the seam itself, past the route's gate, so the
+//! guards of the join tokens (a use given back only when no hello was admitted again since)
+//! and of the registry are still each held to what they promise on their own.
 
 use std::collections::BTreeMap;
 use std::path::Path;

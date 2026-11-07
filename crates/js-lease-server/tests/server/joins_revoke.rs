@@ -5,9 +5,11 @@ use std::fs;
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, hosts, listed, restarted, session, start_agents};
+use crate::agents_support::{
+    JOIN, hosts, listed, restarted, session, start_agents, start_agents_in,
+};
 use crate::joins::{MINT, beat_with, code, hello, minted};
-use crate::support::{Harness, LogCapture, Reply, TOKEN, request};
+use crate::support::{Harness, Kept, LogCapture, Reply, TOKEN, kept_joins, request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -28,10 +30,18 @@ fn joins_file(h: &Harness) -> std::path::PathBuf {
 /// hello of the same host, also after a restart; that the file holds no row for it; and
 /// that the host it registered stays listed (the registry's own retention ends that),
 /// and a token minted afterwards for the instance works. It catches a used token that
-/// stays a credential after its instance is gone, and a revoke kept in memory only.
+/// stays a credential after its instance is gone, and a revoke kept in memory only. It
+/// runs with the tokens in the file and in the state store; in the store it reads the
+/// rows and checks that no file is written.
 #[tokio::test]
 async fn a_revoked_used_token_is_refused() {
-    let h = start_agents("joins_revoke_used", false).await;
+    for kept in Kept::BOTH {
+        a_revoked_used_token_is_refused_in(kept).await;
+    }
+}
+
+async fn a_revoked_used_token_is_refused_in(kept: Kept) {
+    let h = start_agents_in("joins_revoke_used", false, kept).await;
     let token = minted(&h, "i-1").await;
     let held = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
     assert_eq!(beat_with(&h, &token, &held).await.status, 200);
@@ -44,11 +54,10 @@ async fn a_revoked_used_token_is_refused() {
         assert_eq!(refused.status, 401, "{}", refused.body);
         assert!(refused.body.is_empty(), "{}", refused.body);
     }
-    assert!(
-        !fs::read_to_string(joins_file(&h))
-            .unwrap()
-            .contains("burst-1")
-    );
+    assert!(!kept_joins(&h).contains("burst-1"));
+    if kept == Kept::Store {
+        assert!(!joins_file(&h).exists());
+    }
     assert_eq!(listed(&hosts(&h).await), ["burst-1"]);
 
     let h = restarted(h, false).await;
