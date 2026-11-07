@@ -1,5 +1,6 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
-//! read as it is in the repository. Two jobs: `build` runs on pull requests and by hand,
+//! read as it is in the repository. Two jobs: `build` runs when ci.yml calls the workflow (on
+//! a pull request its filter selects) and by hand,
 //! holds no secret and signs nothing; `sign` runs only by hand from main, in the protected
 //! environment `macos-signing`, takes the checked unsigned package from `build` without
 //! rebuilding, and is the only place a secret is named, on the steps that sign and
@@ -78,19 +79,64 @@ fn the_workflow_has_a_build_job_and_a_sign_job() {
     assert_eq!(names, ["build", "sign"]);
 }
 
-#[test]
-fn the_workflow_starts_on_a_pull_request_and_by_hand_only() {
-    let text = read(WORKFLOW);
-    let on: Vec<&str> = text
-        .lines()
+/// The lines of the `on:` block, without comments.
+fn on_block(text: &str) -> Vec<&str> {
+    text.lines()
         .skip_while(|l| *l != "on:")
         .skip(1)
         .take_while(|l| l.starts_with("  ") || l.starts_with('#') || l.is_empty())
-        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        .filter(|l| l.starts_with("  ") && !l.trim_start().starts_with('#'))
+        .collect()
+}
+
+#[test]
+fn the_workflow_starts_when_ci_calls_it_and_by_hand_only() {
+    let text = read(WORKFLOW);
+    let on: Vec<&str> = on_block(&text)
+        .into_iter()
+        .filter(|l| !l.starts_with("   "))
         .map(str::trim)
         .collect();
-    assert_eq!(on, ["pull_request:", "workflow_dispatch:"]);
+    assert_eq!(on, ["workflow_call:", "workflow_dispatch:"]);
+    // No trigger of its own on a pull request: ci.yml's filter decides when it runs there.
+    assert!(!text.contains("pull_request:"));
     assert!(!text.contains("pull_request_target"));
+}
+
+#[test]
+fn a_call_takes_an_optional_version_and_no_secret() {
+    let text = read(WORKFLOW);
+    let call: Vec<&str> = on_block(&text)
+        .into_iter()
+        .skip_while(|l| l.trim() != "workflow_call:")
+        .skip(1)
+        .take_while(|l| l.starts_with("   "))
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        call,
+        [
+            "inputs:",
+            "version:",
+            "description: The package version, MAJOR.MINOR.PATCH; 0.0.0 when not given",
+            "required: false",
+            "type: string",
+        ]
+    );
+    // An absent version is 0.0.0, for a call and for nothing else.
+    assert!(
+        text.contains("  VERSION: ${{ inputs.version || '0.0.0' }}\n"),
+        "the version"
+    );
+}
+
+#[test]
+fn a_newer_push_to_a_pull_request_cancels_its_older_build_and_manual_runs_queue() {
+    let text = read(WORKFLOW);
+    assert!(
+        text.contains("\nconcurrency:\n  group: js-agent-macos-pkg-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"),
+        "the workflow's concurrency"
+    );
 }
 
 #[test]

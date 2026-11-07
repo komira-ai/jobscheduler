@@ -9,7 +9,7 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
 2. `ci-passed` waits for the jobs of the `ci` run of that commit, all but the one named `macos` (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
-   and passes when every other job succeeded or was skipped, even while `macos` is still queued or after it failed.
+   and passes when every other job succeeded or was skipped, even while `macos` is still queued or after it failed. (`macos-pkg` and `macos-result` run only on pull requests, so on main they are skipped.)
    If any other job failed, was cancelled or timed out, the release fails with an error naming those jobs and the `ci`
    run, and nothing is released. It holds `actions: read` and nothing else, and checks out no code.
    A release therefore does not wait for macOS `ci`: that job queues for hours on the hosted macOS runners, so

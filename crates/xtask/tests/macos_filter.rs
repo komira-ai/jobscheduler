@@ -1,9 +1,13 @@
-//! The macos job's filter in `.github/workflows/ci.yml` (the `changes` job). The script of
-//! its `filter` step is taken from the workflow text and run by `bash` against small git
+//! The filter of the macOS jobs in `.github/workflows/ci.yml` (the `changes` job). The script
+//! of its `filter` step is taken from the workflow text and run by `bash` against small git
 //! repositories, so each trigger is pinned by what it does: a push to main always runs the
-//! job; a pull request runs it only when it carries the label `macos`, changes a path that
-//! names darwin, apple, macos or seatbelt (any case), a `js-mac-*` crate, a file of `js-bundle` or `js-bundle-cli`, or ci.yml, or
-//! adds or removes a `target_os = "macos"` or `target_vendor = "apple"` line; and a diff that cannot be computed runs it.
+//! jobs; a pull request runs them only when it carries the label `macos`, changes a path that
+//! names darwin, apple, macos or seatbelt (any case), a file of the Mac and service-manager
+//! surface (a `js-mac-*` crate, `js-bundle`, `js-bundle-cli`, `js-oci`, `js-contain`,
+//! `js-update-hook`, js-agent's native runtime and update hook, js-treestore's macOS code,
+//! xtask's package, release-stage and hostkeeper-package code, the toolchain pin, ci.yml,
+//! release.yml or a manual macOS workflow), or adds or removes a `target_os = "macos"` or
+//! `target_vendor = "apple"` line; and a diff that cannot be computed runs them.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -250,12 +254,157 @@ fn a_change_to_the_toolchain_pin_runs_the_job_and_one_to_the_lockfile_does_not()
 }
 
 #[test]
-fn a_change_to_the_workflow_that_defines_the_job_runs_it() {
-    assert_eq!(pr("ci", &[(".github/workflows/ci.yml", "# c\n")]), "true");
-    assert_eq!(
-        pr("rel", &[(".github/workflows/release.yml", "# c\n")]),
-        "false"
-    );
+fn a_change_to_a_workflow_that_builds_or_checks_macos_code_runs_the_jobs() {
+    for (i, path) in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+        ".github/workflows/js-agent-macos-pkg.yml",
+        ".github/workflows/js-mac-pool-privileged-tests.yml",
+        ".github/workflows/js-mac-provision-privileged-tests.yml",
+        ".github/workflows/js-agent-native-privileged-tests.yml",
+        ".github/workflows/js-agent-native-isolation-test.yml",
+        ".github/workflows/js-treestore-privileged-tests.yml",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(pr(&format!("wf{i}"), &[(path, "# c\n")]), "true", "{path}");
+    }
+    // A Linux workflow does not.
+    for (i, path) in [
+        ".github/workflows/js-agent-deb.yml",
+        ".github/workflows/js-agent-crun-runtime.yml",
+        ".github/workflows/egress-spike.yml",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("linuxwf{i}"), &[(path, "# c\n")]),
+            "false",
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_change_to_the_service_manager_and_self_update_code_runs_the_jobs() {
+    for (i, path) in [
+        // The launchd units, the step runner and the hook contract.
+        "crates/js-update-hook/src/launch_units.rs",
+        "crates/js-update-hook/src/runner.rs",
+        "crates/js-update-hook/tests/launchd.rs",
+        "crates/js-update-hook/Cargo.toml",
+        // The agent's update hook (the self-update) and its tests and fake.
+        "crates/js-agent/src/update_hook/machine.rs",
+        "crates/js-agent/src/update_hook/step/cutover.rs",
+        "crates/js-agent/tests/agent/update_hook/steps_cutover_launchd.rs",
+        "crates/js-agent/tests/update_hook_fakes/ports.rs",
+        "crates/js-agent/tests/bin/update_hook_fake.rs",
+        // The container runtime's crate.
+        "crates/js-contain/src/oci/mod.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("svc{i}"), &[(path, "fn a() {}\n")]),
+            "true",
+            "{path}"
+        );
+    }
+    // A name that only starts like one of them does not count.
+    for (i, path) in [
+        "crates/js-update-hooks/src/lib.rs",
+        "crates/js-container/src/lib.rs",
+        "crates/js-agent/src/update_hooks.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("notsvc{i}"), &[(path, "fn a() {}\n")]),
+            "false",
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_change_to_the_agent_s_native_runtime_runs_the_jobs_and_one_to_its_linux_code_does_not() {
+    for (i, path) in [
+        "crates/js-agent/src/native/profile.rs",
+        "crates/js-agent/src/native/pf.rs",
+        "crates/js-agent/tests/agent/native/fake_helper.rs",
+        "crates/js-agent/tests/native_privileged.rs",
+        "crates/js-agent/tests/native_isolation/main.rs",
+        "crates/js-agent/tests/native_inbound_pf/main.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("native{i}"), &[(path, "fn a() {}\n")]),
+            "true",
+            "{path}"
+        );
+    }
+    for (i, path) in [
+        "crates/js-agent/src/crun/mod.rs",
+        "crates/js-agent/src/egress/mod.rs",
+        "crates/js-agent/tests/crun_runtime/main.rs",
+        "crates/js-agent/tests/agent/crun.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("linux{i}"), &[(path, "fn a() {}\n")]),
+            "false",
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_change_to_xtask_s_macos_package_and_release_code_runs_the_jobs() {
+    for (i, path) in [
+        "crates/xtask/src/macpkg.rs",
+        "crates/xtask/src/pkg.rs",
+        "crates/xtask/src/release/hostkeeper_package.rs",
+        "crates/xtask/src/release/hostkeeper_package/macos.rs",
+        "crates/xtask/src/release/hostkeeper_index.rs",
+        "crates/xtask/src/release/stage.rs",
+        "crates/xtask/tests/hostkeeper_package/install.rs",
+        "crates/xtask/tests/hostkeeper_package_cli.rs",
+        "crates/xtask/tests/release_stage.rs",
+        "crates/xtask/tests/pkg.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("xtask{i}"), &[(path, "fn a() {}\n")]),
+            "true",
+            "{path}"
+        );
+    }
+    // The rest of xtask does not.
+    for (i, path) in [
+        "crates/xtask/src/release/plan.rs",
+        "crates/xtask/src/site_changed.rs",
+        "crates/xtask/src/pkgs.rs",
+        "crates/xtask/tests/release_plan.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            pr(&format!("notxtask{i}"), &[(path, "fn a() {}\n")]),
+            "false",
+            "{path}"
+        );
+    }
 }
 
 #[test]
