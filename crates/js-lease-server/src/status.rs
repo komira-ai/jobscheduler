@@ -21,7 +21,9 @@
 //!
 //! The machines, the figures of what they cost, the orphans and the last launch are the
 //! scaler's records for the pool (what its last tick left), so they are empty for a pool
-//! that has launched nothing, and in `plan` mode. A record holds no secret: it names a
+//! that has launched nothing, and in `plan` mode. So are the offer cool-downs
+//! (`offer_cooldowns`: provider, instance type, zone, `until_ms`, the host and the
+//! dimensions its hello failed), which are left out of the reply while there is none. A record holds no secret: it names a
 //! machine, its provider id, its offer and its price. `idle_since_ms` of the design is not
 //! shown: the scaler does not give out since when a host has been quiet.
 
@@ -31,7 +33,7 @@ use std::sync::{Arc, PoisonError};
 use js_elastic::Demand;
 use js_lease::{Clock, Timestamp};
 use js_registry::Registry;
-use js_scaler::{LaunchMode, Millis, Phase, Record, Records};
+use js_scaler::{HelloDimension, LaunchMode, Millis, Phase, Record, Records};
 use js_types::ExecMode;
 use serde::Serialize;
 
@@ -97,6 +99,11 @@ pub(crate) struct PoolView {
     pub(crate) last_launch: Option<LaunchView>,
     pub(crate) machines: Vec<MachineView>,
     pub(crate) orphans: Vec<OrphanView>,
+    /// The offers of the pool cooling down because a machine's hello did not match them
+    /// (design 5.6.1, step 6). Left out while there is none, so the reply is then as it was
+    /// before the field.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) offer_cooldowns: Vec<OfferCooldownView>,
     /// What an operator must act on, as the scaler's last tick left it: a stuck revoke or
     /// removal, a release the provider does not confirm, an orphan, a silent host that
     /// nothing releases.
@@ -146,6 +153,23 @@ pub(crate) struct MachineView {
 pub(crate) struct OrphanView {
     pub(crate) host: String,
     pub(crate) provider_id: Option<String>,
+}
+
+/// An offer cooling down because the hello of a machine acquired for it did not match it.
+/// It holds no credential: it names the offer, the host and what failed.
+#[derive(Debug, Serialize)]
+pub(crate) struct OfferCooldownView {
+    pub(crate) provider: String,
+    /// The provider's instance type.
+    pub(crate) offer: String,
+    pub(crate) zone: Option<String>,
+    /// The first instant the offer is no longer cooling down, in milliseconds since the
+    /// epoch.
+    pub(crate) until_ms: u64,
+    /// The host whose hello did not match.
+    pub(crate) host: String,
+    /// Every dimension that failed, such as `accelerator_model` or `memory`.
+    pub(crate) failed: Vec<HelloDimension>,
 }
 
 /// One of the provider's own checks.
@@ -257,6 +281,23 @@ fn held(records: &Records, pool: &str) -> (Vec<MachineView>, Vec<OrphanView>, Op
     (machines, orphans, newest.map(|record| launch_view(record)))
 }
 
+/// The offer cool-downs the scaler's records hold for the pool `pool`.
+fn cooled(records: &Records, pool: &str) -> Vec<OfferCooldownView> {
+    records
+        .cooled_offers
+        .iter()
+        .filter(|cooled| cooled.pool == pool)
+        .map(|cooled| OfferCooldownView {
+            provider: cooled.provider.clone(),
+            offer: cooled.offer.clone(),
+            zone: cooled.zone.clone(),
+            until_ms: cooled.until.as_millis(),
+            host: cooled.host.clone(),
+            failed: cooled.failed.clone(),
+        })
+        .collect()
+}
+
 fn check_view(verdict: Option<Verdict>) -> Option<CheckView> {
     verdict.map(|verdict| CheckView {
         ok: verdict.reason.is_none(),
@@ -346,8 +387,9 @@ impl Status {
             State::Available => capped.and_then(|why| why.shown_name()),
             _ => Some("unavailable"),
         };
-        let records = scaled.map(|seen| seen.records);
-        let (machines, orphans, last_launch) = held(&records.unwrap_or_default(), &pool.name);
+        let records = scaled.map(|seen| seen.records).unwrap_or_default();
+        let (machines, orphans, last_launch) = held(&records, &pool.name);
+        let offer_cooldowns = cooled(&records, &pool.name);
         let spend = machines
             .iter()
             .map(|machine| machine.price_cents_per_hour)
@@ -376,6 +418,7 @@ impl Status {
             last_launch,
             machines,
             orphans,
+            offer_cooldowns,
             alerts: self.scaler.as_ref().map(Scaler::alerts).unwrap_or_default(),
             scaler: self.scaler.is_some(),
             last_tick_ms: self
@@ -513,6 +556,19 @@ fn pool_section(out: &mut String, pool: &PoolView) {
     );
     row(out, "instances", &held);
     row(out, "blocked", pool.blocked.unwrap_or("no"));
+    for cooled in &pool.offer_cooldowns {
+        let failed: Vec<&str> = cooled.failed.iter().map(|each| each.name()).collect();
+        let text = format!(
+            "{} of {} in {} until {} ms: host {} did not match in {}",
+            cooled.offer,
+            cooled.provider,
+            cooled.zone.as_deref().unwrap_or("any zone"),
+            cooled.until_ms,
+            cooled.host,
+            failed.join(", ")
+        );
+        row(out, "offer cooled down", &text);
+    }
     for alert in &pool.alerts {
         row(out, "alert", alert);
     }

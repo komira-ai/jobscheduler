@@ -840,6 +840,8 @@ impl Pass<'_> {
             silent_released: self.silent_released,
             launched: self.launched,
             refusals: self.refusals,
+            mismatched: self.mismatched,
+            unverified: self.unverified,
             acquire: self.memory,
             missing: self.missing_now,
             unheard: self.unheard_now,

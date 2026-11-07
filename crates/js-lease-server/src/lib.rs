@@ -292,7 +292,7 @@
 //! below); `quota_backoff` and `acquire_retry` (1h and 60s by default) time pass 2's failover;
 //! `catalog_refresh` (a positive duration, one hour, zero refused) is how long the provider's cached catalog is used before the tick fetches it
 //! again; `offer_cooldown` (the same) is how long an offer that is cooled down is passed
-//! over by the pick of an offer, which nothing enters yet; and `path_grace` is how long a
+//! over by the pick of an offer (a launched machine's hello that does not match its offer cools it down, see `js_scaler::verify_hello` and docs/design/configuration.md); `size_tolerance_percent` (0 to 50, 10 by default) is how far below the offer's CPU, memory and disk that hello may measure; and `path_grace` is how long a
 //! whole-node request of the pool waits once no host could serve it (the registry's
 //! `regain_grace` for that pool). The job pass of the tick (design 6.1) ends a queued job of
 //! the job tables past the pool's `max_queue_wait` as `no-capacity`, and a placed or

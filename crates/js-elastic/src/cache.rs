@@ -205,6 +205,22 @@ impl Cooldowns {
         *kept = (*kept).max(end);
     }
 
+    /// Cools `key` down until `end`, an end decided and written down earlier (a cool-down
+    /// read back after a restart). A key already cooling down keeps the later of its end and
+    /// `end`, as [`Cooldowns::cool_down`] does.
+    pub fn hold_until(&mut self, key: OfferKey, end: Instant) {
+        let kept = self.ends.entry(key).or_insert(end);
+        *kept = (*kept).max(end);
+    }
+
+    /// Takes in every cool-down of `other`, each to its end ([`Cooldowns::hold_until`]): a key
+    /// held by both keeps the later end.
+    pub fn merge(&mut self, other: &Self) {
+        for (key, end) in &other.ends {
+            self.hold_until(key.clone(), *end);
+        }
+    }
+
     /// Whether `key` is cooling down at `now`: `now` is before its end. At the end instant
     /// it no longer is.
     pub fn is_cooled_down(&self, key: &OfferKey, now: Instant) -> bool {
