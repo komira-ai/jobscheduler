@@ -165,7 +165,7 @@ async fn a_scrape_answers_200_in_the_text_format_on_its_own_port_only() {
         404
     );
     assert_eq!(
-        request(addr, "GET", "/v1/leases", Some(TOKEN), None)
+        request(addr, "GET", "/v1/hosts", Some(TOKEN), None)
             .await
             .status,
         404

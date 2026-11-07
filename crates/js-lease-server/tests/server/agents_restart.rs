@@ -1,5 +1,5 @@
-//! A restart over the same files with registered hosts: the leases, the bindings, and
-//! the file the bindings are kept in.
+//! A restart over the same files with registered hosts: the jobs and the restored leases on
+//! them, the bindings, and the file the bindings are kept in.
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -11,12 +11,15 @@ use js_registry::Credential;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, JOIN_B, agent_args, beat, entry, hello_body, hello_with, hosts, join, listed, post,
-    restarted, start_agents, start_agents_in,
+    JOIN, JOIN_B, Session, agent_args, beat, entry, hello_with, hosts, job_hello, join, listed,
+    post, restarted_job_hosts, session, start_agents, start_agents_in, start_job_hosts_in,
+};
+use crate::jobs_support::{
+    JobBody, beat_with, commands, exited, job_agent, job_state, one_start, running, submit_body,
 };
 use crate::support::{
-    Harness, Kept, LogCapture, Scratch, base_args, config, ids, kept_bindings, lease_body,
-    lease_file, replace, start,
+    Harness, Kept, LogCapture, Scratch, base_args, config, kept_bindings, lease_file, replace,
+    start,
 };
 
 fn secs(n: u64) -> Duration {
@@ -30,100 +33,121 @@ fn agent_file(scratch: &Scratch) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Asserts what a restart does to a lease on a registered host. The lease stays held on
-/// the same host and is not freed by ticks while the host is not heard; the host reads
-/// `awaiting` and takes no new lease; the old session is dead (409 `unknown-host`, and a
-/// secret from before the restart does not open the new session); the agent's hello is
-/// admitted, the lease then lives on the live host and can be released. It
-/// catches a restart that drops the lease, one that lets a new lease take the awaiting
-/// host, and an old session that survives the process. It runs with the bindings in files
-/// and in the state store, and catches in the store a restart that loses the lease's host
-/// or its session handling because the binding was not read back.
+/// Submits the job `id` (6 of a host's 8 cores), ticks, and returns the allocation the next
+/// heartbeat of `host` is told to start it under; the job is then running on the host.
+async fn running_on(h: &Harness, host: &Session, id: &str) -> String {
+    let made = submit_body(h, &JobBody::new(id).needs(6000, 1 << 30).json()).await;
+    assert_eq!(made.status, 201, "{}", made.body);
+    h.ticks.step().await;
+    let (job, allocation) = one_start(&beat_with(h, host, &[]).await);
+    assert_eq!(job, id);
+    beat_with(h, host, &[running(id)]).await;
+    allocation
+}
+
+/// A host of the pool that speaks the per-job messages, admitted with the pool's join token.
+async fn job_host(h: &Harness, host: &str) -> Session {
+    job_agent(h, &job_hello(host)).await
+}
+
+/// The heartbeat of `host` that reports a taint, which the server acknowledges. A tainted
+/// host is what a restart seats again from its binding.
+async fn taint(h: &Harness, host: &Session) {
+    let mut body = host.beat();
+    body["taint"] = json!({ "reason": "residue", "check": "tmp" });
+    let sent = post(h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+    assert_eq!(sent.status, 200, "{}", sent.body);
+    assert_eq!(sent.json()["taint_ack"], true, "{}", sent.body);
+}
+
+/// Asserts what a restart does to a tainted registered host that runs a job. The job stays
+/// running and is not ended by ticks while the host is not heard; the host reads `awaiting`;
+/// the old session is dead (409 `unknown-host`, and a secret from
+/// before the restart does not open the new session); the agent's hello is admitted, and the
+/// job then lives on the live host and its end, reported by the agent, is accepted. It
+/// catches a restart that drops the host, one that lets a new job take the awaiting host,
+/// and an old session that survives the process. It runs with the bindings in files and in
+/// the state store, and catches in the store a restart that loses the host or its session
+/// handling because the binding was not read back.
 #[tokio::test]
-async fn restart_keeps_lease_on_registered_host_as_unknown_until_rehello() {
+async fn restart_keeps_a_registered_host_as_unknown_until_rehello() {
     for kept in Kept::BOTH {
-        restart_keeps_lease_on_registered_host_as_unknown_until_rehello_in(kept).await;
+        restart_keeps_a_registered_host_as_unknown_until_rehello_in(kept).await;
     }
 }
 
-async fn restart_keeps_lease_on_registered_host_as_unknown_until_rehello_in(kept: Kept) {
-    let first = start_agents_in("agents_restart_lease", false, kept).await;
-    let old = join(&first, "burst-1").await;
-    let granted = first.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.json()["host"], "burst-1");
+async fn restart_keeps_a_registered_host_as_unknown_until_rehello_in(kept: Kept) {
+    let first = start_job_hosts_in("agents_restart_lease", kept).await;
+    let old = job_host(&first, "burst-1").await;
+    let allocation = running_on(&first, &old, "job-1").await;
+    taint(&first, &old).await;
 
-    let h = restarted(first, false).await;
+    let h = restarted_job_hosts(first).await;
     assert_eq!(Kept::of(&h), kept);
     assert!(kept_bindings(&h).contains("burst-1"));
     if kept == Kept::Store {
         assert!(!agent_file(&h.scratch).exists());
     }
-    let leases = h.call("GET", "/v1/leases", None).await.json();
-    assert_eq!(leases["leases"][0]["id"], "1-1");
-    assert_eq!(leases["leases"][0]["state"], "held");
-    assert_eq!(leases["leases"][0]["host"], "burst-1");
     let waiting = entry(&hosts(&h).await, "burst-1");
     assert_eq!(
         (waiting["state"].clone(), waiting["lost"].clone()),
         (json!("awaiting"), json!(false))
     );
-    assert_eq!(waiting["lease"], "1-1");
     h.ticks.step().await;
-    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
-    let none = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(none.json(), json!({ "error": "no-capacity" }));
+    assert_eq!(job_state(&h, "job-1").await, "JOB_STATE_RUNNING");
 
     let heard = beat(&h, &old).await;
     assert_eq!(heard.status, 409, "{}", heard.body);
     assert_eq!(heard.json(), json!({ "error": "unknown-host" }));
-    let back = join(&h, "burst-1").await;
+    let back = job_host(&h, "burst-1").await;
     assert_eq!(back.epoch, 1);
     assert_ne!(back.secret, old.secret);
     let replayed = beat(&h, &old).await;
     assert_eq!(replayed.json(), json!({ "error": "session-mismatch" }));
-    assert_eq!(beat(&h, &back).await.status, 200);
+    let listed_again = beat_with(&h, &back, &[running("job-1")]).await;
+    assert_eq!(commands(&listed_again), (vec![], vec![]), "{listed_again}");
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
 
     h.ticks.step().await;
-    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
-    let released = h.call("DELETE", "/v1/leases/1-1", None).await;
-    assert_eq!(released.json(), json!({ "state": "freed" }));
-    let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(again.json()["host"], "burst-1");
+    assert_eq!(job_state(&h, "job-1").await, "JOB_STATE_RUNNING");
+    let ended = beat_with(&h, &back, &[exited("job-1", &allocation)]).await;
+    assert_eq!(
+        ended["job_acks"],
+        json!([{ "job_id": "job-1", "ack": "ACCEPTED" }])
+    );
+    assert_eq!(job_state(&h, "job-1").await, "JOB_STATE_SUCCEEDED");
 }
 
-/// Asserts that a lease on a registered host keeps its binding across a restart: after
-/// it, a hello for the host from another join token is refused 403 `host-bound` and the
-/// lease stays with the host that awaits its own agent, whose hello (the token the host
-/// was admitted with) is then admitted. It catches a restart that forgets the binding, so
-/// that the first hello from any holder of a join token takes the lease. It runs with the
-/// bindings in files and in the state store, and catches in the store a binding that is not
-/// read back at the start.
+/// Asserts that a tainted registered host keeps its binding across a restart: after it, a
+/// hello for the host from another join token is refused 403 `host-bound` and the host
+/// awaits its own agent, whose hello (the token the host was admitted with) is then
+/// admitted. It catches a restart that forgets the binding, so that the first hello from
+/// any holder of a join token takes the host. It runs with the bindings in files and in the
+/// state store, and catches in the store a binding that is not read back at the start.
 #[tokio::test]
-async fn restart_keeps_the_binding_so_another_token_cannot_take_the_lease() {
+async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host() {
     for kept in Kept::BOTH {
-        restart_keeps_the_binding_so_another_token_cannot_take_the_lease_in(kept).await;
+        restart_keeps_the_binding_so_another_token_cannot_take_the_host_in(kept).await;
     }
 }
 
-async fn restart_keeps_the_binding_so_another_token_cannot_take_the_lease_in(kept: Kept) {
-    let first = start_agents_in("agents_restart_binding", false, kept).await;
-    join(&first, "burst-1").await;
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
+async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host_in(kept: Kept) {
+    let first = start_job_hosts_in("agents_restart_binding", kept).await;
+    let host = job_host(&first, "burst-1").await;
+    taint(&first, &host).await;
 
-    let h = restarted(first, false).await;
+    let h = restarted_job_hosts(first).await;
     if kept == Kept::Store {
         assert!(!agent_file(&h.scratch).exists());
     }
-    let intruder = hello_with(&h, JOIN_B, "burst-1").await;
+    let intruder = post(&h, "/v1/agent/hello", Some(JOIN_B), &job_hello("burst-1")).await;
     assert_eq!(intruder.status, 403, "{}", intruder.body);
     assert_eq!(intruder.json(), json!({ "error": "host-bound" }));
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "awaiting");
 
-    let owner = hello_with(&h, JOIN, "burst-1").await;
+    let owner = post(&h, "/v1/agent/hello", Some(JOIN), &job_hello("burst-1")).await;
     assert_eq!(owner.status, 200, "{}", owner.body);
-    assert_eq!(entry(&hosts(&h).await, "burst-1")["lease"], "1-1");
-    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
 }
 
 /// Asserts that an instance identity is kept with the binding: a host admitted with an
@@ -140,21 +164,21 @@ async fn restart_keeps_the_instance_of_a_binding() {
 }
 
 async fn restart_keeps_the_instance_of_a_binding_in(kept: Kept) {
-    let first = start_agents_in("agents_restart_instance", false, kept).await;
-    let mut body = hello_body("burst-1");
+    let first = start_job_hosts_in("agents_restart_instance", kept).await;
+    let mut body = job_hello("burst-1");
     body["instance"] = json!({ "provider": "aws", "instance_id": "i-0abc" });
     let admitted = post(&first, "/v1/agent/hello", Some(JOIN), &body).await;
-    assert_eq!(admitted.status, 200, "{}", admitted.body);
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
+    let host = session(&admitted, "burst-1");
+    taint(&first, &host).await;
 
     assert!(kept_bindings(&first).contains("i-0abc"));
-    let h = restarted(first, false).await;
+    let h = restarted_job_hosts(first).await;
     if kept == Kept::Store {
         assert!(!agent_file(&h.scratch).exists());
     }
     let mut other = body.clone();
     other["instance"]["instance_id"] = json!("i-0def");
-    for refused in [other, hello_body("burst-1")] {
+    for refused in [other, job_hello("burst-1")] {
         let reply = post(&h, "/v1/agent/hello", Some(JOIN), &refused).await;
         assert_eq!(reply.status, 403, "{}", reply.body);
         assert_eq!(reply.json(), json!({ "error": "host-bound" }));
@@ -163,8 +187,8 @@ async fn restart_keeps_the_instance_of_a_binding_in(kept: Kept) {
     assert_eq!(own.status, 200, "{}", own.body);
 }
 
-/// Asserts that an awaiting host whose agent never returns is forgotten once its lease
-/// has ended and a grace period and the retention have passed since the restart that
+/// Asserts that an awaiting host whose agent never returns is forgotten once the restored
+/// lease on it has ended and a grace period and the retention have passed since the restart that
 /// seated it: it leaves the listing, its binding leaves the agent file at the tick, and
 /// its place in the pool is free for new hosts. Before that it is still listed, bound and
 /// counted. It catches an awaiting host that keeps its record, binding and `max_machines`
@@ -181,12 +205,16 @@ async fn an_awaiting_host_that_never_returns_is_forgotten_with_its_binding() {
 async fn an_awaiting_host_that_never_returns_is_forgotten_with_its_binding_in(kept: Kept) {
     let first = start_agents_in("agents_awaiting_forgotten", false, kept).await;
     join(&first, "burst-1").await;
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
-
-    let h = restarted(first, false).await;
+    let Harness {
+        running, scratch, ..
+    } = first;
+    running.shutdown().await.unwrap();
+    std::fs::write(scratch.state(), lease_file(&[(1, "held", Some("burst-1"))])).unwrap();
+    let args = kept.args(&scratch, agent_args(&scratch, false));
+    let h = Harness::with(scratch, replace(args, "--boot", "resume"), None).await;
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "awaiting");
     h.clock.advance(secs(7201));
     h.ticks.step().await;
-    assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
     assert_eq!(listed(&hosts(&h).await), ["burst-1"]);
     assert!(kept_bindings(&h).contains("burst-1"));
 
@@ -324,24 +352,13 @@ async fn a_binding_file_that_cannot_be_trusted_refuses_the_start() {
     let _h = Harness::with(scratch, args, None).await;
 }
 
-/// Asserts that the lease file is the same file with or without agents: a lease on a
-/// registered host is recorded in it as on a static host, with nothing of the bindings
-/// (no credential, no digest), so nothing in it needs the agent file to be read; and that
-/// a server started without the agent flags over those same files starts, leaves the
-/// agent file as it was, and (not knowing the host) drops the lease the table cannot
-/// find. It catches a lease file that carries the agent side's data and a server that
-/// cannot be started back without agents.
+/// Asserts that a server started without the agent flags over the files of one that had them
+/// starts, leaves the agent file as it was, and serves its host list. It catches a server
+/// that cannot be started back without agents.
 #[tokio::test]
-async fn the_lease_file_is_unchanged_by_agents_in_both_directions() {
+async fn a_server_started_without_agents_leaves_the_agent_file_as_it_was() {
     let first = start_agents("agents_compat", false).await;
     join(&first, "burst-1").await;
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
-    let lease_text = fs::read_to_string(first.scratch.state()).unwrap();
-    assert!(lease_text.contains("version = 1"), "{lease_text}");
-    assert!(lease_text.contains("host = \"burst-1\""), "{lease_text}");
-    let digest = Credential::of_token(JOIN).to_hex();
-    assert!(!lease_text.contains(&digest), "{lease_text}");
-    assert!(!lease_text.contains("credential"), "{lease_text}");
     let Harness {
         running, scratch, ..
     } = first;
@@ -350,15 +367,14 @@ async fn the_lease_file_is_unchanged_by_agents_in_both_directions() {
 
     let args = replace(base_args(&scratch), "--boot", "resume");
     let plain = Harness::with(scratch, args, None).await;
-    assert!(ids(&plain.call("GET", "/v1/leases", None).await).is_empty());
     assert_eq!(fs::read(agent_file(&plain.scratch)).unwrap(), before);
     assert_eq!(plain.call("GET", "/v1/hosts", None).await.status, 200);
 }
 
 /// Asserts what is done with bookings of the lease file that no source can seat: two
 /// leases on one static host (the lower id keeps it) and two on one unknown host (seated
-/// on the registry as an awaiting host, where the lower id keeps it) leave two leases,
-/// log the other two by id, and list the unknown host as awaiting. It catches a booking
+/// on the registry as an awaiting host, where the lower id keeps it) leave two leases on
+/// the hosts, log the other two by id, and list the unknown host as awaiting. It catches a booking
 /// handed to the wrong source, and one lost without a word.
 #[tokio::test]
 async fn bookings_nobody_can_seat_are_logged_and_dropped() {
@@ -373,11 +389,8 @@ async fn bookings_nobody_can_seat_are_logged_and_dropped() {
     fs::write(scratch.state(), lease_file(&leases)).unwrap();
     let args = replace(agent_args(&scratch, true), "--boot", "resume");
     let h = Harness::with(scratch, args, None).await;
-    assert_eq!(
-        ids(&h.call("GET", "/v1/leases", None).await),
-        ["1-1", "1-3"]
-    );
     let listing: Value = hosts(&h).await;
+    assert!(entry(&listing, "gpu-02").get("lease").is_none());
     assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
     assert_eq!(entry(&listing, "ghost-1")["state"], "awaiting");
     assert_eq!(entry(&listing, "ghost-1")["lease"], "1-3");

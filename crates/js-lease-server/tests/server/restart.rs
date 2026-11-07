@@ -1,5 +1,5 @@
-//! A restart over the same lease file, and over a job store restored from an older backup;
-//! and the job path, which has no lease and no time to live to keep.
+//! A restart over a lease file written by an earlier server, and over a job store restored
+//! from an older backup; and the job path, which has no lease and no time to live to keep.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -14,139 +14,32 @@ use js_state::sqlite::{Options, SqliteStore};
 use js_state::{ManualClock as StoreClock, SystemClock};
 use serde_json::json;
 
-use crate::agents_support::{JOIN, Session};
+use crate::agents_support::{JOB_POOL, JOIN, Session, entry, hosts, listed};
 use crate::jobs_support::{
     beat_with, commands, job_agent as shared_agent, job_of, one_start, running, submit_body,
 };
 use crate::support::{
-    Harness, LogCapture, Scratch, SharedPool, T0, TOKEN, args_with, base_args, config, ids,
-    lease_body, lease_file, replace, request,
+    Harness, LogCapture, Scratch, T0, TOKEN, args_with, base_args, config, lease_file, replace,
+    request,
 };
 
-/// Asserts that, over a provider that outlives both servers (a service of its own), a
-/// server started again with `--boot resume` over the lease file of one
-/// that stopped keeps the leases (the provider, which outlives both, still has them
-/// booked), never reissues an id of the first run, and places a new lease on the host
-/// left free.
-#[tokio::test]
-async fn resume_keeps_leases_and_never_reuses_ids() {
-    let pool = SharedPool::new();
-    let scratch = Scratch::new("resume");
-    let args = base_args(&scratch);
-    let first = Harness::with(scratch, args, Some(Box::new(pool.clone()))).await;
-    let granted = first.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.json()["id"], "1-1");
-    let Harness {
-        running, scratch, ..
-    } = first;
-    running.shutdown().await.unwrap();
-
-    let args = replace(base_args(&scratch), "--boot", "resume");
-    let second = Harness::with(scratch, args, Some(Box::new(pool))).await;
-    let listed = second.call("GET", "/v1/leases", None).await;
-    assert_eq!(ids(&listed), vec!["1-1"]);
-    assert_eq!(listed.json()["leases"][0]["state"], "held");
-    assert_eq!(listed.json()["leases"][0]["host"], "gpu-01");
-
-    let next = second.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(next.status, 201, "{}", next.body);
-    assert_eq!(next.json()["id"], "2-2");
-    assert_eq!(next.json()["host"], "gpu-02");
-
-    assert_eq!(
-        second.call("DELETE", "/v1/leases/1-1", None).await.json(),
-        json!({ "state": "freed" })
-    );
-}
-
-/// Asserts that a first boot over an existing lease file loads it like a resume.
+/// Asserts that a first boot over an existing lease file loads it like a resume: the lease
+/// the file holds on `gpu-01` is on that host in the host list, and `gpu-02` is free.
 #[tokio::test]
 async fn initialise_over_an_existing_file_loads_it() {
-    let pool = SharedPool::new();
     let scratch = Scratch::new("initialise_existing");
+    std::fs::write(scratch.state(), lease_file(&[(1, "held", Some("gpu-01"))])).unwrap();
     let args = args_with(&scratch, &[]);
-    let first = Harness::with(scratch, args.clone(), Some(Box::new(pool.clone()))).await;
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
-    let Harness {
-        running, scratch, ..
-    } = first;
-    running.shutdown().await.unwrap();
-
-    let second = Harness::with(scratch, args, Some(Box::new(pool))).await;
-    assert_eq!(
-        ids(&second.call("GET", "/v1/leases", None).await),
-        vec!["1-1"]
-    );
-}
-
-/// Asserts that a server whose lease file has used its last sequence answers an acquire
-/// 503 `ids-exhausted`, books nothing and leaves the file as it was: the table can issue
-/// no lease until the operator restores the state file.
-#[tokio::test]
-async fn an_acquire_after_the_last_lease_id_is_503() {
-    let scratch = Scratch::new("ids_exhausted");
-    let head = format!(
-        "version = 1\nterm = 1\nnext_sequence = {}\nlease_count = 0\n",
-        i64::MAX
-    );
-    std::fs::write(scratch.state(), &head).unwrap();
-    let args = replace(base_args(&scratch), "--boot", "resume");
     let h = Harness::with(scratch, args, None).await;
-    let refused = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(refused.status, 503, "{}", refused.body);
-    assert_eq!(refused.json(), json!({ "error": "ids-exhausted" }));
-    assert_eq!(
-        ids(&h.call("GET", "/v1/leases", None).await),
-        Vec::<String>::new()
-    );
-}
-
-/// Stops `first`, a server on the base flags, and starts another over its scratch
-/// directory with `--boot resume` and the pool file in its place, exactly as the program
-/// does: the second server builds a fresh pool from the file, and no provider outlives
-/// the first.
-async fn restarted(first: Harness) -> Harness {
-    let Harness {
-        running, scratch, ..
-    } = first;
-    running.shutdown().await.unwrap();
-    let args = replace(base_args(&scratch), "--boot", "resume");
-    Harness::with(scratch, args, None).await
-}
-
-/// Asserts that a restart with the shipped provider, a pool built again from the pool
-/// file, keeps a held lease held on the same host (the lease file is the record of the
-/// pool's bookings), that the host is not leased to anyone else (the second host is
-/// taken by the next acquire and the third acquire has no capacity), that the lease can
-/// be released, and that its host is free after the release.
-#[tokio::test]
-async fn a_restart_keeps_a_held_lease_on_the_shipped_pool() {
-    let first = Harness::new("resume_shipped").await;
-    let granted = first.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.json()["host"], "gpu-01");
-    let second = restarted(first).await;
-
-    let listed = second.call("GET", "/v1/leases", None).await.json();
-    assert_eq!(listed["leases"][0]["id"], "1-1");
-    assert_eq!(listed["leases"][0]["state"], "held");
-    assert_eq!(listed["leases"][0]["host"], "gpu-01");
-
-    let next = second.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(next.json()["host"], "gpu-02");
-    let full = second.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(full.status, 409, "{}", full.body);
-    assert_eq!(full.json(), json!({ "error": "no-capacity" }));
-
-    let released = second.call("DELETE", "/v1/leases/1-1", None).await;
-    assert_eq!(released.json(), json!({ "state": "freed" }));
-    let again = second.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(again.json()["host"], "gpu-01");
+    let listing = hosts(&h).await;
+    assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
+    assert!(entry(&listing, "gpu-02").get("lease").is_none());
 }
 
 /// Asserts that a lease file with a held, a releasing and a pending lease without a
-/// host restores both hosts as booked (an acquire has no capacity), and that a tick then
-/// settles the other two as the table always does: the releasing lease is stopped and
-/// frees its host, the pending lease is not known to the pool and is dropped.
+/// host restores both hosts as booked, and that a tick then settles the other two as the
+/// table always does: the releasing lease is stopped and frees its host, the pending lease
+/// is not known to the pool and is dropped, and the file holds the one lease left.
 #[tokio::test]
 async fn every_booking_of_the_file_is_seated_before_the_table_looks() {
     let scratch = Scratch::new("resume_states");
@@ -158,32 +51,29 @@ async fn every_booking_of_the_file_is_seated_before_the_table_looks() {
     std::fs::write(scratch.state(), lease_file(&leases)).unwrap();
     let args = replace(base_args(&scratch), "--boot", "resume");
     let h = Harness::with(scratch, args, None).await;
-    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await).len(), 3);
-    let full = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(full.json(), json!({ "error": "no-capacity" }));
+    let listing = hosts(&h).await;
+    assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
+    assert_eq!(entry(&listing, "gpu-02")["lease"], "1-2");
 
     h.ticks.step().await;
-    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), vec!["1-1"]);
-    let next = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(next.json()["host"], "gpu-02");
+    let listing = hosts(&h).await;
+    assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
+    assert!(entry(&listing, "gpu-02").get("lease").is_none());
+    let saved = std::fs::read_to_string(h.scratch.state()).unwrap();
+    assert!(saved.contains("lease_count = 1"), "{saved}");
 }
 
 /// Asserts that a lease whose host the pool file no longer lists is dropped at the
 /// restart (the table finds the pool ignorant of it), that the drop is logged with the
-/// lease, the host and the reason, and that the hosts left are leasable.
+/// lease, the host and the reason, and that the hosts left carry no lease.
 #[tokio::test]
 async fn a_host_the_pool_file_dropped_loses_its_lease_and_says_so() {
-    let first = Harness::new("resume_unlisted").await;
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
+    let scratch = Scratch::new("resume_unlisted");
+    std::fs::write(scratch.state(), lease_file(&[(1, "held", Some("gpu-01"))])).unwrap();
     let only_gpu_02 = format!(
         "[[host]]{}",
         EXAMPLE_CONFIG.rsplit("[[host]]").next().unwrap()
     );
-    let Harness {
-        running, scratch, ..
-    } = first;
-    running.shutdown().await.unwrap();
-
     let logs = LogCapture::start();
     let args = replace(base_args(&scratch), "--boot", "resume");
     std::fs::write(scratch.path("pool.toml"), &only_gpu_02).unwrap();
@@ -193,9 +83,9 @@ async fn a_host_the_pool_file_dropped_loses_its_lease_and_says_so() {
     assert!(text.contains("gpu-01"), "{text}");
     assert!(text.contains("not in the pool"), "{text}");
 
-    assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
-    let next = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(next.json()["host"], "gpu-02");
+    let listing = hosts(&h).await;
+    assert_eq!(listed(&listing), ["gpu-02"]);
+    assert!(entry(&listing, "gpu-02").get("lease").is_none());
 }
 
 /// Asserts that when a lease file names one host for two leases the lower id keeps it,
@@ -211,23 +101,8 @@ async fn two_leases_on_one_host_leave_the_lower_id_seated() {
     let text = logs.text();
     assert!(text.contains("1-2"), "{text}");
     assert!(text.contains("held by lease 1-1"), "{text}");
-    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), vec!["1-1"]);
+    assert_eq!(entry(&hosts(&h).await, "gpu-01")["lease"], "1-1");
 }
-
-/// A pool of up to two machines whose capabilities name an `arch`, as `js-sched` needs to
-/// place a job.
-const JOB_POOL: &str = r#"
-name = "burst"
-class = "burst-host"
-max_machines = 2
-
-[shape]
-cpu_millis = 8000
-memory_bytes = 17179869184
-
-[capabilities]
-arch = "x86_64"
-"#;
 
 /// The image every job of the restore runs: pinned by digest, as the service demands.
 const IMAGE: &str =
@@ -459,14 +334,13 @@ async fn a_restored_older_job_store_stops_unknown_jobs_and_reissues_no_id() {
     assert_eq!(stored(&jobs_file(&scratch)), expected);
 }
 
-/// Asserts that the job path works with no ttl flag given, over the same server that
-/// serves leases: a job is submitted through the job service, placed on a registered
+/// Asserts that the job path works with no ttl flag given: a job is submitted through the job service, placed on a registered
 /// agent (its start names the job and the agent lists it running with nothing told
 /// back), a second job submitted while the first holds the host is queued and then
 /// cancelled (200 `JOB_STATE_CANCELLED`) and is never started, and the first job's
 /// success, reported by the agent, is accepted (`ACCEPTED`), after which the job reads
-/// `JOB_STATE_SUCCEEDED` and its result is served. It catches a removal of lease renewal
-/// that reaches into job submission, placement, results or cancel.
+/// `JOB_STATE_SUCCEEDED` and its result is served. It catches a ttl setting that reaches
+/// into job submission, placement, results or cancel.
 #[tokio::test]
 async fn the_job_path_is_unaffected() {
     let scratch = Scratch::new("job_path");

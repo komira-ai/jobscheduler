@@ -104,8 +104,8 @@ async fn a_failing_check_marks_the_pool_unavailable_and_the_server_goes_on() {
     let health = request(rig.running.addr(), "GET", "/healthz", None, None).await;
     assert_eq!((health.status, health.body.as_str()), (200, "ok"));
     rig.ticks.step().await;
-    let leases = request(rig.running.addr(), "GET", "/v1/leases", Some(TOKEN), None).await;
-    assert_eq!(leases.status, 200, "{}", leases.body);
+    let hosts = request(rig.running.addr(), "GET", "/v1/hosts", Some(TOKEN), None).await;
+    assert_eq!(hosts.status, 200, "{}", hosts.body);
     assert!(rig.logs.text().contains("the pool fails its checks"));
     rig.assert_clean();
 }

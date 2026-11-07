@@ -6,7 +6,10 @@ use std::net::SocketAddr;
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, Session, hello_body, session};
-use crate::config_support::{PoolText, file, load, quote, quoted, refusal, server_with_agents};
+use crate::config_support::{
+    PoolText, file, load, quote, quoted, refusal, server, server_with_agents,
+};
+use crate::jobs_support::{JobBody, one_start, submit_body};
 use crate::support::{Harness, Reply, Scratch, TOKEN, request};
 
 /// A joined pool `burst`, six nodes at most, that books 8 cores and 16 GiB and asks the hosts
@@ -15,11 +18,19 @@ fn joined() -> PoolText {
     PoolText::joined("burst")
 }
 
-/// A server over the file whose only pool is `pool`.
+/// A server over the file whose only pool is `pool`, with the job service on a loopback port.
 async fn serving(name: &str, pool: impl FnOnce(&Scratch) -> PoolText) -> Harness {
+    serving_with(name, "", pool).await
+}
+
+/// [`serving`], with `extra` lines in the `[server]` table.
+async fn serving_with(name: &str, extra: &str, pool: impl FnOnce(&Scratch) -> PoolText) -> Harness {
     let scratch = Scratch::new(name);
     let pool = pool(&scratch);
-    let text = file(&server_with_agents(&scratch), &[&pool]);
+    let jobs = format!(
+        "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\njob_listen = \"127.0.0.1:0\"\n{extra}"
+    );
+    let text = file(&server(&scratch, &jobs), &[&pool]);
     let config = load(&scratch, &text).unwrap();
     Harness::over(scratch, config).await
 }
@@ -245,54 +256,49 @@ fn linux_hello(host: &str) -> Value {
     body
 }
 
-/// A whole-node lease request that requires `os`.
-fn needing(os: &str) -> Value {
-    json!({
-        "class": "whole-node",
-        "resources": { "cpu_millis": 1000, "memory_bytes": 1024 },
-        "capabilities": { "os": os },
-        "max_wall_seconds": 3600,
-    })
-}
-
 /// A joined pool that offers `os=linux` and `arch=x86_64` on every host.
 fn linux() -> PoolText {
     joined().set("capabilities", "{ os = \"linux\", arch = \"x86_64\" }")
 }
 
-/// Asserts that a joined pool with a `capabilities` table places a lease that requires one:
-/// the request for `os=linux` is accepted, is handed to the node once its agent reports it
-/// ready, and the lease lands on that node; a request for another `os` fits nothing. The
-/// request is matched against the pool's shape, so this catches a table that is read and
-/// dropped before the registry's pool is built.
+/// A job that requires the operating system `os`.
+fn needing(id: &str, os: &str) -> Value {
+    JobBody::new(id)
+        .needs(1000, 1024)
+        .constraints(json!({ "os": os }))
+        .json()
+}
+
+/// Asserts that a joined pool with a `capabilities` table places a job that requires one:
+/// the job for `os=linux` is accepted and queued, is handed to the node in the reply to
+/// its heartbeat, and starts there; a job for another `os` fits nothing. The job is matched
+/// against the pool's shape, so this catches a table that is read and dropped before the
+/// registry's pool is built.
 #[tokio::test]
-async fn a_lease_that_requires_a_capability_is_placed_on_a_joined_host() {
-    let h = serving("joined_caps", |_| linux()).await;
+async fn a_job_that_requires_a_capability_is_placed_on_a_joined_host() {
+    let h = serving_with("joined_caps", "placement = \"js-sched\"", |_| linux()).await;
     let token = mint(&h, "node-1").await;
-    let welcome = agent_call(&h, "/v1/agent/hello", &token, &linux_hello("node-1")).await;
+    let mut said = linux_hello("node-1");
+    said["capabilities"]["per-job"] = json!("true");
+    let welcome = agent_call(&h, "/v1/agent/hello", &token, &said).await;
     let held = session(&welcome, "node-1");
     let credential = welcome.json()["host_credential"]
         .as_str()
         .unwrap()
         .to_owned();
-    let other = h
-        .call("POST", "/v1/leases", Some(&needing("windows")))
-        .await;
-    assert_eq!(other.status, 409, "{}", other.body);
+    let other = submit_body(&h, &needing("job-mac", "macos")).await;
+    assert_eq!(other.status, 422, "{}", other.body);
     assert_eq!(other.json(), json!({ "error": "no-capable-host" }));
-    let asked = h.call("POST", "/v1/leases", Some(&needing("linux"))).await;
-    assert_eq!(asked.status, 202, "{}", asked.body);
-    let id = asked.json()["id"].as_str().unwrap().to_owned();
-    let mut ready = held.beat();
-    ready["exclusive_ready"] = json!(id);
-    let beat = agent_call(&h, "/v1/agent/heartbeat", &credential, &ready).await;
-    assert_eq!(beat.status, 200, "{}", beat.body);
+    let asked = submit_body(&h, &needing("job-linux", "linux")).await;
+    assert_eq!(asked.status, 201, "{}", asked.body);
     h.ticks.step().await;
-    let listed = h.call("GET", "/v1/leases", None).await.json();
-    assert_eq!(listed["leases"][0]["host"], "node-1", "{listed}");
+    let beat = agent_call(&h, "/v1/agent/heartbeat", &credential, &held.beat()).await;
+    assert_eq!(beat.status, 200, "{}", beat.body);
+    let (job, _allocation) = one_start(&beat.json());
+    assert_eq!(job, "job-linux");
 }
 
-/// Asserts what the table is for: on a joined pool with no `capabilities`, the same request
+/// Asserts what the table is for: on a joined pool with no `capabilities`, the same job
 /// for `os=linux` fits nothing (`no-capable-host`), because requests are matched against the pool's shape and
 /// not against what a host reports; and with the table, a host that does not report the
 /// pool's capabilities is refused 403 `shape-not-accepted`. It catches a joined pool whose
@@ -303,10 +309,8 @@ async fn capabilities_decide_both_the_fit_and_the_admission() {
     let token = mint(&bare, "node-1").await;
     let welcome = agent_call(&bare, "/v1/agent/hello", &token, &linux_hello("node-1")).await;
     session(&welcome, "node-1");
-    let asked = bare
-        .call("POST", "/v1/leases", Some(&needing("linux")))
-        .await;
-    assert_eq!(asked.status, 409, "{}", asked.body);
+    let asked = submit_body(&bare, &needing("job-linux", "linux")).await;
+    assert_eq!(asked.status, 422, "{}", asked.body);
     assert_eq!(asked.json(), json!({ "error": "no-capable-host" }));
 
     let h = serving("joined_caps_admit", |_| linux()).await;
@@ -359,18 +363,14 @@ async fn a_mint_for_another_provider_is_refused() {
     mint(&h, "node-1").await;
 }
 
-/// A whole-node lease request for `memory_bytes`, with no capability.
-fn wanting(memory_bytes: u64) -> Value {
-    json!({
-        "class": "whole-node",
-        "resources": { "cpu_millis": 1000, "memory_bytes": memory_bytes },
-        "max_wall_seconds": 3600,
-    })
+/// A job for `memory_bytes` and one core, with no constraint.
+fn wanting(id: &str, memory_bytes: u64) -> Value {
+    JobBody::new(id).needs(1000, memory_bytes).json()
 }
 
 /// Asserts that a joined pool with `memory_schedulable_percent = 90` books
-/// floor(16 GiB x 90 / 100) for a host: one byte more fits nothing (409 `no-capable-host`) and exactly
-/// that is accepted (202), and `GET /v1/hosts` shows the listed memory, the percent and the
+/// floor(16 GiB x 90 / 100) for a host: a job for one byte more fits nothing (422 `no-capable-host`) and exactly
+/// that is accepted (201), and `GET /v1/hosts` shows the listed memory, the percent and the
 /// bookable memory. A pool without the key books all 16 GiB: one byte more fits nothing and
 /// 16 GiB is accepted. A host's hello still has to claim the whole listed memory. It catches
 /// a joined pool that books the full memory whatever the key says.
@@ -397,23 +397,23 @@ async fn a_joined_pool_books_the_memory_percent_it_is_given() {
             "bookable_bytes": NINETY,
         })
     );
-    let ask = wanting(NINETY + 1);
-    let over = cut.call("POST", "/v1/leases", Some(&ask)).await;
-    assert_eq!(over.status, 409, "{}", over.body);
+    let ask = wanting("over", NINETY + 1);
+    let over = submit_body(&cut, &ask).await;
+    assert_eq!(over.status, 422, "{}", over.body);
     assert_eq!(over.json(), json!({ "error": "no-capable-host" }));
-    let ask = wanting(NINETY);
-    let exact = cut.call("POST", "/v1/leases", Some(&ask)).await;
-    assert_eq!(exact.status, 202, "{}", exact.body);
+    let ask = wanting("exact", NINETY);
+    let exact = submit_body(&cut, &ask).await;
+    assert_eq!(exact.status, 201, "{}", exact.body);
 
     let full = serving("joined_mempct_default", |_| joined()).await;
     let token = mint(&full, "node-1").await;
     let said = hello("node-1", Some("node-1"));
     let welcome = agent_call(&full, "/v1/agent/hello", &token, &said).await;
     session(&welcome, "node-1");
-    let ask = wanting(LISTED + 1);
-    let over = full.call("POST", "/v1/leases", Some(&ask)).await;
-    assert_eq!(over.status, 409, "{}", over.body);
-    let ask = wanting(LISTED);
-    let all = full.call("POST", "/v1/leases", Some(&ask)).await;
-    assert_eq!(all.status, 202, "{}", all.body);
+    let ask = wanting("over", LISTED + 1);
+    let over = submit_body(&full, &ask).await;
+    assert_eq!(over.status, 422, "{}", over.body);
+    let ask = wanting("all", LISTED);
+    let all = submit_body(&full, &ask).await;
+    assert_eq!(all.status, 201, "{}", all.body);
 }
