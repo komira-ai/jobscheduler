@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, hello_body, session, start_agents};
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
+use crate::jobs_support::submit;
 use crate::support::{Harness, Reply, Scratch, TOKEN, lease_body, request};
 
 /// The clouds of these tests, by the path of the key file that names them: a kind is a
@@ -412,23 +413,6 @@ async fn an_unreadable_catalog_counts_as_may_offer() {
     assert_eq!(cloud.reads(), reads + 3);
     refused(&post(&h, &request).await, "no-capacity");
     assert_eq!(cloud.reads(), reads + 3);
-}
-
-/// `SubmitJob` of the job `id` through the job service's gateway on `h`'s job port: 1.5 cores
-/// and 1 GiB, no GPU, for ten minutes.
-async fn submit(h: &Harness, id: &str) -> Reply {
-    let body = json!({
-        "spec": {
-            "jobId": id,
-            "image": format!("team/app@sha256:{}", "a".repeat(64)),
-            "command": "run",
-            "needs": { "cpuMillis": "1500", "memoryBytes": "1073741824" },
-            "wallLimitSeconds": "600",
-        }
-    });
-    let job = h.running.job_addr().unwrap();
-    let body = body.to_string().into_bytes();
-    request(job, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await
 }
 
 /// Asserts, through the job service's port of a server whose pool launches on the test's
