@@ -58,6 +58,7 @@ disk_bytes = 4294967296
 
 [capabilities]
 os = "linux"
+arch = "x86_64"
 scratch-quota = "project"
 "#;
 

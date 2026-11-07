@@ -54,7 +54,7 @@ fn agent_registers_and_host_is_leasable() {
         (host["state"].clone(), host["phase"].clone()),
         (json!("live"), json!("serving"))
     );
-    assert_eq!(host["capabilities"], json!({ "os": "macos" }));
+    assert_eq!(host["capabilities"], json!({ "arch": "arm64", "os": "macos" }));
     assert_eq!(host["labels"], json!({ "rack": "r1" }));
 
     let granted = server.lease();

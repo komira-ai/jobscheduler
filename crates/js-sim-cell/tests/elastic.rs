@@ -35,8 +35,10 @@ use js_testkit::dir::TestDir;
 use js_types::HostId;
 use js_types::sched::FarmTime;
 
-/// How many seeds each scenario runs.
-const SEEDS: u64 = 16;
+/// How many seeds each scenario runs: a seed under js-sched costs about two of the removed
+/// registry placement's, and eight keep the family within what its sixteen registry seeds
+/// and two js-sched seeds cost before.
+const SEEDS: u64 = 8;
 
 /// How long a cell driven by hand runs: past the first launch (the second tick, at 10 s),
 /// the machine's boot ([`Knobs::boot`], 120 s, later) and its hello.
@@ -49,7 +51,7 @@ const TICK_MS: u64 = 5_000;
 const LONG_RUN: Duration = Duration::from_secs(600);
 
 /// Proves the elastic pool end to end at size, billed as EC2 bills (per second, at least
-/// a minute), over sixteen seeds: a hundred whole-host runs against an empty pool of at
+/// a minute), over eight seeds: a hundred whole-host runs against an empty pool of at
 /// most forty machines all succeed, the cloud never runs more than forty of the
 /// scheduler's machines (`instances-within-limits`), every machine is released once idle
 /// and none runs at the end (`launched-machines-settle`), and the cloud's own bill equals
@@ -67,7 +69,7 @@ fn an_ec2_like_pool_scales_up_to_demand_and_back_to_zero() {
 }
 
 /// Proves the same shape over a cloud billed as Lambda bills (each started minute whole,
-/// at least one), over sixteen seeds, with the same invariants and the same bill check:
+/// at least one), over eight seeds, with the same invariants and the same bill check:
 /// every machine is released once idle, so none bills on past the minute its release
 /// fell in. Covers section 6.5's idle release and section 7's "Scaler double launch".
 /// Red as the EC2-like scenario is, and for a recomputation that bills a part of a
