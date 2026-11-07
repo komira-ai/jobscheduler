@@ -25,8 +25,8 @@
 //!   operation are let go. The request keeps the time it was first queued, its give-ups
 //!   and its bars: its next presentation is queued with them ([`Scheduler::restore_whole`]),
 //!   so it is placed again without waiting `drain_after` afresh and is never granted a
-//!   barred host. The operation is not kept queued in between: the registry takes the
-//!   request off its wait list at the commit, and a queued operation with no consumer
+//!   barred host. The operation is not kept queued in between: the request leaves the wait
+//!   list at the commit ([`Engine::whole_cancel`]), and a queued operation with no consumer
 //!   presenting it would be granted a host it never takes.
 //! - **`max_replace`.** At `max_replace` failures the request is terminal: its next start
 //!   is refused `exclusive-not-ready` once, which lets its record and bars go, so the start

@@ -491,6 +491,11 @@ impl Engine {
             return;
         };
         let held = old.reservations(now);
+        // A request that left the queue since that round (it left the wait list, or was
+        // committed) is not queued again.
+        round
+            .waiting
+            .retain(|waiting| old.whole.contains_key(&waiting.id));
         for waiting in &mut round.waiting {
             let mark = held.iter().find(|mark| mark.request == waiting.id);
             waiting.mark = mark.cloned();

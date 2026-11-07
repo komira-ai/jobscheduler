@@ -612,7 +612,7 @@ pub trait Placer: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use js_types::{ClassId, Resources};
+    use js_types::Resources;
 
     use super::*;
 
@@ -635,8 +635,9 @@ mod tests {
         let lease = LeaseId::new(1, 1);
         let host = HostId::new("a").unwrap();
         let resources = Resources::new(1000, 1 << 30, 0, None).unwrap();
+        let class = js_types::ResourceClass::whole_node();
         let request = Request {
-            class: ClassId::new("whole").unwrap(),
+            class: class.id().clone(),
             resources,
             capabilities: BTreeMap::new(),
             max_wall: Duration::from_secs(60),
@@ -656,6 +657,8 @@ mod tests {
         };
         let grace = Duration::from_secs(1);
         let placer = Plain;
+        let spec = StartSpec::new(lease, request.clone(), &[class]).unwrap();
+        assert_eq!(placer.pick(&spec, &[], &MarkedTails::new()), None);
         assert!(!placer.keeps_wait_list());
         let presented = placer.whole_present(&id, lease, &request, true, grace);
         assert_eq!(presented, Presented::Full);

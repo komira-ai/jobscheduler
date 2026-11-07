@@ -41,12 +41,14 @@
 //! A start it places elsewhere or nowhere never falls back to a marked host.
 //!
 //! The engine also keeps the registry's whole-node queue ([`Placer::whole_round`],
-//! [`super::engine::whole`]): at each pass the registry hands it the wait list and its view
-//! of the hosts, and shows the marks the engine answers as its reservations. A host one of
-//! the engine's own requests has set aside is held by that request in the engine, not
-//! outside it, and is backfilled by the same rule against the tail the mark was made with;
-//! the hosts held outside are those of requests put back from the ledger and not presented
-//! since. A whole-node request's start books the host of its pending grant.
+//! [`super::engine::whole`]) over its own wait list and request records
+//! ([`Placer::keeps_wait_list`], [`super::engine::wait`]): at each pass the registry hands it
+//! its view of the hosts, and shows the marks the engine holds as its reservations. A host
+//! one of the engine's own requests has set aside is held by that request in the engine,
+//! not outside it, and is backfilled by the same rule against the tail the mark was made
+//! with; the hosts held outside are those of the marks a restart put back for requests the
+//! engine does not queue yet. A whole-node request's start books the host of its pending
+//! grant.
 //!
 //! The same engine places the queued jobs when the server holds the job tables
 //! ([`super::engine::jobs`]), and holds their allocations beside the leases: a start is

@@ -107,7 +107,7 @@ impl Registry {
         // With no placer, nothing waits and nothing is set aside: nothing to place or drop
         // (a placer is still asked, so it lets go of the requests that left the wait list).
         let placer = self.shared.placer.get();
-        if placer.is_none() && state.waiting.is_empty() && state.marks.is_empty() {
+        if placer.is_none() && (state.waiting.is_empty() & state.marks.is_empty()) {
             return;
         }
         let settings = whole_settings(&self.shared.config);

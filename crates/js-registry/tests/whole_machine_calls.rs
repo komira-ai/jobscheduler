@@ -89,6 +89,9 @@ fn run(p: Placement) -> (World, Vec<ReservationRecord>, World) {
     assert_eq!((place, queued), (Some(0), 1));
     assert_eq!(w.reserved_host("r2").as_deref(), Some("a"));
     assert!(w.provider.waits(&lease(3)));
+    // The tick's pass while `r2` waits.
+    w.fx.registry.advance();
+    assert_eq!(w.reserved_host("r2").as_deref(), Some("a"));
     // The ledger while `r2` waits at the front with its mark on `a`.
     let ledger = w.fx.registry.reservation_ledger();
     // `r1`'s agent refuses the prepare: one failure, counted.

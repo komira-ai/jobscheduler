@@ -374,3 +374,21 @@ fn the_records_of_the_leases_the_registry_commits_are_kept_by_key() {
     e.whole_sweep(Duration::from_secs(1), at(11_000));
     assert_eq!(e.whole_record(&named), None);
 }
+
+/// Catches a rebuild that queues again a request that left the wait list since the last
+/// pass: the new engine would grant it a host nobody presents it for until the next pass.
+/// `r` is granted the quiet `h` and cancelled; the engine is rebuilt and ticks before any
+/// pass, and holds nothing.
+#[test]
+fn a_rebuild_does_not_queue_again_a_request_that_left() {
+    let mut e = engine(&[("h", &[])]);
+    present(&mut e, "r", 1, true, 0);
+    pass(&mut e, &[("h", Standing::Live)], 100);
+    assert_eq!(held(&e, 100), ["r@h*"]);
+    assert!(e.whole_cancel(&id("r"), at(200)));
+    let mut rebuilt = e.rebuild(Settings::default(), &[candidate("h", &[])], at(300));
+    // A host retired elsewhere ticks the queue of the new engine before any pass.
+    rebuilt.whole_drop_host(&host("x"), at(300));
+    assert!(held(&rebuilt, 300).is_empty());
+    assert!(rebuilt.whole_places().is_empty());
+}
