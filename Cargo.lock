@@ -1770,7 +1770,6 @@ dependencies = [
  "js-lease",
  "js-pool-static",
  "js-provider",
- "js-registry",
  "js-sched",
  "js-sched-placer",
  "js-sim",

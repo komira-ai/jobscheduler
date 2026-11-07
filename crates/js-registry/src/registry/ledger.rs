@@ -3,20 +3,22 @@
 //! D55), and what it does with it at a start.
 //!
 //! The ledger is one [`ReservationRecord`] per request that carries an id, written from
-//! the wait list, the marks and the request records:
+//! what the placer keeps of the whole-node queue (the engine of `js-sched-placer`):
 //!
-//! - the place on the wait list and the instant the request was first presented;
+//! - the place on the wait list and the instant the request was first presented
+//!   ([`crate::Placer::whole_places`]);
 //! - the host set aside for it, when it was, its deadline, and whether the host was quiet
-//!   (an assigned mark drains nothing);
+//!   (an assigned mark drains nothing) ([`crate::Placer::whole_reservations`]);
 //! - its failed-prepare count, and the hosts it is kept off, each with the instant that
-//!   ends it or for good;
+//!   ends it or for good ([`crate::Placer::whole_ledger`]);
 //! - a give-up count, always written as zero: no reservation is given up. A count an older
 //!   file holds is read and ignored, so a file written before parses and restores.
 //!
 //! Nothing else is kept. What a host costs to drain, and every estimate of it, is read
 //! from the table at each pass; the last failure's text is not kept; a request without an
 //! id is told apart by its content and is forgotten by a restart, as a start without an
-//! id never waits.
+//! id never waits. The format is the one the registry's own queue wrote before the placer
+//! kept it, so a file written then is read now.
 //!
 //! [`Registry::restore_reservations`] runs once, before any host says hello, over the
 //! records the lease table opened with. A record stands on its own claim: the request
@@ -27,28 +29,18 @@
 //! ([`Registry::dropped_reservations`]). A record that cannot stand at once is dropped and
 //! counted at the restore: a request id that is not one or is listed twice, a host that is
 //! being given back, a mark with no place on the wait list or on a host another record
-//! holds, a place past the wait list's size cap ([`MAX_WAITING_REQUESTS`], the live path's
-//! own), and exclusions past the pool's machine limit (the first hosts by id are kept).
+//! holds, a place the placer's wait list has no room for ([`crate::MAX_WAITING_REQUESTS`]),
+//! and exclusions past the pool's machine limit (the first hosts by id are kept).
 //!
-//! # Under a placer that keeps the queue
-//!
-//! Under `--placement js-sched` the engine keeps the marks of the requests it queues and
-//! their bars, and the failed prepares and bars of requests it committed
-//! ([`crate::Placer::whole_round`] and its siblings). The ledger is then written from the
-//! engine: a request's mark is the engine's ([`crate::Placer::whole_reservations`]) and its
-//! counts and exclusions are the engine's ([`crate::Placer::whole_ledger`]); the place and
-//! the first-presentation instant are its wait list's ([`crate::Placer::whole_places`]). The
-//! format does not change: a file written under one placement is read under the other.
-//!
-//! A restore checks the records as above and hands what stands of each request's counts and
-//! exclusions to the engine ([`crate::Placer::whole_restore`]), which queues the request with
-//! them when it is presented again (`js_sched::Scheduler::restore_whole`) and answers a
-//! terminal request at its next start. A timed exclusion of a record with no failed prepare
-//! can only be the back-off of a give-up an older file recorded, and is put back as one;
-//! any other is a failed prepare's bar. The place goes back on the engine's wait list
-//! ([`crate::Placer::whole_restore_place`]) and the mark to the engine
-//! ([`crate::Placer::whole_revive`]), which holds the host for the request outside its queue
-//! until the request is presented again and its host has said hello, or the mark is dropped.
+//! A restore hands what stands of each request's counts and exclusions to the placer
+//! ([`crate::Placer::whole_restore`]), which queues the request with them when it is
+//! presented again and answers a terminal request at its next start. A timed exclusion of
+//! a record with no failed prepare can only be the back-off of a give-up an older file
+//! recorded, and is put back as one; any other is a failed prepare's bar. The place goes
+//! back on the placer's wait list ([`crate::Placer::whole_restore_place`]) and the mark to
+//! the placer ([`crate::Placer::whole_revive`]), which holds the host for the request
+//! outside its queue until the request is presented again and its host has said hello, or
+//! the mark is dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -58,10 +50,8 @@ use js_types::{HostId, RequestId};
 
 use super::{Registry, State};
 use crate::placer::{Placer, WholeKept};
-use crate::whole::queue::MAX_WAITING_REQUESTS;
-use crate::whole::requests::{Exclusion, RequestKey, RequestRecord, whole_settings};
+use crate::whole::requests::{Exclusion, whole_settings};
 use crate::whole::reserve::Reservation;
-use crate::whole::reserve::Revived;
 
 /// What [`Registry::restore_reservations`] did with the records it was given.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -78,28 +68,10 @@ impl Registry {
     /// be written with the leases.
     pub fn reservation_ledger(&self) -> Vec<ReservationRecord> {
         let state = self.lock();
-        let placer = self.shared.placer.get().map(|placer| &**placer);
+        let placer = self.placer();
         let marks = self.marks_now(&state);
-        let kept = placer.map(Placer::whole_ledger).unwrap_or_default();
-        // The wait list's places, and the registry's own records, are the placer's when it
-        // keeps them.
-        let (places, own) = match self.keeper() {
-            Some(keeper) => (keeper.whole_places(), Vec::new()),
-            None => {
-                let places = state.waiting.queue();
-                let places = places.map(|(id, since)| (id.clone(), since));
-                let own = state.requests.recorded().map(|(id, record)| {
-                    let kept = WholeKept {
-                        give_ups: record.give_ups,
-                        prepare_failures: record.prepare_failures,
-                        exclusions: record.exclusions.clone(),
-                    };
-                    (id.clone(), kept)
-                });
-                (places.collect(), own.collect())
-            }
-        };
-        export(&places, &marks, own.into_iter().chain(kept))
+        let kept = placer.whole_ledger();
+        export(&placer.whole_places(), &marks, kept.into_iter())
     }
 
     /// Puts back the state `records` hold, as the module documentation says. Called once
@@ -115,8 +87,7 @@ impl Registry {
             claim_by: now.plus(Duration::from_millis(whole.regain_grace_ms)),
             max_replace: whole.max_replace,
             max_exclusions: self.shared.config.max_machines(),
-            placer: self.shared.placer.get().map(|placer| &**placer),
-            keeper: self.keeper(),
+            placer: self.placer(),
         };
         let mut ordered: Vec<&ReservationRecord> = records.iter().collect();
         ordered.sort_by(|a, b| order(a).cmp(&order(b)));
@@ -147,9 +118,7 @@ fn order(record: &ReservationRecord) -> (bool, Option<(u32, Timestamp)>, &str) {
 }
 
 /// The ledger as records: the wait list's places (`places`, front first), the hosts set
-/// aside (`marks`), and the counts and exclusions of the registry's records and of what a
-/// placer that keeps the queue keeps (`kept`), the larger of each count and the longer of
-/// each exclusion.
+/// aside (`marks`), and the counts and exclusions the placer keeps (`kept`).
 fn export(
     places: &[(RequestId, Timestamp)],
     marks: &[Reservation],
@@ -231,12 +200,9 @@ struct Standing<'a> {
     /// The most hosts one request is kept off: a request is kept off a host at most once,
     /// so the pool's machine limit bounds it.
     max_exclusions: usize,
-    /// The placer, which keeps the counts and exclusions when it keeps the queue
-    /// ([`Placer::whole_restore`]).
-    placer: Option<&'a dyn Placer>,
-    /// The placer when it keeps the wait list as well ([`Placer::keeps_wait_list`]): it
-    /// takes the places and the marks back too.
-    keeper: Option<&'a dyn Placer>,
+    /// The placer, which takes back the counts and exclusions
+    /// ([`Placer::whole_restore`]), the places and the marks.
+    placer: &'a dyn Placer,
 }
 
 /// Puts back one record, if it can stand; what came of it. `seen` holds the request ids
@@ -276,61 +242,24 @@ fn revive(
             prepare_failures: failures,
             exclusions,
         };
-        let engine = ctx
-            .placer
-            .is_some_and(|placer| placer.whole_restore(&id, &counts, terminal, since));
-        // A placer that keeps the request keeps all of it.
-        let registry = ctx.keeper.is_none();
-        if !engine & registry {
-            let kept = RequestRecord {
-                prepare_failures: failures,
-                give_ups: 0,
-                exclusions: counts.exclusions,
-                last: None,
-                terminal,
-            };
-            state
-                .requests
-                .restore(RequestKey::Id(id.clone()), kept, ctx.now);
-        }
+        let _ = ctx.placer.whole_restore(&id, &counts, terminal, since);
     }
     let wants_place = record.queued;
-    let placed = wants_place.is_some_and(|queued| match ctx.keeper {
-        Some(keeper) => keeper.whole_restore_place(&id, queued.since),
-        None => {
-            let room = state.waiting.len() < MAX_WAITING_REQUESTS;
-            room.then(|| state.waiting.restore(id.clone(), queued.since, ctx.now))
-                .is_some()
-        }
-    });
+    let placed = wants_place.is_some_and(|queued| ctx.placer.whole_restore_place(&id, queued.since));
     dropped += usize::from(wants_place.is_some() & !placed);
     let mut marked = false;
     if let Some(held) = &record.held {
         let leaving = state.ending.contains(&held.host);
         let standing = [placed, !leaving].into_iter().all(|ok| ok);
-        marked = standing
-            && match ctx.keeper {
-                Some(keeper) => {
-                    let mark = Reservation {
-                        request: id,
-                        host: held.host.clone(),
-                        at: held.reserved_at,
-                        deadline: held.deadline,
-                        assigned: held.assigned,
-                        tail_end: held.tail_end,
-                    };
-                    keeper.whole_revive(&mark, ctx.claim_by)
-                }
-                None => state.marks.revive(Revived {
-                    request: id,
-                    host: held.host.clone(),
-                    at: held.reserved_at,
-                    deadline: held.deadline,
-                    assigned: held.assigned,
-                    tail_end: held.tail_end,
-                    claim_by: ctx.claim_by,
-                }),
-            };
+        let mark = Reservation {
+            request: id,
+            host: held.host.clone(),
+            at: held.reserved_at,
+            deadline: held.deadline,
+            assigned: held.assigned,
+            tail_end: held.tail_end,
+        };
+        marked = standing && ctx.placer.whole_revive(&mark, ctx.claim_by);
         dropped += usize::from(!marked);
     }
     let resumed = [counted, placed, marked].into_iter().any(|kept| kept);

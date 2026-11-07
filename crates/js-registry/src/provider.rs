@@ -12,13 +12,15 @@ use crate::registry::Registry;
 /// allocation port that books a lease on one of them. The machine-provider view of the
 /// same hosts is [`crate::StaticCapacity`].
 ///
-/// It answers from memory and never blocks, as the table calls it under its lock. Each
-/// host is leased whole, as the static pool does, and the rules a lease follows are the
-/// ones [`js_provider::HostBook`] holds for both. What differs is which host may be
-/// booked and what a read can say:
+/// It answers from memory and never blocks, as the table calls it under its lock. The rules
+/// a lease follows are the ones [`js_provider::HostBook`] holds for the static pool as well.
+/// What differs is which host may be booked and what a read can say:
 ///
-/// - **Start** books the first host by id that is unbooked, live (heard from within the
-///   grace period) and serving, and whose booked shape fits the request. A host that
+/// - **Start** books the host the registry's placer picks ([`crate::Placer::pick`]) among
+///   those live (heard from within the grace period), serving, with room for the request
+///   and whose booked shape fits it. A class that books part of a host is leasable: its
+///   leases share a host that has room, and a host running its first lease takes a second.
+///   A host that
 ///   is lost, awaiting, draining, quarantined, tainted or in any other phase than
 ///   serving takes no new lease. With no host to book it answers `NoCapacity` for a
 ///   request the pool's shape fits, `NoFit` for one it cannot. A whole-node request
@@ -29,11 +31,6 @@ use crate::registry::Registry;
 ///   id it answers `NoCapacity` and the consumer retries. A request that used up its
 ///   tries to get a host ready answers `ExclusiveNotReady` once (that start removes its
 ///   record, so the next start of the request is a fresh one).
-/// - **Placer.** With [`crate::Registry::set_placer`] a start is shown every host that could
-///   take it and books the one the placer picks. A class that books part of a host is then
-///   leasable: its leases share a host that has room, and a host running its first lease
-///   takes a second. Without a placer the first host by id is booked and such a class is
-///   refused `UnsupportedClass`.
 /// - **Stop** frees the booking at once and reads back `Absent`, as it does for a lost
 ///   host: the table asked for the end of the lease. A whole-node request the lease
 ///   presented and that still waits leaves the wait list, and the host set aside for it is

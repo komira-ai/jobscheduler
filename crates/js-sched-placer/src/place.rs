@@ -479,12 +479,6 @@ impl Placer for SchedPlacer {
         true
     }
 
-    /// The engine keeps the wait list and the records of the registry's whole-node
-    /// requests ([`super::engine::wait`], [`super::engine::prepare`]).
-    fn keeps_wait_list(&self) -> bool {
-        true
-    }
-
     fn whole_present(
         &self,
         id: &RequestId,

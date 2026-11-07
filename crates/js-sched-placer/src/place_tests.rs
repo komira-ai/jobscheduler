@@ -386,7 +386,6 @@ fn a_whole_node_start_books_the_host_of_its_pending_grant() {
     for candidate in &open {
         placer.host_up(&candidate.host, &candidate.shape);
     }
-    assert!(placer.keeps_wait_list());
     let id = js_types::RequestId::new("r").unwrap();
     let start = spec_of(&ResourceClass::whole_node(), 7).with_request_id(id.clone());
     let grace = Duration::from_secs(600);
