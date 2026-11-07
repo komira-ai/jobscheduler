@@ -17,8 +17,9 @@
 #
 # macOS runs on a pull request only in `macos` and `macos-pkg`, and only when the `changes`
 # job's filter selects the pull request (see its comment); `macos-result` is the one check of
-# them that every pull request gets. Neither macOS job names a secret or holds a write
-# permission (crates/xtask/tests/pr_macos_jobs.rs holds every workflow to that).
+# them that every pull request gets. No macOS job that runs on a pull request names a secret
+# or holds a write permission (crates/xtask/tests/pr_macos_jobs.rs holds every workflow to
+# that; the package workflow's `sign` job, which does, runs only by hand from main).
 name: ci
 
 on:
@@ -204,13 +205,17 @@ jobs:
   #     js-oci, js-contain or js-update-hook (the launchd units, the step runner and the
   #     hook contract the agent's self-update runs on); under js-agent's native runtime
   #     (src/native: the sandbox-exec pool users) or its update hook (src/update_hook), or
-  #     their tests; under js-treestore's macOS code or tests; or under xtask's package,
-  #     release-stage and hostkeeper-package code or their tests;
-  #   - a changed path is rust-toolchain.toml, this file, release.yml or a manual macOS
+  #     their tests; under js-treestore's macOS code or tests; or under xtask's package code
+  #     and the release code the two jobs run (stage, stamp, the hostkeeper package and its
+  #     index), or their tests;
+  #   - a changed path is rust-toolchain.toml, LICENSE (a file of the package), this file,
+  #     release.yml or a manual macOS
   #     workflow (js-mac-*, js-agent-native-*, js-treestore-privileged-tests; the others
   #     have macos in their names);
   #   - the diff adds or removes a line with `target_os = "macos"` or `target_vendor = "apple"`
   #     (the cfg( ), cfg!( ), cfg(any( ... )) and no-space spellings all contain it).
+  # Cargo.toml, Cargo.lock and the portable code of the crates the jobs build are left out on
+  # purpose (they are most pull requests): main's run of `macos` is their backstop.
   # If the diff cannot be computed the jobs run (fail closed). The label is read
   # from the pull request at each push and reopen (adding it starts no run).
   # crates/xtask/tests/macos_filter.rs runs this script on built repositories and pins each
@@ -250,9 +255,9 @@ jobs:
           surface+='|^crates/js-agent/src/(native|update_hook)/'
           surface+='|^crates/js-agent/tests/(agent/(native|update_hook)/|native_|update_hook_fakes/|bin/update_hook_fake\.rs$)'
           surface+='|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))'
-          surface+='|^crates/xtask/src/(macpkg\.rs$|pkg\.rs$|release/(hostkeeper_|stage))'
+          surface+='|^crates/xtask/src/(macpkg\.rs$|pkg\.rs$|release/(hostkeeper_|stage|stamp))'
           surface+='|^crates/xtask/tests/(hostkeeper_package|release_stage|pkg\.rs$)'
-          surface+='|^rust-toolchain\.toml$'
+          surface+='|^rust-toolchain\.toml$|^LICENSE$'
           surface+='|^\.github/workflows/(ci|release|js-mac-[a-z-]+|js-agent-native-[a-z-]+|js-treestore-privileged-tests)\.yml$'
           if printf '%s\n' "$files" | grep -Eiq "$surface"; then
             macos=true

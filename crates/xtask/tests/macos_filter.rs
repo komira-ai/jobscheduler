@@ -5,7 +5,7 @@
 //! names darwin, apple, macos or seatbelt (any case), a file of the Mac and service-manager
 //! surface (a `js-mac-*` crate, `js-bundle`, `js-bundle-cli`, `js-oci`, `js-contain`,
 //! `js-update-hook`, js-agent's native runtime and update hook, js-treestore's macOS code,
-//! xtask's package, release-stage and hostkeeper-package code, the toolchain pin, ci.yml,
+//! xtask's package code and the release code the macOS jobs run, the toolchain pin, LICENSE, ci.yml,
 //! release.yml or a manual macOS workflow), or adds or removes a `target_os = "macos"` or
 //! `target_vendor = "apple"` line; and a diff that cannot be computed runs them.
 
@@ -250,6 +250,9 @@ fn a_change_to_the_registry_client_runs_the_job() {
 #[test]
 fn a_change_to_the_toolchain_pin_runs_the_job_and_one_to_the_lockfile_does_not() {
     assert_eq!(pr("pin", &[("rust-toolchain.toml", "# pin\n")]), "true");
+    // The licence is a file of the package; the manifest, like the lockfile, is left to main.
+    assert_eq!(pr("licence", &[("LICENSE", "x\n")]), "true");
+    assert_eq!(pr("manifest", &[("Cargo.toml", "# m\n")]), "false");
     assert_eq!(pr("lock", &[("Cargo.lock", "# lock\n")]), "false");
 }
 
@@ -375,6 +378,7 @@ fn a_change_to_xtask_s_macos_package_and_release_code_runs_the_jobs() {
         "crates/xtask/src/release/hostkeeper_package/macos.rs",
         "crates/xtask/src/release/hostkeeper_index.rs",
         "crates/xtask/src/release/stage.rs",
+        "crates/xtask/src/release/stamp.rs",
         "crates/xtask/tests/hostkeeper_package/install.rs",
         "crates/xtask/tests/hostkeeper_package_cli.rs",
         "crates/xtask/tests/release_stage.rs",

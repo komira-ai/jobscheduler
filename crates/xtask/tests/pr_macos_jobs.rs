@@ -4,24 +4,30 @@
 //! A job is a pull request macOS job when
 //!   - its workflow starts on `pull_request` or `pull_request_target`, or it is a job of a
 //!     workflow that a job of such a workflow calls (`uses: ./.github/workflows/<file>`);
-//!   - its runner names macOS: a `runs-on:` or a matrix `runner:` line with `macos` in it;
+//!   - its runner names macOS: its `runs-on:` value (one line or a list under it) has `macos`
+//!     in it, or it is an expression and the job's text (its matrix) has `macos` in it. A
+//!     `runs-on:` expression of inputs, variables, the event or another job's outputs, with no
+//!     `macos` in the job, is refused: the lint cannot tell what it runs on;
 //!   - and its `if:` does not pin another event: no `&&`-joined part of it, outside
 //!     parentheses, is `github.event_name == '<another event>'` or
 //!     `github.event_name != 'pull_request'`.
 //!
 //! Such a job must
-//!   - name no secret (`secrets.`, a `secrets:` key) and not the job's token (`github.token`,
-//!     `GITHUB_TOKEN`): not in its own lines, not in its workflow's top-level lines, and not in
+//!   - name no secret (the word `secrets` in any spelling: `secrets.X`, `secrets['X']`,
+//!     `toJSON(secrets)`, a `secrets:` key) and not the job's token (`github.token`,
+//!     `github['token']`, `toJSON(github)`, `GITHUB_TOKEN`): not in its own lines, not in its workflow's top-level lines, and not in
 //!     the job that calls it;
 //!   - run in no deployment environment (`environment:`), whose secrets it would get;
 //!   - hold no write permission, `id-token: write` (OIDC) included, under a permissions block
 //!     of its own or its workflow's (without either it gets the repository's default token,
-//!     which may write);
-//!   - be in a workflow whose concurrency cancels the older run of the same pull request (for a
-//!     called workflow, the caller's), except the release dry run (`RELEASE_DRY_RUN`).
+//!     which may write); values are read without quotes and trailing comments, and a block
+//!     written as a `{ ... }` mapping is refused;
+//!   - be in a workflow whose concurrency cancels the older run of the same pull request (a
+//!     group with the pull request's number and nothing that differs per run; for a called
+//!     workflow, the caller's), except the release dry run (`RELEASE_DRY_RUN`).
 //!
-//! A pull request workflow may not call a workflow of another repository: the lint cannot read
-//! its jobs. The set of pull request macOS jobs is pinned (`EXPECTED`). The negative cases run
+//! A pull request workflow may not call a workflow of another repository, and a called
+//! workflow may not call one again: the lint does not follow either. The set of pull request macOS jobs is pinned (`EXPECTED`). The negative cases run
 //! the same check on workflows written here, and on the repository's own workflows with one
 //! line changed.
 
@@ -208,27 +214,75 @@ fn pins_another_event(job: &[String]) -> bool {
     })
 }
 
-fn on_macos(job: &[String]) -> bool {
-    job.iter().any(|l| {
-        let t = l.trim().trim_start_matches("- ");
-        (t.starts_with("runs-on:") || t.starts_with("runner:"))
-            && t.to_lowercase().contains("macos")
+/// A value without a trailing comment and without quotes.
+fn plain(value: &str) -> String {
+    let value = value.split(" #").next().unwrap_or("");
+    value.replace(['"', '\''], "").trim().to_owned()
+}
+
+/// What a job runs on, as far as its text says.
+#[derive(Debug, PartialEq)]
+enum Runner {
+    Mac,
+    Other,
+    /// An expression of inputs, variables or the event, which the text does not settle.
+    Unknown,
+}
+
+fn runner(job: &[String]) -> Runner {
+    let Some(runs_on) = block(job, 4, "runs-on") else {
+        return Runner::Other;
+    };
+    let value = runs_on.join(" ").to_lowercase();
+    if value.contains("macos") {
+        return Runner::Mac;
+    }
+    if !value.contains("${{") {
+        return Runner::Other;
+    }
+    // An expression: a matrix whose values are in the job's text, or something else.
+    if job
+        .iter()
+        .any(|l| plain(l).to_lowercase().contains("macos"))
+    {
+        Runner::Mac
+    } else if ["inputs.", "vars.", "github.", "fromjson", "needs."]
+        .iter()
+        .any(|w| value.contains(w))
+    {
+        Runner::Unknown
+    } else {
+        Runner::Other
+    }
+}
+
+/// Whether `word` stands in `line` as a name of its own (not inside a longer name).
+fn has_word(line: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    line.match_indices(word).any(|(at, _)| {
+        let before = line[..at].chars().next_back();
+        let after = line[at + word.len()..].chars().next();
+        !before.is_some_and(ident) && !after.is_some_and(ident)
     })
 }
 
 /// What a job's lines say about secrets and the job token.
 fn secret_problems(id: &str, whose: &str, lines: &[String]) -> Vec<String> {
     let mut out = Vec::new();
-    if lines
-        .iter()
-        .any(|l| l.contains("secrets.") || l.trim().starts_with("secrets:"))
-    {
+    if lines.iter().any(|l| has_word(l, "secrets")) {
         out.push(format!("{id}: {whose} names a secret"));
     }
-    if lines
+    if lines.iter().any(|l| {
+        let l = l.replace([' ', '"'], "").replace('\'', "").to_lowercase();
+        [
+            "github.token",
+            "github[token]",
+            "tojson(github)",
+            "github_token",
+        ]
         .iter()
-        .any(|l| l.contains("github.token") || l.contains("GITHUB_TOKEN"))
-    {
+        .any(|w| l.contains(w))
+    }) {
         out.push(format!("{id}: {whose} names the job token"));
     }
     out
@@ -242,8 +296,12 @@ fn permission_problems(id: &str, perms: Option<Vec<String>>) -> Vec<String> {
         )];
     };
     let mut out = Vec::new();
-    for p in perms {
-        if p == "id-token: write" {
+    for p in perms.iter().map(|p| plain(p)) {
+        if p.contains('{') && p != "{}" {
+            out.push(format!(
+                "{id}: permissions written as {p}, a mapping the lint does not read"
+            ));
+        } else if p == "id-token: write" || p == "id-token:write" {
             out.push(format!("{id}: holds id-token: write (OIDC)"));
         } else if p == "write-all" || p.ends_with(": write") {
             out.push(format!("{id}: holds {p}"));
@@ -257,9 +315,28 @@ fn cancels_older_pull_request_runs(w: &Workflow) -> bool {
     let Some(c) = w.top_block("concurrency") else {
         return false;
     };
-    let group = c
-        .iter()
-        .any(|l| l.starts_with("group:") && l.contains("github.event.pull_request.number"));
+    // The group is the pull request's, with nothing in it that differs from run to run (but
+    // the fallback after `||`, which a pull request never takes).
+    let group = c.iter().any(|l| {
+        let pr = "github.event.pull_request.number";
+        let mut rest = l.as_str();
+        let mut kept = String::new();
+        while let Some(at) = rest.find(pr) {
+            kept.push_str(&rest[..at + pr.len()]);
+            rest = &rest[at + pr.len()..];
+            if let Some(after) = rest.trim_start().strip_prefix("||") {
+                let after = after.trim_start();
+                let end = after.find([' ', '}']).unwrap_or(after.len());
+                rest = &after[end..];
+            }
+        }
+        kept.push_str(rest);
+        l.starts_with("group:")
+            && l.contains(pr)
+            && !["run_id", "run_number", "run_attempt", "github.sha"]
+                .iter()
+                .any(|w| kept.contains(w))
+    });
     let cancel = c.iter().any(|l| {
         l == "cancel-in-progress: true"
             || l == "cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
@@ -296,10 +373,25 @@ fn lint(workflows: &[(String, String)]) -> (Vec<String>, Vec<String>) {
                     continue;
                 };
                 for (inner, inner_lines) in &called.jobs {
-                    if pins_another_event(inner_lines) || !on_macos(inner_lines) {
+                    if pins_another_event(inner_lines) {
                         continue;
                     }
                     let inner_id = format!("{id} -> {}/{inner}", called.file);
+                    if block(inner_lines, 4, "uses").is_some() {
+                        problems.push(format!(
+                            "{inner_id}: calls a workflow again, which the lint does not follow"
+                        ));
+                        continue;
+                    }
+                    match runner(inner_lines) {
+                        Runner::Other => continue,
+                        Runner::Unknown => {
+                            problems
+                                .push(format!("{inner_id}: runs on a runner the lint cannot read"));
+                            continue;
+                        }
+                        Runner::Mac => {}
+                    }
                     problems.extend(secret_problems(&inner_id, "the calling job", lines));
                     problems.extend(secret_problems(&inner_id, "the job", inner_lines));
                     problems.extend(secret_problems(
@@ -324,8 +416,13 @@ fn lint(workflows: &[(String, String)]) -> (Vec<String>, Vec<String>) {
                 }
                 continue;
             }
-            if !on_macos(lines) {
-                continue;
+            match runner(lines) {
+                Runner::Other => continue,
+                Runner::Unknown => {
+                    problems.push(format!("{id}: runs on a runner the lint cannot read"));
+                    continue;
+                }
+                Runner::Mac => {}
             }
             problems.extend(secret_problems(&id, "the job", lines));
             problems.extend(secret_problems(&id, "the workflow", &w.top));
@@ -834,5 +931,137 @@ fn the_pull_request_build_makes_the_binaries_of_the_release_s_macos_leg() {
     ] {
         assert!(step.contains(needle), "{needle}");
         assert!(release.contains(needle), "release.yml: {needle}");
+    }
+}
+
+#[test]
+fn a_write_permission_spelled_with_quotes_a_comment_or_a_mapping_is_refused() {
+    for (perms, want) in [
+        (
+            "    permissions:\n      contents: write # to push\n",
+            "t.yml/mac: holds contents: write",
+        ),
+        (
+            "    permissions:\n      id-token: \"write\"\n",
+            "t.yml/mac: holds id-token: write (OIDC)",
+        ),
+        (
+            "    permissions: 'write-all' # all\n",
+            "t.yml/mac: holds write-all",
+        ),
+        (
+            "    permissions: { contents: write }\n",
+            "t.yml/mac: permissions written as { contents: write }, a mapping the lint does not read",
+        ),
+    ] {
+        let job = format!("  mac:\n    runs-on: macos-15\n{perms}    steps:\n      - run: true\n");
+        assert_eq!(lint(&one("t.yml", &pr_workflow(&job))).1, [want], "{perms}");
+    }
+}
+
+#[test]
+fn a_secret_or_the_token_in_any_spelling_is_refused() {
+    for line in [
+        "KEY: ${{ secrets['SIGNING_KEY'] }}",
+        "ALL: ${{ toJSON(secrets) }}",
+        "ALL: ${{ secrets }}",
+    ] {
+        let w = pr_workflow(&mac_job(&format!("    env:\n      {line}\n")));
+        assert_eq!(
+            lint(&one("t.yml", &w)).1,
+            ["t.yml/mac: the job names a secret"],
+            "{line}"
+        );
+    }
+    for line in [
+        "T: ${{ github['token'] }}",
+        "T: ${{ github[\"token\"] }}",
+        "ALL: ${{ toJSON(github) }}",
+        "T: ${{ github . token }}",
+    ] {
+        let w = pr_workflow(&mac_job(&format!("    env:\n      {line}\n")));
+        assert_eq!(
+            lint(&one("t.yml", &w)).1,
+            ["t.yml/mac: the job names the job token"],
+            "{line}"
+        );
+    }
+    // A longer name that only holds the word is not a secret.
+    let w = pr_workflow(&mac_job("    env:\n      NO_SECRETS_HERE: x\n"));
+    assert!(lint(&one("t.yml", &w)).1.is_empty());
+}
+
+#[test]
+fn a_runner_in_a_list_a_matrix_key_or_an_unreadable_expression_is_seen() {
+    let secret = "    env:\n      KEY: ${{ secrets.KEY }}\n";
+    let refused = ["t.yml/mac: the job names a secret"];
+    for runs_on in [
+        "    runs-on:\n      - macos-15\n",
+        "    runs-on:\n      labels: macos-15\n",
+        "    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-24.04, macos-15]\n",
+    ] {
+        let job = format!(
+            "  mac:\n{runs_on}    permissions:\n      contents: read\n{secret}    steps:\n      - run: true\n"
+        );
+        assert_eq!(
+            lint(&one("t.yml", &pr_workflow(&job))).1,
+            refused,
+            "{runs_on}"
+        );
+    }
+    for expr in [
+        "${{ inputs.runner }}",
+        "${{ vars.RUNNER }}",
+        "${{ needs.pick.outputs.runner }}",
+    ] {
+        let job = format!("  mac:\n    runs-on: {expr}\n    steps:\n      - run: true\n");
+        assert_eq!(
+            lint(&one("t.yml", &pr_workflow(&job))).1,
+            ["t.yml/mac: runs on a runner the lint cannot read"],
+            "{expr}"
+        );
+    }
+    // A matrix of Linux runners only is Linux.
+    let job = "  lin:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-24.04, ubuntu-24.04-arm]\n    steps:\n      - run: echo ${{ secrets.K }}\n";
+    assert_eq!(lint(&one("t.yml", &pr_workflow(job))), (vec![], vec![]));
+}
+
+#[test]
+fn a_called_workflow_that_calls_another_is_refused() {
+    let caller = pr_workflow("  call:\n    uses: ./.github/workflows/called.yml\n");
+    let called = "name: c\non:\n  workflow_call:\njobs:\n  again:\n    uses: ./.github/workflows/inner.yml\n    secrets: inherit\n".to_owned();
+    let workflows = vec![
+        ("called.yml".to_owned(), called),
+        ("t.yml".to_owned(), caller),
+    ];
+    assert_eq!(
+        lint(&workflows).1,
+        ["t.yml/call -> called.yml/again: calls a workflow again, which the lint does not follow"]
+    );
+}
+
+#[test]
+fn a_concurrency_group_that_differs_per_run_is_refused() {
+    // The fallback after `||` (main's run) is not the pull request's group.
+    let w = pr_workflow(&mac_job("")).replace(
+        "github.event.pull_request.number || github.ref",
+        "github.event.pull_request.number || github.run_id",
+    );
+    assert!(lint(&one("t.yml", &w)).1.is_empty());
+    for per_run in [
+        "github.run_id",
+        "github.run_number",
+        "github.run_attempt",
+        "github.sha",
+    ] {
+        let w = pr_workflow(&mac_job("")).replace(
+            "github.event.pull_request.number || github.ref",
+            &format!("github.event.pull_request.number }}}}-${{{{ {per_run}"),
+        );
+        assert_eq!(
+            lint(&one("t.yml", &w)).1,
+            ["t.yml/mac: a newer push to the pull request does not cancel it"],
+            "{per_run}"
+        );
     }
 }
