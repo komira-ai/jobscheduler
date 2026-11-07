@@ -37,8 +37,8 @@ fn a_lease_that_shares_a_host_records_what_it_books() {
     let scratch = Scratch::new("shares_recorded");
     let clock = clock();
     let mut table = open(fake().with_class(sharing()), &clock, &scratch);
-    let shared = table.acquire(asking(half()), None).unwrap();
-    let whole = table.acquire(request(3600), None).unwrap();
+    let shared = table.acquire(asking(half())).unwrap();
+    let whole = table.acquire(request(3600)).unwrap();
 
     // Both leases started at their acquire, so they start and end as the table lists them.
     let listed = table.list();

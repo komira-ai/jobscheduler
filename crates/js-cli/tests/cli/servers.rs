@@ -1,9 +1,8 @@
-//! Servers that stand between the CLI and the real lease server, or in its place, to lose
-//! an answer after the server has acted, or to hold one back until the test says.
+//! A server that stands between the CLI and the real lease server, to lose an answer after
+//! the server has acted, or before it has.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -121,78 +120,4 @@ fn reply(status: &str, body: &str) -> String {
         "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
-}
-
-/// A server in place of the lease server that grants a lease at once, releases it at
-/// once, and holds a renewal back until the test opens the gate.
-pub struct Gated {
-    pub url: String,
-    /// Receives a message each time a renewal has been read and is being held back.
-    pub renewing: Receiver<()>,
-    gate: Sender<()>,
-    log: Arc<Mutex<Vec<String>>>,
-}
-
-impl Gated {
-    /// A server granting leases that expire at `expires_at_ms`.
-    pub fn new(expires_at_ms: u64) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let (arrived, renewing) = channel();
-        let (gate, open) = channel();
-        let (log, open) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(open)));
-        let seen = Arc::clone(&log);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let (seen, arrived, open) = (Arc::clone(&seen), arrived.clone(), Arc::clone(&open));
-                let stream = stream.unwrap();
-                thread::spawn(move || serve(stream, expires_at_ms, &seen, &arrived, &open));
-            }
-        });
-        Self {
-            url,
-            renewing,
-            gate,
-            log,
-        }
-    }
-
-    /// Lets one held-back renewal be answered.
-    pub fn open(&self) {
-        let _ = self.gate.send(());
-    }
-
-    /// The request lines the server has read, in order.
-    pub fn requests(&self) -> Vec<String> {
-        self.log.lock().unwrap().clone()
-    }
-}
-
-fn serve(
-    mut stream: TcpStream,
-    expires_at_ms: u64,
-    log: &Mutex<Vec<String>>,
-    arrived: &Sender<()>,
-    open: &Mutex<Receiver<()>>,
-) {
-    let (head, _body) = read_request(&mut stream);
-    let line = head.lines().next().unwrap().trim_end_matches(" HTTP/1.1");
-    log.lock().unwrap().push(line.to_owned());
-    let answer = match line {
-        "POST /v1/leases" => reply(
-            "201 Created",
-            &format!(r#"{{"id":"1-1","host":"gpu-01","expires_at_ms":{expires_at_ms}}}"#),
-        ),
-        "POST /v1/leases/1-1/renew" => {
-            let _ = arrived.send(());
-            let _ = open.lock().unwrap().recv();
-            reply(
-                "200 OK",
-                &format!(r#"{{"expires_at_ms":{}}}"#, expires_at_ms + 1),
-            )
-        }
-        "DELETE /v1/leases/1-1" => reply("200 OK", "{}"),
-        _ => reply("404 Not Found", r#"{"error":"unknown-route"}"#),
-    };
-    let _ = stream.write_all(answer.as_bytes());
 }

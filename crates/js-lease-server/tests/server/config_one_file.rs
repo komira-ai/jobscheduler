@@ -202,8 +202,6 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--agent-hello-interval", "5s"),
         key("--placement", "js-sched"),
         key("--cpu-slack", "1.1"),
-        key("--default-ttl", "5m"),
-        key("--max-ttl", "2h"),
         key("--tick", "3s"),
         key("--tls-cert", "/cert"),
         key("--tls-key", "/key"),
@@ -305,12 +303,14 @@ fn every_flag_beside_config_is_refused_by_name() {
 }
 
 /// Asserts that the table of the test above is every flag there is: the long flags of the
-/// command line less `--config` are exactly the flags it refuses. It catches a flag added
+/// command line less `--config` (and less the hidden flags that only refuse, which `--config` does not
+/// treat as settings) are exactly the flags it refuses. It catches a flag added
 /// later that the refusal test does not cover.
 #[test]
 fn the_refused_flags_are_every_flag() {
     let asked: BTreeSet<String> = Cli::command()
         .get_arguments()
+        .filter(|arg| !arg.is_hide_set())
         .filter_map(|arg| arg.get_long())
         .filter(|long| *long != "config")
         .map(|long| format!("--{long}"))
@@ -329,10 +329,10 @@ fn the_first_flag_given_is_the_one_named() {
     let scratch = Scratch::new("one_file_first");
     let base = with_file(&scratch);
     let mut args = base.clone();
-    args.extend(["--max-ttl", "2h", "--listen", "127.0.0.1:0"].map(OsString::from));
-    assert!(refused(args).starts_with("--max-ttl: not allowed with --config;"));
+    args.extend(["--cpu-slack", "1.1", "--listen", "127.0.0.1:0"].map(OsString::from));
+    assert!(refused(args).starts_with("--cpu-slack: not allowed with --config;"));
     let mut args = base.clone();
-    args.extend(["--listen", "127.0.0.1:0", "--max-ttl", "2h"].map(OsString::from));
+    args.extend(["--listen", "127.0.0.1:0", "--cpu-slack", "1.1"].map(OsString::from));
     assert!(refused(args).starts_with("--listen: not allowed with --config;"));
     let mut args = vec![base[0].clone(), "--tick".into(), "3s".into()];
     args.extend(base[1..].iter().cloned());

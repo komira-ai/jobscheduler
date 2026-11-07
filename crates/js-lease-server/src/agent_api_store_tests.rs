@@ -212,7 +212,7 @@ impl Rig {
 /// The server state the host book is read from, over `rig`'s agent side.
 fn shared_over(rig: &Rig) -> Shared {
     let provider = rig.agents.registry.provider();
-    let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+    let settings = Settings::new();
     let file = rig.dir.path().join("leases.toml");
     let clock = SharedClock::new(rig.clock.clone());
     let pool = BoxedPool(Box::new(provider));

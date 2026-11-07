@@ -165,7 +165,7 @@ fn bed(name: &str, sink: Option<Arc<FakeSink>>) -> Bed {
     );
     let registry = Registry::with_sessions(pool, server_clock.clone(), SequentialSessions::new());
     let agents = Agents::over(registry, &server_clock, dir.path()).with_jobs(Arc::new(jobs));
-    let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+    let settings = Settings::new();
     let table = LeaseTable::open(
         BoxedPool(Box::new(agents.registry.provider())),
         server_clock.clone(),

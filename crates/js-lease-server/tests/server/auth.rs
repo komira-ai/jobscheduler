@@ -14,7 +14,6 @@ async fn token_is_required() {
     let routes = [
         ("GET", "/v1/leases"),
         ("POST", "/v1/leases"),
-        ("POST", "/v1/leases/1-1/renew"),
         ("DELETE", "/v1/leases/1-1"),
         ("GET", "/v1/usage/nodes/host-1"),
         ("GET", "/v1/usage/keys/act.build"),
@@ -71,7 +70,7 @@ async fn the_scheme_is_case_insensitive() {
 }
 
 /// Asserts that the server is single-tenant, as its docs say: a lease acquired by one
-/// client is listed, renewed and released by another client that holds the same token
+/// client is listed and released by another client that holds the same token
 /// (each request here is its own connection), because the lease has no owner the
 /// server checks. A per-tenant token would fail this test, which is the point of
 /// pinning it.
@@ -85,9 +84,6 @@ async fn one_token_is_one_trust_domain() {
 
     let listed = request(h.addr(), "GET", "/v1/leases", Some(TOKEN), None).await;
     assert_eq!(crate::support::ids(&listed), vec![id.clone()]);
-    let renew_path = format!("/v1/leases/{id}/renew");
-    let renewed = request(h.addr(), "POST", &renew_path, Some(TOKEN), None).await;
-    assert_eq!(renewed.status, 200, "{}", renewed.body);
     let release_path = format!("/v1/leases/{id}");
     let released = request(h.addr(), "DELETE", &release_path, Some(TOKEN), None).await;
     assert_eq!(released.status, 200, "{}", released.body);

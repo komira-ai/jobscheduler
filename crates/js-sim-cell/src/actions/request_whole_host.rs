@@ -7,7 +7,7 @@ use crate::cell::Cell;
 use crate::work::Work;
 
 /// Submits a number of whole-host requests now ([`Cell::submit`]): each is a whole-node
-/// lease asked for under a request id of its own, with a wall limit and a ttl of
+/// lease asked for under a request id of its own, with a wall limit of
 /// `max_wall`, answered 202 and pending until the agent of the host it is committed on
 /// reports ready; once held it is given a run that ends at once, and released. It is
 /// [`Work::whole_host`] of no time, given up after `max_wall`.

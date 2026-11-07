@@ -91,7 +91,7 @@ fn server(name: &str, agents: bool) -> Server {
         4,
     );
     let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
-    let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+    let settings = Settings::new();
     let table = LeaseTable::open(
         BoxedPool(Box::new(registry.provider())),
         shared_clock.clone(),

@@ -8,13 +8,19 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{Value, json};
 
 use crate::failure::Failure;
-use crate::tag::{self, RunTag};
 
 /// The default for `--wait-pending`.
 const WAIT_PENDING: &str = "60s";
 
-/// The default for `--stop-grace`.
-const STOP_GRACE: &str = "30s";
+/// What `js lease run` says: the command only refuses.
+pub(crate) const RUN_REMOVED: &str =
+    "js lease run was removed: leases are no longer renewed; submit a job";
+
+/// What `js lease acquire --ttl` says: the flag only refuses.
+pub(crate) const TTL_REMOVED: &str = concat!(
+    "--ttl was removed: a lease has no time to live ",
+    "(it ends when released or at its maximum wall time); remove the flag"
+);
 
 /// The command line of `js`. The four global flags may stand before or after the
 /// subcommand.
@@ -22,7 +28,7 @@ const STOP_GRACE: &str = "30s";
 #[command(
     name = "js",
     version,
-    about = "Acquires, renews and releases leases on a lease server, and makes the calls of the job service"
+    about = "Acquires and releases leases on a lease server, and makes the calls of the job service"
 )]
 pub struct Cli {
     /// The lease server, such as `https://leases.example:7300`. Plain `http://` is
@@ -146,27 +152,21 @@ impl MintArgs {
 pub(crate) enum Action {
     /// Ask for a lease and print it.
     Acquire(AcquireArgs),
-    /// Extend a held lease.
-    Renew(RenewArgs),
     /// Give a lease back.
     Release(IdArgs),
     /// List the leases the server holds.
     List,
-    /// Acquire a lease, run a command while renewing it, then release it.
-    ///
-    /// The command is a child process with JS_LEASE_ID and JS_LEASE_HOST set in its
-    /// environment: they are outputs of `js` to the command, not configuration of `js`,
-    /// which reads no environment variable. js renews the lease at a third of the time
-    /// the server's last answer left (at most --renew-every apart), forwards SIGINT,
-    /// SIGTERM and SIGHUP to the command's process group, and when the command ends
-    /// stops what it left running (SIGTERM, then SIGKILL after --stop-grace), releases
-    /// the lease and exits with the command's status (128 plus the signal for a command
-    /// a signal ended). If a renewal finds the lease gone, or none has succeeded before
-    /// the deadline short of the server's expiry (a failed renewal is tried again after a
-    /// sixth of the period, at least a second, until then), it stops the command the same way and
-    /// exits 7; a command that cannot be started exits 127. The held-lease line is
-    /// printed on stderr, so the command owns stdout.
-    Run(RunArgs),
+    /// Removed: leases are no longer renewed. Refuses, and sends nothing.
+    #[command(hide = true)]
+    Run {
+        /// Whatever was given: swallowed, since the command only refuses.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        _words: Vec<OsString>,
+    },
     /// Queue a native job (a program run on the host, no image) on a held lease.
     ///
     /// The lease's host must run native jobs. The program is an absolute path, or
@@ -196,9 +196,9 @@ pub(crate) struct AcquireArgs {
     /// The longest the lease may last in all, such as `2h`.
     #[arg(long, value_parser = parse_duration)]
     pub(crate) max_wall: Duration,
-    /// How long the lease lasts without a renewal (the server's default when absent).
-    #[arg(long, value_parser = parse_duration)]
-    pub(crate) ttl: Option<Duration>,
+    /// Removed: a lease has no time to live. Any value is read and refused.
+    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "DUR")]
+    pub(crate) ttl: Option<String>,
     /// A label of the lease, `key=value`; repeat for more.
     #[arg(long = "label", value_name = "KEY=VALUE", value_parser = parse_label)]
     pub(crate) labels: Vec<(String, String)>,
@@ -213,10 +213,9 @@ pub(crate) struct AcquireArgs {
     /// The request's id, of your choosing (1 to 63 of `a-z`, `A-Z`, `0-9`, `.`, `_`,
     /// `-`): an acquire repeated with the same id and flags answers the lease the first one
     /// made instead of taking a second, and a whole-node request waits for a host instead
-    /// of being refused for lack of one. Every flag that shapes the request counts; `--ttl`
-    /// and `--wait-pending` do not. The same id with another request is refused
-    /// `request-id-conflict` while the first lease is on the server, and so is a second
-    /// `lease run` under it then (each run adds its own random label).
+    /// of being refused for lack of one. Every flag that shapes the request counts;
+    /// `--wait-pending` does not. The same id with another request is refused
+    /// `request-id-conflict` while the first lease is on the server.
     #[arg(long, value_name = "ID")]
     pub(crate) request_id: Option<String>,
     /// How long to wait for a start the provider has not confirmed (202) to settle.
@@ -225,16 +224,15 @@ pub(crate) struct AcquireArgs {
 }
 
 impl AcquireArgs {
-    /// The body of `POST /v1/leases`; `lease run` adds its tag to the labels. A probe
-    /// host and a request id are each sent only when asked for, so a server that predates
-    /// the field takes the body of every other start.
-    pub(crate) fn body(&self, tag: Option<&RunTag>) -> Value {
-        let mut labels: serde_json::Map<String, Value> = self
+    /// The body of `POST /v1/leases`. A probe host and a request id are each sent only
+    /// when asked for, so a server that predates the field takes the body of every other
+    /// start.
+    pub(crate) fn body(&self) -> Value {
+        let labels: serde_json::Map<String, Value> = self
             .labels
             .iter()
             .map(|(key, value)| (key.clone(), json!(value)))
             .collect();
-        labels.extend(tag.map(|tag| (tag::KEY.to_owned(), json!(tag.value()))));
         let mut body = json!({
             "class": self.class,
             "resources": {
@@ -246,7 +244,6 @@ impl AcquireArgs {
             "max_wall_seconds": self.max_wall.as_secs(),
             "labels": labels,
             "validation_run": self.validation_run,
-            "ttl_seconds": self.ttl.map(|ttl| ttl.as_secs()),
         });
         if let Some(host) = &self.probe_host {
             body["probe_host"] = json!(host);
@@ -258,41 +255,12 @@ impl AcquireArgs {
     }
 }
 
-/// A lease id and, for a renewal, the ttl to renew for.
-#[derive(Debug, Args)]
-pub(crate) struct RenewArgs {
-    /// The lease, as `acquire` printed it.
-    #[arg(value_parser = parse_id)]
-    pub(crate) id: String,
-    /// How long the lease lasts from now (the server's default when absent).
-    #[arg(long, value_parser = parse_duration)]
-    pub(crate) ttl: Option<Duration>,
-}
-
 /// A lease id.
 #[derive(Debug, Args)]
 pub(crate) struct IdArgs {
     /// The lease, as `acquire` printed it.
     #[arg(value_parser = parse_id)]
     pub(crate) id: String,
-}
-
-/// `lease run`: a start, a renewal period and the command.
-#[derive(Debug, Args)]
-pub(crate) struct RunArgs {
-    #[command(flatten)]
-    pub(crate) acquire: AcquireArgs,
-    /// The longest to wait between renewals. Without it, and in any case, a renewal is
-    /// tried when a third of the time the server's last answer left is gone.
-    #[arg(long, value_parser = parse_duration)]
-    pub(crate) renew_every: Option<Duration>,
-    /// How long what the command started gets to end after SIGTERM (when the command
-    /// ends, or its lease is lost), before it is killed (SIGKILL).
-    #[arg(long, default_value = STOP_GRACE, value_parser = parse_duration)]
-    pub(crate) stop_grace: Duration,
-    /// The command and its arguments, after `--`.
-    #[arg(last = true, required = true, value_name = "COMMAND")]
-    pub(crate) command: Vec<OsString>,
 }
 
 /// `lease native`: the lease, the program and its limits.
@@ -423,13 +391,6 @@ mod tests {
         args: AcquireArgs,
     }
 
-    /// `lease run`'s flags alone, as clap reads them.
-    #[derive(Debug, Parser)]
-    struct Run {
-        #[command(flatten)]
-        args: RunArgs,
-    }
-
     const BASE: [&str; 5] = ["acquire", "--class", "c", "--max-wall", "1h"];
 
     fn acquire(extra: &[&str]) -> AcquireArgs {
@@ -441,52 +402,44 @@ mod tests {
     /// Asserts the body of a start: without `--probe-host` it has no `probe_host` key at
     /// all (a server that predates the field refuses an unknown key, even a null one, so
     /// every other start keeps working there); with it the key names the host and the rest
-    /// of the body is the same. It catches a key sent when unset, a flag parsed and
-    /// dropped, and a probe that changes the rest of the start.
+    /// of the body is the same; and the body never has a `ttl_seconds` key, whatever
+    /// `--ttl` was given. It catches a key sent when unset, a flag parsed and dropped, a
+    /// probe that changes the rest of the start, and a ttl that still reaches the server.
     #[test]
     fn the_probe_host_is_in_the_body_only_when_asked_for() {
-        let plain = acquire(&[]).body(None);
+        let plain = acquire(&[]).body();
         let expected = json!({
             "class": "c",
             "resources": { "cpu_millis": 0, "memory_bytes": 0, "gpus": 0, "gpu_class": null },
             "max_wall_seconds": 3600,
             "labels": {},
             "validation_run": null,
-            "ttl_seconds": null,
         });
         assert_eq!(plain, expected);
-        let probe = acquire(&["--probe-host", "mac-07"]).body(None);
+        let probe = acquire(&["--probe-host", "mac-07"]).body();
         let mut with = expected;
         with["probe_host"] = json!("mac-07");
         assert_eq!(probe, with);
+        assert!(
+            acquire(&["--ttl", "60s"])
+                .body()
+                .get("ttl_seconds")
+                .is_none()
+        );
     }
 
     /// Asserts the body of a start with `--request-id`: without the flag the body has no
     /// `request_id` key at all (a server that predates the field refuses an unknown key);
-    /// with it the key carries the id and the rest of the body is the same, and `lease run`
-    /// sends it too. It catches a key sent when unset (which an older server would refuse
-    /// for every start), a flag parsed and dropped, and one left off `lease run`.
+    /// with it the key carries the id and the rest of the body is the same. It catches a
+    /// key sent when unset (which an older server would refuse for every start) and a flag
+    /// parsed and dropped.
     #[test]
     fn the_request_id_is_in_the_body_only_when_asked_for() {
-        let plain = acquire(&[]).body(None);
+        let plain = acquire(&[]).body();
         assert!(plain.get("request_id").is_none(), "{plain}");
-        let named = acquire(&["--request-id", "nightly-42"]).body(None);
+        let named = acquire(&["--request-id", "nightly-42"]).body();
         let mut with = plain;
         with["request_id"] = json!("nightly-42");
         assert_eq!(named, with);
-        let words = BASE
-            .iter()
-            .chain(&["--request-id", "nightly-42", "--", "true"]);
-        let run = Run::try_parse_from(words).unwrap().args;
-        assert_eq!(run.acquire.body(None)["request_id"], "nightly-42");
-    }
-
-    /// Asserts that `lease run` takes `--probe-host` as `lease acquire` does and sends it.
-    /// It catches a flag left off the command that runs a job on the lease.
-    #[test]
-    fn lease_run_takes_the_probe_host() {
-        let words = BASE.iter().chain(&["--probe-host", "mac-07", "--", "true"]);
-        let run = Run::try_parse_from(words).unwrap().args;
-        assert_eq!(run.acquire.body(None)["probe_host"], "mac-07");
     }
 }

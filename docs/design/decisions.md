@@ -115,9 +115,9 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   boot, observe once) unchanged; the table is small; there is nothing more to operate. (b) when the service must survive a node or zone
   loss without a minutes-long outage, when the rewrite shows (K29), or when a second replica is wanted. One replica under `Recreate`
   (5.16, [deployment.md](deployment.md)).
-- **D34. Leases across a restart.** (a) As merged: the first tick after a boot expires every lease whose expiry passed in the outage;
-  (b) none expires before `--boot-grace` has passed after a boot (off by default); absent and unknown observations are unchanged.
-  Recommend (b), the grace set to the default TTL (step 49).
+- **D34. Leases across a restart.** (a) As merged: the first tick after a boot ends every lease whose end passed in the outage;
+  (b) none ends before `--boot-grace` has passed after a boot (off by default); absent and unknown observations are unchanged.
+  Recommend (b), the grace set by the operator (step 49).
 - **D35. Admission against registered hosts: refuse when no host could ever serve, queue when one is busy. Settled by the project owner
   (reading (a)).** A `DefaultProvider` pool refuses a request with `no-capable-host`, at submit, only when no registered host could ever
   satisfy its constraints and shape (a host that exists, is not tainted and is merely busy, lost or cordoned is capable), unless an
@@ -206,8 +206,8 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   work untouched, and the request reserves another host, the first excluded for `reserve_backoff`. The default deadline is the pool's max
   wall time, by which every lease on the host at the reservation has ended. Options: (a) re-queue on another host; (b) stop the running work
   after a grace; (c) wait without a bound. Recommend (a): (b) silently destroys other tenants' results for one consumer's convenience, and
-  (c) lets a request hold a host and idle it for ever. The scheduler stops nothing for a reservation; the renewal answer carries
-  `host_reserved` (additive) so a cooperating consumer releases early.
+  (c) lets a request hold a host and idle it for ever. The scheduler stops nothing for a reservation; a consumer that sees its host reserved (the host list
+  carries `reserved_for`) releases early.
   Superseded: a reservation is no longer given up. The deadline is `drain_deadline` if set, else the request's wall limit; reaching it changes nothing (no host is
   excluded, nothing is counted) and `max_reserve_attempts` is deprecated; `reserve_backoff` sizes only the failed-prepare exclusion. Option (a) stays rejected for
   the drain itself: the request keeps its host and the work is never cut.
@@ -224,7 +224,7 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
 - **D51. Host jobs only in a whole-node lease.** A lease may carry `host_jobs` only if it is whole-node, in addition to the three consents
   of 5.12. Options: (a) any class, as 5.12 said; (b) whole-node only. Recommend (b): a host job taints its host unconditionally, and in a
   share that would destroy other consumers' work for a taint they did not cause.
-- **D52. A whole-node lease's clock starts at the token.** The TTL and max wall time count from the minting of the token, not from the
+- **D52. A whole-node lease's clock starts at the token.** The max wall time counts from the minting of the token, not from the
   commit, so a consumer is not charged for the drain or the preparation; readiness is bounded by `prepare_timeout` and `max_replace`.
   Alternative: from the commit; rejected, since a consumer could lose its time before it could use the host.
 - **D53. Environment measurement and the rerun after a loss are the consumer's.** The scheduler's readiness is only that the host is quiet
@@ -266,8 +266,8 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   places VMs on hosts that cannot run them, and (b) cannot know before launch which option to buy. Facts stay unverified claims (K27).
 - **D59. Spot hosts: a reclaim notice taints, drains and reschedules, with the machinery that exists.** The provider's `events()` stream
   (or, without it, the agent's `draining` phase on the cloud's shutdown signal) gives the notice. In that tick the scheduler records the
-  host as tainted with the reason `reclaim` (so the cordon survives a restart, 5.12), asks consumers through a renewal flag `host_leaving`
-  with `leaves_at` (additive, the sibling of `host_reserved`) to place nothing new and release, lets running work finish until the
+  host as tainted with the reason `reclaim` (so the cordon survives a restart, 5.12), asks consumers through a flag `host_leaving`
+  with `leaves_at` on the host list (additive, beside `reserved_for`) to place nothing new and release, lets running work finish until the
   deadline, requeues what had not started, and at the deadline or on a read-back Absent gives up what is left and reruns it elsewhere
   against the platform-fault budget (8.1). The usual replacement acquire follows. A reclaim taint counts toward neither
   `max_taints_in_a_row` nor `max_boot_failures`. Options: (a) treat a notice as nothing and wait for the loss (orderly work lost for

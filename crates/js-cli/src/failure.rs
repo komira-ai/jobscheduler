@@ -8,8 +8,7 @@ use crate::events::ForwardedSignal;
 
 /// The exit statuses of `js`.
 pub mod exit {
-    /// Success: the lease is held, renewed, freed or listed, or the command of `lease run`
-    /// ended with status 0 (any other status of the command is passed through).
+    /// Success: the lease is held, freed or listed, or the job command succeeded.
     pub const OK: u8 = 0;
     /// The server or the network failed, or answered something this client does not know.
     pub const SERVER: u8 = 1;
@@ -26,13 +25,6 @@ pub mod exit {
     pub const UNRESOLVED: u8 = 5;
     /// A release was accepted but the stop is not confirmed yet; the server retries it.
     pub const RELEASING: u8 = 6;
-    /// `lease run` lost its lease: a renewal found it gone, or none succeeded before the
-    /// deadline short of the server's expiry, and the command was stopped.
-    pub const LEASE_LOST: u8 = 7;
-    /// `lease run` ended, but the release of the lease could not be confirmed after every
-    /// attempt: the lease may stay held until its ttl runs out. It replaces the command's
-    /// own status, which is said on stderr.
-    pub const RELEASE_UNCONFIRMED: u8 = 8;
     /// A job command sent its request and read no definite answer: the call may have taken
     /// effect. For `job submit` the job may exist, and the same command with the same `--id`
     /// is safe to run again.
@@ -51,8 +43,6 @@ pub mod exit {
     /// `job wait` and `job run`: how the job ended could not be told, because a call failed
     /// or the job is in a state this `js` does not know.
     pub const UNDETERMINED: u8 = 15;
-    /// `lease run` could not start its command.
-    pub const NOT_STARTED: u8 = 127;
 }
 
 /// Why a command failed. The text is what `js` prints after `js: `; it never holds the
@@ -80,29 +70,11 @@ pub(crate) enum Failure {
         /// How long the client waited, in whole seconds.
         waited: u64,
     },
-    /// The command of `lease run` could not be started.
-    #[error("cannot start {program}: {why}")]
-    NotStarted {
-        /// The command, as given.
-        program: String,
-        /// The system's reason.
-        why: String,
-    },
     /// The answer to a start was lost or unusable (the connection failed, the server
     /// answered 5xx or a status this client does not know, or the body lacks a field), so
     /// the start may have created a lease. It is not repeated.
     #[error("{0}; the request may have created a lease: run \"js lease list\" before trying again")]
     Unconfirmed(String),
-    /// The lease is gone from the server.
-    #[error("lease {0} is gone from the server; stopped the command")]
-    LeaseLost(String),
-    /// No renewal succeeded before the deadline short of the lease's expiry, so the
-    /// server is about to expire it.
-    #[error("lease {0} could not be renewed before its deadline; stopped the command")]
-    LeaseUnrenewed(String),
-    /// A signal ended `lease run` while it waited for the lease; nothing was started.
-    #[error("interrupted by {} before the lease was held; asked the server to release it", .0.name())]
-    Interrupted(ForwardedSignal),
     /// A job command's request never reached the server's handling: the connection or the
     /// TLS handshake failed before it was written, or the server refused the token.
     #[error("{0}")]
@@ -177,9 +149,6 @@ impl Failure {
             Self::Refused(_) => (exit::REFUSED, "refused"),
             Self::Contract(_) => (exit::CONTRACT, "rejected"),
             Self::Unresolved { .. } => (exit::UNRESOLVED, "unresolved"),
-            Self::NotStarted { .. } => (exit::NOT_STARTED, "not-started"),
-            Self::LeaseLost(_) | Self::LeaseUnrenewed(_) => (exit::LEASE_LOST, "lease-lost"),
-            Self::Interrupted(signal) => (128 + signal.number(), "interrupted"),
             Self::NotSent(_) => (exit::SERVER, "not-sent"),
             Self::Unanswered(_) => (exit::UNCONFIRMED, "unconfirmed"),
             Self::Undetermined(_) => (exit::UNDETERMINED, "undetermined"),

@@ -18,7 +18,7 @@ the process. At this release:
 
 - **Kept:** the lease file and the files beside it (cordons, taints, registered hosts, the
   scaler's records), the job store (`<state file>.jobs`, with `--job-listen`) and the usage file.
-  A lease outlives the restart and its holder renews it as before.
+  A lease outlives the restart.
 - **Lost:** runs. They are in memory only. After the restart a host that lists one is told to
   cancel it, and its work is lost; `GET` and `DELETE` of its run id answer 410 `run-forgotten`.
 

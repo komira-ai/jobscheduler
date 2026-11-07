@@ -103,8 +103,8 @@ fn losing_the_writer_lock_stops_the_server() {
         h.ticks.step().await;
     });
     let before = revision(&url);
-    // Past the lease's default ttl (600 s): a tick of the table would now expire it.
-    h.clock.advance(Duration::from_secs(601));
+    // Past the lease's wall end (7200 s): a tick of the table would now end it.
+    h.clock.advance(Duration::from_secs(7201));
     end_the_holder(&url);
 
     let lost: LockLost = runtime.block_on(async {

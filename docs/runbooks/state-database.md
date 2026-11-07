@@ -167,7 +167,7 @@ What the server does by itself, and what to check:
   so a restore cannot wind them back; a job id drawn that names a job the restored store holds is drawn again. A client-chosen job id that the
   restore forgot can be submitted again: that is how a client resubmits a job accepted after the backup. Jobs a client accepted after
   the backup read 404 until resubmitted.
-- **Leases.** A client's renew of a lease the restored lease file does not hold fails 404 `unknown-lease`, so the client leases
+- **Leases.** A lease the restored lease file does not hold is gone: a client's release of it fails 404 `unknown-lease`, so the client leases
   again; a run a host lists that the server has no record of is answered `Cancel`.
 
 The test that restores an older job store under live agents and asserts the stop, the bookings and the ids is

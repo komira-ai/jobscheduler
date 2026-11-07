@@ -85,9 +85,9 @@ impl Client {
             .http_status_as_error(false)
             .https_only(server.https)
             .timeout_global(Some(limit))
-            // A connection that sat idle between two requests (a renewal is minutes
-            // apart) may have been closed by the other side, and a request sent on a dead
-            // one fails; every request opens its own.
+            // A connection that sat idle between two requests may have been closed by the
+            // other side, and a request sent on a dead one fails; every request opens its
+            // own.
             .max_idle_connections(0)
             .tls_config(tls)
             .build()

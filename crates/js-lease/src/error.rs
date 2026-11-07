@@ -4,8 +4,6 @@ use std::path::PathBuf;
 use js_provider::RefusalCode;
 use js_types::LeaseId;
 
-use crate::LeaseState;
-
 /// The lease file could not be written.
 ///
 /// The change that led to the save is already applied in memory, so the table is ahead of
@@ -25,12 +23,6 @@ pub struct SaveError {
 /// The settings were refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SettingsError {
-    /// The default ttl was zero.
-    #[error("the default ttl must be positive")]
-    DefaultNotPositive,
-    /// The default ttl was above the maximum ttl.
-    #[error("the default ttl must not exceed the maximum ttl")]
-    DefaultAboveMax,
     /// The prepare timeout was zero.
     #[error("the prepare timeout must be positive")]
     PrepareNotPositive,
@@ -91,9 +83,6 @@ pub enum OpenError {
 /// An acquire did not produce a held lease.
 #[derive(Debug, thiserror::Error)]
 pub enum AcquireError {
-    /// The ttl was zero.
-    #[error("the ttl must be positive")]
-    TtlNotPositive,
     /// The request's maximum wall time is above the ceiling the table was set with
     /// ([`crate::Settings::with_max_wall`]). Nothing was recorded, no lease id was used and
     /// the provider was not called.
@@ -120,35 +109,8 @@ pub enum AcquireError {
     RequestIdConflict(LeaseId),
     /// The lease file could not be written before the provider was called, so it was
     /// not called. The record stays pending in memory, retried by [`crate::LeaseTable::tick`]
-    /// and ended by its expiry. A save that fails after the provider answered is not an
+    /// and ended by its maximum wall time (a whole-node lease by its prepare deadline). A save that fails after the provider answered is not an
     /// error here: the client gets the answer and the tick report carries the failure.
-    #[error(transparent)]
-    Save(#[from] SaveError),
-}
-
-/// A renew did not extend a lease.
-#[derive(Debug, thiserror::Error)]
-pub enum RenewError {
-    /// The ttl was zero.
-    #[error("the ttl must be positive")]
-    TtlNotPositive,
-    /// The table has no such lease: never acquired, released or expired and freed.
-    #[error("lease {0} is not known")]
-    Unknown(LeaseId),
-    /// The lease is not held: it is pending or being released.
-    #[error("lease {id} is {state}, not held")]
-    NotHeld {
-        /// The lease.
-        id: LeaseId,
-        /// What it is instead.
-        state: LeaseState,
-    },
-    /// The lease's expiry has passed and the next tick will release it.
-    #[error("lease {0} has expired")]
-    Expired(LeaseId),
-    /// The lease file could not be written. The renewal took effect in memory and the file
-    /// is behind it until the next successful save (see [`SaveError`]); reopening the
-    /// table returns to the file's expiry.
     #[error(transparent)]
     Save(#[from] SaveError),
 }

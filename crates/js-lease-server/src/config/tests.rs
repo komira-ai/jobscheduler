@@ -77,18 +77,68 @@ fn the_default_limits_are_the_flag_defaults() {
 /// leaves the flags' settings untouched (every figure), a pool's `prepare_timeout`
 /// replaces only the prepare timeout, and a zero one is a startup error naming the
 /// pool flag. It catches a pool key that is dropped on the way, and one that also
-/// disturbs the ttls.
+/// disturbs the ceiling on the wall time.
 #[test]
 fn a_pools_prepare_timeout_replaces_only_the_prepare_timeout() {
     let secs = Duration::from_secs;
-    let flags = Settings::new(secs(60), secs(3600)).unwrap();
+    let flags = Settings::new().with_max_wall(secs(3600)).unwrap();
     assert_eq!(with_whole_node(flags, None).unwrap(), flags);
     let mut whole = WholeNodeConfig::dedicated(2);
     whole.prepare_timeout_ms = 1_200_000;
     let set = with_whole_node(flags, Some(&whole)).unwrap();
     assert_eq!(set.prepare_timeout(), secs(1200));
-    assert_eq!((set.default_ttl(), set.max_ttl()), (secs(60), secs(3600)));
+    assert_eq!(set.max_wall(), Some(secs(3600)));
     whole.prepare_timeout_ms = 0;
     let err = with_whole_node(flags, Some(&whole)).err().unwrap();
     assert!(err.to_string().contains("--agent-pool-config"), "{err}");
+}
+
+/// The startup error of the command line `args` (the program name left out).
+fn refused_flag(args: &[&str]) -> StartupError {
+    let args = std::iter::once("js-lease-server").chain(args.iter().copied());
+    let cli = Cli::try_parse_from(args).unwrap();
+    Config::from_cli(cli).err().unwrap()
+}
+
+/// Asserts that `--default-ttl` and `--max-ttl`, which still parse (hidden) so that they
+/// can be refused by name, are startup errors with the exact reason, whatever value they
+/// are given, and that the refusal comes before every other check: beside only the flags
+/// the parser requires (whose files are never read), and beside `--config`. It catches a flag that is accepted and ignored (an
+/// operator would think a ttl is in force), one refused as unknown by the parser, and a
+/// refusal that is hidden behind another one.
+#[test]
+fn a_removed_ttl_flag_is_refused_by_name_before_anything_else() {
+    for flag in ["--default-ttl", "--max-ttl"] {
+        for value in ["60s", "not-a-duration"] {
+            let given = format!("{flag}={value}");
+            let required = ["--state-file=s", "--boot=initialise", "--token-file=t"];
+            for args in [
+                [required.as_slice(), &[given.as_str()]].concat(),
+                vec!["--config=x.toml", given.as_str()],
+            ] {
+                let err = refused_flag(&args);
+                assert_eq!(err.flag(), flag);
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "{flag}: was removed: a lease has no time to live (it ends when \
+                         released or at its maximum wall time); remove the flag"
+                    )
+                );
+            }
+        }
+    }
+}
+
+/// Asserts that the removed ttl flags are hidden options of the command line, with no
+/// default, so that `--help` does not offer them. It catches a flag left visible.
+#[test]
+fn the_removed_ttl_flags_are_hidden_and_have_no_default() {
+    let command = <Cli as clap::CommandFactory>::command();
+    for name in ["default_ttl", "max_ttl"] {
+        let arg = command.get_arguments().find(|arg| arg.get_id() == name);
+        let arg = arg.unwrap();
+        assert!(arg.is_hide_set(), "{name}");
+        assert!(arg.get_default_values().is_empty(), "{name}");
+    }
 }

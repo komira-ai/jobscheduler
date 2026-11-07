@@ -573,7 +573,7 @@ impl Core {
 
     /// Asks the registry to remove the host, and drops it from the set when it did. The
     /// refusal is a warning the first time only (`added`): the same refusal at each later
-    /// tick (a lease its holder keeps renewing can last a long while) is a debug line, and
+    /// tick (a lease can last until its maximum wall time) is a debug line, and
     /// the alert says it once for as long as it holds.
     fn ask_removal(&self, memory: &mut Memory, host: &str, added: bool) {
         match self.effects.remove(host) {

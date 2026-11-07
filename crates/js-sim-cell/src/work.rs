@@ -14,9 +14,8 @@ use js_types::sched::FarmTime;
 
 use crate::observe::Ask;
 
-/// How long an item is waited for unless [`Work::give_up_after`] says otherwise: the
-/// server's largest lease ttl (`--max-ttl`, 3600 s), so a lease asked for that long is
-/// not cut short.
+/// How long an item is waited for unless [`Work::give_up_after`] says otherwise: one
+/// hour.
 pub const DEFAULT_GIVE_UP: Duration = Duration::from_secs(3600);
 
 /// What an item needs unless [`Work::needs`] says otherwise: the share the server's own

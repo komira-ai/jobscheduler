@@ -8,10 +8,10 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_cli::{Clock, ForwardedSignal, Services, SignalSource, Signaller, Waiter};
+use js_cli::{Services, Waiter};
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli as ServerCli, Config, Running, Seated, SharedClock, StartupError,
@@ -115,46 +115,12 @@ impl Outcome {
 pub struct Js {
     pub server: String,
     pub token_file: PathBuf,
-    /// The clock the CLI reads: the server's, when it is a test server.
-    pub clock: Arc<dyn Clock>,
-}
-
-/// The clock of a test server, read by the CLI.
-pub struct ServerClock(pub ManualClock);
-
-impl Clock for ServerClock {
-    fn now_ms(&self) -> u64 {
-        js_lease::Clock::now(&self.0).millis()
-    }
-}
-
-/// A clock that always reads the same time.
-pub struct FixedClock(pub u64);
-
-impl Clock for FixedClock {
-    fn now_ms(&self) -> u64 {
-        self.0
-    }
 }
 
 impl Js {
-    /// Services over `waiter`, this server's clock and no signals.
+    /// Services over `waiter` and no signals.
     pub fn services(&self, waiter: Arc<dyn Waiter>) -> Services {
-        Services::new(waiter, self.clock.clone(), Box::new(|_| Ok(())))
-    }
-
-    /// Services over `waiter` and this server's clock whose signal source hands its
-    /// `Signaller` to the test.
-    pub fn services_with_signals(
-        &self,
-        waiter: Arc<dyn Waiter>,
-    ) -> (Services, std::sync::mpsc::Receiver<Signaller>) {
-        let (handed, receiver) = std::sync::mpsc::channel();
-        let source: SignalSource = Box::new(move |signaller| {
-            handed.send(signaller).unwrap();
-            Ok(())
-        });
-        (Services::new(waiter, self.clock.clone(), source), receiver)
+        Services::new(waiter, Box::new(|_| Ok(())))
     }
 
     /// The arguments of a command against this server, program name first.
@@ -202,10 +168,9 @@ pub fn run(args: Vec<OsString>, services: Services) -> Outcome {
     Outcome { code, out, err }
 }
 
-/// Services over `waiter`, a clock that reads [`T0`] and a signal source that reports
-/// nothing.
+/// Services over `waiter` and a signal source that reports nothing.
 pub fn services(waiter: Arc<dyn Waiter>) -> Services {
-    Services::new(waiter, Arc::new(FixedClock(T0)), Box::new(|_| Ok(())))
+    Services::new(waiter, Box::new(|_| Ok(())))
 }
 
 /// A waiter that fails the test when it is asked to wait.
@@ -244,106 +209,6 @@ impl Waiter for Driven {
     }
 }
 
-/// The waits that return at once, whatever the test does, and are kept apart from the
-/// periods the test steps: the 100 ms looks at a group that is ending, and the 3 s between
-/// two tries of a release.
-pub const INSTANT: [Duration; 2] = [Duration::from_millis(100), Duration::from_secs(3)];
-
-/// A waiter the test steps: each wait blocks until the test calls [`Manual::step`], and a
-/// step returns once the CLI has handled that period's renewal and waits again.
-pub struct Manual {
-    state: Mutex<(u64, u64)>,
-    changed: Condvar,
-    intervals: Mutex<Vec<Duration>>,
-    instant: Mutex<Vec<Duration>>,
-}
-
-/// The longest a test blocks on the CLI before it calls the CLI hung. Only a hang
-/// reaches it; the CLI under test answers at once.
-const HANG: Duration = Duration::from_secs(120);
-
-type Guard<'a> = std::sync::MutexGuard<'a, (u64, u64)>;
-
-impl Manual {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new((0, 0)),
-            changed: Condvar::new(),
-            intervals: Mutex::new(Vec::new()),
-            instant: Mutex::new(Vec::new()),
-        })
-    }
-
-    /// The intervals the CLI asked to wait, in order.
-    pub fn intervals(&self) -> Vec<Duration> {
-        self.intervals.lock().unwrap().clone()
-    }
-
-    /// The [`INSTANT`] waits the CLI asked for, in order.
-    pub fn instant(&self) -> Vec<Duration> {
-        self.instant.lock().unwrap().clone()
-    }
-
-    /// The intervals the CLI asked to wait, once there are `count` of them. A wait that
-    /// is asked of the waiter from a thread of the CLI's own (the grace period of a
-    /// command told to stop) can be asked after `js` has returned; a test that checks
-    /// such a wait reads the intervals through this and not through [`Manual::intervals`].
-    pub fn intervals_reaching(&self, count: usize) -> Vec<Duration> {
-        let guard = self.state.lock().unwrap();
-        drop(self.until(guard, |_| self.intervals.lock().unwrap().len() >= count));
-        self.intervals()
-    }
-
-    fn until<'a>(&self, mut guard: Guard<'a>, ready: impl Fn(&(u64, u64)) -> bool) -> Guard<'a> {
-        while !ready(&guard) {
-            let (next, timeout) = self.changed.wait_timeout(guard, HANG).unwrap();
-            assert!(!timeout.timed_out(), "the CLI never reached its waiter");
-            guard = next;
-        }
-        guard
-    }
-
-    /// Lets the CLI's pending wait return, and returns when the CLI is waiting again:
-    /// the renewal that wait led to is done.
-    pub fn step(&self) {
-        let guard = self.until(self.state.lock().unwrap(), |s| s.0 > s.1);
-        let mut guard = guard;
-        guard.1 += 1;
-        let target = guard.1 + 1;
-        self.changed.notify_all();
-        drop(self.until(guard, |s| s.0 >= target));
-    }
-
-    /// Lets the CLI's pending wait return and does not wait for it to wait again: for
-    /// the period after which the CLI stops asking for more.
-    pub fn release(&self) {
-        let mut guard = self.until(self.state.lock().unwrap(), |s| s.0 > s.1);
-        guard.1 += 1;
-        self.changed.notify_all();
-    }
-
-    /// Returns once the CLI is waiting for a period to pass: the lease is held, the
-    /// command is running and the renewal clock has started.
-    pub fn running(&self) {
-        drop(self.until(self.state.lock().unwrap(), |s| s.0 > s.1));
-    }
-}
-
-impl Waiter for Manual {
-    fn wait(&self, interval: Duration) {
-        if INSTANT.contains(&interval) {
-            self.instant.lock().unwrap().push(interval);
-            return;
-        }
-        let mut guard = self.state.lock().unwrap();
-        self.intervals.lock().unwrap().push(interval);
-        guard.0 += 1;
-        let mine = guard.0;
-        self.changed.notify_all();
-        drop(self.until(guard, |s| s.1 >= mine));
-    }
-}
-
 /// A capacity source of two fake hosts whose first calls are scripted to get no answer.
 /// These tests never restart a server, so it is never given bookings to put back.
 pub struct Scripted(pub Vec<(Call, bool)>);
@@ -366,9 +231,8 @@ impl CapacitySource for Scripted {
 /// test's thread, with a clock and a ticker the test moves.
 pub struct Harness {
     pub rt: Runtime,
-    pub running: Option<Running>,
-    /// A clone of the server's listener, never accepted on while the server runs.
-    kept: Option<TcpListener>,
+    /// The server, kept running until the harness is dropped.
+    _running: Running,
     pub clock: ManualClock,
     pub ticks: TickHandle,
     pub scratch: Scratch,
@@ -435,7 +299,6 @@ impl Harness {
         let (ticks, ticker) = channel_ticker();
         let shared = SharedClock::new(clock.clone());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let kept = listener.try_clone().unwrap();
         let config = config.with_listener(listener);
         let running = rt.block_on(start(config, shared, ticker)).unwrap();
         let scheme = if extra.contains(&"--tls-cert") {
@@ -444,19 +307,13 @@ impl Harness {
             "http"
         };
         let server = format!("{scheme}://{}", running.addr());
-        let read_clock = clock.clone();
         Self {
             rt,
-            running: Some(running),
-            kept: Some(kept),
+            _running: running,
             clock,
             ticks,
             scratch,
-            js: Js {
-                server,
-                token_file,
-                clock: Arc::new(ServerClock(read_clock)),
-            },
+            js: Js { server, token_file },
         }
     }
 
@@ -474,28 +331,6 @@ impl Harness {
     pub fn ticking(&self) -> Arc<Driven> {
         let (handle, ticks) = (self.rt.handle().clone(), self.ticks.clone());
         Driven::new(move || tick_on(&handle, &ticks))
-    }
-
-    /// Stops the server; later requests fail to talk to it. The port stays owned for the
-    /// rest of the process by the harness's clone of the server's listener, on which a
-    /// thread, started only once the server's accept loop is gone, drops every
-    /// connection. No other test's server can take the port and answer in its place.
-    ///
-    /// The server made its listener non-blocking, and a clone shares that flag (it lives on
-    /// the open file description), so the kept copy is non-blocking too. It is made
-    /// blocking again only here, after `shutdown()` has returned and the server's copy is
-    /// gone: earlier, it would make the server's own accept loop blocking. Left
-    /// non-blocking, the thread would spin on `WouldBlock` instead of waiting in accept.
-    pub fn stop(&mut self) {
-        let running = self.running.take().unwrap();
-        self.rt.block_on(running.shutdown()).unwrap();
-        let kept = self.kept.take().unwrap();
-        kept.set_nonblocking(false).unwrap();
-        std::thread::spawn(move || {
-            for stream in kept.incoming() {
-                drop(stream);
-            }
-        });
     }
 
     /// The ids of the leases the server lists, read by the CLI.
@@ -629,22 +464,11 @@ fn read_request(stream: &mut impl Read) -> String {
     head
 }
 
-/// Ends a `lease run` when dropped, by delivering `signal` to it: a test that fails
-/// before it delivers the signal itself leaves no run behind to wait for.
-pub struct EndsRun(pub Signaller, pub ForwardedSignal);
-
-impl Drop for EndsRun {
-    fn drop(&mut self) {
-        self.0.deliver(self.1);
-    }
-}
-
 /// The CLI against `server` with the token of `scratch`'s file.
 pub fn against(server: &str, scratch: &Scratch) -> Js {
     Js {
         server: server.to_owned(),
         token_file: scratch.write("token", TOKEN, 0o600),
-        clock: Arc::new(FixedClock(T0)),
     }
 }
 
@@ -661,17 +485,5 @@ pub fn acquire_words<'a>(extra: &[&'a str]) -> Vec<&'a str> {
     words.extend(host_flags(extra));
     words.extend(["--max-wall", "2h"]);
     words.extend(extra);
-    words
-}
-
-/// The words of `lease run` for one whole host, with `extra` flags, then `--` and the
-/// command.
-pub fn run_words<'a>(extra: &[&'a str], command: &[&'a str]) -> Vec<&'a str> {
-    let mut words = vec!["lease", "run"];
-    words.extend(host_flags(extra));
-    words.extend(["--max-wall", "2h"]);
-    words.extend(extra);
-    words.push("--");
-    words.extend(command);
     words
 }

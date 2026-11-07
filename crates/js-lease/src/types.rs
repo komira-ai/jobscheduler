@@ -6,16 +6,16 @@ use crate::clock::Timestamp;
 use crate::error::{SaveError, SettingsError};
 use crate::state::LeaseState;
 
-/// How long a lease lives when the client does not renew it.
+/// The bounds a lease table works within: how long a whole-node lease may wait to be
+/// observed ready, the ceiling on a request's maximum wall time, and the restart grace of
+/// reservation records.
 ///
-/// A ttl the client asks for is clamped to `max_ttl`; a client that names none gets
-/// `default_ttl`. A zero ttl is refused. Neither bound replaces the request's maximum
-/// wall time, which bounds the whole life of a lease whatever the ttl (as the wall clock
-/// reads it; see the crate docs on a clock that steps).
+/// A lease has no time to live: nothing a client does keeps it alive, and nothing but its
+/// release, its maximum wall time (as the wall clock reads it; see the crate docs on a
+/// clock that steps) or, while a whole-node lease waits to be ready, its prepare deadline
+/// ends it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
-    default_ttl: Duration,
-    max_ttl: Duration,
     prepare_timeout: Duration,
     boot_grace: Duration,
     regain_grace: Duration,
@@ -27,29 +27,21 @@ pub struct Settings {
 pub const DEFAULT_PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl Settings {
-    /// Settings with these bounds. `default_ttl` must be positive and at most
-    /// `max_ttl`, which makes `max_ttl` positive as well.
-    pub fn new(default_ttl: Duration, max_ttl: Duration) -> Result<Self, SettingsError> {
-        if default_ttl.is_zero() {
-            return Err(SettingsError::DefaultNotPositive);
-        }
-        if default_ttl > max_ttl {
-            return Err(SettingsError::DefaultAboveMax);
-        }
-        Ok(Self {
-            default_ttl,
-            max_ttl,
+    /// The default settings: a prepare timeout of [`DEFAULT_PREPARE_TIMEOUT`], no ceiling on
+    /// the maximum wall time and no restart grace. The `with_` methods change each.
+    pub fn new() -> Self {
+        Self {
             prepare_timeout: DEFAULT_PREPARE_TIMEOUT,
             boot_grace: Duration::ZERO,
             regain_grace: Duration::ZERO,
             max_wall: None,
-        })
+        }
     }
 
     /// The same settings with `max_wall` as the longest maximum wall time a request may
-    /// ask for. A lease is bounded by its maximum wall time whatever the renewals, so this
-    /// bounds the whole life of every lease the table grants after it is set, and with it
-    /// the time a draining host takes to empty. A request above it is refused with
+    /// ask for. A lease is bounded by its maximum wall time, so this bounds the whole life
+    /// of every lease the table grants after it is set, and with it the time a draining
+    /// host takes to empty. A request above it is refused with
     /// [`AcquireError::WallAboveCeiling`](crate::AcquireError::WallAboveCeiling). It must be
     /// positive; with none set, only a positive wall time is required. A lease already in
     /// the file keeps the wall time it was granted.
@@ -67,8 +59,8 @@ impl Settings {
     }
 
     /// The same settings with `prepare_timeout` as the longest a whole-node lease waits,
-    /// pending, to be observed ready. A whole lease's ttl and maximum wall time count from
-    /// the moment it is observed ready, so this is the only bound on the wait. It must be
+    /// pending, to be observed ready. A whole lease's maximum wall time counts from the
+    /// moment it is observed ready, so this is the only bound on the wait. It must be
     /// positive; it defaults to [`DEFAULT_PREPARE_TIMEOUT`] (600 s). The request's maximum
     /// wall time does not shorten the wait.
     pub fn with_prepare_timeout(
@@ -112,22 +104,11 @@ impl Settings {
     pub fn prepare_timeout(&self) -> Duration {
         self.prepare_timeout
     }
+}
 
-    /// The ttl a client that names none gets.
-    pub fn default_ttl(&self) -> Duration {
-        self.default_ttl
-    }
-
-    /// The longest ttl granted at one time.
-    pub fn max_ttl(&self) -> Duration {
-        self.max_ttl
-    }
-
-    /// The ttl to grant for what the client asked: the default for `None`, the ask
-    /// clamped to the maximum otherwise, and nothing for a zero ask.
-    pub(crate) fn grant(&self, asked: Option<Duration>) -> Option<Duration> {
-        let ttl = asked.unwrap_or(self.default_ttl);
-        (!ttl.is_zero()).then(|| ttl.min(self.max_ttl))
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -138,8 +119,8 @@ pub struct Lease {
     pub id: LeaseId,
     /// The host it holds.
     pub host: HostId,
-    /// When it lapses unless renewed.
-    pub expires_at: Timestamp,
+    /// When its maximum wall time ends it, unless it is released first.
+    pub ends_at: Timestamp,
     /// The labels written onto every billable resource of the lease.
     pub labels: Labels,
 }
@@ -155,9 +136,9 @@ pub struct LeaseInfo {
     pub host: Option<HostId>,
     /// When the lease was acquired.
     pub acquired_at: Timestamp,
-    /// When it lapses unless renewed.
-    pub expires_at: Timestamp,
-    /// When its maximum wall time ends it, whatever renewals say.
+    /// When its maximum wall time ends it, unless it is released first. For a pending
+    /// whole-node lease, whose maximum wall time counts from the moment it is ready, this
+    /// is not yet its end: it ends at its prepare deadline if it is not ready by then.
     pub ends_at: Timestamp,
     /// The labels written onto every billable resource of the lease.
     pub labels: Labels,
@@ -176,7 +157,9 @@ pub enum ReleaseOutcome {
 /// What one [`crate::LeaseTable::tick`] did, for the server to log and count.
 #[derive(Debug, Default)]
 pub struct TickReport {
-    /// Leases whose expiry had passed and whose stop was started this tick.
+    /// Leases that reached their end and whose stop was started this tick: a lease whose
+    /// maximum wall time ended, or a pending whole-node lease whose prepare deadline passed
+    /// (and was observed once at it). Nothing else ends a lease by time.
     pub expired: Vec<LeaseId>,
     /// Leases the provider confirmed gone this tick, expired or being released.
     pub freed: Vec<LeaseId>,
@@ -233,7 +216,7 @@ pub struct Booking {
     /// resources. `None` for a lease that books the whole host, and for a file written
     /// before the file kept them, which a provider puts back as booking the whole host.
     pub shares: Option<Resources>,
-    /// When the lease's ttl and maximum wall time started counting: its acquire, or for a
+    /// When the lease's maximum wall time started counting: its acquire, or for a
     /// whole-node lease the moment it was observed ready. A provider that estimates when
     /// the lease ends counts from here.
     pub started_at: Timestamp,

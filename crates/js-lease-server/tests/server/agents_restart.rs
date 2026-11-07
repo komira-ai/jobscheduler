@@ -34,7 +34,7 @@ fn agent_file(scratch: &Scratch) -> PathBuf {
 /// the same host and is not freed by ticks while the host is not heard; the host reads
 /// `awaiting` and takes no new lease; the old session is dead (409 `unknown-host`, and a
 /// secret from before the restart does not open the new session); the agent's hello is
-/// admitted, the lease then lives on the live host and can be renewed and released. It
+/// admitted, the lease then lives on the live host and can be released. It
 /// catches a restart that drops the lease, one that lets a new lease take the awaiting
 /// host, and an old session that survives the process. It runs with the bindings in files
 /// and in the state store, and catches in the store a restart that loses the lease's host
@@ -86,8 +86,6 @@ async fn restart_keeps_lease_on_registered_host_as_unknown_until_rehello_in(kept
 
     h.ticks.step().await;
     assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
-    let renewed = h.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(renewed.status, 200, "{}", renewed.body);
     let released = h.call("DELETE", "/v1/leases/1-1", None).await;
     assert_eq!(released.json(), json!({ "state": "freed" }));
     let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
@@ -186,7 +184,7 @@ async fn an_awaiting_host_that_never_returns_is_forgotten_with_its_binding_in(ke
     first.call("POST", "/v1/leases", Some(&lease_body())).await;
 
     let h = restarted(first, false).await;
-    h.clock.advance(secs(601));
+    h.clock.advance(secs(7201));
     h.ticks.step().await;
     assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
     assert_eq!(listed(&hosts(&h).await), ["burst-1"]);

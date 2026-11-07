@@ -139,7 +139,6 @@ answer: 200 {"commands":[],"result_acks":[],"taint_ack":false,"exclusive":"1-1"}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-1",
       "id": "1-1",
       "labels": {
@@ -161,7 +160,7 @@ sequence = 1
 state = "held"
 host = "burst-1"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -238,7 +237,6 @@ answer: 200 {"commands":[],"result_acks":[],"taint_ack":false,"exclusive":"1-2"}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-1",
       "id": "1-1",
       "labels": {
@@ -249,7 +247,6 @@ answer: 200 {"commands":[],"result_acks":[],"taint_ack":false,"exclusive":"1-2"}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-2",
       "id": "1-2",
       "labels": {
@@ -271,7 +268,7 @@ sequence = 1
 state = "held"
 host = "burst-1"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -284,7 +281,7 @@ sequence = 2
 state = "held"
 host = "burst-2"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -362,7 +359,6 @@ answer: 409 {"error":"no-capacity"}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-1",
       "id": "1-1",
       "labels": {
@@ -373,7 +369,6 @@ answer: 409 {"error":"no-capacity"}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-2",
       "id": "1-2",
       "labels": {
@@ -384,7 +379,6 @@ answer: 409 {"error":"no-capacity"}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "id": "1-3",
       "labels": {
         "team": "infra"
@@ -406,7 +400,7 @@ sequence = 1
 state = "held"
 host = "burst-1"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -419,7 +413,7 @@ sequence = 2
 state = "held"
 host = "burst-2"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -434,7 +428,6 @@ acquired_at_ms = 1000000
 expires_at_ms = 1600000
 ends_at_ms = 8200000
 whole = true
-ttl_ms = 600000
 wall_ms = 7200000
 
 [lease.labels]
@@ -531,7 +524,6 @@ answer: 200 {"state":"freed"}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-2",
       "id": "1-2",
       "labels": {
@@ -542,7 +534,6 @@ answer: 200 {"state":"freed"}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "id": "1-3",
       "labels": {
         "team": "infra"
@@ -564,7 +555,7 @@ sequence = 2
 state = "held"
 host = "burst-2"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -579,7 +570,6 @@ acquired_at_ms = 1000000
 expires_at_ms = 1600000
 ends_at_ms = 8200000
 whole = true
-ttl_ms = 600000
 wall_ms = 7200000
 
 [lease.labels]
@@ -680,7 +670,6 @@ answer: 200 {"commands":[],"result_acks":[],"taint_ack":false}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-2",
       "id": "1-2",
       "labels": {
@@ -691,7 +680,6 @@ answer: 200 {"commands":[],"result_acks":[],"taint_ack":false}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "id": "1-3",
       "labels": {
         "team": "infra"
@@ -712,7 +700,7 @@ sequence = 2
 state = "held"
 host = "burst-2"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -727,7 +715,6 @@ acquired_at_ms = 1000000
 expires_at_ms = 1600000
 ends_at_ms = 8200000
 whole = true
-ttl_ms = 600000
 wall_ms = 7200000
 
 [lease.labels]
@@ -749,7 +736,7 @@ isa = "x86-64-v3"
 
 == held ==
 answer: 200 {"commands":[],"result_acks":[],"taint_ack":false,"exclusive":"1-3"}
-answer: 201 {"id":"1-3","host":"burst-1","expires_at_ms":1600000}
+answer: 201 {"id":"1-3","host":"burst-1","ends_at_ms":8200000}
 -- hosts 200
 {
   "hosts": [
@@ -817,7 +804,6 @@ answer: 201 {"id":"1-3","host":"burst-1","expires_at_ms":1600000}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-2",
       "id": "1-2",
       "labels": {
@@ -828,7 +814,6 @@ answer: 201 {"id":"1-3","host":"burst-1","expires_at_ms":1600000}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-1",
       "id": "1-3",
       "labels": {
@@ -850,7 +835,7 @@ sequence = 2
 state = "held"
 host = "burst-2"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -863,7 +848,7 @@ sequence = 3
 state = "held"
 host = "burst-1"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
@@ -953,7 +938,6 @@ answer: 200 {"commands":[],"result_acks":[],"taint_ack":false}
     {
       "acquired_at_ms": 1000000,
       "ends_at_ms": 8200000,
-      "expires_at_ms": 1600000,
       "host": "burst-1",
       "id": "1-3",
       "labels": {
@@ -975,7 +959,7 @@ sequence = 3
 state = "held"
 host = "burst-1"
 acquired_at_ms = 1000000
-expires_at_ms = 1600000
+expires_at_ms = 8200000
 ends_at_ms = 8200000
 whole = true
 
