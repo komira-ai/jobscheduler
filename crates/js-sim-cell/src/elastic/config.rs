@@ -105,7 +105,6 @@ pub fn text(cloud: &Cloud, state: &Path, token: &Path, placement: &str) -> Strin
          agent_listen = \"127.0.0.2:0\"\n\
          advertise_url = {advertise}\n\
          max_lease_wall = \"2h\"\n\
-         max_ttl = \"2h\"\n\
          usage_off = true\n\
          placement = {placement}\n\
          \n\

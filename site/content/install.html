@@ -71,7 +71,7 @@ memory_bytes = 17179869184</pre></div>
     <p>With the agent heard by the server, a client leases the host:</p>
     <div class="code"><pre><span class="p">$</span> js --server http://127.0.0.1:7300 --token-file ~/.js-token lease acquire --class whole-node --max-wall 2h
 <span class="p">$</span> js --server http://127.0.0.1:7300 --token-file ~/.js-token lease list</pre></div>
-    <p><code>acquire</code> prints <code>lease &lt;id&gt; host &lt;host&gt; expires &lt;ms&gt;</code>. A whole-node lease is answered <code>pending</code> until the host's agent reports it ready, and the client looks at the list every two seconds for at most <code>--wait-pending</code>, 60 seconds by default, then releases a lease that is still pending. The token file is a regular file owned by you, mode 0600 or 0400.</p>
+    <p><code>acquire</code> prints <code>lease &lt;id&gt; host &lt;host&gt; ends &lt;ms&gt;</code>. A whole-node lease is answered <code>pending</code> until the host's agent reports it ready, and the client looks at the list every two seconds for at most <code>--wait-pending</code>, 60 seconds by default, then releases a lease that is still pending. The token file is a regular file owned by you, mode 0600 or 0400.</p>
     <p class="source-note">From the module documentation of <code>crates/js-cli/src/lib.rs</code>.</p>
   </li>
 </ol>

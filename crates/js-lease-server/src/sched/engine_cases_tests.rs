@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier};
-use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request as HttpRequest, StatusCode};
@@ -369,15 +368,14 @@ fn a_restart_puts_the_leases_back_and_the_engine_learns_them_once() {
     let flags = ["--placement", "js-sched", "--cpu-slack", "1.5"];
     let r = rig("restart", &text, &["h1", "h2"], &flags);
     let mut table = r.table();
-    let ttl = Some(Duration::from_secs(3_600));
     let class = r.agents.registry.provider().classes()[0].clone();
     let mut whole = sharing_spec(1).request().clone();
     whole.class = class.id().clone();
-    let held = table.acquire(whole, ttl).unwrap();
+    let held = table.acquire(whole).unwrap();
     let shared: Vec<_> = (0..3)
         .map(|_| {
             table
-                .acquire(share_of(1, 1_000, GIB).request().clone(), ttl)
+                .acquire(share_of(1, 1_000, GIB).request().clone())
                 .unwrap()
         })
         .collect();
@@ -395,20 +393,20 @@ fn a_restart_puts_the_leases_back_and_the_engine_learns_them_once() {
     assert_eq!(leases, 4);
     // 1.5x of 8 cores, 3 taken: 9 more one-core leases fit, a tenth does not.
     for n in 0..9 {
-        let lease = table.acquire(share_of(1, 1_000, GIB).request().clone(), ttl);
+        let lease = table.acquire(share_of(1, 1_000, GIB).request().clone());
         assert_eq!(lease.unwrap().host.as_str(), busy, "lease {n}");
     }
     assert!(
         table
-            .acquire(share_of(1, 1_000, GIB).request().clone(), ttl)
+            .acquire(share_of(1, 1_000, GIB).request().clone())
             .is_err()
     );
     assert_eq!(r.counted(), (r.placer().fallbacks(), 1, 2));
     table.release(&shared[0].id).unwrap();
-    let again = table.acquire(share_of(1, 1_000, GIB).request().clone(), ttl);
+    let again = table.acquire(share_of(1, 1_000, GIB).request().clone());
     assert_eq!(again.unwrap().host.as_str(), busy);
     let above = share_of(1, 1_000, NINETY + 1).request().clone();
-    assert!(table.acquire(above, ttl).is_err());
+    assert!(table.acquire(above).is_err());
     assert_eq!(r.placer().resynced(), 1);
     let refused = config_result(r.dir(), &text, &[], "resume").err().unwrap();
     assert!(

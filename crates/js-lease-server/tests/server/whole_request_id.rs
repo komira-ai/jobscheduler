@@ -200,10 +200,10 @@ async fn same_request_id_returns_the_same_lease() {
     h.ticks.step().await;
     ready(&h, &me, &id).await;
     let list = h.call("GET", "/v1/leases", None).await.json();
-    let expires = list["leases"][0]["expires_at_ms"].clone();
+    let ends = list["leases"][0]["ends_at_ms"].clone();
     let again = acquire(&h, &named()).await;
     assert_eq!(again.status, 201, "{}", again.body);
-    let held = json!({ "id": id, "host": "burst-1", "expires_at_ms": expires });
+    let held = json!({ "id": id, "host": "burst-1", "ends_at_ms": ends });
     assert_eq!(again.json(), held);
     assert_eq!(lease_ids(&h).await, [id]);
 }
@@ -291,7 +291,7 @@ async fn no_request_id_is_byte_identical_to_today() {
     assert_eq!(granted.status, 201);
     assert_eq!(
         granted.body,
-        "{\"id\":\"1-1\",\"host\":\"gpu-01\",\"expires_at_ms\":1600000}"
+        "{\"id\":\"1-1\",\"host\":\"gpu-01\",\"ends_at_ms\":8200000}"
     );
     let file = std::fs::read_to_string(h.scratch.state()).unwrap();
     assert!(!file.contains("request"), "{file}");

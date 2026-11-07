@@ -81,8 +81,8 @@ async fn the_program_serves_and_stops_on_sigterm() {
 
 /// Asserts that a program whose lease file cannot be written at the last tick exits 1
 /// and says why on standard error, instead of the 0 of an orderly stop. The file is
-/// made unwritable by putting a directory where its temporary file goes; a renew then
-/// fails to save (a 500) and leaves the file behind the table, so the final tick has
+/// made unwritable by putting a directory where its temporary file goes; a release
+/// then fails to save (a 500) and leaves the file behind the table, so the final tick has
 /// to write it and cannot.
 #[tokio::test]
 async fn the_program_exits_1_when_the_final_save_fails() {
@@ -92,8 +92,8 @@ async fn the_program_exits_1_when_the_final_save_fails() {
     let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
     assert_eq!(made.status, 201, "{}", made.body);
     std::fs::create_dir(scratch.path("leases.toml.tmp")).unwrap();
-    let renewed = request(addr, "POST", "/v1/leases/1-1/renew", Some(TOKEN), None).await;
-    assert_eq!(renewed.status, 500, "{}", renewed.body);
+    let refused = request(addr, "DELETE", "/v1/leases/1-1", Some(TOKEN), None).await;
+    assert_eq!(refused.status, 500, "{}", refused.body);
 
     let named = format!(
         "js-lease-server: the final tick could not write the lease file {}: ",

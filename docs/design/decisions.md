@@ -115,9 +115,9 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   boot, observe once) unchanged; the table is small; there is nothing more to operate. (b) when the service must survive a node or zone
   loss without a minutes-long outage, when the rewrite shows (K29), or when a second replica is wanted. One replica under `Recreate`
   (5.16, [deployment.md](deployment.md)).
-- **D34. Leases across a restart.** (a) As merged: the first tick after a boot expires every lease whose expiry passed in the outage;
-  (b) none expires before `--boot-grace` has passed after a boot (off by default); absent and unknown observations are unchanged.
-  Recommend (b), the grace set to the default TTL (step 49).
+- **D34. Leases across a restart.** (a) As merged: the first tick after a boot ends every lease whose end passed in the outage;
+  (b) none ends before `--boot-grace` has passed after a boot (off by default); absent and unknown observations are unchanged.
+  Recommend (b), the grace set by the operator (step 49).
 - **D35. Admission against registered hosts: refuse when no host could ever serve, queue when one is busy. Settled by the project owner
   (reading (a)).** A `DefaultProvider` pool refuses a request with `no-capable-host`, at submit, only when no registered host could ever
   satisfy its constraints and shape (a host that exists, is not tainted and is merely busy, lost or cordoned is capable), unless an
@@ -206,8 +206,8 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   work untouched, and the request reserves another host, the first excluded for `reserve_backoff`. The default deadline is the pool's max
   wall time, by which every lease on the host at the reservation has ended. Options: (a) re-queue on another host; (b) stop the running work
   after a grace; (c) wait without a bound. Recommend (a): (b) silently destroys other tenants' results for one consumer's convenience, and
-  (c) lets a request hold a host and idle it for ever. The scheduler stops nothing for a reservation; the renewal answer carries
-  `host_reserved` (additive) so a cooperating consumer releases early.
+  (c) lets a request hold a host and idle it for ever. The scheduler stops nothing for a reservation; a consumer that sees its host reserved (the host list
+  carries `reserved_for`) releases early.
   Superseded: a reservation is no longer given up. The deadline is `drain_deadline` if set, else the request's wall limit; reaching it changes nothing (no host is
   excluded, nothing is counted) and `max_reserve_attempts` is deprecated; `reserve_backoff` sizes only the failed-prepare exclusion. Option (a) stays rejected for
   the drain itself: the request keeps its host and the work is never cut.

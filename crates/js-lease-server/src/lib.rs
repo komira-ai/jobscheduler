@@ -1,5 +1,5 @@
 //! A lease server: a [`js_lease::LeaseTable`] behind an authenticated HTTP JSON API, so
-//! a CI job can hold a whole GPU host for as long as it renews.
+//! a CI job can hold a whole GPU host until it releases it or its maximum wall time ends.
 //!
 //! The library is the program: [`run`] takes the arguments and the streams to report
 //! to, and `main` calls it. The pieces:
@@ -51,7 +51,6 @@
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler of `--placement js-sched` may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. The registry's book lets the leases sharing a host book that much CPU and no more of anything else. Needs `--placement js-sched` (refused naming it otherwise) and `--agent-pool-config` |
 //! | `--estimate-feed` | off by default. When a whole-node request has to pick a host to drain, each lease is costed at its estimated end, cut to its max-wall bound: the lease's start plus the largest P90 wall time, among the profiles the usage file has learned, of the runs queued on it with a profile name. A lease with no such run is costed at its bound, as every lease is without the flag, and a lease with neither (no such run, and a max wall so long that its end saturates) ranks its host after every host whose tail is known. A usage sink that keeps no curves leaves every lease at its bound. A lease restored from the lease file keeps the start and the bound the file records (its acquire, or for a whole-node lease the moment it was ready). Needs `--agent-pool-config`; not with `--usage-off` |
 //! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of the lease routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
-//! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
@@ -99,7 +98,8 @@
 //! # store: the path of an owner-only file holding the store's connection (never the
 //! # connection itself); allow_sqlite_store (false): refused as true without store
 //! # store_unreachable_after ("60s"): the flag's name, default and rules
-//! # tick, default_ttl, max_ttl, handshake_timeout, header_timeout, read_timeout,
+//! # default_ttl, max_ttl: refused (a lease has no time to live), as are their flags
+//! # tick, handshake_timeout, header_timeout, read_timeout,
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
@@ -387,7 +387,7 @@
 //! # Who may do what
 //!
 //! The server is single-tenant: there is one token, and so one trust domain. Whoever
-//! holds the token can list every lease, and renew or release any of them, whichever
+//! holds the token can list every lease, and release any of them, whichever
 //! client acquired it. A lease has no owner the server checks. Share the token only with
 //! parties that trust each other with every host of the pool. Per-tenant leases (each
 //! tenant with a token of its own that sees and changes only its own leases; the design
@@ -398,10 +398,9 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; `no-capable-host` is answered first, at admission, when no host and no machine provider's catalog could ever serve the request, and records nothing (see "Admission" below): a busy host or a catalog that cannot be read is not a refusal; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none); `resources` also take an optional `accelerator` object `{vendor?, model?, count?, memory_per_device_gib?, interconnect?, form_factor?}` (`interconnect` is `kind>=size`, `form_factor` is `sxm` or `pcie`; every field is optional and one left out matches anything; an unknown key in it is a 400 naming it). `gpus` and `gpu_class` work as before and are resolved through the alias table: a full spelling (`nvidia-a100-sxm4-80gb`) pins its variant, and a family name (`nvidia-a100`) matches every variant of the family. A body with only `gpus` and `gpu_class` is stored with no capability added; the need they state (the class as the model, `gpus` as the count) is derived when the lease is matched, never written. The object is stored as `accelerator.*` capabilities of the request (`accelerator.vendor`, `.model`, `.count`, `.memory-gib`, `.interconnect`, `.form-factor`), merged into the body's own `capabilities`; a body capability with another value for a key the object states is a 400 naming that key. `accelerator.*` capabilities the body names itself narrow the need of `gpus` and `gpu_class` and never drop it: a model and a count they leave out are the pair's, so a vendor alone keeps a full spelling's pin. The object alone books `count` devices of `model` (the class is the model as written); beside `gpus` and `gpu_class`, the object and any `accelerator.model` or `accelerator.count` capability must agree with them, the model by family and variant after resolution (a family name does not agree with a full spelling of it, nor one variant with another) and the count exactly, else 400 naming `accelerator`. A `count` above zero (in the object or as `accelerator.count`) without a model is 400 naming `accelerator.model`; a count above the GPUs the resources book is 400 naming `accelerator.count`; any `accelerator.*` capability that is not valid is 400 naming `accelerator`; a vendor alone books no GPU. A body with no `accelerator` and no `accelerator.*` capability is read as before. A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` and `accelerator` only to a server that has them. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused (`no-capable-host` at admission when no host and no offer has the disk, else `no-fit`) and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
-//! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
+//! | `POST /v1/leases` | 201 `{id, host, ends_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; `no-capable-host` is answered first, at admission, when no host and no machine provider's catalog could ever serve the request, and records nothing (see "Admission" below): a busy host or a catalog that cannot be read is not a refusal; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none); `resources` also take an optional `accelerator` object `{vendor?, model?, count?, memory_per_device_gib?, interconnect?, form_factor?}` (`interconnect` is `kind>=size`, `form_factor` is `sxm` or `pcie`; every field is optional and one left out matches anything; an unknown key in it is a 400 naming it). `gpus` and `gpu_class` work as before and are resolved through the alias table: a full spelling (`nvidia-a100-sxm4-80gb`) pins its variant, and a family name (`nvidia-a100`) matches every variant of the family. A body with only `gpus` and `gpu_class` is stored with no capability added; the need they state (the class as the model, `gpus` as the count) is derived when the lease is matched, never written. The object is stored as `accelerator.*` capabilities of the request (`accelerator.vendor`, `.model`, `.count`, `.memory-gib`, `.interconnect`, `.form-factor`), merged into the body's own `capabilities`; a body capability with another value for a key the object states is a 400 naming that key. `accelerator.*` capabilities the body names itself narrow the need of `gpus` and `gpu_class` and never drop it: a model and a count they leave out are the pair's, so a vendor alone keeps a full spelling's pin. The object alone books `count` devices of `model` (the class is the model as written); beside `gpus` and `gpu_class`, the object and any `accelerator.model` or `accelerator.count` capability must agree with them, the model by family and variant after resolution (a family name does not agree with a full spelling of it, nor one variant with another) and the count exactly, else 400 naming `accelerator`. A `count` above zero (in the object or as `accelerator.count`) without a model is 400 naming `accelerator.model`; a count above the GPUs the resources book is 400 naming `accelerator.count`; any `accelerator.*` capability that is not valid is 400 naming `accelerator`; a vendor alone books no GPU. A body with no `accelerator` and no `accelerator.*` capability is read as before. A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` and `accelerator` only to a server that has them. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused (`no-capable-host` at admission when no host and no offer has the disk, else `no-fit`) and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes`. A `ttl_seconds` that is a value is 400 `ttl-removed` (a lease has no time to live, and nothing is recorded); `null` is read as left out |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
-//! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
+//! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, ends_at_ms, labels}]}` |
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, lease?, leases?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `leases` lists every lease on the host in booking order and is left out when the host has at most one (`lease` is the first); `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when the host a reservation is draining is expected to be drained at the latest; reaching it gives nothing up, and the mark stays) are those of a registered host; so is `cordon {expires_at_ms}`, present while the host is cordoned (see "Cordon" below: a cordon left by a dead hook lapses within its last `lease_secs`, at most 3600 s after its last extension, or the host's own `:uncordon` lifts it) |
 //! | `GET /healthz` | 200 `ok`, no token; 503 `tick loop stopped` once the tick loop has stopped; else 503 `store unreachable` while the tick's store paths have failed for `--store-unreachable-after` (until a tick's store work succeeds) |
 //! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `fenced`, `stale_cursor`, `lease_file`) and never an error's text, `lock` `none`, `held` or `lost`, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
@@ -420,9 +419,6 @@
 //!   and the client has no id. The record stays pending in memory, is listed until the
 //!   next tick, and that tick finds nothing on the provider and drops it; it is never
 //!   started later. The client may retry the acquire after this 500.
-//! - `POST /v1/leases/{id}/renew`: the new expiry took effect in memory only. The lease
-//!   is held and the client may renew again; a restart before the next successful
-//!   write loses the extension.
 //! - `DELETE /v1/leases/{id}`: the lease is marked releasing in memory and the provider
 //!   was not asked to stop it yet. The next tick stops it. Treat the lease as released.
 //!
@@ -431,9 +427,9 @@
 //! cannot tell whether the lease was granted: the server may hold a lease, and a host, that
 //! the client has no id for. A client must not repeat such a `POST /v1/leases` after a lost
 //! answer without first listing (`GET /v1/leases`) and finding its lease by the labels it
-//! sent, or the retry can take a second host; the first one lapses only when its ttl does.
-//! An acquire with a `request_id` is safe to repeat (below). Renew and release name their
-//! lease and are safe to repeat.
+//! sent, or the retry can take a second host; the first one lasts until it is released or its maximum wall time ends it.
+//! An acquire with a `request_id` is safe to repeat (below). Release names its lease and is
+//! safe to repeat.
 //!
 //! ## Request ids
 //!
@@ -442,9 +438,8 @@
 //! long as the lease is in the table: pending, held, or releasing until the provider
 //! confirms it gone. While it is, a `POST /v1/leases` with the same `request_id` and the
 //! same request (the class, resources, capabilities, `max_wall_seconds`, labels,
-//! `validation_run` and `probe_host`; `ttl_seconds` is not compared, and the lease keeps
-//! the ttl of its first acquire) makes nothing and answers from that lease: 201 with its
-//! id, host and expiry as they stand when it is held, 202 `{id, state: "pending"}` when it
+//! `validation_run` and `probe_host`) makes nothing and answers from that lease: 201 with its
+//! id, host and end as they stand when it is held, 202 `{id, state: "pending"}` when it
 //! is pending, and 409 `lease-ended` once it is releasing. The same `request_id` with
 //! another request is 409 `request-id-conflict`, and the lease is unchanged. A restart
 //! keeps the id with the lease. Once the lease is gone (released and freed, expired, or
@@ -467,8 +462,8 @@
 //! pool file sets it), so keep `--tick` below it: a request dropped between two ticks is
 //! entered again at the back by the next one, without the host it had. The
 //! lease's `prepare_timeout` counts from the tick that committed a host, not from the
-//! acquire, so a wait for a host is not a prepare; `expires_at_ms` of a waiting lease is a
-//! `prepare_timeout` after the last tick. The wait ends with a refusal as the registry's
+//! acquire, so a wait for a host is not a prepare; `ends_at_ms` of a waiting lease is a provisional
+//! end that the report of a ready host replaces. The wait ends with a refusal as the registry's
 //! rules say, and the lease is then dropped from the list (the client reads it gone): it is
 //! refused `no-capable-host` once no host could ever serve it for `regain_grace`. A prepare
 //! that fails ends the lease as it ends any whole-node lease; an acquire under the same
@@ -563,7 +558,7 @@
 //! registered one when the static pool has none; it cannot tell which it got except by
 //! `GET /v1/hosts`. A registered host takes a lease only while it is live (heard within
 //! the grace period) and serving. A host that goes silent keeps its lease and reads
-//! `Unknown` until it is heard again or the lease ends by its ttl or a release.
+//! `Unknown` until it is heard again or the lease ends by its maximum wall time or a release.
 //!
 //! **Tokens.** The join tokens and the client tokens are different secrets: each is a 401
 //! with an empty body on the other's routes, and a join-token file that holds the token of
@@ -644,14 +639,12 @@
 //!   the lease ended when the run was queued, and every start is made from the time left
 //!   at the moment it is sent. Its wall limit is the one asked for (that, when none is
 //!   asked), cut to the time left then, so the wall cap is recomputed on every send, and
-//!   the agent may start it for no longer than that either. A renewal does not stretch a
-//!   run already queued, so a client that renews cannot run a job past the lease time it
-//!   queued it under. Once that time is up no start is sent: a run the host has not listed
+//!   the agent may start it for no longer than that either. Once that time is up no start is sent: a run the host has not listed
 //!   gets a stop (the agent then retires its id) and, when the host still does not list it,
 //!   reads `never-started` and gives its budget back, whether or not the lease lives on.
 //!   Host isolation is refused until the scheduler records the taint such a job leaves.
 //! - **Reuse.** A run's limits return to the lease only when the host no longer lists the
-//!   run, which it does after cleanup. When a lease ends (a release or its expiry) with
+//!   run, which it does after cleanup. When a lease ends (a release or its end) with
 //!   live runs, the booking is free at once but the host takes no new lease, and shows
 //!   `releasing` in `GET /v1/hosts`, until a heartbeat lists none; each live run is sent a
 //!   stop meanwhile.
@@ -697,7 +690,7 @@
 //! lease, the server reads the hosts the file names ([`js_lease::read_bookings`]) and
 //! asks the [`CapacitySource`] to seat each lease on its host again, in lease id order.
 //! A lease the source seats is observed present, stays held on the same host, and the
-//! host is not leased to anyone else; it can be renewed and released as before.
+//! host is not leased to anyone else; it can be released as before.
 //!
 //! A booking the source cannot seat is logged at warn level with the lease, the host,
 //! the state and the reason, and the table then finds the provider ignorant of it and
@@ -809,7 +802,7 @@
 //!
 //! # Ticks
 //!
-//! Only a tick expires a lease, retries a stop or resolves a pending start. The server
+//! Only a tick ends a lease at its maximum wall time, retries a stop or resolves a pending start. The server
 //! ticks the table (then advances the agent registry, when agent registration is on) at every tick of its [`Ticker`] (a timer of `--tick` in production),
 //! logs what a tick changed, and counts the ticks that could not write the lease file
 //! ([`Running::save_errors`]); `/healthz` answers 503 once the loop has stopped, or while the

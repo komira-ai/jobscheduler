@@ -35,10 +35,7 @@ use crate::store_health::{StoreHealth, TickStore};
 use crate::usage::ProfileCurves;
 use crate::usage_api;
 use crate::usage_hub::{Usage, UsageCounters};
-use crate::wire::{
-    AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
-    parse_id,
-};
+use crate::wire::{AcquireBody, ApiError, Granted, LeaseList, Pending, Released, parse, parse_id};
 
 /// The largest request body served.
 pub const BODY_LIMIT: usize = 64 * 1024;
@@ -297,7 +294,7 @@ impl Shared {
         let counts = match &self.agents {
             Some(agents) => {
                 // The marks are brought up to this tick, so the counts and the next
-                // renewal read what the tick left.
+                // answer read what the tick left.
                 agents.registry.advance();
                 agents.registry.whole_counts()
             }
@@ -347,7 +344,6 @@ impl Shared {
 pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
     let guarded = Router::new()
         .route("/v1/leases", post(acquire).get(list))
-        .route("/v1/leases/{id}/renew", post(renew))
         .route("/v1/leases/{id}", delete(release))
         .route("/v1/hosts", get(hosts))
         .fallback(no_route)
@@ -497,7 +493,7 @@ fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
 async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
     let body = parse::<AcquireBody>(&body)?;
     let request_id = body.request_id()?;
-    let (request, ttl) = body.into_parts()?;
+    let request = body.into_parts()?;
     let registry = shared.registry();
     // Admission first, under the table lock: the hosts, and the catalogs as the cache holds
     // them, which calls no provider (see `admit`).
@@ -507,8 +503,8 @@ async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
         .decide(&table, registry.as_ref(), request_id.as_ref(), &request);
     let outcome = match decision {
         Decision::Start => match request_id {
-            Some(id) => table.acquire_with_id(id, request, ttl),
-            None => table.acquire(request, ttl),
+            Some(id) => table.acquire_with_id(id, request),
+            None => table.acquire(request),
         },
         Decision::Refuse => Err(AcquireError::Refused(RefusalCode::NoCapableHost)),
     };
@@ -518,7 +514,7 @@ async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
             let granted = Granted {
                 id: lease.id.to_string(),
                 host: lease.host.to_string(),
-                expires_at_ms: lease.expires_at.millis(),
+                ends_at_ms: lease.ends_at.millis(),
             };
             Ok(json(StatusCode::CREATED, &granted))
         }
@@ -531,32 +527,6 @@ async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
         }
         Err(err) => Err(err.into()),
     }
-}
-
-async fn renew(
-    State(shared): State<Arc<Shared>>,
-    Path(id): Path<String>,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
-    let ask = match body.is_empty() {
-        true => RenewBody::default(),
-        false => parse::<RenewBody>(&body)?,
-    };
-    let ttl = ask.ttl_seconds.map(std::time::Duration::from_secs);
-    // The table's lock is held while the registry is asked, as the lock order says.
-    let mut table = shared.lock("wait-renew").await;
-    let expires_at = table.renew(&id, ttl)?;
-    let host_reserved = shared.agents.as_ref().is_some_and(|agents| {
-        let host = agents.registry.host_of(&id);
-        host.is_some_and(|host| agents.registry.is_reserved(&host))
-    });
-    drop(table);
-    let renewed = Renewed {
-        expires_at_ms: expires_at.millis(),
-        host_reserved,
-    };
-    Ok(json(StatusCode::OK, &renewed))
 }
 
 async fn release(

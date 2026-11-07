@@ -11,40 +11,46 @@ fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
-/// Asserts that a start of one host prints the lease as `lease <id> host <host> expires
-/// <ms>` on stdout, with the server's default ttl of 600s from the server's clock, and
-/// nothing on stderr.
+/// When a lease asked for with `--max-wall 2h` (the words of [`acquire_words`]) ends on a
+/// server whose clock reads [`T0`] when it is asked.
+const WALL_END: u64 = T0 + 7_200_000;
+
+/// What `js lease acquire --ttl` says.
+const TTL_REMOVED: &str = concat!(
+    "--ttl was removed: a lease has no time to live ",
+    "(it ends when released or at its maximum wall time); remove the flag"
+);
+
+/// Asserts that a start of one host prints the lease as `lease <id> host <host> ends <ms>`
+/// on stdout, the end being the maximum wall time (`--max-wall 2h`) from the server's
+/// clock, and nothing on stderr. It catches a line that still says `expires` or prints an
+/// end that is not the wall end.
 #[test]
 fn acquire_prints_the_lease() {
     let h = Harness::new("acquire_text");
     let got = h.js.go(&acquire_words(&[]));
     assert_eq!(got.code, 0, "{}", got.err);
-    assert_eq!(
-        got.out,
-        format!("lease 1-1 host gpu-01 expires {}\n", T0 + 600_000)
-    );
+    assert_eq!(got.out, format!("lease 1-1 host gpu-01 ends {WALL_END}\n"));
     assert_eq!(got.err, "");
 }
 
-/// Asserts that `--json` prints one JSON object with the id, the host and the expiry,
+/// Asserts that `--json` prints one JSON object with the id, the host and `ends_at_ms`,
 /// and that the global flags may follow the subcommand.
 #[test]
 fn acquire_prints_json_and_takes_global_flags_last() {
     let h = Harness::new("acquire_json");
     let got = h.js.go_last(&acquire_words(&["--json"]));
     assert_eq!(got.code, 0, "{}", got.err);
-    let expected = json!({ "id": "1-1", "host": "gpu-01", "expires_at_ms": T0 + 600_000 });
+    let expected = json!({ "id": "1-1", "host": "gpu-01", "ends_at_ms": WALL_END });
     assert_eq!(got.json(), expected);
 }
 
-/// Asserts that every flag of a start reaches the server: the ttl sets the expiry and
-/// the labels are listed on the lease.
+/// Asserts that every flag of a start reaches the server: the labels are listed on the
+/// lease and the lease ends at the wall time asked for.
 #[test]
 fn acquire_sends_its_flags() {
     let h = Harness::new("acquire_flags");
     let flags = [
-        "--ttl",
-        "90s",
         "--label",
         "team=infra",
         "--label",
@@ -57,7 +63,7 @@ fn acquire_sends_its_flags() {
     let got = h.js.go(&acquire_words(&flags));
     assert_eq!(got.code, 0, "{}", got.err);
     assert!(
-        got.out.ends_with(&format!("expires {}\n", T0 + 90_000)),
+        got.out.ends_with(&format!("ends {WALL_END}\n")),
         "{}",
         got.out
     );
@@ -69,7 +75,7 @@ fn acquire_sends_its_flags() {
 
 /// Asserts the round trip of `--request-id` through the client and a real server: a start
 /// repeated with the same id and flags prints the lease the first one made (same id, same
-/// host, same expiry) and takes no second host, while the same id with another label is
+/// host, same end) and takes no second host, while the same id with another label is
 /// refused `request-id-conflict` (exit 3) and leaves that lease as it was; a bad id is a
 /// 400 naming the field (exit 4). It catches a flag that never reaches the server (the
 /// repeat would take the second host), a server that books again under a known id, and a
@@ -79,7 +85,7 @@ fn a_start_repeated_under_its_request_id_answers_the_same_lease() {
     let h = Harness::new("acquire_request_id");
     let first = h.js.go(&acquire_words(&["--request-id", "nightly-42"]));
     assert_eq!(first.code, 0, "{}", first.err);
-    let expected = format!("lease 1-1 host gpu-01 expires {}\n", T0 + 600_000);
+    let expected = format!("lease 1-1 host gpu-01 ends {WALL_END}\n");
     assert_eq!(first.out, expected);
     let again = h.js.go(&acquire_words(&["--request-id", "nightly-42"]));
     assert_eq!(
@@ -175,10 +181,7 @@ fn a_pending_start_is_polled_until_held() {
     let got =
         h.js.waiting(&acquire_words(&["--wait-pending", "10s"]), waiter.clone());
     assert_eq!(got.code, 0, "{}", got.err);
-    assert_eq!(
-        got.out,
-        format!("lease 1-1 host h1 expires {}\n", T0 + 600_000)
-    );
+    assert_eq!(got.out, format!("lease 1-1 host h1 ends {WALL_END}\n"));
     assert_eq!(waiter.asked(), vec![secs(2)]);
 }
 
@@ -194,7 +197,7 @@ fn a_pending_start_that_is_dropped_is_refused() {
 
 /// Asserts that a pending start that nobody settles gives up after `--wait-pending`,
 /// measured as the intervals asked of the waiter (two of two seconds for four), exits 5,
-/// and does not leave the lease behind to be held with nobody renewing it.
+/// and does not leave the lease behind to be held with nobody to release it.
 #[test]
 fn a_pending_start_that_is_not_settled_exits_five() {
     let h = Harness::scripted("pending_unsettled", vec![(Call::Start, true)]);
@@ -255,4 +258,63 @@ fn a_poll_that_fails_releases_the_pending_lease() {
         routes,
         vec!["POST /v1/leases", "GET /v1/leases", "DELETE /v1/leases/1-1"]
     );
+}
+
+/// The request lines a [`sequence`] server has read, without the protocol version.
+fn routes(log: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+    let seen = log.lock().unwrap().clone();
+    seen.iter()
+        .map(|line| line.trim_end_matches(" HTTP/1.1").to_owned())
+        .collect()
+}
+
+/// Asserts that a start answered `201 {id, host, ends_at_ms}` prints `lease <id> host
+/// <host> ends <ms>` with that number, and with `--json` an object whose `ends_at_ms` is
+/// that number and which has no `expires_at_ms`; each start is one request. It catches a
+/// client that reads the old `expires_at_ms` field (it would fail the answer as having no
+/// usable field) and one that prints the end under another name.
+#[test]
+fn acquire_prints_the_wall_end() {
+    let scratch = Scratch::new("acquire_wall_end");
+    let granted = http(
+        "201 Created",
+        r#"{"id":"1-1","host":"gpu-01","ends_at_ms":1793617960284}"#,
+    );
+    let (url, log) = sequence(vec![granted]);
+    let js = against(&url, &scratch);
+
+    let text = js.go(&acquire_words(&[]));
+    assert_eq!(text.code, 0, "{}", text.err);
+    assert_eq!(text.out, "lease 1-1 host gpu-01 ends 1793617960284\n");
+    assert_eq!(text.err, "");
+
+    let json = js.go(&acquire_words(&["--json"]));
+    assert_eq!(json.code, 0, "{}", json.err);
+    assert_eq!(
+        json.json(),
+        json!({ "id": "1-1", "host": "gpu-01", "ends_at_ms": 1_793_617_960_284_u64 })
+    );
+    assert_eq!(routes(&log), vec!["POST /v1/leases"; 2]);
+}
+
+/// Asserts that `lease acquire --ttl <dur>` is exit 2 with the message that a lease has no
+/// time to live, as text and as JSON, and that the server is sent nothing, whatever the
+/// value (a duration, a number, something that is not one). It catches a flag that is
+/// accepted and dropped (the user thinks the lease has a ttl), one sent on to the server,
+/// and one clap refuses with its own words.
+#[test]
+fn acquire_with_ttl_is_refused_with_the_message() {
+    let scratch = Scratch::new("acquire_ttl");
+    let (url, log) = sequence(vec![http("500 Internal Server Error", "{}")]);
+    let js = against(&url, &scratch);
+    for value in ["60s", "90", "-5s", "soon"] {
+        let got = js.go(&acquire_words(&["--ttl", value]));
+        assert_eq!((got.code, got.out.as_str()), (2, ""), "{value}");
+        assert_eq!(got.err, format!("js: {TTL_REMOVED}\n"), "{value}");
+    }
+    let json = js.go(&acquire_words(&["--json", "--ttl", "60s"]));
+    assert_eq!(json.code, 2, "{}", json.err);
+    let said: serde_json::Value = serde_json::from_str(&json.err).unwrap();
+    assert_eq!(said, json!({ "error": "usage", "message": TTL_REMOVED }));
+    assert!(routes(&log).is_empty(), "{:?}", routes(&log));
 }

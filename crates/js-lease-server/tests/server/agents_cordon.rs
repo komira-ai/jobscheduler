@@ -185,8 +185,8 @@ async fn a_cordoned_host_takes_no_new_lease_until_it_is_uncordoned() {
     assert_eq!(lease(&h).await.json()["host"], "burst-1");
 }
 
-/// Asserts that a cordon cuts nothing: a lease held when the host is cordoned stays held
-/// and can be renewed, the host's read counts it until it is released, and after the
+/// Asserts that a cordon cuts nothing: a lease held when the host is cordoned stays held,
+/// the host's read counts it until it is released, and after the
 /// release the host still takes no new lease. It catches a cordon that gives up the lease
 /// it finds, and one that lets the freed host be placed again.
 #[tokio::test]
@@ -201,8 +201,8 @@ async fn a_lease_held_before_the_cordon_runs_on_and_its_end_leaves_the_host_cord
         (json!(1), json!("1-1"))
     );
     assert_eq!(
-        h.call("POST", "/v1/leases/1-1/renew", None).await.status,
-        200
+        crate::support::ids(&h.call("GET", "/v1/leases", None).await),
+        ["1-1"]
     );
 
     assert_eq!(h.call("DELETE", "/v1/leases/1-1", None).await.status, 200);

@@ -485,7 +485,7 @@ impl LogCapture {
 }
 
 /// A lease file at term 1 holding these leases, each `(sequence, state, host)`, all
-/// acquired at `T0` and due 600 seconds later.
+/// acquired at `T0` and ending 7200 seconds later.
 pub fn lease_file(leases: &[(u64, &str, Option<&str>)]) -> String {
     let mut text = format!(
         "version = 1\nterm = 1\nnext_sequence = {}\nlease_count = {}\n",
@@ -500,9 +500,8 @@ pub fn lease_file(leases: &[(u64, &str, Option<&str>)]) -> String {
             text.push_str(&format!("host = \"{host}\"\n"));
         }
         text.push_str(&format!(
-            "acquired_at_ms = {T0}\nexpires_at_ms = {}\nends_at_ms = {}\n",
-            T0 + 600_000,
-            T0 + 7_200_000
+            "acquired_at_ms = {T0}\nexpires_at_ms = {end}\nends_at_ms = {end}\n",
+            end = T0 + 7_200_000
         ));
     }
     text

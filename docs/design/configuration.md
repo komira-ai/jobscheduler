@@ -12,7 +12,8 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 
 | flag | in the file |
 |---|---|
-| `--listen`, `--state-file`, `--boot`, `--default-ttl`, `--max-ttl`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
+| `--listen`, `--state-file`, `--boot`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
+| `--default-ttl`, `--max-ttl` | removed: a lease has no time to live (it ends when released or at its maximum wall time). Either flag, and the keys `server.default_ttl` and `server.max_ttl`, are refused at start naming the flag or the key |
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is `"registry"` unless the file says `"js-sched"`; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent, and is refused unless `placement` is `"js-sched"`); refused unless a pool registers agents |
 | `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |

@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use js_lease_server::{SharedClock, channel_ticker, parse_duration, run};
 
+use crate::config_support::{PoolText, file, refusal, server};
 use crate::support::{
     Harness, Scratch, TOKEN, args_with, base_args, config, replace, request, start,
 };
@@ -100,10 +101,10 @@ fn tls_is_required_off_the_loopback() {
     assert!(config(replace(both, "--listen", "0.0.0.0:7300")).is_ok());
 }
 
-/// Asserts that the ttl flags take seconds with an optional unit, refuse what is not a
-/// positive duration, and that a default ttl above the maximum names `--default-ttl`.
+/// Asserts that a duration takes seconds with an optional unit and refuses what is not a
+/// positive duration, and that `--tick` takes one.
 #[test]
-fn durations_parse_and_settings_are_checked() {
+fn durations_parse_and_the_tick_flag_takes_them() {
     let cases = [("90", 90), ("90s", 90), ("15m", 900), ("2h", 7200)];
     for (text, seconds) in cases {
         assert_eq!(parse_duration(text).unwrap().as_secs(), seconds, "{text}");
@@ -140,13 +141,46 @@ fn durations_parse_and_settings_are_checked() {
     }
 
     let scratch = Scratch::new("settings");
-    let over = args_with(&scratch, &["--default-ttl", "2h", "--max-ttl", "1h"]);
-    assert_eq!(flag_of(config(over)), "--default-ttl");
-    let ok = args_with(
-        &scratch,
-        &["--default-ttl", "1m", "--max-ttl", "1h", "--tick", "250s"],
-    );
+    let ok = args_with(&scratch, &["--tick", "250s"]);
     assert_eq!(config(ok).unwrap().tick_period().as_secs(), 250);
+}
+
+/// Asserts that the removed ttl options are startup errors with a message that says a lease
+/// has no time to live: `--default-ttl 60s` and `--max-ttl 1h` each fail in `config(args)`
+/// naming their own flag (the server would exit non-zero without binding), and the file
+/// keys `server.default_ttl` and `server.max_ttl` are refused, not as unknown keys and not
+/// ignored, with the whole message asserted by equality. It catches a removed flag that
+/// is accepted and ignored (an operator would think a ttl is set), and a removed key told
+/// as merely unknown.
+#[test]
+fn the_removed_ttl_flags_are_refused_with_a_message() {
+    let scratch = Scratch::new("removed_ttl_flags");
+    for (flag, value) in [("--default-ttl", "60s"), ("--max-ttl", "1h")] {
+        let refused = config(args_with(&scratch, &[flag, value]))
+            .err()
+            .expect("a removed flag should be refused");
+        assert_eq!(refused.flag(), flag);
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "{flag}: was removed: a lease has no time to live (it ends when released or at \
+                 its maximum wall time); remove the flag"
+            )
+        );
+    }
+
+    for key in ["default_ttl", "max_ttl"] {
+        let scratch = Scratch::new(&format!("removed_ttl_key_{key}"));
+        let pool = PoolText::static_pool(&scratch, "hosts");
+        let extra = format!("{key} = \"5m\"");
+        let text = file(&server(&scratch, &extra), &[&pool]);
+        assert_eq!(
+            refusal(&scratch, &text),
+            format!(
+                "server.{key}: was removed: a lease has no time to live (it ends when released or at its maximum wall time); remove the key"
+            )
+        );
+    }
 }
 
 /// Asserts that `--boot` has no default and only the two modes, through the program's

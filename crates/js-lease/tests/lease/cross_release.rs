@@ -8,7 +8,9 @@
 //! - Files it wrote, kept beside this module in `cross_release/`. They were made by running
 //!   that release's own `js-lease` (its `LeaseTable`, `read_bookings` and `HostBook::seat`)
 //!   from a checkout of the tag, and are checked in as they came out:
-//!   `written_by_previous_release.toml` is `scenario.rs` run there, and
+//!   `written_by_previous_release.toml` is the steps of `scenario.rs` run there, where the
+//!   second acquire also asked for a 30 s time to live and was renewed ten seconds in (a
+//!   release that has neither is not run that way; see the whole-host test below), and
 //!   `rewritten_by_previous_release.toml` is `written_by_this_release.toml` restarted
 //!   there as its server restarts: `read_bookings`, each booking seated with
 //!   `HostBook::seat`, then `LeaseTable::open` over that book.
@@ -33,7 +35,7 @@ use js_provider::{HostBook, SeatError};
 use js_provider::{HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{Admission, ClassId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape};
 
-use crate::support::{Scratch, clock, fake, gpu_host_request, host, open, request, secs, settings};
+use crate::support::{Scratch, clock, fake, gpu_host_request, host, open, request, settings};
 
 include!("cross_release/scenario.rs");
 
@@ -175,10 +177,10 @@ fn assert_disk_left(table: &mut LeaseTable<Sharing, ManualClock>, left: u64) {
         let resources = Resources::new(500, 1, 0, None).unwrap();
         sharing_request(resources.with_disk_bytes(disk))
     };
-    let over = table.acquire(asking(left + 1), None).unwrap_err();
+    let over = table.acquire(asking(left + 1)).unwrap_err();
     let refused = AcquireError::Refused(RefusalCode::NoCapacity);
     assert_eq!(over.to_string(), refused.to_string());
-    let fits = table.acquire(asking(left), None).unwrap();
+    let fits = table.acquire(asking(left)).unwrap();
     assert_eq!(fits.host, host("h1"));
 }
 
@@ -190,12 +192,10 @@ fn shared_host_written(scratch: &Scratch) -> String {
     let boot = Boot::Initialise;
     let path = scratch.file();
     let mut table = LeaseTable::open(Sharing::new(), clock(), settings(), path, boot).unwrap();
-    let first = table.acquire(sharing_request(with_gpu()), None).unwrap();
-    let second = table.acquire(sharing_request(without_gpu()), None).unwrap();
-    let whole = table.acquire(request(3600), None).unwrap();
-    let fourth = table
-        .acquire(sharing_request(releasing_share()), None)
-        .unwrap();
+    let first = table.acquire(sharing_request(with_gpu())).unwrap();
+    let second = table.acquire(sharing_request(without_gpu())).unwrap();
+    let whole = table.acquire(request(3600)).unwrap();
+    let fourth = table.acquire(sharing_request(releasing_share())).unwrap();
     let hosts = [first.host, second.host, whole.host, fourth.host];
     assert_eq!(hosts, [host("h1"), host("h1"), host("h2"), host("h1")]);
     table.provider_mut().unanswered.insert(fourth.id);
@@ -249,14 +249,46 @@ fn listed(table: &LeaseTable<Sharing, ManualClock>) -> Vec<LeaseId> {
     table.list().into_iter().map(|lease| lease.id).collect()
 }
 
+/// `text`, a lease file, with each lease's `expires_at_ms` set to that lease's `ends_at_ms`:
+/// the one difference between what the previous release wrote and what this release writes
+/// for the same steps. That release set a lease's expiry to the end of its time to live
+/// (here 60 s after the acquire, and 70 s for the lease it renewed ten seconds in); this
+/// one has no time to live and writes the wall end there, which the previous release reads
+/// as the lease's expiry.
+fn with_the_wall_end_as_the_expiry(text: &str) -> String {
+    let mut out = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line.starts_with("expires_at_ms = ") {
+            let end = lines.next().unwrap_or_default();
+            out.push(end.replace("ends_at_ms", "expires_at_ms"));
+            out.push(end.to_owned());
+        } else {
+            out.push(line.to_owned());
+        }
+    }
+    out.join("\n") + "\n"
+}
+
 /// Asserts that this release, over leases that book whole hosts (the only leases the
 /// previous release could make), writes the file the previous release wrote for the same
-/// steps byte for byte: `lease.shares` is absent and nothing else moved, so a file of a
-/// deployment that places as before is the file it always was.
+/// steps but for each lease's `expires_at_ms`, which is its `ends_at_ms` here (the
+/// previous file has the end of the time to live, 1 060 000 and, for the lease it renewed,
+/// 1 070 000): `lease.shares` is absent and nothing else moved, so a file of a deployment
+/// that places as before is the file it always was, and the previous release reads each
+/// lease as expiring when its wall time ends. It fails if any other row, or a `ttl_ms`
+/// row, differs, or if a held lease is written with an expiry before its wall end.
 #[test]
-fn whole_host_leases_are_written_as_the_previous_release_wrote_them() {
+fn whole_host_leases_are_written_as_the_previous_release_wrote_them_but_for_the_expiry() {
     let scratch = Scratch::new("cross_release_whole");
-    assert_eq!(whole_hosts_written(&scratch), WRITTEN_BY_PREVIOUS);
+    let written = whole_hosts_written(&scratch);
+    assert!(WRITTEN_BY_PREVIOUS.contains("expires_at_ms = 1060000\n"));
+    assert!(WRITTEN_BY_PREVIOUS.contains("expires_at_ms = 1070000\n"));
+    assert_eq!(
+        written,
+        with_the_wall_end_as_the_expiry(WRITTEN_BY_PREVIOUS)
+    );
+    assert!(!written.contains("ttl_ms"), "{written}");
 }
 
 /// Asserts that this release reads the file the previous release wrote: every lease is a
@@ -395,17 +427,17 @@ fn this_release_restarts_over_its_own_file_with_every_share_booked() {
     };
     assert_eq!(state(&table), Some(LeaseState::Releasing));
     let refused = AcquireError::Refused(RefusalCode::NoCapacity).to_string();
-    let over = table.acquire(cores(1001), None).unwrap_err();
+    let over = table.acquire(cores(1001)).unwrap_err();
     assert_eq!(over.to_string(), refused);
     table.tick();
     assert_eq!(state(&table), Some(LeaseState::Releasing));
-    let over = table.acquire(cores(1001), None).unwrap_err();
+    let over = table.acquire(cores(1001)).unwrap_err();
     assert_eq!(over.to_string(), refused);
     table.provider_mut().unanswered.clear();
     let report = table.tick();
     assert_eq!(report.freed, vec![releasing]);
     assert_eq!(state(&table), None);
-    assert_eq!(table.acquire(cores(1001), None).unwrap().host, host("h1"));
+    assert_eq!(table.acquire(cores(1001)).unwrap().host, host("h1"));
     assert_disk_left(&mut table, 0);
 }
 
@@ -445,7 +477,7 @@ fn the_previous_release_keeps_the_request_row_of_a_lease() {
     let mut table = open(fake(), &clock, &scratch);
     let named = js_types::RequestId::new("r1").unwrap();
     let lease = table
-        .acquire_with_id(named.clone(), gpu_host_request(3600), None)
+        .acquire_with_id(named.clone(), gpu_host_request(3600))
         .unwrap();
     let written = fs::read_to_string(scratch.file()).unwrap();
     let provider = table.into_provider();
@@ -455,6 +487,6 @@ fn the_previous_release_keeps_the_request_row_of_a_lease() {
     assert_eq!(kept, [&"request".to_owned()]);
     fs::write(scratch.file(), previous::write(&document)).unwrap();
     let mut table = open(provider, &clock, &scratch);
-    let again = table.acquire_with_id(named, gpu_host_request(3600), None);
+    let again = table.acquire_with_id(named, gpu_host_request(3600));
     assert_eq!(again.unwrap(), lease);
 }

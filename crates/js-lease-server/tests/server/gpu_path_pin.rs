@@ -1,7 +1,7 @@
 //! Pins what the server does today with no scheduler flag: the flags and their defaults,
 //! the status of every documented route for a request with no token, a wrong token and
 //! the right one, the files the server leaves in its state directory, and the bytes of the
-//! lease file after an acquire, a renew and a release under a fixed clock.
+//! lease file after an acquire and a release under a fixed clock.
 //!
 //! The expected text is `golden/gpu_path.txt`, in sections. A change that alters any of
 //! it edits the golden in its own diff, where a reviewer sees it. Regenerate on purpose
@@ -56,11 +56,13 @@ const SECTIONS: [&str; 6] = [
     "lease-file",
 ];
 
-/// Every flag by name with its default and whether it is required, sorted.
+/// Every flag by name with its default and whether it is required, sorted. A hidden flag
+/// (one that only refuses) is not a flag the server has, so it is not listed.
 fn flags() -> String {
     let command = Cli::command();
     let mut rows: Vec<String> = command
         .get_arguments()
+        .filter(|arg| !arg.is_hide_set())
         .filter_map(|arg| {
             let long = arg.get_long()?;
             let defaults: Vec<String> = arg
@@ -106,9 +108,6 @@ fn probes() -> Vec<Probe> {
         ("POST", "/v1/leases", acquire()),
         ("GET", "/v1/leases", None),
         ("GET", "/v1/hosts", None),
-        ("POST", "/v1/leases/1-1/renew", None),
-        ("POST", "/v1/leases/9-9/renew", None),
-        ("GET", "/v1/leases/1-1/renew", None),
         ("POST", "/v1/leases/1-1/runs", Some(serde_json::json!({}))),
         ("GET", "/v1/leases/1-1/runs", None),
         ("GET", "/v1/leases/1-1/runs/r1", None),
@@ -384,7 +383,7 @@ async fn state_files(tag: &str) -> String {
     out
 }
 
-/// The lease file after an acquire, a renew, a tick, a release, a second acquire whose ttl passes before a tick, and the shutdown, with
+/// The lease file after an acquire, a tick, a release, a second acquire whose wall end passes before a tick, and the shutdown, with
 /// the clock moved by hand between them.
 async fn lease_file(tag: &str) -> String {
     let scratch = Scratch::new(&format!("gpu_path_{tag}_bytes"));
@@ -402,11 +401,7 @@ async fn lease_file(tag: &str) -> String {
         .await;
     assert_eq!(granted.status, 201, "{}", granted.body);
     note("acquire");
-    harness.clock.advance(Duration::from_secs(100));
-    let renewed = harness.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(renewed.status, 200, "{}", renewed.body);
-    note("renew");
-    harness.clock.advance(Duration::from_secs(10));
+    harness.clock.advance(Duration::from_secs(110));
     harness.ticks.step().await;
     note("tick");
     let released = harness.call("DELETE", "/v1/leases/1-1", None).await;
@@ -417,9 +412,9 @@ async fn lease_file(tag: &str) -> String {
         .await;
     assert_eq!(second.status, 201, "{}", second.body);
     note("second acquire");
-    harness.clock.advance(Duration::from_secs(601));
+    harness.clock.advance(Duration::from_secs(7201));
     harness.ticks.step().await;
-    note("a tick after the ttl");
+    note("a tick after the wall end");
     let Harness { running, .. } = harness;
     running.shutdown().await.unwrap();
     note("shutdown");

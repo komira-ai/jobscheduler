@@ -1,21 +1,17 @@
-//! What a command waits on: the injected waiters, the signals and the events the
-//! supervising loop of `lease run` reads.
+//! What a command waits on: the injected waiters and the signals.
 
 use std::io;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use js_client::jobs::{Dialer, TokioWaiter};
-use rustix::process::Signal;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::failure::Failure;
 use crate::signals;
 
-/// How the client lets time pass. Nothing in `js` reads a clock or sleeps on its own: a
-/// poll of a pending start and the pause between two renewals both go through a waiter,
-/// so a test drives them and nothing in it waits for real.
+/// How the client lets time pass. Nothing in `js` reads a clock or sleeps on its own: the
+/// poll of a pending start goes through a waiter, so a test drives it and nothing in it
+/// waits for real.
 pub trait Waiter: Send + Sync + 'static {
     /// Returns once `interval` has passed.
     fn wait(&self, interval: Duration);
@@ -31,29 +27,7 @@ impl Waiter for ThreadWaiter {
     }
 }
 
-/// What time it is, on the clock the server's expiry times are read against. `lease run`
-/// turns the `expires_at_ms` of every reply into the time that is left by asking this,
-/// and nothing else in `js` reads a clock.
-pub trait Clock: Send + Sync + 'static {
-    /// Milliseconds since the Unix epoch.
-    fn now_ms(&self) -> u64;
-}
-
-/// The clock of the program: the system's wall clock (the server's expiry times are wall
-/// times too, so the two machines' clocks are assumed to agree to within a few seconds).
-#[derive(Debug, Clone, Copy)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now_ms(&self) -> u64 {
-        let since = SystemTime::now().duration_since(UNIX_EPOCH);
-        since.map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        })
-    }
-}
-
-/// A signal `lease run` hands on to its command.
+/// A signal `job run` acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardedSignal {
     /// SIGINT.
@@ -65,16 +39,8 @@ pub enum ForwardedSignal {
 }
 
 impl ForwardedSignal {
-    pub(crate) fn os_signal(self) -> Signal {
-        match self {
-            Self::Interrupt => Signal::INT,
-            Self::Terminate => Signal::TERM,
-            Self::Hangup => Signal::HUP,
-        }
-    }
-
     /// The signal's number, which `js` adds to 128 for its own exit status when a signal
-    /// ends it before the command starts.
+    /// ends `job run` a second time.
     pub(crate) fn number(self) -> u8 {
         match self {
             Self::Hangup => 1,
@@ -93,98 +59,28 @@ impl ForwardedSignal {
     }
 }
 
-/// What the supervising loop of `lease run` reads.
-#[derive(Debug)]
-pub(crate) enum Event {
-    /// A renewal came back: the lease's new expiry, or why it failed.
-    Renewed(Result<u64, Failure>),
-    /// The deadline short of the lease's expiry has come with no renewal in flight.
-    Deadline,
-    /// The command has exited (it is not reaped yet).
-    Exited,
-    /// `js` itself was sent a signal.
-    Signal(ForwardedSignal),
-    /// The command was told to stop because its lease is lost, and its grace period to
-    /// end on its own has passed.
-    GraceOver,
-}
-
-/// The inbox of the supervising loop.
-pub(crate) struct Events {
-    sender: Sender<Event>,
-    receiver: Receiver<Event>,
-}
-
-impl Events {
-    pub(crate) fn new() -> Self {
-        let (sender, receiver) = channel();
-        Self { sender, receiver }
-    }
-
-    pub(crate) fn sender(&self) -> Sender<Event> {
-        self.sender.clone()
-    }
-
-    /// The handle a signal source reports to.
-    pub(crate) fn signaller(&self) -> Signaller {
-        Signaller(Route::Lease(self.sender()))
-    }
-
-    /// The signal `js` was sent, if one has arrived, without blocking. Only the signal
-    /// source reports to the inbox until the command is started, so a delivered event is
-    /// a signal.
-    pub(crate) fn interrupted(&self) -> Option<ForwardedSignal> {
-        match self.receiver.try_recv() {
-            Ok(Event::Signal(signal)) => Some(signal),
-            _ => None,
-        }
-    }
-
-    /// Blocks for the next event. This inbox holds a sender itself, so the channel never
-    /// closes; the fallback only keeps the loop from spinning on an impossible error.
-    pub(crate) fn next(&self) -> Event {
-        self.receiver.recv().unwrap_or(Event::Exited)
-    }
-}
-
-/// Where a signal source reports the signals `js` receives.
+/// Where a signal source reports the signals `js` receives: to the `job run` that reads
+/// them as it waits.
 #[derive(Debug, Clone)]
-pub struct Signaller(Route);
-
-/// Who reads the signals a [`Signaller`] reports.
-#[derive(Debug, Clone)]
-enum Route {
-    /// The supervising loop of `lease run`.
-    Lease(Sender<Event>),
-    /// `job run`, which reads them as it waits.
-    Job(UnboundedSender<ForwardedSignal>),
-}
+pub struct Signaller(UnboundedSender<ForwardedSignal>);
 
 impl Signaller {
     /// The handle that reports to `job run` through `to`.
     pub(crate) fn job(to: UnboundedSender<ForwardedSignal>) -> Self {
-        Self(Route::Job(to))
+        Self(to)
     }
 
-    /// Reports `signal`: `lease run` hands it on to the command, `job run` cancels its job
-    /// (or, the second time, stops waiting). A report after the run has ended is dropped.
+    /// Reports `signal`: `job run` cancels its job (or, the second time, stops waiting). A
+    /// report after the run has ended is dropped.
     pub fn deliver(&self, signal: ForwardedSignal) {
-        match &self.0 {
-            Route::Lease(to) => {
-                let _ = to.send(Event::Signal(signal));
-            }
-            Route::Job(to) => {
-                let _ = to.send(signal);
-            }
-        }
+        let _ = self.0.send(signal);
     }
 }
 
-/// How `lease run` and `job run` learn of SIGINT, SIGTERM and SIGHUP: called once, before
-/// the lease is asked for or the job submitted, with the handle to report them to. The
-/// program's source installs the handlers (and only for those two: the other commands keep
-/// the signals' default behaviour); a signal that arrives before the run can act on it is
-/// held until it can.
+/// How `job run` learns of SIGINT, SIGTERM and SIGHUP: called once, before the job is
+/// submitted, with the handle to report them to. The program's source installs the
+/// handlers (and only for `job run`: the other commands keep the signals' default
+/// behaviour); a signal that arrives before the run can act on it is held until it can.
 pub type SignalSource = Box<dyn FnOnce(Signaller) -> io::Result<()> + Send>;
 
 /// The effects a command has beyond HTTP, injected so a test drives them.
@@ -193,20 +89,18 @@ pub struct Services {
     /// The pauses of the job commands' loops (`job wait`, `job follow`, `job run`): tokio's
     /// timer unless a test hands in another.
     pub(crate) job_waiter: Arc<dyn js_client::jobs::Waiter>,
-    pub(crate) clock: Arc<dyn Clock>,
     pub(crate) signals: SignalSource,
     /// How the job commands open their connection: TCP unless a test hands in another.
     pub(crate) dialer: Dialer,
 }
 
 impl Services {
-    /// Services over this waiter, clock and signal source; the job commands dial TCP and
-    /// pause on tokio's timer.
-    pub fn new(waiter: Arc<dyn Waiter>, clock: Arc<dyn Clock>, signals: SignalSource) -> Self {
+    /// Services over this waiter and signal source; the job commands dial TCP and pause on
+    /// tokio's timer.
+    pub fn new(waiter: Arc<dyn Waiter>, signals: SignalSource) -> Self {
         Self {
             waiter,
             job_waiter: Arc::new(TokioWaiter),
-            clock,
             signals,
             dialer: Dialer::tcp(),
         }
@@ -224,14 +118,9 @@ impl Services {
         Self { job_waiter, ..self }
     }
 
-    /// The program's own: a sleeping thread, the system clock and tokio's signal
-    /// handlers.
+    /// The program's own: a sleeping thread and tokio's signal handlers.
     pub fn system() -> Self {
-        Self::new(
-            Arc::new(ThreadWaiter),
-            Arc::new(SystemClock),
-            Box::new(signals::install),
-        )
+        Self::new(Arc::new(ThreadWaiter), Box::new(signals::install))
     }
 }
 
@@ -239,12 +128,27 @@ impl Services {
 mod tests {
     use super::*;
 
-    /// Asserts that the system clock reads milliseconds since the epoch (a count of
-    /// seconds would be a thousand times smaller), and does not go back between reads.
+    /// Asserts the number and the name of each signal: they are what `job run` adds to 128
+    /// for its exit status and prints when it stops waiting. It catches a number or a name
+    /// swapped between signals.
     #[test]
-    fn the_system_clock_reads_wall_time_in_milliseconds() {
-        let first = SystemClock.now_ms();
-        assert!(first > 1_000_000_000_000, "{first}");
-        assert!(SystemClock.now_ms() >= first);
+    fn each_signal_has_its_number_and_its_name() {
+        let all = [
+            (ForwardedSignal::Hangup, 1, "SIGHUP"),
+            (ForwardedSignal::Interrupt, 2, "SIGINT"),
+            (ForwardedSignal::Terminate, 15, "SIGTERM"),
+        ];
+        for (signal, number, name) in all {
+            assert_eq!((signal.number(), signal.name()), (number, name));
+        }
+    }
+
+    /// Asserts that the program's waiter returns after the interval it is given (here none
+    /// at all, so the test does not wait), and that it is the `Waiter` the program's
+    /// services hold. It catches a waiter that does not return.
+    #[test]
+    fn the_thread_waiter_returns_after_its_interval() {
+        ThreadWaiter.wait(Duration::ZERO);
+        Services::system().waiter.wait(Duration::ZERO);
     }
 }

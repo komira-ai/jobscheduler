@@ -12,13 +12,11 @@ use crate::support::{Never, run, services};
 const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cli/goldens");
 
 /// The lease commands whose help is held to `goldens/lease_help/`.
-const LEASE: [&[&str]; 7] = [
+const LEASE: [&[&str]; 5] = [
     &["lease"],
     &["lease", "acquire"],
-    &["lease", "renew"],
     &["lease", "release"],
     &["lease", "list"],
-    &["lease", "run"],
     &["lease", "native"],
 ];
 
@@ -64,8 +62,8 @@ fn help(words: &[&str]) -> String {
     got.out
 }
 
-/// The golden file of a command: `js.txt` for the program, `js-lease-run.txt` for
-/// `js lease run`.
+/// The golden file of a command: `js.txt` for the program, `js-lease-acquire.txt` for
+/// `js lease acquire`.
 fn golden_name(words: &[&str]) -> String {
     std::iter::once("js")
         .chain(words.iter().copied())
@@ -121,7 +119,7 @@ fn job_help_text_matches_goldens() {
 #[test]
 fn golden_files_are_named_by_the_command() {
     assert_eq!(golden_name(&[]), "js.txt");
-    assert_eq!(golden_name(&["lease", "run"]), "js-lease-run.txt");
+    assert_eq!(golden_name(&["lease", "acquire"]), "js-lease-acquire.txt");
 }
 
 /// Asserts that `js_cli::command()`, the tree a documentation check walks, is the one the
