@@ -195,6 +195,9 @@ pub fn same_id_different_job_is_a_conflict<B: Backend>(backend: &B) {
         ("exec", |spec| {
             spec.constraints.exec = Some(js_types::ExecMode::SandboxExec)
         }),
+        ("isolation", |spec| {
+            spec.constraints.isolation = crate::Isolation::Host;
+        }),
         ("a capability", |spec| {
             spec.constraints.capabilities.clear();
         }),

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use js_agent_wire::{
     Command, DEFAULT_HEARTBEAT_INTERVAL_MS, ExclusiveRefusal, HeldJob, HeldState, JobResult,
-    JobStartSpec, LogGrant, LogGrantState, LogTail, Outcome, Phase, RefusalReason,
+    JobStartSpec, LogGrant, LogGrantState, LogTail, Outcome, Phase, RefusalReason, Taint,
 };
 use js_jobs::interfere::Interfere;
 use js_jobs::{
@@ -462,6 +462,25 @@ impl Rig {
         self
     }
 
+    /// This rig's server keeping its join tokens and host bindings in `store`, as a server with
+    /// a store setting does.
+    pub(crate) fn with_kept(mut self, store: Arc<dyn Store>) -> Rig {
+        let agents = Arc::try_unwrap(self.agents).ok().unwrap();
+        self.agents = Arc::new(agents.kept_in(store));
+        self
+    }
+
+    /// Registers `host` past the route, as an agent that reports the `per-job` capability and
+    /// `host-jobs` as `value`.
+    pub(crate) fn register_host_jobs(&mut self, host: &str, value: &str) {
+        let capabilities = json!({
+            "per-job": "true",
+            "host-jobs": value,
+            "arch": "x86_64",
+        });
+        self.register_with(host, capabilities);
+    }
+
     /// Says hello for `host` through the route, as an agent that reports the `per-job`
     /// capability and, when `uploads`, the `log-upload` capability.
     pub(crate) async fn join(&mut self, host: &str, uploads: bool) {
@@ -537,6 +556,15 @@ impl Rig {
 
     /// The heartbeat of `agent`'s host, answered by the route.
     pub(crate) async fn beat(&self, agent: &FakeAgent) -> Result<HeartbeatReply, Refused> {
+        self.beat_reporting(agent, None).await
+    }
+
+    /// The heartbeat of `agent`'s host reporting `taint`, answered by the route.
+    pub(crate) async fn beat_reporting(
+        &self,
+        agent: &FakeAgent,
+        taint: Option<Taint>,
+    ) -> Result<HeartbeatReply, Refused> {
         let (epoch, session) = self.sessions[&agent.host].clone();
         let sent = Heartbeat {
             host_id: agent.host.clone(),
@@ -545,7 +573,7 @@ impl Rig {
             phase: agent.phase,
             held: Vec::new(),
             results: Vec::new(),
-            taint: None,
+            taint,
             exclusive_ready: agent.ready.clone(),
             exclusive_refused: agent.refused.clone(),
             load: None,

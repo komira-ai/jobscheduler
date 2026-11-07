@@ -589,21 +589,21 @@
 //! as trusted as the holders of its join tokens: a lease is a whole machine that the
 //! pool's holders run.
 //!
-//! **Taint.** The first taint a heartbeat reports is kept for the host (`taint` in
-//! `GET /v1/hosts`) and acknowledged with `taint_ack: true`, but only once it is in the
-//! state file, so an agent that stops reporting it has not left the server able to lose it
-//! in a restart; when the file cannot be written the host is tainted at once and the reply
-//! says `taint_ack: false`, so the agent reports again. A start the agent refuses with the
-//! detail `host-tainted` taints the host the same way, since an agent that cannot write
-//! its own marker (a full disk) may never report. A tainted host is sent no start, takes
-//! no new run (409 `host-tainted`), takes no new lease (a request only it could serve is
-//! `no-capacity`; a lease already on it is untouched until it ends), still counts toward
-//! `max_machines`, is never forgotten for being silent, and keeps its
-//! taint across its own hello and a server restart (the `.agents` file or the store holds
-//! it, see "Restart"). The runs it already holds finish: their stops are sent, their results are
-//! acknowledged, and the budget returns when the host stops listing them. Nothing clears a
-//! taint: an operator stops the server and removes the `taint_` keys of the host's entry
-//! in the `.agents` file (or of its value in the store).
+//! **Taint.** The first taint a heartbeat reports is kept for the host (`taint` in `GET /v1/hosts`)
+//! and acknowledged with `taint_ack: true`, but only once it is in the state file, so an agent that
+//! stops reporting it has not left the server able to lose it in a restart; when the file cannot be
+//! written the host is tainted at once and the reply says `taint_ack: false`, so the agent reports
+//! again. A start the agent refuses with the detail `host-tainted` taints the host the same way,
+//! since an agent that cannot write its own marker (a full disk) may never report. A tainted host
+//! is sent no start, takes no new run (409 `host-tainted`), takes no new lease (a request only it
+//! could serve is `no-capacity`; a lease already on it is untouched until it ends), still counts
+//! toward `max_machines`, is never forgotten for being silent, and keeps its taint across its own
+//! hello and a server restart (the `.agents` file or the store holds it, see "Restart"). The runs
+//! it already holds finish: their stops are sent, their results are acknowledged, and the budget
+//! returns when the host stops listing them. Nothing clears a taint: an operator stops the server
+//! and removes the `taint_` keys of the host's entry in the `.agents` file (or of its value in the
+//! store). A job with host isolation taints its host when its placement commits (reason `host-job`,
+//! `run_id` the job's id; `docs/runbooks/host-jobs.md`), and its own start is still sent.
 //!
 //! **Not built.** Clearing a taint, the agent's side of the runs below, several pools, a
 //! deny list of host ids.
@@ -642,7 +642,7 @@
 //!   the agent may start it for no longer than that either. Once that time is up no start is sent: a run the host has not listed
 //!   gets a stop (the agent then retires its id) and, when the host still does not list it,
 //!   reads `never-started` and gives its budget back, whether or not the lease lives on.
-//!   Host isolation is refused until the scheduler records the taint such a job leaves.
+//!   Host isolation is refused (422 `host-jobs-not-allowed`): a host job is a job, not a run.
 //! - **Reuse.** A run's limits return to the lease only when the host no longer lists the
 //!   run, which it does after cleanup. When a lease ends (a release or its end) with
 //!   live runs, the booking is free at once but the host takes no new lease, and shows

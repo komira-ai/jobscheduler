@@ -319,6 +319,7 @@ fn an_enum_value_this_build_does_not_know_is_newer() {
         (job_tag::EXEC, 2),
         (job_tag::NETWORK, 3),
         (job_tag::RESULT_REASON, 4),
+        (job_host_tag::ISOLATION, 2),
     ] {
         assert_eq!(
             decode_job(&with(&job, tag, &[code])),

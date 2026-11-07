@@ -10,16 +10,18 @@
 //! once, so it is made under the lock too. A catalog the cache has never fetched is
 //! [`CatalogView::Unread`], which counts as "may offer".
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use js_agent_wire::HOST_JOBS_CAPABILITY;
 use js_elastic::CapacityProvider;
+use js_jobs::Isolation;
 use js_provider::{HostCapacity, Pool, StartSpec};
 use js_registry::{HostMark, HostState as RegistryState, HostView as RegistryView, Registry};
 use js_sched::admission_ever::{
     Admission, CatalogView, HostState, HostView, PoolLimits, ProviderView, can_ever_serve,
 };
-use js_types::{HostId, LeaseId, Request, RequestId, Requirements};
+use js_types::{HostId, LeaseId, Request, RequestId, Requirements, Shape};
 
 use crate::api::Table;
 use crate::catalogs::{Cached, Catalogs};
@@ -109,6 +111,8 @@ impl Admit {
 
 /// Admission of a submitted job (design section 5.6, step 2, `SubmitJob` step 3): the hosts
 /// that register (a job runs on no other host), and the pool's launching machine providers.
+/// A job with host isolation is offered only the registered hosts whose hello reported
+/// `host-jobs`, and no provider: a machine not launched yet has reported nothing.
 ///
 /// The hosts are read from the registry alone, whose lock the read takes and lets go at once;
 /// the lease table's lock is never taken. The launching providers' catalogs are read from the
@@ -128,10 +132,32 @@ impl JobAdmission {
 
 #[tonic::async_trait]
 impl crate::job_api::submit::Admission for JobAdmission {
-    async fn can_ever_serve(&self, wanted: &Requirements) -> bool {
-        let hosts: Vec<HostView> = self.registry.hosts().iter().map(registered).collect();
-        can_ever_serve(wanted, &hosts, &self.admit.providers()) != Admission::Refuse
+    async fn can_ever_serve(&self, wanted: &Requirements, isolation: Isolation) -> bool {
+        let on_the_machine = isolation == Isolation::Host;
+        let hosts: Vec<HostView> = self
+            .registry
+            .hosts()
+            .iter()
+            .filter(|host| !on_the_machine | host.claim.as_ref().is_some_and(reports))
+            .map(registered)
+            .collect();
+        let providers = match on_the_machine {
+            true => Vec::new(),
+            false => self.admit.providers(),
+        };
+        can_ever_serve(wanted, &hosts, &providers) != Admission::Refuse
     }
+}
+
+/// Whether a host's hello claim reports that its agent runs host jobs.
+fn reports(claim: &Shape) -> bool {
+    reports_host_jobs(claim.capabilities())
+}
+
+/// Whether `capabilities`, those a host's hello reported, say its agent runs host jobs
+/// ([`HOST_JOBS_CAPABILITY`] is exactly `"true"`).
+pub(crate) fn reports_host_jobs(capabilities: &BTreeMap<String, String>) -> bool {
+    capabilities.get(HOST_JOBS_CAPABILITY).map(String::as_str) == Some("true")
 }
 
 /// `one`'s provider as admission sees it at `now`: enabled (no key turns a provider off),
@@ -229,5 +255,23 @@ mod tests {
         assert_eq!(state_of(false, true, true), HostState::Cordoned);
         assert_eq!(state_of(false, false, true), HostState::Busy);
         assert_eq!(state_of(false, false, false), HostState::Serving);
+    }
+
+    /// Asserts that a hello reports host jobs only with the capability `host-jobs` set to
+    /// exactly `true`: absent, `false`, another case or a padded value do not. Catches a
+    /// host that reports nothing, or something else, offered a host job.
+    #[test]
+    fn host_jobs_are_reported_only_by_the_value_true() {
+        let said = |value: Option<&str>| {
+            let caps: BTreeMap<String, String> = value
+                .map(|value| (HOST_JOBS_CAPABILITY.to_owned(), value.to_owned()))
+                .into_iter()
+                .collect();
+            reports_host_jobs(&caps)
+        };
+        assert!(said(Some("true")));
+        for other in [None, Some("false"), Some("True"), Some("true ")] {
+            assert!(!said(other), "{other:?}");
+        }
     }
 }

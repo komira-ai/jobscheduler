@@ -51,19 +51,45 @@ fn good_job_flags_start_the_agent() {
 }
 
 /// Asserts that `--allow-host-jobs` ends the agent with status 2 before anything is sent,
-/// and says why: the scheduler does not record a host job's taint yet. It catches an agent
-/// that runs jobs outside a container before the scheduler can tell the host is tainted.
+/// on a Linux host and on a Mac, and says why: no runtime launches a host job yet. Also
+/// asserts that an agent started without the flag sends a hello with no `host-jobs`
+/// capability. Catches an agent that accepts host jobs, or reports it runs them, while no
+/// runtime can launch one (the server would taint the host for a job that cannot start).
 #[test]
-fn host_jobs_are_not_available_yet() {
-    let (status, err, sent) = start(&["--allow-host-jobs"]);
-    assert_eq!(status, code(2), "{err}");
-    assert!(
-        err.contains(
-            "--allow-host-jobs: host jobs are not available yet: the scheduler does not record a host job's taint"
-        ),
-        "{err}"
+fn the_agent_refuses_allow_host_jobs_until_a_runtime_launches_host_jobs() {
+    let said = "--allow-host-jobs: no runtime of this agent launches a host job yet: crun and \
+                docker run contained jobs only";
+    for host in [linux_host(), crate::support::mac_host()] {
+        let (ran, sent, _) = run_scripted(&["--allow-host-jobs"], &host, vec![welcome(1)], 1);
+        assert_eq!(ran.status(), code(2), "{}", ran.err);
+        assert!(ran.err.contains(said), "{}", ran.err);
+        assert!(sent.borrow().is_empty());
+    }
+    let (ran, sent, _) = run_scripted(&[], &linux_host(), vec![welcome(1)], 1);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    let hello = sent.borrow()[0].1.clone();
+    assert!(hello["capabilities"].get("host-jobs").is_none(), "{hello}");
+}
+
+/// Asserts that an operator cannot give `host-jobs` with `--capability`: the agent ends with
+/// status 2 naming the key and sends nothing. Catches a host that claims host jobs without
+/// the flag that makes the agent take them.
+#[test]
+fn the_host_jobs_capability_cannot_be_set_by_hand() {
+    let (ran, sent, _) = run_scripted(
+        &["--capability", "host-jobs=true"],
+        &linux_host(),
+        vec![welcome(1)],
+        1,
     );
-    assert_eq!(sent, 0);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err
+            .contains("--capability: host-jobs is detected and cannot be set"),
+        "{}",
+        ran.err
+    );
+    assert!(sent.borrow().is_empty());
 }
 
 /// The user containers run as, for an agent of any user.

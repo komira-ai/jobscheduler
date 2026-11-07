@@ -88,6 +88,10 @@ pub(crate) struct BeatContext<'a> {
     pub(crate) host: &'a HostId,
     /// The most network the host's agent reported it gives a job.
     pub(crate) ceiling: &'a NetworkCeiling,
+    /// Whether the host's agent reported that it runs host jobs
+    /// ([`js_agent_wire::HOST_JOBS_CAPABILITY`]); a host-isolation start is built only for
+    /// one that did.
+    pub(crate) host_jobs: bool,
     /// What the registry books for the host, which a start of the whole host books; `None`
     /// when it is not known.
     pub(crate) shape: Option<&'a Resources>,

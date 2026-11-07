@@ -1,4 +1,4 @@
-//! [`JobStore`]: the job, allocation and mark tables over a state [`Store`].
+//! [`JobStore`]: the job, allocation, mark and taint tables over a state [`Store`].
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -22,6 +22,7 @@ mod hosts;
 mod index;
 mod marks;
 mod queue;
+mod taints;
 mod whole;
 
 pub use index::Backfill;
@@ -347,7 +348,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// earlier allocation, which the new one overwrites), at the version read. The new allocation
     /// id differs from the freed row's: a source that repeats it is drawn again, at most
     /// [`MINT_TRIES`] times. The job's mark, if it has one, is left as it is:
-    /// [`JobStore::place_with`] places a job and drops its mark in the same transaction.
+    /// [`JobStore::place_with`] places a job and drops its mark in the same transaction. For a
+    /// job that runs on the host itself ([`crate::Isolation::Host`]) the same transaction also
+    /// puts `taint/<host>`, which must be absent, so a host a host job already tainted makes
+    /// the placement stale.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not
