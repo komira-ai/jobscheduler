@@ -12,7 +12,7 @@
 //! than leaving a mark on a job that is not queued. The other writes of a job
 //! ([`JobStore::end_job`], [`JobStore::place`]) do not touch its mark: the caller that keeps
 //! marks ends a marked job with [`JobStore::end_and_unmark`] and deletes the mark of one it
-//! places with `place`, or whose hold it gives up, with [`JobStore::delete_mark`].
+//! places with `place`, or whose mark it drops, with [`JobStore::delete_mark`].
 //!
 //! The table is additive: a store written before it has no `mark/` rows and reads and writes
 //! its jobs and allocations as before; no `idx/` space names a mark, so the index backfill

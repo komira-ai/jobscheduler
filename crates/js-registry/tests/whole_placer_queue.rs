@@ -225,8 +225,9 @@ fn the_round_carries_the_expected_life_of_each_booked_lease() {
 
 /// Catches: a mark put back from the ledger dropped by the placer's pass before its
 /// request is presented again, or not handed over (another request could take its host);
-/// and the request's restored give-ups, exclusions and mark not handed over once it is
-/// presented. `q` held `a` with a give-up and `b` left out for life.
+/// and the request's restored exclusions and mark not handed over once it is presented, or
+/// an old record's give-up count carried into what is handed over. `q` held `a`, with a
+/// give-up count from an older release, and `b` left out for life.
 #[test]
 fn a_restored_mark_is_held_outside_until_its_request_is_presented() {
     let (mut w, queue) = world(&["a", "b"]);
@@ -272,7 +273,7 @@ fn a_restored_mark_is_held_outside_until_its_request_is_presented() {
     let round = queue.last();
     assert!(round.outside.is_empty());
     let presented = &round.waiting[0];
-    assert_eq!(presented.give_ups, 1);
+    assert_eq!(presented.give_ups, 0);
     let excluded = BTreeMap::from([(host("b"), Exclusion::ForLife)]);
     assert_eq!(presented.exclusions, excluded);
     assert_eq!(
@@ -337,14 +338,12 @@ fn a_placer_that_keeps_no_prepare_leaves_it_to_the_registry() {
 }
 
 /// A placer that keeps only the pass of the queue and, beside it, the marks as it holds
-/// them, the holds its requests gave up, and the prepares of the leases committed from it.
+/// them and the prepares of the leases committed from it.
 #[derive(Default)]
 struct Keeping {
     queue: Queue,
     /// The marks as the placer holds them now.
     held: Mutex<Vec<Reservation>>,
-    /// The holds each request gave up.
-    give_ups: Mutex<BTreeMap<RequestId, u32>>,
 }
 
 impl Placer for Keeping {
@@ -360,10 +359,6 @@ impl Placer for Keeping {
         Some(self.held.lock().unwrap().clone())
     }
 
-    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
-        self.give_ups.lock().unwrap().clone()
-    }
-
     fn prepare_failed(&self, _: &js_types::LeaseId, _: &js_registry::PrepareFailure) -> bool {
         true
     }
@@ -372,13 +367,12 @@ impl Placer for Keeping {
 /// Catches a placer that keeps only the pass read as one that keeps the wait list (the
 /// registry would drop its own marks and records), a mark read from the registry where the
 /// placer holds the same host for the same request (its deadline would be the registry's),
-/// a placer's give-ups not raised in the request's record, and a failed prepare the placer
-/// keeps counted by the registry as well. `r` is marked on the cordoned `a`: the registry
-/// shows the placer's deadline for it, not for a mark the placer holds on another host,
-/// and the record counts the two holds the placer gave up. Then `s` is committed on the
+/// and a failed prepare the placer keeps counted by the registry as well. `r` is marked on
+/// the cordoned `a`: the registry shows the placer's deadline for it, not for a mark the
+/// placer holds on another host, and the request has no record. Then `s` is committed on the
 /// quiet `b` and refused: the registry counts no failure of its own.
 #[test]
-fn a_placer_that_keeps_only_the_pass_is_read_for_its_marks_give_ups_and_failures() {
+fn a_placer_that_keeps_only_the_pass_is_read_for_its_marks_and_failures() {
     let mut w = World::new(&["a", "b"], plain);
     let placer = Arc::new(Keeping::default());
     w.fx.registry.set_placer(placer.clone());
@@ -391,10 +385,9 @@ fn a_placer_that_keeps_only_the_pass_is_read_for_its_marks_give_ups_and_failures
         ..drain.clone()
     };
     *placer.held.lock().unwrap() = vec![later.clone(), mark("q", "b", now, false)];
-    placer.give_ups.lock().unwrap().insert(id("r"), 2);
     assert_eq!(w.ask(2, "r"), StartAck::Unknown);
     assert_eq!(w.reservations(), [later]);
-    assert_eq!(w.fx.registry.request_record(&id("r")).unwrap().give_ups, 2);
+    assert_eq!(w.fx.registry.request_record(&id("r")), None);
     placer.held.lock().unwrap().clear();
     assert_eq!(w.reservations(), [drain]);
     placer.queue.answer(mark("s", "b", w.now().millis(), true));

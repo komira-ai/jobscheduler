@@ -63,7 +63,7 @@ fn engine(hosts: &[(&str, &[u64])]) -> Engine {
 }
 
 /// The settings of the rounds: a request waits ten seconds before it marks a busy host,
-/// and a mark is given up after a minute.
+/// and a mark's deadline is a minute after it is made (reaching it gives nothing up).
 fn settings() -> WholeNodeConfig {
     WholeNodeConfig {
         drain_after_ms: 10_000,
@@ -233,21 +233,26 @@ fn a_mark_stays_on_its_host_and_goes_with_its_request() {
     assert_eq!(e.sched.state(op), None);
 }
 
-/// Catches: a give-up at a mark's deadline that the registry is not told of (its record of
-/// the request, which its history and its ledger read, would count none), or a request
-/// that gave nothing up reported. `r` marks `a` and gives it up at its deadline: one
-/// give-up, reported for `r`; nothing is reported before.
+/// Catches: a mark dropped, or its host barred, when its deadline passes (the deadline is
+/// informational: the request would lose the host it waited for and be counted for it).
+/// `r` marks `a` at ten seconds; at the deadline and long past it the mark is still on
+/// `a`, nothing is barred for `r`, and its record shows no failure.
 #[test]
-fn the_give_ups_of_the_queue_are_reported_by_request() {
+fn a_mark_is_kept_at_and_past_its_deadline() {
     let hosts = live(&["a", "b"]);
     let mut e = engine(&[("a", &[1]), ("b", &[2])]);
     e.whole_round(round(vec![waiting("r", 0)], &hosts), at(11_000));
-    assert!(e.whole_give_ups().is_empty());
-    for now in (16_000..=72_000).step_by(5_000) {
+    let op = e.whole[&id("r")];
+    let mark = e.sched.whole_mark(op).cloned();
+    assert!(mark.is_some());
+    for now in (16_000..=300_000).step_by(5_000) {
         beat(&mut e, &["a", "b"], now);
-        e.whole_round(round(vec![waiting("r", 0)], &hosts), at(now));
+        let marks = e.whole_round(round(vec![waiting("r", 0)], &hosts), at(now));
+        assert_eq!(held(&marks), ["r@a"], "at {now}");
     }
-    assert_eq!(e.whole_give_ups(), BTreeMap::from([(id("r"), 1)]));
+    assert_eq!(e.sched.whole_mark(op).cloned(), mark);
+    assert!(e.sched.whole_barred(op, at(300_000)).is_empty());
+    assert_eq!(e.whole_record(&js_registry::RequestKey::Id(id("r"))), None);
 }
 
 /// Catches: a pending grant kept when the whole-node ceiling falls below the hosts held
@@ -471,11 +476,11 @@ fn a_mark_the_registry_holds_is_taken_when_the_request_is_queued() {
 }
 
 /// Catches: a rebuild that drops the whole-node queue (the requests would lose their
-/// marks, their give-ups and their places) or numbers its leases afresh. `r` gives up its
-/// mark on `a` at the deadline and marks `b`; the rebuilt engine queues it with the same
-/// mark and one give-up, and an engine with no queue rebuilds with none.
+/// marks and their places) or numbers its leases afresh. `r` holds its mark on `a` past
+/// the deadline; the rebuilt engine queues it with the same mark, and an engine with no
+/// queue rebuilds with none.
 #[test]
-fn a_rebuild_keeps_the_queue_its_marks_and_give_ups() {
+fn a_rebuild_keeps_the_queue_and_its_marks() {
     let hosts = live(&["a", "b"]);
     let every = [candidate("a", &[1]), candidate("b", &[2])];
     let mut e = Engine::build(Settings::default(), &every, at(0));
@@ -486,16 +491,14 @@ fn a_rebuild_keeps_the_queue_its_marks_and_give_ups() {
         e.whole_round(round(vec![waiting("r", 0)], &hosts), at(now));
     }
     let op = e.whole[&id("r")];
-    assert_eq!(e.sched.whole_give_ups(op), 1);
     let marks = e.whole_round(round(vec![waiting("r", 0)], &hosts), at(72_000));
-    assert_eq!(held(&marks), ["r@b"]);
+    assert_eq!(held(&marks), ["r@a"]);
     let mut rebuilt = e.rebuild(Settings::default(), &every, at(72_000));
     let again = rebuilt.whole[&id("r")];
-    assert_eq!(rebuilt.sched.whole_give_ups(again), 1);
     assert_eq!(rebuilt.sched.whole_mark(again), e.sched.whole_mark(op));
     assert_eq!(rebuilt.whole_seq, e.whole_seq);
     let marks = rebuilt.whole_round(round(vec![waiting("r", 0)], &hosts), at(73_000));
-    assert_eq!(held(&marks), ["r@b"]);
+    assert_eq!(held(&marks), ["r@a"]);
 }
 
 /// Catches: a whole-node request granted by a round that is not its own keeping that

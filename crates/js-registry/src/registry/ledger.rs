@@ -8,8 +8,10 @@
 //! - the place on the wait list and the instant the request was first presented;
 //! - the host set aside for it, when it was, its deadline, and whether the host was quiet
 //!   (an assigned mark drains nothing);
-//! - its give-up and failed-prepare counts, and the hosts it is kept off, each with the
-//!   instant that ends it or for good.
+//! - its failed-prepare count, and the hosts it is kept off, each with the instant that
+//!   ends it or for good;
+//! - a give-up count, always written as zero: no reservation is given up. A count an older
+//!   file holds is read and ignored, so a file written before parses and restores.
 //!
 //! Nothing else is kept. What a host costs to drain, and every estimate of it, is read
 //! from the table at each pass; the last failure's text is not kept; a request without an
@@ -27,12 +29,11 @@
 //! being given back, a mark with no place on the wait list or on a host another record
 //! holds, a place past the wait list's size cap ([`MAX_WAITING_REQUESTS`], the live path's
 //! own), and exclusions past the pool's machine limit (the first hosts by id are kept).
-//! Nothing it drops counts as a give-up.
 //!
 //! # Under a placer that keeps the queue
 //!
-//! Under `--placement js-sched` the engine keeps the marks of the requests it queues, their
-//! give-ups and back-offs, and the failed prepares and bars of requests it committed
+//! Under `--placement js-sched` the engine keeps the marks of the requests it queues and
+//! their bars, and the failed prepares and bars of requests it committed
 //! ([`crate::Placer::whole_round`] and its siblings). The ledger is then written from the
 //! engine: a request's mark is the engine's ([`crate::Placer::whole_reservations`]) and its
 //! counts and exclusions are the engine's ([`crate::Placer::whole_ledger`]); the place and
@@ -43,8 +44,8 @@
 //! exclusions to the engine ([`crate::Placer::whole_restore`]), which queues the request with
 //! them when it is presented again (`js_sched::Scheduler::restore_whole`) and answers a
 //! terminal request at its next start. A timed exclusion of a record with no failed prepare
-//! can only be a give-up's back-off, and is put back as one; any other is a failed
-//! prepare's bar. The place goes back on the engine's wait list
+//! can only be the back-off of a give-up an older file recorded, and is put back as one;
+//! any other is a failed prepare's bar. The place goes back on the engine's wait list
 //! ([`crate::Placer::whole_restore_place`]) and the mark to the engine
 //! ([`crate::Placer::whole_revive`]), which holds the host for the request outside its queue
 //! until the request is presented again and its host has said hello, or the mark is dropped.
@@ -113,7 +114,6 @@ impl Registry {
             now,
             claim_by: now.plus(Duration::from_millis(whole.regain_grace_ms)),
             max_replace: whole.max_replace,
-            max_reserve_attempts: whole.max_reserve_attempts,
             max_exclusions: self.shared.config.max_machines(),
             placer: self.shared.placer.get().map(|placer| &**placer),
             keeper: self.keeper(),
@@ -228,7 +228,6 @@ struct Standing<'a> {
     now: Timestamp,
     claim_by: Timestamp,
     max_replace: u32,
-    max_reserve_attempts: u32,
     /// The most hosts one request is kept off: a request is kept off a host at most once,
     /// so the pool's machine limit bounds it.
     max_exclusions: usize,
@@ -256,11 +255,8 @@ fn revive(
             dropped: 1,
         };
     };
-    let counted = [
-        record.give_ups > 0,
-        record.prepare_failures > 0,
-        !record.exclusions.is_empty(),
-    ];
+    // The give-up count is read and ignored: no reservation is given up.
+    let counted = [record.prepare_failures > 0, !record.exclusions.is_empty()];
     let counted = counted.into_iter().any(|counted| counted);
     let mut dropped = 0;
     if counted {
@@ -276,32 +272,26 @@ fn revive(
         let terminal = used_up.into_iter().all(|used| used);
         let since = record.queued.map_or(ctx.now, |queued| queued.since);
         let counts = WholeKept {
-            give_ups: record.give_ups,
+            give_ups: 0,
             prepare_failures: failures,
             exclusions,
         };
         let engine = ctx
             .placer
             .is_some_and(|placer| placer.whole_restore(&id, &counts, terminal, since));
-        // A placer that keeps the request keeps all of it; the registry keeps the give-up
-        // count it shows and hands the placer at each pass.
-        let kept = match engine {
-            true => RequestRecord {
-                give_ups: record.give_ups,
-                ..RequestRecord::default()
-            },
-            false => RequestRecord {
+        // A placer that keeps the request keeps all of it.
+        let registry = ctx.keeper.is_none();
+        if !engine & registry {
+            let kept = RequestRecord {
                 prepare_failures: failures,
-                give_ups: record.give_ups,
+                give_ups: 0,
                 exclusions: counts.exclusions,
                 last: None,
                 terminal,
-            },
-        };
-        let key = RequestKey::Id(id.clone());
-        let registry = ctx.keeper.is_none();
-        if [kept.give_ups > 0, !engine].into_iter().any(|keep| keep) & registry {
-            state.requests.restore(key, kept, ctx.now);
+            };
+            state
+                .requests
+                .restore(RequestKey::Id(id.clone()), kept, ctx.now);
         }
     }
     let wants_place = record.queued;
@@ -337,7 +327,6 @@ fn revive(
                     at: held.reserved_at,
                     deadline: held.deadline,
                     assigned: held.assigned,
-                    capped: record.give_ups >= ctx.max_reserve_attempts,
                     tail_end: held.tail_end,
                     claim_by: ctx.claim_by,
                 }),

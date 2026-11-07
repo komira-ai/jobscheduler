@@ -208,6 +208,9 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   after a grace; (c) wait without a bound. Recommend (a): (b) silently destroys other tenants' results for one consumer's convenience, and
   (c) lets a request hold a host and idle it for ever. The scheduler stops nothing for a reservation; the renewal answer carries
   `host_reserved` (additive) so a cooperating consumer releases early.
+  Superseded: a reservation is no longer given up. The deadline is `drain_deadline` if set, else the request's wall limit; reaching it changes nothing (no host is
+  excluded, nothing is counted) and `max_reserve_attempts` is deprecated; `reserve_backoff` sizes only the failed-prepare exclusion. Option (a) stays rejected for
+  the drain itself: the request keeps its host and the work is never cut.
 - **D49. Caps.** Per pool: `max_whole_node` (reserved plus held), `max_draining` (default 1), `max_whole_node_per_consumer` (default 1),
   `keep_for_ordinary` (default 1 in a mixed pool, 0 in a dedicated one); the effective ceiling is the least of `max_whole_node` and capable
   hosts less `keep_for_ordinary`. A reservation does not start on the last unreserved capable host of an ordinary request queued ahead of
@@ -234,6 +237,7 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   256 bytes, and the scheduler acts at once instead of waiting for `prepare_timeout`; each code is a data row (host effect, request effect).
   A refusal or a timeout is a prepare failure and counts toward `max_replace` (default 3); drain give-ups count toward `max_reserve_attempts`
   (default 2); the two are separate because one is the cost of waiting for a host and the other is a host or setup that does not work.
+  Superseded in part: a drain is no longer given up, so nothing counts toward `max_reserve_attempts`, which is deprecated (parsed, validated, ignored).
   Alternatives: one shared counter (rejected: a noisy host would eat the drain budget and the reverse); only a timeout (rejected: a known
   refusal would idle a host for up to ten minutes).
 - **D55. Reservations are persisted.** A reservation record (request id, host, deadline, both counters, exclusions) is written to the lease
@@ -241,6 +245,7 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   id is bound to its record and the drain continues; an unclaimed record is dropped after `regain_grace`. Alternative: not persisted, so a
   restart drops every mark and the drains restart; rejected, since a drain costs up to a max wall time of idle host, and a restart loop
   would reset the give-up counter and defeat the bound of D48.
+  Superseded in part: the record no longer carries a counted give-up (the `give_ups` field is written 0 and ignored when read); what the record keeps is the mark, its deadline, the failed-prepare count and the exclusions.
 - **D56. A provider brings hosts that run many jobs; capacity is booked as a request vector and packed by the placement rule. Direction
   settled by the project owner; the rules are chosen here. Amends D7.** (a) One machine or one VM for each job; (b) a host sized to hold
   many jobs, each run booking its request vector (a container its CPU and memory under `Book`; a VM its CPUs, memory and one `vms` slot in

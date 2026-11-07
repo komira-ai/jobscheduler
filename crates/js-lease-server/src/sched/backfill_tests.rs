@@ -161,7 +161,7 @@ impl Live {
     }
 
     /// Starts whole-node request `name` as lease `sequence`, which may run an hour: its
-    /// mark is not given up (the registry's drain deadline) before then.
+    /// mark is kept (its drain deadline gives nothing up) before then.
     fn whole(&mut self, sequence: u64, name: &str) -> StartAck {
         let class = ResourceClass::whole_node();
         let mut request = sharing_spec(sequence).request().clone();
@@ -279,7 +279,7 @@ fn with_the_flag_a_lease_too_long_for_the_tail_goes_to_an_unmarked_host() {
 
 /// Asserts, through the server, that an overdue lease is handled as the design states: at
 /// 650 s the lease of 600 s on `h1` has not ended (nothing has stopped it yet), the mark
-/// stands (the request may run an hour, so its drain is not given up), the tail it took
+/// stands (the request may run an hour, and no mark is given up at its deadline), the tail it took
 /// is past, and not even a lease of a second is placed there. It catches a past tail read
 /// as a free host.
 #[test]

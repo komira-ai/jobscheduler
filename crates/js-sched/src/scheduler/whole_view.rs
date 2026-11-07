@@ -2,9 +2,8 @@
 //! numbers the caps use ([`Scheduler::whole_summary`]), for a caller that shows them
 //! (a status page, a metric) without reading the accessors one by one.
 //!
-//! Both read what the placement rounds recorded, the marks, give-ups, bars and waits
-//! ([`Scheduler::whole_mark`], [`Scheduler::whole_give_ups`],
-//! [`Scheduler::whole_barred`], [`Scheduler::whole_wait`]), and count with the code the
+//! Both read what the placement rounds recorded, the marks, bars and waits
+//! ([`Scheduler::whole_mark`], [`Scheduler::whole_barred`], [`Scheduler::whole_wait`]), and count with the code the
 //! caps use, so neither can drift from what admission enforces. Two things are read at
 //! the scheduler's time now instead: whether a request is before `drain_after`, and which
 //! bars have not ended, so a bar that ended since the last round no longer shows as
@@ -37,11 +36,9 @@ pub enum WholeState {
         worker: WorkerId,
         /// When the hold was made.
         made: FarmTime,
-        /// When the hold is given up if the worker is still busy. `None` once the request
-        /// has given up `max_reserve_attempts` holds: it is not given up again.
-        deadline: Option<FarmTime>,
-        /// How many holds it has given up so far.
-        give_ups: u32,
+        /// When the worker is expected to be drained at the latest
+        /// ([`super::WholeMark::deadline`]); reaching it does not end the hold.
+        deadline: FarmTime,
         /// Whether the worker still has leases, so it is draining; when it has none the
         /// next round grants it.
         draining: bool,
@@ -49,21 +46,19 @@ pub enum WholeState {
         /// ([`super::WholeMark::tail_end`]): when the request is expected to start there.
         tail_end: Option<FarmTime>,
     },
-    /// It holds no worker and some are barred to it ([`Scheduler::whole_barred`]): the
-    /// workers it gave up a hold on, until their back-off ends, and those barred with
-    /// [`Scheduler::bar_whole`]; no other worker could be held.
+    /// It holds no worker and some are barred to it ([`Scheduler::whole_barred`]): those
+    /// barred with [`Scheduler::bar_whole`] or put back, until their bar ends; no other
+    /// worker could be held.
     Barred {
         /// The barred workers, each with when its bar ends (exclusive; the end of time,
         /// `u64::MAX` milliseconds, for a bar for life).
         workers: BTreeMap<WorkerId, FarmTime>,
-        /// How many holds it has given up so far.
-        give_ups: u32,
     },
     /// It has waited out `drain_after` and a cap, or the last-capable rule, stopped a
     /// hold ([`Scheduler::whole_wait`]).
     Stopped(WholeWait),
-    /// It has waited out `drain_after` and holds nothing, and no cap, give-up or
-    /// unservable reason is recorded. Either every worker it could hold is held by a
+    /// It has waited out `drain_after` and holds nothing, and no cap, bar or unservable
+    /// reason is recorded. Either every worker it could hold is held by a
     /// request ahead of it, or no placement round has run since it became due (or since
     /// its bar ended). A status page may label it "Waiting".
     Queued,
@@ -204,13 +199,11 @@ impl Scheduler {
         if self.now < may_hold_at {
             return WholeState::Early { may_hold_at };
         }
-        let give_ups = self.whole_give_ups(operation);
         if let Some(mark) = self.whole_mark(operation) {
             return WholeState::Holding {
                 worker: mark.worker.clone(),
                 made: mark.made,
-                deadline: self.drain.gives_up(operation, cfg).then_some(mark.deadline),
-                give_ups,
+                deadline: mark.deadline,
                 draining: self.workers.get(&mark.worker).is_some_and(|w| w.leases > 0),
                 tail_end: mark.tail_end,
             };
@@ -222,7 +215,7 @@ impl Scheduler {
         if workers.is_empty() {
             WholeState::Queued
         } else {
-            WholeState::Barred { workers, give_ups }
+            WholeState::Barred { workers }
         }
     }
 }

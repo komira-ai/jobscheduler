@@ -172,11 +172,11 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
 (the hierarchy).
 
 56. Reservation and drain. A queued whole-node request takes a quiet host, else reserves exactly one (the cost order: latest end bound,
-    fewest leases, lowest host id); the `reserved` mark places nothing new; the `host_reserved` flag on a renewal answer; the drain deadline,
-    give-up and `reserve_backoff`; cancel drops the reservation; the reservation records in the lease file, bound again to a request
-    presented after a restart. *Proves:* a restart mid-drain keeps the host, the deadline and the counters; with a stream of share requests a queued whole-node request is
+    fewest leases, lowest host id); the `reserved` mark places nothing new; the `host_reserved` flag on a renewal answer; the drain deadline (kept past, never given up)
+    and `reserve_backoff` for the failed-prepare exclusion; cancel drops the reservation; the reservation records in the lease file, bound again to a request
+    presented after a restart. *Proves:* a restart mid-drain keeps the host, the deadline and the failed-prepare count; with a stream of share requests a queued whole-node request is
     committed within its bound on the injected clock; a reserved host takes no new lease or placed run (backfill that ends by its tail came later, whole-node.md section 4); nothing is stopped by a reservation
-    (the leases and runs on the host are the same set at the give-up); the cost order on a host table with three different hosts; a request
+    (the leases and runs on the host are the same set at the deadline); the cost order on a host table with three different hosts; a request
     never holds two hosts and a host never two requests.
 57. Caps and the host-job rule. `max_whole_node`, `max_draining`, `max_whole_node_per_consumer`, `keep_for_ordinary`, `allow_last_capable`,
     the effective ceiling, config validation, and `host_jobs` only in a whole-node lease. *Proves:* over seeded runs none of the caps is

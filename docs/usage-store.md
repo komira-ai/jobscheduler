@@ -25,7 +25,7 @@ Every row starts with a version byte.
 | `run_ms` | from the lease's start to its end, on the registry's clock; zero for a request cancelled before it had a host; absent when the start is not known |
 | `ended_reason` | why it ended: `released`, `expired`, `lost`, `cancelled-while-waiting`, `failed-to-start` or `stopped-at-wall-limit` |
 | `drain_outcome` | what became of the host set aside for a whole-node request: `none` (an ordinary lease), `no-mark`, `mark-held`, `mark-dropped`, or `unknown` (put back after a restart) |
-| `give_up_outcome` | how many hosts a whole-node request gave up waiting for (drain give-ups); absent for an ordinary lease |
+| `give_up_outcome` | always 0 for a whole-node request (a drain is never given up; the column is kept for the row's shape); absent for an ordinary lease |
 | `estimated_end` | the end the estimate feed (`--estimate-feed`) gave the lease, if it had one |
 | `actual_end` | when it ended: the key's time |
 | `error_ms` | `actual_end` less `estimated_end`, positive for a lease that outlived its estimate; absent without an estimate. It is the error the tail counters bucket |

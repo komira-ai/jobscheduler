@@ -1,6 +1,4 @@
-//! The drain cost order (design section 3) and the reservation deadline (section 4).
-
-use crate::config::WholeNodeConfig;
+//! The drain cost order (design section 3) and the tail a reserved host drains to.
 
 /// What the scheduler's table shows on one host, as facts for [`drain_cost`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,18 +105,6 @@ pub fn fits_in_tail(
                 .and_then(|end| end.checked_add(margin));
             end.is_some_and(|end| end <= tail_end)
         })
-}
-
-/// How long a reservation may drain before it is given up. After `attempts_given_up`
-/// reaches `max_reserve_attempts` the deadline is `max_wall_ms` whatever
-/// `drain_deadline_ms` says; before that it is `drain_deadline_ms`, or `max_wall_ms`
-/// when none is set.
-pub fn reserve_deadline(attempts_given_up: u32, cfg: &WholeNodeConfig, max_wall_ms: u64) -> u64 {
-    if attempts_given_up >= cfg.max_reserve_attempts {
-        max_wall_ms
-    } else {
-        cfg.drain_deadline_ms(max_wall_ms)
-    }
 }
 
 #[cfg(test)]
@@ -461,39 +447,5 @@ mod tests {
         // The last instant there is still fits exactly.
         assert!(fits_in_tail(max - margin - 1, Some(1), Some(max), margin));
         assert!(fits_in_tail(max, Some(0), Some(max), 0));
-    }
-
-    fn cfg(deadline: Option<u64>, attempts: u32) -> WholeNodeConfig {
-        WholeNodeConfig {
-            drain_deadline_ms: deadline,
-            max_reserve_attempts: attempts,
-            ..WholeNodeConfig::dedicated(2)
-        }
-    }
-
-    #[test]
-    fn deadline_below_the_attempt_cap_is_the_configured_one() {
-        // Catches: always returning max wall.
-        assert_eq!(reserve_deadline(0, &cfg(Some(60), 2), 1000), 60);
-        assert_eq!(reserve_deadline(1, &cfg(Some(60), 2), 1000), 60);
-    }
-
-    #[test]
-    fn unset_deadline_is_max_wall() {
-        // Catches: treating None as zero.
-        assert_eq!(reserve_deadline(0, &cfg(None, 2), 1000), 1000);
-    }
-
-    #[test]
-    fn at_the_attempt_cap_the_deadline_is_max_wall_even_if_shorter_is_set() {
-        // W6: kills `>` for `>=`, and honouring a shorter drain_deadline forever.
-        assert_eq!(reserve_deadline(2, &cfg(Some(60), 2), 1000), 1000);
-        assert_eq!(reserve_deadline(7, &cfg(Some(60), 2), 1000), 1000);
-    }
-
-    #[test]
-    fn a_longer_configured_deadline_is_also_cut_to_max_wall_at_the_cap() {
-        // Catches: max() instead of the max wall at the cap; the bound is max wall.
-        assert_eq!(reserve_deadline(2, &cfg(Some(5000), 2), 1000), 1000);
     }
 }

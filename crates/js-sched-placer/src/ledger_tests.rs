@@ -9,8 +9,8 @@ use std::time::Duration;
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Candidate, Held, StartSpec};
 use js_registry::{
-    Exclusion, MarkedTails, NotReady, Placer, PrepareFailure, RequestRecord, Standing,
-    WaitingWhole, WholeHost, WholeKept, WholeNodeConfig, WholeRound,
+    Exclusion, MarkedTails, NotReady, Placer, PrepareFailure, Standing, WaitingWhole, WholeHost,
+    WholeKept, WholeNodeConfig, WholeRound,
 };
 use js_sched::Bar;
 use js_types::sched::FarmTime;
@@ -152,19 +152,19 @@ fn for_life() -> PrepareFailure {
 }
 
 /// When the hold of `r` reaches its deadline: a minute after it was made.
-const GIVE_UP: u64 = DRAIN_AFTER + DEADLINE;
+const AT_DEADLINE: u64 = DRAIN_AFTER + DEADLINE;
 
-/// An engine over busy `a` where request `r` held `a` from `DRAIN_AFTER` and gave the hold
-/// up at its deadline, `GIVE_UP`.
-fn gave_up() -> Engine {
+/// An engine over busy `a` where request `r` held `a` from `DRAIN_AFTER` and still holds it
+/// at its deadline, `AT_DEADLINE`: the deadline gives nothing up.
+fn held_to_deadline() -> Engine {
     let mut e = engine(&[("a", &[1])]);
     pass(&mut e, vec![waiting("r", 0)], &["a"], DRAIN_AFTER);
     assert!(e.sched.whole_mark(e.whole[&id("r")]).is_some());
     // The host is heard and the queue passed every five seconds, as the registry does.
-    for now in (DRAIN_AFTER + 5_000..=GIVE_UP).step_by(5_000) {
+    for now in (DRAIN_AFTER + 5_000..=AT_DEADLINE).step_by(5_000) {
         pass(&mut e, vec![waiting("r", 0)], &["a"], now);
     }
-    assert_eq!(e.sched.whole_give_ups(e.whole[&id("r")]), 1);
+    assert!(e.sched.whole_mark(e.whole[&id("r")]).is_some());
     e
 }
 
@@ -182,22 +182,25 @@ fn failed() -> Engine {
     e
 }
 
-/// Catches: a ledger without the give-up the engine counted, without its back-off, or
-/// without the failed prepare and the bar of a request the engine committed (a restart under
-/// js-sched would then reset `max_reserve_attempts`, lift a back-off and give the request its
-/// tries again). Each request is written with its counts and its host; a back-off that has
-/// ended is no longer written, and the count stays.
+/// Catches: a ledger that keeps a row for a request whose mark reached its deadline (the
+/// deadline gives nothing up, so there is nothing to keep, and the mark itself is written
+/// by the reservation listing), or one without the failed prepare and the bar of a request
+/// the engine committed (a restart under js-sched would then lift the bar and give the
+/// request its tries again). `r` holds `a` to its deadline and past it with no row and no
+/// bar; `s` is written with its failure and its host.
 #[test]
-fn the_ledger_holds_each_requests_give_ups_back_off_failures_and_bars() {
-    let e = gave_up();
-    let ledger = e.whole_ledger(at(GIVE_UP));
-    let r = &ledger[&id("r")];
-    assert_eq!((r.give_ups, r.prepare_failures), (1, 0));
-    let back_off = Exclusion::Until(stamp(GIVE_UP + BACKOFF));
-    assert_eq!(r.exclusions, BTreeMap::from([(host("a"), back_off)]));
-    let later = e.whole_ledger(at(GIVE_UP + 10 * BACKOFF));
-    assert_eq!(later[&id("r")].give_ups, 1);
-    assert!(later[&id("r")].exclusions.is_empty());
+fn the_ledger_holds_each_requests_failures_and_bars_and_nothing_for_a_mark() {
+    let mut e = held_to_deadline();
+    assert!(e.whole_ledger(at(AT_DEADLINE)).is_empty());
+    assert_eq!(e.whole_record(&key("r")), None);
+    pass(
+        &mut e,
+        vec![waiting("r", 0)],
+        &["a"],
+        AT_DEADLINE + 10 * BACKOFF,
+    );
+    assert!(e.sched.whole_mark(e.whole[&id("r")]).is_some());
+    assert!(e.whole_ledger(at(AT_DEADLINE + 10 * BACKOFF)).is_empty());
 
     let e = failed();
     let barred = WholeKept {
@@ -209,24 +212,30 @@ fn the_ledger_holds_each_requests_give_ups_back_off_failures_and_bars() {
         e.whole_ledger(at(1_000)),
         BTreeMap::from([(id("s"), barred.clone())])
     );
-    let later = e.whole_ledger(at(GIVE_UP + 10 * BACKOFF));
+    let later = e.whole_ledger(at(AT_DEADLINE + 10 * BACKOFF));
     assert_eq!(later, BTreeMap::from([(id("s"), barred)]));
 }
 
 /// Catches: a restored record that the engine does not keep until its request is presented,
-/// one queued without its give-ups or its back-off, a back-off put back as a hard bar (the
-/// request could then never take the host it backed off, even with no other), and a record
-/// with failed prepares that is not answered until it is queued: the terminal request is
-/// refused at its first start, once, with both its bars, and the record without failures
-/// shows none.
+/// an old record's give-up count that no longer parses or is carried on (it is read, ignored
+/// and written back as 0), one queued without its back-off, a back-off put back as a hard
+/// bar (the request could then never take the host it backed off, even with no other), and
+/// a record with failed prepares that is not answered until it is queued: the terminal
+/// request is refused at its first start, once, with both its bars, and the record without
+/// failures shows none.
 #[test]
-fn a_restored_request_is_queued_with_its_counts_and_a_terminal_one_is_refused() {
+fn a_restored_request_is_queued_with_its_bars_and_a_terminal_one_is_refused() {
     let mut e = engine(&[("a", &[1])]);
     let backoff_end = stamp(5 * BACKOFF);
+    // A record an earlier release wrote after a give-up: one counted, a timed back-off.
     let gave_up = WholeKept {
         give_ups: 1,
         prepare_failures: 0,
         exclusions: BTreeMap::from([(host("a"), Exclusion::Until(backoff_end))]),
+    };
+    let written_now = WholeKept {
+        give_ups: 0,
+        ..gave_up.clone()
     };
     e.whole_restore(&id("r"), &gave_up, (false, stamp(0)), at(1_000));
     let used = WholeKept {
@@ -238,30 +247,26 @@ fn a_restored_request_is_queued_with_its_counts_and_a_terminal_one_is_refused() 
         ]),
     };
     e.whole_restore(&id("t"), &used, (true, stamp(0)), at(1_000));
-    // A request put back with a give-up shows its count, and no bar: its back-off is soft.
-    let shown = RequestRecord {
-        give_ups: 1,
-        ..RequestRecord::default()
-    };
-    assert_eq!(e.whole_record(&key("r")), Some(shown));
+    // A request put back with a give-up counts none, and no failed prepare: its back-off
+    // is soft.
+    assert_eq!(e.whole_record(&key("r")), None);
     let terminal = e.whole_record(&key("t")).unwrap();
     assert_eq!((terminal.prepare_failures, terminal.terminal), (2, true));
     assert_eq!(terminal.last, None);
     assert_eq!(terminal.exclusions, used.exclusions);
     let ledger = e.whole_ledger(at(1_000));
-    assert_eq!(ledger[&id("r")], gave_up);
+    assert_eq!(ledger[&id("r")], written_now);
     assert_eq!(ledger[&id("t")], used);
     assert!(e.whole_start(&key("t"), at(2_000)));
     assert!(!e.whole_start(&key("t"), at(2_000)));
 
     pass(&mut e, vec![waiting("r", 0)], &["a"], 2_000);
     let operation = e.whole[&id("r")];
-    assert_eq!(e.sched.whole_give_ups(operation), 1);
     let worker = map::worker(&host("a"));
     let bars = e.sched.whole_barred(operation, at(2_000));
     let soft = Bar::Backoff(FarmTime::from_millis(backoff_end.millis()));
     assert_eq!(bars, BTreeMap::from([(worker, soft)]));
-    assert_eq!(e.whole_ledger(at(2_000))[&id("r")], gave_up);
+    assert_eq!(e.whole_ledger(at(2_000))[&id("r")], written_now);
 }
 
 /// Catches: what a restart put back kept for ever when its request never comes back (it
@@ -271,7 +276,7 @@ fn a_restored_request_is_queued_with_its_counts_and_a_terminal_one_is_refused() 
 fn what_a_restart_put_back_and_nobody_presented_goes_at_the_idle_horizon() {
     let horizon = Duration::from_millis(4 * BACKOFF);
     let kept = WholeKept {
-        give_ups: 2,
+        prepare_failures: 2,
         ..WholeKept::default()
     };
     let mut e = engine(&[("a", &[])]);
@@ -299,7 +304,7 @@ fn the_placer_hands_the_ledger_calls_to_its_engine() {
     assert_eq!(placer.whole_reservations(), Some(Vec::new()));
     assert!(placer.whole_ledger().is_empty());
     let kept = WholeKept {
-        give_ups: 1,
+        prepare_failures: 1,
         ..WholeKept::default()
     };
     assert!(placer.whole_restore(&id("r"), &kept, false, stamp(0)));

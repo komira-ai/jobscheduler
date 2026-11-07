@@ -28,7 +28,7 @@ pub(crate) mod mark_tag {
     pub const HOST: u16 = 2;
     /// When the mark was made (time).
     pub const MADE: u16 = 3;
-    /// When the hold is given up (time).
+    /// When the host is expected to be drained at the latest (time).
     pub const DEADLINE: u16 = 4;
     /// The end of the host's tail when the mark was made (time).
     pub const TAIL_END: u16 = 5;

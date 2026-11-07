@@ -240,6 +240,9 @@ fn whole_node(raw: &RawPool, admission: &Admission) -> Result<Option<WholeNodeCo
             raw.reserve_backoff.clone(),
             base.reserve_backoff_ms,
         )?,
+        // `max_reserve_attempts` is deprecated and ignored: it is still parsed and checked
+        // (zero is refused) so a pool file that sets it loads, but a reservation is never
+        // given up, so nothing counts attempts.
         max_reserve_attempts: raw
             .max_reserve_attempts
             .unwrap_or(base.max_reserve_attempts),
@@ -678,6 +681,20 @@ mod tests {
             regain_grace_ms: 45_000,
         };
         assert_eq!(all.whole_node(), Some(&expected));
+    }
+
+    /// Asserts that `max_reserve_attempts`, deprecated and ignored, is still accepted: a
+    /// pool file that sets it to 5 loads and the value lands in the config, a file that
+    /// leaves it out gets the default, and zero is still refused by name. It catches a
+    /// build that refuses an older pool file for a key it no longer acts on.
+    #[test]
+    fn deprecated_max_reserve_attempts_still_parses_and_does_nothing() {
+        let set = parse(&whole("max_reserve_attempts = 5")).unwrap();
+        assert_eq!(set.whole_node().unwrap().max_reserve_attempts, 5);
+        let unset = parse(&whole("")).unwrap();
+        assert_eq!(unset.whole_node().unwrap().max_reserve_attempts, 2);
+        let zero = parse(&whole("max_reserve_attempts = 0")).unwrap_err();
+        assert!(zero.contains("max_reserve_attempts"), "{zero}");
     }
 
     /// A pool file written before the whole-node keys loads unchanged in every old field:

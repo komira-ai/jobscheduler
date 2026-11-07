@@ -345,13 +345,14 @@ impl Scheduler {
     /// holds a mark takes it whatever the caps, as its mark is already counted; any other
     /// that a cap stops stays queued and [`Scheduler::whole_wait`] says which. A request that fits
     /// nowhere holds a worker only after it has waited `drain_after` since it was queued,
-    /// and marks it ([`Scheduler::whole_mark`]) with a deadline from
-    /// [`js_whole::cost::reserve_deadline`] (the longest it may run is the one given with
-    /// [`Scheduler::set_max_wall`]; with none, no deadline but `drain_deadline`). At the
-    /// deadline, if the worker is still busy, the hold is given up: counted, dropped, the
-    /// worker barred to the request for `reserve_backoff`, and another held if there is
-    /// one. Nothing running is stopped. The marks, counts and bars are in memory only; a
-    /// recovered scheduler has none until [`Scheduler::restore_whole`] puts them back.
+    /// and marks it ([`Scheduler::whole_mark`]) with a deadline of `drain_deadline`, or the
+    /// longest it may run when none is set (the one given with
+    /// [`Scheduler::set_max_wall`]; with neither, the end of time). The deadline is when
+    /// the worker is expected to be drained at the latest: reaching it does not give the
+    /// hold up, so the mark stays until the request is placed or cancelled, and nothing
+    /// running is stopped. `max_reserve_attempts` and `reserve_backoff` are not read. The
+    /// marks and bars are in memory only; a recovered scheduler has none until
+    /// [`Scheduler::restore_whole`] puts them back.
     ///
     /// A new mark is made only while the caps allow it: whole workers (marks and held
     /// whole-machine leases, never a head's hold) below `max_whole_node` and below the
@@ -361,8 +362,8 @@ impl Scheduler {
     /// is tried). A request a cap stops holds nothing and [`Scheduler::whole_wait`] says
     /// which. The pool is every worker that serves whole-machine leases: all but a
     /// quarantined or draining one counts as capable, a lost one too. When the ceiling falls
-    /// below the whole workers, the newest marks beyond it are dropped (no give-up
-    /// counted), never a held lease. `max_whole_node_per_consumer` is not enforced
+    /// below the whole workers, the newest marks beyond it are dropped, never a held
+    /// lease. `max_whole_node_per_consumer` is not enforced
     /// here: no request, waiter or qos names a consumer, so the setting is ignored. The
     /// lease server or the registry, where the caller's identity exists, enforces it.
     /// Workers of every platform count toward one ceiling and one `max_draining`.
@@ -634,8 +635,8 @@ impl Scheduler {
             );
             let (cost, profile) = self.charging(id, request);
             let fit_minutes = self.admission.fit_minutes(id, profile.as_deref());
-            // A whole-machine request avoids the workers it gave up for the back-off, and
-            // is never granted one barred to it.
+            // A whole-machine request avoids the workers in a back-off for it, and is never
+            // granted one barred to it.
             let (barred, backoff) = self.drain.kept_off(id, now);
             let avoid = whole::Drain::avoiding(&op.avoid, &backoff);
             let backfill = self.backfill_duration(id);

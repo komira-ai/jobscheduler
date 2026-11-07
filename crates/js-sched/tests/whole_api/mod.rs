@@ -76,18 +76,17 @@ pub fn waiter(f: &Farm) -> WaiterId {
     WaiterId(u64::from(f.next_n))
 }
 
-/// A restored state for `operation` queued at zero, with nothing given up or barred.
+/// A restored state for `operation` queued at zero, with nothing barred.
 pub fn restored(operation: OperationId, mark: Option<RestoredMark>) -> RestoredWhole {
     RestoredWhole {
         operation,
         queued_at: t(0),
-        give_ups: 0,
         bars: BTreeMap::new(),
         mark,
     }
 }
 
-/// A restored mark on `worker`, made at zero, given up at ten minutes, tail unknown.
+/// A restored mark on `worker`, made at zero, due at ten minutes, tail unknown.
 pub fn mark_on(worker: &str) -> RestoredMark {
     RestoredMark {
         worker: w(worker),

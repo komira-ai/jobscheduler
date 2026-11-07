@@ -95,8 +95,9 @@ fn at(millis: u64) -> Timestamp {
 const GRACE_MS: u64 = RESERVATION_BOOT_GRACE.as_secs() * 1000;
 
 /// A lease file as an earlier server wrote it: request `r1` first presented at `T0`, at the
-/// front of the wait list, holding no host, with one drain give-up.
-const GAVE_UP_ONCE: &str = "version = 1\nterm = 3\nnext_sequence = 1\nlease_count = 0\n\
+/// front of the wait list, holding no host, with the give-up count of one that an older
+/// build kept.
+const WITH_OLD_GIVE_UP_COUNT: &str = "version = 1\nterm = 3\nnext_sequence = 1\nlease_count = 0\n\
     reservation_count = 1\n\n\
     [[reservation]]\nrequest_id = \"r1\"\nqueue_place = 0\nqueued_since_ms = 1000000\n\
     give_ups = 1\n";
@@ -110,19 +111,19 @@ fn row(rig: &Rig, name: &str) -> ReservationRecord {
 
 /// Asserts that the ledger the engine writes is read back by a second server over the same
 /// file under js-sched, and that the engine then keeps the restored mark. A server
-/// comes up over a file in which `r1` has one give-up and its place; the host is busy, and
-/// `r1`, presented again, marks it with the thirty-second deadline of a request that has
-/// given one up. The tick writes the ledger, and a second server over the same file with
-/// `--boot resume` gets back the mark on the same host with the same instant and tail and
-/// with its deadline at the boot floor (the stored one has passed it, so it is raised, not
-/// restarted), the place and the give-up count. Presented again, the engine holds the same
-/// mark and gives it up at the floor, not a deadline restarted from the presentation: the
-/// count is then two and the host is backed off. It catches a ledger written without the
-/// engine's mark or count, a restart that resets the count or the place, and a restored
-/// mark the engine replaces by a new one.
+/// comes up over a file in which `r1` has an older build's give-up count of one and its
+/// place; the count is ignored and the row is written back with zero. The host is busy,
+/// and `r1`, presented again, marks it with the thirty-second deadline. The tick writes the
+/// ledger, and a second server over the same file with `--boot resume` gets back the mark
+/// on the same host with the same instant and tail and with its deadline at the boot floor
+/// (the stored one has passed it, so it is raised, not restarted), and the place. Presented
+/// again, the engine holds the same mark at the floor and past it: nothing is given up, the
+/// count stays zero and no host is backed off. It catches a ledger written without the
+/// engine's mark, a restart that resets the place, a restored mark the engine replaces by a
+/// new one, a count carried over from an older row, and a mark dropped at its deadline.
 #[tokio::test]
 async fn reservation_ledger_rebinds_after_restart_on_the_sched_path() {
-    let mut rig = Rig::over_file_in("sched_rebinds", GAVE_UP_ONCE, true).await;
+    let mut rig = Rig::over_file_in("sched_rebinds", WITH_OLD_GIVE_UP_COUNT, true).await;
     rig.lease().await;
     rig.ask("r1");
     let before = rig.registry.reservations();
@@ -130,8 +131,11 @@ async fn reservation_ledger_rebinds_after_restart_on_the_sched_path() {
     let mark = &before[0];
     assert_eq!((&mark.request, mark.host.as_str()), (&id("r1"), "a"));
     assert_eq!((mark.at, mark.deadline), (at(T0), at(T0 + 30_000)));
-    assert_eq!(row(&rig, "r1").give_ups, 1);
+    assert_eq!(row(&rig, "r1").give_ups, 0);
     rig.shared.tick().await;
+    let written = fs::read_to_string(rig.file()).unwrap();
+    assert!(written.contains("give_ups = 0"), "{written}");
+    assert!(!written.contains("give_ups = 1"), "{written}");
 
     let mut back = rig.restart(true).await;
     let after = back.registry.reservations();
@@ -141,7 +145,7 @@ async fn reservation_ledger_rebinds_after_restart_on_the_sched_path() {
     assert_eq!((kept.at, kept.tail_end), (mark.at, mark.tail_end));
     assert_eq!(kept.deadline, at(T0 + GRACE_MS));
     assert_eq!(back.registry.queue_position(&id("r1")), Some(0));
-    assert_eq!(row(&back, "r1").give_ups, 1);
+    assert_eq!(row(&back, "r1").give_ups, 0);
     assert_eq!(back.registry.dropped_reservations(), 0);
 
     back.ask("r1");
@@ -149,15 +153,12 @@ async fn reservation_ledger_rebinds_after_restart_on_the_sched_path() {
     back.pass(GRACE_MS / 1000 - 5, &["r1"]);
     assert_eq!(back.registry.reservations(), after);
     back.pass(5, &["r1"]);
-    assert!(
-        back.registry.reservations().is_empty(),
-        "given up at the floor"
-    );
-    let gave_up = row(&back, "r1");
-    assert_eq!(gave_up.give_ups, 2);
-    assert_eq!(gave_up.exclusions.len(), 1);
-    let backed_off = ExclusionEnd::At(at(T0 + GRACE_MS + 300_000));
-    assert_eq!(gave_up.exclusions[0].until, backed_off);
+    assert_eq!(back.registry.reservations(), after);
+    back.pass(60, &["r1"]);
+    assert_eq!(back.registry.reservations(), after);
+    let kept_row = row(&back, "r1");
+    assert_eq!(kept_row.give_ups, 0);
+    assert!(kept_row.exclusions.is_empty());
     assert_eq!(back.registry.queue_position(&id("r1")), Some(0));
 }
 
@@ -191,8 +192,9 @@ async fn hosts_api_and_d55_goldens_unchanged() {
 /// release's reader with no field it does not know, in the file or in the row, and every
 /// field it knows holds the mark; the file that release writes back resumes here with the
 /// same mark and place. A file the previous release wrote itself, with a mark, a place, a
-/// give-up and an exclusion, resumes here under js-sched with each of them. It catches a
-/// field added, renamed or required by the ledger written from the engine.
+/// give-up count of one and an exclusion, resumes here under js-sched with the mark, the
+/// place and the exclusion, the count read and ignored. It catches a field added, renamed
+/// or required by the ledger written from the engine, and an older row that no longer parses.
 #[tokio::test]
 async fn the_previous_release_reads_the_new_ledger_and_the_reverse() {
     let mut rig = Rig::sched("sched_cross_out").await;
@@ -259,7 +261,7 @@ async fn the_previous_release_reads_the_new_ledger_and_the_reverse() {
     assert_eq!(resumed.registry.queue_position(&id("r9")), Some(0));
     assert_eq!(resumed.registry.queue_position(&id("r10")), Some(1));
     let r9 = row(&resumed, "r9");
-    assert_eq!(r9.give_ups, 1);
+    assert_eq!(r9.give_ups, 0);
     assert_eq!(r9.exclusions.len(), 1);
     assert_eq!(r9.exclusions[0].until, ExclusionEnd::At(at(T0 + 400_000)));
     assert_eq!(resumed.registry.dropped_reservations(), 0);

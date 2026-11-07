@@ -437,8 +437,7 @@ fn keep_one() -> WholeNodeConfig {
 both_rules! {
 /// Catches: marks left standing over a ceiling that fell, or the oldest dropped: when the
 /// spare worker is quarantined (two capable, one kept, ceiling one) the newer request's
-/// mark goes and the older keeps its worker. The newer request waits, is not given up (no
-/// count), and holds a worker again when the spare returns.
+/// mark goes and the older keeps its worker. The newer request waits and holds a worker again when the spare returns.
 fn a_falling_ceiling_drops_the_newest_mark() {
     let (mut f, _, [older, newer], spare) = two_held(keep_one());
     let kept = mark(&f, older).unwrap();
@@ -450,11 +449,9 @@ fn a_falling_ceiling_drops_the_newest_mark() {
     assert!(f.grants().is_empty());
     assert_eq!(mark(&f, older), Some(kept));
     waits(&f, newer, blocked(Blocked::KeepForOrdinary));
-    assert_eq!(f.s.whole_give_ups(newer), 0);
     phase(&mut f, &spare, NodePhase::Serving);
     assert!(f.grants().is_empty());
     marked(&f, newer);
-    assert_eq!(f.s.whole_give_ups(newer), 0);
 }
 }
 

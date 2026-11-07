@@ -108,8 +108,9 @@ pub struct HostView {
     /// The request a reserved host is set aside for; `None` unless `mark` is
     /// [`HostMark::Reserved`].
     pub reserved_for: Option<RequestId>,
-    /// When a reservation that drains a busy host is given up if the host is still not
-    /// quiet; `None` unless the host is reserved and was busy when it was set aside.
+    /// When a reservation that drains a busy host expects the host to be drained at the
+    /// latest (reaching it does not give the reservation up); `None` unless the host is
+    /// reserved and was busy when it was set aside.
     pub drain_deadline: Option<Timestamp>,
     /// When the host's cordon lapses, when it is cordoned ([`Registry::cordon`]): it
     /// takes no new lease until then.

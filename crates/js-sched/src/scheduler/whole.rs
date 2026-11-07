@@ -1,5 +1,5 @@
 //! The drain cost of a worker, for the worker a blocked whole-machine request holds, and
-//! the wait before it holds one, the deadline of the hold and its give-up
+//! the wait before it holds one and the deadline of the hold
 //! ([`Scheduler::with_whole_node`]); and the caps that keep whole-machine requests from
 //! taking a pool (`max_whole_node`, `max_draining`, `keep_for_ordinary`, the last
 //! capable worker of an older ordinary request), with the ceiling that falls when
@@ -13,7 +13,7 @@
 //! caller's identity exists, enforces it ([`Scheduler::with_whole_node`]).
 //!
 //! A mark belongs to its request: it stays on the worker it was made on until the request
-//! is placed, is cancelled or gives the hold up at its deadline, and is never traded for a
+//! is placed or is cancelled, whatever its deadline, and is never traded for a
 //! worker that has become cheaper to drain, nor taken by another request's hold or mark
 //! ([`Scheduler::hold_whole`]). It moves only when its worker can no longer hold the
 //! request (gone, cordoned, barred to it). A worker a whole-machine lease holds is never
@@ -21,13 +21,11 @@
 //!
 //! The whole-node state of each operation is kept in memory only: its queue time, its
 //! mark (the worker, when it was made, its deadline and the end of the tail the worker
-//! was chosen on), how many holds it has given up, and the workers barred to it, each
-//! with a [`Bar`] (the back-off of a give-up, or a hard bar set with
-//! [`Scheduler::bar_whole`]). The waits ([`Scheduler::whole_wait`]) are only the last
-//! round's reading. A caller that keeps the rest outside the scheduler (a ledger, a
-//! store) puts it back with [`Scheduler::restore_whole`] after a restart, and reads it
-//! with [`Scheduler::whole_mark`], [`Scheduler::whole_give_ups`] and
-//! [`Scheduler::whole_barred`].
+//! was chosen on), and the workers barred to it, each with a [`Bar`] (a back-off or a
+//! hard bar set with [`Scheduler::bar_whole`]). The waits ([`Scheduler::whole_wait`])
+//! are only the last round's reading. A caller that keeps the rest outside the scheduler
+//! (a ledger, a store) puts it back with [`Scheduler::restore_whole`] after a restart,
+//! and reads it with [`Scheduler::whole_mark`] and [`Scheduler::whole_barred`].
 //!
 //! [`Scheduler::restore_whole`], [`Scheduler::bar_whole`] and [`Scheduler::cancel_whole`] are
 //! methods of the scheduler, not [`crate::Event`]s, as [`Scheduler::unplace`] is: the
@@ -54,7 +52,7 @@ use js_whole::caps::{
     Blocked, Capability, Counts, Limits, Mark, OrdinaryRequest, capable_hosts, ceiling,
     ceiling_excess, last_capable_blocks, may_reserve,
 };
-use js_whole::cost::{DrainCost, HostLoad, drain_cost, reserve_deadline, tail};
+use js_whole::cost::{DrainCost, HostLoad, drain_cost, tail};
 
 use super::{Scheduler, Worker};
 use crate::backfill;
@@ -79,7 +77,9 @@ pub struct WholeMark {
     pub worker: WorkerId,
     /// When the mark was made.
     pub made: FarmTime,
-    /// When the hold is given up if the worker is still busy.
+    /// When the worker is expected to be drained at the latest: `drain_deadline`, else the
+    /// request's wall limit, after the mark was made. Reaching it changes nothing: the
+    /// mark stays on its worker, and nothing running there is stopped.
     pub deadline: FarmTime,
     /// The end of the worker's tail when the mark was made on it: when the request is
     /// expected to start there (`None`: not known). Taken once, when the mark is made,
@@ -91,14 +91,12 @@ pub struct WholeMark {
     pub tail_end: Option<FarmTime>,
 }
 
-/// The drain state of the whole-node requests: marks, give-up counts and bars, kept in
-/// memory only. Empty unless whole-node settings are on.
+/// The drain state of the whole-node requests: marks and bars, kept in memory only. Empty
+/// unless whole-node settings are on.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Drain {
     /// The mark of each request that holds a worker, as of the last placement round.
     pub(super) marks: BTreeMap<OperationId, WholeMark>,
-    /// How many holds each request has given up.
-    give_ups: BTreeMap<OperationId, u32>,
     /// The workers each request is barred from, and how ([`Bar`]).
     bars: BTreeMap<OperationId, BTreeMap<WorkerId, Bar>>,
     /// Why each request without a mark waits, as of the last placement round.
@@ -107,7 +105,7 @@ pub(super) struct Drain {
 
 /// What a request may do in one placement round, from [`Drain::turn`].
 pub(super) struct Turn {
-    /// The mark the request keeps, if its hold is still on.
+    /// The mark the request had at the start of the round, if any.
     pub(super) kept: Option<WholeMark>,
     /// The workers the request may not hold now.
     pub(super) barred: BTreeSet<WorkerId>,
@@ -181,12 +179,6 @@ impl Drain {
         bar::set_bar(self.bars.entry(operation).or_default(), worker, bar, now);
     }
 
-    /// Whether the hold of `operation` is given up when its deadline comes: not once it
-    /// has given up `max_reserve_attempts` holds.
-    pub(super) fn gives_up(&self, operation: OperationId, cfg: &WholeNodeConfig) -> bool {
-        self.give_ups.get(&operation).copied().unwrap_or(0) < cfg.max_reserve_attempts
-    }
-
     /// `avoid` with the workers `barred` added.
     pub(super) fn avoiding<'a>(
         avoid: &'a BTreeSet<WorkerId>,
@@ -200,11 +192,9 @@ impl Drain {
     }
 
     /// Whether `operation`, queued since `queued_at`, may hold a worker this round, and
-    /// what it keeps. `None` before `drain_after` has passed. A hold that has reached its
-    /// deadline and is still not placed (a worker that emptied would have been taken
-    /// before this) is given up here: counted, dropped, and its worker barred with a
-    /// [`Bar::Backoff`] until the back-off ends. A request that has given up
-    /// `max_reserve_attempts` holds is not given up again.
+    /// the mark it had. `None` before `drain_after` has passed. A hold is never given up:
+    /// a mark past its deadline is kept as any other is, so a drain never ends while the
+    /// worker's work runs (whole-node.md section 4).
     pub(super) fn turn(
         &mut self,
         operation: OperationId,
@@ -215,34 +205,19 @@ impl Drain {
         if now.as_millis() < queued_at.as_millis().saturating_add(cfg.drain_after_ms) {
             return None;
         }
-        let mut kept = None;
-        if let Some(mark) = self.marks.remove(&operation) {
-            // Once the count has reached the cap the hold is never given up: its deadline
-            // is the request's own wall time, and a worker may hold a lease with a longer
-            // one, so reaching it must not end the hold (whole-node.md section 4).
-            if now >= mark.deadline && self.gives_up(operation, cfg) {
-                *self.give_ups.entry(operation).or_default() += 1;
-                let until =
-                    FarmTime::from_millis(now.as_millis().saturating_add(cfg.reserve_backoff_ms));
-                self.bar(operation, mark.worker, Bar::Backoff(until), now);
-            } else {
-                kept = Some(mark);
-            }
-        }
         Some(Turn {
-            kept,
+            kept: self.marks.remove(&operation),
             barred: self.barred(operation, now),
         })
     }
 
-    /// The mark `operation` has on `worker` at `now`: the one it kept, when it is on the
-    /// same worker, else a new one on `worker` whose deadline follows [`reserve_deadline`],
-    /// whose tail end is `tail` (the end of the worker's tail now) and whose time of
+    /// The mark on `worker` at `now`: the one kept, when it is on the same worker, else a
+    /// new one on `worker` whose deadline is `drain_deadline`, or the request's wall
+    /// limit `max_wall` when none is set ([`WholeNodeConfig::drain_deadline_ms`]), after
+    /// now, whose tail end is `tail` (the end of the worker's tail now) and whose time of
     /// making is the kept mark's: a mark moved off a worker that can no longer hold its
     /// request keeps its age.
     pub(super) fn mark(
-        &self,
-        operation: OperationId,
         (worker, tail): (&WorkerId, Option<u64>),
         kept: Option<WholeMark>,
         now: FarmTime,
@@ -256,8 +231,7 @@ impl Drain {
         let wall = max_wall.map_or(u64::MAX, |d| {
             u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
         });
-        let attempts = self.give_ups.get(&operation).copied().unwrap_or(0);
-        let wait = reserve_deadline(attempts, cfg, wall);
+        let wait = cfg.drain_deadline_ms(wall);
         WholeMark {
             worker: worker.clone(),
             made,
@@ -266,16 +240,14 @@ impl Drain {
         }
     }
 
-    /// Puts back the give-up count and the bars of `operation`, replacing its own.
-    fn restore(&mut self, operation: OperationId, give_ups: u32, bars: BTreeMap<WorkerId, Bar>) {
-        self.give_ups.insert(operation, give_ups);
+    /// Puts back the bars of `operation`, replacing its own.
+    fn restore(&mut self, operation: OperationId, bars: BTreeMap<WorkerId, Bar>) {
         self.bars.insert(operation, bars);
     }
 
     /// Forgets `operation`.
     pub(super) fn forget(&mut self, operation: OperationId) {
         self.marks.remove(&operation);
-        self.give_ups.remove(&operation);
         self.bars.remove(&operation);
         self.waits.remove(&operation);
     }
@@ -340,21 +312,12 @@ fn capability(worker: &Worker, now: FarmTime) -> Capability {
 impl Scheduler {
     /// The mark queued whole-machine `operation` has on the worker it holds, with
     /// whole-node settings on ([`Scheduler::with_whole_node`]): its time, its deadline and
-    /// the tail end it was made with. The marks, the give-up counts and the bars are in
-    /// memory only: a recovered scheduler starts without them, so a request that gave up
-    /// holds again from a count of zero, unless the caller puts them back
+    /// the tail end it was made with. The marks and the bars are in memory only: a
+    /// recovered scheduler starts without them unless the caller puts them back
     /// ([`Scheduler::restore_whole`]).
     #[must_use]
     pub fn whole_mark(&self, operation: OperationId) -> Option<&WholeMark> {
         self.drain.marks.get(&operation)
-    }
-
-    /// How many holds `operation` has given up at their deadline, with whole-node
-    /// settings on; zero after a recovery that did not restore it
-    /// ([`Scheduler::restore_whole`]).
-    #[must_use]
-    pub fn whole_give_ups(&self, operation: OperationId) -> u32 {
-        self.drain.give_ups.get(&operation).copied().unwrap_or(0)
     }
 
     /// Why queued whole-machine `operation` holds no worker although it has waited out
@@ -503,8 +466,7 @@ impl Scheduler {
 
     /// The start of a placement round: if the ceiling has fallen below the whole workers
     /// (a worker taken out of the pool, a cap lowered), drops the newest marks beyond it,
-    /// never a held lease. A dropped mark counts no give-up and bars no worker. The
-    /// round's state for the caps.
+    /// never a held lease. A dropped mark bars no worker. The round's state for the caps.
     pub(super) fn whole_round(&mut self) -> Round {
         let Some(cfg) = self.whole_node.clone() else {
             return Round {
@@ -560,12 +522,12 @@ impl Scheduler {
 
     /// The worker whole-machine `id`, at queue `position`, holds this round, its mark and
     /// the start time of the hold for backfill, when it holds one. A mark belongs to its
-    /// request until the request is placed, cancelled or gives the hold up at its
-    /// deadline: `kept` stays on its worker, without a check (that mark is already
+    /// request until the request is placed or cancelled, past its deadline too: `kept`
+    /// stays on its worker, without a check (that mark is already
     /// counted), for as long as that worker could still hold the request, however cheap
     /// another worker becomes to drain, and no other request's hold or mark takes the
     /// worker ([`Scheduler::off_marks`]). Only a worker that can no longer hold it (gone,
-    /// cordoned, barred to it) moves the mark, keeping its age and counting no give-up.
+    /// cordoned, barred to it) moves the mark, keeping its age.
     /// A new mark is made only if the caps allow it ([`may_reserve`]) and the worker is
     /// not the last capable one of an older ordinary request, in which case the next
     /// worker by drain cost is tried. `Err` is the reason it holds none. `Ok(None)` is no
@@ -631,9 +593,7 @@ impl Scheduler {
                 }
             }
             let tail = super::gate::tail_of(&drain, &name);
-            let mark = self
-                .drain
-                .mark(id, (&name, tail), turn.kept, self.now, cfg, max_wall);
+            let mark = Drain::mark((&name, tail), turn.kept, self.now, cfg, max_wall);
             let mark = self.end_bounded(mark);
             let start = mark
                 .tail_end
@@ -667,7 +627,7 @@ impl Scheduler {
 
     /// The workers the marks of requests other than `id` are on, of the marks this round
     /// has not reached yet: a request's own mark leaves them when the round reaches it
-    /// ([`Drain::turn`]), and is kept, moved or dropped there.
+    /// ([`Drain::turn`]), and is kept or moved there.
     fn marked_workers(&self, id: OperationId) -> impl Iterator<Item = &WorkerId> + '_ {
         let others = self.drain.marks.iter().filter(move |(op, _)| **op != id);
         others.map(|(_, m)| &m.worker)
@@ -760,36 +720,57 @@ impl Scheduler {
 mod tests {
     use super::*;
 
-    /// Catches: `forget` leaving one of the three maps behind: each holds an entry for the
-    /// operation (a mark, a give-up count and a back-off), and none does after it.
+    /// Catches: a turn past the mark's deadline dropping the mark or barring its worker:
+    /// the mark comes back whole, and the request is barred from nothing.
     #[test]
-    fn forget_drops_the_mark_the_count_and_the_backoff() {
+    fn a_turn_past_the_deadline_keeps_the_mark_and_bars_nothing() {
         let cfg = WholeNodeConfig::dedicated(4);
         let op = OperationId(1);
-        let other = OperationId(2);
-        let worker = WorkerId::new("a");
-        let mark = |deadline| WholeMark {
-            worker: worker.clone(),
+        let mark = WholeMark {
+            worker: WorkerId::new("a"),
             made: FarmTime::from_millis(0),
-            deadline: FarmTime::from_millis(deadline),
+            deadline: FarmTime::from_millis(10),
+            tail_end: Some(FarmTime::from_millis(50)),
+        };
+        let mut drain = Drain::default();
+        drain.marks.insert(op, mark.clone());
+        let turn = drain
+            .turn(
+                op,
+                FarmTime::from_millis(0),
+                FarmTime::from_millis(1_000),
+                &cfg,
+            )
+            .unwrap();
+        assert_eq!(turn.kept, Some(mark));
+        assert!(turn.barred.is_empty());
+        assert!(drain.bars.is_empty());
+    }
+
+    /// Catches: `forget` leaving one of the maps behind: each holds an entry for the
+    /// operation (a mark, a back-off and a wait), and none does after it, while another
+    /// operation's mark stays.
+    #[test]
+    fn forget_drops_the_mark_the_backoff_and_the_wait() {
+        let op = OperationId(1);
+        let other = OperationId(2);
+        let mark = WholeMark {
+            worker: WorkerId::new("a"),
+            made: FarmTime::from_millis(0),
+            deadline: FarmTime::from_millis(10),
             tail_end: None,
         };
         let mut drain = Drain::default();
-        drain.marks.insert(op, mark(10));
-        drain.marks.insert(other, mark(10));
-        drain.turn(
-            op,
-            FarmTime::from_millis(0),
-            FarmTime::from_millis(10),
-            &cfg,
-        );
-        drain.marks.insert(op, mark(10));
-        assert_eq!(drain.give_ups.get(&op), Some(&1));
-        assert!(drain.bars.contains_key(&op));
+        drain.marks.insert(op, mark.clone());
+        drain.marks.insert(other, mark);
+        let until = FarmTime::from_millis(100);
+        let now = FarmTime::from_millis(0);
+        drain.bar(op, WorkerId::new("b"), Bar::Backoff(until), now);
+        drain.waits.insert(op, WholeWait::LastCapable);
         drain.forget(op);
         assert!(!drain.marks.contains_key(&op));
-        assert!(!drain.give_ups.contains_key(&op));
         assert!(!drain.bars.contains_key(&op));
+        assert!(!drain.waits.contains_key(&op));
         assert!(drain.marks.contains_key(&other));
     }
 
