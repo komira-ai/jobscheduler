@@ -53,8 +53,6 @@ struct RawPool {
     drain_after: Option<String>,
     drain_deadline: Option<String>,
     reserve_backoff: Option<String>,
-    // Deprecated and ignored: still parsed and checked (zero is refused) so a pool file that
-    // sets it loads, but a reservation is never given up, so nothing counts attempts.
     max_reserve_attempts: Option<u32>,
     prepare_timeout: Option<String>,
     max_replace: Option<u32>,
@@ -242,7 +240,9 @@ fn whole_node(raw: &RawPool, admission: &Admission) -> Result<Option<WholeNodeCo
             raw.reserve_backoff.clone(),
             base.reserve_backoff_ms,
         )?,
-        // Deprecated and ignored by the registry; carried so the config round-trips.
+        // `max_reserve_attempts` is deprecated and ignored: it is still parsed and checked
+        // (zero is refused) so a pool file that sets it loads, but a reservation is never
+        // given up, so nothing counts attempts.
         max_reserve_attempts: raw
             .max_reserve_attempts
             .unwrap_or(base.max_reserve_attempts),
