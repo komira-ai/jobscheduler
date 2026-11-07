@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use js_lease::ManualClock;
-use js_state::Store as _;
 #[cfg(feature = "postgres")]
 use js_state::postgres::{PostgresConfig, PostgresStore, TestDatabase};
 use js_state::sqlite::{Options, SqliteStore};
