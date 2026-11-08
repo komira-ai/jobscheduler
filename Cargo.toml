@@ -193,10 +193,10 @@ opt-level = 2
 [profile.test.package.js-types]
 opt-level = 2
 
-# The coverage job builds with this profile (`cargo llvm-cov --profile coverage`): it
-# is `dev`, so no package is optimised and the instrumentation sees every line. An
-# optimised build inlines small functions and closures away, and their lines then read
-# as missed. cargo-llvm-cov takes no `--config`, and cargo has no environment variable
-# for a per-package override, so the job cannot undo the `test` overrides above.
+# The coverage job builds with this profile (`cargo llvm-cov nextest --cargo-profile
+# coverage`): it is `dev`, so no package is optimised and the instrumentation sees every
+# line. An optimised build inlines small functions and closures away, and their lines
+# then read as missed. cargo-llvm-cov takes no `--config`, and cargo has no environment
+# variable for a per-package override, so the job cannot undo the `test` overrides above.
 [profile.coverage]
 inherits = "dev"
