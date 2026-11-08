@@ -306,7 +306,7 @@ const EXPECTED: Record<string, (string | null)[]> = {
       "gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS",
       'sha256sum -c --ignore-missing SHA256SUMS',
       'gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R komira-ai/jobscheduler \\',
-      '--signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml \\',
+      '--signer-workflow komira-ai/jobscheduler/.github/workflows/artifacts.yml \\',
       '--source-ref refs/heads/main \\',
       '--source-digest "$(git rev-parse vX.Y.Z^{commit})"',
       '',

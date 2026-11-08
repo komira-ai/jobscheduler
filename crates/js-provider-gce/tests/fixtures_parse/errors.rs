@@ -32,15 +32,14 @@ fn refused_error(reason: ErrorReason) -> ApiError {
 /// acquire acts on:
 ///
 /// - 404 `notFound` and 400 `invalid` are refused as a shape error;
-/// - 403 `forbidden`, 401 `authError` and, because every other 403 is read as a denial,
-///   403 `quotaExceeded` are refused as denied (whether that 403 should be a quota refusal
-///   is komira-ai/jobscheduler#768; this row pins today's mapping until it is decided);
+/// - 403 `quotaExceeded` is refused as a quota, so the engine passes over the machine type;
+/// - 403 `forbidden` and 401 `authError` are refused as denied;
 /// - 403 and 429 `rateLimitExceeded` are throttles, and 409 `alreadyExists`, 400
 ///   `badRequest`, 503 `backendError` and 500 `internalError` are plain refusals; all five
 ///   leave the launch unknown, since the insert may have landed.
 ///
-/// It catches a throttle read as a refusal, a server error read as a denial, and an
-/// answer whose first reason is not the one read.
+/// It catches a throttle read as a refusal, a server error read as a denial, a quota
+/// answer read as a denial, and an answer whose first reason is not the one read.
 #[test]
 fn every_compute_error_answer_is_the_api_error_and_launch_answer_its_reason_makes() {
     let cases: [(&str, u16, &str, ApiError, Acquired); 11] = [
@@ -76,8 +75,8 @@ fn every_compute_error_answer_is_the_api_error_and_launch_answer_its_reason_make
             fixture!("error_quota_exceeded_403.json"),
             403,
             "error_quota_exceeded_403.json",
-            error_of(denied, "quotaExceeded"),
-            refused(RefusalCode::Denied, "quotaExceeded"),
+            error_of(refused_error, "quotaExceeded"),
+            refused(RefusalCode::Quota, "quotaExceeded"),
         ),
         (
             fixture!("error_forbidden_403.json"),

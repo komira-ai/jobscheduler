@@ -1,7 +1,7 @@
 //! `release stage --bin <name> --target <triple> --version X.Y.Z --out <dir> [--repo-dir <dir>]`:
 //! lays down the directory a release archive is made of, `<out>/<bin>-<version>-<target>/`, with
 //! exactly the files [`members`] lists, copied from the checkout. The workflow then archives it
-//! (`.github/workflows/release.yml`, docs/release.md).
+//! (`.github/workflows/artifacts.yml`, which `release.yml` calls; docs/release.md).
 //!
 //! Every archive holds its binary and the repository's `LICENSE`. The Linux archive, of either
 //! architecture (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`), of a binary that has

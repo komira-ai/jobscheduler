@@ -61,14 +61,15 @@ files first, then order hostkeeper to install `js-agent`.
 ## Trusting the package
 
 hostkeeper installs only what a trusted workflow attested. The package is attested by
-`.github/workflows/release.yml` of `komira-ai/jobscheduler` on `refs/heads/main`. The entry a
-channel needs for the service `js-agent`:
+`.github/workflows/artifacts.yml` of `komira-ai/jobscheduler` on `refs/heads/main` (which
+`release.yml` calls), and the bundle of that attestation is the release asset
+`<package>.sigstore.json` beside it. The entry a channel needs for the service `js-agent`:
 
 | key | value |
 |---|---|
 | service | `js-agent` |
 | repository | `komira-ai/jobscheduler` |
-| workflow | `.github/workflows/release.yml` |
+| workflow | `.github/workflows/artifacts.yml` |
 | refs | `refs/heads/main` |
 
 ## Moving a host from the setup script's unit

@@ -62,7 +62,7 @@ An error is the actual end minus the estimated end. A lease that outlives its es
 
 The file documents two limits. First, the end of a lease is the time `stop` is called, on the registry's clock, not the time the work exited. Second, a lease put back after a restart has no bound and no start, so its stop counts nothing. With the feed on, a restored lease keeps both (section 1), so its stop does count.
 
-**Where they are kept.** In memory only. They start at zero at every server start. Only `Registry::tail_counters` reads them, and today only tests call it: no route, log line or metric serves them. Design section 10.1 lists them as "Memory only", to become stored rows in step 3. Until then they cannot hold a window of days.
+**Where they are kept.** In the usage store under `usage/tail/` (the SQLite file of `--usage-db`) when the server has one, so they survive a restart (`docs/usage-store.md`). With `--usage-off`, or without agent registration, they are in memory only and start at zero at every server start. Only `Registry::tail_counters` reads them, and today only tests call it: no route, log line or metric serves them. Rows in Postgres are step 3.
 
 ### The ended-allocation row
 
