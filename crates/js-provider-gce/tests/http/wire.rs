@@ -108,6 +108,27 @@ fn a_401_and_a_403_are_denials() {
     assert_eq!(error_of(status(403, "{}")), denied("forbidden"));
 }
 
+/// Asserts that an answer whose reason is `quotaExceeded` is a refusal with that reason,
+/// at HTTP 403 (the status Compute Engine gives it) and at any other status, and that the
+/// match is on the exact reason: a 403 whose reason differs only in case is still a denial.
+/// It catches a project's quota answer read as a credential the cloud refuses, which makes
+/// the scheduler treat the provider as denied instead of passing over the machine type.
+#[test]
+fn a_quota_exceeded_answer_is_a_refusal_not_a_denial() {
+    assert_eq!(
+        error_of(status(403, &error_body(403, "quotaExceeded"))),
+        refused("quotaExceeded")
+    );
+    assert_eq!(
+        error_of(status(400, &error_body(400, "quotaExceeded"))),
+        refused("quotaExceeded")
+    );
+    assert_eq!(
+        error_of(status(403, &error_body(403, "quotaexceeded"))),
+        denied("quotaexceeded")
+    );
+}
+
 /// Asserts that HTTP 429 is a throttle whatever the answer says, with `RATE_LIMIT_EXCEEDED`
 /// when the answer names no throttle reason (none, another reason, or a body that is not
 /// JSON). It catches a 429 that is read as an ordinary refusal.
