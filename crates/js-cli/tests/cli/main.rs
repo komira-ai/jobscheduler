@@ -12,5 +12,6 @@ mod job_conformance;
 mod job_loops;
 mod jobs;
 mod join_token;
+mod queue_status;
 mod support;
 mod tls;

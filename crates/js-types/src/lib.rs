@@ -9,7 +9,8 @@
 //! what it needs of a host, on the platform of [`Os`], in the CPU vocabulary of [`Arch`] and
 //! [`IsaLevel`] and the accelerator vocabulary of [`Accelerator`] and [`AcceleratorNeed`],
 //! resolved through the alias table ([`ALIASES`], [`FAMILIES`]) that `js-caps` re-exports;
-//! a container's network is a [`JobNetwork`] level and the [`PortMap`]s it declares.
+//! a container's network is a [`JobNetwork`] level and the [`PortMap`]s it declares. Why a
+//! queued job waits is a [`QueueCode`], and what one pass records of it a [`QueueNote`].
 //!
 //! Time is an input: a [`Timestamp`] read through a [`Clock`], elapsed time through a
 //! [`Monotonic`] clock, and [`ManualClock`] for code that moves time itself. A start is a
@@ -36,6 +37,7 @@ mod job;
 mod labels;
 mod memory;
 mod network;
+mod queue;
 mod request;
 mod resources;
 pub mod sched;
@@ -62,6 +64,7 @@ pub use job::{
 pub use labels::{LabelError, Labels, RESERVED_PREFIX, ReservedKey};
 pub use memory::{MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, MemoryPercentError};
 pub use network::{JobNetwork, PortMap, UnknownJobNetwork};
+pub use queue::{JobEventKind, QueueCode, QueueNote};
 pub use request::{Request, RequestError};
 pub use resources::{Dim, Dims, Resources, TypeError};
 pub use shape::{Capabilities, Shape};

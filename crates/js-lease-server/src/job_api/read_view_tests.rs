@@ -121,6 +121,10 @@ async fn get_job_shows_every_field_of_the_record() {
         host_silent_since_ms: None,
         cancel_requested: false,
         client: None,
+        queue_status: None,
+        attempts: 0,
+        events: Vec::new(),
+        dropped_events: 0,
     };
     assert_eq!(rig.get_job("full-1").await.expect("read"), shown);
 

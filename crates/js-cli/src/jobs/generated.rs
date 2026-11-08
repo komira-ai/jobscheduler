@@ -54,7 +54,7 @@ pub(crate) const SURFACE: &[Command] = &[
     Command {
         path: &["job", "get"],
         rpc: "GetJob",
-        doc: "Reads a job: its state, its host once placed, its times and its host's silence. Changes nothing.",
+        doc: "Reads a job: its state, its host once placed, its times, its host's silence, and why it waits with its placement attempts and newest events. Changes nothing.",
         idempotency: Idempotency::Unknown,
         request: "jobscheduler.v1.GetJobRequest",
         response: "jobscheduler.v1.GetJobResponse",

@@ -29,7 +29,7 @@ fn call(rpc: &str) -> String {
 }
 
 /// Runs `js --server PLAIN --token-file <token> <words>` through `dialer`.
-fn js(scratch: &Scratch, dialer: Dialer, words: &[&str]) -> Outcome {
+pub(crate) fn js(scratch: &Scratch, dialer: Dialer, words: &[&str]) -> Outcome {
     let token = scratch.write("token", TOKEN, 0o600);
     let mut args: Vec<OsString> = vec![
         "js".into(),

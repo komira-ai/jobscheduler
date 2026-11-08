@@ -398,6 +398,7 @@ mod tests {
             client: None,
             failed_prepares: 0,
             prepare_bars: std::collections::BTreeMap::new(),
+            queue: crate::QueueTrail::default(),
             carried: crate::codec::Carried::default(),
         }
     }

@@ -82,6 +82,9 @@ pub struct Refused {
     pub code: RefusalCode,
     /// For a `quota` answer: what is passed over, and until when.
     pub passed_over: Option<(PassedOver, Instant)>,
+    /// The request the acquire was made for, when this memory was told
+    /// ([`AcquireMemory::launched`]).
+    pub request: Option<RequestId>,
 }
 
 /// One request's attempt in progress.
@@ -232,8 +235,8 @@ impl AcquireMemory {
         let mut passed_over = None;
         match code {
             RefusalCode::Capacity => {
-                if let Some(request) = request {
-                    let attempt = self.attempts.entry(request).or_default();
+                if let Some(request) = &request {
+                    let attempt = self.attempts.entry(request.clone()).or_default();
                     attempt.declined.insert(OfferKey::of(provider, offer), now);
                     attempt.following = Some((provider.clone(), offer.id.clone()));
                 }
@@ -253,6 +256,7 @@ impl AcquireMemory {
             zone: offer.zone.clone(),
             code,
             passed_over,
+            request,
         })
     }
 

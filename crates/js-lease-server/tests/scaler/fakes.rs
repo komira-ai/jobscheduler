@@ -93,6 +93,8 @@ pub struct World {
     pub notices: Vec<EventStream>,
     /// How many times the provider was asked for its notices.
     pub notices_asked: usize,
+    /// What the shell handed the placement pass, every tick's in turn.
+    pub pass_two: Vec<(js_jobs::JobId, js_sched::queue_status::Outcome)>,
 }
 
 /// A provider call held at a gate: the call tells `entered` it is there and waits (for at
@@ -347,6 +349,10 @@ impl Effects for Handle {
         }
     }
 
+    fn pass_two(&self, outcomes: Vec<(js_jobs::JobId, js_sched::queue_status::Outcome)>) {
+        self.world().pass_two.extend(outcomes);
+    }
+
     fn events(&self) -> Option<EventStream> {
         let mut world = self.world();
         world.notices_asked += 1;
@@ -444,6 +450,7 @@ pub fn new_world() -> Arc<Mutex<World>> {
         catalog_fetches: 0,
         notices: Vec::new(),
         notices_asked: 0,
+        pass_two: Vec::new(),
     }))
 }
 

@@ -284,8 +284,12 @@ retention end.
 | a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
 
 **`GetJob`** answers the job: its spec as submitted (a file's contents left empty), its state
-and start failure, its host once placed, whether a cancel was asked for, and its times
-(queued, placed, started, ended). The host silence is not set yet.
+and start failure, its host once placed, whether a cancel was asked for, its times
+(queued, placed, started, ended), and why it waits: its queue status (`queueStatus`, a code, a
+detail and `sinceMs`), its placement attempts (`attempts`), its newest events (`events`, at most
+32) and how many older ones were dropped (`droppedEvents`), as
+[design/queue-status.md](design/queue-status.md) describes. `ListJobs` shows each job the same
+way. The host silence is not set yet.
 
 **The `expired` window.** An ended job keeps its record and result until its retention end
 (the end plus the server's retention window, seven days by default). From that instant

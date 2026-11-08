@@ -618,7 +618,9 @@ commit. A large share job has no mark, by design: work that is not behind it in 
 later) can keep a host from ever having room for it, and it is placed the first time there is room. A whole-host job is placed
 by the same pass, before the walk, under the pool's whole-node settings: it is marked on the host that drains cheapest (the mark
 is a row of the store's mark table), committed placed with the whole host booked when that host is quiet, and requeued when its
-prepare fails (`crates/js-sched-placer/src/whole_jobs.rs`, `crates/js-lease-server/src/job_whole.rs`).
+prepare fails (`crates/js-sched-placer/src/whole_jobs.rs`, `crates/js-lease-server/src/job_whole.rs`). The same pass records
+why each job it did not place waits, with what pass 2 told it, and each placement attempt, on the job's row; a read of the job
+shows them as its queue status, attempts and events ([design/queue-status.md](design/queue-status.md)).
 
 ## 7. Request history and sizing
 

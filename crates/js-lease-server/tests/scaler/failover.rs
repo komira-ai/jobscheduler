@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use js_elastic::{Acquired, Offer, Reason, Refusal, RefusalCode};
 use js_scaler::{Records, Settings};
+use js_sched::queue_status::Outcome;
 
 use crate::fakes::{START, job, live, logged, offer, rig};
 
@@ -150,5 +151,54 @@ async fn a_quota_refusal_is_logged_with_what_it_passes_over_and_until_when() {
         lines[0].contains(&format!("until_ms={until}")),
         "{}",
         lines[0]
+    );
+}
+
+/// Asserts that the shell hands the placement pass what pass 2 reached for a queued job, in
+/// the order it came: the machine launched for the job's request, that acquire's refusal for
+/// capacity (with the request it was made for), then the machine launched on the next offer.
+/// It catches a refusal or a launch that never reaches the job's queue status, one handed at
+/// every tick, and one charged to the wrong job.
+#[tokio::test]
+async fn the_shell_hands_a_jobs_refusal_and_launch_to_the_placement_pass() {
+    let rig = rig(Records::default(), settings());
+    let second = Offer {
+        id: "second".to_owned(),
+        ..offer()
+    };
+    rig.world().offers = vec![offer(), second];
+    rig.world().queued = vec![job("j1")];
+    rig.world().acquire_answers = [refused(RefusalCode::Capacity)].into();
+    for _ in 0..4 {
+        rig.scaler.tick().await;
+    }
+    let handed = std::mem::take(&mut rig.world().pass_two);
+    let seen: Vec<(String, String)> = handed
+        .iter()
+        .map(|(job, outcome)| {
+            let what = match outcome {
+                Outcome::Refused(refused) => {
+                    format!(
+                        "refused {} {:?} {:?}",
+                        refused.offer, refused.code, refused.request
+                    )
+                }
+                Outcome::Launched { .. } => "launched".to_owned(),
+                other => format!("{other:?}"),
+            };
+            (job.to_string(), what)
+        })
+        .collect();
+    let request = js_types::RequestId::new("j1").ok();
+    assert_eq!(
+        seen,
+        vec![
+            ("j1".to_owned(), "launched".to_owned()),
+            (
+                "j1".to_owned(),
+                format!("refused {} Capacity {request:?}", offer().id)
+            ),
+            ("j1".to_owned(), "launched".to_owned()),
+        ]
     );
 }
