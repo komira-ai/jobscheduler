@@ -248,26 +248,27 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
 fn queue_status(job: &JobRecord) -> Option<v1::QueueStatus> {
     let trail = &job.queue;
     let holds = (job.state == JobState::Queued) | (trail.code() == QueueCode::Placed);
-    let shown = (trail.code() != QueueCode::Unspecified) & holds;
-    shown.then(|| v1::QueueStatus {
-        code: queue_code(trail.code()).into(),
+    let code = queue_code(trail.code()).filter(|_| holds)?;
+    Some(v1::QueueStatus {
+        code: code.into(),
         detail: trail.detail().to_owned(),
         since_ms: trail.since().map_or(0, millis),
     })
 }
 
-/// The job service's value of `code`.
-fn queue_code(code: QueueCode) -> v1::QueueStatusCode {
+/// The job service's value of `code`; none for unspecified, which shows no status.
+fn queue_code(code: QueueCode) -> Option<v1::QueueStatusCode> {
     use v1::QueueStatusCode as V;
-    match code {
-        QueueCode::Unspecified => V::Unspecified,
+    let value = match code {
+        QueueCode::Unspecified => return None,
         QueueCode::WaitingForCapacity => V::WaitingForCapacity,
         QueueCode::WaitingForWholeHost => V::WaitingForWholeHost,
         QueueCode::QuotaBackoff => V::QuotaBackoff,
         QueueCode::FailingOver => V::FailingOver,
         QueueCode::Placed => V::Placed,
         QueueCode::WaitingForMachine => V::WaitingForMachine,
-    }
+    };
+    Some(value)
 }
 
 /// One event of a job's history as the job service shows it.
