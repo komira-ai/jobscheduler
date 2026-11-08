@@ -67,17 +67,19 @@
 //! lock (registry, then placer), and the placer never calls the registry, so the order is
 //! fixed. A pass over the queued jobs ([`super::engine::jobs`]) takes its own lock, then the
 //! engine's, and reads the registry before either. The record of removed hosts has a lock of
-//! its own, a leaf.
+//! its own, a leaf, and so has the record of what pass 2 told of the queued jobs.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use js_jobs::JobId;
 use js_registry::{
     MarkedTails, Placer, PrepareFailure, Presented, ProbeHost, RequestKey, RequestRecord,
     Reservation, SeatedLease, Waiter, WaitingRequest, WholeKept, WholeRound,
 };
+use js_sched::queue_status::Outcome;
 use js_types::Candidate;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
@@ -110,6 +112,9 @@ pub struct SchedPlacer {
     gone: Mutex<BTreeMap<HostId, u64>>,
     /// How many removals were recorded.
     removals: AtomicU64,
+    /// What pass 2 told of each job since the last pass over the queued jobs, in the order it
+    /// came ([`SchedPlacer::note_outcomes`]); the pass takes them all. Its lock is a leaf.
+    outcomes: Mutex<BTreeMap<JobId, Vec<Outcome>>>,
     /// How many engines this placer built, counted for the tests that hold it to one.
     #[cfg(any(test, feature = "test-support"))]
     built: AtomicU64,
@@ -142,6 +147,7 @@ impl SchedPlacer {
             resynced: AtomicU64::new(0),
             gone: Mutex::default(),
             removals: AtomicU64::new(0),
+            outcomes: Mutex::default(),
             #[cfg(any(test, feature = "test-support"))]
             built: AtomicU64::new(1),
         }
@@ -176,6 +182,22 @@ impl SchedPlacer {
     /// A host that says hello again is taken off at its hello.
     pub fn gone(&self) -> BTreeMap<HostId, u64> {
         self.removed().clone()
+    }
+
+    /// Notes `outcomes`, what pass 2 reached for jobs (a refused acquire, a launch), for the
+    /// next pass over the queued jobs to record on each job's queue status before its own
+    /// outcome (`docs/design/queue-status.md`, section 2): pass 2 writes nothing itself, so the
+    /// pass is the one writer of a job's status.
+    pub fn note_outcomes(&self, outcomes: impl IntoIterator<Item = (JobId, Outcome)>) {
+        let mut noted = self.outcomes.lock().unwrap_or_else(PoisonError::into_inner);
+        for (job, outcome) in outcomes {
+            noted.entry(job).or_default().push(outcome);
+        }
+    }
+
+    /// Takes what pass 2 told since the last pass ([`SchedPlacer::note_outcomes`]).
+    pub(super) fn take_outcomes(&self) -> BTreeMap<JobId, Vec<Outcome>> {
+        std::mem::take(&mut *self.outcomes.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Takes off each of `settled`, removals the job pass has settled (every job allocation on

@@ -92,6 +92,7 @@ fn capacity_of(id: &str, zone: &str) -> Refused {
         zone: Some(zone.to_owned()),
         code: RefusalCode::Capacity,
         passed_over: None,
+        request: js_types::RequestId::new("r1").ok(),
     }
 }
 
@@ -189,6 +190,7 @@ fn quota_passes_over_that_type_for_quota_backoff() {
         zone: Some("z1".to_owned()),
         code: RefusalCode::Quota,
         passed_over: Some((passed, until)),
+        request: js_types::RequestId::new("r1").ok(),
     };
     assert_eq!(rig.state.refusals, [logged]);
     calm(&rig);

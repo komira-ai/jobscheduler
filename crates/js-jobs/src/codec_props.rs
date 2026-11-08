@@ -269,6 +269,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
             proptest::option::of(ident()),
         ),
         (any::<u32>(), btree_map(host_id(), exclusion(), 0..4)),
+        queue_trail(),
     )
         .prop_map(
             |(
@@ -276,6 +277,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 (placed_at, started_at, ended_at, host, cancel_requested, cancel_requested_at),
                 (result, retention_ends, deadline_floor, client),
                 (failed_prepares, prepare_bars),
+                queue,
             )| JobRecord {
                 id: JobId::parse(&id).expect("an id"),
                 spec,
@@ -294,9 +296,66 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 client: client.map(|name| ClientName::parse(&name).expect("a client name")),
                 failed_prepares,
                 prepare_bars,
+                queue,
                 carried: Carried::default(),
             },
         )
+}
+
+fn queue_code() -> impl Strategy<Value = js_types::QueueCode> {
+    use js_types::QueueCode as C;
+    prop_oneof![
+        Just(C::Unspecified),
+        Just(C::WaitingForCapacity),
+        Just(C::WaitingForWholeHost),
+        Just(C::QuotaBackoff),
+        Just(C::FailingOver),
+        Just(C::Placed),
+        Just(C::WaitingForMachine),
+    ]
+}
+
+fn event_kind() -> impl Strategy<Value = js_types::JobEventKind> {
+    use js_types::JobEventKind as K;
+    prop_oneof![
+        Just(K::Unspecified),
+        Just(K::WaitingForCapacity),
+        Just(K::WaitingForWholeHost),
+        Just(K::QuotaBackoff),
+        Just(K::FailingOver),
+        Just(K::Placed),
+        Just(K::Requeued),
+        Just(K::WaitingForMachine),
+    ]
+}
+
+fn job_event() -> impl Strategy<Value = crate::JobEvent> {
+    (
+        store_time(),
+        event_kind(),
+        ".{0,12}",
+        proptest::option::of(host_id()),
+    )
+        .prop_map(|(at, kind, detail, host)| crate::JobEvent {
+            at,
+            kind,
+            detail,
+            host,
+        })
+}
+
+/// A queue trail as a row could hold it: any code, detail and time, with up to a few more
+/// events than the bound.
+fn queue_trail() -> impl Strategy<Value = crate::QueueTrail> {
+    (
+        (queue_code(), ".{0,12}", proptest::option::of(store_time())),
+        any::<u32>(),
+        vec(job_event(), 0..crate::MAX_JOB_EVENTS + 3),
+        any::<u32>(),
+    )
+        .prop_map(|(status, attempts, events, dropped)| {
+            crate::QueueTrail::of_row(status, attempts, events, dropped)
+        })
 }
 
 fn booked() -> impl Strategy<Value = Booked> {

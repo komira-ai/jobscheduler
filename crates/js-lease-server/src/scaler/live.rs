@@ -10,9 +10,11 @@ use js_elastic::{
     AcquireId, Acquired, CapacityProvider, Demand, EventStream, Held, HostName, HostRef, Offer,
     ProviderError, Released, SchedulerId, Secret,
 };
-use js_jobs::JobStoreError;
+use js_jobs::{JobId, JobStoreError};
 use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
+use js_sched::queue_status::Outcome;
+use js_sched_placer::place::SchedPlacer;
 use js_types::{HostId, ProviderId};
 use tracing::warn;
 
@@ -121,6 +123,12 @@ impl Effects for Live {
 
     fn catalog_fetches(&self) -> u64 {
         self.launcher.catalog_fetches()
+    }
+
+    /// Notes `outcomes` with the server's placer, for its next pass over the queued jobs.
+    fn pass_two(&self, outcomes: Vec<(JobId, Outcome)>) {
+        let noted = |placer: &Arc<SchedPlacer>| placer.note_outcomes(outcomes.iter().cloned());
+        self.agents.placer.iter().for_each(noted);
     }
 
     /// Writes the records, then hands the offer cool-downs they hold to the catalog's

@@ -37,7 +37,7 @@ pub(crate) mod alloc_whole_tag {
 }
 
 /// A `u32`.
-fn u32_of(tag: u16, value: Vec<u8>) -> Result<u32, DecodeError> {
+pub(super) fn u32_of(tag: u16, value: Vec<u8>) -> Result<u32, DecodeError> {
     value
         .as_slice()
         .try_into()
