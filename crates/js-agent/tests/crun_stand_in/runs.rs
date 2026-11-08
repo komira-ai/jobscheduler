@@ -220,7 +220,9 @@ fn a_start_the_runtime_cannot_make_is_refused_and_leaves_nothing() {
         mutate(&mut spec);
         runtime.create_and_start(&spec).expect_err(run).to_string()
     };
-    assert!(refused("h1", &|s| s.isolation = Isolation::Host).contains("contained jobs only"));
+    assert!(
+        refused("h1", &|s| s.isolation = Isolation::Host).contains("without --allow-host-jobs")
+    );
     assert!(refused("g1", &|s| s.gpu_indices = vec![0]).contains("cannot use a GPU"));
     assert!(refused("n1", &|s| s.body = Body::Native(native())).contains("container jobs only"));
     assert!(refused("u1", &named("registry.example/job:1")).contains("not pinned"));

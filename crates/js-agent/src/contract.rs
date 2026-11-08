@@ -49,11 +49,16 @@
 //!   fence (the job id with the allocation id), keeps the fences it retired in its state root,
 //!   and stops every job after a silence of the server
 //!   ([`js_agent_wire::START_FENCE_CAPABILITY`]). An operator cannot set it.
+//! - `host-jobs` is `true` for an agent started with `--allow-host-jobs`, which only
+//!   `--runtime crun` takes: its runtime launches a job with `isolation = host`
+//!   ([`js_agent_wire::HOST_JOBS_CAPABILITY`]). The server taints a host when it places such
+//!   a job, so no other agent reports it. An operator cannot set it.
 
 use std::path::Path;
 
 use js_agent_wire::{
-    Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
+    HOST_JOBS_CAPABILITY, Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling, PER_JOB_CAPABILITY,
+    START_FENCE_CAPABILITY,
 };
 use js_caps::{
     EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB,
@@ -138,6 +143,16 @@ fn report_per_job(hello: &mut Hello) {
     hello
         .capabilities
         .insert(START_FENCE_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+}
+
+/// Says that the agent launches host jobs, when it was started with `--allow-host-jobs`
+/// (`allowed`), which the start check takes only with `--runtime crun`.
+pub(crate) fn report_host_jobs(hello: &mut Hello, allowed: bool) {
+    if allowed {
+        hello
+            .capabilities
+            .insert(HOST_JOBS_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    }
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs
@@ -423,5 +438,28 @@ mod tests {
             assert_eq!(read, Ok(level), "{ceiling}");
             assert_eq!(hello.validate(), Ok(()), "{ceiling}");
         }
+    }
+
+    /// Asserts that `host-jobs` is reported as `true` only by an agent started with
+    /// `--allow-host-jobs` (the start check takes it only with `--runtime crun`), that such
+    /// a hello still validates, and that without the flag the key is absent. It catches a
+    /// server sent to taint a host whose agent cannot launch the host job, and one never
+    /// told that a crun agent can.
+    #[test]
+    fn host_jobs_is_reported_only_with_the_flag() {
+        let mut allowed = reported(&Config::none());
+        report_host_jobs(&mut allowed, true);
+        assert_eq!(
+            allowed
+                .capabilities
+                .get(HOST_JOBS_CAPABILITY)
+                .map(String::as_str),
+            Some(FLAG_SET)
+        );
+        assert_eq!(allowed.validate(), Ok(()));
+        let mut refused = reported(&Config::none());
+        report_host_jobs(&mut refused, false);
+        assert!(!refused.capabilities.contains_key(HOST_JOBS_CAPABILITY));
+        assert_eq!(HOST_JOBS_CAPABILITY, "host-jobs");
     }
 }

@@ -2,7 +2,7 @@
 //! the whole-host job on the real server (placed in turn on one host), the whole-host
 //! expectations (those over what the cell observed, at the end or at a virtual time), the
 //! record of a client cancel, and what the server spec adds for a whole-node pool (the
-//! class, the placement, the job service's address and the architecture).
+//! class, the job service's address, the architecture, and no placement flag).
 //!
 //! Sizes: one host beating every 5 s for at most 1,800 s of virtual time, under 400 agent
 //! requests a seed.
@@ -70,34 +70,37 @@ fn whole_host_jobs_are_placed_in_turn_and_a_wrong_count_fails() {
 }
 
 /// Asserts what the server spec adds: a whole-node pool's file names the class
-/// `whole-node` and an ordinary pool's `gpu-host`, both are started with `--placement
-/// js-sched` and a `--job-listen`, a shape with no architecture is given `arch = x86_64`
-/// while one that names an architecture keeps it; and the virtual time of a wall time,
-/// from the cell's epoch and floored at zero. Catches a placement that never reaches the
-/// server, a job service that is not turned on, an architecture written over, and a time
-/// off by the epoch.
+/// `whole-node` and an ordinary pool's `gpu-host`, both are started with a `--job-listen`
+/// and with no `--placement` (the server has one placement), a shape with no architecture
+/// is given `arch = x86_64` while one that names an architecture keeps it; and the virtual
+/// time of a wall time, from the cell's epoch and floored at zero. Catches a deprecated
+/// flag still passed, a job service that is not turned on, a pool the scheduler refuses
+/// for want of an `arch`, an architecture written over, and a time off by the epoch.
 #[test]
-fn the_server_spec_passes_the_placement_the_class_and_an_arch() {
-    let flag = |spec: &ServerSpec, name: &str, flag: &str| {
+fn the_server_spec_passes_the_class_and_an_arch_and_no_placement() {
+    let args = |spec: &ServerSpec, name: &str| {
         let dir = scratch(name);
-        let args = spec.args(dir.path()).expect("the files are written");
-        let at = args.iter().position(|arg| arg == flag);
-        args[at.expect("the flag is passed") + 1].clone()
+        spec.args(dir.path()).expect("the files are written")
     };
     let whole = whole_pool(1);
+    let passed = args(&whole, "spec-whole");
+    assert!(!passed.iter().any(|arg| arg == "--placement"));
+    let at = passed.iter().position(|arg| arg == "--job-listen");
     assert_eq!(
-        flag(&whole, "spec-placement", "--placement"),
-        OsString::from("js-sched")
-    );
-    assert_eq!(
-        flag(&whole, "spec-job-listen", "--job-listen"),
+        passed[at.expect("the flag is passed") + 1],
         OsString::from("127.0.0.1:0")
     );
     assert!(whole.pool_file().contains("class = \"whole-node\""));
     let arch = whole.shape().capabilities.get(ARCH_KEY);
     assert_eq!(arch.map(String::as_str), Some(ARCH));
     let plain = ServerSpec::registered_pool("burst", Shape::cpu_host(), 1);
+    assert!(
+        !args(&plain, "spec-plain")
+            .iter()
+            .any(|arg| arg == "--placement")
+    );
     assert!(plain.pool_file().contains("class = \"gpu-host\""));
+    assert!(plain.pool_file().contains("\"arch\" = \"x86_64\""));
     let arm = Shape {
         capabilities: BTreeMap::from([(ARCH_KEY.to_owned(), "arm64".to_owned())]),
         ..Shape::cpu_host()

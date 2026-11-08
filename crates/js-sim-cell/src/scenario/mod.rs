@@ -58,6 +58,7 @@ use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
 use crate::server::{ServerSpec, Shape, Store};
 use crate::work::Work;
 
+mod cloud;
 mod expect;
 mod held_after_runs;
 mod launched_on;

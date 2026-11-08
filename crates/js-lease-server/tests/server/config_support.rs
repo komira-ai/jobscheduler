@@ -231,8 +231,8 @@ impl PoolText {
             )
     }
 
-    /// A pool `name` of hand-joined agents: six machines of 8 cores and 16 GiB, with no
-    /// host contract.
+    /// A pool `name` of hand-joined agents: six `x86_64` machines of 8 cores and 16 GiB
+    /// (the scheduler describes a host by its `arch`), with no host contract.
     pub fn joined(name: &str) -> Self {
         Self(Vec::new())
             .set("kind", &quote("joined"))
@@ -241,6 +241,7 @@ impl PoolText {
             .set("exec", &quote("none"))
             .set("max_machines", "6")
             .set("shape", "{ cpu_millis = 8000, memory_bytes = 17179869184 }")
+            .set("capabilities", "{ arch = \"x86_64\" }")
     }
 
     /// An elastic pool `gpu` of the stand-in cloud kind with every required key.

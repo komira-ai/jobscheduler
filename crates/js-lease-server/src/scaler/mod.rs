@@ -25,6 +25,9 @@
 //! - the alerts it has raised, so that each is said once while it holds;
 //! - the queued jobs set aside for the machines launched for them (the `jobs` module), in
 //!   memory only;
+//! - the launches whose call to the provider is out (the `in_flight` module), each only while
+//!   its call is out, so a reader sees a launch that the memory, swapped in only at the end
+//!   of the tick, does not hold yet;
 //! - the hosts the registry refused to remove (`unremoved`), tried again at every tick. The
 //!   set is kept in its own file ([`UnremovedFile`]), or with a store setting in its own key
 //!   (the `kept` module), and is a write-ahead: a host is added
@@ -88,6 +91,7 @@ mod build;
 mod complete;
 mod effects;
 mod events;
+mod in_flight;
 mod jobs;
 pub(crate) mod kept;
 mod launch;
@@ -125,6 +129,7 @@ const ALERT_QUEUE: usize = 64;
 pub(crate) use build::{Parts, build};
 pub use complete::{REGISTRY_FLOOR, REGISTRY_QUIET};
 pub use effects::{Call, Effects, JobTables};
+pub use in_flight::InFlight;
 pub use launch::{KEY_VALID_FOR, Launcher, RETRY_AFTER};
 pub(crate) use live::Live;
 pub use store::RecordsFile;
@@ -203,6 +208,8 @@ struct Core {
     reclaimed: Mutex<BTreeSet<String>>,
     /// The reclaim notices that named no machine of the records, since the scaler started.
     reclaims_ignored: AtomicU64,
+    /// The launches whose provider call is out now (the `in_flight` module).
+    in_flight: in_flight::Out,
 }
 
 /// The scaler of one elastic pool. A handle: clones share one scaler.
@@ -286,6 +293,7 @@ impl Scaler {
             listen: Mutex::new(events::Listen::Closed),
             reclaimed: Mutex::new(BTreeSet::new()),
             reclaims_ignored: AtomicU64::new(0),
+            in_flight: in_flight::Out::default(),
         };
         Self {
             core: Arc::new(core),
@@ -448,6 +456,13 @@ impl Scaler {
     /// could not be written since the scaler started.
     pub fn save_errors(&self) -> u64 {
         self.core.memory().save_errors
+    }
+
+    /// The launches whose provider call is out now, by acquire id: each acquire a tick has
+    /// handed to the provider and whose answer has not come back, with when it was called.
+    /// Read while a tick runs, without waiting for the call (the `in_flight` module).
+    pub fn in_flight(&self) -> Vec<InFlight> {
+        self.core.in_flight.now()
     }
 }
 
@@ -756,7 +771,10 @@ impl Core {
                 Action::Acquire(plan) => {
                     let answer = match tokens.remove(&plan.name) {
                         Some(token) => {
+                            let since = Millis::new(self.clock.now().millis());
+                            let landing = self.in_flight.begin(&plan, since);
                             let answer = self.effects.acquire(&plan, token);
+                            drop(landing);
                             let meter = self.meter.get().unwrap_or(Meter::off());
                             meter.sink().acquire_answered(&plan.pool, &answer);
                             answer

@@ -32,7 +32,7 @@ fn config() -> PoolConfig {
         max_replace: 2,
         ..WholeNodeConfig::dedicated(4)
     };
-    PoolConfig::new(name, whole(), world_shape(), 4)
+    PoolConfig::new(name, whole(), pool_shape(), 4)
         .with_whole_node(settings)
         .unwrap()
 }
@@ -57,11 +57,11 @@ fn exclusive_not_ready() -> StartAck {
     StartAck::Refused(RefusalCode::ExclusiveNotReady)
 }
 
-fn pool(p: Placement, names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
-    let fx = fixture_in(config(), p);
+fn pool(names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
+    let fx = fixture_of(config());
     let hosts = names
         .iter()
-        .map(|name| (*name, fx.join_world(name)))
+        .map(|name| (*name, fx.join(name, "t")))
         .collect();
     (fx, hosts)
 }
@@ -113,8 +113,9 @@ fn use_up_the_tries(fx: &Fixture, hosts: &[(&str, u64)], code: RefusalReason) {
 /// The terminal refusal is delivered by the next start; the record goes with it, and the
 /// start after is a fresh request that is placed, though the back-off of the failed
 /// hosts has not run out.
-fn a_later_identical_request_after_the_terminal_refusal_is_placed(p: Placement) {
-    let (fx, hosts) = pool(p, &["a", "b"]);
+#[test]
+fn a_later_identical_request_after_the_terminal_refusal_is_placed() {
+    let (fx, hosts) = pool(&["a", "b"]);
     let mut provider = fx.provider.clone();
     use_up_the_tries(&fx, &hosts, RefusalReason::NotQuiet);
     restore(&fx, &hosts);
@@ -127,8 +128,9 @@ fn a_later_identical_request_after_the_terminal_refusal_is_placed(p: Placement) 
 
 /// A host left out for the life of a request is left out of that request only: the
 /// exclusion goes with the record.
-fn a_for_life_exclusion_dies_with_the_record(p: Placement) {
-    let (fx, hosts) = pool(p, &["a", "b"]);
+#[test]
+fn a_for_life_exclusion_dies_with_the_record() {
+    let (fx, hosts) = pool(&["a", "b"]);
     let mut provider = fx.provider.clone();
     use_up_the_tries(&fx, &hosts, RefusalReason::Unsupported);
     restore(&fx, &hosts);
@@ -139,8 +141,9 @@ fn a_for_life_exclusion_dies_with_the_record(p: Placement) {
 
 /// A terminal request is refused once, not for ever, and not a second time while
 /// another start of it is placed.
-fn only_one_start_gets_the_terminal_refusal(p: Placement) {
-    let (fx, hosts) = pool(p, &["a", "b"]);
+#[test]
+fn only_one_start_gets_the_terminal_refusal() {
+    let (fx, hosts) = pool(&["a", "b"]);
     let mut provider = fx.provider.clone();
     use_up_the_tries(&fx, &hosts, RefusalReason::NotQuiet);
     restore(&fx, &hosts);
@@ -151,8 +154,9 @@ fn only_one_start_gets_the_terminal_refusal(p: Placement) {
 
 /// A record whose request is not started for the horizon is dropped at the horizon,
 /// not before: `reserve_backoff` for each of `max_replace + 1` tries.
-fn an_idle_record_is_dropped_exactly_at_the_horizon(p: Placement) {
-    let (fx, hosts) = pool(p, &["a"]);
+#[test]
+fn an_idle_record_is_dropped_exactly_at_the_horizon() {
+    let (fx, hosts) = pool(&["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
     refuse(&fx, hosts[0], lease(1).to_string(), RefusalReason::NotQuiet);
@@ -166,8 +170,9 @@ fn an_idle_record_is_dropped_exactly_at_the_horizon(p: Placement) {
 }
 
 /// A start of the request restarts the idle time.
-fn a_start_of_the_request_restarts_the_idle_time(p: Placement) {
-    let (fx, hosts) = pool(p, &["a"]);
+#[test]
+fn a_start_of_the_request_restarts_the_idle_time() {
+    let (fx, hosts) = pool(&["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
     refuse(&fx, hosts[0], lease(1).to_string(), RefusalReason::NotQuiet);
@@ -182,7 +187,8 @@ fn a_start_of_the_request_restarts_the_idle_time(p: Placement) {
 
 /// With a back-off short enough that `reserve_backoff` for each try is under the prepare
 /// timeout, a record is still kept until the prepare timeout and dropped at it.
-fn an_idle_record_is_kept_for_at_least_the_prepare_timeout(p: Placement) {
+#[test]
+fn an_idle_record_is_kept_for_at_least_the_prepare_timeout() {
     let name = ProviderId::new("builders").unwrap();
     let settings = WholeNodeConfig {
         prepare_timeout_ms: TIMEOUT,
@@ -190,11 +196,11 @@ fn an_idle_record_is_kept_for_at_least_the_prepare_timeout(p: Placement) {
         max_replace: 2,
         ..WholeNodeConfig::dedicated(4)
     };
-    let short = PoolConfig::new(name, whole(), world_shape(), 4)
+    let short = PoolConfig::new(name, whole(), pool_shape(), 4)
         .with_whole_node(settings)
         .unwrap();
-    let fx = fixture_in(short, p);
-    let hosts = vec![("a", fx.join_world("a"))];
+    let fx = fixture_of(short);
+    let hosts = vec![("a", fx.join("a", "t"))];
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
     refuse(&fx, hosts[0], lease(1).to_string(), RefusalReason::NotQuiet);
@@ -210,7 +216,8 @@ fn an_idle_record_is_kept_for_at_least_the_prepare_timeout(p: Placement) {
 /// The record of a request with a lease committed is kept while the lease waits for its
 /// agent, even when the wait is as long as the horizon (a short back-off leaves the
 /// prepare timeout as the horizon): the timeout then counts as the second failure.
-fn a_record_with_a_committed_lease_is_kept(p: Placement) {
+#[test]
+fn a_record_with_a_committed_lease_is_kept() {
     let name = ProviderId::new("builders").unwrap();
     let settings = WholeNodeConfig {
         prepare_timeout_ms: TIMEOUT,
@@ -218,11 +225,11 @@ fn a_record_with_a_committed_lease_is_kept(p: Placement) {
         max_replace: 2,
         ..WholeNodeConfig::dedicated(4)
     };
-    let short = PoolConfig::new(name, whole(), world_shape(), 4)
+    let short = PoolConfig::new(name, whole(), pool_shape(), 4)
         .with_whole_node(settings)
         .unwrap();
-    let fx = fixture_in(short, p);
-    let hosts = vec![("a", fx.join_world("a")), ("b", fx.join_world("b"))];
+    let fx = fixture_of(short);
+    let hosts = vec![("a", fx.join("a", "t")), ("b", fx.join("b", "t"))];
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
     refuse(&fx, hosts[0], lease(1).to_string(), RefusalReason::NotQuiet);
@@ -236,8 +243,9 @@ fn a_record_with_a_committed_lease_is_kept(p: Placement) {
 }
 
 /// Many requests that each fail once leave only the recent ones behind.
-fn the_records_stay_bounded_across_many_failed_requests(p: Placement) {
-    let (fx, hosts) = pool(p, &["a"]);
+#[test]
+fn the_records_stay_bounded_across_many_failed_requests() {
+    let (fx, hosts) = pool(&["a"]);
     let mut provider = fx.provider.clone();
     let step = 10_000;
     let total = 60;
@@ -256,14 +264,3 @@ fn the_records_stay_bounded_across_many_failed_requests(p: Placement) {
     assert_eq!(kept, expected);
     assert!(kept.len() < 20);
 }
-
-crate::both!(
-    a_later_identical_request_after_the_terminal_refusal_is_placed,
-    a_for_life_exclusion_dies_with_the_record,
-    only_one_start_gets_the_terminal_refusal,
-    an_idle_record_is_dropped_exactly_at_the_horizon,
-    a_start_of_the_request_restarts_the_idle_time,
-    an_idle_record_is_kept_for_at_least_the_prepare_timeout,
-    a_record_with_a_committed_lease_is_kept,
-    the_records_stay_bounded_across_many_failed_requests,
-);

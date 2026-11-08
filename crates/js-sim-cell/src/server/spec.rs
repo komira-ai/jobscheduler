@@ -34,11 +34,8 @@ pub const WHOLE_CLASS: &str = "whole-node";
 /// The capability key a host's architecture is given under.
 pub const ARCH_KEY: &str = "arch";
 
-/// The architecture a server's shape is given when it names none.
+/// The architecture a registered pool's shape is given when it names none.
 pub const ARCH: &str = "x86_64";
-
-/// The `--placement` value of every cell's server: the placement that places queued jobs.
-const PLACEMENT: &str = "js-sched";
 
 /// The address `--job-listen` names: on the loopback, as the server demands of an address
 /// served without TLS, and never bound, since the cell's server runs in process.
@@ -111,17 +108,16 @@ impl Shape {
 /// registry's default `lost_retention` unless [`ServerSpec::lost_retention`] says
 /// otherwise. Usage recording is off (`--usage-off`): its store reads the system's clock
 /// and commits on a thread of its own, so a run would depend on both. The pool's class is
-/// [`POOL_CLASS`] ([`WHOLE_CLASS`] for [`ServerSpec::whole_node_pool`]); placement
-/// (`--placement`) is `js-sched`, the one placement that places queued jobs, and the
-/// job service is on (`--job-listen`, an address that is never bound: the cell reaches
-/// the service in process). The shape is given the capability [`ARCH_KEY`] = [`ARCH`]
-/// when it names no architecture: `js-sched` refuses an agent or joined pool without
-/// one, and places an elastic pool's machines by the one their agents report. The agents
-/// announce, and the client's jobs ask for, the shape's capabilities, this one too. The
-/// cell's agents speak the per-job messages (they report
-/// [`js_agent_wire::PER_JOB_CAPABILITY`] in their hello). The server keeps its state in a
-/// SQLite store in its directory unless [`ServerSpec::store`] says otherwise (module
-/// `store`).
+/// [`POOL_CLASS`] ([`WHOLE_CLASS`] for [`ServerSpec::whole_node_pool`]). The server places
+/// with `js-sched`, its only placement, which takes a host by its `arch`, and the job
+/// service is on (`--job-listen`, an address that is never bound: the cell reaches the
+/// service in process). The shape is given the capability [`ARCH_KEY`] = [`ARCH`] when it
+/// names no architecture: `js-sched` refuses an agent or joined pool without one, and
+/// places an elastic pool's machines by the one their agents report. The agents announce,
+/// and the client's jobs ask for, the shape's capabilities, this one too. The cell's agents
+/// speak the per-job messages (they report [`js_agent_wire::PER_JOB_CAPABILITY`] in their
+/// hello). The server keeps its state in a SQLite store in its directory unless
+/// [`ServerSpec::store`] says otherwise (module `store`).
 #[derive(Clone, Debug)]
 pub struct ServerSpec {
     pool: String,
@@ -142,8 +138,8 @@ pub struct ServerSpec {
 }
 
 impl ServerSpec {
-    /// A server whose one pool, `pool_name`, books `shape` for each of `hosts` hosts that
-    /// register with [`JOIN_TOKEN`].
+    /// A server whose one pool, `pool_name`, books `shape` (given [`ARCH`] when it names no
+    /// architecture) for each of `hosts` hosts that register with [`JOIN_TOKEN`].
     #[must_use]
     pub fn registered_pool(pool_name: &str, mut shape: Shape, hosts: usize) -> Self {
         shape
@@ -169,7 +165,8 @@ impl ServerSpec {
     /// machines are launched by the server's scaler on the pool's cloud, which the server
     /// node makes and owns ([`crate::Cloud`]), and each is a host of `shape`. The node
     /// reads the server's configuration from a file ([`crate::elastic`]), not from the
-    /// command line; the file also turns the job service on and places as `js-sched`. A host of an elastic pool beats at the registry's defaults (5 s, with a
+    /// command line; the file also turns the job service on. A host of an elastic pool beats at the
+    /// registry's defaults (5 s, with a
     /// grace of 15 s), which an elastic pool does not set: [`ServerSpec::heartbeat`] and
     /// the pool file's keys do not apply to it. The client asks for `shape`'s capabilities,
     /// and the pool's floor has none, so a scenario gives a shape without any. The pool's
@@ -308,7 +305,7 @@ impl ServerSpec {
     /// Writes the pool file, the two token files and the store file into `dir` and returns
     /// the server's command line: the lease file in `dir`, a first boot (or a resumed one,
     /// for a server started again), registration into the pool with [`JOIN_TOKEN`], the
-    /// hello burst, the placement, the job service's address, the store
+    /// hello burst, the job service's address, the store
     /// (`--store`, a SQLite file in `dir` with `--allow-sqlite-store`), and usage off.
     ///
     /// # Errors
@@ -346,7 +343,6 @@ impl ServerSpec {
             ("--agent-token-file", joins),
             ("--agent-pool-config", pool),
             ("--agent-hello-burst", self.hello_burst.to_string().into()),
-            ("--placement", PLACEMENT.into()),
             ("--store", store),
             ("--job-listen", JOB_LISTEN.into()),
         ];
@@ -411,8 +407,8 @@ impl ServerSpec {
 }
 
 impl ServerSpec {
-    /// The configuration of the server of `cloud`'s elastic pool, placing as
-    /// `js-sched` and serving the job service, over the store `at`: the client token file, the store file and the
+    /// The configuration of the server of `cloud`'s elastic pool, serving the job service,
+    /// over the store `at`: the client token file, the store file and the
     /// configuration file written into `dir` ([`elastic::config::text`]), read by the
     /// server with the cell's `sim-cloud` kind over `cloud`, on `clock`, the lease table
     /// timing its saves on `clock`, and the scaler drawing its acquire ids from `entropy`.
@@ -437,7 +433,7 @@ impl ServerSpec {
             store: Path::new(&store),
             allow_sqlite: at.is_sqlite(),
         };
-        let text = elastic::config::text(cloud, &files, PLACEMENT);
+        let text = elastic::config::text(cloud, &files);
         let file = write(dir, "js.toml", &text, "--config")?;
         let shared = SharedClock::new(clock.clone());
         let config = elastic::config::read(Path::new(&file), cloud, shared)?;

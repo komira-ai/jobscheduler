@@ -161,6 +161,12 @@ impl CatalogCache {
     pub fn last_error(&self) -> Option<&str> {
         self.error.as_deref()
     }
+
+    /// When the catalog that is read now came, and how many offers it holds: `None` while
+    /// no catalog has come. A failed fetch moves neither, since the last good catalog stays.
+    pub fn fetched(&self) -> Option<(Instant, usize)> {
+        self.good.as_ref().map(|(offers, at)| (*at, offers.len()))
+    }
 }
 
 /// An offer as a cool-down knows it: the provider, the instance type and the zone.

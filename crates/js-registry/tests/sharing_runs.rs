@@ -7,28 +7,17 @@
 
 mod support;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, HeldRun, HeldState, Hello, JobSpec};
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
-use js_provider::Candidate;
 use js_provider::{StartAck, StartSpec};
-use js_registry::{MarkedTails, Placer, PoolConfig, RunRefusal};
+use js_registry::{PoolConfig, RunRefusal};
 use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources, Shape};
 use support::world::job;
 use support::*;
 
 const GIB: u64 = 1 << 30;
-
-/// A placer that books the first host it is shown that no whole-node request has set aside.
-struct First;
-
-impl Placer for First {
-    fn pick(&self, _: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
-        open.iter().position(|c| !marked.contains_key(&c.host))
-    }
-}
 
 fn book() -> ResourceClass {
     let id = ClassId::new("book").unwrap();
@@ -83,7 +72,7 @@ fn spec_of(sequence: u64) -> StartSpec {
 /// How leases 1 and 2 came to be on `a`.
 #[derive(Debug, Clone, Copy)]
 enum Came {
-    /// Started by the registry, with a placer.
+    /// Started by the registry.
     Started,
     /// Put back after a restart, with what they booked, before the host said hello.
     Restored,
@@ -92,7 +81,6 @@ enum Came {
 /// Host `a` registered, with leases 1 and 2 on it as `came` says, and its session epoch.
 fn host_with_two_leases(came: Came) -> (Fixture, u64) {
     let fx = fixture_of(pool_config());
-    fx.registry.set_placer(Arc::new(First));
     let mut provider = fx.registry.provider().with_classes(vec![book()]);
     if let Came::Restored = came {
         for n in 1..=2 {

@@ -2,6 +2,8 @@
 
 mod support;
 
+use std::collections::BTreeMap;
+
 use js_agent_wire::{Phase, refusal};
 use js_provider::SeatError;
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StopAck};
@@ -240,8 +242,9 @@ fn empty_pool_is_no_capacity_and_oversize_is_no_fit() {
     );
 }
 
-/// Asserts the provider's identity, and that a class the provider does not list or one
-/// that does not book the whole host is refused UnsupportedClass and books nothing.
+/// Asserts the provider's identity, that a class the provider does not list is refused
+/// UnsupportedClass and books nothing, and that a class it lists which books only part of
+/// a host is leasable: its start is placed and booked on the host.
 #[test]
 fn identity_and_class_gate() {
     let mut fx = fixture(4);
@@ -257,6 +260,7 @@ fn identity_and_class_gate() {
         fx.provider.start(spec),
         StartAck::Refused(RefusalCode::UnsupportedClass)
     );
+    assert!(fx.provider.booked().is_empty());
     let shared = ResourceClass::new(
         ClassId::new("shared").unwrap(),
         Admission::Book(std::collections::BTreeSet::from([js_types::Dim::CpuMillis])),
@@ -271,9 +275,12 @@ fn identity_and_class_gate() {
     let spec = js_provider::StartSpec::new(lease(2), asks_shared, &fx.provider.classes()).unwrap();
     assert_eq!(
         fx.provider.start(spec),
-        StartAck::Refused(RefusalCode::UnsupportedClass)
+        StartAck::Started { host: host("a") }
     );
-    assert!(fx.provider.booked().is_empty());
+    assert_eq!(
+        fx.provider.booked(),
+        BTreeMap::from([(host("a"), lease(2))])
+    );
 }
 
 /// Asserts that seating on a known free host books it, that seating a lease on another

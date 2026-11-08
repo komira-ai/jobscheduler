@@ -31,6 +31,21 @@ fn a_dedicated_pool_keeps_its_settings_and_reports_the_surplus() {
     assert_eq!(some.whole_surplus(), 2);
 }
 
+/// Asserts that the registry hands out its pool's whole-node settings as the pool has them,
+/// and none for a pool without any: the one source the lease table and the scaler read the
+/// prepare timeout from. Catches a registry that answers defaults in place of the pool's.
+#[test]
+fn the_registry_answers_the_whole_node_settings_of_its_pool() {
+    let settings = WholeNodeConfig {
+        prepare_timeout_ms: 7_000,
+        ..WholeNodeConfig::dedicated(6)
+    };
+    let pool = pool_of(Admission::Whole, 6).with_whole_node(settings.clone());
+    let whole = support::fixture_of(pool.unwrap());
+    assert_eq!(whole.registry.whole_node(), Some(&settings));
+    assert_eq!(support::fixture(2).registry.whole_node(), None);
+}
+
 /// A mixed pool (class `Book`) fits when `max_whole_node + keep_for_ordinary` is at most
 /// `max_machines` and is refused one over; a dedicated pool refuses a kept host and a `max_whole_node` above `max_machines`; a class
 /// that books all without the whole-node lease refuses the settings; a zero names its

@@ -249,15 +249,10 @@ async fn the_listener_stops_with_the_server() {
 #[tokio::test]
 async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
     let scratch = Scratch::new("job_port_holds_host");
-    let mut args = job_args(&scratch, "127.0.0.1:0");
-    // A pool of CPU hosts that names an arch: the scheduler takes a pool as a node only
-    // then, and starts no job on a host with GPUs.
-    let pool = POOL
-        .replace("gpus = 1\ngpu_class = \"nvidia-a100\"\n", "")
-        .replace("[capabilities]", "[capabilities]\narch = \"x86_64\"");
+    let args = job_args(&scratch, "127.0.0.1:0");
+    // A pool of CPU hosts: the scheduler starts no job on a host with GPUs.
+    let pool = POOL.replace("gpus = 1\ngpu_class = \"nvidia-a100\"\n", "");
     scratch.write("agent-pool.toml", &pool, 0o644);
-    args.push("--placement".into());
-    args.push("js-sched".into());
     let h = Harness::with(scratch, args, None).await;
     let mut hello = per_job_hello("host-1");
     hello["shape"] = json!({ "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 });

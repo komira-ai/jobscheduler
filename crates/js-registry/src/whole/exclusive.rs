@@ -44,8 +44,8 @@
 //! The deadline is checked only as the lease table's tick reads the pending leases, never
 //! at a heartbeat: a ready report that arrives after the deadline but before that tick
 //! wins, and one that arrives after the tick that ended the lease names a lease the host
-//! no longer holds. Under `--placement js-sched` the engine keeps the commit time and the
-//! deadline of a lease it committed from its whole-node queue
+//! no longer holds. The placer keeps the commit time and the deadline of a lease it
+//! committed from its whole-node queue
 //! ([`crate::Placer::prepare_overdue`]); the states here stay the registry's.
 
 use js_lease::Timestamp;
@@ -122,16 +122,16 @@ impl Exclusive {
 
     /// [`Exclusive::overdue`], asking `placer` first: a placer that committed the lease
     /// from its whole-node queue keeps its deadline ([`crate::Placer::prepare_overdue`]),
-    /// and its answer stands; for any other lease (one put back after a restart, one whose
-    /// request carried no id, or no placer) the commit time here decides.
+    /// and its answer stands; for any other lease (one put back after a restart, or one the
+    /// placer keeps no deadline of) the commit time here decides.
     pub(crate) fn overdue_with(
         &self,
         now: Timestamp,
         timeout_ms: u64,
-        placer: Option<&dyn crate::Placer>,
+        placer: &dyn crate::Placer,
     ) -> Option<LeaseId> {
         let lease = self.committed()?;
-        match placer.and_then(|placer| placer.prepare_overdue(&lease)) {
+        match placer.prepare_overdue(&lease) {
             Some(due) => due.then_some(lease),
             None => self.overdue(now, timeout_ms),
         }

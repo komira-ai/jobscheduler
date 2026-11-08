@@ -470,7 +470,12 @@ generated paragraph above.
 - `ListPools` and `ListProviders` read the status `GET /v1/pools` writes: per elastic pool its
   name, kind, state, reasons, memory, machine count and last tick; per pool's provider its
   credentials check and its own checks, and the machines it launched. Nothing else of the
-  status (the next launch's plan, the alerts, the orphans) is carried. A server with no elastic
+  status (the next launch's plan, the alerts, the orphans) is carried. `ListProviders` also
+  tells what keeps a job waiting on the provider, which `GET /v1/pools` does not write: the
+  catalog's fetch time and offer count, the instance types passed over for quota, the offers
+  declined for capacity, the pool's brake and cool-down, and the launches whose call to the
+  provider is out, with their age (`design/providers.md`, "Reading why a provider launches
+  nothing"). A server with no elastic
   pool answers empty lists. Both are served whatever the listen address: unlike
   `GET /v1/pools`, which takes no token and is served only on a private address, they take a
   client's token.

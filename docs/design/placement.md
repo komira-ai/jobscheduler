@@ -53,11 +53,10 @@ second rule:
 ## 6.7 A probe pinned to one host
 
 An operator who installs or updates js-agent on a host proves it with one job on that host while the host stays cordoned for ordinary
-work. That job is a **probe**: a request that names one host (`probe_host` on `POST /v1/leases`, `js lease acquire --probe-host HOST`;
-`Request::pin` in `js-sched`). It runs on that host and nowhere else, and it is the only new work a cordoned host takes. (The lease routes and `js lease` named here are removed; the job API is the client API.)
+work. That job is a **probe**: a request that names one host (`Request::pin` in `js-sched`; no client route can request one now, since the lease routes and `js lease` that did are removed). It runs on that host and nowhere else, and it is the only new work a cordoned host takes.
 
 **The rule** is one function, `js_sched::admit_probe`, and both placement engines call it: the scheduler's round for every queued probe,
-over the workers it holds, and the lease server's placer (`--placement js-sched`) for every probe lease, over the facts its registry keeps
+over the workers it holds, and the lease server's placer for every probe lease, over the facts its registry keeps
 of the host. It checks, in order, and the first that fails is the refusal, by name:
 
 | Check | Refusal (`js-sched` / lease API code) |
@@ -84,13 +83,13 @@ ends, and ordinary work stays off the host the whole time. A probe is never join
 prove nothing about the host. Ordinary placement is unchanged when no probe is submitted. A request with no pin takes exactly the path it
 took before.
 
-**Where a probe can be placed.**
+**Where a probe can be placed.** No client route requests a probe now; the rules below describe the placement engines, not an API.
 
-- The lease server with `--placement js-sched` places probes. Its cordon is the host's own (`POST /v1/hosts/{id}:cordon`, which the update
+- The lease server places probes. Its cordon is the host's own (`POST /v1/hosts/{id}:cordon`, which the update
   hook takes), so a cordoned host is one whose cordon has not lapsed. The registry has no drain of that cordon, so the lease server never
   answers `probe-host-draining`. The registry only reports what it knows of the host (its booked shape, cordon, phase, taint and whether it
   is being scaled away), and the placer judges it.
-- With the default `--placement registry`, a probe is refused `probe-unsupported`, as it is by the static pool, whose hosts are never
+- A probe is refused `probe-unsupported` by the static pool, whose hosts are never
   cordoned. The layered provider passes over a child that answers `probe-unsupported`, so a probe reaches the registry. Every other
   probe refusal is final there: the probe is never placed by a child that did not judge its host. A probe of a whole-node class is
   refused `probe-unsupported` too, because its host would be prepared and held as the whole-node queue decides, and no probe rule judges

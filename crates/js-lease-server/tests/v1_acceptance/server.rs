@@ -123,8 +123,6 @@ impl Files {
             boot,
             "--job-listen",
             "127.0.0.1:0",
-            "--placement",
-            "js-sched",
             // The tick never comes: every change a case looks for rides on a heartbeat or a
             // call.
             "--tick",

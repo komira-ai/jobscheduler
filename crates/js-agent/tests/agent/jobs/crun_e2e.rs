@@ -58,8 +58,8 @@ disk_bytes = 4294967296
 
 [capabilities]
 os = "linux"
-scratch-quota = "project"
 arch = "x86_64"
+scratch-quota = "project"
 "#;
 
 /// The first host uid and gid of the subordinate ranges of the node's job user.

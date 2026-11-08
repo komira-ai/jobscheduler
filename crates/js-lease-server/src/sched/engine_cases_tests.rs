@@ -358,10 +358,10 @@ fn a_host_gone_while_the_engine_holds_a_lease_there_is_kept() {
 /// memory percent of 90): the shared and whole-host leases the file records are put back
 /// before any host says hello, the engine is told of each as it is put back, so no start
 /// rebuilds it, and starts and ends agree from the first; the slack and the percent hold
-/// after the restart as before it. Restarted with `--placement registry`, the pool that
-/// shares hosts is refused at start, as it always is. It catches restored leases the engine
-/// never learns (it would place past them), settings lost on restart, and a put-back the
-/// engine learns only by rebuilding.
+/// after the restart as before it. Restarted with no `--placement` flag, the same pool
+/// that shares hosts starts. It catches restored leases the engine never learns (it would
+/// place past them), settings lost on restart, and a put-back the engine learns only by
+/// rebuilding.
 #[test]
 fn a_restart_puts_the_leases_back_and_the_engine_learns_them_once() {
     let text = shared_pool(2, 8000, "memory_schedulable_percent = 90");
@@ -408,11 +408,7 @@ fn a_restart_puts_the_leases_back_and_the_engine_learns_them_once() {
     let above = share_of(1, 1_000, NINETY + 1).request().clone();
     assert!(table.acquire(above).is_err());
     assert_eq!(r.placer().resynced(), 0);
-    let refused = config_result(r.dir(), &text, &[], "resume").err().unwrap();
-    assert!(
-        refused.to_string().contains("share_class needs js-sched"),
-        "{refused}"
-    );
+    assert!(config_result(r.dir(), &text, &[], "resume").is_ok());
 }
 
 /// Asserts the settings through a configuration file whose joined pool sets

@@ -50,6 +50,8 @@ use crate::usage_js::{NodeUsage, no_names};
 mod hosts;
 #[path = "fleet_pools_tests.rs"]
 mod pools;
+#[path = "fleet_providers_tests.rs"]
+mod providers;
 #[path = "fleet_usage_tests.rs"]
 mod usage;
 
@@ -83,14 +85,22 @@ fn server(name: &str, agents: bool) -> Server {
     let dir = TestDir::under(root, name);
     let clock = ManualClock::new(Timestamp::from_millis(T0));
     let shared_clock = SharedClock::new(clock.clone());
-    let shape = Shape::new(resources(), BTreeMap::new());
+    let shape = Shape::new(
+        resources(),
+        BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
+    );
     let pool = PoolConfig::new(
         ProviderId::new("burst").unwrap(),
         ResourceClass::gpu_host(),
         shape,
         4,
     );
-    let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
+    let registry = Registry::with_sessions(
+        pool,
+        clock.clone(),
+        SequentialSessions::new(),
+        Arc::new(js_sched_placer::place::SchedPlacer::default()),
+    );
     let settings = Settings::new();
     let table = LeaseTable::open(
         BoxedPool::new(Box::new(registry.provider())),
@@ -147,7 +157,7 @@ impl Server {
                 "gpus": 1,
                 "gpu_class": "nvidia-a100",
             },
-            "capabilities": {},
+            "capabilities": { "arch": "x86_64" },
             "phase": "serving",
         }))
         .unwrap();

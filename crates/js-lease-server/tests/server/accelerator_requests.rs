@@ -2,9 +2,8 @@
 //! today, resolved through the alias table, the optional `constraints.accelerator` message,
 //! and a host whose hello predates the accelerator.
 //!
-//! The tests that place a job run under `--placement js-sched`, whose scheduler places the
-//! host by the shape the registry lists for it, the accelerator facts of its hello
-//! included. The scheduler's mapping of the same need is covered in process, in
+//! The scheduler places the host by the shape the registry lists for it, the accelerator
+//! facts of its hello included. The scheduler's mapping of the same need is covered in process, in
 //! `crates/js-sched-placer/src/map.rs`. A job placed on a host with GPUs is not sent to its
 //! agent, so it reads `JOB_STATE_PLACED` with the host it is placed on.
 
@@ -23,8 +22,8 @@ const A100_40: &str = "nvidia-a100-sxm4-40gb";
 /// Bytes in a GiB.
 const GIB: u64 = 1 << 30;
 
-/// The pool a host registers into: eight GPUs of `class` and a floor of the same, naming
-/// an `arch` as the scheduler describes a host by.
+/// The pool a host registers into: eight GPUs of `class` and a floor of the same, on
+/// `x86_64` (the scheduler describes a host by its `arch`).
 fn pool(class: &str) -> String {
     format!(
         r#"
@@ -75,13 +74,11 @@ fn old_hello(class: &str, memory_gib: u64) -> Value {
     })
 }
 
-/// A server placing jobs by `--placement js-sched`, whose only host is `burst-1`,
-/// registered with `hello` (with `arch` and the per-job messages), in a pool of
+/// A server whose only host is `burst-1`, registered with `hello` (with `arch` and the per-job messages), in a pool of
 /// `pool_class`.
 async fn serve(name: &str, pool_class: &str, hello: &Value) -> Harness {
     let scratch = Scratch::new(name);
-    let mut args = job_args(&scratch, "127.0.0.1:0");
-    args.extend(["--placement", "js-sched"].map(Into::into));
+    let args = job_args(&scratch, "127.0.0.1:0");
     let mut hello = hello.clone();
     hello["capabilities"]["arch"] = json!("x86_64");
     hello["capabilities"]["per-job"] = json!("true");

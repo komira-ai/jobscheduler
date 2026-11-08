@@ -9,10 +9,9 @@ mod support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use js_lease::Timestamp;
-use js_provider::{Candidate, SeatError};
+use js_provider::SeatError;
 use js_provider::{Pool, StartSpec};
-use js_registry::{MarkedTails, Placer, ProfileLives, TailCounters};
+use js_registry::{ProfileLives, TailCounters};
 use js_types::{Admission, ClassId, Dims, Request, ResourceClass, Resources};
 use js_usage::ProfileKey;
 use support::world::*;
@@ -24,15 +23,6 @@ struct Table(BTreeMap<&'static str, u32>);
 impl ProfileLives for Table {
     fn wall_minutes_p90(&self, key: &ProfileKey) -> Option<u32> {
         self.0.get(key.as_str()).copied()
-    }
-}
-
-/// A placer that books the first host it is shown that no whole-node request has set aside.
-struct First;
-
-impl Placer for First {
-    fn pick(&self, _: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
-        open.iter().position(|c| !marked.contains_key(&c.host))
     }
 }
 
@@ -49,7 +39,6 @@ fn book() -> ResourceClass {
 /// set when `lives` is.
 fn world(hosts: &[&str], lives: bool) -> World {
     let mut w = World::of(config(4), hosts);
-    w.fx.registry.set_placer(Arc::new(First));
     w.provider = w.provider.clone().with_classes(vec![whole(), book()]);
     if lives {
         let table = BTreeMap::from([("fast", 1), ("three", 3), ("slow", 8)]);
@@ -139,23 +128,24 @@ fn restored_sharing_leases_each_keep_their_own_start_and_bound() {
     assert_eq!(tail, (Some("a".to_string()), Some(now + 10 * MINUTE)));
 }
 
-/// Catches: a lease put back a second time keeping the start and bound of the first. Lease
-/// 1 is put back as started now with a bound of 15 minutes, then again as started a minute
-/// before now with a bound of five minutes: the tail is the second bound, and with a keyed
-/// run of three minutes, two minutes from now (counted from the second start).
+/// Catches: a lease put back a second time taking the start and bound of the second seat,
+/// or losing the first. Lease 1 is put back as started now with a bound of 15 minutes, then
+/// again as started a minute before now with a bound of five minutes: the placer holds the
+/// lease already and leaves it as it is, so the tail is the first bound, and with a keyed
+/// run of three minutes, three minutes from now (counted from the first start).
 #[test]
-fn a_lease_put_back_again_takes_the_start_and_bound_of_the_second_seat() {
+fn a_lease_put_back_again_keeps_the_start_and_bound_of_the_first_seat() {
     let mut w = world(&["a"], true);
     let now = w.now().millis();
     assert_eq!(restore(&w, "a", 1, None, (now, now + 15 * MINUTE)), Ok(()));
     let again = (now - MINUTE, now + 4 * MINUTE);
     assert_eq!(restore(&w, "a", 1, None, again), Ok(()));
     let tail = ask(&mut w, 10, "q1");
-    assert_eq!(tail, (Some("a".to_string()), Some(now + 4 * MINUTE)));
+    assert_eq!(tail, (Some("a".to_string()), Some(now + 15 * MINUTE)));
     withdraw(&mut w, "q1");
     keyed(&w, "a", 1, "r1", "three");
     let tail = ask(&mut w, 11, "q2");
-    assert_eq!(tail, (Some("a".to_string()), Some(now + 2 * MINUTE)));
+    assert_eq!(tail, (Some("a".to_string()), Some(now + 3 * MINUTE)));
 }
 
 /// Catches: a refused seat that still keeps a start or a bound, or counts a stop. With the
@@ -247,29 +237,4 @@ fn a_restored_start_ahead_of_the_clock_is_counted_as_recorded() {
     keyed(&w, "a", 1, "r1", "three");
     let tail = ask(&mut w, 10, "q1");
     assert_eq!(tail, (Some("a".to_string()), Some(now + 4 * MINUTE)));
-}
-
-/// Catches: with the feed on, a lease whose recorded end saturated (an endless max wall)
-/// taken for a far but known bound. With no keyed run its tail is unknown, so its host
-/// ranks after `b` (ten minutes) and, alone, is reserved with no tail; a keyed run of one
-/// minute makes it known, ending a minute after its start. With the feed off the same lease
-/// keeps the saturated bound as before (and, restored, has none at all).
-#[test]
-fn with_the_feed_on_a_saturated_end_is_no_bound_and_the_tail_is_unknown_until_a_keyed_run() {
-    let mut w = world(&["a", "b"], true);
-    let now = w.now().millis();
-    let endless = (now, Timestamp::MAX.millis());
-    assert_eq!(restore(&w, "a", 1, None, endless), Ok(()));
-    assert_eq!(restore(&w, "b", 2, None, (now, now + 10 * MINUTE)), Ok(()));
-    let tail = ask(&mut w, 10, "q1");
-    assert_eq!(tail, (Some("b".to_string()), Some(now + 10 * MINUTE)));
-    withdraw(&mut w, "q1");
-    w.stop(2);
-    let mut alone = world(&["a"], true);
-    assert_eq!(restore(&alone, "a", 1, None, endless), Ok(()));
-    assert_eq!(ask(&mut alone, 10, "q2"), (Some("a".to_string()), None));
-    withdraw(&mut alone, "q2");
-    keyed(&alone, "a", 1, "r1", "fast");
-    let tail = ask(&mut alone, 11, "q3");
-    assert_eq!(tail, (Some("a".to_string()), Some(now + MINUTE)));
 }

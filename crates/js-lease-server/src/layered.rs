@@ -561,12 +561,16 @@ mod tests {
     fn bookings_that_share_a_host_are_seated_with_their_resources() {
         let floor = Shape::new(
             Resources::new(4000, 8 << 30, 0, None).unwrap(),
-            BTreeMap::new(),
+            BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
         );
         let name = ProviderId::new("builders").unwrap();
         let config = js_registry::PoolConfig::new(name, sharing(), floor, 2);
         let now = js_lease::Timestamp::from_millis(1);
-        let registry = Registry::new(config, js_lease::ManualClock::new(now));
+        let registry = Registry::new(
+            config,
+            js_lease::ManualClock::new(now),
+            std::sync::Arc::new(js_sched_placer::place::SchedPlacer::default()),
+        );
         let source = LayeredSource::new(None, registry, BTreeMap::new());
         let booking = |n: u64| Booking {
             lease: LeaseId::new(1, n),

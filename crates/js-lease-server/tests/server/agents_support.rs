@@ -28,6 +28,7 @@ gpus = 1
 gpu_class = "nvidia-a100"
 
 [capabilities]
+arch = "x86_64"
 isa = "x86-64-v3"
 "#;
 
@@ -68,11 +69,11 @@ pub fn agent_args(scratch: &Scratch, keep_static: bool) -> Vec<OsString> {
 }
 
 /// The agent flags over [`JOB_POOL`] without the static pool, the job service on a loopback
-/// port and `js-sched` placing, so that a host which says hello with [`job_hello`] runs jobs.
+/// port, so that a host which says hello with [`job_hello`] runs jobs.
 pub fn job_host_args(scratch: &Scratch) -> Vec<OsString> {
     let mut args = agent_args(scratch, false);
     scratch.write("agent-pool.toml", JOB_POOL, 0o644);
-    args.extend(["--job-listen", "127.0.0.1:0", "--placement", "js-sched"].map(Into::into));
+    args.extend(["--job-listen", "127.0.0.1:0"].map(Into::into));
     args
 }
 
@@ -133,7 +134,7 @@ pub fn hello_body(host: &str) -> Value {
             "gpus": 1,
             "gpu_class": "nvidia-a100",
         },
-        "capabilities": { "isa": "x86-64-v3" },
+        "capabilities": { "arch": "x86_64", "isa": "x86-64-v3" },
         "labels": { "rack": "r1" },
         "phase": "serving",
     })

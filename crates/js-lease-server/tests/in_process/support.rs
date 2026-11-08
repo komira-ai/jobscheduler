@@ -47,6 +47,7 @@ gpus = 1
 gpu_class = "nvidia-a100"
 
 [capabilities]
+arch = "x86_64"
 isa = "x86-64-v3"
 "#;
 
@@ -304,10 +305,18 @@ pub fn hello_body(host: &str) -> Value {
             "gpus": 1,
             "gpu_class": "nvidia-a100",
         },
-        "capabilities": { "isa": "x86-64-v3" },
+        "capabilities": { "arch": "x86_64", "isa": "x86-64-v3" },
         "labels": { "rack": "r1" },
         "phase": "serving",
     })
+}
+
+/// The hello of `host` that says it is draining, so the scheduler places no job on it and a
+/// queued job stays queued.
+pub fn hello_body_draining(host: &str) -> Value {
+    let mut body = hello_body(host);
+    body["phase"] = json!("draining");
+    body
 }
 
 /// The heartbeat of the session a welcome opened for `host`.

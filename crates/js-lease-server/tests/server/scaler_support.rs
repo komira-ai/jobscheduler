@@ -593,6 +593,12 @@ pub fn hello_body_of(name: &str) -> Value {
     // The class the agent of a `gpu_1x_a100` machine reads from `nvidia-smi`: the 40 GB
     // PCIe variant the provider's catalog table offers for that type.
     body["shape"]["gpu_class"] = json!("nvidia-a100-pcie-40gb");
+    // These tests are about the machine's life, and the job queued for it is the demand that
+    // launched it: a host that names no `arch` is one the scheduler places no job on, so the
+    // job stays queued and the host's only holder is the test's own doing.
+    if let Some(capabilities) = body["capabilities"].as_object_mut() {
+        capabilities.remove("arch");
+    }
     body
 }
 

@@ -154,7 +154,8 @@ pub const REVOKE: [&str; 6] = [
     "i-1",
 ];
 
-/// A pool that asks nothing of a host, for the server's `--agent-pool-config`.
+/// A pool that asks nothing of a host but an `arch` (the scheduler describes a host by
+/// it), for the server's `--agent-pool-config`. No host says hello here.
 const POOL: &str = r#"
 name = "macs"
 class = "mac"
@@ -163,6 +164,9 @@ max_machines = 4
 [shape]
 cpu_millis = 1
 memory_bytes = 1
+
+[capabilities]
+arch = "x86_64"
 "#;
 
 /// A server in this process, on a runtime of its own so the CLI can block the test's

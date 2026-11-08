@@ -1,13 +1,11 @@
-//! The expected life of a lease, the feed of [`js_whole::cost::HostLoad::est_ends`].
+//! The expected life of a lease: what the placer's round ([`crate::WholeRound::lives`]) and
+//! the record of a lease's end read.
 //!
 //! The feed reads the raw P90 of the wall minutes (`Fit.wall_minutes_p90` of the usage
 //! store), not the life admission charges a lease to (`Profile.life`, which is that P90
 //! plus `expected_life_delta_minutes`).
 
-use js_types::LeaseId;
 use js_usage::{ProfileCurves, ProfileKey};
-
-use crate::runs::Runs;
 
 /// Where the registry finds how long the runs of a profile usually take.
 pub trait ProfileLives: Send + Sync {
@@ -43,20 +41,6 @@ pub(crate) fn longest_p90(profiles: &[ProfileKey], lives: &dyn ProfileLives) -> 
         .iter()
         .filter_map(|key| lives.wall_minutes_p90(key));
     known.max()
-}
-
-/// The `est_ends` of a host, one entry for each lease in `started` (a booked lease and
-/// when it started, in the order of the host's end bounds): the estimate of the lease, or
-/// `None` when no source of lives is set or no keyed run of the lease has a P90.
-pub(crate) fn est_ends(
-    lives: Option<&dyn ProfileLives>,
-    runs: &Runs,
-    started: &[(LeaseId, u64)],
-) -> Vec<Option<u64>> {
-    let estimate = |(lease, started_at): &(LeaseId, u64)| {
-        estimate_end(*started_at, &runs.profiles_of(lease), lives?)
-    };
-    started.iter().map(estimate).collect()
 }
 
 #[cfg(test)]

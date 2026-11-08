@@ -600,12 +600,12 @@ request (absent: no coalescing) lets kbf keep its in-flight coalescing by action
 ### 6.7 A probe pinned to one host
 A probe names one host and runs only there, past that host's cordon: it is the only new work a cordoned host takes, so an operator can
 prove a host with one job while the host stays out of ordinary placement. One rule, `js_sched::admit_probe`, judges it in both placement
-engines (the scheduler's round, and the lease server's placer under `--placement js-sched`). It refuses by name a host that is unknown, not
+engines (the scheduler's round, and the lease server's placer). It refuses by name a host that is unknown, not
 serving, not cordoned, draining, mismatched or too small. Room, the load predicate and `memory_schedulable_percent` apply to a probe as to
 any request. See [design/placement.md](design/placement.md).
 
 ### 6.8 Queued jobs and their allocations
-Under `--placement js-sched`, when the server holds the job and allocation tables (the job service, off by default; no default
+When the server holds the job and allocation tables (the job service, off by default; no default
 behaviour changes), the lease server's engine also places queued jobs (`crates/js-sched-placer/src/jobs.rs`). On each tick and
 after each heartbeat of a host that speaks the per-job messages it reads the live allocations and the queued jobs (higher priority
 first, then earlier submit, then job id) from the tables as they stand, so no queued job has to be presented again. It walks the

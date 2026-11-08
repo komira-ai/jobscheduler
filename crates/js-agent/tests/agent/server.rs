@@ -26,12 +26,30 @@ pub const T0: u64 = 1_000_000;
 /// The client token of the server.
 pub const CLIENT_TOKEN: &str = "client-token-0123456789-abcdefghijkl";
 
+/// The architecture of the machine this test was built for, as an agent reports it
+/// (`arm64`, never `aarch64`): the release platforms are `x86_64` and `arm64` machines.
+#[cfg(target_arch = "aarch64")]
+macro_rules! host_arch {
+    () => {
+        "arm64"
+    };
+}
+
+/// The architecture of the machine this test was built for, as an agent reports it.
+#[cfg(not(target_arch = "aarch64"))]
+macro_rules! host_arch {
+    () => {
+        "x86_64"
+    };
+}
+
 /// The pool's join token.
 pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// The pool agents join: a class of its own that asks nothing but a CPU and a little
-/// memory, and the capability `os=macos`. It states no GPU, so a host with one or none
-/// satisfies it.
+/// memory, and the capabilities `os=macos` and `arch=arm64` (the Macs of these tests, and
+/// the scheduler describes a host by its `arch`). It states no GPU, so a host with one or
+/// none satisfies it.
 pub const POOL_TOML: &str = r#"
 name = "macs"
 class = "mac"
@@ -43,6 +61,7 @@ memory_bytes = 1073741824
 
 [capabilities]
 os = "macos"
+arch = "arm64"
 "#;
 
 /// A running server and the files it was started on.
@@ -56,9 +75,11 @@ pub struct Server {
     pool: &'static str,
 }
 
-/// A pool that asks nothing of a host: any machine fits it, as the real one running the
-/// binary in a test does.
-pub const POOL_OPEN_TOML: &str = r#"
+/// A pool that asks nothing of a host but its `arch` (the scheduler describes a host by
+/// it): the machine running the binary in a test fits it, being of the architecture this
+/// test was built for.
+pub const POOL_OPEN_TOML: &str = concat!(
+    r#"
 name = "macs"
 class = "mac"
 max_machines = 4
@@ -66,11 +87,14 @@ max_machines = 4
 [shape]
 cpu_millis = 1
 memory_bytes = 1
-"#;
 
-/// The flags of a server with agents and the job service on, over `scratch`. A pool that
-/// states an `arch` capability, as `js-sched` needs of a pool it places on, also turns on
-/// that placement.
+[capabilities]
+arch = ""#,
+    host_arch!(),
+    "\"\n"
+);
+
+/// The flags of a server with agents and the job service on, over `scratch`.
 fn args(scratch: &Scratch, boot: &str, extra: &[String], pool_text: &str) -> Vec<String> {
     let client = scratch.write("client-token", CLIENT_TOKEN, 0o600);
     let join = scratch.write("join-token", JOIN, 0o600);
@@ -95,9 +119,6 @@ fn args(scratch: &Scratch, boot: &str, extra: &[String], pool_text: &str) -> Vec
     ]
     .map(str::to_owned)
     .into();
-    if pool_text.contains("arch =") {
-        all.extend(["--placement".to_owned(), "js-sched".to_owned()]);
-    }
     all.extend_from_slice(extra);
     all
 }
@@ -279,8 +300,9 @@ impl Server {
     }
 }
 
-/// A pool that books a host as 4 CPUs and 4 GiB and asks only that it runs Linux: a machine
-/// that offers more joins it, and the jobs placed on it book up to that shape.
+/// A pool that books a host as 4 CPUs and 4 GiB and asks only that it runs Linux on
+/// `x86_64` (the hosts of these tests): a machine that offers more joins it, and the jobs
+/// placed on it book up to that shape.
 pub const POOL_RUNS_TOML: &str = r#"
 name = "macs"
 class = "mac"

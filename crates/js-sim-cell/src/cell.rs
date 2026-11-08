@@ -59,6 +59,7 @@ use js_types::{HostId, IdError, Resources};
 use crate::agent::{AgentKind, AgentNode, AgentSpec};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::{Counter, Counters};
+use crate::elastic::Cloud;
 use crate::front::{ClientPort, Front};
 use crate::invariant::{Checker, Invariant, Touched, Violation};
 use crate::jobs::JobFront;
@@ -70,6 +71,7 @@ use crate::server::{JOIN_TOKEN, ServerNode, ServerSpec};
 use crate::text;
 use crate::work::Work;
 
+mod cloud_faults;
 mod elastic;
 mod store;
 
@@ -483,10 +485,15 @@ impl Cell {
         self.agents
     }
 
-    /// Every agent's counts added together.
+    /// Every agent's counts added together, and the elastic pool's cloud's
+    /// ([`Cloud::counters`]).
     #[must_use]
     pub fn total_counters(&self) -> Counters {
-        Counters::sum((0..self.agents).filter_map(|index| self.counters(index)))
+        let agents = (0..self.agents).filter_map(|index| self.counters(index));
+        let mut total = Counters::sum(agents);
+        let cloud = self.cloud().map(Cloud::counters);
+        cloud.iter().for_each(|counted| total.absorb(counted));
+        total
     }
 
     /// Kills the process of agent `index`: it holds nothing and drops every input until

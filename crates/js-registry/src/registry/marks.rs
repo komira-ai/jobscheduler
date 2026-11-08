@@ -135,9 +135,7 @@ impl Registry {
     /// [`Busy::Releasing`] when it is releasing: that mark is not undone.
     pub fn retire(&self, host: &HostId) -> Result<(), Busy> {
         let mut guard = self.lock();
-        let keeper = self.keeper();
-        let State { records, marks, .. } = &mut *guard;
-        let record = records.get_mut(host).ok_or(Busy::UnknownHost)?;
+        let record = guard.records.get_mut(host).ok_or(Busy::UnknownHost)?;
         match record.leaving {
             Some(Leaving::Releasing) => Err(Busy::Releasing),
             _ => {
@@ -146,10 +144,7 @@ impl Registry {
                 // and no machine is launched for a request that holds one: it is let go,
                 // so the scaler sees it unreserved. A whole-node lease already committed
                 // on the host is not a mark and runs on.
-                match keeper {
-                    Some(keeper) => keeper.whole_drop_host(host),
-                    None => marks.drop_host(host),
-                }
+                self.placer().whole_drop_host(host);
                 Ok(())
             }
         }

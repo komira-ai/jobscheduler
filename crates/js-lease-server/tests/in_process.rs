@@ -15,6 +15,8 @@ mod elastic;
 mod feature;
 #[path = "in_process/jobs.rs"]
 mod jobs;
+#[path = "in_process/providers.rs"]
+mod providers;
 #[path = "in_process/support.rs"]
 mod support;
 
@@ -30,7 +32,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     Cell, JOIN, Listening, Reply, Scratch, Stepping, TOKEN, args, beat_body, clock, hello_body,
-    routed,
+    hello_body_draining, routed,
 };
 
 fn secs(n: u64) -> Duration {
@@ -184,7 +186,7 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
                 assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
             }
             Input::Hello => {
-                let hello = hello_body("host-a");
+                let hello = hello_body_draining("host-a");
                 welcome = Some(
                     server
                         .request("POST", "/v1/agent/hello", JOIN, Some(&hello))
@@ -192,7 +194,8 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
                 );
             }
             Input::Beat => {
-                let beat = beat_body("host-a", welcome.as_ref().unwrap());
+                let mut beat = beat_body("host-a", welcome.as_ref().unwrap());
+                beat["phase"] = json!("draining");
                 let reply = server
                     .request("POST", "/v1/agent/heartbeat", JOIN, Some(&beat))
                     .await;
@@ -236,12 +239,13 @@ async fn through_the_seam(inputs: &[Input]) -> Vec<Listing> {
                 assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
             }
             Input::Hello => {
-                let hello = hello_body("host-a");
+                let hello = hello_body_draining("host-a");
                 let path = "/v1/agent/hello";
                 welcome = Some(routed(&agents, "POST", path, Some(JOIN), Some(&hello)).await);
             }
             Input::Beat => {
-                let beat = beat_body("host-a", welcome.as_ref().unwrap());
+                let mut beat = beat_body("host-a", welcome.as_ref().unwrap());
+                beat["phase"] = json!("draining");
                 let path = "/v1/agent/heartbeat";
                 let reply = routed(&agents, "POST", path, Some(JOIN), Some(&beat)).await;
                 assert_eq!(reply.status, 200, "{:?}", reply.body);
@@ -262,8 +266,8 @@ async fn through_the_seam(inputs: &[Input]) -> Vec<Listing> {
 /// equal inputs, list equal jobs and equal hosts after every one of five ticks. The inputs
 /// register a host, submit two jobs, cancel one, and let the registered host go silent past
 /// its grace, so the listings change at every tick: a job is queued, a second one joins it,
-/// the first is cancelled, and the host goes from live to lost. It catches a seam whose tick
-/// does less, more, or another thing than the tick loop's (a part of `Shared::tick` skipped
+/// the first is cancelled, and the host goes from live to lost (the host says it is draining, so the scheduler places neither job). It catches a
+/// seam whose tick does less, more, or another thing than the tick loop's (a part of `Shared::tick` skipped
 /// or done twice), and routers that answer otherwise than the listeners.
 #[tokio::test]
 async fn the_tick_loop_and_the_seam_leave_equal_job_listings_after_equal_ticks() {

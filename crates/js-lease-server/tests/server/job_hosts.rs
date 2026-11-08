@@ -10,20 +10,16 @@ use crate::agents_support::POOL;
 use crate::jobs_support::{job_args, per_job_hello};
 use crate::support::{Harness, Kept, Scratch, replace};
 
-/// The shared pool without its GPU, with the arch `x86_64` named: the scheduler takes a
-/// pool as a node only then, and starts no job on a host with GPUs.
+/// The shared pool without its GPU: the scheduler starts no job on a host with GPUs.
 pub fn cpu_pool() -> String {
     POOL.replace("gpus = 1\ngpu_class = \"nvidia-a100\"\n", "")
-        .replace("[capabilities]", "[capabilities]\narch = \"x86_64\"")
 }
 
 /// The flags of a server with agent registration on, the job service on a loopback port,
 /// the scheduler placing jobs on the CPU pool, and the bindings kept as `kept` says.
 pub fn placing_args(scratch: &Scratch, kept: Kept) -> Vec<OsString> {
-    let mut args = job_args(scratch, "127.0.0.1:0");
+    let args = job_args(scratch, "127.0.0.1:0");
     scratch.write("agent-pool.toml", &cpu_pool(), 0o644);
-    args.push("--placement".into());
-    args.push("js-sched".into());
     kept.args(scratch, args)
 }
 

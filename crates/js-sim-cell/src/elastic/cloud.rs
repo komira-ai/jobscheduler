@@ -17,6 +17,7 @@ use js_types::{ExecMode, Model, ProviderId, accelerator_of};
 
 use super::record::{AcquireAnswer, CloudCall, CloudEvent, ReleaseAnswer};
 use super::{ElasticPool, OfferSpec};
+use crate::counters::{Counter, Counters};
 use crate::server::{EPOCH_MS, Shape, virtual_time};
 
 /// One elastic pool's cloud: the [`ElasticFake`] the server launches machines on, and the
@@ -32,6 +33,11 @@ use crate::server::{EPOCH_MS, Shape, virtual_time};
 /// whose answer was lost (`Acquired::Unknown`) and stopped at the end of the tick, before a
 /// later tick acts on anything ([`CloudEvent::Crash`]). What survives is what the scaler
 /// had written before the call and in the rest of that tick.
+///
+/// The cloud counts what a witness reads of it ([`Cloud::counters`]): each acquire the fake
+/// answered with no answer, a deferral or a refusal, and each machine it preempted while it
+/// ran. Whether a booted machine says hello starts as its pool says
+/// ([`ElasticPool::joined`]) and can be switched while the cell runs ([`Cloud::joins`]).
 #[derive(Clone)]
 pub struct Cloud {
     pool: ElasticPool,
@@ -42,6 +48,10 @@ pub struct Cloud {
     armed: Arc<AtomicBool>,
     /// Whether an acquire crashed the server since the node last asked.
     crashed: Arc<AtomicBool>,
+    /// What the cloud counted.
+    counters: Arc<Mutex<Counters>>,
+    /// Whether a machine that boots from now on says hello.
+    joins: Arc<AtomicBool>,
 }
 
 impl Cloud {
@@ -60,7 +70,43 @@ impl Cloud {
             record: Arc::default(),
             armed: Arc::default(),
             crashed: Arc::default(),
+            counters: Arc::default(),
+            joins: Arc::new(AtomicBool::new(pool.joined())),
         }
+    }
+
+    /// What the cloud counted so far: [`Counter::AcquireLost`],
+    /// [`Counter::AcquireThrottled`], [`Counter::AcquireRefused`] and
+    /// [`Counter::MachinePreempted`].
+    #[must_use]
+    pub fn counters(&self) -> Counters {
+        self.counted().clone()
+    }
+
+    /// Whether a machine that boots from now on says hello: the pool's
+    /// [`ElasticPool::joined`] until [`crate::Cell::machines_never_join`] switches it.
+    #[must_use]
+    pub fn joins(&self) -> bool {
+        self.joins.load(Ordering::SeqCst)
+    }
+
+    /// Makes the machines that boot from now on say hello (`true`) or never (`false`).
+    pub(crate) fn set_joins(&self, joins: bool) {
+        self.joins.store(joins, Ordering::SeqCst);
+    }
+
+    /// Makes the fake preempt machine `id` (`ElasticFake::preempt`), counting
+    /// [`Counter::MachinePreempted`] when the fake was running it.
+    pub(crate) fn preempt(&self, id: &HostRef) {
+        let running = self.fake.running().contains(id);
+        self.fake.preempt(id);
+        if running {
+            self.counted().bump(Counter::MachinePreempted);
+        }
+    }
+
+    fn counted(&self) -> MutexGuard<'_, Counters> {
+        self.counters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Makes the next acquire the server makes crash it, as a process that dies after the
@@ -194,6 +240,9 @@ impl CapacityProvider for Recording {
 
     fn acquire(&self, request: &AcquireRequest) -> Acquired {
         let answer = self.0.fake.acquire(request);
+        if let Some(counter) = counted(&answer) {
+            self.0.counted().bump(counter);
+        }
         self.0.note(CloudEvent::Acquire {
             offer: request.offer.id.clone(),
             zone: request.offer.zone.clone(),
@@ -249,6 +298,16 @@ impl CapacityProvider for Recording {
     /// `elastic`). A preempted machine is found by the scaler's next list.
     fn events(&self) -> Option<EventStream> {
         None
+    }
+}
+
+/// What the cloud counts of an acquire the fake answered `answer`: nothing for a machine.
+fn counted(answer: &Acquired) -> Option<Counter> {
+    match answer {
+        Acquired::Accepted { .. } => None,
+        Acquired::Unknown => Some(Counter::AcquireLost),
+        Acquired::Deferred { .. } => Some(Counter::AcquireThrottled),
+        Acquired::Refused(_) => Some(Counter::AcquireRefused),
     }
 }
 
@@ -369,5 +428,65 @@ mod tests {
             "the clock never goes back"
         );
         assert_eq!(cloud.calls_after(3).len(), 1);
+    }
+
+    /// Catches: an acquire answer counted as another (a lost answer as a refusal, a 429 as
+    /// a lost answer), and a machine counted as a fault.
+    #[test]
+    fn each_faulty_acquire_answer_is_counted_as_what_it_was() {
+        let held = Held {
+            id: HostRef("fake-0001".to_owned()),
+            acquire: "burst-1".to_owned(),
+            name: None,
+            offer: "sim_1x_a100".to_owned(),
+            zone: None,
+            status: js_elastic::HostStatus::Booting,
+            ends_unix_seconds: None,
+        };
+        let refusal = js_elastic::Refusal {
+            code: js_elastic::RefusalCode::Capacity,
+            reason: js_elastic::Reason::Api("scripted".to_owned()),
+        };
+        let cases = [
+            (
+                Acquired::Accepted {
+                    held,
+                    extras: Vec::new(),
+                },
+                None,
+            ),
+            (Acquired::Unknown, Some(Counter::AcquireLost)),
+            (
+                Acquired::Deferred {
+                    wait: Duration::from_secs(30),
+                },
+                Some(Counter::AcquireThrottled),
+            ),
+            (Acquired::Refused(refusal), Some(Counter::AcquireRefused)),
+        ];
+        for (answer, counter) in cases {
+            assert_eq!(counted(&answer), counter);
+        }
+    }
+
+    /// Catches: a preemption counted for a machine the cloud was not running (an id it does
+    /// not hold, or one already preempted), and a join switch that does not start as the
+    /// pool says or does not switch.
+    #[test]
+    fn a_preemption_is_counted_once_and_the_join_switch_switches() {
+        let cloud = cloud();
+        let foreign = offer(&cloud.pool().offers()[0], cloud.shape());
+        let id = cloud.fake().add_foreign(None, foreign);
+        cloud.preempt(&HostRef("fake-0099".to_owned()));
+        assert_eq!(cloud.counters().get(Counter::MachinePreempted), 0);
+        cloud.preempt(&id);
+        cloud.preempt(&id);
+        assert_eq!(cloud.counters().get(Counter::MachinePreempted), 1);
+        assert!(cloud.fake().running().is_empty());
+        assert!(cloud.joins());
+        cloud.set_joins(false);
+        assert!(!cloud.joins());
+        let silent = ElasticPool::ec2_like("burst", Vec::new(), 1).joins(false);
+        assert!(!Cloud::new(&silent, &Shape::gpu_host()).joins());
     }
 }

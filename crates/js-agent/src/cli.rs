@@ -106,10 +106,11 @@ pub struct Cli {
     /// Allowed only when at least one GPU is offered.
     #[arg(long, value_name = "CLASS")]
     pub gpu_class: Option<String>,
-    /// Accept a start whose job is not confined to a container (`isolation = host`). Not
-    /// available yet: no runtime of this agent launches a host job (crun and docker run
-    /// contained jobs only), and the server taints a host when it places one, so the agent
-    /// refuses this flag at start. Without it such a start creates nothing and is refused.
+    /// Accept a start whose job is not confined to a container (`isolation = host`): `crun`
+    /// runs it as root in the host's namespaces, with the host's `/` as its root, in a cgroup
+    /// of its own below its lease's. Taken with `--runtime crun` only; the agent then reports
+    /// `host-jobs`. The server taints a host for good when it places a host job: the machine
+    /// must be reimaged. Without it such a start creates nothing and is refused.
     #[arg(long)]
     pub allow_host_jobs: bool,
     /// A directory jobs may mount from, as `name=path`; the name is what a mount in a

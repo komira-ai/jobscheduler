@@ -613,7 +613,8 @@ impl Oci {
             .arg(limits.file_cap.to_string())
             .arg(limits.tail.to_string())
             .arg(limits.drain_grace.as_millis().to_string());
-        self.crun.prepare(&mut command);
+        // As the job user, or as the daemon for a host container (`Oci::crun_of`).
+        self.crun_of(spec).prepare(&mut command);
         let supervised = Supervised::spawn(command, spec.dir.clone(), READY, READY_WAIT)?;
         note_supervisor(&spec.dir, supervised.id());
         Ok(supervised)

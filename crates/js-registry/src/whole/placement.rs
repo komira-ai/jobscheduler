@@ -5,28 +5,24 @@ use std::collections::BTreeSet;
 use js_provider::{HostCapacity, RefusalCode, StartAck, StartSpec};
 use js_types::{Capabilities, HostId, Resources};
 
-use super::requests::{RequestKey, Requests};
 use crate::Presented;
 
 /// What decides whether some host could ever be given whole to a request.
 pub(crate) struct Asking<'a> {
     pub(crate) spec: &'a StartSpec,
-    pub(crate) key: &'a RequestKey,
     /// Every host the pool lists.
     pub(crate) hosts: &'a [HostCapacity],
     /// The hosts that reported a taint.
     pub(crate) tainted: &'a BTreeSet<HostId>,
-    /// The hosts a placer that keeps the request leaves out of its placements for the rest
-    /// of its life ([`crate::Placer::whole_record`]), beside those the registry's own
-    /// record bars.
+    /// The hosts the placer leaves out of the request's placements for the rest of its life
+    /// ([`crate::Placer::whole_record`]).
     pub(crate) for_life: &'a BTreeSet<HostId>,
 }
 
 /// Whether some listed host could ever be given whole to the request: it could hold it
-/// ([`could_hold`]) and is not barred for the request's life, by `requests` (the
-/// registry's records, `None` under a placer that keeps them) or by the placer. A busy,
-/// lost or reserved host counts as capable.
-pub(crate) fn capable(asking: &Asking<'_>, requests: Option<&Requests>) -> bool {
+/// ([`could_hold`]) and the placer does not bar it for the request's life. A busy, lost or
+/// reserved host counts as capable.
+pub(crate) fn capable(asking: &Asking<'_>) -> bool {
     let wanted = asking.spec.request();
     asking.hosts.iter().any(|host| {
         let holds = could_hold(
@@ -35,9 +31,7 @@ pub(crate) fn capable(asking: &Asking<'_>, requests: Option<&Requests>) -> bool 
             &wanted.capabilities,
             asking.tainted,
         );
-        let own = requests.is_some_and(|requests| requests.barred_for_life(asking.key, &host.host));
-        let barred = own | asking.for_life.contains(&host.host);
-        holds & !barred
+        holds & !asking.for_life.contains(&host.host)
     })
 }
 

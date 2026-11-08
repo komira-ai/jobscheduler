@@ -48,19 +48,19 @@ fn wait(fx: &Fixture, hosts: &[(&str, u64)], ms: u64) {
     }
 }
 
-fn pool(names: &[&'static str], engine: Placement) -> (Fixture, Vec<(&'static str, u64)>) {
+fn pool(names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
     let name = ProviderId::new("builders").unwrap();
     let settings = WholeNodeConfig {
         prepare_timeout_ms: TIMEOUT,
         ..WholeNodeConfig::dedicated(4)
     };
-    let config = PoolConfig::new(name, whole(), world_shape(), 4)
+    let config = PoolConfig::new(name, whole(), pool_shape(), 4)
         .with_whole_node(settings)
         .unwrap();
-    let fx = fixture_in(config, engine);
+    let fx = fixture_of(config);
     let hosts = names
         .iter()
-        .map(|name| (*name, fx.join_world(name)))
+        .map(|name| (*name, fx.join(name, "t")))
         .collect();
     (fx, hosts)
 }
@@ -68,8 +68,9 @@ fn pool(names: &[&'static str], engine: Placement) -> (Fixture, Vec<(&'static st
 /// A lease in use whose agent restarts and says hello after the lost window gets a whole
 /// prepare timeout from the hello: one millisecond short of it the lease is kept and no
 /// failure is counted, at it the lease is overdue.
-fn a_hello_gives_the_agent_a_whole_prepare_timeout(engine: Placement) {
-    let (fx, hosts) = pool(&["a"], engine);
+#[test]
+fn a_hello_gives_the_agent_a_whole_prepare_timeout() {
+    let (fx, hosts) = pool(&["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
     let mut ready = fx.heartbeat("a", hosts[0].1);
@@ -80,7 +81,7 @@ fn a_hello_gives_the_agent_a_whole_prepare_timeout(engine: Placement) {
     // In use for longer than a prepare timeout, then the agent goes away and comes back.
     wait(&fx, &hosts, 2 * TIMEOUT);
     fx.pass_grace();
-    fx.hello(&world_hello("a"), &cred("t")).unwrap();
+    fx.hello(&hello("a"), &cred("t")).unwrap();
     assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
     fx.registry.advance();
     assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
@@ -98,13 +99,14 @@ fn a_hello_gives_the_agent_a_whole_prepare_timeout(engine: Placement) {
 
 /// A hello from a host whose lease is committed but not yet ready leaves the commit time
 /// alone, so an agent that keeps restarting cannot postpone the prepare deadline.
-fn a_hello_on_a_committed_host_keeps_the_commit_time(engine: Placement) {
-    let (fx, _) = pool(&["a"], engine);
+#[test]
+fn a_hello_on_a_committed_host_keeps_the_commit_time() {
+    let (fx, _) = pool(&["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
     // The agent goes silent past the grace period and comes back.
     fx.pass_grace();
-    let epoch = fx.join_world("a");
+    let epoch = fx.join("a", "t");
     assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
     let gone = DEFAULT_GRACE_MS + 1;
     wait(&fx, &[("a", epoch)], TIMEOUT - gone - 1);
@@ -117,8 +119,3 @@ fn a_hello_on_a_committed_host_keeps_the_commit_time(engine: Placement) {
     let kept = fx.registry.request_record(&id()).unwrap();
     assert_eq!(kept.prepare_failures, 1);
 }
-
-crate::both!(
-    a_hello_gives_the_agent_a_whole_prepare_timeout,
-    a_hello_on_a_committed_host_keeps_the_commit_time,
-);

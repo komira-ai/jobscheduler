@@ -54,7 +54,10 @@ fn agent_registers_and_the_host_is_listed() {
         (host["state"].clone(), host["phase"].clone()),
         (json!("live"), json!("serving"))
     );
-    assert_eq!(host["capabilities"], json!({ "os": "macos" }));
+    assert_eq!(
+        host["capabilities"],
+        json!({ "arch": "arm64", "os": "macos" })
+    );
     assert_eq!(host["labels"], json!({ "rack": "r1" }));
 
     agent.elapse();
@@ -80,7 +83,10 @@ fn an_apple_gpu_host_is_admitted_and_listed() {
     agent.next_wait();
     let host = server.host("mac-gpu");
     assert_eq!(host["state"], "live");
-    assert_eq!(host["capabilities"], json!({ "os": "macos" }));
+    assert_eq!(
+        host["capabilities"],
+        json!({ "arch": "arm64", "os": "macos" })
+    );
     agent.stop();
 }
 

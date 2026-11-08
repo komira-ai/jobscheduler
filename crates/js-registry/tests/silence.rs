@@ -11,7 +11,7 @@ use std::time::Duration;
 use js_agent_wire::DEFAULT_GRACE_MS;
 use js_lease::{Clock, Timestamp};
 use js_provider::{Candidate, StartSpec};
-use js_registry::{DEFAULT_LOST_RETENTION_MS, MarkedTails, Placer};
+use js_registry::{DEFAULT_LOST_RETENTION_MS, MarkedTails, Placer, Registry, SequentialSessions};
 use js_types::HostId;
 use support::*;
 
@@ -64,9 +64,14 @@ impl Placer for Holding {
 /// once the placer holds nothing there.
 #[test]
 fn a_host_its_placer_holds_work_on_is_not_forgotten_for_silence() {
-    let fx = fixture(2);
     let placer = Arc::new(Holding(AtomicBool::new(true)));
-    fx.registry.set_placer(placer.clone());
+    let mut fx = fixture(2);
+    fx.registry = Registry::with_sessions(
+        config(2).booking_whole_memory(),
+        fx.clock.clone(),
+        SequentialSessions::new(),
+        placer.clone(),
+    );
     let epoch = fx.join("a", "t");
     let a = host("a");
     let silent = DEFAULT_GRACE_MS + DEFAULT_LOST_RETENTION_MS + 1;

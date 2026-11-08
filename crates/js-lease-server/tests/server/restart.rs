@@ -118,7 +118,6 @@ fn job_args(scratch: &Scratch, boot: &str) -> Vec<OsString> {
         ("--agent-token-file", tokens.into_os_string()),
         ("--agent-pool-config", pool.into_os_string()),
         ("--job-listen", "127.0.0.1:0".into()),
-        ("--placement", "js-sched".into()),
     ];
     for (flag, value) in flags {
         args.push(flag.into());

@@ -315,8 +315,7 @@ impl JobFront {
         Self::default()
     }
 
-    /// The factory of job fronts, for [`crate::Scenario::front`]: the default front of a
-    /// scenario.
+    /// The factory of job fronts: the front a scenario's cell gets.
     #[must_use]
     pub fn factory() -> FrontFactory {
         FrontFactory::new(|_| Box::new(JobFront::new()))

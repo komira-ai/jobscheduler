@@ -408,6 +408,27 @@ async fn a_completed_fetch_is_counted_and_a_failed_one_is_not() {
     assert_eq!(catalogs.fetches(&ProviderId::known("stranger-cloud")), 0);
 }
 
+/// Asserts that `Catalogs::fetched` names no fetch before the first, then the instant of
+/// the fetch that worked and the count of its offers; that a failed fetch after it moves
+/// neither; that reading it calls no provider; and that a provider the catalogs do not hold
+/// has none. Catches a fetch time taken from a failed attempt, a read that calls the
+/// provider, and another provider's catalog read.
+#[tokio::test]
+async fn the_fetch_time_and_offer_count_are_read_without_a_call() {
+    let cloud = Counting::new("fetched-cloud");
+    cloud.set(Ok(list_a()));
+    let catalogs = cloud.catalogs(HOUR, HOUR);
+    let id = cloud.id();
+    assert_eq!(catalogs.fetched(&id), None);
+    catalogs.refresh_due(t0()).await;
+    assert_eq!(catalogs.fetched(&id), Some((t0(), list_a().len())));
+    cloud.set(Err("the cloud is down"));
+    catalogs.refresh_due(after(t0(), HOUR_MS)).await;
+    assert_eq!(catalogs.fetched(&id), Some((t0(), list_a().len())));
+    assert_eq!(cloud.calls(), 2);
+    assert_eq!(catalogs.fetched(&ProviderId::known("stranger-cloud")), None);
+}
+
 /// The `cache-cloud` clouds of these tests, by the path of the key file that names them: a
 /// kind is a plain function, so a test leaves its cloud here for the kind to find.
 static CLOUDS: Mutex<BTreeMap<String, Arc<Counting>>> = Mutex::new(BTreeMap::new());

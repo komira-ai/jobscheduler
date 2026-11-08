@@ -538,7 +538,8 @@ pub(crate) fn open(
     let pools = Arc::new(
         pools
             .with_logs(logs)
-            .with_store_health(Arc::clone(&store_health)),
+            .with_store_health(Arc::clone(&store_health))
+            .with_catalogs(Arc::clone(cached.catalogs())),
     );
     let status = serves_status.then(|| Arc::clone(&pools));
     let shared = Arc::new(

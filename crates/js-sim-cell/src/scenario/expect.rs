@@ -2,8 +2,10 @@
 //! seed after the end check ([`super::Scenario::expect`]) or at a virtual time
 //! ([`super::Scenario::expect_at`]).
 //!
-//! Every statement reads what the cell observed (`launched_on.rs` and `held_after_runs.rs`
-//! hold the two that need more than a count).
+//! Every statement but the last two reads what the cell observed (`launched_on.rs` and
+//! `held_after_runs.rs` hold the two that need more than a count). The two from
+//! [`Expect::pool_tripped`] on read the elastic pool's cloud and its brake when they are
+//! judged (`cloud.rs`).
 
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ use crate::cell::Cell;
 use crate::observe::{ClientEvent, HowEnded, ItemId, ItemRecord};
 use crate::server::ServerNode;
 
+use super::cloud::{self, CloudFact};
 use super::{held_after_runs, launched_on};
 
 /// How the server's listing shows a host.
@@ -46,6 +49,7 @@ pub struct Expect(Wanted);
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Wanted {
     Seen(Seen),
+    Cloud(CloudFact),
 }
 
 /// A statement over what the cell observed.
@@ -120,12 +124,35 @@ impl Expect {
         Self(Wanted::Seen(Seen::HeldAfterRuns(item)))
     }
 
+    /// The server's scaler reads the brake of elastic pool `pool` tripped (`true`: it
+    /// launches nothing until an operator resets it) or not, when this is judged. A pool
+    /// that is not the cell's elastic pool is `no-pool`.
+    #[must_use]
+    pub fn pool_tripped(pool: &str, tripped: bool) -> Self {
+        Self(Wanted::Cloud(CloudFact::Tripped(pool.to_owned(), tripped)))
+    }
+
+    /// The cloud of elastic pool `pool` has launched exactly `count` machines for the
+    /// scheduler by the time this is judged, by the elastic fake: every machine it made
+    /// (`ElasticFake::launched`) but those added as another's
+    /// ([`crate::Cell::add_foreign_machine`]), whether it still runs or not. A pool that is
+    /// not the cell's elastic pool is `no-pool`.
+    #[must_use]
+    pub fn machines_launched(pool: &str, count: usize) -> Self {
+        Self(Wanted::Cloud(CloudFact::Launched(pool.to_owned(), count)))
+    }
+
     /// `None` when `cell` meets the statement; otherwise what it wanted and what it got,
     /// as `<statement>: wanted <w>, got <g>`.
     #[must_use]
     pub fn unmet(&self, cell: &Cell) -> Option<String> {
-        let Wanted::Seen(seen) = &self.0;
-        let (name, wanted, got) = observed(seen, cell);
+        let (name, wanted, got) = match &self.0 {
+            Wanted::Cloud(fact) => {
+                let [name, wanted, got] = cloud::judged(fact, cell);
+                (name, wanted, got)
+            }
+            Wanted::Seen(seen) => observed(seen, cell),
+        };
         (wanted != got).then(|| format!("{name}: wanted {wanted}, got {got}"))
     }
 }

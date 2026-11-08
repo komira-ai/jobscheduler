@@ -1,9 +1,10 @@
 //! Whole-node reservations across a restart. The registry owns the wait list, and the marks
-//! and the counts with it (under `--placement js-sched` the engine keeps the marks of the
-//! requests it queues, their back-offs, failed prepares and bars, and the registry
-//! writes the ledger from it); the lease file keeps them beside the leases, as the table's
-//! reservation ledger (`js-lease`), so a restart over the same file with `--boot resume`
-//! gets them back, under either placement (design `whole-node.md`, D55).
+//! and the counts with it (the placement engine keeps the marks of the requests it
+//! queues, their back-offs, failed prepares and bars, and the registry writes the ledger
+//! from it); the lease file keeps them beside the leases, as the table's reservation
+//! ledger (`js-lease`), so a restart over the same file with `--boot resume` gets them
+//! back, a file the removed registry placement wrote included (design `whole-node.md`,
+//! D55).
 //!
 //! - Each tick hands the table the registry's ledger when it changed since the last
 //!   hand-over ([`Handed`]), and the table writes it in the same atomic replace as the

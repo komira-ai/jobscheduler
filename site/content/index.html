@@ -47,7 +47,7 @@ js: refused: no-capable-host: no host and no catalog could ever serve the job
       <li><h3>A job is recorded before it is placed</h3><p>A client runs <code>js job submit</code> with an image pinned by digest and a wall limit above 0, and the server records the job as queued before it answers. The same id with the same job answers from the job the first submit made. <code>js job cancel</code> cancels a job.</p></li>
       <li><h3>An agent on every host</h3><p><code>js-agent</code> offers the host's CPU, memory and GPUs, heartbeats, and runs container jobs on Linux (through Docker, Podman or crun) and native jobs on a Mac.</p></li>
       <li><h3>A whole node, quiet, when asked</h3><p>A job that needs the whole host is placed with the whole host booked, and starts when its host's agent reports the host quiet. A host that holds such a job's mark takes no other job, except as backfill.</p></li>
-      <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits an action to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The server places jobs only under <code>--placement js-sched</code>, which keeps one scheduler for the life of the server and tells it of every hello and every accepted heartbeat with its load reading.</p></li>
+      <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits an action to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The server places every job with it, as the only placement; it keeps one scheduler for the life of the server and tells it of every hello and every accepted heartbeat with its load reading.</p></li>
     </ul>
     <p><a href="concepts.html">The concepts page</a> says how each of these works and where it stops.</p>
   </div>
@@ -63,10 +63,10 @@ js: refused: no-capable-host: no host and no catalog could ever serve the job
     <tr><td>Job API: submit, get, list, cancel; the <code>js</code> client; a bearer token; TLS</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Agents that register with a join token and run container jobs on Linux or native jobs on a Mac</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Pools of class <code>whole-node</code> or <code>gpu-host</code></td><td><span class="tag tag-ok">works today</span></td></tr>
-    <tr><td>The reservation and drain of a whole node for a queued job</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">for a job that needs the whole host, under <code>--placement js-sched</code></span></td></tr>
+    <tr><td>The reservation and drain of a whole node for a queued job</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">for a job that needs the whole host</span></td></tr>
     <tr><td>An elastic pool on Lambda Labs</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">launches nothing until the pool file says <code>live</code></span></td></tr>
-    <tr><td><code>js-sched</code> placing the jobs</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">only under <code>--placement js-sched</code>; the default is <code>registry</code></span></td></tr>
-    <tr><td>Placement by load, in the <code>js-sched</code> crate</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">used by the lease server only under <code>--placement js-sched</code></span></td></tr>
+    <tr><td><code>js-sched</code> placing the jobs</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the only placement; <code>--placement</code> is deprecated and does nothing</span></td></tr>
+    <tr><td>Placement by load, in the <code>js-sched</code> crate</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">used by the lease server for every job on a registered host</span></td></tr>
     <tr><td>A pool that books part of a host</td><td><span class="tag tag-planned">not built: refused when the pool file loads</span></td></tr>
     <tr><td>A token for each client of the job service</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">a client of the role <code>client</code> reads and cancels only its own jobs</span></td></tr>
     <tr><td>A token for each tenant of the host and pool routes</td><td><span class="tag tag-planned">not built: one shared token</span></td></tr>

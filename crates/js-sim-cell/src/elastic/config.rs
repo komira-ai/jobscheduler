@@ -90,17 +90,20 @@ pub(crate) struct Files<'a> {
 }
 
 /// The configuration file of a server whose one pool is `cloud`'s elastic pool: the lease
-/// file, the client token's file and the store's file of `files`, placing as `placement`
-/// (its `--placement` spelling), usage recording off, and booting `initialise` (which reads
+/// file, the client token's file and the store's file of `files`,
+/// usage recording off, and booting `initialise` (which reads
 /// the lease file, and the join tokens and the scaler's saved state from the store, when
 /// they are there, so a restart over the same files and store reads them too).
 ///
 /// The pool is of class `whole-node` and launches for real (`launch = "live"`); its
 /// spending caps are what `max_instances` machines of its dearest offer cost, an hour and a
 /// day, so they never refuse a launch the instance limit allows. It names no shared join
-/// token: only the one-time tokens of its launched machines register hosts.
+/// token: only the one-time tokens of its launched machines register hosts. A queued job
+/// waits for a machine two hours (`max_queue_wait`, the server's default being one), longer
+/// than the longest the elastic fault scenarios keep demand waiting through the cloud's
+/// cooldowns and its brake.
 #[must_use]
-pub(crate) fn text(cloud: &Cloud, files: &Files<'_>, placement: &str) -> String {
+pub(crate) fn text(cloud: &Cloud, files: &Files<'_>) -> String {
     let pool = cloud.pool();
     let dearest = pool.offers().iter().map(|offer| offer.cents_per_hour).max();
     let hour = dearest
@@ -121,7 +124,6 @@ pub(crate) fn text(cloud: &Cloud, files: &Files<'_>, placement: &str) -> String 
          advertise_url = {advertise}\n\
          max_lease_wall = \"2h\"\n\
          usage_off = true\n\
-         placement = {placement}\n\
          \n\
          [[pool]]\n\
          name = {name}\n\
@@ -133,6 +135,7 @@ pub(crate) fn text(cloud: &Cloud, files: &Files<'_>, placement: &str) -> String 
          min_host_lifetime = {lifetime}\n\
          max_age = {age}\n\
          launch = \"live\"\n\
+         max_queue_wait = \"2h\"\n\
          agent = {{ x86_64 = {{ url = {url}, sha256 = {sha} }} }}\n\
          provider = {{ kind = {kind} }}\n",
         state = quoted(&files.state.display().to_string()),
@@ -140,7 +143,6 @@ pub(crate) fn text(cloud: &Cloud, files: &Files<'_>, placement: &str) -> String 
         store = quoted(&files.store.display().to_string()),
         allow_sqlite = files.allow_sqlite,
         advertise = quoted(ADVERTISE_URL),
-        placement = quoted(placement),
         name = quoted(pool.name()),
         max = pool.max_instances(),
         hour = dollars(hour),
