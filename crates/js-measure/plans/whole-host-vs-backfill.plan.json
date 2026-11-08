@@ -1,0 +1,11 @@
+{
+  "parameter": "large_job_class",
+  "settings": ["steady-small-stream"],
+  "arms": [
+    { "label": "backfill", "control": true, "lease_class": "action" },
+    { "label": "whole-host" }
+  ],
+  "runs_per_arm": 20,
+  "warmups_per_arm": 1,
+  "seed": 17
+}
