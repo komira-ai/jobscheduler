@@ -45,6 +45,19 @@ pub const MOUNT: &str = r"var-lib-js\x2dagent-scratch.mount";
 pub const SCRATCH: &str = "/var/lib/js-agent/scratch";
 pub const SERVER: &str = "https://sched.example.org:7300";
 
+/// What psmisc's `fuser` (23.7) prints when it is given `--` (the start of it: its usage goes on):
+/// it takes no `--`, says it was given nothing to look for, and exits 1.
+pub const FUSER_NO_SPEC: &str = "No process specification given\nUsage: fuser [-fIMuvw] [-a|-s] [-4|-6] [-c|-m|-n SPACE]\n             [-k [-i] [-SIGNAL]] NAME...\n";
+
+/// The rules that make the `fuser` stand-in answer `--` as psmisc's does. They come before a
+/// test's own rules, so no test can make the stand-in take `--`.
+pub fn psmisc_fuser() -> Vec<String> {
+    vec![
+        rule("fuser", "-- *", 1, &esc(FUSER_NO_SPEC), &[]),
+        rule("fuser", "-m -- *", 1, &esc(FUSER_NO_SPEC), &[]),
+    ]
+}
+
 pub fn repo(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -339,7 +352,7 @@ impl Rig {
                 &format!("-n -o OPTIONS --mountpoint {SCRATCH}"),
                 "mount-options",
             ),
-            rule("fuser", &format!("-m -- {SCRATCH}"), 1, "", &[]),
+            rule("fuser", &format!("-m {SCRATCH}"), 1, "", &[]),
             ok("systemctl", "daemon-reload", ""),
             rule(
                 "systemctl",
@@ -371,7 +384,8 @@ impl Rig {
     /// Like `run`; with `small_files` the script may write files of 2 KiB at most (a full disk
     /// for anything bigger: the write fails, and the signal that would kill the writer is ignored).
     pub fn run_with(&self, args: &[&str], small_files: bool) -> Out {
-        let mut answers = self.front.clone();
+        let mut answers = psmisc_fuser();
+        answers.extend(self.front.iter().cloned());
         answers.extend(self.defaults());
         std::fs::write(self.shim.join("answers"), answers.join("\n") + "\n").expect("answers");
         // The program the script runs by an absolute path under the root is a stand-in as well.

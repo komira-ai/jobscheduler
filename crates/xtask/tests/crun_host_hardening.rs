@@ -161,18 +161,75 @@ fn a_bind_mount_or_a_mount_below_the_scratch_directory_is_refused() {
 #[test]
 fn a_fuser_that_fails_is_not_taken_for_a_mount_nothing_holds() {
     let mut rig = Rig::new("fuser-fails");
-    rig.rule(rule("fuser", &format!("-m -- {SCRATCH}"), 2, "", &[]));
+    rig.rule(rule("fuser", &format!("-m {SCRATCH}"), 2, "", &[]));
     rig.expect_refused("cannot tell");
 
     let mut rig = Rig::new("fuser-complains");
     rig.rule(rule(
         "fuser",
-        &format!("-m -- {SCRATCH}"),
+        &format!("-m {SCRATCH}"),
         1,
         "fuser: cannot stat\\n",
         &[],
     ));
     rig.expect_refused("cannot tell");
+}
+
+/// The `fuser` stand-in answers as psmisc's does: `--` is a usage error (exit 1 with the usage
+/// text, which the script must not read as "nothing holds it"), and a plain `-m PATH` that nothing
+/// holds is exit 1 with no output.
+#[test]
+fn the_fuser_stand_in_refuses_a_double_dash_as_psmisc_does() {
+    let rig = Rig::new("fuser-stand-in");
+    let mut answers = psmisc_fuser();
+    answers.extend(rig.defaults());
+    std::fs::write(rig.shim.join("answers"), answers.join("\n") + "\n").expect("answers");
+    let fuser = |args: &[&str]| {
+        let out = std::process::Command::new(rig.shim.join("fuser"))
+            .args(args)
+            .env_clear()
+            .env("HOST_SHIM_DIR", &rig.shim)
+            .envs(profile_env())
+            .output()
+            .expect("run");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let usage = (Some(1), FUSER_NO_SPEC.to_owned());
+    assert_eq!(fuser(&["-m", "--", SCRATCH]), usage);
+    assert_eq!(fuser(&["--", SCRATCH]), usage);
+    assert_eq!(fuser(&["-m", SCRATCH]), (Some(1), String::new()));
+}
+
+/// On a host whose `fuser` is psmisc's, the scratch step passes when nothing holds the mount: the
+/// dry run plans it and the apply unmounts and mounts the filesystem again. The script asks
+/// `fuser -m PATH`, with no `--`.
+#[test]
+fn the_scratch_step_passes_with_psmiscs_fuser_when_nothing_holds_the_mount() {
+    let rig = Rig::new("fuser-psmisc");
+    let dry = rig.run(
+        &rig.file_args()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(dry.code, 0, "{}", dry.text);
+    assert!(!dry.text.contains("REFUSE"), "{}", dry.text);
+    let out = rig.apply();
+    assert_eq!(out.code, 0, "{}", out.text);
+    let calls = rig.calls();
+    let fusers: Vec<&String> = calls.iter().filter(|c| c.starts_with("fuser ")).collect();
+    let want = format!("fuser -m {SCRATCH}");
+    assert!(
+        !fusers.is_empty() && fusers.iter().all(|c| **c == want),
+        "{fusers:?}"
+    );
+    assert!(
+        index(&calls, &want) < index(&calls, &format!("systemctl stop {MOUNT}")),
+        "{calls:?}"
+    );
 }
 
 // --- the mount unit ---------------------------------------------------------------------------
