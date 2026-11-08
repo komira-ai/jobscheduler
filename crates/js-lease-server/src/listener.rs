@@ -626,3 +626,7 @@ mod tests {
         assert!(call.await.unwrap().is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "listener_answer_tests.rs"]
+mod answer_tests;

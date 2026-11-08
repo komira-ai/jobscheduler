@@ -38,7 +38,7 @@ use tonic::{Code, Status};
 use crate::agents_support::{JOIN, hello_body, session, start_agents};
 use crate::config_support::{PoolText, clock, file, kinds, quote, quoted, server};
 use crate::job_listen::job_args;
-use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request};
+use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request, unanswered};
 use crate::tls::{connector, test_identity, tls_request};
 
 /// The gateway's answer to `GetJob` of a job the store does not hold.
@@ -271,10 +271,7 @@ async fn the_job_port_speaks_tls_over_the_reloaded_pair() {
     assert_eq!(status.code(), Code::NotFound);
     let reply = tls_request(job, &connector(&cert), "GET", GET_JOB, Some(TOKEN), None).await;
     assert_eq!((reply.status, reply.body.as_str()), (404, UNKNOWN_JOB_BODY));
-    assert_eq!(
-        request(job, "GET", GET_JOB, Some(TOKEN), None).await.status,
-        0
-    );
+    assert_eq!(unanswered(job, "GET", GET_JOB).await.status, 0);
 
     let (renewed, renewed_key) = test_identity();
     h.scratch.write("test-only-cert.pem", &renewed, 0o644);
