@@ -105,15 +105,22 @@ impl QueueTrail {
         *self != before
     }
 
+    /// Applies `notes` in order at `at` ([`QueueTrail::apply`]), and whether the trail is now
+    /// other than it was.
+    pub fn apply_all(&mut self, notes: &[QueueNote], at: StoreTime) -> bool {
+        let before = self.clone();
+        for note in notes {
+            self.apply(note, at);
+        }
+        *self != before
+    }
+
     /// Whether applying `notes` in order would change this trail: what a pass checks against
     /// the job it read, so a job whose status stands is not read or written again.
     #[must_use]
     pub fn changed_by(&self, notes: &[QueueNote]) -> bool {
-        let mut trail = self.clone();
         let at = self.since.unwrap_or_default();
-        notes
-            .iter()
-            .fold(false, |changed, note| trail.apply(note, at) | changed)
+        self.clone().apply_all(notes, at)
     }
 
     /// A trail as a row holds it.

@@ -37,17 +37,19 @@ pub(crate) mod job_queue_tag {
 
 use job_queue_tag as t;
 
-/// The byte of `code`: its number in the job service's `QueueStatusCode`.
-fn code_byte(code: QueueCode) -> u8 {
-    match code {
-        QueueCode::Unspecified => 0,
+/// The value of `code`, its number in the job service's `QueueStatusCode` as one byte; none
+/// for unspecified, which is not written.
+fn code_value(code: QueueCode) -> Option<Vec<u8>> {
+    let byte = match code {
+        QueueCode::Unspecified => return None,
         QueueCode::WaitingForCapacity => 1,
         QueueCode::WaitingForWholeHost => 2,
         QueueCode::QuotaBackoff => 3,
         QueueCode::FailingOver => 4,
         QueueCode::Placed => 5,
         QueueCode::WaitingForMachine => 6,
-    }
+    };
+    Some(vec![byte])
 }
 
 /// The code of a byte; one this build does not know is unspecified.
@@ -128,9 +130,7 @@ fn events_of(tag: u16, value: Vec<u8>) -> Result<Vec<JobEvent>, DecodeError> {
 
 /// Writes the queue fields of `trail` that are not at their default.
 pub(super) fn put_job(row: &mut Writer, trail: &QueueTrail) {
-    if trail.code() != QueueCode::Unspecified {
-        row.put(t::CODE, [code_byte(trail.code())]);
-    }
+    row.put_opt(t::CODE, code_value(trail.code()));
     if !trail.detail().is_empty() {
         row.put(t::DETAIL, text(trail.detail()));
     }

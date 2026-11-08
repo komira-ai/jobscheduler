@@ -38,11 +38,27 @@ set on the events that name a host: a placement and a requeue.
 | `QUOTA_BACKOFF` | 3 | An acquire for the job was refused for quota: its instance type is passed over in that region until the time the detail gives. |
 | `FAILING_OVER` | 4 | An acquire for the job was refused for capacity: pass 2 asks the next zone, offer or provider. |
 | `PLACED` | 5 | The job was placed on a host. |
+| `WAITING_FOR_MACHINE` | 6 | A machine was launched for the job, and the job waits for it to join. |
 
 The server writes only these values. A later release may append values; it never renumbers or reuses one. A reader that meets a
 value it does not know reads it as `UNSPECIFIED`, and so does the store (section 5).
 
-### 1.2 What a job past its queue shows
+### 1.2 `JobEventKind`
+
+| Value | Number | Appended when |
+| --- | --- | --- |
+| `UNSPECIFIED` | 0 | Never written: what a reader reads a value it does not know as. |
+| `WAITING_FOR_CAPACITY` | 1 | The job began to wait for room. |
+| `WAITING_FOR_WHOLE_HOST` | 2 | The job began to wait for a whole host. |
+| `QUOTA_BACKOFF` | 3 | A machine for the job was refused for quota (every refusal). |
+| `FAILING_OVER` | 4 | A machine for the job was refused for capacity (every refusal). |
+| `PLACED` | 5 | The job was placed; `host_id` names the host. |
+| `REQUEUED` | 6 | A failed whole-host prepare sent the job back; `host_id` names the host. |
+| `WAITING_FOR_MACHINE` | 7 | The job began to wait for a machine launched for it. |
+
+The same rule holds: values are appended, never renumbered, and an unknown one reads as `UNSPECIFIED`.
+
+### 1.3 What a job past its queue shows
 
 A placed, starting or running job shows `PLACED`. So does a job that ended after it was placed. A job that ended without
 being placed has its status left out: a code such as `WAITING_FOR_CAPACITY` would be false once the job is no longer queued.
@@ -52,9 +68,10 @@ there to read.
 ## 2. Who sets the fields, and from what
 
 The fields are written by one writer: the placement pass of the engine (`SchedPlacer::place_jobs_with`), through the job store
-(`js-jobs`). The one exception is the requeue after a failed whole-host prepare. The time pass of the tick
-(`job_pass.rs`, through `job_whole::expire_prepares`) moves the job back to queued, and the transaction that does so writes the
-status the engine decided for it (`FailedPrepare::queue`).
+(`js-jobs`). The one exception is the requeue after a failed whole-host prepare. The job goes back to queued in
+`job_whole.rs`, when its prepare runs out of time (the time pass of the tick, `job_pass.rs`) or its host refuses the prepare (a
+heartbeat). The transaction that requeues it writes the status the engine decided for it in `failed_prepare`
+(`FailedPrepare::queue`).
 
 What to write is decided by a pure function, `js_sched::queue_status::note`. It takes the outcome a pass reached for a job and
 the job's current code, and returns a `QueueNote`: the code, the detail, the event to append (if any), the host, and whether this
@@ -69,20 +86,26 @@ The outcomes (`js_sched::queue_status::Outcome`):
 | `WholeHost { emptying }` | pass 1: a whole-host job was not committed | `WAITING_FOR_WHOLE_HOST` | on a code change | no |
 | `Refused(Refused)`, capacity | pass 2: an acquire made for the job's request was refused for capacity | `FAILING_OVER` | `FAILING_OVER`, every time | yes |
 | `Refused(Refused)`, quota | pass 2: as above, for quota | `QUOTA_BACKOFF` | `QUOTA_BACKOFF`, every time | yes |
-| `Launched { machine }` | pass 2: a machine was launched for the job's request | `WAITING_FOR_CAPACITY` | on a code change | no |
+| `Launched { machine }` | pass 2: a machine was launched for the job's request | `WAITING_FOR_MACHINE` | on a code change | no |
 | `Placed { host }` | the placement commit | `PLACED` | `PLACED`, with the host | yes |
 | `Requeued { host }` | a failed whole-host prepare sent the job back | `WAITING_FOR_WHOLE_HOST` | `REQUEUED`, with the host | no |
 
 Two rules join pass 1 and pass 2:
 
-- **A pass-2 reason outlives "no room".** Pass 1 sees every queued job that it placed nowhere as waiting for room. When the job
-  already shows `QUOTA_BACKOFF` or `FAILING_OVER`, that is the better reason, so `Waiting` leaves it as it is. It changes when the
-  job is placed, when a machine is launched for it, or when another refusal comes.
+- **A pass-2 reason outlives "nothing is free".** Pass 1 sees every queued job that it placed nowhere as waiting for room, and a
+  whole-host job it did not commit as waiting for a whole host. When the job already shows `QUOTA_BACKOFF`, `FAILING_OVER` or
+  `WAITING_FOR_MACHINE`, that is the better reason, so `Waiting`, and `WholeHost` with no host being emptied, leave it as it is.
+  It changes when the job is placed, when a host is emptied or a machine is launched for it, or when another refusal comes. So a
+  pass-2 code stands until pass 2 or a placement changes it: a job whose quota backoff ended and that pass 2 does not try again
+  keeps showing `QUOTA_BACKOFF`, with the time it began.
 - **Pass 2 hands its outcomes to pass 1 and writes nothing.** The scaler runs on its own task. After each step it maps each
   refusal (`Refused::request`, new) and each launch to the job of its request, and hands them to the placer
   (`SchedPlacer::note_outcomes`). The next placement pass takes them in queue order before its own outcome for the job. So no
   second writer ever races the placement commit for a job's row. A job whose request id also names a lease request has no pass-2
   outcome, because the scaler does not map such a request to a job.
+
+Within one pass the outcomes are decided in order, each against the code the ones before it left
+(`js_sched::queue_status::notes`): what pass 2 told since the last pass, in the order it came, then the pass's own outcome.
 
 A job whose constraints are no platform requirements, and a whole-host job that runs on the host itself, are not walked by
 pass 1, so pass 1 records nothing for them. They keep `UNSPECIFIED` unless pass 2 says something.

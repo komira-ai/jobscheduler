@@ -199,9 +199,26 @@ fn changed_by_tells_whether_notes_would_change_the_trail() {
     trail.apply(&first, at(7));
     let before = trail.clone();
     let same = note(QueueCode::WaitingForCapacity, "room", None);
-    assert!(!trail.changed_by(&[same.clone()]));
+    assert!(!trail.changed_by(std::slice::from_ref(&same)));
     assert!(!trail.changed_by(&[]));
     assert!(trail.changed_by(&[same, note(QueueCode::WaitingForCapacity, "other", None)]));
     assert!(trail.changed_by(&[refused(1)]));
     assert_eq!(trail, before, "nothing was applied");
+}
+
+/// Applying several notes says whether the trail ended other than it was: a note undone by the
+/// next one is no change, and nothing to apply is none.
+#[test]
+fn apply_all_compares_the_trail_before_and_after() {
+    let mut trail = QueueTrail::default();
+    let first = note(
+        QueueCode::WaitingForCapacity,
+        "room",
+        Some(JobEventKind::WaitingForCapacity),
+    );
+    assert!(trail.apply_all(std::slice::from_ref(&first), at(1)));
+    let other = note(QueueCode::WaitingForCapacity, "other", None);
+    let back = note(QueueCode::WaitingForCapacity, "room", None);
+    assert!(!trail.apply_all(&[other, back], at(2)));
+    assert!(!trail.apply_all(&[], at(3)));
 }

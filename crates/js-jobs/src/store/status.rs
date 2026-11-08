@@ -32,10 +32,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
         let now = self.store.now();
         let mut noted = job.clone();
-        let changed = notes.iter().fold(false, |changed, note| {
-            noted.queue.apply(note, now) | changed
-        });
-        if !changed {
+        if !noted.queue.apply_all(notes, now) {
             return Ok(None);
         }
         let txn = put_job(Txn::new(), Some(&job), &noted, Cond::Version(version))?;

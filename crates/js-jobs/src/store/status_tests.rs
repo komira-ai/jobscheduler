@@ -177,7 +177,7 @@ fn a_placement_applies_its_notes_in_its_own_transaction() {
 }
 
 /// A requeued whole-host job takes its note in the requeue's transaction; a terminal failed
-/// prepare takes none, and its placed status and events stay.
+/// prepare, which the engine gives no note, keeps its placed status and events.
 #[test]
 fn a_requeue_applies_its_note_and_a_terminal_failure_keeps_the_trail() {
     let rig = rig(&fake());
@@ -192,7 +192,7 @@ fn a_requeue_applies_its_note_and_a_terminal_failure_keeps_the_trail() {
         failed_prepares: 1,
         prepare_bars: BTreeMap::new(),
         terminal,
-        queue: Some(requeued.clone()),
+        queue: (!terminal).then(|| requeued.clone()),
     };
     let mut outcomes = Vec::new();
     for (text, terminal) in [("again", false), ("over", true)] {

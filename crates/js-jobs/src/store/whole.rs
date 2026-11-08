@@ -55,7 +55,8 @@ pub struct FailedPrepare {
     /// [`StartFailure::ExclusiveNotReady`] instead of going back to queued.
     pub terminal: bool,
     /// The queue note the engine decided for a job that goes back to queued, applied to its
-    /// queue status in the same transaction; `None` for a terminal one, or for none.
+    /// queue status in the same transaction when there is one; the engine gives none for a
+    /// terminal failure, whose job keeps the status of its placement.
     pub queue: Option<QueueNote>,
 }
 
@@ -145,9 +146,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             placed_at: Some(now),
             ..job.clone()
         };
-        for note in &placement.queue {
-            placed.queue.apply(note, now);
-        }
+        placed.queue.apply_all(&placement.queue, now);
         let txn = put_job(Txn::new(), Some(&job), &placed, Cond::Version(job_version))?;
         let earlier = earlier.as_ref().map(|(record, _)| record);
         let txn = put_allocation(txn, earlier, &allocation, allocation_cond)?;
@@ -196,9 +195,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             prepare_bars,
             ..job.clone()
         };
-        if let Some(note) = queue.filter(|_| !terminal) {
-            counted.queue.apply(&note, now);
-        }
+        counted.queue.apply_all(queue.as_slice(), now);
         let after = if terminal {
             let end = JobEnd::FailedToStart(StartFailure::ExclusiveNotReady);
             ended(counted, end, now, self.retention)

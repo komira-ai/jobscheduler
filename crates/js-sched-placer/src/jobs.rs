@@ -57,6 +57,16 @@
 //!    ([`Engine::job_failed`]): nothing is booked, the job stays queued and the next pass
 //!    places it. A job that books the whole host and runs on the host itself is not marked or
 //!    committed by the whole-host pass: it stays queued.
+//! 6. **Records why each job waits** (`docs/design/queue-status.md`): what pass 2 told of a
+//!    job since the last pass ([`SchedPlacer::note_outcomes`]), then the pass's own outcome
+//!    for it, decided by [`js_sched::queue_status::notes`] against the code the job showed.
+//!    A placement's notes ride in its commit ([`Placement::queue`]); a job the walk placed
+//!    nowhere waits for capacity, and a whole-host job that was not committed waits for a
+//!    whole host, naming the host its mark holds. A job whose status the notes would not
+//!    change is not written ([`js_jobs::QueueTrail::changed_by`]); the others are written
+//!    with [`js_jobs::JobStore::note_queue`], and one that fails is logged and counted and
+//!    written by a later pass. The pass is the one writer of a job's queue status: pass 2
+//!    writes none.
 //!
 //! The start rides on the host's next heartbeat reply, built from the job table
 //! (the server's `per_job`): so the server's [`JobStarts`] hands no start on (it only collects
@@ -119,6 +129,10 @@ fn is_fenced(error: &JobStoreError) -> bool {
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
 /// none is a lease of the registry's (term 1) or one taken up (term 0).
 pub const JOB_TERM: u64 = 2;
+
+/// A placement the walk decided: the job, its host, what it books there and what its commit
+/// writes beside the booking ([`Engine::walk_jobs`]).
+pub type Decided = (JobId, HostId, Booked, Placement);
 
 /// A job allocation the engine holds.
 #[derive(Debug, Clone)]
@@ -301,7 +315,7 @@ impl Engine {
         queued: &[JobRecord],
         open: &BTreeMap<HostId, OpenHost>,
         now: FarmTime,
-    ) -> (Vec<(JobId, HostId, Booked, Placement)>, Vec<(JobId, bool)>) {
+    ) -> (Vec<Decided>, Vec<(JobId, bool)>) {
         let nodes: BTreeMap<HostId, (super::Node, &OpenHost)> = open
             .iter()
             .filter_map(|(host, offer)| {
