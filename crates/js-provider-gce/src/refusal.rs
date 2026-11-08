@@ -10,7 +10,7 @@ use crate::error::ApiError;
 const NO_CREDENTIAL: &str = "NoCredential";
 
 /// The refusals: a reason or code and the constant it is.
-const TABLE: [(&str, RefusalCode); 7] = [
+const TABLE: [(&str, RefusalCode); 8] = [
     // The zone has no capacity for the machine type now (zone operation error codes,
     // Compute Engine "Troubleshooting resource availability errors").
     ("ZONE_RESOURCE_POOL_EXHAUSTED", RefusalCode::Capacity),
@@ -21,6 +21,8 @@ const TABLE: [(&str, RefusalCode); 7] = [
     // The project's limits: instances, CPUs, accelerators and addresses all answer this
     // code, the metric named only in the message.
     ("QUOTA_EXCEEDED", RefusalCode::Quota),
+    // The same refused as the insert's own answer (HTTP 403 `quotaExceeded`).
+    ("quotaExceeded", RefusalCode::Quota),
     // The request does not fit: a field the cloud refuses (a machine type that cannot run
     // the image's architecture among them), and an image, machine type, network or zone
     // the project does not have (operation codes), or the same refused as the insert's own
@@ -36,7 +38,8 @@ const TABLE: [(&str, RefusalCode); 7] = [
 ///
 /// - `ZONE_RESOURCE_POOL_EXHAUSTED`, `ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS`: refused,
 ///   [`RefusalCode::Capacity`]; the engine falls through to its next option.
-/// - `QUOTA_EXCEEDED`: refused, [`RefusalCode::Quota`]; the engine passes over the type.
+/// - `QUOTA_EXCEEDED`, `quotaExceeded`: refused, [`RefusalCode::Quota`]; the engine passes
+///   over the type.
 /// - `INVALID_FIELD_VALUE`, `RESOURCE_NOT_FOUND`, `invalid`, `notFound`: refused,
 ///   [`RefusalCode::Shape`], a configuration error.
 /// - [`ApiError::Denied`] (HTTP 401 and 403 that are not a rate limit: `forbidden`,

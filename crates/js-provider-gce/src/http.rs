@@ -10,10 +10,10 @@
 //! [`crate::launch`]; a field the documentation says is there and is not makes the call
 //! [`ApiError::Unreadable`]. A failure is told by the reason of the cloud's error answer
 //! and by nothing else; the cloud's message is never kept. HTTP 401 is always
-//! [`ApiError::Denied`], HTTP 403 is denied unless the reason is a throttle, and HTTP 429
-//! is a throttle. An error answer with no reason is [`ApiError::Unreadable`], a transport
-//! that timed out is [`ApiError::Timeout`] and any other transport failure is
-//! [`ApiError::Transport`].
+//! [`ApiError::Denied`], HTTP 403 is denied unless the reason is a throttle or
+//! `quotaExceeded` (a refusal), and HTTP 429 is a throttle. An error answer with no reason
+//! is [`ApiError::Unreadable`], a transport that timed out is [`ApiError::Timeout`] and any
+//! other transport failure is [`ApiError::Transport`].
 //!
 //! **Pages.** A list is read page by page under one call. A page that fails fails the
 //! call, and a token the cloud repeats is [`ApiError::Incomplete`]: the walk never ends
@@ -69,6 +69,11 @@ const UNAUTHENTICATED: &str = "UNAUTHENTICATED";
 
 /// The reason of a 403 that carries no reason of its own.
 const FORBIDDEN: &str = "forbidden";
+
+/// The reason of an answer that says a limit of the project is used up (the standard error
+/// reasons of Google's JSON APIs: `quotaExceeded`, domain `usageLimits`, at HTTP 403). It
+/// is a refusal whatever the status, never a denial: the credential may make the call.
+const QUOTA_EXCEEDED: &str = "quotaExceeded";
 
 /// The client of the port over a transport. It reads the clock only to know when its
 /// access token runs out.
@@ -212,8 +217,9 @@ fn error_reason(body: &[u8]) -> Option<String> {
 }
 
 /// The error an answer that is not a success is. HTTP 401 is always a denial; otherwise a
-/// throttle reason is a throttle whatever the status, HTTP 429 is a throttle, 403 is a
-/// denial, and any other status is told by the reason. The message of the answer is never kept.
+/// throttle reason is a throttle whatever the status, HTTP 429 is a throttle, a 403 is a
+/// denial unless its reason is `quotaExceeded`, and any other answer is told by the reason.
+/// The message of the answer is never kept.
 fn refusal(status: u16, body: &[u8]) -> ApiError {
     let reason = error_reason(body);
     let answered = reason.as_deref().map(ApiError::answered);
@@ -226,6 +232,7 @@ fn refusal(status: u16, body: &[u8]) -> ApiError {
         (429, _) => ApiError::Throttled {
             reason: ErrorReason::new(RATE_LIMIT),
         },
+        (403, Some(error)) if reason.as_deref() == Some(QUOTA_EXCEEDED) => error,
         (403, _) => ApiError::Denied {
             reason: reason_or(FORBIDDEN),
         },

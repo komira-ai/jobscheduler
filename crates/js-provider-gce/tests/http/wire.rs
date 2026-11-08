@@ -76,7 +76,7 @@ fn an_error_answer_is_told_by_its_reason() {
 /// Asserts that HTTP 401 is always a denial, with the answer's reason when it has one
 /// (`authError`, or the `error.status`) and `UNAUTHENTICATED` when it has none or the body
 /// is not JSON; and that HTTP 403 is a denial with the answer's reason, or `forbidden` when
-/// it has none. It catches a rejected credential that is read as a refusal the scheduler
+/// it has none (a 403 `quotaExceeded` is the one refusal, asserted apart). It catches a rejected credential that is read as a refusal the scheduler
 /// might retry.
 #[test]
 fn a_401_and_a_403_are_denials() {
