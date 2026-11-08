@@ -308,10 +308,11 @@ async fn other_start_refusals_name_their_flag() {
 /// `--token-file`, instead of the start waiting for a writer that never comes.
 #[test]
 fn a_named_pipe_as_token_file_is_refused() {
-    use rustix::fs::{CWD, FileType, Mode, mknodat};
+    use nix::sys::stat::Mode;
     let scratch = Scratch::new("token_fifo");
     let pipe = scratch.path("pipe");
-    mknodat(CWD, &pipe, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+    // mkfifo, not rustix's mknodat, which rustix has on Linux only.
+    nix::unistd::mkfifo(&pipe, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
     let args = replace(base_args(&scratch), "--token-file", pipe);
     assert_eq!(flag_of(config(args)), "--token-file");
 }

@@ -8,7 +8,6 @@ use std::error::Error as _;
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::AsFd;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
@@ -17,8 +16,8 @@ use js_update_hook::{
     fd_stat, peek,
 };
 use state_support::{
-    Note, NoteInvalid, ROOT_0700, TestReason, as_root, cell, dir_with_mode, failing_at, fifo, open,
-    rooted, seeing,
+    Note, NoteInvalid, ROOT_0700, TestReason, as_root, cell, dir_with_mode, failing_at, fifo,
+    fifo_reader, open, rooted, seeing,
 };
 
 /// Whether a holder other than the step can take the directory's lock now.
@@ -565,8 +564,10 @@ fn a_directory_held_elsewhere_refuses_the_step_before_anything_is_made_in_it() {
     assert_eq!(
         error.to_string(),
         format!(
-            "cannot lock {}: Resource temporarily unavailable (os error 11)",
-            tmp.path().display()
+            "cannot lock {}: {}",
+            tmp.path().display(),
+            // EWOULDBLOCK is 11 on Linux and 35 on Darwin: the platform's own text.
+            io::Error::from(rustix::io::Errno::WOULDBLOCK)
         )
     );
     assert!(!tmp.path().join(LOCK_FILE).exists());
@@ -642,13 +643,7 @@ fn a_lock_file_that_is_not_a_regular_file_fails_the_step_and_releases_the_direct
             }
             _ => {
                 fifo(&lock);
-                reader = Some(
-                    File::options()
-                        .read(true)
-                        .custom_flags(0o4000)
-                        .open(&lock)
-                        .unwrap(),
-                );
+                reader = Some(fifo_reader(&lock));
             }
         }
         let error = open(tmp.path()).unwrap_err();

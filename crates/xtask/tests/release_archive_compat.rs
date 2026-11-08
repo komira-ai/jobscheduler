@@ -35,11 +35,35 @@ const COMMIT_TIME: u64 = 1_790_000_000;
 /// workflow spells them; [`archive_with_gzip`] runs the same with the variables filled in.
 const WORKFLOW_ARCHIVE_OPTIONS: &str = r#"--sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz""#;
 
+/// The GNU tar the release workflow archives with: `gtar` when it is on `PATH` (a Mac's
+/// `/usr/bin/tar` is bsdtar, and Homebrew's GNU tar is `gtar`), else `tar`. Fails, naming the
+/// need, when neither is GNU tar.
+fn gnu_tar() -> &'static str {
+    static PROGRAM: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    PROGRAM.get_or_init(|| {
+        let is_gnu = |program: &str| {
+            Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("GNU tar"))
+        };
+        if is_gnu("gtar") {
+            "gtar"
+        } else {
+            assert!(
+                is_gnu("tar"),
+                "GNU tar is needed: neither `gtar` nor `tar` on PATH is GNU tar (on a Mac: brew install gnu-tar)"
+            );
+            "tar"
+        }
+    })
+}
+
 /// `tar -C <stage> --sort=name --mtime=@<t> --owner=0 --group=0 --numeric-owner -cf - <name> |
 /// gzip -n`, as the release workflow's build step runs it (gzip with no name or time is what
 /// flate2 writes).
 fn archive(stage: &Path, name: &str, out: &Path) -> PathBuf {
-    let tarred = Command::new("tar")
+    let tarred = Command::new(gnu_tar())
         .arg("-C")
         .arg(stage)
         .args([
@@ -53,7 +77,7 @@ fn archive(stage: &Path, name: &str, out: &Path) -> PathBuf {
             name,
         ])
         .output()
-        .expect("tar");
+        .expect("GNU tar");
     assert!(tarred.status.success(), "{tarred:?}");
     let file = out.join(format!("{name}.tar.gz"));
     let mut gz = flate2::write::GzEncoder::new(
@@ -68,24 +92,24 @@ fn archive(stage: &Path, name: &str, out: &Path) -> PathBuf {
 /// `tar -xzf <archive> -C <dir>`: what a host runs; the directory it unpacked to.
 fn unpack(archive: &Path, into: &Path) -> PathBuf {
     std::fs::create_dir_all(into).expect("into");
-    let out = Command::new("tar")
+    let out = Command::new(gnu_tar())
         .arg("-xzf")
         .arg(archive)
         .arg("-C")
         .arg(into)
         .output()
-        .expect("tar");
+        .expect("GNU tar");
     assert!(out.status.success(), "{out:?}");
     into.to_owned()
 }
 
 /// What `tar -tzf` lists.
 fn listed(archive: &Path) -> Vec<String> {
-    let out = Command::new("tar")
+    let out = Command::new(gnu_tar())
         .arg("-tzf")
         .arg(archive)
         .output()
-        .expect("tar");
+        .expect("GNU tar");
     assert!(out.status.success(), "{out:?}");
     String::from_utf8(out.stdout)
         .expect("utf-8")
@@ -177,7 +201,7 @@ fn a_new_archive_has_the_members_of_a_previous_releases_archive() {
 /// `tar -C <stage> --sort=name --mtime=@COMMIT_TIME --owner=0 --group=0 --numeric-owner -cf -
 /// <name> | gzip -n`, run from `cwd`: the workflow's line, with the real `gzip`. The bytes made.
 fn archive_with_gzip(stage: &Path, name: &str, cwd: &Path) -> Vec<u8> {
-    let mut tar = Command::new("tar")
+    let mut tar = Command::new(gnu_tar())
         .current_dir(cwd)
         .arg("-C")
         .arg(stage)
@@ -193,14 +217,14 @@ fn archive_with_gzip(stage: &Path, name: &str, cwd: &Path) -> Vec<u8> {
         ])
         .stdout(Stdio::piped())
         .spawn()
-        .expect("tar");
+        .expect("GNU tar");
     let gzipped = Command::new("gzip")
         .current_dir(cwd)
         .arg("-n")
         .stdin(tar.stdout.take().expect("tar's output"))
         .output()
         .expect("gzip");
-    assert!(tar.wait().expect("tar").success(), "tar failed");
+    assert!(tar.wait().expect("GNU tar").success(), "tar failed");
     assert!(gzipped.status.success(), "{gzipped:?}");
     gzipped.stdout
 }

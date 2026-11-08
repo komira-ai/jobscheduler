@@ -6,10 +6,10 @@
 //! the allow below is the stated reason, one helper set for two binaries.
 #![allow(dead_code)]
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::os::fd::BorrowedFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use js_testkit::dir::TestDir;
@@ -172,13 +172,21 @@ pub fn dir_with_mode(path: &Path, mode: u32) {
 
 /// A named pipe at `path`.
 pub fn fifo(path: &Path) -> PathBuf {
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
+    nix::unistd::mkfifo(
         path,
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .unwrap();
     path.to_owned()
+}
+
+/// The named pipe at `path` opened for reading without waiting for a writer, so that opening
+/// it for writing finds a reader. The flag is the platform's own `O_NONBLOCK`: its value
+/// differs between Linux and macOS, and a wrong one makes the open wait for a writer forever.
+pub fn fifo_reader(path: &Path) -> File {
+    File::options()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path)
+        .unwrap()
 }

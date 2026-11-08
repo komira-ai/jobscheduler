@@ -1467,6 +1467,7 @@ dependencies = [
  "js-update-hook",
  "js-usage",
  "log",
+ "nix 0.31.3",
  "postgres",
  "prost-reflect",
  "prost-types",
@@ -1740,6 +1741,7 @@ dependencies = [
  "js-types",
  "libc",
  "log",
+ "nix 0.31.3",
  "rcgen",
  "rustix",
  "rustls",
@@ -1945,6 +1947,7 @@ name = "js-update-hook"
 version = "0.1.0"
 dependencies = [
  "js-testkit",
+ "nix 0.31.3",
  "rustix",
  "serde",
  "serde_json",

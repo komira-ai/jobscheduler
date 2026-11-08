@@ -12,6 +12,12 @@
 //! writes the days keys were last used. Reading a stored series or profile back is the
 //! read routes' part, in `usage_api`.
 //!
+//! The tail counters: the sink keeps a [`StoreTailSink`] over the same store, which it hands
+//! the registry ([`UsageSink::tail`]); the registry hands it each change once its lock is
+//! released, which only joins the counts waiting to be written, and every flush writes
+//! them. A write that fails keeps them for the next flush, is counted, and is logged once
+//! per run of failures.
+//!
 //! The history side: the record of each ended allocation is written under its key in
 //! [`EndedHistory`] (once: a row already there is kept), and the daily prune also removes the
 //! records older than `--history-retention-days`.
@@ -23,6 +29,7 @@
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_state::sqlite::{Options, SqliteStore};
@@ -31,9 +38,10 @@ use js_types::HostId;
 use js_types::sched::WorkKey;
 use js_usage::{
     EndedHistory, EndedPage, EndedQuery, EndedRow, KeyProfile, NodeBuffer, NodeSeries,
-    ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder, RunSeries,
+    ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder, RunSeries, StoreTailSink,
+    TailFlush, TailSink,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::StartupError;
 use crate::usage::{
@@ -111,6 +119,11 @@ pub(crate) struct NodeUsage {
     store: Arc<dyn Store>,
     curves: Arc<ProfileCurves>,
     inner: Mutex<Inner>,
+    /// The registry's tail counters, in the same store.
+    tail: Arc<StoreTailSink>,
+    /// Whether the last write of the tail counters failed: a failure is logged when it
+    /// starts a run of them, and the recovery when it ends one.
+    tail_failing: AtomicBool,
     /// How long a record of an ended allocation is kept, in milliseconds.
     history_retention_ms: u64,
 }
@@ -131,6 +144,10 @@ impl NodeUsage {
         let curves = Arc::new(ProfileCurves::new(Box::new(move |key| names(key))));
         let profiles = ProfileStore::open(store.clone(), curves.clone(), budget_bytes, today)?;
         Ok(Self {
+            tail: Arc::new(StoreTailSink::new(
+                store.clone(),
+                js_registry::ERROR_EDGES_MS,
+            )),
             store,
             curves,
             inner: Mutex::new(Inner {
@@ -138,6 +155,7 @@ impl NodeUsage {
                 buffer: NodeBuffer::new(),
                 profiles,
             }),
+            tail_failing: AtomicBool::new(false),
             history_retention_ms: DEFAULT_HISTORY_RETENTION_DAYS * MILLIS_PER_DAY,
         })
     }
@@ -153,6 +171,38 @@ impl NodeUsage {
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes the tail counts that wait, and says what is to be logged: the first failure
+    /// of a run of them, and the write that ends the run. A failure costs the stored
+    /// counters only: the sink counts it and keeps or drops the counts as it says. A flush
+    /// with nothing waiting asks the store nothing, so it neither ends a run nor starts one.
+    fn flush_tail(&self) -> Option<TailNote> {
+        let set = |failing| self.tail_failing.swap(failing, Ordering::SeqCst);
+        match self.tail.flush() {
+            Ok(TailFlush::Idle) => None,
+            Ok(TailFlush::Written) => set(false).then_some(TailNote::Recovered),
+            Err(error) => (!set(true)).then(|| TailNote::Failing(error.to_string())),
+        }
+    }
+}
+
+/// What a flush of the tail counters logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TailNote {
+    /// The first failed write of a run of them, and why it failed.
+    Failing(String),
+    /// A write that landed after a run of failed ones.
+    Recovered,
+}
+
+/// Logs `note`.
+fn log_tail(note: TailNote) {
+    match note {
+        TailNote::Failing(error) => {
+            warn!(%error, "cannot write the tail counters; they wait for the next flush");
+        }
+        TailNote::Recovered => info!("the tail counters are written again"),
     }
 }
 
@@ -184,6 +234,7 @@ impl UsageSink for NodeUsage {
     }
 
     fn flush(&self, now_minute: u64) -> Result<Vec<(HostId, NodeRow)>, UsageFault> {
+        self.flush_tail().into_iter().for_each(log_tail);
         let mut inner = self.inner();
         let due = inner.recorder.node_minutes_due(now_minute);
         for (host, row) in &due {
@@ -228,6 +279,10 @@ impl UsageSink for NodeUsage {
 
     fn curves(&self) -> Option<Arc<ProfileCurves>> {
         Some(self.curves.clone())
+    }
+
+    fn tail(&self) -> Option<Arc<dyn TailSink>> {
+        Some(self.tail.clone())
     }
 
     fn allocation_ended(&self, row: &EndedRow) -> Result<(), UsageFault> {
