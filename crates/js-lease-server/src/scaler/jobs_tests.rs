@@ -460,3 +460,50 @@ fn a_reservation_is_let_go_when_its_machine_cannot_take_the_job() {
         assert!(gone(&job, &registered, &[broken]), "breaker {n}");
     }
 }
+
+/// Asserts what a step hands the placement pass ([`pass_two`]): each refusal for a request
+/// that names a job, then each launch for one, charged to that job; a refusal recorded with
+/// no request, and a refusal or launch for a request that names no job (a lease request's),
+/// are left out. It catches an outcome charged to the wrong job, one handed for a lease
+/// request, and launches handed before the refusals that came first.
+#[test]
+fn pass_two_charges_each_refusal_and_launch_to_its_job() {
+    use js_sched::failover::Refused;
+    let request = |text: &str| RequestId::new(text).unwrap();
+    let refused = |request: Option<RequestId>| Refused {
+        provider: js_types::ProviderId::new("cloud").unwrap(),
+        offer: "big".to_owned(),
+        zone: None,
+        code: js_elastic::RefusalCode::Capacity,
+        passed_over: None,
+        request,
+    };
+    let mut next = State::default();
+    next.refusals = vec![
+        refused(None),
+        refused(Some(request("lease-1"))),
+        refused(Some(request("r-job"))),
+    ];
+    next.launched = BTreeMap::from([
+        ("m-lease".to_owned(), request("lease-1")),
+        ("m-job".to_owned(), request("r-job")),
+    ]);
+    let job = JobId::parse("job-1").unwrap();
+    let jobs = BTreeMap::from([(request("r-job"), job.clone())]);
+    let handed = pass_two(&next, &jobs);
+    assert_eq!(
+        handed,
+        vec![
+            (
+                job.clone(),
+                Outcome::Refused(refused(Some(request("r-job"))))
+            ),
+            (
+                job,
+                Outcome::Launched {
+                    machine: "m-job".to_owned()
+                }
+            ),
+        ]
+    );
+}

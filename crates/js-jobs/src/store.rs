@@ -11,6 +11,7 @@ use crate::codec::{Carried, DecodeError, decode_allocation, decode_job};
 use crate::error::JobStoreError;
 use crate::ids::{AllocationId, ClientName, IdSource, JobId, RandomIds};
 use crate::keys;
+use crate::queue::QueueTrail;
 use crate::record::{
     AllocationRecord, AllocationStep, Booked, EndReason, HostBooking, JobRecord, JobSpec, JobState,
     may_move,
@@ -22,6 +23,7 @@ mod hosts;
 mod index;
 mod marks;
 mod queue;
+mod status;
 mod taints;
 mod whole;
 
@@ -276,6 +278,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             client,
             failed_prepares: 0,
             prepare_bars: BTreeMap::new(),
+            queue: QueueTrail::default(),
             carried: Carried::default(),
         }
     }

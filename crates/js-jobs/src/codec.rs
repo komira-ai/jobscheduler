@@ -20,8 +20,9 @@
 //! back can move a job a newer build wrote without losing the newer fields. A field this
 //! build knows but the row lacks reads as its default (`None`, empty, zero, the default
 //! network policy), so a row an older build wrote reads too. A row whose format byte is above
-//! [`FORMAT`], or which holds an enum value this build does not know, is
-//! [`DecodeError::Newer`]: the store answers it as an unknown row, never as a missing one.
+//! [`FORMAT`], or which holds an enum value this build does not know (but a queue code or event
+//! kind, which reads as unspecified: `queue_fields`), is [`DecodeError::Newer`]: the store
+//! answers it as an unknown row, never as a missing one.
 //! Any other row that does not parse is an error naming what is wrong; nothing here panics or
 //! reads past a length.
 
@@ -42,6 +43,7 @@ use crate::record::{
 mod file_fields;
 mod host_fields;
 mod mark_fields;
+mod queue_fields;
 mod result_fields;
 mod whole_fields;
 
@@ -388,6 +390,7 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
         job.client.as_ref().map(|name| text(name.as_str())),
     );
     whole_fields::put_job(&mut row, job);
+    queue_fields::put_job(&mut row, &job.queue);
     row.finish(&job.carried)
 }
 
@@ -576,7 +579,6 @@ fn items_of(tag: u16, value: &[u8]) -> Result<Vec<&[u8]>, DecodeError> {
         .ok_or(DecodeError::BadValue { tag })
 }
 
-/// The keys and values of a map value.
 /// The keys and values of a map value, borrowed from it.
 type Pairs<'a> = Vec<(&'a [u8], &'a [u8])>;
 
@@ -908,6 +910,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         client,
         failed_prepares,
         prepare_bars,
+        queue: queue_fields::take_job(&mut fields)?,
         carried: fields.carried(),
     })
 }

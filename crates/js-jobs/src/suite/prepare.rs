@@ -110,6 +110,7 @@ pub fn a_failed_prepare_requeues_the_job_with_its_count_and_bars<B: Backend>(bac
                 failed_prepares: 2,
                 prepare_bars: replaced.clone(),
                 terminal: false,
+                queue: None,
             },
             &|_| Vec::new(),
         )
@@ -274,6 +275,7 @@ pub fn a_failed_prepare_refuses_what_the_requeue_refuses<B: Backend>(backend: &B
             failed_prepares: 1,
             prepare_bars: BTreeMap::new(),
             terminal: false,
+            queue: None,
         };
         assert_eq!(
             rig.jobs.fail_prepare_with(&id, failed, beside).map(drop),

@@ -213,7 +213,12 @@ async fn cancel_while_preparing_frees_after_preparing_ends() {
     let queued = queue_share(&rig, "job-q", 600);
     let before = rig.commits();
     let reply = beat(&rig, &mut agent).await;
-    assert_eq!(rig.commits(), before + 1);
+    // The cancel's free, and the pass's queue status of the job it could not place.
+    assert_eq!(rig.commits(), before + 2);
+    assert_eq!(
+        rig.job(&queued).queue.code(),
+        js_types::QueueCode::WaitingForCapacity
+    );
     assert_eq!(
         rig.states(&job),
         (JobState::Cancelled, AllocationStep::Freed)
@@ -264,10 +269,30 @@ async fn failed_prepare_requeues_and_then_fails_after_max_replace() {
     agent.refuse(RefusalReason::NotQuiet);
     let before = rig.commits();
     let reply = beat(&rig, &mut agent).await;
-    assert_eq!(rig.commits(), before + 1);
+    // The requeue, and the pass's queue status of the requeued job, which waits for a whole
+    // host again.
+    assert_eq!(rig.commits(), before + 2);
     assert_eq!(reply.exclusive, None);
     let requeued = rig.job(&job);
     assert_eq!(requeued.state, JobState::Queued);
+    assert_eq!(
+        requeued.queue.code(),
+        js_types::QueueCode::WaitingForWholeHost
+    );
+    let kinds: Vec<js_types::JobEventKind> = requeued
+        .queue
+        .events()
+        .iter()
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            js_types::JobEventKind::Placed,
+            js_types::JobEventKind::Requeued
+        ]
+    );
+    assert_eq!(requeued.queue.attempts(), 1);
     assert_eq!(
         (requeued.failed_prepares, requeued.submitted_at),
         (1, submitted)

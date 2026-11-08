@@ -123,6 +123,8 @@ mod logs_tests;
 #[cfg(test)]
 mod read_list_tests;
 #[cfg(test)]
+mod read_queue_tests;
+#[cfg(test)]
 mod read_tests;
 #[cfg(test)]
 mod read_view_tests;

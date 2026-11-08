@@ -23,8 +23,8 @@ impl JobClient {
         answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
-    /// Reads a job: its state, its host once placed, its times and its host's silence.
-    /// Changes nothing.
+    /// Reads a job: its state, its host once placed, its times, its host's silence, and why it
+    /// waits with its placement attempts and newest events. Changes nothing.
     pub async fn get_job(&mut self, request: v1::GetJobRequest) -> Result<v1::GetJobResponse, JobError> {
         let (attempt, request) = self.begin(request);
         let answer = tokio::time::timeout(self.limit, self.service.get_job(request)).await;

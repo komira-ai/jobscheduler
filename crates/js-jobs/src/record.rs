@@ -8,6 +8,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::codec::Carried;
 use crate::ids::{AllocationId, ClientName, JobId};
+use crate::queue::QueueTrail;
 use crate::result::JobResult;
 
 /// What a job needs of the host it runs on.
@@ -370,6 +371,9 @@ pub struct JobRecord {
     /// count by [`crate::JobStore::fail_prepare_with`], and kept while the job is queued, so the
     /// bars survive the deletion of its mark. Empty on a row that never had any.
     pub prepare_bars: BTreeMap<HostId, Exclusion>,
+    /// Why the job waits, its placement attempts and its newest events
+    /// (`docs/design/queue-status.md`).
+    pub queue: QueueTrail,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }

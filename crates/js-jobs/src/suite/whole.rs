@@ -38,6 +38,7 @@ pub(super) fn engine_placement() -> Placement {
     Placement {
         prepare_timeout: Some(PREPARE),
         wall_limit_secs: None,
+        queue: Vec::new(),
     }
 }
 
@@ -64,6 +65,7 @@ pub(super) fn requeue_with<S: Store>(rig: &Rig<S>, count: u32) -> FailedPrepare 
             (host("host-x"), Exclusion::ForLife),
         ]),
         terminal: false,
+        queue: None,
     }
 }
 
@@ -94,11 +96,12 @@ pub fn place_with_writes_the_prepare_deadline_and_drops_the_mark<B: Backend>(bac
     let placement = Placement {
         prepare_timeout: Some(PREPARE),
         wall_limit_secs: Some(1200),
+        queue: Vec::new(),
     };
     let commits = rig.store.commit_stats().txns;
     let (job, allocation) = rig
         .jobs
-        .place_with(&id, host("host-a"), Booked::WholeHost, placement)
+        .place_with(&id, host("host-a"), Booked::WholeHost, placement.clone())
         .expect("a marked job is placed");
     assert_eq!(
         rig.store.commit_stats().txns,
@@ -175,7 +178,12 @@ pub fn place_with_writes_the_prepare_deadline_and_drops_the_mark<B: Backend>(bac
     rig.store.fail_next();
     assert_eq!(
         rig.jobs
-            .place_with(&failing, host("host-d"), Booked::WholeHost, placement)
+            .place_with(
+                &failing,
+                host("host-d"),
+                Booked::WholeHost,
+                placement.clone()
+            )
             .map(drop),
         Err(injected()),
         "{name}: a failed commit did not answer the store's error"
@@ -185,7 +193,7 @@ pub fn place_with_writes_the_prepare_deadline_and_drops_the_mark<B: Backend>(bac
 
     assert_eq!(
         rig.jobs
-            .place_with(&id, host("host-e"), Booked::WholeHost, placement)
+            .place_with(&id, host("host-e"), Booked::WholeHost, placement.clone())
             .map(drop),
         Err(JobStoreError::UnexpectedState {
             id: id.clone(),
@@ -213,9 +221,12 @@ pub fn a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark<B:
     let key = keys::mark(&rewritten);
     let row = rig.raw(&key).map(|row| row.value);
     rig.store.before_next(rewrite(&rig, &key));
-    let answer = rig
-        .jobs
-        .place_with(&rewritten, host("host-a"), Booked::WholeHost, placement);
+    let answer = rig.jobs.place_with(
+        &rewritten,
+        host("host-a"),
+        Booked::WholeHost,
+        placement.clone(),
+    );
     assert_eq!(
         state_of(&rig.jobs, &rewritten),
         Some(JobState::Queued),
@@ -249,7 +260,7 @@ pub fn a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark<B:
     });
     assert_eq!(
         rig.jobs
-            .place_with(&plain, host("host-a"), Booked::WholeHost, placement)
+            .place_with(&plain, host("host-a"), Booked::WholeHost, placement.clone())
             .map(drop),
         Err(JobStoreError::Stale { id: plain.clone() }),
         "{name}: a placement that a new mark raced was not stale"
