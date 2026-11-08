@@ -71,6 +71,16 @@
 //! js-analysis DIR/records.jsonl --compare-cv shared whole-host
 //! ```
 //!
+//! # The report's plans
+//!
+//! `plans/job-launch`, `plans/queue-wait-under-load` and `plans/whole-host-vs-backfill`
+//! (each a `.plan.json` and a `.workload.json`) are the experiments that fill the report's
+//! open cells of launch time as a client sees it, queue wait at 1000 jobs, and the wait of
+//! a large job behind a stream of small ones as a whole-host request against a share. Their
+//! images are `REPLACE-WITH-...` placeholders, so none runs as shipped.
+//! `docs/report/results/README.md` gives each plan's arms, baseline and metrics, how a
+//! result is produced from it, and the columns of the three files and of the analysis.
+//!
 //! # Live mode
 //!
 //! `--live --server URL --job-server URL --token-file F [--ca-cert F]` runs against a server; without
