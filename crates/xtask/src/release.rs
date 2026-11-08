@@ -37,6 +37,7 @@ use serde::Deserialize;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;
 pub mod include;
+pub mod macos_leg;
 pub mod plan;
 pub mod stage;
 pub mod stamp;
@@ -155,6 +156,49 @@ pub enum Error {
     /// The packages `release hostkeeper-index` found are not the three of the version.
     #[error("the hostkeeper packages: {0}")]
     Packages(String),
+    /// An entry of `release macos-leg --builds` that is not `<package>:<bin>`.
+    #[error("--builds entry {0:?} is not <package>:<bin>")]
+    BadBuild(String),
+    /// `release macos-leg --builds` names no `js-agent` binary, which the hostkeeper package is of.
+    #[error("--builds has no js-agent binary to make the hostkeeper package of")]
+    NoAgentBuild,
+    /// A macOS version that is not dotted numbers.
+    #[error("not a macOS version of dotted numbers: {0:?}")]
+    BadMacosVersion(String),
+    /// A `cargo build` ended with a failure.
+    #[error("{command} failed ({status})")]
+    BuildFailed {
+        /// The command line.
+        command: String,
+        /// How it ended.
+        status: String,
+    },
+    /// `otool -l` shows no `minos` after `LC_BUILD_VERSION`.
+    #[error("{bin} has no LC_BUILD_VERSION minos to check")]
+    NoMinos {
+        /// The binary.
+        bin: String,
+    },
+    /// A binary needs a newer macOS than the floor.
+    #[error("{bin} needs macOS {minos}, above the pinned {floor}")]
+    MinosTooHigh {
+        /// The binary.
+        bin: String,
+        /// Its minimum macOS.
+        minos: String,
+        /// The floor.
+        floor: String,
+    },
+    /// The first line of `--version` does not end with the version.
+    #[error("{bin} prints {printed:?}, not the version {version}")]
+    WrongVersionLine {
+        /// The binary.
+        bin: String,
+        /// The line it printed.
+        printed: String,
+        /// The version expected.
+        version: String,
+    },
     /// The checkout is not at the commit the run is about.
     #[error("the checkout is at {actual}, not at --head {expected}")]
     WrongCheckout {

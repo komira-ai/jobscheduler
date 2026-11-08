@@ -4,7 +4,7 @@
 # refuses anything but the files, modes, owners and script the package is meant to have. It
 # publishes nothing: the packages and their SHA256SUMS are workflow artifacts for seven days.
 #
-# Two jobs. `build` runs on pull requests and by hand: it builds, checks and sums the package
+# Two jobs. `build` (its check is `js-agent-macos-pkg`) runs on every pull request and by hand: it builds, checks and sums the package
 # unsigned, and no secret is named anywhere in it, so no code of a branch (a build script, a
 # macro, xtask) can see one. `sign` runs only by hand from main, in the environment
 # `macos-signing`, which a repository administrator creates with its secrets and a rule that
@@ -19,21 +19,12 @@
 # No command expands an expression: a script reads its environment. The version, which goes
 # into file names, is checked as MAJOR.MINOR.PATCH before anything uses it.
 #
-# A pull request that changes the package, its checker, a crate or the toolchain builds it as
-# version 0.0.0. A manual run builds the version typed. crates/xtask/tests/macos_pkg_workflow.rs
-# pins these rules.
+# Every pull request builds it as version 0.0.0; it is a required check of main. A manual run
+# builds the version typed. crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
 name: js-agent-macos-pkg
 
 on:
   pull_request:
-    paths:
-      - '.github/workflows/js-agent-macos-pkg.yml'
-      - 'packaging/js-agent-macos/**'
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'LICENSE'
   workflow_dispatch:
     inputs:
       version:
@@ -43,9 +34,11 @@ on:
 
 permissions: {}
 
+# A newer push to a pull request cancels its older run, so a burst of pushes does not queue
+# macOS runners; a manual run of one version on one ref waits for the one before it.
 concurrency:
-  group: js-agent-macos-pkg-${{ github.ref }}-${{ inputs.version }}
-  cancel-in-progress: false
+  group: js-agent-macos-pkg-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -56,6 +49,9 @@ env:
 
 jobs:
   build:
+    # The check's name, which main's branch protection requires (`build` alone is also a job
+    # of js-agent-deb.yml).
+    name: js-agent-macos-pkg
     runs-on: macos-15
     timeout-minutes: 60
     permissions:

@@ -13,7 +13,7 @@ use js_testkit::dir::TestDir;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::fake::{FakeClock, work_with_base};
+use crate::fake::FakeClock;
 use crate::system::{Clock, OfflineFile, Signature};
 
 /// What a scripted helper does when asked to stop.
@@ -191,6 +191,19 @@ impl System for HostFake {
     }
 }
 
+/// A work directory holding a base bundle, with a name short enough that the socket at
+/// `<work>/runs/run-1/exec.sock` fits a Unix socket path on macOS (104 bytes, where the
+/// temporary directory alone is about 50). The name is unique per process and per call.
+fn short_work_with_base() -> TestDir {
+    let work = TestDir::under(std::env::temp_dir(), "jvl");
+    let base = work.join("base");
+    std::fs::create_dir_all(&base).expect("base");
+    for f in crate::bundle::FILES {
+        std::fs::write(base.join(f), format!("contents of {f}")).expect("base file");
+    }
+    work
+}
+
 /// A driver over a store with a base image, and the VM it is for.
 struct Rig {
     dir: TestDir,
@@ -199,12 +212,12 @@ struct Rig {
 }
 
 impl Rig {
-    fn new(name: &str) -> Self {
-        Self::with_token(name, random_token)
+    fn new() -> Self {
+        Self::with_token(random_token)
     }
 
-    fn with_token(name: &str, token: fn() -> io::Result<[u8; TOKEN_LEN]>) -> Self {
-        let dir = work_with_base(name);
+    fn with_token(token: fn() -> io::Result<[u8; TOKEN_LEN]>) -> Self {
+        let dir = short_work_with_base();
         let mut driver =
             SystemDriver::new(HostFake::new(), dir.path().to_owned()).with_timing(DriverTiming {
                 ready: Duration::from_secs(1),
@@ -319,7 +332,7 @@ fn shell(script: &str) -> ExecRequest {
 /// the guest cannot read, an exec that loses the status or the output, and a VM left behind.
 #[test]
 fn a_vm_is_cloned_booted_run_collected_stopped_and_destroyed() {
-    let r = Rig::new("lease-life");
+    let r = Rig::new();
     let (d, vm) = (&r.driver, &r.vm);
     d.clone_base(vm).expect("clone");
     assert_eq!(d.leftovers(), Ok(vec![vm.clone()]));
@@ -424,8 +437,8 @@ fn each_end_the_guest_reports_is_the_end_exec_returns() {
         (End::TimedOut, ExecEnd::TimedOut),
         (End::Killed, ExecEnd::Killed),
     ];
-    for (i, (end, want)) in cases.into_iter().enumerate() {
-        let r = Rig::new(&format!("lease-ends-{i}"));
+    for (end, want) in cases {
+        let r = Rig::new();
         r.booted();
         let guest = spawn_script(r.run(), move |mut s| {
             handshake(&mut s);
@@ -459,7 +472,7 @@ fn each_end_the_guest_reports_is_the_end_exec_returns() {
 /// success and a command run twice.
 #[test]
 fn a_refused_request_a_broken_connection_and_a_second_exec_are_errors() {
-    let r = Rig::new("lease-exec-errors");
+    let r = Rig::new();
     r.booted();
     let guest = spawn_script(r.run(), |mut s| {
         handshake(&mut s);
@@ -483,7 +496,7 @@ fn a_refused_request_a_broken_connection_and_a_second_exec_are_errors() {
         "VM run-1: exec failed: the guest agent is not connected (not ready, or the command already ran)"
     );
 
-    let r = Rig::new("lease-exec-broken");
+    let r = Rig::new();
     r.booted();
     let guest = spawn_script(r.run(), |mut s| {
         handshake(&mut s);
@@ -501,7 +514,7 @@ fn a_refused_request_a_broken_connection_and_a_second_exec_are_errors() {
 /// still runs its command.
 #[test]
 fn exec_on_a_killed_vm_returns_killed_and_runs_nothing() {
-    let r = Rig::new("lease-killed-first");
+    let r = Rig::new();
     r.driver.clone_base(&r.vm).expect("clone");
     r.driver.kill(&r.vm);
     assert_eq!(
@@ -516,7 +529,7 @@ fn exec_on_a_killed_vm_returns_killed_and_runs_nothing() {
 /// reaches the guest.
 #[test]
 fn kill_while_the_command_runs_ends_it() {
-    let r = Rig::new("lease-kill-running");
+    let r = Rig::new();
     r.booted();
     let (started_tx, started_rx) = mpsc::channel();
     let guest = spawn_script(r.run(), move |mut s| {
@@ -542,7 +555,7 @@ fn kill_while_the_command_runs_ends_it() {
 /// the command runs.
 #[test]
 fn a_kill_that_races_the_start_is_repeated_after_it() {
-    let r = Rig::new("lease-kill-race");
+    let r = Rig::new();
     r.booted();
     let (d, vm) = (r.driver.clone(), r.vm.clone());
     let guest = spawn_script(r.run(), move |mut s| {
@@ -566,7 +579,7 @@ fn a_kill_that_races_the_start_is_repeated_after_it() {
 /// that was never cloned. Catches a panic on an unknown name.
 #[test]
 fn a_vm_that_was_never_cloned_is_unknown_to_every_step() {
-    let r = Rig::new("lease-unknown");
+    let r = Rig::new();
     let (d, vm) = (&r.driver, &r.vm);
     d.kill(vm);
     for (text, step) in [
@@ -588,7 +601,7 @@ fn a_vm_that_was_never_cloned_is_unknown_to_every_step() {
 /// half-made clone left behind and a second clone overwriting the first.
 #[test]
 fn clone_base_failures_leave_nothing_and_keep_an_existing_clone() {
-    let r = Rig::new("lease-clone-fails");
+    let r = Rig::new();
     std::fs::remove_dir_all(r.dir.join("base")).expect("rm base");
     let err = r.error_of(r.driver.clone_base(&r.vm));
     assert!(err.starts_with("VM run-1: clone failed: "), "{err}");
@@ -596,7 +609,7 @@ fn clone_base_failures_leave_nothing_and_keep_an_existing_clone() {
     assert!(!r.run().exists());
     assert_eq!(r.driver.leftovers(), Ok(vec![]));
 
-    let r = Rig::new("lease-clone-twice");
+    let r = Rig::new();
     r.driver.clone_base(&r.vm).expect("clone");
     std::fs::write(r.run().join("mine"), "x").expect("mark");
     let err = r.error_of(r.driver.clone_base(&r.vm));
@@ -606,7 +619,7 @@ fn clone_base_failures_leave_nothing_and_keep_an_existing_clone() {
         "x"
     );
 
-    let r = Rig::new("lease-clone-blocked");
+    let r = Rig::new();
     std::fs::write(r.dir.join("runs"), "").expect("file");
     let err = r.error_of(r.driver.clone_base(&r.vm));
     assert!(err.starts_with("VM run-1: clone failed: make "), "{err}");
@@ -621,7 +634,7 @@ fn no_token() -> io::Result<[u8; TOKEN_LEN]> {
 /// booted.
 #[test]
 fn boot_failures_are_errors_of_the_boot_step() {
-    let r = Rig::new("lease-boot-twice");
+    let r = Rig::new();
     r.booted();
     assert_eq!(
         r.error_of(r.driver.boot(&r.vm, Rig::size())),
@@ -629,7 +642,7 @@ fn boot_failures_are_errors_of_the_boot_step() {
     );
     assert_eq!(lock(&r.driver.system.specs).len(), 1);
 
-    let r = Rig::new("lease-boot-share");
+    let r = Rig::new();
     r.driver.clone_base(&r.vm).expect("clone");
     std::fs::write(r.run().join("inputs"), "").expect("file");
     let err = r.error_of(r.driver.boot(&r.vm, Rig::size()));
@@ -638,14 +651,14 @@ fn boot_failures_are_errors_of_the_boot_step() {
         "{err}"
     );
 
-    let r = Rig::with_token("lease-boot-token", no_token);
+    let r = Rig::with_token(no_token);
     r.driver.clone_base(&r.vm).expect("clone");
     assert_eq!(
         r.error_of(r.driver.boot(&r.vm, Rig::size())),
         "VM run-1: boot failed: a token: no entropy"
     );
 
-    let r = Rig::new("lease-boot-token-file");
+    let r = Rig::new();
     r.driver.clone_base(&r.vm).expect("clone");
     std::fs::create_dir_all(r.run().join("inputs").join(TOKEN_FILE)).expect("dir");
     let err = r.error_of(r.driver.boot(&r.vm, Rig::size()));
@@ -655,13 +668,13 @@ fn boot_failures_are_errors_of_the_boot_step() {
     );
 
     // A socket path longer than `sun_path`.
-    let r = Rig::new("lease-boot-socket");
+    let r = Rig::new();
     let long = VmName::new(&"a".repeat(MAX_NAME)).expect("name");
     r.driver.clone_base(&long).expect("clone");
     let err = r.error_of(r.driver.boot(&long, Rig::size()));
     assert!(err.contains("boot failed: listen on "), "{err}");
 
-    let r = Rig::new("lease-boot-helper");
+    let r = Rig::new();
     r.script(Err("no helper".to_owned()));
     r.driver.clone_base(&r.vm).expect("clone");
     assert_eq!(
@@ -679,7 +692,7 @@ const MAX_NAME: usize = js_vm_lease::MAX_NAME_LEN;
 /// why.
 #[test]
 fn wait_ready_fails_when_the_vm_does_not_come_up() {
-    let r = Rig::new("lease-ready-unbooted");
+    let r = Rig::new();
     r.driver.clone_base(&r.vm).expect("clone");
     assert_eq!(
         r.error_of(r.driver.wait_ready(&r.vm)),
@@ -711,8 +724,8 @@ fn wait_ready_fails_when_the_vm_does_not_come_up() {
             "the guest agent did not connect within 1s",
         ),
     ];
-    for (i, (start, why)) in cases.into_iter().enumerate() {
-        let r = Rig::new(&format!("lease-ready-{i}"));
+    for (start, why) in cases {
+        let r = Rig::new();
         r.script(Ok(start));
         r.booted();
         assert_eq!(
@@ -726,7 +739,7 @@ fn wait_ready_fails_when_the_vm_does_not_come_up() {
 /// guest's reason. Catches a handshake failure reported as ready.
 #[test]
 fn a_guest_that_refuses_the_token_or_hangs_up_is_not_ready() {
-    let r = Rig::new("lease-token-refused");
+    let r = Rig::new();
     r.booted();
     let guest = spawn_script(r.run(), |mut s| {
         recv(&mut s);
@@ -744,7 +757,7 @@ fn a_guest_that_refuses_the_token_or_hangs_up_is_not_ready() {
     );
     guest.join().expect("guest");
 
-    let r = Rig::new("lease-hangup");
+    let r = Rig::new();
     r.booted();
     let guest = spawn_script(r.run(), |mut s| {
         recv(&mut s);
@@ -762,7 +775,7 @@ fn a_guest_that_refuses_the_token_or_hangs_up_is_not_ready() {
 /// start, a truncation flag that misses stderr, and an unreadable file read as empty.
 #[test]
 fn collect_keeps_the_tail_of_each_stream() {
-    let r = Rig::new("lease-collect");
+    let r = Rig::new();
     let outputs = r.run().join("outputs");
     std::fs::create_dir_all(&outputs).expect("outputs");
     let put = |name: &str, body: &str| std::fs::write(outputs.join(name), body).expect("write");
@@ -834,7 +847,7 @@ fn collect_keeps_the_tail_of_each_stream() {
 /// hung helper reported as stopped, and a second stop acting twice.
 #[test]
 fn stop_asks_first_kills_second_and_reports_a_helper_that_survives() {
-    let r = Rig::new("lease-stop-unbooted");
+    let r = Rig::new();
     r.driver.clone_base(&r.vm).expect("clone");
     assert_eq!(r.driver.stop(&r.vm), Ok(()));
     assert!(lock(&r.driver.system.log).is_empty());
@@ -843,7 +856,7 @@ fn stop_asks_first_kills_second_and_reports_a_helper_that_survives() {
         (Mode::Obeys, vec!["shutdown"]),
         (Mode::NeedsKill, vec!["shutdown", "kill9"]),
     ] {
-        let r = Rig::new("lease-stop-modes");
+        let r = Rig::new();
         r.script(Ok(Start {
             mode,
             ..Start::booted()
@@ -855,7 +868,7 @@ fn stop_asks_first_kills_second_and_reports_a_helper_that_survives() {
         assert_eq!(*lock(&r.driver.system.log), log);
     }
 
-    let r = Rig::new("lease-stop-immortal");
+    let r = Rig::new();
     r.script(Ok(Start {
         mode: Mode::Immortal,
         ..Start::booted()
@@ -878,7 +891,7 @@ fn stop_asks_first_kills_second_and_reports_a_helper_that_survives() {
 /// a clone left on disk and a running VM whose files are deleted.
 #[test]
 fn destroy_stops_the_vm_and_removes_everything_of_it() {
-    let r = Rig::new("lease-destroy");
+    let r = Rig::new();
     assert_eq!(r.driver.destroy(&r.vm), Ok(()));
 
     r.booted();
@@ -900,7 +913,7 @@ fn destroy_stops_the_vm_and_removes_everything_of_it() {
 /// and a missing `runs` taken for a failure.
 #[test]
 fn leftovers_are_the_vm_directories_of_the_store() {
-    let r = Rig::new("lease-leftovers");
+    let r = Rig::new();
     assert_eq!(r.driver.leftovers(), Ok(vec![]));
     let runs = r.dir.join("runs");
     std::fs::create_dir_all(&runs).expect("runs");
@@ -930,7 +943,7 @@ fn leftovers_are_the_vm_directories_of_the_store() {
 fn the_token_is_32_random_bytes_and_a_short_source_is_an_error() {
     let (a, b) = (random_token().expect("a"), random_token().expect("b"));
     assert_ne!(a, b);
-    let dir = TestDir::under(std::env::temp_dir(), "js-vmm-lease-token");
+    let dir = TestDir::under(std::env::temp_dir(), "jvl-token");
     assert!(read_token(&dir.join("missing")).is_err());
     std::fs::write(dir.join("short"), [1u8; TOKEN_LEN - 1]).expect("short");
     assert!(read_token(&dir.join("short")).is_err());

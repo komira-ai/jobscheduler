@@ -120,10 +120,6 @@ fn failures_are_errors() {
     assert!(matches!(error, Error::Io(_)));
     assert!(error.to_string().starts_with("cannot write the output: "));
 
-    // /dev/full accepts the open and refuses every write.
-    let cli = parse(&[input.to_str().unwrap(), "--json", "/dev/full"]).unwrap();
-    assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Json(_))));
-
     struct Closed;
     impl std::io::Write for Closed {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -135,6 +131,17 @@ fn failures_are_errors() {
     }
     let cli = parse(&[input.to_str().unwrap()]).unwrap();
     assert!(matches!(run(&cli, &mut Closed), Err(Error::Io(_))));
+}
+
+/// A `--json` file that opens but refuses every write is a JSON error. `/dev/full` is a Linux
+/// device: macOS has no file that accepts the open and refuses writes, and there the same
+/// writer failure is covered by `write_json` in `tests/render.rs`.
+#[cfg(target_os = "linux")]
+#[test]
+fn json_output_that_refuses_writes_is_a_json_error() {
+    let input = write_runs("cli_full.jsonl");
+    let cli = parse(&[input.to_str().unwrap(), "--json", "/dev/full"]).unwrap();
+    assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Json(_))));
 }
 
 /// Asserts the program answers `--version`, which catches a `main` that is not wired up.

@@ -14,7 +14,9 @@ use hostkeeper_config::daemon::Sha256Hex;
 use hostkeeper_config::manifest::{Expected, HostkeeperVersion, Manifest, ManifestRefusal};
 use hostkeeper_config::names::{ServiceName, Version as HostVersion};
 use hostkeeper_config::platform::Platform as Hk;
-use hostkeeper_unpack::{HostFs, Limits, Owner, UnpackError, UnpackOrder, Unpacked};
+use hostkeeper_unpack::{
+    HostFs, Limits, Owner, PackageFs, ServiceLock, StagedFile, UnpackError, UnpackOrder, Unpacked,
+};
 use js_testkit::dir::TestDir;
 use sha2::{Digest, Sha256};
 use xtask::release::Version;
@@ -113,6 +115,66 @@ impl Drop for Scratch {
     }
 }
 
+/// hostkeeper's [`HostFs`] with the one difference between the daemon's user and the test's.
+///
+/// The unpacker makes the staged tree read-only (0555) and then renames its directory into place.
+/// macOS refuses to rename a directory its caller cannot write (`rename(2)`: EACCES "the path
+/// argument is a directory and denies write permission"), while Linux does not, and root, which
+/// the daemon is, is refused on neither. The tests run as an ordinary user, so on macOS this
+/// opens the directory to 0700 for the rename and gives it back 0555, which stands in for root
+/// there. Every other call, and every call on Linux, is [`HostFs`]'s own.
+struct TestFs(HostFs);
+
+impl PackageFs for TestFs {
+    fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<std::ffi::OsString>> {
+        self.0.read_dir(dir)
+    }
+    fn exists(&self, path: &Path) -> std::io::Result<bool> {
+        self.0.exists(path)
+    }
+    fn create_service(&self, service: &Path) -> std::io::Result<()> {
+        self.0.create_service(service)
+    }
+    fn lock(&self, service: &Path) -> std::io::Result<ServiceLock> {
+        self.0.lock(service)
+    }
+    fn create_stage(&self, service: &Path) -> std::io::Result<PathBuf> {
+        self.0.create_stage(service)
+    }
+    fn create_dir(&self, path: &Path) -> std::io::Result<()> {
+        self.0.create_dir(path)
+    }
+    fn create_file(&self, path: &Path) -> std::io::Result<Box<dyn StagedFile>> {
+        self.0.create_file(path)
+    }
+    fn set_mode(&self, path: &Path, mode: u32) -> std::io::Result<()> {
+        self.0.set_mode(path, mode)
+    }
+    fn sync_dir(&self, path: &Path) -> std::io::Result<()> {
+        self.0.sync_dir(path)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        if !cfg!(target_os = "macos") {
+            return self.0.rename(from, to);
+        }
+        let is_dir = std::fs::symlink_metadata(self.0.real_path(from)).is_ok_and(|m| m.is_dir());
+        if is_dir {
+            self.0.set_mode(from, 0o700)?;
+        }
+        self.0.rename(from, to)?;
+        if is_dir {
+            self.0.set_mode(to, 0o555)?;
+        }
+        Ok(())
+    }
+    fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
+        self.0.remove_tree(path)
+    }
+    fn real_path(&self, path: &Path) -> PathBuf {
+        self.0.real_path(path)
+    }
+}
+
 /// The order of js-agent [`VERSION`] on `platform`.
 pub fn expected(platform: Platform) -> Expected {
     Expected {
@@ -146,7 +208,7 @@ pub fn unpack(dir: &Path, archive: &[u8], platform: Platform) -> Result<Unpacked
         uid: meta.uid(),
         gid: meta.gid(),
     };
-    let fs = HostFs::open(&packages, owner).expect("open the packages directory");
+    let fs = TestFs(HostFs::open(&packages, owner).expect("open the packages directory"));
     let order = UnpackOrder {
         service: ServiceName::new("js-agent").expect("a service name"),
         version: HostVersion::new(VERSION).expect("a version"),
