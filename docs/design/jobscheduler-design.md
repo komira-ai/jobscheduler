@@ -837,7 +837,7 @@ Shipped: Linux: `js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`; macO
 
 There is no update hook for the lease server. Its update path is open (section 13, question 10). As built an update of the server drops all runs, which are in memory; with jobs in Postgres it does not (question 10).
 
-**Trust decision.** The trust entry hostkeeper's channel-sync holds for js-agent names this repository's release workflow, on main, as the signer, so whoever can push to main can ship code that runs as root on every host. The repository had no ruleset at the time of writing. Section 13 lists this as a decision.
+**Trust decision.** The trust entry hostkeeper's channel-sync holds for js-agent names this repository's `artifacts.yml` (which the release workflow calls), on main, as the signer, so whoever can push to main can ship code that runs as root on every host. The repository had no ruleset at the time of writing. Section 13 lists this as a decision.
 
 ### 6.7 Restart recovery
 
@@ -1088,7 +1088,7 @@ Settled by the maintainers and therefore not listed: the job and allocation mode
 8. **Above the ceiling: refuse or lower?** A job that asks for more network than the agent allows could be refused (the client sees why) or run with less (it may fail later and confusingly). macOS lowers today. Recommendation: refuse on both, with a code that names the ceiling.
 9. **Should the API listener refuse a public non-wildcard address unless an explicit flag is set?** Today only status pages are private-gated; keeping the API off the public internet is operator posture.
 10. **What is the service's update procedure?** With state in Postgres a restart no longer drops jobs, so the choice is drain to zero running jobs or restart in place. Today there is no update hook for the service and an update drops all runs. Recommendation: an update hook that restarts in place once jobs are durable (step 4).
-11. **Host-updater trust.** The trust entry hostkeeper's channel-sync holds for js-agent names this repository's release workflow, on main, as the signer, so whoever can push to main can ship code that runs as root on every host. Is that accepted, or must the client republish under its own signer, with branch protection first? The repository had no ruleset at the time of writing.
+11. **Host-updater trust.** The trust entry hostkeeper's channel-sync holds for js-agent names this repository's `artifacts.yml` (which the release workflow calls), on main, as the signer, so whoever can push to main can ship code that runs as root on every host. Is that accepted, or must the client republish under its own signer, with branch protection first? The repository had no ruleset at the time of writing.
 12. **Remove the agent drain cap of 3600 s, or keep it and document that it cuts work?** Section 6.4 states that drain never cuts work; a job that outlives the cap is stopped. Recommendation: no default cap, a configurable one, so a drain never fails a build.
 13. **Idempotency scope.** Job ids are single-tenant and the comparison is on the whole job (every field except the priority). Is a per-client scope needed before a second token exists?
 14. **Retention.** How long are job records and results kept in Postgres after the job ends? A client can read a result for that whole window (section 8, row 30). Recommendation: a configurable window, default seven days; allocation history kept as long as estimates need it. Log objects are not deleted by the scheduler; their bucket lifecycle rule must be at least this window (question 26).
