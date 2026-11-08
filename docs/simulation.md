@@ -689,7 +689,10 @@ model:
 ## Which section 8 rows have a scenario
 
 Rows of section 8 of `docs/design/jobscheduler-design.md` that a merged scenario covers,
-and how much of each. A row not listed has no scenario.
+and how much of each. A row not listed has no scenario. The technical report,
+`docs/report/jobscheduler.html`, renders its table of section 8 rows from this one
+(`cargo xtask gen-report`), and `cargo test -p xtask --test report` fails until it is
+rendered again after a change here.
 
 | row | scenario | family file | what the scenario shows |
 |---|---|---|---|

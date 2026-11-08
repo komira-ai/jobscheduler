@@ -54,6 +54,11 @@
 //!   service's descriptor set into the two checked-in files, and the generated blocks of
 //!   `docs/http-gateway.md` (its route table and the paragraph that says which calls the
 //!   server serves); `--check` fails naming a file that is not current (docs/job-surface.md).
+//! - `gen-report [--root <dir>] [--check]` ([`report`]): the generated table of the technical
+//!   report, `docs/report/jobscheduler.html` (the section 8 rows of the design and the scenarios
+//!   of `docs/simulation.md` that cover them); `--check` also fails on a crate, path, test,
+//!   constant or metric the report quotes that the tree does not have. The test
+//!   `cargo test -p xtask --test report` runs the check on this tree.
 //! - [`doc_refs`]: every `js` command the runbooks show and every `/v1/` route they and
 //!   `docs/http-gateway.md` name exists, used by the `doc_refs` test rather than a verb:
 //!   `cargo test -p xtask --test doc_refs`.
@@ -94,6 +99,7 @@ pub mod macpkg;
 pub mod pkg;
 pub mod postgres_for_tests;
 pub mod release;
+pub mod report;
 pub mod site_changed;
 pub mod site_demo;
 pub mod spawn_sites;
@@ -141,6 +147,10 @@ pub enum Error {
     /// The job surface could not be generated, or the checked-in files are not current.
     #[error(transparent)]
     JobSurface(#[from] job_surface::GenError),
+    /// The report's generated block could not be written, or the report does not hold to the
+    /// tree.
+    #[error(transparent)]
+    Report(#[from] report::ReportError),
     /// Flags that do not fit together (exit status 2, like a clap error).
     #[error("{0}")]
     Usage(String),
@@ -256,6 +266,9 @@ enum Verb {
     /// Render the job commands of js and the job client's methods from the job service's
     /// descriptor set, or with `--check` fail when the checked-in files differ.
     GenJobSurface(job_surface::Args),
+    /// Render the technical report's table of section 8 rows and their scenarios, or with
+    /// `--check` fail when it is stale or the report quotes what the tree does not have.
+    GenReport(report::Args),
     /// Write the build descriptions of the linux-x86_64 and linux-arm64 machine images, and the
     /// cloud-init seed that builds each one (no network: every archive is pinned).
     ImageRecipe(image::Args),
@@ -368,6 +381,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
         Verb::PostgresForTests(args) => Ok(postgres_for_tests::run(&args)?),
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
+        Verb::GenReport(args) => Ok(report::run(&args)?),
         Verb::ImageRecipe(args) => Ok(image::run(&args)?),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
