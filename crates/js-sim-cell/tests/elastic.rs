@@ -87,7 +87,9 @@ fn a_lambda_like_pool_bills_whole_minutes_and_releases_idle_machines() {
 /// Runs seeds `0..SEEDS` of the scenario `make` builds, [`THREADS`] contiguous ranges at
 /// once, each on a thread of its own with a scenario built there (a scenario is built
 /// and run on one thread), and fails with the first failure of any range. The scenarios
-/// have no witness, so judging each range alone judges what one run of every seed would.
+/// have no witness, so judging each range alone judges what one run of every seed would;
+/// a witness added to either would be judged per range, and these tests would then run
+/// the seeds as one range.
 fn on_threads(make: fn() -> Scenario) {
     let parts: Vec<_> = (0..THREADS)
         .map(|part| {
