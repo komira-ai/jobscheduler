@@ -1,0 +1,26 @@
+{
+  "jobs": [
+    {
+      "name": "small",
+      "count": 300,
+      "image": "REPLACE-WITH-A-PINNED-IMAGE-THAT-HAS-SLEEP@sha256:REPLACE-WITH-ITS-DIGEST",
+      "args": ["sleep", "120"],
+      "cpu_millis": 4000,
+      "memory_bytes": 17179869184,
+      "wall_ms": 180000,
+      "class": "action",
+      "stagger_ms": 2000
+    },
+    {
+      "name": "large",
+      "count": 1,
+      "image": "REPLACE-WITH-A-PINNED-IMAGE-THAT-HAS-SLEEP@sha256:REPLACE-WITH-ITS-DIGEST",
+      "args": ["sleep", "600"],
+      "cpu_millis": 64000,
+      "memory_bytes": 274877906944,
+      "wall_ms": 660000,
+      "class": "whole-node",
+      "submit_at_ms": 60000
+    }
+  ]
+}

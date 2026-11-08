@@ -11,6 +11,7 @@ mod fake;
 mod http;
 mod measure;
 mod plan;
+mod plans;
 mod record;
 mod reported;
 mod stub;

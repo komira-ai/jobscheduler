@@ -1,0 +1,14 @@
+{
+  "jobs": [
+    {
+      "name": "probe",
+      "count": 1,
+      "image": "REPLACE-WITH-A-PINNED-IMAGE-THAT-HAS-SLEEP@sha256:REPLACE-WITH-ITS-DIGEST",
+      "args": ["sleep", "5"],
+      "cpu_millis": 1000,
+      "memory_bytes": 1073741824,
+      "wall_ms": 60000,
+      "class": "action"
+    }
+  ]
+}
