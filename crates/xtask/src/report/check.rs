@@ -7,7 +7,10 @@
 //! - **Paths.** A `code` element whose text starts `crates/`, `docs/`, `.github/`,
 //!   `packaging/`, `tools/` or `site/` and has no space, and a link into this repository's
 //!   `main` (`https://github.com/komira-ai/jobscheduler/blob/main/...` or `/tree/main/...`),
-//!   name a file or directory that exists (without the link's `#` fragment).
+//!   name a file or directory that exists.
+//! - **Anchors.** A link's `#` fragment names a heading of the `.md` file it links to
+//!   (its slug as GitHub makes it: lower case, spaces as `-`, every character but letters,
+//!   digits, `-` and `_` dropped), and a link `#x` within the page names an `id` of the page.
 //! - **Crates.** A `code` element whose whole text is a `js-` name or `xtask` names a crate:
 //!   `crates/<name>/Cargo.toml` exists.
 //! - **Test names.** A `code` element with a `data-test` attribute names a test in that
@@ -20,11 +23,12 @@
 //!   `tests/<name>/main.rs`).
 //! - **Cells.** Each `span` with a `data-cell` has an id of its own and is one of two kinds.
 //!   A cell of the code has `data-source` (a file) and `data-item` (a `const` or `static`
-//!   of it), and the item's statement, up to its `;` and read without `_`, holds the first
-//!   number of the cell's text. An open cell has `data-open` (the experiment that will
-//!   measure it) and `data-metrics` (the js-measure metric names that will carry it, or
-//!   `none`), prints no digit, and each metric is a name of [`METRICS`] (the value of one of
-//!   its `pub const`s) or a `reported_` name [`MEASURE_DOC`] gives.
+//!   of it), and one numeric literal of the item's value (after the first `=`, up to the
+//!   `;`, read without `_`) is the first number of the cell's text. An open cell has
+//!   `data-open` (the experiment that will measure it) and prints no digit; the metrics that
+//!   will carry it are the `code` elements inside it, each a name of [`METRICS`] (the value
+//!   of one of its `pub const`s) or a `reported_` word of [`MEASURE_DOC`], and a cell with
+//!   none says `no metric yet`.
 
 use std::path::Path;
 
@@ -88,6 +92,8 @@ pub enum Stale {
     },
     /// A cell is of neither kind, or its id is taken.
     Cell(String),
+    /// A link's fragment names no heading of its file, or no `id` of the page.
+    Anchor(String),
 }
 
 impl std::fmt::Display for Stale {
@@ -108,6 +114,7 @@ impl std::fmt::Display for Stale {
                 write!(f, "cell {cell}: js-measure has no metric {metric}")
             }
             Self::Cell(why) => write!(f, "{why}"),
+            Self::Anchor(link) => write!(f, "{link} names no heading or id"),
         }
     }
 }
@@ -142,34 +149,78 @@ pub fn check(root: &Path) -> Result<Vec<Stale>, ReportError> {
     if generated(root)? != page {
         stale.push(Stale::Rows);
     }
-    let measure = read(root, METRICS)? + &read(root, MEASURE_DOC)?;
-    let metrics = metric_names(&measure);
+    let metrics = metric_names(&read(root, METRICS)?, &read(root, MEASURE_DOC)?);
     for code in elements(&page, "code") {
         stale.extend(code_span(root, &code, &metrics));
     }
+    let ids: Vec<String> = page
+        .split(" id=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('"').map(|(id, _)| id.to_owned()))
+        .collect();
     for link in elements(&page, "a") {
-        let target = link.attr("href").unwrap_or_default();
-        let path = ["blob/main/", "tree/main/"]
-            .iter()
-            .find_map(|kind| target.strip_prefix(&format!("{REPO}{kind}")));
-        if let Some(path) = path {
-            let path = path.split('#').next().unwrap_or_default();
-            if !root.join(path).exists() {
-                stale.push(Stale::Path(path.to_owned()));
-            }
-        }
+        stale.extend(link_target(
+            root,
+            link.attr("href").unwrap_or_default(),
+            &ids,
+        ));
     }
-    let mut ids: Vec<String> = Vec::new();
+    let mut cells: Vec<String> = Vec::new();
     for span in elements(&page, "span") {
         if let Some(id) = span.attr("data-cell") {
-            if ids.iter().any(|seen| seen == id) {
+            if cells.iter().any(|seen| seen == id) {
                 stale.push(Stale::Cell(format!("the cell id {id} is used twice")));
             }
-            ids.push(id.to_owned());
+            cells.push(id.to_owned());
             stale.extend(cell(root, id, &span, &metrics));
         }
     }
     Ok(stale)
+}
+
+/// What is wrong with the link `target`: a path into this repository that names nothing, or
+/// a fragment that names no heading of the markdown file, or no `id` of the page.
+fn link_target(root: &Path, target: &str, ids: &[String]) -> Vec<Stale> {
+    if let Some(id) = target.strip_prefix('#') {
+        return match ids.iter().any(|known| known == id) {
+            true => Vec::new(),
+            false => vec![Stale::Anchor(target.to_owned())],
+        };
+    }
+    let Some(path) = ["blob/main/", "tree/main/"]
+        .iter()
+        .find_map(|kind| target.strip_prefix(&format!("{REPO}{kind}")))
+    else {
+        return Vec::new();
+    };
+    let (path, fragment) = path.split_once('#').unwrap_or((path, ""));
+    if !root.join(path).exists() {
+        return vec![Stale::Path(path.to_owned())];
+    }
+    let text = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+    let headed = text
+        .lines()
+        .filter_map(|line| line.strip_prefix('#'))
+        .any(|heading| slug(heading) == fragment);
+    match fragment.is_empty() || !path.ends_with(".md") || headed {
+        true => Vec::new(),
+        false => vec![Stale::Anchor(format!("{path}#{fragment}"))],
+    }
+}
+
+/// The anchor GitHub gives a markdown heading (its text after the first `#`).
+fn slug(heading: &str) -> String {
+    heading
+        .trim_start_matches('#')
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
+        .map(|c| match c {
+            ' ' => '-',
+            other => other,
+        })
+        .collect()
 }
 
 /// What is wrong with one `code` element.
@@ -248,8 +299,13 @@ fn cell(root: &Path, id: &str, span: &Element, metrics: &[String]) -> Vec<Stale>
             None => format!("{file} has no const or static {item}"),
             Some(at) => {
                 let statement = source[at..].split(';').next().unwrap_or_default();
+                let value = statement.split_once('=').map_or("", |(_, value)| value);
                 let number = first_number(&span.text);
-                match statement.replace('_', "").contains(&number) && !number.is_empty() {
+                let held = value
+                    .replace('_', "")
+                    .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+                    .any(|literal| literal.trim_end_matches('.') == number);
+                match held && !number.is_empty() {
                     true => return Vec::new(),
                     false => format!("{item} in {file} does not hold the number {number:?}"),
                 }
@@ -265,19 +321,19 @@ fn cell(root: &Path, id: &str, span: &Element, metrics: &[String]) -> Vec<Stale>
         if span.text.chars().any(|c| c.is_ascii_digit()) {
             stale.push(Stale::Number(id.to_owned()));
         }
-        let named = span.attr("data-metrics").unwrap_or_default();
-        if named.trim().is_empty() {
+        let named = elements(&span.text, "code");
+        if named.is_empty() && !span.text.contains("no metric yet") {
             stale.push(Stale::Cell(format!(
-                "the open cell {id} names no data-metrics"
+                "the open cell {id} names no metric and does not say no metric yet"
             )));
         }
         stale.extend(
             named
-                .split_whitespace()
-                .filter(|m| *m != "none" && !metrics.iter().any(|known| known == m))
+                .iter()
+                .filter(|m| !metrics.contains(&m.text))
                 .map(|m| Stale::Metric {
                     cell: id.to_owned(),
-                    metric: m.to_owned(),
+                    metric: m.text.clone(),
                 }),
         );
         return stale;
@@ -301,10 +357,10 @@ fn first_number(text: &str) -> String {
         .to_owned()
 }
 
-/// The metric names in js-measure's source: the value of each `pub const NAME: &str = "..."`
-/// and each `reported_` word.
-fn metric_names(source: &str) -> Vec<String> {
-    let consts = source.lines().filter_map(|line| {
+/// The metric names of js-measure: the value of each `pub const NAME: &str = "..."` of
+/// `metrics`, and each `reported_` word of `doc`.
+fn metric_names(metrics: &str, doc: &str) -> Vec<String> {
+    let consts = metrics.lines().filter_map(|line| {
         let value = line
             .trim()
             .strip_prefix("pub const ")?
@@ -312,7 +368,7 @@ fn metric_names(source: &str) -> Vec<String> {
             .1;
         value.split_once('"').map(|(v, _)| v.to_owned())
     });
-    let reported = source
+    let reported = doc
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|w| w.len() > "reported_".len() && w.starts_with("reported_"))
         .map(str::to_owned);

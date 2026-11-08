@@ -18,7 +18,7 @@ const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const SIM: &str = "# The cell\n\n## Which section 8 rows have a scenario\n\nRows covered.\n\n\
 | row | scenario | family file | what the scenario shows |\n|---|---|---|---|\n\
 | 1 | `a_b` | `tests/jobs.rs` | It's `x` & <y> |\n\
-| 2 | `c_d` | `tests/cell/more.rs` | Shows |\n\nAfter the table.\n";
+| 2 | `c_d` | `tests/cell/more.rs` | Shows |\n\nAfter the table.\n\n## A well-known foo_bar\n";
 
 /// The design of the small repository: three rows in section 8.
 const DESIGN_TEXT: &str = "# The design\n\n## 8. Races and failures the current code loses\n\n\
@@ -37,7 +37,7 @@ const BLOCK: &str = "<div class=\"tblw wide\"><table class=\"tbl\">\n\
 
 /// A page of the small repository that holds to it: one element of each kind the check
 /// reads and passes, around the generated block (empty until [`repo`] renders it).
-const GOOD: &str = "<html><body>\n<!-- gen-report rows begin -->\n<!-- gen-report rows end -->\n\
+const GOOD: &str = "<html><body id=\"top\">\n<!-- gen-report rows begin -->\n<!-- gen-report rows end -->\n\
 <p><code data-test=\"crates/js-sim-cell/tests/jobs.rs\">a_test_with_five_words_name</code>\n\
 <code>cargo test -p js-demo2 --test flat</code> <code>cargo test -p js-demo2 --test in_dir</code>\n\
 <code>cargo test -p js-demo2</code> <code>crates/js-demo2/src/lib.rs</code>\n\
@@ -46,11 +46,15 @@ const GOOD: &str = "<html><body>\n<!-- gen-report rows begin -->\n<!-- gen-repor
 <code>p99_of_the_queue_wait</code> <codex>not code</codex>\n\
 <a href=\"https://github.com/komira-ai/jobscheduler/blob/main/crates/js-demo2/src/lib.rs#L1\">a</a>\n\
 <a href=\"https://github.com/komira-ai/jobscheduler/tree/main/crates/js-demo2\">b</a>\n\
-<a href=\"https://example.org/\">c</a> <a>d</a> <abbr>e</abbr>\n\
+<a href=\"https://example.org/\">c</a> <a>d</a> <abbr>e</abbr> <a href=\"#top\">f</a>\n\
+<a href=\"https://github.com/komira-ai/jobscheduler/blob/main/docs/simulation.md#a-well-known-foo_bar\">g</a>\n\
+<a href=\"https://github.com/komira-ai/jobscheduler/blob/main/docs/design/jobscheduler-design.md#8-races-and-failures-the-current-code-loses\">h</a>\n\
+<a href=\"https://github.com/komira-ai/jobscheduler/blob/main/docs/simulation.md\">i</a>\n\
 <span class=\"x\">plain</span>\n\
 <span data-cell=\"c-limit\" data-source=\"crates/js-demo2/src/lib.rs\" data-item=\"LIMIT\">4,096 ids</span>\n\
 <span data-cell=\"c-wait\" data-source=\"crates/js-demo2/src/lib.rs\" data-item=\"WAIT\">30.</span>\n\
-<span data-cell=\"m-open\" data-open=\"an experiment\" data-metrics=\"jobs reported_steady_ms none\">NOT YET</span>\n\
+<span data-cell=\"m-open\" data-open=\"an experiment\">NOT YET; <code>jobs</code>, <code>reported_steady_ms</code></span>\n\
+<span data-cell=\"m-none\" data-open=\"another\">NOT YET; no metric yet</span>\n\
 </p></body></html>\n";
 
 /// Writes `text` to `path` under `dir`, making its directory.
@@ -329,7 +333,8 @@ fn a_test_command_with_no_target_is_found() {
 }
 
 /// Asserts that a cell of the code is held to its constant: an item the file does not have,
-/// a number the item does not hold, and a cell with no number are each found.
+/// a number the item does not hold, a number that is only in the item's type (`u64`) or
+/// only part of its value (409 of 4096), and a cell with no number are each found.
 #[test]
 fn a_cell_of_the_code_is_held_to_its_constant() {
     let source = "data-source=\"crates/js-demo2/src/lib.rs\"";
@@ -351,6 +356,20 @@ fn a_cell_of_the_code_is_held_to_its_constant() {
         }]
     );
     assert_eq!(
+        found("type", &cell("c-type", "WAIT", "64 s")),
+        vec![Stale::Item {
+            cell: "c-type".to_owned(),
+            why: "WAIT in crates/js-demo2/src/lib.rs does not hold the number \"64\"".to_owned()
+        }]
+    );
+    assert_eq!(
+        found("part", &cell("c-part", "LIMIT", "409 ids")),
+        vec![Stale::Item {
+            cell: "c-part".to_owned(),
+            why: "LIMIT in crates/js-demo2/src/lib.rs does not hold the number \"409\"".to_owned()
+        }]
+    );
+    assert_eq!(
         found("no-number", &cell("c-none", "LIMIT", "many ids")),
         vec![Stale::Item {
             cell: "c-none".to_owned(),
@@ -359,44 +378,48 @@ fn a_cell_of_the_code_is_held_to_its_constant() {
     );
 }
 
-/// Asserts that an open cell that prints a digit, names no metrics, or names a metric
-/// js-measure does not have is found.
+/// Asserts that an open cell that prints a digit, names no metric and does not say so, or
+/// names a metric js-measure does not have (beside one it has) is found.
 #[test]
 fn an_open_cell_prints_no_number_and_names_known_metrics() {
-    let open = |id: &str, metrics: &str, text: &str| {
-        format!("<span data-cell=\"{id}\" data-open=\"x\"{metrics}>{text}</span>")
-    };
+    let open =
+        |id: &str, text: &str| format!("<span data-cell=\"{id}\" data-open=\"x\">{text}</span>");
     assert_eq!(
-        found(
-            "number",
-            &open("m-n", " data-metrics=\"jobs\"", "NOT YET, 3 runs")
-        ),
+        found("number", &open("m-n", "NOT YET, 3 runs; <code>jobs</code>")),
         vec![Stale::Number("m-n".to_owned())]
     );
     assert_eq!(
-        found("no-metrics", &open("m-a", "", "NOT YET")),
+        found("no-metrics", &open("m-a", "NOT YET")),
         vec![Stale::Cell(
-            "the open cell m-a names no data-metrics".to_owned()
-        )]
-    );
-    assert_eq!(
-        found(
-            "empty-metrics",
-            &open("m-e", " data-metrics=\" \"", "NOT YET")
-        ),
-        vec![Stale::Cell(
-            "the open cell m-e names no data-metrics".to_owned()
+            "the open cell m-a names no metric and does not say no metric yet".to_owned()
         )]
     );
     assert_eq!(
         found(
             "metric",
-            &open("m-u", " data-metrics=\"jobs nope\"", "NOT YET")
+            &open("m-u", "NOT YET; <code>jobs</code>, <code>nope</code>")
         ),
         vec![Stale::Metric {
             cell: "m-u".to_owned(),
             metric: "nope".to_owned()
         }]
+    );
+}
+
+/// Asserts that a link whose fragment names no heading of the markdown file it links to,
+/// and a link within the page to an id the page does not have, are each found.
+#[test]
+fn a_link_to_a_missing_heading_or_id_is_found() {
+    assert_eq!(
+        found(
+            "heading",
+            "<a href=\"https://github.com/komira-ai/jobscheduler/blob/main/docs/simulation.md#gone\">x</a>"
+        ),
+        vec![Stale::Anchor("docs/simulation.md#gone".to_owned())]
+    );
+    assert_eq!(
+        found("id", "<a href=\"#nowhere\">x</a>"),
+        vec![Stale::Anchor("#nowhere".to_owned())]
     );
 }
 
@@ -430,7 +453,7 @@ fn a_cell_of_neither_kind_or_a_taken_id_is_found() {
     assert_eq!(
         found(
             "twice",
-            "<span data-cell=\"m-open\" data-open=\"y\" data-metrics=\"none\">NOT YET</span>"
+            "<span data-cell=\"m-open\" data-open=\"y\">NOT YET; no metric yet</span>"
         ),
         vec![Stale::Cell("the cell id m-open is used twice".to_owned())]
     );
@@ -460,6 +483,7 @@ fn each_finding_reads_as_one_line() {
             metric: "x".to_owned(),
         },
         Stale::Cell("a cell".to_owned()),
+        Stale::Anchor("a.md#b".to_owned()),
     ]
     .iter()
     .map(ToString::to_string)
@@ -477,6 +501,7 @@ fn each_finding_reads_as_one_line() {
             "open cell m prints a number",
             "cell m: js-measure has no metric x",
             "a cell",
+            "a.md#b names no heading or id",
         ]
     );
     let dir = with("verb", "<code>docs/a.md</code><code>js-nothing</code>");

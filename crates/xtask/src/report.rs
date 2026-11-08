@@ -12,10 +12,12 @@
 //! the block is not what it renders; the test `cargo test -p xtask --test report` runs the
 //! check on this tree.
 //!
-//! **Markdown in a cell.** A cell's text is escaped for HTML (`&`, `<`, `>`), a typographic
-//! apostrophe replaces `'`, and a code span (between two backticks) becomes a `code`
-//! element. The scenario becomes a `code` element whose `data-test` names its file under
-//! [`SIM_CELL`], which [`check`] then holds to the file.
+//! **Markdown in a cell.** The text of a failure, a state and what a scenario shows is
+//! escaped for HTML (`&`, `<`, `>`), a typographic apostrophe replaces `'`, and a code span
+//! (between two backticks) becomes a `code` element. The scenario and its family file are
+//! identifiers and are taken as they stand, without their backticks: the scenario becomes a
+//! `code` element whose `data-test` names its file under [`SIM_CELL`], which [`check`] then
+//! holds to the file.
 
 use std::path::{Path, PathBuf};
 
