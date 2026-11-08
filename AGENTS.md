@@ -84,7 +84,7 @@ The shared core is the text between the two `shared-core` markers below. `docs/a
 - B9-mac BLOCK. This repository's exceptions to B9's ban on macOS jobs in per-PR checks; there are no others. macOS runs on a pull request exactly in these jobs, on GitHub's hosted `macos-15` runner:
   - on every pull request, whatever it changes: `ci.yml`'s `macos` (the workspace's tests on Apple silicon, all but js-contain, js-host-step and js-mdm, which are Linux code; then the release's macOS build, staged and packaged, which it uploads nowhere) and `js-agent-macos-pkg.yml`'s `build` (the check `js-agent-macos-pkg`: the unsigned package, kept as a workflow artifact for seven days). Both are to be required checks of main; the held script `tools/held/required-checks/require_macos_checks.sh` makes them so.
   - `macos-probe.yml`'s `probe`, when `crates/js-mac-probe/` or that file changes; it is not a required check.
-  - `release.yml`'s macOS `build` leg, in the release dry run of a pull request that changes `release.yml`; it predates B9 and is not yet changed to meet it.
+  - `artifacts.yml`'s macOS `build` leg, which `release.yml`'s `artifacts` job calls, in the release dry run of a pull request that changes `release.yml`; it predates B9 and is not yet changed to meet it.
 
   A pull request macOS job names no secret and not the job token, runs in no environment, holds no write or `id-token` permission, and is cancelled by a newer push to its pull request (the release dry run excepted). `cargo test -p xtask --test pr_macos_jobs` holds every workflow to this and pins the list of jobs above; a pull request that adds a macOS job to it changes this rule in the same pull request.
 

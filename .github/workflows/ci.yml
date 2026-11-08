@@ -211,7 +211,7 @@ jobs:
   # a package with Apple's pkgbuild.
   #
   # On a pull request the job then makes, from the pull request's commit, what the release's
-  # macOS leg makes after a merge (release.yml, `build` for aarch64-apple-darwin): the release
+  # macOS leg makes after a merge (artifacts.yml, `build` for aarch64-apple-darwin): the release
   # build of each binary of that leg, its archive directory (`release stage`) and the
   # hostkeeper package of js-agent for macos-arm64 (`release hostkeeper-package`), with the
   # leg's checks (each binary's minos is at most the pinned macOS and its --version prints

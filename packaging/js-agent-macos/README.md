@@ -129,8 +129,9 @@ Known limits:
 
 ## Not done yet
 
-- The package is a workflow artifact for seven days, not a release asset: `release.yml` lists
-  its assets by name and attests `*.tar.gz`, `*.tar.zst` and the index. It no longer carries an
+- The package is a workflow artifact for seven days, not a release asset: `artifacts.yml` (which
+  `release.yml` calls) lists the release's assets by name and attests `*.tar.gz`, `*.tar.zst` and
+  the index. It no longer carries an
   update declaration, and nothing in it moves `link/current`: the agent is updated as a
   hostkeeper package (`hostkeeper/`, a release asset), which runs its own launchd job.
 - The update hook (`js-agent update-hook`) runs its five steps on a Mac as hostkeeper's hook, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
