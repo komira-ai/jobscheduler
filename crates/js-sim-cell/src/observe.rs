@@ -364,7 +364,9 @@ pub struct ServerHost {
     /// Whether the host is leaving the pool: drained or being released by the scaler.
     pub leaving: bool,
     /// The whole-host request a reservation sets the host aside for, while the server
-    /// holds one for it (the listing's `reserved_for`).
+    /// holds one for it (the listing's `reserved_for`). The cell's server lists none, since
+    /// the job front makes no reservation; the checks that read it run over a view built by
+    /// hand ([`Observations::with_reservation`]).
     pub reserved_for: Option<String>,
     /// The end of the host's tail when the reservation was made, on the cell's virtual
     /// clock; `None` without a reservation, or for one whose tail the server does not

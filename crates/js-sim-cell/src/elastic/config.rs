@@ -57,24 +57,24 @@ fn sim_cloud(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindErr
         field: "kind".to_owned(),
         reason: "no cloud was left for this read of the file".to_owned(),
     };
-    NEXT.take().map(built).ok_or(missing)
+    NEXT.take().map(elastic).map(Built::Elastic).ok_or(missing)
 }
 
 /// The pool of `cloud`: its provider the cloud behind its recording wrapper, its floor the
 /// GPUs of the cloud's shape, of the shape's class, on hosts that run containers.
-fn built(cloud: Cloud) -> Built {
+fn elastic(cloud: Cloud) -> ElasticBuilt {
     let shape = cloud.shape();
     let class = shape.gpu_class.as_deref();
     let floor = Floor {
         gpus: shape.gpus,
         gpu_class: class.and_then(|class| Model::parse(class).ok()),
     };
-    Built::Elastic(ElasticBuilt {
+    ElasticBuilt {
         provider: cloud.provider(),
         floor,
         idle_costs: false,
         exec: vec![ExecMode::Container],
-    })
+    }
 }
 
 /// The files the configuration file of an elastic pool's server names.
@@ -167,4 +167,30 @@ fn millis(duration: Duration) -> String {
 /// `text` as a TOML basic string, which the JSON string grammar is a part of.
 fn quoted(text: &str) -> String {
     serde_json::Value::from(text).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elastic::{ElasticPool, OfferSpec};
+    use crate::server::Shape;
+
+    /// The floor the built kind gives over a cloud of `shape`.
+    fn floor_of(shape: &Shape) -> Floor {
+        let offers = vec![OfferSpec::new("sim_1x_a100", "zone-a", 120)];
+        let cloud = Cloud::new(&ElasticPool::ec2_like("burst", offers, 2), shape);
+        elastic(cloud).floor
+    }
+
+    /// Asserts that the floor of the pool is the GPUs of the cloud's shape, of the shape's
+    /// class when it has GPUs, and none of any class when it has none.
+    #[test]
+    fn the_floor_is_the_gpus_of_the_shape_in_its_class() {
+        let with_gpus = floor_of(&Shape::gpu_host());
+        assert_eq!(with_gpus.gpus, 1);
+        assert_eq!(with_gpus.gpu_class, Model::parse("nvidia-a100").ok());
+        assert!(with_gpus.gpu_class.is_some());
+        let without = floor_of(&Shape::cpu_host());
+        assert_eq!((without.gpus, without.gpu_class), (0, None));
+    }
 }

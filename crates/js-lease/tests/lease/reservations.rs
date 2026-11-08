@@ -89,6 +89,22 @@ fn records_survive_a_reopen_field_for_field() {
     assert!(restored.iter().all(|r| r.claim_by == Some(at(T0))));
 }
 
+/// Asserts that `tick_then` replaces the table's ledger with the one its closure gives, and
+/// writes it in the tick's one replace, so a reopened table holds it; and that a closure
+/// that gives nothing keeps the ledger.
+#[test]
+fn a_ledger_given_by_a_tick_is_written_with_it() {
+    let (mut table, clock, scratch) = fresh("res_tick_then");
+    let report = table.tick_then(|| Some(ledger()));
+    assert!(report.save_error.is_none());
+    assert_eq!(unclaimed(table.reservations()), ledger());
+
+    let mut table = reopen(table, &clock, &scratch);
+    assert_eq!(unclaimed(table.reservations()), ledger());
+    table.tick_then(|| None);
+    assert_eq!(unclaimed(table.reservations()), ledger());
+}
+
 /// Asserts that a record cannot reach the file without the leases written with it: one
 /// acquire after `set_reservations` writes both in the same replace.
 #[test]

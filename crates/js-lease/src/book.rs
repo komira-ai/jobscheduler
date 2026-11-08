@@ -545,6 +545,14 @@ impl Book {
         self.unsaved = true;
     }
 
+    /// Replaces the ledger with `records` when there are some ([`Self::set_reservations`]);
+    /// `None` keeps it.
+    pub(crate) fn replace_reservations(&mut self, records: Option<Vec<ReservationRecord>>) {
+        if let Some(records) = records {
+            self.set_reservations(records);
+        }
+    }
+
     /// Every lease kept with a request id, with that id, in lease order.
     pub(crate) fn request_ids(&self) -> Vec<(LeaseId, RequestId)> {
         let kept = self.leases.values();

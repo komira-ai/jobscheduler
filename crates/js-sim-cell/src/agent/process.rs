@@ -15,19 +15,23 @@
 //! of it, the real lifecycle is handed the reply without it). Every start that reaches the
 //! process, and every stop or cancel of a run it runs, is written into the cell's ledger
 //! first, whichever agent is behind it.
+//!
+//! The fake's half (what it holds and is told) is in `fake`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent::{BASE, REQUEST_LIMIT};
 use js_agent_wire::{
-    Ack, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, Hello, JobSpec, Outcome,
-    ProtocolRange, RETRY_AFTER_CAP, ResultAck, RunResult, Welcome, WireShape, refusal,
+    Ack, Command, Heartbeat, HeartbeatReply, HeldRun, Hello, JobSpec, ProtocolRange,
+    RETRY_AFTER_CAP, ResultAck, RunResult, Welcome, WireShape, refusal,
 };
 use js_conformance::agent::{AgentHarness, FakeAgent};
 use js_jobs::JobId;
 use js_types::sched::FarmTime;
 use js_types::{LeaseId, Resources};
+
+mod fake;
 
 use super::exclusive::Exclusive;
 use super::per_job::{Acks, Listing, PerJob};
@@ -209,7 +213,7 @@ impl Behind {
     /// acknowledged (the real lifecycle also lists a run until its cleanup is done).
     fn held(&self) -> Vec<HeldRun> {
         match self {
-            Behind::Fake(agent) => fake_held(agent),
+            Behind::Fake(agent) => fake::held(agent),
             Behind::Real(real) => real.held(),
         }
     }
@@ -217,7 +221,7 @@ impl Behind {
     /// The results not yet acknowledged, of the runs in `runs`.
     fn results(&self, runs: &BTreeMap<String, RunInfo>) -> Vec<RunResult> {
         match self {
-            Behind::Fake(agent) => fake_results(agent, runs),
+            Behind::Fake(agent) => fake::results(agent, runs),
             Behind::Real(real) => real.results(),
         }
     }
@@ -418,7 +422,7 @@ impl Process {
             return;
         };
         let ended = match &mut self.agent {
-            Behind::Fake(agent) => fake_run_ends(agent, &run),
+            Behind::Fake(agent) => fake::run_ends(agent, &run),
             Behind::Real(real) => real.run_ends(&run),
         };
         if ended {
@@ -666,11 +670,11 @@ impl Process {
                 let handed = check.commands.iter().filter(|c| takes || !is_start(c));
                 for command in handed {
                     let book = &mut self.book;
-                    fake_command(agent, book, &self.beats_sent, command, capacity, io);
+                    fake::command(agent, book, &self.beats_sent, command, capacity, io);
                 }
                 if check.acks.is_ok() {
                     for ack in &reply.result_acks {
-                        fake_ack(agent, &mut self.book, ack);
+                        fake::ack(agent, &mut self.book, ack);
                     }
                 }
             }
@@ -843,94 +847,6 @@ fn hand_over(
     launched
 }
 
-/// The runs the fake holds: those it runs, and those whose result is not yet
-/// acknowledged.
-fn fake_held(agent: &FakeAgent) -> Vec<HeldRun> {
-    let observed = agent.observed();
-    let unacked = agent.unacked();
-    let mut held: BTreeMap<&str, HeldState> = unacked
-        .iter()
-        .map(|run| (run.as_str(), HeldState::ExitedUnacked))
-        .collect();
-    held.extend(
-        observed
-            .running
-            .iter()
-            .map(|run| (run.as_str(), HeldState::Running)),
-    );
-    let held = held.into_iter().map(|(run, state)| HeldRun {
-        run_id: run.to_owned(),
-        state,
-    });
-    held.collect()
-}
-
-/// The results the fake has not had acknowledged, of the runs in `runs`.
-fn fake_results(agent: &FakeAgent, runs: &BTreeMap<String, RunInfo>) -> Vec<RunResult> {
-    let unacked = agent.unacked();
-    let results = runs
-        .iter()
-        .filter(|(run, _)| unacked.contains(*run))
-        .map(|(run, info)| RunResult {
-            run_id: run.clone(),
-            lease_id: info.lease_text.clone(),
-            outcome: Outcome::Succeeded,
-            exit_code: Some(0),
-            detail: None,
-            log_tail: None,
-        });
-    results.collect()
-}
-
-/// Tells the fake one command of a reply; `beats_sent` dates the heartbeat a start names.
-fn fake_command(
-    agent: &mut FakeAgent,
-    book: &mut Book,
-    beats_sent: &BTreeMap<u64, FarmTime>,
-    command: &Command,
-    capacity: &Resources,
-    io: &mut Io,
-) {
-    match command {
-        Command::Start(job) => fake_start(agent, book, beats_sent, job, capacity, io),
-        Command::Stop { run_id } | Command::Cancel { run_id } => {
-            book.stopped.insert(run_id.clone());
-            agent.cancel(run_id);
-        }
-        _ => {}
-    }
-}
-
-fn fake_start(
-    agent: &mut FakeAgent,
-    book: &mut Book,
-    beats_sent: &BTreeMap<u64, FarmTime>,
-    job: &JobSpec,
-    capacity: &Resources,
-    io: &mut Io,
-) {
-    let Some(info) = RunInfo::of(job, capacity) else {
-        return io.bump(Counter::ReplyInvalid);
-    };
-    let run = job.run_id.as_str();
-    let before = agent.observed();
-    if book.stopped.contains(run) {
-        io.bump(Counter::StartAfterStop);
-    } else if before.launches.contains_key(run) {
-        io.bump(Counter::StartRepeated);
-    }
-    let since = sent_for(beats_sent, job, io.now);
-    let waited = io.now.as_millis().saturating_sub(since.as_millis());
-    agent.start(run, job.valid_for_ms, waited);
-    let after = agent.observed();
-    if after.never_started.len() > before.never_started.len() {
-        io.bump(Counter::StartDroppedLate);
-    }
-    if after.launches.get(run) != before.launches.get(run) {
-        book.launched(job, info, io);
-    }
-}
-
 /// Writes every verdict of `acks` this version can read into the cell's ledger, whether
 /// or not the agent still holds the result.
 fn note_verdicts(acks: &[ResultAck], io: &mut Io) {
@@ -947,27 +863,6 @@ fn note_verdicts(acks: &[ResultAck], io: &mut Io) {
     for acked in read {
         io.ledger.acked(acked);
     }
-}
-
-fn fake_ack(agent: &mut FakeAgent, book: &mut Book, ack: &ResultAck) {
-    let Some(verdict) = verdict(ack.ack) else {
-        return;
-    };
-    if agent.unacked().contains(&ack.run_id) {
-        let run = RunId::new(ack.run_id.clone());
-        book.acknowledged.insert(run, verdict);
-    }
-    agent.ack(&ack.run_id);
-}
-
-/// The run's own time ran out on the fake: it completes, and `true`, unless it no longer
-/// runs.
-fn fake_run_ends(agent: &mut FakeAgent, run: &str) -> bool {
-    let running = agent.observed().running.contains(run);
-    if running {
-        agent.complete(run);
-    }
-    running
 }
 
 #[cfg(test)]

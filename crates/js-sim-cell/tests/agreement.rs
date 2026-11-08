@@ -26,8 +26,8 @@ use js_sim_cell::actions::{
     agents, cancel_work, items, kill_agents, partition_agents, replace_agents, set_bus_faults,
 };
 use js_sim_cell::{
-    Counter, Disagreement, Expect, HowEnded, ItemId, Outcome, RunId, Scenario, ServerSpec, Shape,
-    Side, Work, compare, differences,
+    Counter, Disagreement, Expect, HowEnded, ItemId, Outcome, Scenario, ServerSpec, Shape, Side,
+    Work, compare, differences,
 };
 
 use crate::real_agents::{GIVE_UP, HOSTS, POOL, RUN, RUNS, SETTLE, with_hosts, world};
@@ -178,28 +178,24 @@ fn a_fake_agent_with_a_defect_disagrees_with_the_real_agent_on_a_lossy_wire() {
     );
 }
 
-fn outcome(terminal: Option<HowEnded>, run: &str) -> Outcome {
-    Outcome {
-        terminal,
-        run: Some(RunId::new(run)),
-    }
+fn outcome(terminal: Option<HowEnded>) -> Outcome {
+    Outcome { terminal }
 }
 
 /// Asserts that the comparison, given two outcome maps that differ in one item's terminal
-/// (and in the run ids the server gave, which are not compared), returns that item and
-/// nothing else; and that an item one side lacks counts as one that never ended there.
+/// returns that item and nothing else; and that an item one side lacks counts as one that never ended there.
 /// Catches a comparison that ignores a difference or reports an item that agrees.
 #[test]
 fn an_agreement_check_reports_a_run_whose_outcomes_differ() {
     let fake = BTreeMap::from([
-        (ItemId(0), outcome(Some(HowEnded::Succeeded), "f0")),
-        (ItemId(1), outcome(Some(HowEnded::Succeeded), "f1")),
-        (ItemId(2), outcome(None, "f2")),
+        (ItemId(0), outcome(Some(HowEnded::Succeeded))),
+        (ItemId(1), outcome(Some(HowEnded::Succeeded))),
+        (ItemId(2), outcome(None)),
     ]);
     let mut real = BTreeMap::from([
-        (ItemId(0), outcome(Some(HowEnded::Succeeded), "r0")),
-        (ItemId(1), outcome(Some(HowEnded::Lost), "r1")),
-        (ItemId(2), outcome(None, "r2")),
+        (ItemId(0), outcome(Some(HowEnded::Succeeded))),
+        (ItemId(1), outcome(Some(HowEnded::Lost))),
+        (ItemId(2), outcome(None)),
     ]);
     assert_eq!(differences(&fake, &real), [ItemId(1)]);
     assert!(differences(&fake, &fake).is_empty());
@@ -215,7 +211,7 @@ fn an_agreement_check_reports_a_run_whose_outcomes_differ() {
 
 /// Asserts that a seed whose items end differently is reported once, naming the scenario,
 /// the seed, each item with its outcome on each side (an item one side never had reads
-/// `terminal none (run none)`) and the last forty trace lines of both runs. The two sides
+/// `terminal none`) and the last forty trace lines of both runs. The two sides
 /// here are two scenarios of fake agents, one of which cancels its items at once and
 /// submits one more. Catches a report that loses the item, the seed or the traces a
 /// finding needs.
@@ -264,7 +260,7 @@ fn a_comparison_names_each_item_that_ended_differently_with_both_traces() {
         "{text}"
     );
     assert!(
-        text.contains("\n  item 2: fake terminal none (run none), real terminal cancelled"),
+        text.contains("\n  item 2: fake terminal none, real terminal cancelled"),
         "{text}"
     );
     assert!(

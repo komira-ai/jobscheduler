@@ -215,10 +215,7 @@ impl<P: Pool, C: Clock> LeaseTable<P, C> {
         }
         report.pending = self.book.count(LeaseState::Pending);
         report.releasing = self.book.count(LeaseState::Releasing);
-        let after = ledger();
-        after
-            .into_iter()
-            .for_each(|records| self.book.set_reservations(records));
+        self.book.replace_reservations(ledger());
         if report.changed() | self.book.unsaved() {
             report.save_error = self.save("tick").err();
         }

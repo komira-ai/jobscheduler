@@ -13,7 +13,12 @@ impl Registry {
     /// record. A request with an id that a placer keeps (the engine of `--placement
     /// js-sched`) reads the placer's record, which it counts in place of the registry's.
     pub fn request_record(&self, key: impl Into<RequestKey>) -> Option<RequestRecord> {
-        let key = key.into();
+        self.record_of(key.into())
+    }
+
+    /// [`Registry::request_record`], over the key itself, so that every kind of key runs
+    /// the same code.
+    fn record_of(&self, key: RequestKey) -> Option<RequestRecord> {
         // Locked first: the idle records are dropped, the placer's as well.
         let state = self.lock();
         let id = match &key {
