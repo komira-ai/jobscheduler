@@ -630,7 +630,9 @@ quota_remount_checks() {
     refuse "no fuser (package psmisc): cannot tell whether anything holds $SCRATCH open"
     return 1
   fi
-  out=$(fuser -m -- "$SCRATCH" 2>&1) || rc=$?
+  # No `--` before the path: psmisc's fuser does not take it (it answers "No process specification
+  # given" and exits 1). $SCRATCH is this script's own absolute path, so it cannot read as an option.
+  out=$(fuser -m "$SCRATCH" 2>&1) || rc=$?
   if [ "$rc" = 0 ]; then
     refuse "something holds $SCRATCH open (fuser -vm $SCRATCH lists it): the filesystem is unmounted to turn $QUOTA_OPTION on, so stop it first"
     return 1
