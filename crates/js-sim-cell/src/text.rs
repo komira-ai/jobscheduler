@@ -62,3 +62,47 @@ pub(crate) fn axes(r: &Resources) -> [u128; 3] {
 
 /// The names of the booked axes, in the order of [`axes`].
 pub(crate) static AXES: [&str; 3] = ["cpu", "mem", "gpus"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observe::HowEnded;
+
+    /// Asserts that every client event is spelled as the module table says, with no id the
+    /// client learned: a pending try and a queued item read as their words alone, a
+    /// placement names its host, a terminal its end, and the release sent reads
+    /// `release-sent`.
+    #[test]
+    fn every_client_event_is_spelled_without_its_ids() {
+        let lease = LeaseId::new(3, 7);
+        let events = [
+            (ClientEvent::Submitted, "submitted"),
+            (ClientEvent::Pending { lease }, "pending"),
+            (
+                ClientEvent::Queued {
+                    lease,
+                    run: RunId::new("a"),
+                },
+                "queued",
+            ),
+            (
+                ClientEvent::Placed {
+                    host: HostId::new("h000").expect("a host id"),
+                },
+                "placed h000",
+            ),
+            (ClientEvent::Started, "started"),
+            (
+                ClientEvent::Terminal {
+                    how: HowEnded::Succeeded,
+                },
+                "terminal succeeded",
+            ),
+            (ClientEvent::ReleaseSent, "release-sent"),
+            (ClientEvent::Released, "released"),
+        ];
+        for (heard, spelled) in events {
+            assert_eq!(event(&heard), spelled);
+        }
+    }
+}

@@ -481,3 +481,20 @@ impl Monotonic for Virtual {
         Duration::from_millis(self.0.now().millis())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use js_types::Timestamp;
+
+    /// Asserts that the lease table's monotonic clock reads the cell's clock in
+    /// milliseconds, and moves when the cell's clock does.
+    #[test]
+    fn the_monotonic_clock_reads_the_cells_clock() {
+        let clock = ManualClock::new(Timestamp::from_millis(5_250));
+        let monotonic = Virtual(clock.clone());
+        assert_eq!(monotonic.reading(), Duration::from_millis(5_250));
+        clock.advance(Duration::from_secs(2));
+        assert_eq!(monotonic.reading(), Duration::from_millis(7_250));
+    }
+}

@@ -78,7 +78,6 @@ use js_lease_server::{Config, SharedClock, StartupError};
 use js_registry::{HostMark, HostState, HostView, Registry, SessionSource};
 use js_sim::{Event, NodeId, NodeInput, Output};
 use js_testkit::dir::TestDir;
-use js_types::HostId;
 use js_types::sched::{Effect, FarmTime, StateMachine};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
@@ -403,26 +402,18 @@ impl ServerNode {
             .unwrap_or_default()
     }
 
-    /// The registry's listing as the cell observes it, in the registry's order, with the
-    /// request each reserved host is set aside for and the end of its tail
-    /// ([`Registry::reservations`]).
+    /// The registry's listing as the cell observes it, in the registry's order. The job
+    /// front makes no reservation for a whole-host request, so no host is listed as set
+    /// aside for one: a listed host's `reserved_for` and `tail_end` are left empty.
     #[must_use]
     pub fn view(&self) -> ServerView {
-        let reservations = self.registry().map(|r| r.reservations());
-        let tails: BTreeMap<HostId, Option<u64>> = reservations
-            .unwrap_or_default()
-            .into_iter()
-            .map(|reservation| (reservation.host, reservation.tail_end))
-            .collect();
         let hosts = self.hosts().into_iter().map(|host| {
-            let tail_end = tails.get(&host.id).copied().flatten();
             let listed = ServerHost {
                 lost: host.state == HostState::Lost,
                 leases: host.leases,
                 set_aside: host.mark.is_some(),
                 leaving: matches!(host.mark, Some(HostMark::Draining | HostMark::Releasing)),
-                reserved_for: host.reserved_for.map(|request| request.to_string()),
-                tail_end: tail_end.map(virtual_time),
+                ..ServerHost::default()
             };
             (host.id, listed)
         });

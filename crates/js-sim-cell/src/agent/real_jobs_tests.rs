@@ -270,6 +270,29 @@ fn a_start_or_stop_that_names_no_valid_id_is_refused() {
     assert!(!rig.jobs.timer(7, &mut rig.real, &mut rig.io));
 }
 
+/// Asserts that a command that names no job (a cancel of a run) is left alone by the
+/// per-job half: nothing is refused, launched or taken out of the reply.
+#[test]
+fn a_command_that_names_no_job_is_left_alone() {
+    let mut rig = rig("real-jobs-run-command");
+    let commands = vec![Command::Cancel {
+        run_id: "run-1".to_owned(),
+    }];
+    let reply = HeartbeatReply {
+        commands,
+        ..HeartbeatReply::default()
+    };
+    let check = reply.validate();
+    let handed: Vec<&Command> = reply.commands.iter().collect();
+    let acks = Acks::of(&reply, &check);
+    let noted = rig
+        .jobs
+        .noted(CallId(0), &handed, &acks, &capacity(), &mut rig.io);
+    assert!(noted.unaccounted.is_empty());
+    assert_eq!(rig.io.counters.get(Counter::ReplyInvalid), 0);
+    assert!(rig.launches().is_empty());
+}
+
 /// Asserts that only a real agent whose hello reports the capability as `true` has the
 /// per-job half. Catches a real node that speaks per-job messages to a server that never
 /// asked, and a fake's half that shadows it.

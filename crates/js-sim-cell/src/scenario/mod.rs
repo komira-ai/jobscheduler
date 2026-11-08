@@ -12,8 +12,8 @@
 //!     .run_seeds(4)
 //! ```
 //!
-//! A scenario states its world (the server, the hosts, the bus's faults at the start, the
-//! client's [`FrontFactory`]), what happens and when ([`Scenario::work`] at time zero,
+//! A scenario states its world (the server, the hosts, the bus's faults at the start; the
+//! client is always the [`JobFront`]), what happens and when ([`Scenario::work`] at time zero,
 //! [`Action`]s at virtual times), and what it expects beyond the invariants ([`Expect`]
 //! at the end, or at a virtual time with [`Scenario::expect_at`], and
 //! [`Scenario::witness`]). Every invariant of [`crate::Invariant::ALL`] is checked in
@@ -52,7 +52,6 @@ use crate::actions::{Action, submit_work};
 use crate::agreement::{self, Outcome};
 use crate::cell::{Cell, Setup};
 use crate::counters::{Counter, Counters};
-use crate::front::FrontFactory;
 use crate::jobs::JobFront;
 use crate::observe::ItemId;
 use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
@@ -116,7 +115,6 @@ pub struct Scenario {
     statements: Vec<Statement>,
     witnesses: Vec<Witness>,
     settle_within: Duration,
-    front: FrontFactory,
 }
 
 /// One seed that passed.
@@ -227,7 +225,6 @@ impl Scenario {
             statements: Vec::new(),
             witnesses: Vec::new(),
             settle_within: DEFAULT_SETTLE,
-            front: JobFront::factory(),
         }
     }
 
@@ -368,13 +365,6 @@ impl Scenario {
         self
     }
 
-    /// This scenario, its client made by `front` in place of [`JobFront::factory`].
-    #[must_use]
-    pub fn front(mut self, front: FrontFactory) -> Self {
-        self.front = front;
-        self
-    }
-
     /// Runs seeds `0..seeds` in order: [`Scenario::run_seed_range`] from seed 0.
     ///
     /// # Panics
@@ -504,7 +494,7 @@ impl Scenario {
         let name = format!("{}-{}", self.name, setup.seed());
         let dir = TestDir::under(root.join("js-sim-cell"), &name);
         let mut cell = Cell::new(setup, self.server.clone(), dir, self.bus.clone())?;
-        cell.set_front(self.front.make(&self.server));
+        cell.set_front(JobFront::factory().make(&self.server));
         for hosts in &self.hosts {
             cell.set_worker_lag(self.worker_lag);
             self.add(&mut cell, hosts)?;

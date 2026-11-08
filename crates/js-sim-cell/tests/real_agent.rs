@@ -385,6 +385,21 @@ fn a_real_agent_is_handed_only_the_starts_the_cell_can_account_for() {
     assert_eq!(held, ["r1"]);
 }
 
+/// The answer to heartbeat 1 carries a stop of a job the agent does not hold: the real
+/// agent takes it without complaint (the reply is not counted invalid, and no run is
+/// launched), and the heartbeats go on. Catches a real node that lets a job stop in a reply
+/// break the session.
+#[test]
+fn a_real_agent_takes_a_job_stop_for_a_job_it_does_not_hold() {
+    let dir = root("real-agent-job-stop");
+    let stop = json!({ "type": "job_stop", "job_id": "sim-job-1" });
+    let script = Script::plain().commands(1, json!([stop]));
+    let (sim, ledger) = run(&dir, script, 3_500);
+    assert!(launches(&ledger).is_empty());
+    assert_eq!(count(&sim, Counter::ReplyInvalid), 0);
+    assert_eq!(stand_in(&sim).beat_times(), [1_015, 2_025, 3_035]);
+}
+
 /// A real agent, silent on a prepare, goes through the whole-host handshake of the
 /// session as the fake does: answer 1 names lease `1-1` and carries a start of it, which
 /// is written into the ledger and not handed to the lifecycle (a cancel beside it is

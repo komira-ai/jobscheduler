@@ -17,7 +17,9 @@ use crate::agents_support::{
 };
 use crate::jobs_support::{JobBody, commands, exited, job_state, one_start, running, submit_body};
 use crate::joins::{beat_with, code, minted};
-use crate::support::{Harness, Kept, Reply, Scratch, T0, kept_bindings, replace, request};
+use crate::support::{
+    Harness, Kept, Reply, Scratch, T0, kept_bindings, lease_file, replace, request,
+};
 
 /// The default length of a cordon asked for with no length, and the longest one a request
 /// can ask for, in seconds.
@@ -464,6 +466,30 @@ async fn a_cordon_survives_a_restart_in(kept: Kept) {
     if kept == Kept::Store {
         assert!(!agents_file(&h).exists());
     }
+}
+
+/// Asserts that a host's own read names the lease a restart restored on it: the server
+/// restarts over a lease file that holds lease 1 on the host, and the host, still awaiting
+/// its agent, reads `lease` `1-1` and one lease; before the restart it read none. It
+/// catches a read that leaves out the lease the lease file gave the host.
+#[tokio::test]
+async fn a_host_reads_the_lease_a_restart_restored_on_it() {
+    let first = start_job_hosts_in("cordon_restored_lease", Kept::Files).await;
+    let me = enrolled(&first, "burst-1", "i-1").await;
+    let before = show(&first, "burst-1", &me).await;
+    assert!(before.get("lease").is_none(), "{before}");
+    let Harness {
+        running, scratch, ..
+    } = first;
+    running.shutdown().await.unwrap();
+    fs::write(scratch.state(), lease_file(&[(1, "held", Some("burst-1"))])).unwrap();
+    let args = Kept::Files.args(&scratch, job_host_args(&scratch));
+    let args = replace(args, "--boot", "resume");
+    let h = Harness::with(scratch, args, None).await;
+    let read = show(&h, "burst-1", &me).await;
+    assert_eq!(read["state"], "awaiting");
+    assert_eq!(read["lease"], "1-1");
+    assert_eq!(read["leases"], 1);
 }
 
 /// Asserts that a lifted cordon is not brought back by a restart, and that a host the

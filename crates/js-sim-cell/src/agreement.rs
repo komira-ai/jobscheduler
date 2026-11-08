@@ -8,8 +8,7 @@
 //! `cancelled`, a job that ended with none reads `lost` (or `cancelled`
 //! after a cancel), so two items whose terminals agree have results that agree as far as
 //! the client can tell. Nothing else is compared: the traces differ by design, since the
-//! two agents send different bodies, and the run ids the server gives are named in a
-//! report but are not compared.
+//! two agents send different bodies.
 //!
 //! [`compare`] runs both and returns every [`Disagreement`]: a seed whose items ended
 //! differently, with each item, its outcome on each side and the last trace lines of both
@@ -19,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::observe::{ClientEvent, HowEnded, ItemId, Observations, RunId};
+use crate::observe::{HowEnded, ItemId, Observations};
 use crate::scenario::{Scenario, ended};
 
 /// What the client heard of one item by the end of a run.
@@ -27,30 +26,21 @@ use crate::scenario::{Scenario, ended};
 pub struct Outcome {
     /// The terminal it heard first, or `None` when the item never ended.
     pub terminal: Option<HowEnded>,
-    /// The run the server gave the item, when the client learned one. Named in a report;
-    /// not compared.
-    pub run: Option<RunId>,
 }
 
 impl fmt::Display for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let terminal = self.terminal.map_or("none", HowEnded::name);
-        let run = self.run.as_ref().map_or("none", RunId::as_str);
-        write!(f, "terminal {terminal} (run {run})")
+        write!(f, "terminal {terminal}")
     }
 }
 
 /// The outcome of every item `observations` hold.
 #[must_use]
 pub fn outcomes(observations: &Observations) -> BTreeMap<ItemId, Outcome> {
-    let queued = |event: &ClientEvent| match event {
-        ClientEvent::Queued { run, .. } => Some(run.clone()),
-        _ => None,
-    };
     let each = observations.items.iter().map(|(item, record)| {
-        let run = record.heard.iter().find_map(|heard| queued(&heard.event));
         let terminal = ended(record);
-        (*item, Outcome { terminal, run })
+        (*item, Outcome { terminal })
     });
     each.collect()
 }
@@ -209,9 +199,6 @@ pub fn compare(fake: &Scenario, real: &Scenario, seeds: u64) -> Vec<Disagreement
 
 /// The outcome of `item` on one side; one that side never had is an item that never ended.
 fn side_outcome(side: &BTreeMap<ItemId, Outcome>, item: ItemId) -> Outcome {
-    let none = Outcome {
-        terminal: None,
-        run: None,
-    };
+    let none = Outcome { terminal: None };
     side.get(&item).cloned().unwrap_or(none)
 }

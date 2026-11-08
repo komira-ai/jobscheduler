@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use js_agent_wire::{HeldState, RETRY_AFTER_CAP};
 use js_conformance::agent::Defect;
-use js_sim::Sim;
-use js_sim_cell::bus::agent_name;
+use js_sim::{Event, Node, NodeId, NodeInput, Sim};
+use js_sim_cell::bus::{SERVER, agent_name};
 use js_sim_cell::{
-    AgentKind, AgentSpec, Checker, Counter, Invariant, Ledger, Observations, RunId, SIM_RUN_IMAGE,
-    Touched, Verdict,
+    AgentKind, AgentNode, AgentSpec, CallId, Checker, Counter, Invariant, Ledger, Msg,
+    Observations, Route, RunId, SIM_RUN_IMAGE, Touched, Verdict,
 };
-use js_types::sched::FarmTime;
+use js_types::sched::{FarmTime, StateMachine};
 use js_types::{HostId, LeaseId, Resources};
 use serde_json::{Value, json};
 
@@ -695,6 +695,46 @@ fn a_killed_agent_loses_its_state_and_a_replacement_registers_empty_and_the_ledg
     let both = [("a".to_owned(), 1_020), ("b".to_owned(), 1_020)];
     assert_eq!(launches(&ledger), both);
     assert!(completions(&ledger).is_empty());
+}
+
+/// A call addressed to the agent (only the server takes calls) reaches a live process: the
+/// node ignores it, sending nothing and counting nothing. Catches a node that takes a call
+/// for an answer.
+#[test]
+fn a_call_addressed_to_the_agent_is_ignored() {
+    let mut node = AgentNode::new(spec(), Ledger::new());
+    let call = Msg::Request {
+        id: CallId(0),
+        route: Route::Hello,
+        bearer: JOIN.to_owned(),
+        body: String::new(),
+    };
+    let from = NodeId::new(SERVER);
+    let event = Event::Message { from, msg: call };
+    let input = NodeInput {
+        now: ms(10),
+        entropy: 0,
+        event,
+    };
+    assert!(node.apply(input).is_empty());
+    assert!(node.take_outputs().is_empty());
+    assert_eq!(node.counters().get(Counter::ReplyInvalid), 0);
+}
+
+/// The answer to heartbeat 1 starts `r1`, which the next hello or heartbeat has not yet
+/// listed: from the start until heartbeat 2 leaves (at 2 010) the agent runs a run the
+/// server cannot have seen listed, and after it, which names `r1` held, it does not.
+/// Catches an agent that counts a run listed before it was, or one never listed.
+#[test]
+fn a_started_run_is_unlisted_until_a_heartbeat_lists_it() {
+    let script = Script::plain().commands(1, json!([start("r1", LONG_RUN_MS, 1, 0)]));
+    let (mut sim, _) = cell(spec(), script, INTERVAL);
+    sim.run_until(ms(500));
+    assert!(!agent(&sim).runs_unlisted());
+    sim.run_until(ms(1_500));
+    assert!(agent(&sim).runs_unlisted());
+    sim.run_until(ms(2_500));
+    assert!(!agent(&sim).runs_unlisted());
 }
 
 /// The same script twice gives the same trace hash; the trace names every call and

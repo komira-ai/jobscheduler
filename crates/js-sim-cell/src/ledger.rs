@@ -106,12 +106,6 @@ impl Ledger {
         entries.completions.iter().skip(skip).cloned().collect()
     }
 
-    /// Every verdict an agent read, oldest first.
-    #[must_use]
-    pub fn verdicts(&self) -> Vec<Acked> {
-        self.0.borrow().verdicts.clone()
-    }
-
     /// The verdicts after the first `skip`, oldest first.
     pub(crate) fn verdicts_after(&self, skip: usize) -> Vec<Acked> {
         let entries = self.0.borrow();
