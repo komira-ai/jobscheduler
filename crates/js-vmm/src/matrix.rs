@@ -27,6 +27,8 @@ pub const MANIFEST: &str = "matrix.json";
 /// The directory every user of the Mac may write to. Spelled in two pieces because the
 /// repository's hygiene lint refuses any text that looks like a home path.
 const SHARED_DIR: &str = concat!("/Us", "ers/Shared");
+/// The real path behind `/tmp`.
+const TMP_DIR: &str = "/private/tmp";
 /// The name a multiple-directory share lists its one directory under.
 pub const SUBDIR: &str = "m";
 /// The user id the other-owner variant is given (only a root run can do it).
@@ -37,10 +39,31 @@ pub const OTHER_UID: u32 = 59_001;
 enum Place {
     /// Beside the clone, in the work directory.
     Work,
-    /// `/private/tmp`, the real path behind `/tmp`.
+    /// Under [`Roots::tmp`] (`/private/tmp` in a real run).
     Tmp,
-    /// the shared-users directory.
+    /// Under [`Roots::shared`] (the shared-users directory in a real run).
     Shared,
+}
+
+/// The directories outside the work directory that the `tmp` and `shared` variants are
+/// made in. A real run uses [`Roots::host`]; a test points both at a scratch directory of
+/// its own, so what it asserts about them does not depend on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Roots {
+    /// Where the `tmp` variant's directory is made.
+    pub(crate) tmp: PathBuf,
+    /// Where the `shared` variant's directory is made.
+    pub(crate) shared: PathBuf,
+}
+
+impl Roots {
+    /// The host's own: `/private/tmp` and the shared-users directory.
+    pub(crate) fn host() -> Self {
+        Self {
+            tmp: PathBuf::from(TMP_DIR),
+            shared: PathBuf::from(SHARED_DIR),
+        }
+    }
 }
 
 /// One row of the matrix: the baseline with one thing changed.
@@ -134,8 +157,8 @@ fn dir_of(ctx: &Ctx<'_>, vm: &str, v: &Variant) -> PathBuf {
     let leaf = format!("kbf-{vm}-mx-{}", v.name);
     match v.place {
         Place::Work => ctx.work.join(leaf),
-        Place::Tmp => Path::new("/private/tmp").join(leaf),
-        Place::Shared => Path::new(SHARED_DIR).join(leaf),
+        Place::Tmp => ctx.matrix_roots.tmp.join(leaf),
+        Place::Shared => ctx.matrix_roots.shared.join(leaf),
     }
 }
 
@@ -294,7 +317,14 @@ pub fn remove(ctx: &Ctx<'_>, shares: &[Prepared], keep: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fake::{FakeSystem, ctx, work_with_base};
+    use crate::fake::{FakeSystem, ctx, host_roots, names_in, work_with_base};
+
+    /// A context in `work` whose matrix roots are `roots`.
+    fn ctx_in<'a>(sys: &'a FakeSystem, work: &Path, roots: &Roots) -> Ctx<'a> {
+        let mut c = ctx(sys, work);
+        c.matrix_roots = roots.clone();
+        c
+    }
 
     /// Catches a matrix whose variants differ in more than one factor from the baseline
     /// (the answer would not name the factor), duplicated names or tags, a tag that is the
@@ -326,10 +356,11 @@ mod tests {
             assert!(names.contains(want), "{want}");
         }
         let work = work_with_base("matrix-tags");
+        let (_host, roots) = host_roots("matrix-tags");
         let sys = FakeSystem::new();
-        let shares = prepare(&ctx(&sys, &work), "vm");
+        let shares = prepare(&ctx_in(&sys, &work, &roots), "vm");
         let tags: std::collections::BTreeSet<_> = shares.iter().map(|s| s.tag.clone()).collect();
-        assert_eq!(tags.len(), shares.len());
+        assert_eq!(tags.len(), VARIANTS.len());
         for t in &tags {
             assert!(t.starts_with("kbfmx"));
             assert_ne!(t, guest::AUTOMOUNT_TAG);
@@ -337,18 +368,25 @@ mod tests {
     }
 
     /// Catches directories made with the wrong mode (the umask would narrow 0777), the
-    /// other-owner variant made by a non-root run (it must be skipped, with the reason),
-    /// shared places written to by a test, and a skipped share that is still attached.
+    /// `tmp` and `shared` variants made anywhere but under their roots, the other-owner
+    /// variant made by a non-root run (it must be skipped, with the reason), and a skipped
+    /// share that is still attached.
     #[test]
     fn directories_get_their_mode_and_a_variant_that_cannot_be_made_is_skipped() {
         let work = work_with_base("matrix-prepare");
+        let (_host, roots) = host_roots("matrix-prepare");
         let sys = FakeSystem::new();
-        let c = ctx(&sys, &work);
+        let c = ctx_in(&sys, &work, &roots);
         let shares = prepare(&c, "vm");
         let by = |n: &str| shares.iter().find(|s| s.name == n).expect("share");
+        assert_eq!(by("tmp").dir, roots.tmp.join("kbf-vm-mx-tmp"));
+        assert_eq!(by("shared").dir, roots.shared.join("kbf-vm-mx-shared"));
+        assert_eq!(by("base").dir, work.join("kbf-vm-mx-base"));
         for (name, mode) in [
             ("base", 0o777),
             ("mode755", 0o755),
+            ("tmp", 0o777),
+            ("shared", 0o777),
             ("control-mode555", 0o555),
         ] {
             let got = std::fs::metadata(&by(name).dir)
@@ -366,7 +404,14 @@ mod tests {
                 .contains("root run")
         );
         assert!(!by("other-owner").dir.exists());
-        // /private/tmp and the shared-users directory exist on a Mac; elsewhere they are skipped or made.
+        assert_eq!(
+            shares
+                .iter()
+                .filter(|s| s.skipped.is_some())
+                .map(|s| s.name)
+                .collect::<Vec<_>>(),
+            ["other-owner"]
+        );
         let mut spec = VmSpec::minimal(work.join("vm"));
         attach(&mut spec, &shares);
         let attached: Vec<&str> = spec.tagged.iter().map(|t| t.tag.as_str()).collect();
@@ -410,6 +455,8 @@ mod tests {
         remove(&c, &again, false);
         remove(&c, &shares, false);
         assert!(!by("base").dir.exists());
+        assert!(names_in(&roots.tmp).is_empty());
+        assert!(names_in(&roots.shared).is_empty());
         assert!(
             !by("control-mode555").dir.exists(),
             "a 0555 directory is removed too"
@@ -421,14 +468,16 @@ mod tests {
     #[test]
     fn the_manifest_lists_what_is_attached_and_is_written_into_the_share() {
         let work = work_with_base("matrix-manifest");
+        let (_host, roots) = host_roots("matrix-manifest");
         let sys = FakeSystem::new();
-        let shares = prepare(&ctx(&sys, &work), "vm");
+        let shares = prepare(&ctx_in(&sys, &work, &roots), "vm");
         let m = manifest(&shares);
         let rows = m.as_array().expect("rows");
         assert_eq!(
             rows.len(),
             shares.iter().filter(|s| s.skipped.is_none()).count()
         );
+        assert_eq!(rows.len(), VARIANTS.len() - 1, "all but other-owner");
         assert!(rows.iter().all(|r| r["name"] != "other-owner"));
         let multiple = rows
             .iter()
@@ -459,8 +508,9 @@ mod tests {
     #[test]
     fn the_host_listing_shows_what_landed_and_who_owns_the_directory() {
         let work = work_with_base("matrix-list");
+        let (_host, roots) = host_roots("matrix-list");
         let sys = FakeSystem::new();
-        let shares = prepare(&ctx(&sys, &work), "vm");
+        let shares = prepare(&ctx_in(&sys, &work, &roots), "vm");
         let base = shares.iter().find(|s| s.name == "base").expect("base");
         std::fs::write(base.dir.join("landed"), "abc").expect("file");
         std::fs::write(base.dir.join("a-first"), "").expect("file");
@@ -498,14 +548,31 @@ mod tests {
         assert!(gone["entries"]["error"].is_string());
     }
 
-    /// Catches a removal that leaves scratch outside the work directory and one that
-    /// removes the kept clones' directories under `--keep`.
+    /// Catches a removal that leaves scratch outside the work directory, one that
+    /// removes the kept clones' directories under `--keep`, and one that removes anything
+    /// in the shared places that the matrix did not make.
     #[test]
     fn keep_leaves_the_work_directories_and_removes_nothing_else() {
         let work = work_with_base("matrix-keep");
+        let (_host, roots) = host_roots("matrix-keep");
         let sys = FakeSystem::new();
-        let c = ctx(&sys, &work);
+        let c = ctx_in(&sys, &work, &roots);
+        // Another program's directory in each shared place.
+        for root in [&roots.tmp, &roots.shared] {
+            std::fs::create_dir(root.join("not-ours")).expect("other");
+        }
         let shares = prepare(&c, "vm");
+        assert_eq!(names_in(&roots.tmp), ["kbf-vm-mx-tmp", "not-ours"]);
+        assert_eq!(names_in(&roots.shared), ["kbf-vm-mx-shared", "not-ours"]);
+        let in_work = [
+            "base",
+            "kbf-vm-mx-base",
+            "kbf-vm-mx-control-mode555",
+            "kbf-vm-mx-control-readonly",
+            "kbf-vm-mx-mode755",
+            "kbf-vm-mx-multiple",
+        ];
+        assert_eq!(names_in(&work), in_work);
         remove(&c, &shares, true);
         assert!(
             shares
@@ -516,13 +583,77 @@ mod tests {
         assert!(
             !shares
                 .iter()
-                .any(|s| s.dir.starts_with(SHARED_DIR) && s.dir.exists())
+                .any(|s| s.dir.starts_with(&roots.shared) && s.dir.exists())
         );
+        assert_eq!(names_in(&work), in_work);
+        assert_eq!(names_in(&roots.tmp), ["not-ours"]);
+        assert_eq!(names_in(&roots.shared), ["not-ours"]);
         remove(&c, &shares, false);
         assert!(
             shares
                 .iter()
                 .all(|s| !s.dir.starts_with(&work) || !s.dir.exists())
         );
+        assert_eq!(names_in(&work), ["base"]);
+        assert_eq!(names_in(&roots.tmp), ["not-ours"]);
+        assert_eq!(names_in(&roots.shared), ["not-ours"]);
+    }
+
+    /// Catches a `tmp` or `shared` variant whose root is missing failing the matrix (it
+    /// is skipped with the error, and the rest is still made), a skipped share that is
+    /// attached, and a removal that trips over a directory that was never made.
+    #[test]
+    fn a_variant_whose_root_is_missing_is_skipped_and_the_rest_is_made() {
+        let work = work_with_base("matrix-noroot");
+        let sys = FakeSystem::new();
+        let c = ctx(&sys, &work);
+        let shares = prepare(&c, "vm");
+        for name in ["tmp", "shared"] {
+            let s = shares.iter().find(|s| s.name == name).expect("share");
+            let why = s.skipped.as_deref().expect("skipped");
+            assert!(
+                why.starts_with(&format!("create {}: ", s.dir.display())),
+                "{why}"
+            );
+            assert!(!s.dir.exists());
+        }
+        assert!(!c.matrix_roots.tmp.exists());
+        assert!(!c.matrix_roots.shared.exists());
+        let made: Vec<&str> = shares
+            .iter()
+            .filter(|s| s.skipped.is_none())
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            made,
+            [
+                "base",
+                "mode755",
+                "multiple",
+                "control-mode555",
+                "control-readonly"
+            ]
+        );
+        let mut spec = VmSpec::minimal(work.join("vm"));
+        attach(&mut spec, &shares);
+        assert_eq!(spec.tagged.len(), made.len());
+        remove(&c, &shares, false);
+        assert_eq!(names_in(&work), ["base"]);
+    }
+
+    /// Catches a real run whose matrix moved off the host's `/private/tmp` and
+    /// shared-users directory (the experiment compares exactly those places).
+    #[test]
+    fn a_real_run_uses_the_hosts_own_tmp_and_shared_directories() {
+        let roots = Roots::host();
+        assert_eq!(roots.tmp, Path::new("/private/tmp"));
+        assert_eq!(roots.shared, Path::new(SHARED_DIR));
+        let work = work_with_base("matrix-host");
+        let sys = FakeSystem::new();
+        let c = ctx_in(&sys, &work, &roots);
+        let at = |n: &str| dir_of(&c, "vm", VARIANTS.iter().find(|v| v.name == n).expect("v"));
+        assert_eq!(at("tmp"), Path::new("/private/tmp/kbf-vm-mx-tmp"));
+        assert_eq!(at("shared"), Path::new(SHARED_DIR).join("kbf-vm-mx-shared"));
+        assert_eq!(at("base"), work.join("kbf-vm-mx-base"));
     }
 }
