@@ -42,7 +42,8 @@ const TABLE: [(&str, RefusalCode); 8] = [
 ///   over the type.
 /// - `INVALID_FIELD_VALUE`, `RESOURCE_NOT_FOUND`, `invalid`, `notFound`: refused,
 ///   [`RefusalCode::Shape`], a configuration error.
-/// - [`ApiError::Denied`] (HTTP 401 and 403 that are not a rate limit: `forbidden`,
+/// - [`ApiError::Denied`] (HTTP 401, and 403 that is neither a rate limit nor `quotaExceeded`:
+///   `forbidden`,
 ///   `PERMISSION_DENIED`, `authError`, `UNAUTHENTICATED`) and [`ApiError::NoCredential`]
 ///   (as `NoCredential`): refused, [`RefusalCode::Denied`].
 /// - Everything else is [`Acquired::Unknown`]: `RESOURCE_OPERATION_RATE_EXCEEDED` (a rate

@@ -71,8 +71,8 @@ const UNAUTHENTICATED: &str = "UNAUTHENTICATED";
 const FORBIDDEN: &str = "forbidden";
 
 /// The reason of an answer that says a limit of the project is used up (the standard error
-/// reasons of Google's JSON APIs: `quotaExceeded`, domain `usageLimits`, at HTTP 403). It
-/// is a refusal whatever the status, never a denial: the credential may make the call.
+/// reasons of Google's JSON APIs: `quotaExceeded`, domain `usageLimits`, at HTTP 403). At
+/// a 403 it is a refusal, never a denial: the credential may make the call.
 const QUOTA_EXCEEDED: &str = "quotaExceeded";
 
 /// The client of the port over a transport. It reads the clock only to know when its
