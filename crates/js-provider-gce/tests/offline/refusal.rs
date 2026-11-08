@@ -36,6 +36,7 @@ fn every_listed_cloud_error_maps_to_its_constant() {
             RefusalCode::Capacity,
         ),
         ("QUOTA_EXCEEDED", RefusalCode::Quota),
+        ("quotaExceeded", RefusalCode::Quota),
         ("INVALID_FIELD_VALUE", RefusalCode::Shape),
         ("RESOURCE_NOT_FOUND", RefusalCode::Shape),
         ("invalid", RefusalCode::Shape),
@@ -84,6 +85,7 @@ fn a_refused_insert_frees_the_room_and_an_unknown_one_keeps_it() {
     let table = [
         ("ZONE_RESOURCE_POOL_EXHAUSTED", RefusalCode::Capacity),
         ("QUOTA_EXCEEDED", RefusalCode::Quota),
+        ("quotaExceeded", RefusalCode::Quota),
         ("INVALID_FIELD_VALUE", RefusalCode::Shape),
         ("forbidden", RefusalCode::Denied),
     ];

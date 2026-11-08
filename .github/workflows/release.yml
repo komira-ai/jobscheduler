@@ -2,11 +2,12 @@
 # released as the next version, with no step by hand (docs/release.md). GitHub-hosted
 # runners only, actions pinned to commit SHAs.
 #
-# What starts it. A push to main (`on: push`), and nothing else releases: every job below
-# but `plan` tests that the event is a push and the ref is main, and no tag and no manual
-# run starts a release. A pull request that changes this file builds the same assets as a
-# dry run (`plan` is told so with --dry-run) and never waits for `ci`, attests, tags or
-# publishes.
+# What starts it. A push to main (`on: push`), and nothing else releases: the wait and
+# every job that attests, publishes or deploys test that the event is a push and the ref is
+# main, and no tag and no manual run starts a release. A pull request that changes this file
+# builds the same assets as a dry run (`plan` is told so with --dry-run, and artifacts.yml
+# builds and sums) and never waits for `ci`, attests, tags or publishes. A pull request that
+# changes only artifacts.yml starts no dry run.
 #
 # Which commit. The one pushed: `github.sha` of a push run is the pushed commit, and an
 # attestation records `github.sha` and `github.ref` (the certificate's source digest and
@@ -20,7 +21,7 @@
 # Every other job needs it. It holds `actions: read` only and checks out nothing; ten reads of the runs in a row that fail
 # (about twenty minutes) fail it too. A re-run keeps the commit and `github.sha`
 # of the run it repeats; a re-run of only the failed jobs keeps the `plan` that succeeded,
-# so `publish` and `verify` check the tag and the attestations.
+# so `publish` and artifacts.yml's `verify` check the tag and the attestations.
 #
 # Two tag views differ on purpose. `plan` counts only the `v*` tags merged into the commit;
 # `publish` compares against the highest `vX.Y.Z` tag of the whole repository and refuses
@@ -41,12 +42,15 @@
 # stamp` puts the version into the build's checkout, so `--version` prints it; nothing is
 # committed.
 #
-# The assets. The archives of the binaries (`*.tar.gz`); the hostkeeper package of js-agent for
-# each of linux-x86_64, linux-arm64 and macos-arm64 (`js-agent-<version>-<platform>.tar.zst`,
-# made by `build`), and `js-agent-index.json`, the index of the three (made by `sums`).
-# SHA256SUMS lists all of them, `attest` attests the whole list and `verify` checks each file.
+# The assets, built and signed by artifacts.yml, which the `artifacts` job calls: the archives of
+# the binaries (`*.tar.gz`); the hostkeeper package of js-agent for each of linux-x86_64,
+# linux-arm64 and macos-arm64 (`js-agent-<version>-<platform>.tar.zst`) with the bundle of its
+# own provenance beside it (`<package>.sigstore.json`); and `js-agent-index.json`, the index of
+# the three. SHA256SUMS lists all of them but the bundles. This file attests nothing: every
+# attestation is signed by artifacts.yml, the one signer farm hosts trust (see the top of that
+# file).
 #
-# Order: ci-passed, plan, build, sums, attest, verify, publish, then gamma. The tag is made last: `publish` makes
+# Order: ci-passed, plan, artifacts (build, sums, attest, verify), publish, then gamma. The tag is made last: `publish` makes
 # a draft release, uploads the files built, attested and verified, and publishes it in
 # one call, which creates the tag. A failed run leaves no tag. A re-run of a failed run
 # continues the same draft and adds what is missing; a published release is never changed,
@@ -57,12 +61,14 @@
 # (a notice, and the job passes) until the repository variable JS_COORDINATOR_URL is set
 # (docs/release.md, "The gamma step").
 #
-# Permissions are per job. Only `attest` and `gamma` hold id-token write, `attest` also
-# attestations write, and only `publish` holds contents write; none of the three runs
-# repository code: `attest` and `publish` run only pinned actions, `sha256sum`, `cmp` and
-# `gh`, and `gamma` runs the `xtask` binary that the permissionless `deploy-tool` job built
-# (so no build script ever sees the token service's address and key), after the pinned
-# actions. A test (crates/xtask/tests/release_workflow) pins these rules.
+# Permissions are per job. Only `artifacts` and `gamma` hold id-token write here, and
+# `artifacts` also attestations write, only because a called workflow can hold no more than its
+# calling job grants: in artifacts.yml only `attest` holds them. Only `publish` holds contents
+# write. None of the jobs that hold a write runs repository code: `attest` and `publish` run
+# only pinned actions, `sha256sum`, `cmp`, `cp` and `gh`, and `gamma` runs the `xtask` binary
+# that the permissionless `deploy-tool` job built (so no build script ever sees the token
+# service's address and key), after the pinned actions. A test
+# (crates/xtask/tests/release_workflow) pins these rules for both files.
 name: release
 
 on:
@@ -188,261 +194,27 @@ jobs:
           fi
           cargo xtask release plan --head "$COMMIT" --output "$GITHUB_OUTPUT" "${flags[@]}" | tee "$GITHUB_STEP_SUMMARY"
 
-  build:
+  # The files of the release, built and signed by artifacts.yml (see the top of that file): the
+  # signer of every attestation is that file, the one farm hosts trust, not this one. Its jobs run
+  # in this run, at this commit, under this event: `build` and `sums` on a pull request too (the
+  # dry run), `attest` and `verify` only for a push to main. A called workflow gets no more
+  # permission than its calling job grants, so this job grants what `attest` needs; each job of
+  # artifacts.yml then holds only its own (only `attest` holds the two writes).
+  artifacts:
     needs: [plan]
     # `!cancelled()`: on a pull request the wait before `plan` is skipped, and a skipped job
     # upstream would otherwise skip this one.
     if: ${{ !cancelled() && needs.plan.outputs.release == 'true' }}
-    name: build ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        # The five Linux binaries build for two architectures, x86_64 and arm64, each natively
-        # on a hosted runner of its own architecture (no cross linker, no emulation), so the
-        # check step below runs every binary on the kind of host it is for. The lease server
-        # and js-mdm are Linux-only; the client, the agent, the js-bundle CLI and the Mac host
-        # tools (js-mac-session, js-mac-provision) also build for Apple silicon.
-        include:
-          # Static musl binaries: they run on gcr.io/distroless/cc-debian12 and on any
-          # Linux host of their architecture, whatever its libc. rustls links ring, which
-          # compiles C, hence musl-tools on both Linux legs.
-          - target: x86_64-unknown-linux-musl
-            runner: ubuntu-24.04
-            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mdm:js-mdm
-          - target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04-arm
-            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mdm:js-mdm
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
-    env:
-      TARGET: ${{ matrix.target }}
-      VERSION: ${{ needs.plan.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.COMMIT }}
-          persist-credentials: false
-      - name: Install musl tools
-        if: ${{ endsWith(matrix.target, '-linux-musl') }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends musl-tools
-      # ring's C code for arm64 musl. On the arm64 runner the host (aarch64 glibc) and the target
-      # differ, so the cc crate looks for the compiler `aarch64-linux-musl-gcc`; musl-tools installs
-      # it as `musl-gcc` only (for x86_64 the cc crate falls back to `musl-gcc` by itself). The
-      # link gives musl-tools' compiler the name the crate looks for.
-      - name: Name musl-gcc as the arm64 musl compiler
-        if: ${{ matrix.target == 'aarch64-unknown-linux-musl' }}
-        run: sudo ln -s /usr/bin/musl-gcc /usr/local/bin/aarch64-linux-musl-gcc
-      # The archives are made with GNU tar's options; the runner has Homebrew's gnu-tar
-      # (`gtar`), and this installs it if an image does not.
-      - name: Install GNU tar
-        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
-        run: command -v gtar > /dev/null || brew install gnu-tar
-      - run: rustup toolchain install
-      - run: rustup target add "$TARGET"
-      # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so
-      # the binaries print it; the repository keeps its own version.
-      - name: Stamp the release version
-        run: cargo xtask release stamp --to "$VERSION"
-      - name: Build and package
-        env:
-          BUILDS: ${{ matrix.builds }}
-        run: |
-          set -euo pipefail
-          mkdir dist
-          # Archives that depend only on the commit and the binaries: sorted names, the
-          # commit's time as the modification time, numeric owner 0/0, no name or time in
-          # the gzip header. A full re-run then makes the same files as the first run.
-          mtime="$(git log -1 --format=%ct "$COMMIT")"
-          # The oldest macOS the Apple silicon binaries must run on; a newer runner image
-          # must not raise it (the check step below reads each binary's minos).
-          case "$TARGET" in
-            *-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
-          esac
-          # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
-          tar=tar
-          if command -v gtar > /dev/null; then
-            tar=gtar
-          fi
-          for entry in $BUILDS; do
-            package="${entry%%:*}"
-            bin="${entry##*:}"
-            cargo build --locked --release --target "$TARGET" -p "$package" --bin "$bin"
-            name="$bin-$VERSION-$TARGET"
-            # The files of the archive (crates/xtask/src/release/stage.rs): the binary, LICENSE
-            # and, in the Linux js-lease-server archive of either architecture,
-            # updater.d/js-lease-server.toml.
-            cargo xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin"
-            "$tar" -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
-          done
-          ls -l dist
-      # The hostkeeper package of js-agent for this leg's platform (linux-x86_64, linux-arm64
-      # or macos-arm64), made of the js-agent binary built above and the files in
-      # packaging/js-agent/hostkeeper or packaging/js-agent-macos/hostkeeper
-      # (crates/xtask/src/release/hostkeeper_package.rs). It lands in dist beside the archives.
-      - name: Package js-agent for hostkeeper
-        run: cargo xtask release hostkeeper-package --binary "target/$TARGET/release/js-agent" --target "$TARGET" --version "$VERSION" --out dist
-      - name: Check the binaries
-        run: |
-          set -euo pipefail
-          for entry in $BUILDS; do
-            bin="${entry##*:}"
-            file "target/$TARGET/release/$bin"
-          done
-          case "$TARGET" in
-            *-apple-darwin)
-              for entry in $BUILDS; do
-                bin="${entry##*:}"
-                minos="$(otool -l "target/$TARGET/release/$bin" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
-                echo "$bin minos $minos"
-                if [ -z "$minos" ]; then
-                  echo "::error::$bin has no LC_BUILD_VERSION minos to check"
-                  exit 1
-                fi
-                if [ "$(printf '%s\n%s\n' "$minos" 11.0 | sort -V | tail -n 1)" != "11.0" ]; then
-                  echo "::error::$bin needs macOS $minos, above the pinned 11.0"
-                  exit 1
-                fi
-              done
-              ;;
-            *-linux-musl)
-              for entry in $BUILDS; do
-                bin="${entry##*:}"
-                # A static binary has no dynamic loader and no shared libraries.
-                if readelf -d "target/$TARGET/release/$bin" | grep -q NEEDED; then
-                  echo "::error::$bin links shared libraries"
-                  exit 1
-                fi
-              done
-              ;;
-          esac
-          # Every binary runs on the build host and prints the release version on the first
-          # line of --version; js-agent prints a `runtimes:` line after it.
-          for entry in $BUILDS; do
-            bin="${entry##*:}"
-            printed="$("target/$TARGET/release/$bin" --version)"
-            echo "$printed"
-            printed="$(printf '%s\n' "$printed" | sed -n 1p)"
-            case "$printed" in
-              *" $VERSION") ;;
-              *)
-                echo "::error::$bin prints '$printed', not the release version $VERSION"
-                exit 1
-                ;;
-            esac
-          done
-        env:
-          BUILDS: ${{ matrix.builds }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dist-${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.tar.zst
-          if-no-files-found: error
-          retention-days: 7
-
-  # The hostkeeper release index of js-agent over the three packages, then one SHA256SUMS over
-  # every asset (the archives, the packages and the index), checked before anything is
-  # attested or published.
-  sums:
-    needs: [plan, build]
-    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' && needs.build.result == 'success' }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    env:
-      VERSION: ${{ needs.plan.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.COMMIT }}
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: dist-*
-          merge-multiple: true
-          path: dist
-      - run: rustup toolchain install
-      # js-agent-index.json: for each platform the package's file name, SHA-256 and size, in
-      # the form hostkeeper reads (crates/xtask/src/release/hostkeeper_index.rs). It refuses a
-      # directory that does not hold exactly the three packages of this version.
-      - name: Write the hostkeeper release index
-        run: cargo xtask release hostkeeper-index --dir dist --version "$VERSION"
-      - name: Write and check SHA256SUMS
-        run: |
-          set -euo pipefail
-          cd dist
-          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-aarch64-unknown-linux-musl.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-aarch64-unknown-linux-musl.tar.gz js-agent-$VERSION-linux-arm64.tar.zst js-agent-$VERSION-linux-x86_64.tar.zst js-agent-$VERSION-macos-arm64.tar.zst js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-index.json js-bundle-$VERSION-aarch64-apple-darwin.tar.gz js-bundle-$VERSION-aarch64-unknown-linux-musl.tar.gz js-bundle-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-aarch64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz js-mac-session-$VERSION-aarch64-apple-darwin.tar.gz js-mdm-$VERSION-aarch64-unknown-linux-musl.tar.gz js-mdm-$VERSION-x86_64-unknown-linux-musl.tar.gz"
-          actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::unexpected assets: '$actual' (expected '$expected')"
-            exit 1
-          fi
-          sha256sum -- *.tar.gz *.tar.zst js-agent-index.json > SHA256SUMS
-          sha256sum --check --strict SHA256SUMS
-          echo "assets:"
-          cat SHA256SUMS
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-assets
-          path: dist/
-          if-no-files-found: error
-          retention-days: 7
-
-  # Build provenance for every asset, from the checksums file. No repository code runs here.
-  attest:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
-    needs: [plan, sums]
-    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
       attestations: write
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-assets
-          path: dist
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-checksums: dist/SHA256SUMS
+    uses: ./.github/workflows/artifacts.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
 
-  # The attestations as a user checks them (docs/release.md), before anything is tagged:
-  # made by this workflow, for the commit being released.
-  verify:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
-    needs: [plan, attest]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      attestations: read
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-assets
-          path: dist
-      - name: Verify every archive, package and the index
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum --check --strict SHA256SUMS
-          for file in ./*.tar.gz ./*.tar.zst ./js-agent-index.json; do
-            gh attestation verify "$file" --repo "$REPO" \
-              --signer-workflow "$REPO/.github/workflows/release.yml" \
-              --source-ref refs/heads/main \
-              --source-digest "$COMMIT"
-          done
-
-  # Creates the release with the attested files, then publishes it, which creates the tag.
+  # Creates the release with the files artifacts.yml built, attested and verified, then
+  # publishes it, which creates the tag.
   # Nothing is rebuilt. The release starts as a draft for this version (tag_name and
   # target_commitish the commit), every file is uploaded to it, and one last call
   # publishes it: a failed upload leaves a draft and no tag, and a re-run continues the
@@ -460,7 +232,7 @@ jobs:
   # below. Nothing here is covered by a test; the dry run checks the file parses.
   publish:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
-    needs: [plan, sums, verify]
+    needs: [plan, artifacts]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -468,6 +240,12 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-assets
+          path: dist
+      # The bundle of each package's provenance, `<package>.sigstore.json`, made by
+      # artifacts.yml's `attest` and checked by its `verify`. SHA256SUMS does not list them.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bundles
           path: dist
       - name: Draft the release, add the files it lacks, publish it
         env:
@@ -480,6 +258,13 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum --check --strict SHA256SUMS
+          # Every package has its bundle beside it: hostkeeper takes no package without one.
+          for package in ./*.tar.zst; do
+            if [ ! -f "$package.sigstore.json" ]; then
+              echo "::error::$package has no bundle ($package.sigstore.json); nothing is released"
+              exit 1
+            fi
+          done
           api="repos/$REPO"
           # The commit the tag names: nothing when there is no tag, a failure on any
           # other error (a failed read is not "no tag").
@@ -495,7 +280,7 @@ jobs:
           # A draft for this version at this commit (tag_name and target_commitish).
           new_draft() {
             gh api "$api/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="jobscheduler $VERSION" \
-              -f body="js-lease-server, js, js-agent, js-bundle, js-mdm and the Mac host tools $VERSION, and the hostkeeper packages and index of js-agent. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
+              -f body="js-lease-server, js, js-agent, js-bundle, js-mdm and the Mac host tools $VERSION, and the hostkeeper packages, bundles and index of js-agent. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
               -F draft=true -F generate_release_notes=true --jq .id
           }
           # `plan` found no tag for this version: one that exists now was made since, and
@@ -518,7 +303,9 @@ jobs:
           draft="$(gh api "$api/releases/$id" --jq .draft)"
           target="$(gh api "$api/releases/$id" --jq .target_commitish)"
           # A file the release has must be this run's, byte for byte, or the files of two
-          # builds would be mixed. A file whose upload did not finish is not compared.
+          # builds would be mixed. A file whose upload did not finish is not compared, and
+          # neither is a bundle: each signing makes new bytes for the same package, which is
+          # compared itself, so an earlier run's bundle of an equal package is kept.
           replace=""
           differing=""
           if [ "$draft" = true ] && [ "$target" != "$COMMIT" ]; then
@@ -528,6 +315,9 @@ jobs:
           assets="$(gh api "$api/releases/$id" --jq '.assets[] | "\(.id) \(.state) \(.name)"')"
           while read -r asset_id state name; do
             [ "$state" = uploaded ] || continue
+            case "$name" in
+              *.sigstore.json) continue ;;
+            esac
             gh api -H "Accept: application/octet-stream" "$api/releases/assets/$asset_id" > "../existing/$asset_id"
             cmp -s -- "$name" "../existing/$asset_id" || differing="$name"
           done <<< "$assets"
@@ -553,7 +343,7 @@ jobs:
           fi
           # Add the files the release lacks.
           present="$(gh api "$api/releases/$id" --jq '.assets[] | select(.state == "uploaded") | .name')"
-          for file in ./*.tar.gz ./*.tar.zst ./js-agent-index.json SHA256SUMS; do
+          for file in ./*.tar.gz ./*.tar.zst ./*.tar.zst.sigstore.json ./js-agent-index.json SHA256SUMS; do
             name="${file#./}"
             if grep -Fxq -- "$name" <<< "$present"; then
               echo "$name is on the release already: kept"

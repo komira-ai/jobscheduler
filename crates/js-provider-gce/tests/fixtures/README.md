@@ -68,7 +68,7 @@ also fails on any file under this directory that no test names.
 | `error_already_exists_409.json` | `instances.insert` | HTTP 409, reason `alreadyExists` | documented response shape, not yet captured from a live account | us-central1-a |
 | `error_rate_limit_exceeded_403.json` | any call | HTTP 403, reason `rateLimitExceeded` (domain `usageLimits`) | documented response shape, not yet captured from a live account | none |
 | `error_rate_limit_exceeded_429.json` | any call | HTTP 429, reason `rateLimitExceeded`, status `RESOURCE_EXHAUSTED` | documented response shape, not yet captured from a live account | none |
-| `error_quota_exceeded_403.json` | any call | HTTP 403, reason `quotaExceeded` (domain `usageLimits`); read as a denial today, see komira-ai/jobscheduler#768 | documented response shape, not yet captured from a live account | none |
+| `error_quota_exceeded_403.json` | any call | HTTP 403, reason `quotaExceeded` (domain `usageLimits`); read as a quota refusal (komira-ai/jobscheduler#768) | documented response shape, not yet captured from a live account | none |
 | `error_forbidden_403.json` | `instances.insert` | HTTP 403, reason `forbidden`, a missing permission | documented response shape, not yet captured from a live account | us-central1-a |
 | `error_auth_error_401.json` | any call | HTTP 401, reason `authError` | documented response shape, not yet captured from a live account | none |
 | `error_invalid_400.json` | `instances.insert` | HTTP 400, reason `invalid`, a field value the API refuses | documented response shape, not yet captured from a live account | none |
