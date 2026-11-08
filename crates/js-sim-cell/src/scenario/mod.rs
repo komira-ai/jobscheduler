@@ -63,6 +63,7 @@ mod answer;
 mod cloud;
 mod expect;
 mod facts;
+mod jobs;
 mod launched_on;
 mod tries;
 

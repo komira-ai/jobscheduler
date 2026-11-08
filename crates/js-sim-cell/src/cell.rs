@@ -569,7 +569,7 @@ impl Cell {
     }
 
     /// Bumps [`Counter::CutWithUnlistedRun`] of agent `index` when its process runs a run
-    /// that no hello or heartbeat it sent listed ([`AgentNode::runs_unlisted`]): what a
+    /// or a job that no hello or heartbeat it sent listed ([`AgentNode::runs_unlisted`]): what a
     /// cut of the agent notes as it starts.
     pub(crate) fn note_cut(&mut self, index: usize) {
         let agent = self.agent_mut(index).filter(|agent| agent.runs_unlisted());
