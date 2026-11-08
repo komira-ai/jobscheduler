@@ -25,6 +25,7 @@ use super::{Passed, run, store_time};
 use crate::agent_api::job_rig::{
     FakeAgent, Rig, clocked_rig, clocked_rig_keeping, spec, starts, stops,
 };
+use crate::api::whole_view_tests::{Lines, process_sink};
 use crate::config::FeedRetention;
 use crate::job_api::JobApi;
 use crate::job_api::read::{Ctx, Silence};
@@ -671,6 +672,50 @@ async fn a_failed_pass_changes_nothing_and_the_next_one_acts() {
     );
     let without = crate::agent_api::job_rig::rig("pass_no_tables", false);
     without.agents.job_pass();
+}
+
+/// Asserts the job pass's own log lines: a pass that changes nothing logs nothing; a pass
+/// that fails a queued job past its queue wait logs one "ended or deleted jobs" line, with
+/// one expired job and none unprepared, deleted or lost; and a pass the store fails logs that
+/// the next tick passes again. It catches a line logged at every pass, counts that are not
+/// the pass's, and a failed pass that says nothing.
+#[test]
+fn a_pass_logs_the_jobs_it_ended_and_a_failed_pass_says_the_next_tick_passes() {
+    let lines = Lines::default();
+    process_sink();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let rig = clocked_rig("pass_logs", false, JobLimits::DEFAULT);
+    rig.agents.job_pass();
+    assert_eq!(lines.take(), "");
+
+    queue(&rig, "job-q", spec());
+    rig.advance(HOUR);
+    rig.agents.job_pass();
+    let text = lines.take();
+    let said: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("the job pass ended or deleted jobs"))
+        .collect();
+    assert_eq!(said.len(), 1, "{text}");
+    assert!(
+        said[0].contains("unprepared=0 expired=1 deleted=0 lost=0"),
+        "{text}"
+    );
+
+    queue(&rig, "job-r", spec());
+    rig.advance(HOUR);
+    rig.store.fail_read_after(0);
+    rig.agents.job_pass();
+    let text = lines.take();
+    assert!(
+        text.contains("the job pass failed; the next tick passes again"),
+        "{text}"
+    );
+    assert!(!text.contains("ended or deleted jobs"), "{text}");
 }
 
 /// A rig whose server keeps the newest `keep` changes of its job store's feed, trimming on each

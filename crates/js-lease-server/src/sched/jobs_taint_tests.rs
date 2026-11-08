@@ -20,6 +20,7 @@ use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{FakeAgent, placing_rig, starts};
 use crate::agent_state::{self, BindingStore};
 use crate::agents::{Agents, assemble_placed, state_path};
+use crate::api::whole_view_tests::{Lines, process_sink};
 use crate::hosts::HostList;
 use crate::sched::engine_rig::{GIB, hello_of, pool};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
@@ -207,10 +208,19 @@ async fn the_first_taint_reason_stands() {
 /// registry, so no other job lands on it, keeps the job store's taint row, and that the next
 /// save of the bindings writes the taint; that a failed delete of the row leaves it for the
 /// next try; that a host with no binding keeps its row; and that no hosts to keep writes
-/// nothing. It catches a failed write that undoes the taint or deletes the row the taint then
-/// lives in alone, and one that is never tried again.
+/// nothing. Each failure logs what is left for later: the failed write that the next tick
+/// writes the taint, naming the host, and the failed delete that the next start deletes the
+/// row. It catches a failed write that undoes the taint or deletes the row the taint then
+/// lives in alone, one that is never tried again, and a failure that says nothing.
 #[tokio::test]
 async fn a_failed_binding_write_is_written_by_the_next_save() {
+    let lines = Lines::default();
+    process_sink();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     let kept = kept_store();
     let mut rig = placing_rig("taint_unwritten").with_kept(kept.clone());
     rig.register_host_jobs("host-a", "true");
@@ -222,8 +232,13 @@ async fn a_failed_binding_write_is_written_by_the_next_save() {
     rig.agents.keep_taints(Vec::new()).await;
     assert_eq!(kept.commit_stats().txns, before);
 
+    lines.take();
     kept.fail_next();
     rig.agents.keep_taints(tainted).await;
+    let text = lines.take();
+    let said = "a host job's taint is not written to the binding; the next tick writes it";
+    assert!(text.contains(said), "{text}");
+    assert!(text.contains("host-a"), "{text}");
     assert_eq!(bound_taint(&kept, "host-a"), None);
     assert_eq!(
         registry_taint(&rig.agents, "host-a"),
@@ -233,8 +248,12 @@ async fn a_failed_binding_write_is_written_by_the_next_save() {
     assert!(rig.agents.save_bindings().await);
     assert_eq!(bound_taint(&kept, "host-a"), Some(host_job_taint("job-h")));
 
+    lines.take();
     rig.store.fail_next();
     rig.agents.keep_taints(vec![host("host-a")]).await;
+    let text = lines.take();
+    let said = "a host job's taint row is not deleted; the next start deletes it";
+    assert!(text.contains(said), "{text}");
     assert!(rig.store.get("taint/host-a").unwrap().is_some());
     rig.agents.keep_taints(vec![host("host-z")]).await;
     assert!(rig.store.get("taint/host-a").unwrap().is_some());

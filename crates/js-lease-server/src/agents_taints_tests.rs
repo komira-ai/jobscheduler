@@ -20,6 +20,7 @@ use js_types::HostId;
 use super::restore_job_taints;
 use crate::agent_api::job_rig::{BOOKED, placed, spec, tables};
 use crate::agent_state::BindingStore;
+use crate::api::whole_view_tests::{Lines, process_sink};
 use crate::job_store::ServerJobs;
 
 /// The flag a refusal names.
@@ -90,17 +91,38 @@ fn bindings(taint: Option<Taint>) -> BTreeMap<HostId, Binding> {
 
 /// Asserts the reconcile in file mode: a taint row whose host's binding holds none is put on
 /// the binding (reason `host-job`, run id the job's id); a binding that holds a taint keeps
-/// it; a row of a host with no binding is skipped, makes no binding and is kept; the rows of
-/// the hosts with a binding are deleted, and the file holds the bindings as merged. It catches
-/// a row that replaces the taint a binding holds, a host with no binding that fails the start
-/// or loses its row, and a row deleted while the file does not hold its taint.
+/// it; a row of a host with no binding is skipped, logged with its host and job, makes no
+/// binding and is kept; the rows of the hosts with a binding are deleted, and the file holds
+/// the bindings as merged. It catches a row that replaces the taint a binding holds, a host
+/// with no binding that fails the start, loses its row or is skipped without a word, and a
+/// row deleted while the file does not hold its taint.
 #[test]
 fn a_taint_row_the_binding_lacks_is_put_on_it_and_a_held_taint_stands() {
+    let lines = Lines::default();
+    process_sink();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     let dir = files("reconcile_file");
     let (_store, jobs) = host_jobs_placed();
     let mut held = bindings(Some(residue()));
     let store = BindingStore::new(dir.path().join("bindings"), held.clone());
     restore_job_taints(&jobs, &store, &mut held, FLAG).unwrap();
+    let text = lines.take();
+    let said: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("its taint is not restored"))
+        .collect();
+    assert_eq!(said.len(), 1, "{text}");
+    for part in [
+        "host=host-c",
+        "job=job-c",
+        "a host job tainted a host with no binding",
+    ] {
+        assert!(said[0].contains(part), "{text}");
+    }
     assert_eq!(held.len(), 2);
     assert_eq!(held[&host("host-a")].taint(), Some(&host_job("job-a")));
     assert_eq!(held[&host("host-b")].taint(), Some(&residue()));
