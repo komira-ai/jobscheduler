@@ -180,7 +180,7 @@ impl Pool for LoggedPool {
 }
 
 /// The one offer of the cloud: one a100 on 8 cores and 64 GiB.
-fn offer() -> Offer {
+pub(crate) fn offer() -> Offer {
     Offer {
         id: "gpu_1x_a100".to_owned(),
         zone: Some("us-west-1".to_owned()),
@@ -209,7 +209,7 @@ fn offer() -> Offer {
 /// leases of 60 s wall time, the agent routes on a port of their own (which an elastic pool needs,
 /// and which the seam does not bind), and the job service on, so the server holds the job
 /// tables beside the state file (the seam binds no job listener either).
-fn file_text(scratch: &Scratch) -> String {
+pub(crate) fn file_text(scratch: &Scratch) -> String {
     let token = scratch.write("client-token", TOKEN, 0o600);
     let key = scratch.write("api-key", "test-api-key", 0o600);
     let quoted = |path: &std::path::Path| format!("{:?}", path.display().to_string());
@@ -247,7 +247,7 @@ fn file_text(scratch: &Scratch) -> String {
 /// Writes one queued job, `id`, asking for one core, 1 GiB and one a100, into the job tables
 /// beside the state file of `scratch`, before the server opens them: the demand the scaler
 /// reads.
-fn queue_job(scratch: &Scratch, id: &str) {
+pub(crate) fn queue_job(scratch: &Scratch, id: &str) {
     let mut path = scratch.state().into_os_string();
     path.push(".jobs");
     let clock = Arc::new(js_state::ManualClock::default());

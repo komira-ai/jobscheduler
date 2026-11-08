@@ -24,7 +24,7 @@
 //! settled under its own acquire id. `shape` and `denied` answers are not failed over here
 //! either; the caller handles them as before.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Acquired, Instant, Offer, OfferKey, RefusalCode};
@@ -87,8 +87,9 @@ pub struct Refused {
 /// One request's attempt in progress.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Attempt {
-    /// The offers that answered `capacity` in this attempt.
-    declined: BTreeSet<OfferKey>,
+    /// The offers that answered `capacity` in this attempt, each with the time of its
+    /// latest such answer.
+    declined: BTreeMap<OfferKey, Instant>,
     /// The provider and offer id whose other zones are asked next.
     following: Option<(ProviderId, String)>,
     /// When the next attempt may begin, after one that ended with nothing to ask.
@@ -165,6 +166,27 @@ impl AcquireMemory {
         self.passed_over.len()
     }
 
+    /// The instance types passed over at `now`, each with the end of its pass-over, in key
+    /// order (provider, instance type, region). An ended one not yet forgotten is left out,
+    /// as [`AcquireMemory::is_passed_over`] reads it. Changes nothing.
+    pub fn passed_over(&self, now: Instant) -> impl Iterator<Item = (&PassedOver, Instant)> {
+        let held = self.passed_over.iter();
+        held.filter(move |(_, until)| **until > now)
+            .map(|(key, until)| (key, *until))
+    }
+
+    /// The offers that answered `capacity` in the attempt in progress of each request, each
+    /// with the request and the time of the answer, by request and then by offer. An attempt
+    /// that ended (every offer refused or passed over) holds none: its next one asks every
+    /// offer again. Changes nothing.
+    pub fn declined(&self) -> impl Iterator<Item = (&RequestId, &OfferKey, Instant)> {
+        let attempts = self.attempts.iter();
+        attempts.flat_map(|(request, attempt)| {
+            let declined = attempt.declined.iter();
+            declined.map(move |(key, at)| (request, key, *at))
+        })
+    }
+
     /// How many requests have an attempt or a wait for their next one.
     #[must_use]
     pub fn attempts_len(&self) -> usize {
@@ -212,7 +234,7 @@ impl AcquireMemory {
             RefusalCode::Capacity => {
                 if let Some(request) = request {
                     let attempt = self.attempts.entry(request).or_default();
-                    attempt.declined.insert(OfferKey::of(provider, offer));
+                    attempt.declined.insert(OfferKey::of(provider, offer), now);
                     attempt.following = Some((provider.clone(), offer.id.clone()));
                 }
             }
@@ -334,7 +356,9 @@ impl AcquireMemory {
                     .filter(|offer| {
                         let followed = only
                             .is_none_or(|(provider, id)| (&view.id, &offer.id) == (provider, id));
-                        let declined = attempt.declined.contains(&OfferKey::of(&view.id, offer));
+                        let declined = attempt
+                            .declined
+                            .contains_key(&OfferKey::of(&view.id, offer));
                         followed & !declined & !self.is_passed_over(&view.id, offer, now)
                     })
                     .cloned()

@@ -181,6 +181,72 @@ message Machine {
   string provider_id = 6;
 }
 
+// The provider's catalog as the service holds it: the offers the pick of a machine reads,
+// fetched at the service's tick and kept until the next fetch that works.
+message ProviderCatalog {
+  // When the catalog read now was fetched, in milliseconds since the Unix epoch. A fetch
+  // that failed does not move it: the last good catalog stays in use.
+  uint64 fetched_at_ms = 1;
+  // How many offers that catalog holds. 0: the provider offered nothing.
+  uint32 offer_count = 2;
+}
+
+// An instance type the service does not ask the provider for in a region, after the
+// provider refused it for quota, until the time given. Every waiting job is held to it.
+message PassedOver {
+  // The provider's instance type.
+  string instance_type = 1;
+  // The region the instance type is passed over in. Empty: the provider names no zone for
+  // the offer, and its whole catalog is one region.
+  string region = 2;
+  // Why it is passed over: the provider's refusal code, `quota`.
+  string reason = 3;
+  // When the service asks for it again, in milliseconds since the Unix epoch.
+  uint64 until_ms = 4;
+}
+
+// An offer the provider refused for one waiting request, which the service asks no more
+// for that request until the request's next attempt.
+message DeclinedOffer {
+  // The waiting request the offer was asked for: a job id, or a whole-node request's id.
+  string request = 1;
+  // The provider's instance type.
+  string offer = 2;
+  // The offer's zone. Empty: the offer names none.
+  string zone = 3;
+  // Why it was refused: the provider's refusal code, `capacity`.
+  string reason = 4;
+  // When the refusal was taken in, in milliseconds since the Unix epoch.
+  uint64 declined_at_ms = 5;
+}
+
+// The failure brake of the pool the provider launches for: the count of failed boots and
+// refused launches in a row, and whether the count tripped the pool to launch nothing.
+message ProviderBrake {
+  // The brake is engaged: the pool launches nothing until an operator resets it
+  // (`POST /v1/pools/{pool}/brake/reset`).
+  bool engaged = 1;
+  // When the brake was engaged, in milliseconds since the Unix epoch. Absent: it is not.
+  optional uint64 engaged_at_ms = 2;
+  // The failures counted in a row since the last success or reset.
+  uint32 failures = 3;
+}
+
+// A launch whose call to the provider is out: the service asked for a machine and the
+// provider has not answered yet.
+message PendingLaunch {
+  // The name the machine is given, which it registers under.
+  string host = 1;
+  // The provider's instance type asked for.
+  string offer = 2;
+  // The offer's zone. Empty: the offer names none.
+  string zone = 3;
+  // When the provider was called, in milliseconds since the Unix epoch.
+  uint64 started_at_ms = 4;
+  // How long the call has been out when the answer was written, in milliseconds.
+  uint64 age_ms = 5;
+}
+
 // A machine provider as an operator reads it.
 message Provider {
   // The provider's name.
@@ -193,4 +259,22 @@ message Provider {
   repeated ProviderCheck checks = 4;
   // The machines the provider launched for the service.
   repeated Machine machines = 5;
+  // The provider's catalog as the service holds it. Absent: none has been fetched since the
+  // service started.
+  ProviderCatalog catalog = 6;
+  // The instance types passed over now after a quota refusal, by instance type and region.
+  repeated PassedOver passed_over = 7;
+  // The offers refused for capacity in the attempt in progress of each waiting request, by
+  // request and offer.
+  repeated DeclinedOffer declined = 8;
+  // The failure brake of the provider's pool. Absent: no failure is counted and the brake
+  // is not engaged.
+  ProviderBrake brake = 9;
+  // When the cool-down of the provider's pool ends, in milliseconds since the Unix epoch.
+  // Absent: no cool-down is running.
+  optional uint64 cooldown_until_ms = 10;
+  // Why the pool cools down, such as `boot_failed`. Empty when no cool-down is running.
+  string cooldown_reason = 11;
+  // The launches whose call to the provider is out now.
+  repeated PendingLaunch launching = 12;
 }
