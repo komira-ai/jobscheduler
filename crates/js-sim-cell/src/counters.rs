@@ -19,8 +19,8 @@ pub enum Counter {
     /// An answer the agent ignored, wholly or in part, because it failed to decode or
     /// validate, or named a start the cell cannot account for.
     ReplyInvalid,
-    /// The agent was cut off from the server while it ran a run that no hello or
-    /// heartbeat it had sent listed: the server cannot have seen it listed. Bumped by
+    /// The agent was cut off from the server while it ran a run, or a job, that no hello
+    /// or heartbeat it had sent listed: the server cannot have seen it listed. Bumped by
     /// [`crate::actions::partition_agents`] at the cut.
     CutWithUnlistedRun,
     /// A heartbeat answered 409 `unknown-host`: the server had forgotten the host.

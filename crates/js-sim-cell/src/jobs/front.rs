@@ -43,13 +43,24 @@
 //! A give-up of a submitted item sends the job's cancel at each poll until it is answered
 //! 200 or 404, and then reports `Released`.
 //!
+//! # A lost answer
+//!
+//! A front made with a [`LostAnswer`] switch ([`JobFront::losing_answers`]) loses the
+//! answer to its next SubmitJob once an action throws the switch: whatever the service
+//! answered, the item reads it as no answer at all, as a client does whose connection
+//! dropped after the request reached the server, and submits again at the next poll under
+//! the same job id. The switch then falls back; the answer is still kept ([`Answer`]), so
+//! a scenario can name what the service said to the submit whose answer was lost.
+//!
 //! # Answers
 //!
 //! Every answer is kept as it came ([`Answer`]), its [`CallKind`] read as the job's call:
 //! [`CallKind::Queue`] for SubmitJob, [`CallKind::Read`] for GetJob and GetResult, and
 //! [`CallKind::Cancel`] for CancelJob.
 
+use std::cell::Cell as Flag;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use axum::body::Body;
 use axum::http::Request;
@@ -103,14 +114,15 @@ struct Item {
     started: bool,
 }
 
-/// What one poll shares across items: the time, the server, the item being polled, and
-/// the events heard and the answers given.
+/// What one poll shares across items: the time, the server, the item being polled, the
+/// events heard and the answers given, and the front's lost-answer switch.
 struct Poll<'a> {
     now: FarmTime,
     server: &'a mut dyn ClientPort,
     item: ItemId,
     heard: Vec<ClientEvent>,
     answers: Vec<Answer>,
+    lost: LostAnswer,
 }
 
 impl Poll<'_> {
@@ -206,9 +218,13 @@ impl Item {
         self.stage = next;
     }
 
+    /// Submits the job; an answer the [`LostAnswer`] switch takes is read as none.
     fn submit(&mut self, poll: &mut Poll<'_>) {
         let body = self.body.clone();
         let (status, _) = poll.call(CallKind::Queue, "POST", "/v1/jobs", Some(&body));
+        if poll.lost.take() {
+            return;
+        }
         match status {
             201 => self.stage = Stage::Reading,
             422 | 500..=599 => {}
@@ -303,12 +319,45 @@ fn submit_body(id: &str, work: &Work) -> Value {
     })
 }
 
+/// A switch an action throws so that a [`JobFront`] loses the answer to its next
+/// SubmitJob (see the module doc). The front and the action share it: the scenario makes
+/// one, gives the front its factory ([`JobFront::losing_answers`]) and the action a clone.
+/// A cell runs on one thread, and each seed's front puts the switch back down when it is
+/// made, so a throw never reaches the seed after its own.
+#[derive(Clone, Debug, Default)]
+pub struct LostAnswer(Rc<Flag<bool>>);
+
+impl LostAnswer {
+    /// A switch, down.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Throws the switch: the next SubmitJob answer of the front that shares it is lost.
+    pub fn throw(&self) {
+        self.0.set(true);
+    }
+
+    /// Whether the switch is thrown and no answer has been lost to it since.
+    #[must_use]
+    pub fn is_thrown(&self) -> bool {
+        self.0.get()
+    }
+
+    /// Takes the throw: whether it was thrown, putting it back down.
+    fn take(&self) -> bool {
+        self.0.replace(false)
+    }
+}
+
 /// The front of the job service: one job per unit of work.
 #[derive(Default)]
 pub struct JobFront {
     items: BTreeMap<ItemId, Item>,
     due: Option<FarmTime>,
     answers: Vec<Answer>,
+    lost: LostAnswer,
 }
 
 impl JobFront {
@@ -323,6 +372,22 @@ impl JobFront {
     #[must_use]
     pub fn factory() -> FrontFactory {
         FrontFactory::new(|_| Box::new(JobFront::new()))
+    }
+
+    /// The factory of job fronts that lose the answer to their next SubmitJob each time
+    /// `switch` is thrown, for [`crate::Scenario::front`] after
+    /// [`crate::Scenario::over_jobs`]. Each front it makes puts the switch down first, so a
+    /// seed starts with it down whatever the seed before did.
+    #[must_use]
+    pub fn losing_answers(switch: &LostAnswer) -> FrontFactory {
+        let switch = switch.clone();
+        FrontFactory::new(move |_| {
+            switch.take();
+            Box::new(JobFront {
+                lost: switch.clone(),
+                ..JobFront::new()
+            })
+        })
     }
 
     /// Polls at `now`, or earlier if a poll is already due.
@@ -366,6 +431,7 @@ impl Front for JobFront {
             item: ItemId(0),
             heard: Vec::new(),
             answers: Vec::new(),
+            lost: self.lost.clone(),
         };
         let mut heard = Vec::new();
         let open = self.items.iter_mut();

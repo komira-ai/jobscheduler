@@ -37,7 +37,7 @@ use crate::observe::{Observations, Verdict};
 mod front;
 pub(crate) mod read;
 
-pub use front::{JOB_PREFIX, JobFront};
+pub use front::{JOB_PREFIX, JobFront, LostAnswer};
 
 /// A job's state as one read of the server's job table showed it, when it differed from
 /// the read before (or the job was not read before).
@@ -93,13 +93,17 @@ pub struct JobBeat {
     pub retired: BTreeSet<JobId>,
 }
 
-/// A start a per-job agent was sent: the job and the allocation it names.
+/// A start a per-job agent was sent: the job and the allocation it names, and whether the
+/// agent refused it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobStartSeen {
     /// The job.
     pub job: JobId,
     /// The allocation the start names.
     pub allocation: AllocationId,
+    /// The agent refused the start because a stop had named the job before it (a start
+    /// after its stop): it launched nothing and does not hold the job.
+    pub refused: bool,
 }
 
 /// One answer a per-job agent read to one of its heartbeats, with what that heartbeat had

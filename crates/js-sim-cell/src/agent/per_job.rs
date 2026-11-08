@@ -23,7 +23,8 @@
 //! What the agent sent and read is written into the cell's ledger: each heartbeat
 //! ([`JobBeat`]), each answer with what its heartbeat listed ([`JobReply`]), each result made
 //! ([`ResultMade`]), and each launch, in the launches beside the runs', named
-//! `<job>/<allocation>`.
+//! `<job>/<allocation>`. A job it runs that no heartbeat has listed yet counts as a run
+//! the server cannot have seen listed (`AgentNode::runs_unlisted`), as a run does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -116,6 +117,8 @@ pub(super) struct PerJob {
     sent: BTreeMap<CallId, Sent>,
     /// Every job whose result a heartbeat sent at least once.
     reported: BTreeSet<JobId>,
+    /// Every job a heartbeat listed, running or with its result.
+    listed: BTreeSet<JobId>,
 }
 
 impl PerJob {
@@ -137,6 +140,7 @@ impl PerJob {
             retired: BTreeSet::new(),
             sent: BTreeMap::new(),
             reported: BTreeSet::new(),
+            listed: BTreeSet::new(),
         })
     }
 
@@ -153,6 +157,14 @@ impl PerJob {
             (job.clone(), running)
         });
         now.collect()
+    }
+
+    /// Whether the agent runs a job that no heartbeat it sent listed, so the server cannot
+    /// have seen it listed (a hello lists no job).
+    pub(super) fn runs_unlisted(&self) -> bool {
+        let running = self.fake.observed().running;
+        let mut jobs = self.jobs.keys();
+        jobs.any(|job| running.contains(job.as_str()) & !self.listed.contains(job))
     }
 
     /// What the next heartbeat lists.
@@ -216,6 +228,7 @@ impl PerJob {
             retired_ids,
             ..
         } = listing;
+        self.listed.extend(running.iter().chain(&results).cloned());
         let sent = Sent {
             at: io.now,
             listed: running.clone(),
@@ -297,12 +310,14 @@ impl PerJob {
         let (Some(job), Some(allocation)) = named else {
             return io.bump(Counter::ReplyInvalid);
         };
+        let refused = self.stopped.contains(&job);
         read.starts.push(JobStartSeen {
             job: job.clone(),
             allocation,
+            refused,
         });
         let before = self.fake.observed();
-        if self.stopped.contains(&job) {
+        if refused {
             io.bump(Counter::StartAfterStop);
         } else if before.launches.contains_key(job.as_str()) {
             io.bump(Counter::StartRepeated);
