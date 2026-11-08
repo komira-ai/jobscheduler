@@ -65,7 +65,9 @@
 //!    whole host, naming the host its mark holds. A job whose status the notes would not
 //!    change is not written ([`js_jobs::QueueTrail::changed_by`]); the others are written
 //!    with [`js_jobs::JobStore::note_queue`], and one that fails is logged and counted and
-//!    written by a later pass. The pass is the one writer of a job's queue status: pass 2
+//!    written by a later pass: what pass 2 told of a job whose placement or status write did
+//!    not land is given back, for the job's status write after it in the pass or for the next
+//!    pass, before what pass 2 told since. The pass is the one writer of a job's queue status: pass 2
 //!    writes none.
 //!
 //! The start rides on the host's next heartbeat reply, built from the job table
@@ -631,6 +633,7 @@ impl SchedPlacer {
                 .map(|job| (job.id.clone(), job.queue.code()))
                 .collect(),
             outcomes: self.take_outcomes(),
+            taken: BTreeMap::new(),
         };
         let mut emptying: BTreeMap<JobId, HostId> = marks
             .iter()
@@ -663,6 +666,7 @@ impl SchedPlacer {
                 }
                 Err(error) => {
                     self.engine().job_failed(&job);
+                    noted.unwritten(&job);
                     warn!(%job, %host, %error, "a queued job's placement was not committed; it stays queued");
                     // A store with a newer writer commits nothing more: the pass ends here
                     // and answers the error, for the caller to trip the fence on.
@@ -687,6 +691,8 @@ impl SchedPlacer {
             }
             if let Err(error) = jobs.note_queue(&job.id, &notes) {
                 warn!(job = %job.id, %error, "a queued job's queue status was not written; the next pass writes it");
+                noted.unwritten(&job.id);
+                self.restore_outcomes(noted.outcomes.remove_entry(&job.id).into_iter().collect());
                 failed_write(error, metrics)?;
             }
         }
@@ -726,6 +732,7 @@ impl SchedPlacer {
                     Ok(placed) => placed,
                     Err(error) => {
                         self.engine().whole_job_failed(job);
+                        noted.unwritten(job);
                         return Err(error);
                     }
                 };
@@ -744,15 +751,26 @@ impl SchedPlacer {
 pub(super) struct Noted {
     codes: BTreeMap<JobId, QueueCode>,
     outcomes: BTreeMap<JobId, Vec<Outcome>>,
+    /// What pass 2 told of each job whose notes were taken this pass, until its write lands.
+    taken: BTreeMap<JobId, Vec<Outcome>>,
 }
 
 impl Noted {
     /// The notes of `job`: what pass 2 told of it, then `last`, the pass's own outcome.
     fn notes(&mut self, job: &JobId, last: Option<Outcome>) -> Vec<QueueNote> {
         let current = self.codes.get(job).copied().unwrap_or_default();
-        let mut outcomes = self.outcomes.remove(job).unwrap_or_default();
+        let told = self.outcomes.remove(job).unwrap_or_default();
+        let mut outcomes = told.clone();
+        self.taken.insert(job.clone(), told);
         outcomes.extend(last);
         queue_status::notes(current, &outcomes)
+    }
+
+    /// What pass 2 told of `job`, whose write with its notes did not land, given back: to this
+    /// pass, for the job's queue status write after a placement that failed.
+    fn unwritten(&mut self, job: &JobId) {
+        let told = self.taken.remove(job).unwrap_or_default();
+        self.outcomes.insert(job.clone(), told);
     }
 
     /// The notes of `job`, placed on `host`, for its placement's commit.
@@ -811,6 +829,14 @@ impl SchedPlacer {
     pub fn booked_on(&self, host: &str) -> Option<js_types::sched::Resources> {
         let worker = js_types::sched::WorkerId::new(host);
         self.engine().sched.booked(&worker)
+    }
+
+    /// What pass 2 told of each job that the next pass has still to take
+    /// ([`SchedPlacer::note_outcomes`]), left as it is.
+    pub fn outcomes_noted(&self) -> BTreeMap<JobId, Vec<Outcome>> {
+        let taken = self.take_outcomes();
+        self.restore_outcomes(taken.clone());
+        taken
     }
 
     /// How many operations wait in the engine's scheduler: a job a pass did not place leaves

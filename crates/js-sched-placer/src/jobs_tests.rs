@@ -711,3 +711,58 @@ fn a_fenced_status_write_ends_the_pass() {
     let answered = rig.pass(Some(&whole), &["a", "b"], &Recorder::default());
     assert_eq!(answered, Err(JobStoreError::Store(StoreError::Fenced)));
 }
+
+/// Catches: what pass 2 told of a job lost when the write that carried it failed, and given
+/// back after what pass 2 told since. A capacity refusal is told; the status write at 1 s
+/// fails; a launch is told; the pass at 2 s records the refusal, then the launch, with one
+/// attempt.
+#[test]
+fn what_pass_2_told_survives_a_status_write_that_failed() {
+    let rig = full();
+    let j = rig.tables.share("j");
+    let recorder = Recorder::default();
+    rig.placer
+        .note_outcomes([(j.id.clone(), refusal(RefusalCode::Capacity, "z1"))]);
+    rig.at(1_000);
+    rig.tables.store.fail_next();
+    rig.go(&recorder);
+    assert_eq!(recorder.failures(), 1);
+    assert_eq!(read(&rig, &j.id).queue.code(), QueueCode::Unspecified);
+    let launched = Outcome::Launched {
+        machine: "m-1".to_owned(),
+    };
+    rig.placer.note_outcomes([(j.id.clone(), launched)]);
+    rig.at(2_000);
+    rig.go(&recorder);
+    let job = read(&rig, &j.id);
+    assert_eq!(job.queue.code(), QueueCode::WaitingForMachine);
+    assert_eq!(job.queue.attempts(), 1);
+    assert_eq!(
+        events(&job),
+        [
+            (JobEventKind::FailingOver, 2_000, None),
+            (JobEventKind::WaitingForMachine, 2_000, None)
+        ]
+    );
+}
+
+/// Catches: what pass 2 told of a job lost with a placement whose commit failed. A capacity
+/// refusal is told and the placement's commit fails: the same pass writes the refusal on the
+/// job, which stays queued, failing over with one attempt.
+#[test]
+fn what_pass_2_told_survives_a_placement_that_failed() {
+    let rig = Rig::quiet();
+    let j = rig.tables.share("j");
+    rig.placer
+        .note_outcomes([(j.id.clone(), refusal(RefusalCode::Capacity, "z1"))]);
+    rig.at(1_000);
+    rig.tables.store.fail_next();
+    let recorder = Recorder::default();
+    assert!(rig.go(&recorder).is_empty());
+    assert_eq!(recorder.failures(), 1);
+    let job = read(&rig, &j.id);
+    assert_eq!(job.state, JobState::Queued);
+    assert_eq!(job.queue.code(), QueueCode::FailingOver);
+    assert_eq!(job.queue.attempts(), 1);
+    assert!(rig.placer.take_outcomes().is_empty());
+}

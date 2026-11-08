@@ -195,6 +195,17 @@ impl SchedPlacer {
         }
     }
 
+    /// Puts back `earlier`, what pass 2 told of jobs whose write did not land, before what it
+    /// told of each since, so the next pass takes them in the order they came.
+    pub(super) fn restore_outcomes(&self, earlier: BTreeMap<JobId, Vec<Outcome>>) {
+        let mut noted = self.outcomes.lock().unwrap_or_else(PoisonError::into_inner);
+        for (job, mut outcomes) in earlier {
+            let since = noted.entry(job).or_default();
+            outcomes.append(since);
+            *since = outcomes;
+        }
+    }
+
     /// Takes what pass 2 told since the last pass ([`SchedPlacer::note_outcomes`]).
     pub(super) fn take_outcomes(&self) -> BTreeMap<JobId, Vec<Outcome>> {
         std::mem::take(&mut *self.outcomes.lock().unwrap_or_else(PoisonError::into_inner))

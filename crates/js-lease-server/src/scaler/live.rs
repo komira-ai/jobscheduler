@@ -642,4 +642,31 @@ mod tests {
         assert_eq!(live.remove(&host), Ok(()));
         assert_eq!(live.remove("Not A Host Id"), Ok(()));
     }
+
+    /// Asserts that the live effects hand what a step reached for a job to the server's
+    /// placer, in order, for its next pass, and that a server whose agents hold no placer
+    /// takes them and does nothing. It catches a hand-off that never reaches the placement
+    /// pass.
+    #[test]
+    fn pass_two_reaches_the_servers_placer() {
+        let (live, _dir) = live("pass_two");
+        let job = js_jobs::JobId::parse("j-1").unwrap();
+        let launched = |machine: &str| Outcome::Launched {
+            machine: machine.to_owned(),
+        };
+        live.pass_two(vec![(job.clone(), launched("m-1"))]);
+        let placer = Arc::new(SchedPlacer::default());
+        let mut with = live;
+        let agents = Arc::try_unwrap(with.agents).ok().unwrap();
+        with.agents = Arc::new(agents.with_placer(Arc::clone(&placer)));
+        with.pass_two(vec![
+            (job.clone(), launched("m-2")),
+            (job.clone(), launched("m-3")),
+        ]);
+        let noted = placer.outcomes_noted();
+        assert_eq!(
+            noted,
+            BTreeMap::from([(job, vec![launched("m-2"), launched("m-3")])])
+        );
+    }
 }
