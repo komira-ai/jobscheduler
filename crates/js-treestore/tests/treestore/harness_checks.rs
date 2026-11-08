@@ -1,6 +1,7 @@
 //! The privileged tests' harness helpers, checked where CI can run them.
 
 use std::path::Path;
+use std::process::Output;
 
 use crate::priv_harness::{inheritable_write_ace, user_command, user_name};
 
@@ -33,8 +34,8 @@ fn a_command_run_as_another_user_starts_in_the_root_directory() {
     let mut command = user_command("/bin/pwd", &[], me, group);
     assert_eq!(command.get_current_dir(), Some(Path::new("/")));
     let out = command.output().unwrap();
-    assert!(out.status.success());
-    assert_eq!(out.stdout, b"/\n");
+    assert!(out.status.success(), "/bin/pwd failed: {}", ran(&out));
+    assert_eq!(out.stdout, b"/\n", "{}", ran(&out));
 }
 
 #[test]
@@ -43,5 +44,17 @@ fn a_command_passes_its_arguments_and_reads_no_input() {
     let group = rustix::process::getegid().as_raw();
     let mut command = user_command("/bin/echo", &[Path::new("-n"), Path::new("a")], me, group);
     let out = command.output().unwrap();
-    assert_eq!(out.stdout, b"a");
+    assert!(out.status.success(), "/bin/echo failed: {}", ran(&out));
+    assert_eq!(out.stdout, b"a", "{}", ran(&out));
+}
+
+/// How a command ended, for a failed assertion: its status (an exit code or the signal
+/// that killed it), what it wrote to stdout and what it wrote to stderr.
+fn ran(out: &Output) -> String {
+    format!(
+        "{}; stdout {:?}; stderr {:?}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
 }
