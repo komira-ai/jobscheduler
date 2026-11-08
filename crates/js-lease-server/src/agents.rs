@@ -844,16 +844,16 @@ impl Agents {
 mod taints;
 
 #[cfg(test)]
+#[path = "agents_tail_tests.rs"]
+mod tail_tests;
+
+#[cfg(test)]
 #[path = "agents_mint_tests.rs"]
 mod mint_tests;
 
 #[cfg(test)]
 #[path = "agents_estimate_tests.rs"]
 mod estimate_tests;
-
-#[cfg(test)]
-#[path = "agents_tail_tests.rs"]
-mod tail_tests;
 
 #[cfg(test)]
 mod tests {
