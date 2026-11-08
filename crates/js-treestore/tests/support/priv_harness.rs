@@ -11,14 +11,24 @@ use std::process::{Command, Stdio};
 /// The command that runs `program` as `uid`:`gid`. The working directory is `/`: the child
 /// inherits the root test process's directory, which the unprivileged user may not be able
 /// to read, and some programs refuse to start without a readable one.
+///
+/// The user and group are set only where they differ from the test process's own. Setting
+/// them makes the standard library fork the whole test process and change them in the copy
+/// before the exec, where it otherwise spawns the program directly (`posix_spawn`). A fork
+/// of a test binary whose other tests run on other threads is unsafe: on macOS the copy can
+/// abort inside `fork` on a one-time initialisation another thread was part way through,
+/// and until its exec it holds every file the process has open, store locks included. As
+/// the process's own user the two calls would change nothing, so they are left out; the
+/// privileged tests, which change user, run on one thread.
 pub fn user_command(program: &str, args: &[&Path], uid: u32, gid: u32) -> Command {
     let mut command = Command::new(program);
-    command
-        .args(args)
-        .uid(uid)
-        .gid(gid)
-        .current_dir("/")
-        .stdin(Stdio::null());
+    command.args(args).current_dir("/").stdin(Stdio::null());
+    if uid != rustix::process::geteuid().as_raw() {
+        command.uid(uid);
+    }
+    if gid != rustix::process::getegid().as_raw() {
+        command.gid(gid);
+    }
     command
 }
 
