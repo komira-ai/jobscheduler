@@ -111,11 +111,13 @@ fn the_coverage_profile_is_dev_and_the_coverage_job_builds_with_it() {
     assert_eq!(coverage["inherits"].as_str(), Some("dev"));
     assert!(coverage.get("opt-level").is_none());
     let ci = std::fs::read_to_string(repo().join(".github/workflows/ci.yml")).expect("ci.yml");
+    // The job runs the tests under cargo-nextest, where `--profile` names a nextest
+    // profile; the cargo profile is `--cargo-profile`.
     let run = ci
         .lines()
-        .find(|l| l.contains("llvm-cov --workspace"))
+        .find(|l| l.contains("llvm-cov nextest --workspace"))
         .expect("the coverage run line");
-    assert!(run.contains("--profile coverage"), "{run}");
+    assert!(run.contains("--cargo-profile coverage"), "{run}");
     assert!(ci.contains("root=target/llvm-cov-target/coverage"));
 }
 
