@@ -21,7 +21,7 @@ use js_types::{HostId, LeaseId};
 
 use crate::{
     DropReason, EndedPage, EndedQuery, EndedRow, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute,
-    Observed, ProfileCurves, ProfileKey, RunSeries,
+    Observed, ProfileCurves, ProfileKey, RunSeries, TailSink,
 };
 
 /// A short fixed name for a drop reason, for logs.
@@ -118,6 +118,12 @@ pub trait UsageSink: Send + Sync {
     /// The learned curves, for admission to read as its `CurveSource`; `None` for a sink
     /// that learns none.
     fn curves(&self) -> Option<Arc<ProfileCurves>> {
+        None
+    }
+
+    /// The sink the registry keeps its tail counters in, over the same store; `None` for
+    /// a sink with no store to keep them in, which leaves them in the registry's memory.
+    fn tail(&self) -> Option<Arc<dyn TailSink>> {
         None
     }
 
@@ -220,7 +226,7 @@ mod tests {
     use super::*;
 
     /// Asserts that the sink that records nothing takes every reading, returns no closed
-    /// rows, and the key source that knows nothing names no key. It catches a
+    /// rows and keeps no tail counters, and the key source that knows nothing names no key. It catches a
     /// default sink that errors (and so counts a fault on every beat) or invents rows.
     #[test]
     fn the_empty_sink_and_the_empty_key_source_do_nothing() {
@@ -257,6 +263,7 @@ mod tests {
         );
         assert_eq!(sink.key_profile(&end.key), Ok(None));
         assert!(sink.curves().is_none());
+        assert!(sink.tail().is_none());
         let row = crate::history::tests::row(5);
         assert_eq!(sink.allocation_ended(&row), Ok(()));
         assert_eq!(

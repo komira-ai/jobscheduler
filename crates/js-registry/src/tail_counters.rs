@@ -4,20 +4,35 @@
 //!
 //! The repository has no histogram type, so the error is kept as a count, a signed sum in
 //! milliseconds and signed buckets with fixed upper edges ([`ERROR_EDGES_MS`]), which is
-//! what a histogram is made of. The counters live in memory and start at zero.
+//! what a histogram is made of.
+//!
+//! Which counters are durable, and when. The registry counts in memory, from zero, and
+//! hands every change to the sink it was given ([`crate::Registry::set_tail_sink`]) once
+//! its lock is released; [`crate::Registry::tail_counters`] is what the sink held when it
+//! was given plus every change since, written or not. With a sink over a store
+//! (`js_usage::StoreTailSink`) every counter is durable once the sink has written it: the
+//! server gives the registry one over its usage store, so the counters survive a restart.
+//! With no sink (a server with `--usage-off` or without agent registration has no usage
+//! store) every counter is in memory only and starts at zero, as before. A sink whose
+//! stored counters cannot be read, or were bucketed by other edges, also leaves the
+//! counters starting at zero; the sink still adds to what it can write.
 //!
 //! Two limits of what is counted. The end of a lease is the time `stop` is called, on the
 //! registry's clock, not when the work exited. And a lease put back after a restart has no
 //! bound and no start (a host keeps one of each for every lease the registry started, in
 //! `Record::bounds`), so its stop counts nothing.
 
+use std::sync::{Arc, Weak};
+
 use js_types::RequestId;
+use js_usage::{TAIL_BUCKETS, TailDelta, TailSink, TailTotals};
 
 /// The upper edges, in milliseconds, of the estimate-error buckets: bucket `i` counts the
 /// errors up to and including `ERROR_EDGES_MS[i]` (and above the edge before it); the
 /// last bucket counts the errors above the last edge. An error is the actual end minus the
 /// estimated end, so a lease that outlives its estimate is positive.
-pub const ERROR_EDGES_MS: [i64; 7] = [-300_000, -60_000, -10_000, 0, 10_000, 60_000, 300_000];
+pub const ERROR_EDGES_MS: [i64; TAIL_BUCKETS - 1] =
+    [-300_000, -60_000, -10_000, 0, 10_000, 60_000, 300_000];
 
 /// The counters of the tail rule ([`crate::Registry::tail_counters`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,7 +49,7 @@ pub struct TailCounters {
     /// The sum of the errors, actual end minus estimated end, in milliseconds.
     pub error_sum_ms: i64,
     /// The errors by bucket ([`ERROR_EDGES_MS`]): one more bucket than there are edges.
-    pub error_buckets: [u64; 8],
+    pub error_buckets: [u64; TAIL_BUCKETS],
 }
 
 impl TailCounters {
@@ -63,6 +78,105 @@ impl TailCounters {
         self.error_sum_ms = self.error_sum_ms.saturating_add(error);
         let bucket = ERROR_EDGES_MS.partition_point(|edge| *edge < error);
         self.error_buckets[bucket] += 1;
+    }
+}
+
+impl From<TailTotals> for TailCounters {
+    fn from(t: TailTotals) -> Self {
+        Self {
+            started_on_marked: t.started_on_marked,
+            backfilled: t.backfilled,
+            ended_estimated: t.ended_estimated,
+            ended_unestimated: t.ended_unestimated,
+            error_sum_ms: t.error_sum_ms,
+            error_buckets: t.error_buckets,
+        }
+    }
+}
+
+impl From<TailCounters> for TailTotals {
+    fn from(c: TailCounters) -> Self {
+        Self {
+            started_on_marked: c.started_on_marked,
+            backfilled: c.backfilled,
+            ended_estimated: c.ended_estimated,
+            ended_unestimated: c.ended_unestimated,
+            error_sum_ms: c.error_sum_ms,
+            error_buckets: c.error_buckets,
+        }
+    }
+}
+
+/// The counts of `c` as a change to add.
+fn delta_of(c: TailCounters) -> TailDelta {
+    TailDelta {
+        started_on_marked: c.started_on_marked,
+        backfilled: c.backfilled,
+        ended_estimated: c.ended_estimated,
+        ended_unestimated: c.ended_unestimated,
+        error_sum_ms: c.error_sum_ms,
+        error_buckets: c.error_buckets,
+    }
+}
+
+/// The registry's tail counters, the changes not yet handed to its sink, and the sink.
+#[derive(Default)]
+pub(crate) struct TailBook {
+    /// What the sink held when it was given, plus every change since.
+    pub(crate) counters: TailCounters,
+    /// The changes counted and not yet handed to the sink.
+    pub(crate) unsent: TailDelta,
+    /// Where the counters are kept beyond memory; `None` keeps them in memory only, and
+    /// the changes wait in `unsent` for a sink. Held weakly: the sink's owner (the server's
+    /// usage side) keeps it, and its store, alive, so a handle on the registry never holds
+    /// the store open; once the owner has dropped it the changes wait in `unsent`.
+    pub(crate) sink: Option<Weak<dyn TailSink>>,
+}
+
+impl TailBook {
+    /// Counts a start, as [`TailCounters::started`] does.
+    pub(crate) fn started(&mut self, holder: Option<&RequestId>, starter: Option<&RequestId>) {
+        let mut one = TailCounters::default();
+        one.started(holder, starter);
+        self.count(one);
+    }
+
+    /// Counts an end, as [`TailCounters::ended`] does.
+    pub(crate) fn ended(&mut self, ended_at: u64, estimate: Option<u64>) {
+        let mut one = TailCounters::default();
+        one.ended(ended_at, estimate);
+        self.count(one);
+    }
+
+    /// Adds the counts of one start or end to the counters and to what waits for the sink.
+    fn count(&mut self, one: TailCounters) {
+        let delta = delta_of(one);
+        let mut totals = TailTotals::from(self.counters);
+        totals.add(&delta);
+        self.counters = totals.into();
+        self.unsent.merge(&delta);
+    }
+
+    /// Takes the sink and the changes that wait for it; with no sink, or one its owner has
+    /// dropped, the changes wait on.
+    pub(crate) fn take_unsent(&mut self) -> Option<(Arc<dyn TailSink>, TailDelta)> {
+        let sink = self.sink.as_ref()?.upgrade()?;
+        Some((sink, std::mem::take(&mut self.unsent)))
+    }
+
+    /// Gives the book its sink and counts on from `stored`, what the sink held; a book
+    /// that has a sink keeps it. Whether the sink was taken.
+    pub(crate) fn set_sink(&mut self, sink: Arc<dyn TailSink>, stored: TailTotals) -> bool {
+        let first = self.sink.is_none();
+        let counted = delta_of(self.counters);
+        let mut totals = stored;
+        totals.add(&counted);
+        let taken = first.then(|| (Arc::downgrade(&sink), TailCounters::from(totals)));
+        taken.into_iter().for_each(|(sink, counters)| {
+            self.sink = Some(sink);
+            self.counters = counters;
+        });
+        first
     }
 }
 
