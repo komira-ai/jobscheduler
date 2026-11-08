@@ -19,10 +19,14 @@
 //!   [`SILENT_CUT_FOR`] and [`SILENT_SETTLE`], 1,500 s, makes about 50;
 //! - the cancel before the start is listed: [`EARLY_HOSTS`] beating every second for
 //!   [`EARLY_QUIET_AT`] plus [`EARLY_SETTLE`], 150 s, make about 1,200;
-//! - the headline: about 10,700 (`cell/jobs_headline.rs`);
+//! - the headline: about 670 (`cell/jobs_headline.rs`);
 //! - the restart: [`RESTART_HOSTS`] beating every 5 s for [`RESTART_AT`] plus
-//!   [`RESTART_SETTLE`], 1,080 s, less the [`RESTART_AT`] minus [`STOP_AT`] the server is
-//!   down, make about 4,100, with a hello from every host after the restart besides.
+//!   [`RESTART_SETTLE`], 490 s, less the [`RESTART_AT`] minus [`STOP_AT`] the server is
+//!   down, make about 370, with a hello from every host after the restart besides.
+//!
+//! The headline and the restart are smaller than a farm of hosts: every scenario here runs
+//! in the pull request's `test` and `coverage` jobs, which a slow scenario must not hold
+//! up, and sixteen seeds of two hundred hosts and four hundred jobs take minutes each.
 
 #[path = "cell/jobs_headline.rs"]
 mod jobs_headline;
@@ -87,19 +91,19 @@ const EARLY_SETTLE: Duration = Duration::from_secs(120);
 /// largest by far.
 const HEADLINE_THREADS: u64 = 4;
 
-/// The restart: twenty hosts at the server's default heartbeat, room for 160 jobs at once,
-/// and 180 jobs of 300 s, so twenty wait queued; the server is stopped at 120 s, while the
-/// first 160 run, for 60 s (longer than the 15 s grace), and started again over the same
+/// The restart: four hosts at the server's default heartbeat, room for 32 jobs at once,
+/// and 36 jobs of 150 s, so four wait queued; the server is stopped at 60 s, while the
+/// first 32 run, for 30 s (longer than the 15 s grace), and started again over the same
 /// directory and store.
-const RESTART_HOSTS: usize = 20;
-const RESTART_JOBS: u32 = 180;
-const RESTART_RUN: Duration = Duration::from_secs(300);
+const RESTART_HOSTS: usize = 4;
+const RESTART_JOBS: u32 = 36;
+const RESTART_RUN: Duration = Duration::from_secs(150);
 const RESTART_GIVE_UP: Duration = Duration::from_secs(2_400);
-const STOP_AT: Duration = Duration::from_secs(120);
-const RESTART_AT: Duration = Duration::from_secs(180);
+const STOP_AT: Duration = Duration::from_secs(60);
+const RESTART_AT: Duration = Duration::from_secs(90);
 /// When, after the restart, every job is checked to be still queued, placed or running.
-const RESTART_CHECK_AT: Duration = Duration::from_secs(240);
-const RESTART_SETTLE: Duration = Duration::from_secs(900);
+const RESTART_CHECK_AT: Duration = Duration::from_secs(120);
+const RESTART_SETTLE: Duration = Duration::from_secs(400);
 
 /// Covers section 8, row 1 (submit answer lost: the job id closes it, section 5.3). Four
 /// hosts; once they have said hello, the client submits one job and loses the answer to
@@ -237,7 +241,7 @@ fn a_cancel_before_the_host_lists_the_start_ends_cancelled_and_frees_the_allocat
 }
 
 /// The headline over jobs (no row of section 8: it gathers sections 6.2, 6.3 and 7):
-/// two hundred hosts and four hundred jobs, twenty agents cut off for 30 s, and ten
+/// twenty hosts and forty jobs, four agents cut off for 30 s, and two
 /// agents killed mid-job and replaced; the scenario and what it states are in
 /// `cell/jobs_headline.rs`. Every job reaches one terminal state, nothing is
 /// double-booked, and no allocation is booked once every job is terminal. Red for a
@@ -269,8 +273,8 @@ fn the_headline_over_jobs() {
 
 /// Covers section 8, rows 3 (a restart with a job in flight: the host keeps it and lists
 /// it, and the client reads the job) and 36 (a restart ends no running job and a queued
-/// job keeps waiting; the outage here is a minute, not longer than a queue wait). Twenty
-/// hosts run 160 jobs and twenty more wait queued when the server is stopped for 60 s and
+/// job keeps waiting; the outage here is 30 s, not longer than a queue wait). Four hosts
+/// run 32 jobs and four more wait queued when the server is stopped for 30 s and
 /// started again over its own directory and store (`--boot resume`); the hosts are told
 /// they are unknown, say hello again and list what they hold. States that after the
 /// restart every job is still in the server's table and none has ended

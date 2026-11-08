@@ -3,44 +3,47 @@
 //! hash in the golden file (family `jobs_scenarios`).
 //!
 //! Size: [`HOSTS`] agents beating every [`INTERVAL`] until [`KILL_AT`] plus
-//! [`REPLACE_AFTER`] plus [`SETTLE`], 1,470 s, make about 9,800 heartbeats a seed; the
-//! hellos at the start, and those of the ten new processes, refused once a second until
-//! their hosts read lost (about 70 s each), add about 900, for about 10,700.
+//! [`REPLACE_AFTER`] plus [`SETTLE`], 770 s, make about 510 heartbeats a seed; the
+//! hellos at the start, and those of the two new processes, refused once a second until
+//! their hosts read lost (about 70 s each), add about 160, for about 670. It is the
+//! two-hundred-host headline at a tenth of its hosts, jobs, cut and killed agents, on the
+//! same timeline: it runs in every pull request's `test` and `coverage` jobs, where
+//! sixteen seeds of two hundred hosts take far longer than either job allows.
 
 use std::time::Duration;
 
 use js_sim_cell::actions::{drawn_agents, kill_agents_mid_job, partition_agents};
 use js_sim_cell::{Expect, Scenario, ServerSpec, Shape, Work};
 
-/// Two hundred hosts beating every 30 s, held lost after 90 s of silence.
-const HOSTS: usize = 200;
+/// Twenty hosts beating every 30 s, held lost after 90 s of silence.
+const HOSTS: usize = 20;
 const INTERVAL: Duration = Duration::from_secs(30);
 const GRACE: Duration = Duration::from_secs(90);
 
-/// Four hundred jobs of 300 s, which the client gives up on only after 2,400 s.
-const JOBS: u32 = 400;
+/// Forty jobs of 300 s, which the client gives up on only after 2,400 s.
+const JOBS: u32 = 40;
 const RUN: Duration = Duration::from_secs(300);
 const GIVE_UP: Duration = Duration::from_secs(2_400);
 
-/// Twenty agents, drawn from the seed, cut off for 30 s while their jobs run: shorter than
+/// Four agents, drawn from the seed, cut off for 30 s while their jobs run: shorter than
 /// the grace, so their hosts stay live.
-const CUT: usize = 20;
+const CUT: usize = 4;
 const CUT_AT: Duration = Duration::from_secs(60);
 const CUT_FOR: Duration = Duration::from_secs(30);
 
-/// Ten agents killed mid-job, once every agent has listed its jobs again after the cut,
+/// Two agents killed mid-job, once every agent has listed its jobs again after the cut,
 /// and replaced 20 s later.
-const KILLED: usize = 10;
+const KILLED: usize = 2;
 const KILL_AT: Duration = Duration::from_secs(150);
 const REPLACE_AFTER: Duration = Duration::from_secs(20);
 
 /// How long the cell runs after the replacement, before the end check: the new processes'
 /// hosts read lost (90 s), their hellos are taken, the jobs they no longer list end, and
-/// every other job runs out its 300 s.
-const SETTLE: Duration = Duration::from_secs(1_300);
+/// every other job runs out its 300 s, all by about 400 s.
+const SETTLE: Duration = Duration::from_secs(600);
 
-/// The headline over jobs: two hundred hosts run four hundred jobs of 300 s; at 60 s twenty
-/// agents, drawn from the seed, are cut off for 30 s, and at 150 s ten agents running
+/// The headline over jobs: twenty hosts run forty jobs of 300 s; at 60 s four agents,
+/// drawn from the seed, are cut off for 30 s, and at 150 s two agents running
 /// jobs every heartbeat of theirs had listed are killed and, 20 s later, replaced by new
 /// processes that hold nothing. It states, beside every invariant (the five job invariants
 /// among them, and `no-double-booking`, which holds each host to its capacity at every

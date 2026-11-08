@@ -47,9 +47,9 @@
 //! seeds, in the cell's ledger, where each job's launch is named by its job and allocation
 //! ids.
 //!
-//! And the headline over jobs, family `jobs_scenarios`: two hundred hosts and four hundred
-//! jobs, twenty agents cut off and ten killed mid-job and replaced
-//! (`cell/jobs_headline.rs`, about 10,700 agent requests a seed) over
+//! And the headline over jobs, family `jobs_scenarios`: twenty hosts and forty jobs, four
+//! agents cut off and two killed mid-job and replaced (`cell/jobs_headline.rs`, about 670
+//! agent requests a seed) over
 //! [`JOBS_SCENARIOS_SEEDS`] seed, so a change to how the server ends a killed host's jobs
 //! and frees their allocations, or to the action that picks the agents it kills, moves a
 //! hash; the replay test runs its seed twice.
