@@ -24,11 +24,11 @@
   </li>
   <li>
     <h3>Verify them <span class="tag tag-ok">works today</span></h3>
-    <p>This needs the GitHub CLI (<code>gh</code>), signed in. The checksum proves the download is intact; the attestation proves the file was built from this repository by the <code>release</code> workflow, from <code>main</code>, at the commit the tag names.</p>
+    <p>This needs the GitHub CLI (<code>gh</code>), signed in. The checksum proves the download is intact; the attestation proves the file was built from this repository by the <code>artifacts</code> workflow (which the <code>release</code> workflow calls), from <code>main</code>, at the commit the tag names.</p>
     <div class="code"><pre><span class="p">$</span> gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS
 <span class="p">$</span> sha256sum -c --ignore-missing SHA256SUMS
 <span class="p">$</span> gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R komira-ai/jobscheduler \
-    --signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml \
+    --signer-workflow komira-ai/jobscheduler/.github/workflows/artifacts.yml \
     --source-ref refs/heads/main \
     --source-digest "$(git rev-parse vX.Y.Z^{commit})"</pre></div>
     <p>For the client use <code>-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'</code>, for the agent <code>-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'</code>, and for the bundle tool <code>-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'</code>. On an arm64 Linux host, write <code>aarch64-unknown-linux-musl</code> in their place, as in <code>-p 'js-agent-*-aarch64-unknown-linux-musl.tar.gz'</code>.</p>

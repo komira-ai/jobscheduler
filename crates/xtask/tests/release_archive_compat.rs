@@ -255,14 +255,14 @@ fn touch_all(path: &Path, secs: u64) {
 fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_tar() {
     // The options here are the workflow's: a change there must come here too.
     let workflow = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/artifacts.yml"),
     )
-    .expect("read release.yml");
+    .expect("read artifacts.yml");
     assert!(
         workflow.contains(&format!(
             r#""$tar" -C "stage-$bin" {WORKFLOW_ARCHIVE_OPTIONS}"#
         )),
-        "release.yml no longer archives with {WORKFLOW_ARCHIVE_OPTIONS}"
+        "artifacts.yml no longer archives with {WORKFLOW_ARCHIVE_OPTIONS}"
     );
 
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "archive-arm64-again");
