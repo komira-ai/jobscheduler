@@ -115,6 +115,8 @@ pub struct Ctx<'a> {
     pub graphics: bool,
     /// Give E1's VMs the share matrix (`crate::matrix`); `--no-matrix` turns it off.
     pub matrix: bool,
+    /// Where the matrix makes its directories outside `work`; the host's own in a real run.
+    pub(crate) matrix_roots: crate::matrix::Roots,
     pub timing: Timing,
 }
 

@@ -362,7 +362,7 @@ pub fn e1(ctx: &Ctx<'_>) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fake::{FakeSystem, Script, ctx, work_with_base};
+    use crate::fake::{FakeSystem, Script, ctx, host_roots, names_in, work_with_base};
     use crate::report::Status;
     use crate::spec::Event;
     use crate::system::Poll;
@@ -889,15 +889,18 @@ mod tests {
     }
 
     /// Catches a second guest that fails to start leaving the first guest's matrix
-    /// directories behind: they are scratch, and a failed run removes them.
+    /// directories behind, in the work directory or in the shared places: they are
+    /// scratch, and a failed run removes them.
     #[test]
     fn a_failed_second_start_removes_the_first_guests_matrix() {
         let work = work_with_base("e1-fail-matrix");
+        let (_host, roots) = host_roots("e1-fail-matrix");
         let sys = FakeSystem::new();
         // The first guest's bundle is cloned whole; the second one's first file is refused.
         sys.clone_budget.set(Some(crate::bundle::FILES.len()));
         let mut c = guest_ctx(&sys, &work);
         c.matrix = true;
+        c.matrix_roots = roots.clone();
         let r = e1(&c);
         assert_eq!(r.status, Status::Error, "{r:?}");
         assert_eq!(sys.cloned.borrow().len(), crate::bundle::FILES.len());
@@ -910,6 +913,8 @@ mod tests {
                 .all(|e| !e.file_name().to_string_lossy().contains("-mx-")),
             "no matrix directory is left"
         );
+        assert!(names_in(&roots.tmp).is_empty());
+        assert!(names_in(&roots.shared).is_empty());
     }
 
     /// Catches a matrix that is not attached to both guests (each guest needs its own host
@@ -919,9 +924,11 @@ mod tests {
     #[test]
     fn the_matrix_is_attached_listed_and_cleaned_up() {
         let work = work_with_base("e1-matrix");
+        let (_host, roots) = host_roots("e1-matrix");
         let sys = FakeSystem::new();
         let mut c = guest_ctx(&sys, &work);
         c.matrix = true;
+        c.matrix_roots = roots.clone();
         c.keep = true;
         let r = e1(&c);
         assert_eq!(r.status, Status::Ok, "{r:?}");
@@ -943,8 +950,19 @@ mod tests {
             let base = listed.iter().find(|row| row["name"] == "base");
             assert_eq!(base.expect("base row")["entries"], json!([]));
         }
-        // Kept: the work directories stay for inspection.
+        // Every variant was made for each guest; the shared places' ones were attached.
+        assert_eq!(starts[0].0.tagged.len(), 2 + 7);
+        assert!(
+            starts[1]
+                .0
+                .tagged
+                .iter()
+                .any(|t| t.path == roots.shared.join("kbf-e1-y-mx-shared"))
+        );
+        // Kept: the work directories stay for inspection; the shared places are scratch.
         assert!(work.join("kbf-e1-x-mx-base").is_dir());
+        assert!(names_in(&roots.tmp).is_empty());
+        assert!(names_in(&roots.shared).is_empty());
         drop(starts);
         let work = work_with_base("e1-matrix-clean");
         let mut c = guest_ctx(&sys, &work);
