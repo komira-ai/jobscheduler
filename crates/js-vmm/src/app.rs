@@ -10,7 +10,7 @@ use crate::image::{BaseArgs, SetupArgs};
 use crate::probe::{Ctx, Timing};
 use crate::report::{Report, Status};
 use crate::system::System;
-use crate::{bench, e3, gates, image, prime};
+use crate::{bench, e3, gates, image, matrix, prime};
 
 fn name_of(cmd: &Cmd) -> &'static str {
     match cmd {
@@ -27,6 +27,7 @@ fn context<'a>(
     common: &Common,
     timing: Timing,
     keep: bool,
+    roots: &matrix::Roots,
 ) -> Result<Ctx<'a>, String> {
     std::fs::create_dir_all(&common.work_dir)
         .map_err(|e| format!("create {}: {e}", common.work_dir.display()))?;
@@ -41,15 +42,16 @@ fn context<'a>(
         keep,
         graphics: !common.headless,
         matrix: !common.no_matrix,
+        matrix_roots: roots.clone(),
         timing,
     })
 }
 
-fn probe(sys: &dyn System, args: &ProbeArgs, timing: Timing) -> Report {
+fn probe(sys: &dyn System, args: &ProbeArgs, timing: Timing, roots: &matrix::Roots) -> Report {
     if args.graphics.is_some() && args.gate != Gate::E3 {
         return Report::error("probe", "--graphics applies to the e3 probe only");
     }
-    match context(sys, &args.common, timing, args.keep) {
+    match context(sys, &args.common, timing, args.keep, roots) {
         Ok(ctx) => match (args.gate, args.graphics) {
             (Gate::E3, Some(mode)) => e3::e3(&ctx, mode),
             _ => gates::run(&ctx, args.gate, args.run_as_uid),
@@ -65,6 +67,7 @@ fn prime_cmd(
     guest_binary: &Path,
     deadline: Duration,
     timing: Timing,
+    roots: &matrix::Roots,
 ) -> Report {
     let work = std::path::absolute(base).unwrap_or(base.to_owned());
     let ctx = Ctx {
@@ -75,13 +78,14 @@ fn prime_cmd(
         keep: false,
         graphics: true,
         matrix: false,
+        matrix_roots: roots.clone(),
         timing,
     };
     prime::prime(&ctx, deadline)
 }
 
-fn bench_cmd(sys: &dyn System, args: &BenchArgs, timing: Timing) -> Report {
-    match context(sys, &args.common, timing, false) {
+fn bench_cmd(sys: &dyn System, args: &BenchArgs, timing: Timing, roots: &matrix::Roots) -> Report {
+    match context(sys, &args.common, timing, false, roots) {
         Ok(ctx) => bench::run(&ctx, args.runs),
         Err(e) => Report::error("probe-bench", e),
     }
@@ -97,6 +101,20 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    run_in(cli, sys, timing, &matrix::Roots::host(), input, out, err)
+}
+
+/// [`run`] with the share matrix's directories outside the work directory made under
+/// `roots` (the host's own in a real run; a test's scratch directory in a test).
+pub(crate) fn run_in(
+    cli: Cli,
+    sys: Option<&dyn System>,
+    timing: Timing,
+    roots: &matrix::Roots,
+    input: &mut (dyn BufRead + Send),
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
     let Some(sys) = sys else {
         let _ = writeln!(
             err,
@@ -108,8 +126,8 @@ pub fn run(
     let report = match &cli.command {
         Cmd::VmRun { spec } => return vm_run(sys, spec, err),
         Cmd::Lease { store } => return lease(store, input, out, err),
-        Cmd::Probe(args) => probe(sys, args, timing),
-        Cmd::ProbeBench(args) => bench_cmd(sys, args, timing),
+        Cmd::Probe(args) => probe(sys, args, timing, roots),
+        Cmd::ProbeBench(args) => bench_cmd(sys, args, timing, roots),
         Cmd::Image(ImageCmd::Base {
             ipsw,
             sha256,
@@ -168,6 +186,7 @@ pub fn run(
                 shutdown_timeout: Duration::from_secs(*shutdown_secs),
                 ..timing
             },
+            roots,
         ),
         Cmd::Image(ImageCmd::Harvest { bundle, out }) => image::harvest(sys, bundle, out),
     };
