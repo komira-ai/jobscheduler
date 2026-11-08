@@ -69,7 +69,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="1236.0" y="182.0" class="t-m" text-anchor="middle">coordinator</text>
 <text x="1236.0" y="198.0" class="t-m" text-anchor="middle">configured</text>
 <rect x="640" y="46" width="330" height="44" rx="5" class="box-r"/>
-<text x="805.0" y="64.5" class="t-r" text-anchor="middle">signer = this repo's release workflow:</text>
+<text x="805.0" y="64.5" class="t-r" text-anchor="middle">signer = this repo's artifacts.yml:</text>
 <text x="805.0" y="79.5" class="t-r" text-anchor="middle">push access to main means root on hosts</text>
 <path d="M804,90 L804,120" class="ln-r" marker-end="url(#release-update-ar)"/>
 <path d="M1236,220 L1236,245 L122,245 L122,280" class="ln" marker-end="url(#release-update-ak)"/>

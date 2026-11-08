@@ -269,8 +269,9 @@ js-agent releases needs this entry for the service `js-agent`:
 |---|---|
 | service | `js-agent` |
 | repository | `komira-ai/jobscheduler` |
-| workflow | `.github/workflows/release.yml` |
+| workflow | `.github/workflows/artifacts.yml` |
 | refs | `refs/heads/main` |
 
-This is the same entry as in `packaging/js-agent/hostkeeper/README.md`. It lives on the hostkeeper
-side, not in this repository.
+This is the same entry as in `packaging/js-agent/hostkeeper/README.md`, and the same workflow path
+hostkeeper's and tierstore's packages are trusted by. It lives on the hostkeeper side, not in this
+repository.

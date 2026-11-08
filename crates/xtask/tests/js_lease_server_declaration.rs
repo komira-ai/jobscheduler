@@ -291,7 +291,7 @@ fn js_lease_server_declaration_loads_with_the_updater_validator_and_the_hook_rea
     assert_eq!(read.updater.registration_ttl_secs, 300);
     assert!(read.updater.hook.environment.is_empty());
     assert_eq!(read.updater.signer.repository, "komira-ai/jobscheduler");
-    assert_eq!(read.updater.signer.workflow, "release.yml");
+    assert_eq!(read.updater.signer.workflow, "artifacts.yml");
     assert_eq!(read.updater.state_dir, "/var/lib/js-lease-server-update");
     assert_eq!(read.hook.state_dir, Path::new(&read.updater.state_dir));
     assert_eq!(

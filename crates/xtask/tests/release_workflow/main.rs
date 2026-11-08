@@ -1,8 +1,9 @@
 //! The rules the release workflow keeps (the comments at the top of
-//! `.github/workflows/release.yml`), read from the file as text: actions pinned to commit
-//! SHAs, no permission at the top, hosted runners, a push to main as the only trigger that
-//! releases, a read-only wait for `ci`, `id-token: write` and `contents: write` only where
-//! they are meant, and the gamma step's shape.
+//! `.github/workflows/release.yml` and of `.github/workflows/artifacts.yml`, which it calls to
+//! build and sign the files), read from the files as text: actions pinned to commit SHAs, no
+//! permission at the top, hosted runners, a push to main as the only trigger that releases, a
+//! read-only wait for `ci`, `id-token: write` and `contents: write` only where they are meant,
+//! every attestation signed by artifacts.yml, and the gamma step's shape.
 
 use std::path::Path;
 
@@ -10,12 +11,25 @@ use xtask::release::Version;
 use xtask::release::hostkeeper_index::INDEX_FILE;
 use xtask::release::hostkeeper_package::{Platform, file_name};
 
+mod artifacts;
 mod hostkeeper;
 
-/// The workflow's text.
+/// The text of `.github/workflows/<file>`.
+fn read_workflow(file: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.github/workflows")
+        .join(file);
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {file}: {e}"))
+}
+
+/// The release workflow's text.
 fn workflow() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
-    std::fs::read_to_string(path).expect("read release.yml")
+    read_workflow("release.yml")
+}
+
+/// The text of the workflow that builds and signs the files, which the release calls.
+fn artifacts_workflow() -> String {
+    read_workflow("artifacts.yml")
 }
 
 /// The jobs: name and the lines of its block (the lines under `jobs:` split at the
@@ -49,46 +63,78 @@ fn job<'a>(jobs: &'a [(String, Vec<String>)], name: &str) -> &'a [String] {
         .1
 }
 
-/// Asserts that every `uses:` names a full 40-digit commit SHA with its version in a
-/// comment, that the top level grants nothing, and that every job runs on a GitHub-hosted
-/// runner image of a pinned version.
+/// The one workflow a job of the release calls, as its `uses:` line writes it.
+const CALLED: &str = "uses: ./.github/workflows/artifacts.yml";
+
+/// The `uses:` value of a job that calls a workflow (`uses:` at the job's own level), if it is one.
+fn calls(lines: &[String]) -> Option<&str> {
+    lines
+        .iter()
+        .find_map(|l| l.strip_prefix("    uses: "))
+        .map(str::trim)
+}
+
+/// Asserts, in both files, that every action `uses:` names a full 40-digit commit SHA with its
+/// version in a comment (the one local call, the release's `artifacts` job, excepted), that the
+/// top level grants nothing, and that every job runs on a GitHub-hosted runner image of a
+/// pinned version, or is that call.
 #[test]
 fn actions_are_pinned_and_the_top_grants_nothing() {
-    let text = workflow();
-    let mut uses = 0;
-    for line in text
-        .lines()
-        .filter(|l| l.trim_start().starts_with("- uses:") || l.trim_start().starts_with("uses:"))
-    {
-        uses += 1;
-        let (_, rest) = line.split_once('@').unwrap_or_else(|| panic!("{line}"));
-        let (sha, comment) = rest.split_once(' ').unwrap_or_else(|| panic!("{line}"));
-        assert!(
-            sha.len() == 40 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-            "{line}"
-        );
-        assert!(comment.starts_with("# v"), "{line}");
-    }
-    assert!(uses >= 8, "{uses} uses: lines");
-    assert!(text.lines().any(|l| l == "permissions: {}"));
-    for (name, lines) in jobs(&text) {
-        let runs_on: Vec<&String> = lines
-            .iter()
-            .filter(|l| l.trim_start().starts_with("runs-on:"))
-            .collect();
-        assert_eq!(runs_on.len(), 1, "{name}");
-        assert!(
-            runs_on[0].contains("ubuntu-24.04") || runs_on[0].contains("matrix.runner"),
-            "{name}: {}",
-            runs_on[0]
-        );
+    for (file, text, least) in [
+        ("release.yml", workflow(), 7),
+        ("artifacts.yml", artifacts_workflow(), 9),
+    ] {
+        let mut uses = 0;
+        for line in text.lines().filter(|l| {
+            l.trim_start().starts_with("- uses:") || l.trim_start().starts_with("uses:")
+        }) {
+            if line.trim() == CALLED {
+                assert_eq!(file, "release.yml", "{line}");
+                continue;
+            }
+            uses += 1;
+            let (_, rest) = line.split_once('@').unwrap_or_else(|| panic!("{line}"));
+            let (sha, comment) = rest.split_once(' ').unwrap_or_else(|| panic!("{line}"));
+            assert!(
+                sha.len() == 40 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "{line}"
+            );
+            assert!(comment.starts_with("# v"), "{line}");
+        }
+        assert!(uses >= least, "{file}: {uses} uses: lines");
+        assert!(text.lines().any(|l| l == "permissions: {}"), "{file}");
+        for (name, lines) in jobs(&text) {
+            let runs_on: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.trim_start().starts_with("runs-on:"))
+                .collect();
+            if let Some(called) = calls(&lines) {
+                assert_eq!(
+                    (file, name.as_str(), called),
+                    (
+                        "release.yml",
+                        "artifacts",
+                        "./.github/workflows/artifacts.yml"
+                    )
+                );
+                assert!(runs_on.is_empty(), "{name}");
+                continue;
+            }
+            assert_eq!(runs_on.len(), 1, "{file}: {name}");
+            assert!(
+                runs_on[0].contains("ubuntu-24.04") || runs_on[0].contains("matrix.runner"),
+                "{file}: {name}: {}",
+                runs_on[0]
+            );
+        }
     }
 }
 
 /// Asserts that a push to main is the only trigger that releases (the other is a pull
 /// request, the dry run), that the run's commit is its own `github.sha`, and that every job
-/// that attests, publishes or deploys, and the wait and the plan, tests for a push to main
-/// of its own condition; the other jobs follow `plan`'s output.
+/// that publishes or deploys, and the wait and the plan, tests for a push to main of its own
+/// condition; the call of artifacts.yml follows `plan`'s output (its jobs that attest test for
+/// a push to main themselves: `artifacts::attest_and_verify_run_only_for_a_push_to_main`).
 #[test]
 fn a_push_to_main_is_the_only_releasing_trigger() {
     let text = workflow();
@@ -104,32 +150,21 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     );
     assert!(text.contains("\n  COMMIT: ${{ github.sha }}\n"));
     assert!(!text.contains("workflow_run."));
-    // The dry run still builds: with the wait skipped, the build and the sums run on the
-    // plan's word alone.
+    // The dry run still builds: with the wait skipped, the call of artifacts.yml (its build and
+    // sums) runs on the plan's word alone.
     let all = jobs(&text);
-    for name in ["build", "sums"] {
-        let ifs: Vec<&String> = job(&all, name)
-            .iter()
-            .filter(|l| l.starts_with("    if:"))
-            .collect();
-        assert_eq!(ifs.len(), 1, "{name}");
-        assert!(
-            ifs[0].contains("!cancelled() && needs.plan.outputs.release == 'true'"),
-            "{name}: {}",
-            ifs[0]
-        );
-    }
+    let ifs: Vec<&String> = job(&all, "artifacts")
+        .iter()
+        .filter(|l| l.starts_with("    if:"))
+        .collect();
+    assert_eq!(ifs.len(), 1);
+    assert_eq!(
+        ifs[0].as_str(),
+        "    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' }}"
+    );
     let push = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
     let jobs = jobs(&text);
-    for name in [
-        "ci-passed",
-        "plan",
-        "attest",
-        "verify",
-        "publish",
-        "deploy-tool",
-        "gamma",
-    ] {
+    for name in ["ci-passed", "plan", "publish", "deploy-tool", "gamma"] {
         let ifs: Vec<&String> = job(&jobs, name)
             .iter()
             .filter(|l| l.starts_with("    if:"))
@@ -213,14 +248,20 @@ fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     assert!(job(&jobs, "plan").join("\n").contains("needs: [ci-passed]"));
 }
 
-/// Asserts that attest, verify, publish, deploy-tool and gamma run only on the plan's word
-/// that a release is made, and never with a status function that would run them after a
-/// failed or skipped job.
+/// Asserts that publish, deploy-tool and gamma run only on the plan's word that a release is
+/// made, and never with a status function that would run them after a failed or skipped job,
+/// and that publish needs the call of artifacts.yml (so a failed attest or verify there stops
+/// it).
 #[test]
 fn the_release_jobs_need_the_plans_release_and_no_status_function() {
     let text = workflow();
     let all = jobs(&text);
-    for name in ["attest", "verify", "publish", "deploy-tool", "gamma"] {
+    assert!(
+        job(&all, "publish")
+            .iter()
+            .any(|l| l == "    needs: [plan, artifacts]")
+    );
+    for name in ["publish", "deploy-tool", "gamma"] {
         let ifs: Vec<&String> = job(&all, name)
             .iter()
             .filter(|l| l.starts_with("    if:"))
@@ -260,16 +301,27 @@ fn only_publish_holds_contents_write_and_checks_the_tag_order() {
     assert!(publish.contains(r#"[ "$relation" != ahead ]"#));
 }
 
-/// Asserts that `id-token: write` is held by `attest` and `gamma` and by no other job.
+/// The jobs of `text` that hold `permission` (a `name: write` line).
+fn holders(text: &str, permission: &str) -> Vec<String> {
+    jobs(text)
+        .into_iter()
+        .filter(|(_, lines)| lines.iter().any(|l| l.trim() == permission))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Asserts that in release.yml `id-token: write` is held by `artifacts` (the call, whose grant
+/// is the most its jobs can hold) and `gamma`, and `attestations: write` by `artifacts` alone;
+/// and that in artifacts.yml both are held by `attest` and by no other job.
 #[test]
 fn only_attest_and_gamma_hold_id_token() {
-    let text = workflow();
-    let holders: Vec<String> = jobs(&text)
-        .into_iter()
-        .filter(|(_, lines)| lines.iter().any(|l| l.trim() == "id-token: write"))
-        .map(|(name, _)| name)
-        .collect();
-    assert_eq!(holders, ["attest", "gamma"]);
+    let release = workflow();
+    assert_eq!(holders(&release, "id-token: write"), ["artifacts", "gamma"]);
+    assert_eq!(holders(&release, "attestations: write"), ["artifacts"]);
+    let artifacts = artifacts_workflow();
+    assert_eq!(holders(&artifacts, "id-token: write"), ["attest"]);
+    assert_eq!(holders(&artifacts, "attestations: write"), ["attest"]);
+    assert!(holders(&artifacts, "contents: write").is_empty());
 }
 
 /// Asserts the gamma step's shape: after `publish` and the tool's build, no more permission
@@ -313,7 +365,7 @@ fn gamma_is_off_by_variable_and_sets_the_server_before_the_agents() {
 /// reproducibility of the files depends on them.
 #[test]
 fn the_macos_leg_builds_the_client_agent_bundle_and_mac_tools_and_packs_with_gnu_tar() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build").join("\n");
     assert!(
@@ -333,7 +385,7 @@ fn the_macos_leg_builds_the_client_agent_bundle_and_mac_tools_and_packs_with_gnu
 /// declaration), and not copied by the step itself, so an archive cannot drift from what the tests read.
 #[test]
 fn the_archives_are_staged_by_the_xtask_list_and_nothing_else() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build").join("\n");
     assert!(
@@ -353,7 +405,7 @@ fn the_archives_are_staged_by_the_xtask_list_and_nothing_else() {
 /// and that all three matrix legs build it. The two Mac host tools are expected for darwin only.
 #[test]
 fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let sums = job(&jobs, "sums").join("\n");
     for target in [
@@ -382,7 +434,7 @@ fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
 /// There is no darwin archive.
 #[test]
 fn the_js_mdm_archive_is_built_and_expected_for_linux_only() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build").join("\n");
     let linux: Vec<&str> = build
@@ -413,7 +465,7 @@ fn the_js_mdm_archive_is_built_and_expected_for_linux_only() {
 /// SDK cannot silently raise what the binaries need.
 #[test]
 fn the_macos_leg_pins_the_deployment_target_and_checks_each_binary() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build").join("\n");
     assert!(
@@ -495,7 +547,7 @@ const LINUX_BUILDS: [&str; 5] = [
 /// and could not run the binaries) and a binary dropped from it.
 #[test]
 fn the_linux_arm64_leg_builds_the_five_linux_binaries_on_a_hosted_arm_runner() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build");
     assert!(
@@ -549,7 +601,7 @@ fn expected_assets(sums: &[String]) -> Vec<String> {
 /// the listing and would fail every real release.
 #[test]
 fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_is_sorted() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let expected = expected_assets(job(&jobs, "sums"));
     let mut wanted: Vec<String> = Vec::new();
@@ -688,7 +740,7 @@ fn the_condition_reader_reads_equality_suffix_and_or() {
 /// for musl), and a Mac leg that would run `apt-get`.
 #[test]
 fn the_musl_tools_are_installed_for_both_musl_legs() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build");
     let install = step(build, "Install musl tools");
@@ -831,7 +883,7 @@ fn target_case(lines: &[String]) -> Vec<(String, Vec<String>)> {
 /// narrowed to the x86_64 name, which would let a dynamically linked arm64 binary through.
 #[test]
 fn the_static_check_covers_the_arm64_linux_leg() {
-    let text = workflow();
+    let text = artifacts_workflow();
     let jobs = jobs(&text);
     let check = step(job(&jobs, "build"), "Check the binaries");
     let arms = target_case(check);
@@ -874,9 +926,23 @@ const HOSTED_RUNNERS: [&str; 3] = ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15
 /// Catches a self-hosted or larger-runner label, in a job or in a matrix leg.
 #[test]
 fn no_self_hosted_or_paid_runner_labels() {
-    let text = workflow();
-    assert!(!text.contains("self-hosted"));
-    for (name, lines) in jobs(&text) {
+    for text in [workflow(), artifacts_workflow()] {
+        no_self_hosted_or_paid_runner_label_in(&text);
+    }
+}
+
+/// The check above, on one workflow's text; a job that calls a workflow has no runner of its own.
+fn no_self_hosted_or_paid_runner_label_in(text: &str) {
+    // `gh attestation verify --deny-self-hosted-runners` refuses such a runner; it is no label.
+    assert!(
+        !text
+            .replace("--deny-self-hosted-runners", "")
+            .contains("self-hosted")
+    );
+    for (name, lines) in jobs(text) {
+        if calls(&lines).is_some() {
+            continue;
+        }
         let runs_on = lines
             .iter()
             .find_map(|l| l.trim_start().strip_prefix("runs-on: "))

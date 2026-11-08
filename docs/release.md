@@ -17,7 +17,8 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    build still runs on a Mac (below).
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
-4. `build` stamps the version into the CI checkout, builds the binaries for
+4. The `artifacts` job calls `.github/workflows/artifacts.yml` with that version; its jobs run in
+   the same run, at the same commit. Its `build` stamps the version into the CI checkout, builds the binaries for
    `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`, for each of the two Linux architectures) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), each target on a GitHub-hosted runner of its own architecture, checks that
    the Linux ones are static and that `--version` prints the release version, and packages them:
    `cargo xtask release stage` lays down the files of each archive (`crates/xtask/src/release/stage.rs`
@@ -25,12 +26,18 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    hostkeeper with `cargo xtask release hostkeeper-package` (below). `sums` writes the hostkeeper
    release index of the three packages with `cargo xtask release hostkeeper-index`, then one
    `SHA256SUMS` over the archives, the packages and the index.
-5. `attest` attests every archive, package and the index with build provenance
-   (`actions/attest-build-provenance`, from `SHA256SUMS`); `verify` then checks the attestations
-   the way a user does (below).
+5. artifacts.yml's `attest` attests every archive, package and the index with build provenance
+   (`actions/attest-build-provenance`, from `SHA256SUMS`), after refusing sums other than the ones
+   `sums` made and files that differ from them; it then attests each package alone and keeps the
+   bundle of that attestation beside it as `<package>.sigstore.json`, the file hostkeeper verifies
+   a package with. Its `verify` then checks the attestations the way a user does (below), and each
+   package from its bundle the way a host does. The signer of every attestation is
+   `.github/workflows/artifacts.yml`, not `release.yml`: that is the one workflow of this
+   repository a farm host trusts (see [The hostkeeper packages of js-agent](#the-hostkeeper-packages-of-js-agent)).
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
-   commit), uploads the archives, the packages, the index and `SHA256SUMS` to it, and publishes it
-   in one call. Publishing creates the tag `vX.Y.Z` on the commit.
+   commit), uploads the archives, the packages and their bundles, the index and `SHA256SUMS` to it,
+   and publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a
+   package without its bundle.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
@@ -69,12 +76,15 @@ that passes `ci` and ships code. Nothing runs on a timer.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums and
 verify (plus `attestations: read` for verify), `id-token` and `attestations` write for `attest`,
-`actions: read` alone for `ci-passed`, `contents` write for `publish` (the tag and the release), `id-token` write alone for `gamma`. No job
+`actions: read` alone for `ci-passed`, `contents` write for `publish` (the tag and the release), `id-token` write alone for `gamma`.
+The `artifacts` job of release.yml grants `contents: read` and the two writes of `attest`, since a
+called workflow's jobs can hold no more than the calling job grants; each job of artifacts.yml then
+asks for its own. No job
 that holds a write permission runs repository code, except that `gamma` runs the `xtask` binary
 that `deploy-tool` built in a job with no token: the build, whose scripts run code from the locked
 dependency set, never shares a job with the token service's address and key. The rules (SHA-pinned
-actions, no permission at the top, `id-token` write in `attest` and `gamma` only) are pinned by
-`crates/xtask/tests/release_workflow`.
+actions, no permission at the top, `id-token` write in `attest` and `gamma` only, signing in
+artifacts.yml's `attest` only) are pinned by `crates/xtask/tests/release_workflow`.
 
 ## What is released
 
@@ -149,8 +159,9 @@ For version `X.Y.Z`:
 | `js-agent-X.Y.Z-linux-x86_64.tar.zst` | the hostkeeper package of `js-agent` for x86_64 Linux hosts (below) |
 | `js-agent-X.Y.Z-linux-arm64.tar.zst` | the hostkeeper package of `js-agent` for arm64 Linux hosts |
 | `js-agent-X.Y.Z-macos-arm64.tar.zst` | the hostkeeper package of `js-agent` for Apple silicon Macs |
+| `js-agent-X.Y.Z-<platform>.tar.zst.sigstore.json` | for each of the three packages, the Sigstore bundle of its own build provenance attestation, which hostkeeper verifies the package with offline |
 | `js-agent-index.json` | the release index of the three packages: for each platform the package's file name, SHA-256 and size |
-| `SHA256SUMS` | SHA-256 of the fifteen archives, the three packages and the index |
+| `SHA256SUMS` | SHA-256 of the fifteen archives, the three packages and the index (not of the bundles) |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
@@ -159,7 +170,10 @@ the declaration the host updater loads the hook's rights from
 (`packaging/js-lease-server/updater.d/js-lease-server.toml`; the updater's own install step puts it
 in `/etc/updater.d` from a verified release, after checking it asks for no more than the approved
 one). It sits beside the binary, at the name kbf's release unpacker takes a declaration by
-(`updater.d/<binary>.toml`), and the attestation of the archive covers it.
+(`updater.d/<binary>.toml`), and the attestation of the archive covers it. Its `signer` is this
+repository's `artifacts.yml`, the workflow that signs every release file. A host whose
+`/etc/updater.d/js-lease-server.toml` still names `release.yml` refuses the releases signed by
+`artifacts.yml`: set that line to `workflow = "artifacts.yml"` on the host.
 `crates/xtask/tests/js_lease_server_declaration.rs` reads it as the declaration's shape and with the
 hook's own reader, and `crates/xtask/tests/release_stage.rs` fails if the archive leaves it out.
 What the server's hook does is in [lease-server-update.md](lease-server-update.md). The `js-agent`
@@ -190,8 +204,11 @@ carries no server address, pool, token or host name: the host's own flags are in
 
 `cargo xtask release hostkeeper-index --dir dist --version X.Y.Z` writes `js-agent-index.json` from the
 three packages. It refuses a directory that lacks one of them or holds another `.tar.zst`. `SHA256SUMS`
-lists the packages and the index, `attest` attests them and `verify` checks each one as it does an
-archive, so hostkeeper can trust a package it fetched by the attestation of this workflow.
+lists the packages and the index, artifacts.yml's `attest` attests them, and attests each package
+alone so that its bundle (`<package>.sigstore.json`) can sit beside it, and `verify` checks each one
+as it does an archive and each package from its bundle, so hostkeeper can trust a package it fetched
+by the attestation of artifacts.yml. hostkeeper's channel-sync stages a package only with its bundle
+beside it.
 
 hostkeeper's channel-sync does not trust a package by its name: it needs an entry for the service
 that says whose attestation is accepted. For `js-agent` the entry is:
@@ -200,11 +217,15 @@ that says whose attestation is accepted. For `js-agent` the entry is:
 |---|---|
 | service | `js-agent` |
 | repository | `komira-ai/jobscheduler` |
-| workflow | `.github/workflows/release.yml` |
+| workflow | `.github/workflows/artifacts.yml` |
 | refs | `refs/heads/main` |
 
-This is what `gh attestation verify ... --signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml
---source-ref refs/heads/main` checks (below). The entry is hostkeeper's configuration, not this
+This is what `gh attestation verify ... --signer-workflow komira-ai/jobscheduler/.github/workflows/artifacts.yml
+--source-ref refs/heads/main` checks (below). It is the same signer hostkeeper's and tierstore's
+packages have (their own `.github/workflows/artifacts.yml`), so a farm host trusts one workflow
+path, in any repository of the organisation. A release whose assets have no `.sigstore.json` was
+attested by `release.yml`, before the signing moved; a host that trusts only `artifacts.yml` refuses
+it and takes the releases after it. The entry is hostkeeper's configuration, not this
 repository's: this repository documents it and does not set it.
 
 The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`. The js-agent Debian package (`.github/workflows/js-agent-deb.yml`) is built for x86_64 only: there is no arm64 deb, and an arm64 host takes the agent from its release archive.
@@ -219,7 +240,7 @@ Needs the GitHub CLI (`gh`), signed in.
 gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
 gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R komira-ai/jobscheduler \
-  --signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml \
+  --signer-workflow komira-ai/jobscheduler/.github/workflows/artifacts.yml \
   --source-ref refs/heads/main \
   --source-digest "$(git rev-parse vX.Y.Z^{commit})"
 ```
@@ -236,8 +257,14 @@ architecture `uname -m` prints the first part of the target (`x86_64` or `aarch6
 `-p "js-agent-*-$(uname -m)-unknown-linux-musl.tar.gz"` picks the host's own.
 
 The checksum check proves the download is intact. The attestation check proves the file was built
-from this repository by the `release` workflow, from `main` (`--source-ref`), at exactly that commit
-(`--source-digest`), which is the commit the tag `vX.Y.Z` names.
+from this repository by the `artifacts` workflow (which the `release` workflow calls), from `main`
+(`--source-ref`), at exactly that commit (`--source-digest`), which is the commit the tag `vX.Y.Z`
+names. A release whose assets have no `.sigstore.json` was signed by `release.yml`: check it with
+`--signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml`.
+
+A hostkeeper package can also be checked from its bundle, as a host does, with
+`gh attestation verify js-agent-X.Y.Z-linux-x86_64.tar.zst --bundle js-agent-X.Y.Z-linux-x86_64.tar.zst.sigstore.json`
+and the same flags (download the bundle with `-p 'js-agent-*-linux-x86_64.tar.zst.sigstore.json'`).
 
 ## Configuration the project owner must set
 
@@ -264,7 +291,8 @@ Not proven until the first real run on `main`, and fixed there if it differs:
 
 - that creating the tag by publishing the release is allowed under the tag ruleset above;
 - the values of the attestation's source claims, `--source-ref refs/heads/main` and
-  `--source-digest <commit>`, for a run started by a push (`verify` refuses the release
+  `--source-digest <commit>`, and the signer `artifacts.yml` (the called workflow, not its
+  caller `release.yml`), for a run started by a push (artifacts.yml's `verify` refuses the release
   before anything is published if they differ);
 - the draft and asset calls of `publish` (listing drafts, uploading to a draft, reading an asset
   back to compare it).
@@ -320,8 +348,8 @@ Open the failed run on the Actions page and use "Re-run failed jobs", not "Re-ru
 that were built and verified are kept and nothing is built twice. Re-running only the failed jobs
 keeps the `plan` job that succeeded, with its outputs: `plan` does not look at `main` again. The
 guards of such a re-run are in the jobs that run again: `publish` checks the tag before it
-publishes (and once more right before the publishing call), and `verify` checks the attestations
-against the commit. "Re-run all jobs" runs `plan` again, which checks that `main` is still at the
+publishes (and once more right before the publishing call), and artifacts.yml's `verify` checks the
+attestations against the commit. "Re-run all jobs" runs `plan` again, which checks that `main` is still at the
 commit and may find nothing to release.
 
 A published release is never changed: its files are never deleted or replaced and its commit never
@@ -340,7 +368,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | `publish` failed at the last call or after it | Possibly the tag and a published release | Re-run failed jobs: the tag stays, files the release lacks are added, the tag is checked to name the commit. |
 | `publish` says a file differs | The release holds a file that is not this run's | Never delete or replace assets of a published release. Cut a new version: push a change that ships (the next version counts from the tag). |
 | The run was green but released nothing | `plan` printed why | a later release exists past the commit, or nothing that ships changed. Nothing to do. |
-| "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files; `publish` compares each against the release and keeps them. If a file differs the run fails and nothing is changed. |
+| "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files and signs them again; `publish` compares each against the release and keeps them, and keeps the release's bundles without comparing them (each signing writes new bytes for the same package). If a file differs the run fails and nothing is changed. |
 
 Runs that wait: a release run starts with its push and waits for the jobs of `ci` but `macos`; if one fails there, the run fails
 at `ci-passed` (red, with the `ci` run's link and the failed jobs) and the change is released by the next push that passes
@@ -349,5 +377,5 @@ at `ci-passed` (red, with the `ci` run's link and the failed jobs) and the chang
 There is no dispatch and no tag trigger: a `v*` tag pushed by hand does not start a release, and
 `workflow_dispatch` does not exist. An old run that is re-run with "Re-run all jobs" cannot publish its
 old commit under a newer release, because `plan` finds a later tag past it, and `publish` checks the tag order again. A re-run of only the failed jobs does not run `plan`
-again; the tag checks in `publish` and the attestation check in `verify` are what guard it (the draft
+again; the tag checks in `publish` and the attestation check in artifacts.yml's `verify` are what guard it (the draft
 it finds is replaced when it targets another commit). To release by hand there is nothing to do but merge a change that ships.

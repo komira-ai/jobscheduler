@@ -25,7 +25,8 @@
 name   = "js-lease-server"
 binary = "js-lease-server"
 hook_args = ["update-hook", "--release-link=/opt/js-lease-server/link/current", "--unit=js-lease-server.service", "--store=/etc/js-lease-server/store", "--healthz-url=http://127.0.0.1:7300"]
-signer = { repository = "komira-ai/jobscheduler", workflow = "release.yml" }
+# The workflow that signs every release file (release.yml calls it): the one signer of this repository.
+signer = { repository = "komira-ai/jobscheduler", workflow = "artifacts.yml" }
 # The account the server's unit runs it as.
 uid    = "js-lease-server"
 # The server is stopped for the length of a cutover; the registration outlives a restart.

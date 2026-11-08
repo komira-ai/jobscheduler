@@ -43,7 +43,7 @@ const EXPECTED: [&str; 4] = [
     "ci.yml/macos",
     "js-agent-macos-pkg.yml/build",
     "macos-probe.yml/probe",
-    "release.yml/build",
+    "release.yml/artifacts -> artifacts.yml/build",
 ];
 
 fn repo() -> &'static Path {
@@ -221,7 +221,8 @@ fn value_after<'a>(text: &'a str, under: &str, key: &str) -> &'a str {
 #[test]
 fn the_pull_request_build_makes_the_binaries_of_the_release_s_macos_leg() {
     let ci = read("ci.yml");
-    let release = read("release.yml");
+    // The release's legs are artifacts.yml's `build`, which release.yml calls.
+    let release = read("artifacts.yml");
     let pr = value_after(
         &ci,
         "      - name: Build, stage and package the release's macOS binaries\n",
@@ -251,7 +252,7 @@ fn the_pull_request_build_makes_the_binaries_of_the_release_s_macos_leg() {
         "${{ !cancelled() && github.event_name == 'pull_request' }}"
     );
     // One command, the xtask verb (tests/release_macos_leg.rs pins what it runs), against the
-    // pinned macOS; the leg's release.yml steps run the same verbs and checks.
+    // pinned macOS; the leg's artifacts.yml steps run the same verbs and checks.
     assert_eq!(
         value_after(
             &ci,
@@ -266,7 +267,7 @@ fn the_pull_request_build_makes_the_binaries_of_the_release_s_macos_leg() {
         "otool -l",
         "--version",
     ] {
-        assert!(release.contains(needle), "release.yml: {needle}");
+        assert!(release.contains(needle), "artifacts.yml: {needle}");
     }
     assert!(ci.contains("  MACOSX_DEPLOYMENT_TARGET: \"11.0\"\n"));
 }
