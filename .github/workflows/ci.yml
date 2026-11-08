@@ -287,18 +287,20 @@ jobs:
       # --no-fail-fast: a red run names every failing test, as in the Linux `test` job.
       - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step --exclude js-mdm
       # TEMPORARY probe for the js-treestore harness check; removed before merge.
-      - name: Probe js-treestore's treestore tests 200 times at 64 threads
+      - name: Probe js-treestore's test binaries 200 times each at 64 threads
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         run: |
-          fails=0
-          for i in $(seq 1 200); do
-            if ! cargo test -q -p js-treestore --test treestore --locked -- --test-threads=64 > "$RUNNER_TEMP/probe.txt" 2>&1; then
-              fails=$((fails + 1)); echo "::warning::run $i failed"; grep -A8 -- '---- ' "$RUNNER_TEMP/probe.txt" || cat "$RUNNER_TEMP/probe.txt"
-            fi
+          for t in treestore children user_command_spawn; do
+            fails=0
+            for i in $(seq 1 200); do
+              if ! cargo test -q -p js-treestore --test "$t" --locked -- --test-threads=64 > "$RUNNER_TEMP/probe.txt" 2>&1; then
+                fails=$((fails + 1)); echo "::warning::$t run $i failed"; grep -A8 -- '---- ' "$RUNNER_TEMP/probe.txt" || cat "$RUNNER_TEMP/probe.txt"
+              fi
+            done
+            echo "probe: $t: $fails of 200 runs failed"
           done
-          echo "probe: $fails of 200 runs failed"
-          ls -la ~/Library/Logs/DiagnosticReports/ /Library/Logs/DiagnosticReports/ 2>&1 | head -50
-          for f in ~/Library/Logs/DiagnosticReports/treestore* /Library/Logs/DiagnosticReports/treestore*; do [ -f "$f" ] && { echo "== $f"; head -c 12000 "$f"; echo; }; done
+          ls -la ~/Library/Logs/DiagnosticReports/ 2>&1 | head -50
+          for f in ~/Library/Logs/DiagnosticReports/treestore* ~/Library/Logs/DiagnosticReports/children* ~/Library/Logs/DiagnosticReports/user_command_spawn*; do [ -f "$f" ] && { echo "== $f"; head -c 6000 "$f"; echo; }; done
           true
       - name: Add the release's macOS target
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}

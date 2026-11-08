@@ -1,7 +1,8 @@
 //! The two pieces of the privileged tests' harness that a wrong value breaks silently on a
 //! provisioned Mac: the command that runs something as the unprivileged user, and the text
-//! of the ACL entry given to that user. They are compiled into `tests/privileged.rs` and
-//! into the ordinary test binary, which checks them on every platform.
+//! of the ACL entry given to that user. They are compiled into `tests/privileged.rs`, into
+//! `tests/children`, which checks them on every platform, and into
+//! `tests/user_command_spawn.rs`.
 #![allow(dead_code)]
 
 use std::os::unix::process::CommandExt as _;
@@ -17,9 +18,9 @@ use std::process::{Command, Stdio};
 /// before the exec, where it otherwise spawns the program directly (`posix_spawn`). A fork
 /// of a test binary whose other tests run on other threads is unsafe: on macOS the copy can
 /// abort inside `fork` on a one-time initialisation another thread was part way through,
-/// and until its exec it holds every file the process has open, store locks included. As
-/// the process's own user the two calls would change nothing, so they are left out; the
-/// privileged tests, which change user, run on one thread.
+/// and is killed before it runs the program. As the process's own user the two calls would
+/// change nothing, so they are left out; the privileged tests, which change user, run on
+/// one thread.
 pub fn user_command(program: &str, args: &[&Path], uid: u32, gid: u32) -> Command {
     let mut command = Command::new(program);
     command.args(args).current_dir("/").stdin(Stdio::null());
