@@ -1,0 +1,10 @@
+{
+  "parameter": "jobs",
+  "settings": ["1000"],
+  "arms": [
+    { "label": "load-placement", "control": true }
+  ],
+  "runs_per_arm": 10,
+  "warmups_per_arm": 1,
+  "seed": 21
+}
