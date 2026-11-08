@@ -191,10 +191,41 @@ fn a_repeated_jobstart_for_a_held_job_runs_once() {
     assert_eq!(launches(&io), [named.as_str(), named.as_str()]);
 }
 
+/// Asserts that a job the agent runs is unlisted until a heartbeat lists it, and stays
+/// listed once one has, running or with its result; and that an agent that runs no job,
+/// or holds only a result, runs nothing unlisted. Catches a cut agent's job counted as seen
+/// by the server before any heartbeat carried it (the silent-host witness would then never
+/// hold for jobs), and one counted unlisted after a heartbeat listed it.
+#[test]
+fn a_job_is_unlisted_until_a_heartbeat_lists_it() {
+    let mut agent = agent(None);
+    let mut io = fresh_io();
+    assert!(!agent.runs_unlisted());
+    answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
+    assert!(agent.runs_unlisted());
+    beat(&mut agent, &mut io);
+    assert!(!agent.runs_unlisted());
+    answer(&mut agent, &mut io, vec![start(OTHER)], &[], &[]);
+    assert!(agent.runs_unlisted());
+    beat(&mut agent, &mut io);
+    assert!(!agent.runs_unlisted());
+    assert!(run_out_job(&mut agent, &mut io, OTHER));
+    assert!(!agent.runs_unlisted());
+}
+
+/// Fires the end timer of `job`.
+fn run_out_job(agent: &mut PerJob, io: &mut Io, job: &str) -> bool {
+    let tag = agent.timers.iter().find(|(_, held)| held.as_str() == job);
+    let tag = *tag.expect("an end timer of the job").0;
+    agent.timer(tag, io)
+}
+
 /// Asserts that a stop of a job the agent never held retires its id: listed in
-/// `retired_jobs`, not in `jobs`, and a later start of it is refused and counted as a start
-/// after a stop. Catches an agent that ignores a stop of a job it does not hold (the
-/// server would never free the allocation), and one that runs a start after the stop.
+/// `retired_jobs`, not in `jobs`, and a later start of it is refused, counted as a start
+/// after a stop, and written into the ledger as refused (a start it took is not). Catches
+/// an agent that ignores a stop of a job it does not hold (the server would never free the
+/// allocation), one that runs a start after the stop, and a refused start taken by the
+/// invariants for one the agent acted on.
 #[test]
 fn a_jobstop_for_an_unknown_job_retires_its_id() {
     let mut agent = agent(None);
@@ -206,8 +237,12 @@ fn a_jobstop_for_an_unknown_job_retires_its_id() {
     answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
     assert!(launches(&io).is_empty());
     assert_eq!(io.counters.get(Counter::StartAfterStop), 1);
-    let beats = io.ledger.jobs_after([0; 3]).0;
+    let (beats, replies, _) = io.ledger.jobs_after([0; 3]);
     assert_eq!(beats[0].retired, [job(JOB)].into());
+    assert!(replies[1].starts[0].refused);
+    answer(&mut agent, &mut io, vec![start(OTHER)], &[], &[]);
+    let replies = io.ledger.jobs_after([0; 3]).1;
+    assert!(!replies[2].starts[0].refused);
 }
 
 /// Asserts that a result is listed with every heartbeat, `exited_unacked` and `succeeded`,

@@ -7,11 +7,11 @@ use crate::cell::Cell;
 
 /// Cuts the agents off from the server and from the other agents, as one group, in
 /// place of any partition in force ([`Cell::partition`]), and heals every partition
-/// `lasting` later ([`Cell::heal`]). At the cut, each agent that runs a run no hello or
-/// heartbeat of its own listed, so the server cannot have seen it listed, counts one
-/// [`crate::Counter::CutWithUnlistedRun`]: the witness of a scenario about a host that
-/// goes silent while it holds a run the server never saw listed (design section 8, row
-/// 35).
+/// `lasting` later ([`Cell::heal`]). At the cut, each agent that runs a run or a job no
+/// hello or heartbeat of its own listed, so the server cannot have seen it listed, counts
+/// one [`crate::Counter::CutWithUnlistedRun`]: the witness of a scenario about a host
+/// that goes silent while it holds a run or a job the server never saw listed (design
+/// section 8, row 35).
 #[derive(Clone, Debug)]
 pub struct PartitionAgents {
     agents: Agents,
