@@ -26,6 +26,8 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The queue-status tests build the refusals pass 2 hands the placer.
+js-elastic = { path = "../js-elastic" }
 # The whole-host job tests run the job tables on the in-memory fake, behind the wrapper that
 # fails or races a commit.
 js-jobs = { path = "../js-jobs", features = ["test-support"] }

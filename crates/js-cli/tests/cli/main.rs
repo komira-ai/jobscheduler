@@ -17,6 +17,7 @@ mod join_token;
 mod lost_reply;
 mod native;
 mod ops;
+mod queue_status;
 mod servers;
 mod support;
 mod tls;

@@ -206,6 +206,75 @@ message JobTimes {
   optional uint64 ended_at_ms = 4;
 }
 
+// Why a queued job is where it is (docs/design/queue-status.md). The service writes only
+// these values; a later release may append one, and a reader that meets a value it does not
+// know reads it as unspecified.
+enum QueueStatusCode {
+  // Nothing has been recorded of the job yet, or a reader met a value it does not know.
+  QUEUE_STATUS_CODE_UNSPECIFIED = 0;
+  // No open host has room for the job now; the detail says whether any open host could run
+  // it at all.
+  QUEUE_STATUS_CODE_WAITING_FOR_CAPACITY = 1;
+  // The job books a whole host and none is free; the detail names the host being emptied for
+  // it, when one is.
+  QUEUE_STATUS_CODE_WAITING_FOR_WHOLE_HOST = 2;
+  // A machine for the job was refused for quota: its instance type is passed over in that
+  // region for a while.
+  QUEUE_STATUS_CODE_QUOTA_BACKOFF = 3;
+  // A machine for the job was refused for capacity: the next zone, offer or provider is asked.
+  QUEUE_STATUS_CODE_FAILING_OVER = 4;
+  // The job was placed on a host.
+  QUEUE_STATUS_CODE_PLACED = 5;
+  // A machine was launched for the job, and the job waits for it to join.
+  QUEUE_STATUS_CODE_WAITING_FOR_MACHINE = 6;
+}
+
+// Why a job is where it is in the queue, and since when.
+message QueueStatus {
+  // The reason. A program acts on this only.
+  QueueStatusCode code = 1;
+  // Text for a person saying more.
+  string detail = 2;
+  // When the code last changed, in milliseconds since the Unix epoch. A change of the detail
+  // alone leaves it as it was.
+  uint64 since_ms = 3;
+}
+
+// What one event of a job's history says happened. A later release may append a value; a
+// reader that meets one it does not know reads it as unspecified.
+enum JobEventKind {
+  // Not a kind: what a value this reader does not know reads as.
+  JOB_EVENT_KIND_UNSPECIFIED = 0;
+  // The job began to wait for room.
+  JOB_EVENT_KIND_WAITING_FOR_CAPACITY = 1;
+  // The job began to wait for a whole host.
+  JOB_EVENT_KIND_WAITING_FOR_WHOLE_HOST = 2;
+  // A machine for the job was refused for quota.
+  JOB_EVENT_KIND_QUOTA_BACKOFF = 3;
+  // A machine for the job was refused for capacity.
+  JOB_EVENT_KIND_FAILING_OVER = 4;
+  // The job was placed on a host; the event names the host.
+  JOB_EVENT_KIND_PLACED = 5;
+  // A failed whole-host prepare sent the placed job back to the queue; the event names the
+  // host.
+  JOB_EVENT_KIND_REQUEUED = 6;
+  // A machine was launched for the job.
+  JOB_EVENT_KIND_WAITING_FOR_MACHINE = 7;
+}
+
+// One event of a job's history.
+message JobEvent {
+  // When the service recorded it, in milliseconds since the Unix epoch.
+  uint64 at_ms = 1;
+  // What happened.
+  JobEventKind kind = 2;
+  // Text for a person saying more.
+  string detail = 3;
+  // The host the event names: the one the job was placed on, or sent back from. Absent
+  // otherwise.
+  optional string host_id = 4;
+}
+
 // The record the service keeps of a job.
 message Job {
   // The job's id, the client's or the one the service minted.
@@ -234,6 +303,17 @@ message Job {
   // `--token-file`). Set by the server, never by the request: a retry of the same job from
   // another client keeps the first. Absent on a job recorded before clients were named.
   optional string client = 32;
+  // Why the job is where it is in the queue (docs/design/queue-status.md). Absent while
+  // nothing has been recorded, and on a job that ended without being placed; a placed,
+  // running or ended job that was placed shows placed.
+  QueueStatus queue_status = 33;
+  // How many placement attempts the job had: each placement and each machine refused for it.
+  uint32 attempts = 34;
+  // The job's newest events, oldest first: at most 32.
+  repeated JobEvent events = 35;
+  // How many older events were dropped to keep the bound, so this plus the events kept is
+  // the number the job ever had.
+  uint32 dropped_events = 36;
 }
 
 // How an ended job ended, as its result says.

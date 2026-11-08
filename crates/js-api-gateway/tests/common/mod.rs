@@ -435,6 +435,19 @@ pub fn job() -> Job {
         host_silent_since_ms: Some(BIG + 4000),
         cancel_requested: true,
         client: Some("client-a".to_owned()),
+        queue_status: Some(js_proto::v1::QueueStatus {
+            code: js_proto::v1::QueueStatusCode::FailingOver.into(),
+            detail: "refused for capacity".to_owned(),
+            since_ms: BIG + 5000,
+        }),
+        attempts: 3,
+        events: vec![js_proto::v1::JobEvent {
+            at_ms: BIG + 6000,
+            kind: js_proto::v1::JobEventKind::Placed.into(),
+            detail: "placed".to_owned(),
+            host_id: Some("host-a".to_owned()),
+        }],
+        dropped_events: 4,
     }
 }
 

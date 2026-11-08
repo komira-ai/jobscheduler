@@ -147,6 +147,7 @@ mod ids;
 #[cfg(any(test, feature = "test-support"))]
 pub mod interfere;
 pub mod keys;
+mod queue;
 mod record;
 mod result;
 #[cfg(any(test, feature = "test-support"))]
@@ -164,6 +165,7 @@ pub use ids::{
     AllocationId, ClientName, ClientNameError, DEFAULT_CLIENT_NAME, IdSource, JobId, JobIdError,
     MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
 };
+pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{
     AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, Exclusion,
     FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint, Isolation, JobFiles, JobRecord, JobSpec,

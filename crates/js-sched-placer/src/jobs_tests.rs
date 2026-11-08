@@ -6,12 +6,16 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use js_elastic::RefusalCode;
 use js_jobs::{Booked, Isolation, JobId, JobRecord, JobState, JobStoreError, Needs, NewJob};
 use js_registry::{Placer, WholeNodeConfig};
 use js_sched::Backfill;
+use js_sched::failover::Refused;
+use js_sched::queue_status::Outcome;
 use js_state::{Store, StoreError};
 use js_types::sched::WorkKey;
 use js_types::{HostId, LeaseId, Resources};
+use js_types::{JobEventKind, ProviderId, QueueCode};
 use js_types::{ManualClock, Timestamp};
 
 use super::{JobHosts, JobStarts, OpenHost, PassMetrics};
@@ -436,7 +440,8 @@ fn backfilled(wall_secs: u64) -> Option<u64> {
     let steps = run(&mut e, (&[whole], &[]), 20_000);
     assert_eq!(steps.len(), 1);
     let open = BTreeMap::from([(host("b"), OpenHost::default())]);
-    let decided = e.walk_jobs(&[share], &open, at(20_000));
+    let (decided, waiting) = e.walk_jobs(&[share], &open, at(20_000));
+    assert!(waiting.is_empty());
     assert_eq!(decided.len(), 1);
     assert_eq!(decided[0].1, host("b"));
     decided[0].3.wall_limit_secs
@@ -450,4 +455,314 @@ fn backfilled(wall_secs: u64) -> Option<u64> {
 fn a_job_backfilled_on_a_marked_host_has_its_wall_limit_cut_to_the_tail() {
     assert_eq!(backfilled(3_600), Some(520));
     assert_eq!(backfilled(100), None);
+}
+
+// ---- queue status ----------------------------------------------------------------------
+
+/// Both hosts full: eight one-core leases on each of their eight cores.
+fn full() -> Rig {
+    let a: Vec<u64> = (1..=8).collect();
+    let b: Vec<u64> = (9..=16).collect();
+    Rig::new(&[("a", &a), ("b", &b)])
+}
+
+/// The job `id` as the tables hold it.
+fn read(rig: &Rig, id: &JobId) -> JobRecord {
+    rig.tables.jobs.get_job(id).unwrap().unwrap()
+}
+
+/// The kinds and times of a job's events, in milliseconds on the store's clock.
+fn events(job: &JobRecord) -> Vec<(JobEventKind, u64, Option<HostId>)> {
+    let ms = |at: js_state::StoreTime| u64::try_from(at.as_duration().as_millis()).unwrap();
+    let each = job.queue.events().iter();
+    each.map(|event| (event.kind, ms(event.at), event.host.clone()))
+        .collect()
+}
+
+/// A refusal pass 2 recorded for the job's request, for `code`.
+fn refusal(code: RefusalCode, zone: &str) -> Outcome {
+    Outcome::Refused(Refused {
+        provider: ProviderId::new("cloud").unwrap(),
+        offer: "big".to_owned(),
+        zone: Some(zone.to_owned()),
+        code,
+        passed_over: None,
+        request: None,
+    })
+}
+
+/// Catches: a job placed nowhere that shows no reason, a reason written again at every pass,
+/// and a time that is not the store's at the change. On full hosts a one-core job waits for
+/// capacity from the pass at 5 s, with one event then and no attempt; a second pass at 9 s
+/// writes nothing and the time stays 5 s.
+#[test]
+fn a_job_with_no_room_waits_for_capacity_from_the_pass_that_found_none() {
+    let rig = full();
+    let j = rig.tables.share("j");
+    rig.at(5_000);
+    let recorder = Recorder::default();
+    assert!(rig.go(&recorder).is_empty());
+    let job = read(&rig, &j.id);
+    assert_eq!(job.queue.code(), QueueCode::WaitingForCapacity);
+    assert_eq!(
+        job.queue.detail(),
+        "no open host that can run the job has room for it now"
+    );
+    assert_eq!(job.queue.since(), Some(store(5_000)));
+    assert_eq!(job.queue.attempts(), 0);
+    assert_eq!(
+        events(&job),
+        [(JobEventKind::WaitingForCapacity, 5_000, None)]
+    );
+    let before = rig.tables.store.commit_stats().txns;
+    rig.at(9_000);
+    rig.go(&recorder);
+    assert_eq!(rig.tables.store.commit_stats().txns, before);
+    assert_eq!(read(&rig, &j.id), job);
+}
+
+/// Catches: a job no open host can run told it waits for room. A job of 64 cores, more than
+/// any host has, waits for capacity with the detail that no open host can run it.
+#[test]
+fn a_job_no_open_host_can_run_says_so() {
+    let rig = Rig::quiet();
+    let resources = Resources::new(64_000, 1 << 30, 0, None).unwrap();
+    let j = rig.tables.submit_with("huge", Needs::Shape(resources), 600);
+    rig.at(2_000);
+    rig.go(&Recorder::default());
+    let job = read(&rig, &j.id);
+    assert_eq!(job.queue.code(), QueueCode::WaitingForCapacity);
+    assert_eq!(job.queue.detail(), "no open host can run the job");
+}
+
+/// Catches: a whole-host job told it waits for room, a detail that does not name the host
+/// being emptied, and a change of detail that moves the time or appends an event. On busy
+/// hosts `w` waits for a whole host from 1 s with none being emptied; at 20 s it marks `a`:
+/// the detail names `a`, the time stays 1 s and there is still one event.
+#[test]
+fn a_whole_host_job_waits_for_a_whole_host_and_then_names_its_mark() {
+    let rig = Rig::busy();
+    let w = rig.tables.whole("w");
+    let recorder = Recorder::default();
+    rig.at(1_000);
+    rig.go(&recorder);
+    let job = read(&rig, &w.id);
+    assert_eq!(job.queue.code(), QueueCode::WaitingForWholeHost);
+    assert_eq!(job.queue.detail(), "no whole host is free");
+    assert_eq!(job.queue.since(), Some(store(1_000)));
+    rig.at(20_000);
+    rig.go(&recorder);
+    let job = read(&rig, &w.id);
+    assert_eq!(job.queue.detail(), "host a is being emptied for the job");
+    assert_eq!(job.queue.since(), Some(store(1_000)));
+    assert_eq!(
+        events(&job),
+        [(JobEventKind::WaitingForWholeHost, 1_000, None)]
+    );
+}
+
+/// Catches: a quota refusal pass 2 told that never reaches the job, one that is not counted
+/// as an attempt, and pass 1's "no room" taking its place. On full hosts `j` waits for
+/// capacity at 1 s; pass 2 tells a quota refusal; the pass at 3 s shows quota backoff from
+/// 3 s, one attempt, its event after the wait's, and the next pass keeps it.
+#[test]
+fn a_quota_refusal_backs_the_job_off_and_outlives_no_room() {
+    let rig = full();
+    let j = rig.tables.share("j");
+    let recorder = Recorder::default();
+    rig.at(1_000);
+    rig.go(&recorder);
+    rig.placer
+        .note_outcomes([(j.id.clone(), refusal(RefusalCode::Quota, "z1"))]);
+    rig.at(3_000);
+    rig.go(&recorder);
+    let job = read(&rig, &j.id);
+    assert_eq!(job.queue.code(), QueueCode::QuotaBackoff);
+    assert_eq!(job.queue.since(), Some(store(3_000)));
+    assert_eq!(job.queue.attempts(), 1);
+    assert_eq!(
+        events(&job),
+        [
+            (JobEventKind::WaitingForCapacity, 1_000, None),
+            (JobEventKind::QuotaBackoff, 3_000, None)
+        ]
+    );
+    rig.at(4_000);
+    rig.go(&recorder);
+    assert_eq!(read(&rig, &j.id), job);
+}
+
+/// Catches: refusals that fail over counted once, a launch that leaves the job failing over
+/// or that pass 1's "no room" takes the place of, and outcomes taken out of order. Pass 2
+/// tells two capacity refusals and then a launch; the pass at 2 s, on full hosts, shows the
+/// job waiting for the machine, from 2 s, with two attempts and the events in the order they
+/// came.
+#[test]
+fn a_failover_then_a_launch_is_recorded_in_order() {
+    let rig = full();
+    let j = rig.tables.share("j");
+    let launched = Outcome::Launched {
+        machine: "m-1".to_owned(),
+    };
+    rig.placer.note_outcomes([
+        (j.id.clone(), refusal(RefusalCode::Capacity, "z1")),
+        (j.id.clone(), refusal(RefusalCode::Capacity, "z2")),
+        (j.id.clone(), launched),
+    ]);
+    rig.at(2_000);
+    rig.go(&Recorder::default());
+    let job = read(&rig, &j.id);
+    assert_eq!(job.queue.code(), QueueCode::WaitingForMachine);
+    assert_eq!(
+        job.queue.detail(),
+        "machine m-1 was launched for the job; it waits for the machine to join"
+    );
+    assert_eq!(job.queue.since(), Some(store(2_000)));
+    assert_eq!(job.queue.attempts(), 2);
+    let kinds: Vec<JobEventKind> = events(&job).into_iter().map(|e| e.0).collect();
+    assert_eq!(
+        kinds,
+        [
+            JobEventKind::FailingOver,
+            JobEventKind::FailingOver,
+            JobEventKind::WaitingForMachine
+        ]
+    );
+}
+
+/// Catches: a placement without its status, a placement not counted as an attempt, and what
+/// pass 2 told before it lost. Pass 2 tells a capacity refusal for `j`, and the pass at 6 s
+/// places it on `a`: it shows placed from 6 s, two attempts, the refusal's event and then the
+/// placement's naming `a`, all in the placement's own commit.
+#[test]
+fn a_placement_records_placed_with_what_pass_2_told_before_it() {
+    let rig = Rig::quiet();
+    let j = rig.tables.share("j");
+    rig.placer
+        .note_outcomes([(j.id.clone(), refusal(RefusalCode::Capacity, "z1"))]);
+    rig.at(6_000);
+    let before = rig.tables.store.commit_stats().txns;
+    assert_eq!(rig.go(&Recorder::default()), std::slice::from_ref(&j.id));
+    assert_eq!(rig.tables.store.commit_stats().txns, before + 1);
+    let job = read(&rig, &j.id);
+    assert_eq!(job.state, JobState::Placed);
+    assert_eq!(job.queue.code(), QueueCode::Placed);
+    assert_eq!(job.queue.since(), Some(store(6_000)));
+    assert_eq!(job.queue.attempts(), 2);
+    assert_eq!(
+        events(&job),
+        [
+            (JobEventKind::FailingOver, 6_000, None),
+            (JobEventKind::Placed, 6_000, Some(host("a")))
+        ]
+    );
+}
+
+/// Catches: a whole-host commit without its placed status. A whole-host job committed on a
+/// quiet host at 1 s shows placed on `a` from 1 s with one attempt.
+#[test]
+fn a_whole_host_commit_records_placed() {
+    let rig = Rig::quiet();
+    let w = rig.tables.whole("w");
+    rig.at(1_000);
+    rig.go(&Recorder::default());
+    let job = read(&rig, &w.id);
+    assert_eq!(job.queue.code(), QueueCode::Placed);
+    assert_eq!(job.queue.attempts(), 1);
+    assert_eq!(
+        events(&job),
+        [(JobEventKind::Placed, 1_000, Some(host("a")))]
+    );
+}
+
+/// Catches: a status write that fails and takes the pass with it, goes uncounted, or is never
+/// tried again; and what pass 2 told of a job no longer queued kept for ever. The first status
+/// write of the pass fails: the pass ends well and counts it, and the next pass writes it. An
+/// outcome told for a job that is not queued is dropped by the pass.
+#[test]
+fn a_status_write_that_fails_is_counted_and_written_at_the_next_pass() {
+    let rig = full();
+    let j = rig.tables.share("j");
+    let recorder = Recorder::default();
+    rig.at(1_000);
+    rig.tables.store.fail_next();
+    assert_eq!(rig.go(&recorder), Vec::<JobId>::new());
+    assert_eq!(recorder.failures(), 1);
+    assert_eq!(read(&rig, &j.id).queue.code(), QueueCode::Unspecified);
+    let gone = JobId::parse("gone").unwrap();
+    rig.placer
+        .note_outcomes([(gone, refusal(RefusalCode::Capacity, "z1"))]);
+    rig.at(2_000);
+    rig.go(&recorder);
+    assert_eq!(read(&rig, &j.id).queue.since(), Some(store(2_000)));
+    assert!(rig.placer.take_outcomes().is_empty());
+}
+
+/// Catches: a status write the store answers as fenced that does not end the pass. The
+/// status write is answered with a newer writer: the pass answers the error.
+#[test]
+fn a_fenced_status_write_ends_the_pass() {
+    let rig = full();
+    rig.tables.share("j");
+    rig.at(1_000);
+    rig.tables.store.fail_with(StoreError::Fenced);
+    rig.tables.store.fail_next();
+    let whole = settings();
+    let answered = rig.pass(Some(&whole), &["a", "b"], &Recorder::default());
+    assert_eq!(answered, Err(JobStoreError::Store(StoreError::Fenced)));
+}
+
+/// Catches: what pass 2 told of a job lost when the write that carried it failed, and given
+/// back after what pass 2 told since. A capacity refusal is told; the status write at 1 s
+/// fails; a launch is told; the pass at 2 s records the refusal, then the launch, with one
+/// attempt.
+#[test]
+fn what_pass_2_told_survives_a_status_write_that_failed() {
+    let rig = full();
+    let j = rig.tables.share("j");
+    let recorder = Recorder::default();
+    rig.placer
+        .note_outcomes([(j.id.clone(), refusal(RefusalCode::Capacity, "z1"))]);
+    rig.at(1_000);
+    rig.tables.store.fail_next();
+    rig.go(&recorder);
+    assert_eq!(recorder.failures(), 1);
+    assert_eq!(read(&rig, &j.id).queue.code(), QueueCode::Unspecified);
+    let launched = Outcome::Launched {
+        machine: "m-1".to_owned(),
+    };
+    rig.placer.note_outcomes([(j.id.clone(), launched)]);
+    rig.at(2_000);
+    rig.go(&recorder);
+    let job = read(&rig, &j.id);
+    assert_eq!(job.queue.code(), QueueCode::WaitingForMachine);
+    assert_eq!(job.queue.attempts(), 1);
+    assert_eq!(
+        events(&job),
+        [
+            (JobEventKind::FailingOver, 2_000, None),
+            (JobEventKind::WaitingForMachine, 2_000, None)
+        ]
+    );
+}
+
+/// Catches: what pass 2 told of a job lost with a placement whose commit failed. A capacity
+/// refusal is told and the placement's commit fails: the same pass writes the refusal on the
+/// job, which stays queued, failing over with one attempt.
+#[test]
+fn what_pass_2_told_survives_a_placement_that_failed() {
+    let rig = Rig::quiet();
+    let j = rig.tables.share("j");
+    rig.placer
+        .note_outcomes([(j.id.clone(), refusal(RefusalCode::Capacity, "z1"))]);
+    rig.at(1_000);
+    rig.tables.store.fail_next();
+    let recorder = Recorder::default();
+    assert!(rig.go(&recorder).is_empty());
+    assert_eq!(recorder.failures(), 1);
+    let job = read(&rig, &j.id);
+    assert_eq!(job.state, JobState::Queued);
+    assert_eq!(job.queue.code(), QueueCode::FailingOver);
+    assert_eq!(job.queue.attempts(), 1);
+    assert!(rig.placer.take_outcomes().is_empty());
 }

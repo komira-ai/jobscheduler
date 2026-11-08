@@ -523,6 +523,7 @@ impl Core {
             return;
         };
         self.report(&mut work, (&next, &input), now);
+        self.effects.pass_two(jobs::pass_two(&next, &jobs));
         work.reserved.note(&next.launched, &jobs);
         work.state = next.clone();
         work.acquired = answers.acquired;

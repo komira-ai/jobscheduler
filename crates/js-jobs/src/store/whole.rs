@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_state::{Cond, Store, StoreTime, Txn, Version};
-use js_types::HostId;
+use js_types::{HostId, QueueNote};
 
 use super::index::{put_allocation, put_job};
 use super::{Beside, JobStore, ensure, with_rows};
@@ -28,7 +28,7 @@ use crate::record::{
 use crate::result::{JobEnd, ended};
 
 /// What a placement writes beside its booking ([`JobStore::place_with`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Placement {
     /// For a whole-host placement: how long the agent has to report the host ready; the
     /// allocation's [`AllocationRecord::prepare_deadline`] is the placement's time plus this.
@@ -37,6 +37,10 @@ pub struct Placement {
     /// The placement's wall limit when it is shorter than the job's own
     /// ([`AllocationRecord::wall_limit_secs`]).
     pub wall_limit_secs: Option<u64>,
+    /// The queue notes the engine decided for the job, applied in order to its queue status
+    /// in the same transaction (`docs/design/queue-status.md`): what pass 2 told it since the
+    /// last pass, then its placement.
+    pub queue: Vec<QueueNote>,
 }
 
 /// How a failed whole-host prepare ends, as the placement engine decided it
@@ -50,6 +54,10 @@ pub struct FailedPrepare {
     /// Whether the job has used up its prepares: it ends failed to start with
     /// [`StartFailure::ExclusiveNotReady`] instead of going back to queued.
     pub terminal: bool,
+    /// The queue note the engine decided for a job that goes back to queued, applied to its
+    /// queue status in the same transaction when there is one; the engine gives none for a
+    /// terminal failure, whose job keeps the status of its placement.
+    pub queue: Option<QueueNote>,
 }
 
 /// A job and its allocation, each with the version it was read at.
@@ -132,12 +140,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             wall_limit_secs: placement.wall_limit_secs,
             carried: Carried::default(),
         };
-        let placed = JobRecord {
+        let mut placed = JobRecord {
             state: JobState::Placed,
             host: Some(host),
             placed_at: Some(now),
             ..job.clone()
         };
+        placed.queue.apply_all(&placement.queue, now);
         let txn = put_job(Txn::new(), Some(&job), &placed, Cond::Version(job_version))?;
         let earlier = earlier.as_ref().map(|(record, _)| record);
         let txn = put_allocation(txn, earlier, &allocation, allocation_cond)?;
@@ -179,12 +188,14 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             failed_prepares,
             prepare_bars,
             terminal,
+            queue,
         } = failed;
-        let counted = JobRecord {
+        let mut counted = JobRecord {
             failed_prepares,
             prepare_bars,
             ..job.clone()
         };
+        counted.queue.apply_all(queue.as_slice(), now);
         let after = if terminal {
             let end = JobEnd::FailedToStart(StartFailure::ExclusiveNotReady);
             ended(counted, end, now, self.retention)

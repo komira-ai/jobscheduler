@@ -294,6 +294,7 @@ fn quota_passes_over_that_type_for_quota_backoff() {
             zone: Some("r-a".to_owned()),
             code: RefusalCode::Quota,
             passed_over: Some((key, until)),
+            request: Some(request("one")),
         }]
     );
     assert_eq!(memory.passed_over_len(), 1);

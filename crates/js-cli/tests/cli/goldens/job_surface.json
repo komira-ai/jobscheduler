@@ -377,7 +377,7 @@
     "streaming": false
   },
   {
-    "doc": "Reads a job: its state, its host once placed, its times and its host's silence. Changes nothing.",
+    "doc": "Reads a job: its state, its host once placed, its times, its host's silence, and why it waits with its placement attempts and newest events. Changes nothing.",
     "flags": [
       {
         "doc": "The id of the job to read.",

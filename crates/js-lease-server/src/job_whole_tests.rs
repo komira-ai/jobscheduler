@@ -80,6 +80,7 @@ impl Fixture {
         let placement = Placement {
             prepare_timeout: Some(PREPARE),
             wall_limit_secs: None,
+            ..Placement::default()
         };
         self.jobs
             .place_with(id, host(), Booked::WholeHost, placement)

@@ -64,8 +64,9 @@ pub fn spec(contents: &str) -> JobSpec {
 }
 
 /// A job with every field set, as a read returns it: its file's contents are empty. The
-/// client, a field added after `golden/job.hex` was written, is absent, so the golden stays
-/// the bytes of the schema before it (`the_client_field_is_additive_in_the_proto` sets it).
+/// client and the queue status fields, added after `golden/job.hex` was written, are absent,
+/// so the golden stays the bytes of the schema before them
+/// (`the_client_field_is_additive_in_the_proto` and `tests/queue_status.rs` set them).
 pub fn job() -> Job {
     Job {
         id: "job-1".to_owned(),
@@ -83,5 +84,9 @@ pub fn job() -> Job {
         host_silent_since_ms: Some(T0 + 4000),
         cancel_requested: true,
         client: None,
+        queue_status: None,
+        attempts: 0,
+        events: Vec::new(),
+        dropped_events: 0,
     }
 }
