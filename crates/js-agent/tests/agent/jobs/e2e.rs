@@ -301,6 +301,9 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
     agent.elapse();
     agent.next_wait();
     assert_eq!(server.job_state(&job), "JOB_STATE_SUCCEEDED");
+    // The server's acknowledgement of the result is in the reply to that heartbeat: the
+    // worker takes it before the stop, so the drain finds nothing left to wait for.
+    assert!(worker.settle());
     agent.stop();
 }
 
@@ -348,6 +351,9 @@ fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
     agent.elapse();
     agent.next_wait();
     assert_eq!(server.job_get(&format!("/v1/jobs/{job}")).status, 404);
+    // The worker has taken the reply to that heartbeat before the stop, so the drain finds
+    // nothing left to wait for.
+    assert!(worker.settle());
     agent.stop();
 }
 
