@@ -499,3 +499,55 @@ fn a_quota_cooldown_an_earlier_release_wrote_still_holds_the_pool() {
     let launched = only(step(&mut rig, at(10 * MINUTE), vec![]));
     assert_eq!(label(&launched), "a/z1");
 }
+
+/// Asserts that the state's failover memory, as a reader outside the step sees it, holds
+/// what the steps took in: after a capacity answer for X/z1 the request `r1` has X/z1
+/// declined at the step that read the answer, and after a quota answer for X/z2 the instance
+/// type X is passed over in region z2 until that step plus `quota_backoff`. Catches a
+/// reader handed a copy that the step does not update, and a decline timed at the acquire
+/// rather than at the answer.
+#[test]
+fn the_failover_memory_is_readable_from_the_state() {
+    let limits = Settings {
+        quota_backoff: minutes(30),
+        ..settings("gpu")
+    };
+    let mut rig = rig_with(limits, vec![zoned("X", "z1", 60), zoned("X", "z2", 80)]);
+    assert_eq!(rig.state.failover().declined().count(), 0);
+
+    let first = only(step(&mut rig, at(0), vec![]));
+    let second = only(step(&mut rig, at(SECOND), vec![capacity(&first)]));
+    let declined: Vec<(String, String, Option<String>, u64)> = rig
+        .state
+        .failover()
+        .declined()
+        .map(|(request, key, when)| {
+            let (offer, zone) = (key.offer.clone(), key.zone.clone());
+            (request.to_string(), offer, zone, when.millis())
+        })
+        .collect();
+    let z1 = Some("z1".to_owned());
+    let declined_at = at(SECOND).as_millis();
+    assert_eq!(
+        declined,
+        [("r1".to_owned(), "X".to_owned(), z1, declined_at)]
+    );
+
+    let quota = answered(&second, refusal(RefusalCode::Quota));
+    step(&mut rig, at(2 * SECOND), vec![quota]);
+    let now = Instant::from_millis(at(2 * SECOND).as_millis());
+    let passed: Vec<(String, Option<String>, u64)> = rig
+        .state
+        .failover()
+        .passed_over(now)
+        .map(|(key, until)| {
+            (
+                key.instance_type.clone(),
+                key.region.clone(),
+                until.millis(),
+            )
+        })
+        .collect();
+    let until = at(2 * SECOND).as_millis() + 30 * MINUTE;
+    assert_eq!(passed, [("X".to_owned(), Some("z2".to_owned()), until)]);
+}

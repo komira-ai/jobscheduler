@@ -18,7 +18,7 @@ use js_elastic::{
     AcquireId, Artifact, BootPlan, BootStep, CapacityProvider, Demand, Dimension, HostName, Offer,
     SchedulerId,
 };
-use js_types::{ExecMode, MemoryHeadroom, normalise_arch};
+use js_types::{ExecMode, MemoryHeadroom, ProviderId, normalise_arch};
 use serde::Serialize;
 
 use crate::adapt::SharedClock;
@@ -161,6 +161,12 @@ impl Pool {
             advertise: setup.advertise,
             agents: plan.agent.clone(),
         }
+    }
+
+    /// The id of the pool's provider, which its cached catalog is kept under
+    /// ([`crate::Catalogs`]).
+    pub(crate) fn provider_id(&self) -> ProviderId {
+        self.provider.id()
     }
 
     /// The network mode the pool launches with, or why it cannot be built.

@@ -59,7 +59,7 @@ use crate::checks::State;
 use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, UNKNOWN_HOST};
 use crate::hosts::{self, HostEntry, HostList, LeasesOn, MemoryView, ShapeView, Source};
 use crate::status::Status as PoolStatus;
-use crate::status::{CheckView, MachineView, NamedCheckView, PoolView, PoolsView};
+use crate::status::{CheckView, MachineView, NamedCheckView, PoolView, PoolsView, ProviderState};
 use crate::usage::{UsageFault, UsageSink};
 use crate::util::blocking;
 
@@ -538,8 +538,9 @@ fn pool(view: &PoolView) -> wire::Pool {
 }
 
 /// The provider of a pool as `ListProviders` tells it: its credentials check and its own
-/// checks, the machines it launched, and a state of its own: checking until the pool's
-/// first pass, then available while every one of its checks holds.
+/// checks, the machines it launched, a state of its own (checking until the pool's first
+/// pass, then available while every one of its checks holds), and what the service holds of
+/// it that keeps a job waiting ([`provider_state`]).
 fn provider(view: &PoolView) -> wire::Provider {
     let credentials = view.credentials.iter().map(credentials_check);
     let own = view.provider_checks.iter().map(named_check);
@@ -555,6 +556,73 @@ fn provider(view: &PoolView) -> wire::Provider {
         state: i32::from(state),
         checks,
         machines: view.machines.iter().map(machine).collect(),
+        ..provider_state(&view.provider_state)
+    }
+}
+
+/// The refusal code a `quota` answer is told as.
+const QUOTA: &str = "quota";
+
+/// The refusal code a `capacity` answer is told as.
+const CAPACITY: &str = "capacity";
+
+/// What `ListProviders` tells of a provider besides its name, kind, state, checks and
+/// machines, from `state` as the status read it: its catalog, the instance types passed over
+/// for quota, the offers declined for capacity, its pool's brake and cool-down, and the
+/// launches out with their age at the status's time (the status leaves out a cool-down that
+/// has ended).
+fn provider_state(state: &ProviderState) -> wire::Provider {
+    let catalog = state.catalog.map(|(at, offers)| wire::ProviderCatalog {
+        fetched_at_ms: at.millis(),
+        offer_count: u32::try_from(offers).unwrap_or(u32::MAX),
+    });
+    let passed_over = state
+        .passed_over
+        .iter()
+        .map(|(key, until)| wire::PassedOver {
+            instance_type: key.instance_type.clone(),
+            region: key.region.clone().unwrap_or_default(),
+            reason: QUOTA.to_owned(),
+            until_ms: until.millis(),
+        });
+    let declined = state
+        .declined
+        .iter()
+        .map(|(request, key, at)| wire::DeclinedOffer {
+            request: request.to_string(),
+            offer: key.offer.clone(),
+            zone: key.zone.clone().unwrap_or_default(),
+            reason: CAPACITY.to_owned(),
+            declined_at_ms: at.millis(),
+        });
+    let brake = state.brake.map(|brake| wire::ProviderBrake {
+        engaged: brake.tripped_at.is_some(),
+        engaged_at_ms: brake.tripped_at.map(|at| at.as_millis()),
+        failures: brake.failures,
+    });
+    // The reason as the records file spells it (`boot_failed`, `denied`, ...).
+    let reason = state
+        .cooldown
+        .map(|cooldown| serde_json::to_value(cooldown.reason).ok());
+    let reason = reason
+        .flatten()
+        .and_then(|reason| reason.as_str().map(str::to_owned));
+    let launching = state.in_flight.iter().map(|flight| wire::PendingLaunch {
+        host: flight.host.clone(),
+        offer: flight.offer.clone(),
+        zone: flight.zone.clone().unwrap_or_default(),
+        started_at_ms: flight.since.as_millis(),
+        age_ms: state.now_ms.saturating_sub(flight.since.as_millis()),
+    });
+    wire::Provider {
+        catalog,
+        passed_over: passed_over.collect(),
+        declined: declined.collect(),
+        brake,
+        cooldown_until_ms: state.cooldown.map(|cooldown| cooldown.until.as_millis()),
+        cooldown_reason: reason.unwrap_or_default(),
+        launching: launching.collect(),
+        ..wire::Provider::default()
     }
 }
 
