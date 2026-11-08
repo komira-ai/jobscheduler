@@ -1,7 +1,7 @@
 //! The privileged tests' harness helpers, checked where CI can run them.
 
 use std::path::Path;
-use std::process::Output;
+use std::process::{Command, Output};
 
 use crate::priv_harness::{inheritable_write_ace, user_command, user_name};
 
@@ -46,6 +46,39 @@ fn a_command_passes_its_arguments_and_reads_no_input() {
     let out = command.output().unwrap();
     assert!(out.status.success(), "/bin/echo failed: {}", ran(&out));
     assert_eq!(out.stdout, b"a", "{}", ran(&out));
+}
+
+/// Catches: `user_command` setting the user or group when they are the caller's own. The
+/// standard library forks the test process to start a command that sets either (it must,
+/// to change them before the exec) and spawns it with `posix_spawn` otherwise; a fork of
+/// this multithreaded binary could abort inside `fork` on macOS. The alternate `Debug` of
+/// a `Command` shows `uid` and `gid` exactly when they are set.
+#[test]
+fn a_command_as_the_callers_own_user_sets_no_user_or_group_and_one_for_another_sets_them() {
+    let me = rustix::process::geteuid().as_raw();
+    let group = rustix::process::getegid().as_raw();
+    let own = settings(&user_command("/bin/pwd", &[], me, group));
+    assert!(!own.contains("uid:"), "{own}");
+    assert!(!own.contains("gid:"), "{own}");
+    assert!(own.contains("cwd:Some("), "{own}");
+
+    let other = me.wrapping_add(1);
+    let theirs = settings(&user_command("/bin/pwd", &[], other, group));
+    assert!(theirs.contains(&format!("uid:Some({other},)")), "{theirs}");
+    assert!(!theirs.contains("gid:"), "{theirs}");
+
+    let other_group = group.wrapping_add(1);
+    let regrouped = settings(&user_command("/bin/pwd", &[], me, other_group));
+    assert!(!regrouped.contains("uid:"), "{regrouped}");
+    assert!(
+        regrouped.contains(&format!("gid:Some({other_group},)")),
+        "{regrouped}"
+    );
+}
+
+/// The command's settings as its alternate `Debug` prints them, without whitespace.
+fn settings(command: &Command) -> String {
+    format!("{command:#?}").replace(char::is_whitespace, "")
 }
 
 /// How a command ended, for a failed assertion: its status (an exit code or the signal
