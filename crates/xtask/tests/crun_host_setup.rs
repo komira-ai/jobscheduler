@@ -270,10 +270,7 @@ fn prjquota_already_present_is_left_alone() {
         !calls.contains(&format!("systemctl start {MOUNT}")),
         "{calls:?}"
     );
-    assert!(
-        !calls.contains(&"fuser -m -- /var/lib/js-agent/scratch".to_owned()),
-        "{calls:?}"
-    );
+    assert!(!calls.iter().any(|c| c.starts_with("fuser ")), "{calls:?}");
     assert!(out.text.contains("prjquota"), "{}", out.text);
 }
 
@@ -304,13 +301,7 @@ fn a_unit_with_prjquota_and_a_mount_without_it_is_mounted_again() {
 #[test]
 fn a_mount_that_something_holds_open_is_refused() {
     let mut rig = Rig::new("held");
-    rig.rule(rule(
-        "fuser",
-        &format!("-m -- {SCRATCH}"),
-        0,
-        " 4242\\n",
-        &[],
-    ));
+    rig.rule(rule("fuser", &format!("-m {SCRATCH}"), 0, " 4242\\n", &[]));
     let before = rig.snapshot();
     let out = rig.apply();
     assert_eq!(out.code, 2, "{}", out.text);

@@ -40,6 +40,11 @@ use js_types::sched::FarmTime;
 /// and two js-sched seeds cost before.
 const SEEDS: u64 = 8;
 
+/// The two scenarios are the family's largest by far (about a quarter hour each under the
+/// coverage job's unoptimised, instrumented build): each runs its seeds on this many
+/// threads, a quarter each, so that neither outlasts the rest of the job's tests.
+const THREADS: u64 = 4;
+
 /// How long a cell driven by hand runs: past the first launch (the second tick, at 10 s),
 /// the machine's boot ([`Knobs::boot`], 120 s, later) and its hello.
 const LOOK_AT: FarmTime = FarmTime::from_millis(200_000);
@@ -65,7 +70,7 @@ const LONG_RUN: Duration = Duration::from_secs(600);
 /// for ever and the seed never settles).
 #[test]
 fn an_ec2_like_pool_scales_up_to_demand_and_back_to_zero() {
-    elastic::an_ec2_like_pool().run_seeds(SEEDS);
+    on_threads(elastic::an_ec2_like_pool);
 }
 
 /// Proves the same shape over a cloud billed as Lambda bills (each started minute whole,
@@ -76,7 +81,32 @@ fn an_ec2_like_pool_scales_up_to_demand_and_back_to_zero() {
 /// minute.
 #[test]
 fn a_lambda_like_pool_bills_whole_minutes_and_releases_idle_machines() {
-    elastic::a_lambda_like_pool().run_seeds(SEEDS);
+    on_threads(elastic::a_lambda_like_pool);
+}
+
+/// Runs seeds `0..SEEDS` of the scenario `make` builds, [`THREADS`] contiguous ranges at
+/// once, each on a thread of its own with a scenario built there (a scenario is built
+/// and run on one thread), and fails with the first failure of any range. The scenarios
+/// have no witness, so judging each range alone judges what one run of every seed would;
+/// a witness added to either would be judged per range, and these tests would then run
+/// the seeds as one range.
+fn on_threads(make: fn() -> Scenario) {
+    let parts: Vec<_> = (0..THREADS)
+        .map(|part| {
+            let seeds = part * SEEDS / THREADS..(part + 1) * SEEDS / THREADS;
+            std::thread::spawn(move || {
+                let ran = make().try_run_seed_range(seeds);
+                ran.map(|_| ()).map_err(|failure| failure.to_string())
+            })
+        })
+        .collect();
+    for part in parts {
+        match part.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(failure)) => panic!("{failure}"),
+            Err(panicked) => std::panic::resume_unwind(panicked),
+        }
+    }
 }
 
 /// A cell of seed `seed` with an elastic pool of at most two machines of `pool`'s kind,

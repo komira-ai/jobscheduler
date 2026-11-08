@@ -8,11 +8,13 @@
 //! the moment they are judged (`facts.rs`): the facts the server's own HTTP tests read,
 //! so a test moved onto the cell asserts what it asserted. The two from
 //! [`Expect::pool_tripped`] on read the elastic pool's cloud and its brake when they are
-//! judged (`cloud.rs`).
+//! judged (`cloud.rs`). The eight from [`Expect::jobs_read`] on read the server's job and
+//! allocation tables as the cell read them, and the jobs the agents launched (`jobs.rs`).
 
 use std::time::Duration;
 
 use js_agent_wire::Phase;
+use js_jobs::{AllocationStep, JobState};
 use js_registry::{HostState, HostView, RequestKey};
 use js_sim::text::list;
 use js_types::HostId;
@@ -27,6 +29,7 @@ use crate::server::ServerNode;
 use super::answer::{self, Call};
 use super::cloud::{self, CloudFact};
 use super::facts::{self, Booked, Fact, Listed, RecordFact};
+use super::jobs::{self, JobFact};
 use super::{launched_on, tries};
 
 /// How the server's listing shows a host.
@@ -58,6 +61,7 @@ enum Wanted {
     Answer(Call, u16, Option<Value>),
     Fact(Fact),
     Cloud(CloudFact),
+    Job(JobFact),
 }
 
 /// A statement over what the cell observed.
@@ -240,6 +244,64 @@ impl Expect {
         Self(Wanted::Cloud(CloudFact::Launched(pool.to_owned(), count)))
     }
 
+    /// Exactly `count` jobs were read in the server's job table, whatever their state:
+    /// how a scenario states that a submit sent again under the same job id made no
+    /// second job.
+    #[must_use]
+    pub fn jobs_read(count: usize) -> Self {
+        Self(Wanted::Job(JobFact::Read(count)))
+    }
+
+    /// Exactly `count` jobs were last read in the server's job table in a state that has
+    /// ended (succeeded, failed, cancelled, lost or failed to start).
+    #[must_use]
+    pub fn jobs_ended(count: usize) -> Self {
+        Self(Wanted::Job(JobFact::Ended(count)))
+    }
+
+    /// Exactly `count` jobs were last read in the server's job table in `state`.
+    #[must_use]
+    pub fn jobs_in_state(count: usize, state: JobState) -> Self {
+        Self(Wanted::Job(JobFact::In(count, state)))
+    }
+
+    /// The job of `item` (`sim-job-<n>`, as the job front submits it) was last read in
+    /// the server's job table in `state`; a job never read is `unread`.
+    #[must_use]
+    pub fn job_state(item: ItemId, state: JobState) -> Self {
+        Self(Wanted::Job(JobFact::State(item, state)))
+    }
+
+    /// Exactly `count` allocations of the job of `item` were read in the server's
+    /// allocation table: one per placement, so a job placed again has more than one.
+    #[must_use]
+    pub fn allocations_of(item: ItemId, count: usize) -> Self {
+        Self(Wanted::Job(JobFact::Allocations(item, count)))
+    }
+
+    /// The allocation of the job of `item` was last read at `step` (booked, releasing or
+    /// freed); an allocation never read is `unread`.
+    #[must_use]
+    pub fn allocation_step(item: ItemId, step: AllocationStep) -> Self {
+        Self(Wanted::Job(JobFact::Step(item, step)))
+    }
+
+    /// No allocation was last read booked or releasing in the server's allocation table:
+    /// every allocation read was freed, so once every job is terminal nothing is left
+    /// booked for one.
+    #[must_use]
+    pub fn no_allocation_live() -> Self {
+        Self(Wanted::Job(JobFact::NoneLive))
+    }
+
+    /// No job was launched more than once by the cell's launch ledger, under any
+    /// allocation: `at-most-one-launch` counts a launch per job and allocation, so this is
+    /// how a scenario states that a job was never run again under a second placement.
+    #[must_use]
+    pub fn each_job_launched_once() -> Self {
+        Self(Wanted::Job(JobFact::LaunchedOnce))
+    }
+
     /// `None` when `cell` meets the statement; otherwise what it wanted and what it got,
     /// as `<statement>: wanted <w>, got <g>`. A statement about the server reads it now,
     /// the lease list through the client router (a call the trace shows).
@@ -257,6 +319,10 @@ impl Expect {
             }
             Wanted::Cloud(fact) => {
                 let [name, wanted, got] = cloud::judged(fact, cell);
+                (name, wanted, got)
+            }
+            Wanted::Job(fact) => {
+                let [name, wanted, got] = jobs::judged(fact, cell.observations());
                 (name, wanted, got)
             }
             Wanted::Seen(seen) => observed(seen, cell),

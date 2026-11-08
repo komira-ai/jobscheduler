@@ -13,6 +13,7 @@ use js_testkit::dir::TestDir;
 use serde_json::{Value, json};
 
 use crate::bundle::{FILES, Sizing};
+use crate::matrix::Roots;
 use crate::spec::{Event, LIMIT_EXCEEDED, VmSpec};
 use crate::system::{Clock, OfflineFile, Poll, Signature, System, VmProcess};
 
@@ -551,7 +552,34 @@ pub fn holds(conditions: &[bool]) -> bool {
     conditions.iter().all(|c| *c)
 }
 
-/// A probe context over `sys` in `work`, with instant timing.
+/// Scratch stand-ins for the host's `/private/tmp` and shared-users directory, outside
+/// every work directory, so the matrix's `tmp` and `shared` variants are made there and
+/// not on the host. Both are made empty; the returned directory removes them when dropped.
+pub fn host_roots(name: &str) -> (TestDir, Roots) {
+    let host = tmp(&format!("{name}-host"));
+    let roots = Roots {
+        tmp: host.join("tmp"),
+        shared: host.join("shared"),
+    };
+    for dir in [&roots.tmp, &roots.shared] {
+        std::fs::create_dir(dir).expect("root");
+    }
+    (host, roots)
+}
+
+/// The names in `dir`, sorted.
+pub fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A probe context over `sys` in `work`, with instant timing. Its matrix roots are paths
+/// in `work` that do not exist, so a matrix made in it skips the `tmp` and `shared`
+/// variants and never touches the host; a test of those variants sets [`host_roots`].
 pub fn ctx<'a>(sys: &'a FakeSystem, work: &Path) -> crate::probe::Ctx<'a> {
     crate::probe::Ctx {
         sys,
@@ -561,6 +589,10 @@ pub fn ctx<'a>(sys: &'a FakeSystem, work: &Path) -> crate::probe::Ctx<'a> {
         keep: false,
         graphics: false,
         matrix: false,
+        matrix_roots: Roots {
+            tmp: work.join("absent-host-tmp"),
+            shared: work.join("absent-host-shared"),
+        },
         timing: crate::probe::Timing::instant(),
     }
 }

@@ -168,7 +168,7 @@ pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory, LeaseFront, R
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use jobs::{
     AllocationRead, AllocationRow, JOB_PREFIX, JobBeat, JobFront, JobRead, JobReply, JobStartSeen,
-    ResultMade,
+    LostAnswer, ResultMade,
 };
 pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
