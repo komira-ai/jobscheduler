@@ -198,7 +198,8 @@ pub struct Cli {
     pub handshake_timeout: Duration,
     /// How long a client has to send the head of a request, from the connection's
     /// start and again after each response on it. This is also how long a keep-alive
-    /// connection may sit idle between requests.
+    /// connection may sit idle between requests, and the most the server waits for the
+    /// rest of a body its route answered without reading.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub header_timeout: Duration,
     /// How long a read from a client may make no progress before the connection is
@@ -291,7 +292,8 @@ pub struct Limits {
     /// How long a TLS handshake may take.
     pub handshake_timeout: Duration,
     /// How long the head of a request may take to arrive; also the idle time of a
-    /// keep-alive connection between two requests.
+    /// keep-alive connection between two requests, and the most the rest of a body its
+    /// route answered without reading is waited for.
     pub header_timeout: Duration,
     /// How long a read from a client may make no progress.
     pub read_timeout: Duration,

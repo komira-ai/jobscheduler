@@ -30,6 +30,29 @@
 //! on making progress (a byte in each read period, say) is not cut by them, and what it
 //! can send is bounded by the sizes above and by `max_requests`.
 //!
+//! # A client that has sent its request gets the answer
+//!
+//! Two things would otherwise lose an answer the server has for a well-formed HTTP/1.1
+//! client:
+//!
+//! - A client may shut its sending side once its request is sent and then read the answer.
+//!   The connections allow that half-close: the end of the client's sending side ends the
+//!   request's body, if the body was not complete (so a short body is still refused), and
+//!   is not taken for the client giving up while the route works. A route in flight is
+//!   therefore not cut when its client goes away; the write of its answer then fails, or
+//!   the write limit cuts it.
+//! - A route may answer without reading the body (a refused token, a hello over its rate
+//!   limit, a path that does not exist). Closing a connection whose received bytes were
+//!   never read makes the kernel reset it, and a reset can cost the client the answer
+//!   that was already sent. So before the answer goes, what the route left of the body is
+//!   read and dropped, up to [`BODY_LIMIT`] and for at most [`Limits::header_timeout`]
+//!   (the time a client has to send a head; the refusal of a token is decided on the head,
+//!   so without that bound a client with no token could hold a connection by trickling a
+//!   body). With more left than the limit, or the rest not sent in that time, it is not
+//!   read on, the answer goes, and its connection closes after the answer. An HTTP/2
+//!   request is not read on (the protocol refuses a stream on its own), nor is one that
+//!   asked to be told to send its body (`Expect: 100-continue`), which then sends none.
+//!
 //! # HTTP/1.1, or both
 //!
 //! The lease and agent listeners ([`serve`]) speak HTTP/1.1 alone. The job service's
@@ -47,17 +70,20 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Extension;
 use axum::Router;
+use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::HeaderValue;
-use axum::http::header::CONNECTION;
+use axum::http::header::{CONNECTION, EXPECT};
+use axum::http::{HeaderValue, Version};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::Response;
+use hyper::body::Frame;
 use hyper::rt::Executor;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -69,6 +95,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::warn;
 
+use crate::api::BODY_LIMIT;
 use crate::config::Limits;
 use crate::io_timeout::IoTimeout;
 use crate::util::or_pending;
@@ -307,12 +334,15 @@ async fn handshake(stream: TcpStream, tls: Option<TlsAcceptor>, limit: Duration)
 /// Speaks HTTP/1.1 on `io` until the client is done. When `stopping` fires the request
 /// in flight is answered (with `Connection: close`) and an idle connection is closed.
 /// An error on the connection (a reset, a head that did not arrive in time, a write
-/// that stalled) ends it.
+/// that stalled) ends it. A client that shuts its sending side after its request still
+/// gets the answer, and what a route left unread of a body is read before the answer
+/// goes (see the module's notes).
 async fn talk_http1(io: Io, app: Router, limits: Limits, mut stopping: watch::Receiver<()>) {
     let io = IoTimeout::new(io, limits.read_timeout, limits.write_timeout);
-    let app = counted(app, limits);
+    let app = counted(finishing_bodies(app, limits), limits);
     let served = http1::Builder::new()
         .timer(TokioTimer::new())
+        .half_close(true)
         .header_read_timeout(limits.header_timeout)
         .max_buf_size(MAX_BUF)
         .serve_connection(TokioIo::new(io), TowerToHyperService::new(app));
@@ -338,11 +368,12 @@ async fn talk_both(
     streams: Streams,
 ) {
     let io = IoTimeout::new(io, limits.read_timeout, limits.write_timeout);
-    let app = counted(app, limits);
+    let app = counted(finishing_bodies(app, limits), limits);
     let mut builder = auto::Builder::new(streams);
     builder
         .http1()
         .timer(TokioTimer::new())
+        .half_close(true)
         .header_read_timeout(limits.header_timeout)
         .max_buf_size(MAX_BUF);
     builder
@@ -388,6 +419,54 @@ where
             }
             drop(permit);
         });
+    }
+}
+
+/// `app`, reading what its route left of an HTTP/1 request's body before the answer goes,
+/// for at most `limits.header_timeout`.
+fn finishing_bodies(app: Router, limits: Limits) -> Router {
+    app.layer(from_fn_with_state(limits.header_timeout, finish_body))
+}
+
+/// Runs the route on a body lent from `request`'s, then reads what the route left of it and
+/// drops it, up to [`BODY_LIMIT`] and for at most `wait`, before the answer goes: so the
+/// connection does not close with bytes of the request unread, which the kernel would
+/// answer with a reset. An HTTP/2 request and one that waits to be told to send its body
+/// (`Expect: 100-continue`) go to the route as they are.
+async fn finish_body(State(wait): State<Duration>, request: Request, next: Next) -> Response {
+    let continues = request
+        .headers()
+        .get(EXPECT)
+        .is_some_and(|expect| expect.as_bytes().eq_ignore_ascii_case(b"100-continue"));
+    if request.version() == Version::HTTP_2 || continues {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    let kept = Arc::new(Mutex::new(body));
+    let lent = Body::new(Lent(Arc::clone(&kept)));
+    let response = next.run(Request::from_parts(parts, lent)).await;
+    let left = std::mem::take(&mut *kept.lock().unwrap_or_else(PoisonError::into_inner));
+    // A body with more left than the limit is read to the limit and no further, and one
+    // whose rest does not come in `wait` no longer: the error says only that, and the
+    // connection closes after the answer.
+    let _ = tokio::time::timeout(wait, axum::body::to_bytes(left, BODY_LIMIT)).await;
+    response
+}
+
+/// The body a route reads: the request's, which stays with [`finish_body`] for what the
+/// route leaves of it.
+struct Lent(Arc<Mutex<Body>>);
+
+impl HttpBody for Lent {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
+        let mut body = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        Pin::new(&mut *body).poll_frame(cx)
     }
 }
 
