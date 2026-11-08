@@ -4,22 +4,27 @@ use clap::Parser;
 use serde_json::Value;
 use std::path::PathBuf;
 
-use crate::app::run;
+use crate::app::{run, run_in};
 use crate::cli::{Cli, Cmd, Gate, ImageCmd};
-use crate::fake::{FakeSystem, tmp, work_with_base};
+use crate::fake::{FakeSystem, host_roots, names_in, tmp, work_with_base};
+use crate::matrix::Roots;
 use crate::probe::Timing;
 
 fn go(sys: Option<&FakeSystem>, args: &[&str]) -> (String, String, String) {
+    let (_host, roots) = host_roots("app");
+    go_in(sys, &roots, args)
+}
+
+/// Runs `args` with the share matrix's outside directories under `roots`. Without a
+/// system it goes through [`run`] itself, which refuses before it uses them.
+fn go_in(sys: Option<&FakeSystem>, roots: &Roots, args: &[&str]) -> (String, String, String) {
     let cli = Cli::parse_from(std::iter::once("js-vmm").chain(args.iter().copied()));
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = run(
-        cli,
-        sys.map(|s| s as &dyn crate::system::System),
-        Timing::instant(),
-        &mut std::io::empty(),
-        &mut out,
-        &mut err,
-    );
+    let (input, timing) = (&mut std::io::empty(), Timing::instant());
+    let code = match sys {
+        None => run(cli, None, timing, input, &mut out, &mut err),
+        Some(s) => run_in(cli, Some(s), timing, roots, input, &mut out, &mut err),
+    };
     (
         format!("{code:?}"),
         String::from_utf8(out).expect("utf8"),
@@ -367,16 +372,19 @@ fn image_setup_runs_the_offline_write_and_disk_size_is_bounded() {
 
 /// Catches the default dropping the graphics device (a headless guest crash-loops its
 /// window server), `--headless` not reaching the pair (E1's first arm is headless either
-/// way), `--keep` not reaching the probe context (the clones would be removed), and a
-/// harvest whose two paths are swapped on the way to the system.
+/// way), `--keep` not reaching the probe context (the clones would be removed), the
+/// matrix roots not reaching it (its shared-place variants would not be made, or would
+/// be kept), and a harvest whose two paths are swapped on the way to the system.
 #[test]
 fn e1_flags_and_the_harvest_verb_reach_their_steps() {
     let work = work_with_base("app-e1");
+    let (_host, roots) = host_roots("app-e1");
     let sys = FakeSystem::new();
     let bin = work.join("guest-src");
     std::fs::write(&bin, "bin").expect("bin");
-    let (code, out, _) = go(
+    let (code, out, _) = go_in(
         Some(&sys),
+        &roots,
         &[
             "probe",
             "e1",
@@ -398,8 +406,20 @@ fn e1_flags_and_the_harvest_verb_reach_their_steps() {
         .map(|(s, _)| s.graphics)
         .collect();
     assert_eq!(graphics, [false, true]);
-    // The share matrix is on by default.
+    // The share matrix is on by default, with its shared-place variants made under the
+    // roots it was given and removed at the end even under `--keep`.
     assert!(sys.starts.borrow().iter().all(|(s, _)| s.tagged.len() > 2));
+    for root in [&roots.tmp, &roots.shared] {
+        let attached = sys
+            .starts
+            .borrow()
+            .iter()
+            .flat_map(|(s, _)| s.tagged.iter().map(|t| t.path.clone()))
+            .filter(|p| p.starts_with(root))
+            .count();
+        assert_eq!(attached, 2, "one per guest under {}", root.display());
+        assert!(names_in(root).is_empty(), "{}", root.display());
+    }
     assert!(work.join("e1-x").is_dir());
     let cli = Cli::parse_from(["js-vmm", "probe", "e1", "--work-dir", "w"]);
     assert!(matches!(&cli.command, Cmd::Probe(a) if !a.common.headless && !a.keep));

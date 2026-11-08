@@ -220,9 +220,11 @@ fn a_started_job_runs_ends_and_is_acknowledged() {
 
 /// Asserts that a start for a job the agent holds launches nothing and is counted as a
 /// repeat, and that the start of a job a stop retired runs nothing and is counted as a start
-/// after a stop, while the retired id is listed until an answer carries it; and that a stop
-/// of a running job ends it `killed` and writes its result. Catches a node that launches a
-/// repeated or stale start, or counts neither.
+/// after a stop, while the retired id is listed until an answer carries it; that a stop
+/// of a running job ends it `killed` and writes its result; and that only the first stop
+/// of a job no answer handed a start of, before it or in the same answer, counts as a stop
+/// before the start. Catches a node that launches a repeated or stale start, or counts neither, and
+/// one that miscounts a stop before the start.
 #[test]
 fn a_repeated_start_a_retired_job_and_a_stop_are_counted_and_listed() {
     let mut rig = rig("real-jobs-stops");
@@ -241,13 +243,21 @@ fn a_repeated_start_a_retired_job_and_a_stop_are_counted_and_listed() {
     assert_eq!(held, [killed]);
     assert_eq!(rig.io.ledger.jobs_after([0; 3]).2.len(), 1);
 
+    assert_eq!(rig.io.counters.get(Counter::StopBeforeStart), 0);
+
     let other = "sim-job-1";
     rig.answer(vec![stop(other)], &[]);
+    rig.answer(vec![stop(other)], &[]);
+    assert_eq!(rig.io.counters.get(Counter::StopBeforeStart), 1);
     let (_, retired) = rig.beat();
     assert_eq!(retired, [other]);
     rig.answer(vec![start_of(other, &allocation())], &[]);
     assert_eq!(rig.io.counters.get(Counter::StartAfterStop), 1);
     assert_eq!(rig.launches().len(), 1);
+
+    let third = "sim-job-2";
+    rig.answer(vec![start_of(third, &allocation()), stop(third)], &[]);
+    assert_eq!(rig.io.counters.get(Counter::StopBeforeStart), 1);
 }
 
 /// Asserts that a start or stop that names no valid id is counted and never reaches the

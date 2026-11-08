@@ -143,6 +143,7 @@ pub fn start_with_no_allocation() -> Observations {
     answer.starts.push(JobStartSeen {
         job: job(0),
         allocation: allocation(1),
+        refused: false,
     });
     let mut observations = Observations::quiet().at(ms(400)).with_job_reply(answer);
     observations.tables_at = Some(ms(400));
@@ -288,7 +289,8 @@ fn a_lost_job_a_host_lists_later_is_answered_with_a_stop() {
 /// a heartbeat in between left the job out, or named it retired, or the server no longer
 /// lists the host, or it ended as a failed whole-host prepare before any launch; and that a
 /// heartbeat that listed the job, one sent before the allocation was committed, one sent
-/// before its host read the job's start, and one sent before its host read the verdict on the
+/// before its host read the job's start (unless the host refused that start, as a start
+/// after its stop), and one sent before its host read the verdict on the
 /// job's result, is no confirmation, nor a failed prepare whose placement was launched. Catches a server that
 /// frees an allocation on silence, or on a listing it cannot have read.
 #[test]
@@ -328,6 +330,7 @@ fn an_allocation_freed_on_silence_is_flagged() {
     started.starts.push(JobStartSeen {
         job: job(0),
         allocation: allocation(1),
+        refused: false,
     });
     let read_start = || freed_on_silence().with_job_reply(started.clone());
     let before_start = read_start().with_job_beat(beat(0, 1_500, &[], &[]));
@@ -335,6 +338,15 @@ fn an_allocation_freed_on_silence_is_flagged() {
     clear(flagged(&read_start().with_job_beat(beat(
         0,
         2_500,
+        &[],
+        &[],
+    ))));
+    let mut refused = started.clone();
+    refused.starts[0].refused = true;
+    let read_refused = freed_on_silence().with_job_reply(refused);
+    clear(flagged(&read_refused.with_job_beat(beat(
+        0,
+        1_500,
         &[],
         &[],
     ))));

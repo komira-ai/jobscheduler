@@ -45,6 +45,13 @@
 //! seeds, in the cell's ledger, where each job's launch is named by its job and allocation
 //! ids.
 //!
+//! And the headline over jobs, family `jobs_scenarios`: twenty hosts and forty jobs, four
+//! agents cut off and two killed mid-job and replaced (`cell/jobs_headline.rs`, about 670
+//! agent requests a seed) over
+//! [`JOBS_SCENARIOS_SEEDS`] seed, so a change to how the server ends a killed host's jobs
+//! and frees their allocations, or to the action that picks the agents it kills, moves a
+//! hash; the replay test runs its seed twice.
+//!
 //! And one elastic scenario, family `elastic`: an EC2-like pool scaled up to forty machines
 //! by a hundred whole-host runs and back to none (`cell/elastic.rs`, about 19,200 agent
 //! requests a seed) over [`ELASTIC_SEEDS`] seed, so a change to a decision of the scaler,
@@ -77,6 +84,8 @@ mod elastic;
 mod elastic_faults;
 #[path = "cell/jobs.rs"]
 mod jobs;
+#[path = "cell/jobs_headline.rs"]
+mod jobs_headline;
 #[path = "cell/lossy_wire.rs"]
 mod lossy_wire;
 #[path = "cell/real_agents.rs"]
@@ -183,6 +192,11 @@ const FAULTS_FAMILY: &str = "faults";
 const JOBS_SEEDS: u64 = 1;
 const JOBS_FAMILY: &str = "jobs";
 
+/// How many seeds of the headline over jobs the golden file pins, and the family they are
+/// kept under.
+const JOBS_SCENARIOS_SEEDS: u64 = 1;
+const JOBS_SCENARIOS_FAMILY: &str = "jobs_scenarios";
+
 /// How many seeds of the elastic scenario the golden file pins, and the family they are
 /// kept under.
 const ELASTIC_SEEDS: u64 = 1;
@@ -269,7 +283,8 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// the end), so the hash covers a run that reached the server. The same for a seed of the
 /// whole-host scenario and one of the cancelled whole-host job, each run twice, and for
 /// one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
-/// whose items end alike, and for one seed of the EC2-like elastic scenario
+/// whose items end alike, and for one seed of the headline over jobs
+/// (`cell/jobs_headline.rs`), run twice, whose items end alike, and for one seed of the EC2-like elastic scenario
 /// (`cell/elastic.rs`), run twice, whose items end alike, and for one seed of the lost but
 /// landed acquire (`cell/elastic_faults.rs`), run twice, whose items end alike, and for one
 /// seed of the restart over a SQLite store (`cell/store.rs`), run twice. Catches a handler path that reads a
@@ -321,6 +336,12 @@ fn a_seed_replays_to_the_same_trace_hash() {
     let once = jobs::jobs_on_a_lossy_wire().run_seeds(1).runs.remove(0);
     let again = jobs::jobs_on_a_lossy_wire().run_seeds(1).runs.remove(0);
     assert_eq!(once.hash, again.hash);
+    assert_eq!(once.outcomes, again.outcomes);
+
+    let headline = jobs_headline::the_headline_over_jobs;
+    let once = headline().run_seeds(1).runs.remove(0);
+    let again = headline().run_seeds(1).runs.remove(0);
+    assert_eq!(once.hash, again.hash, "headline over jobs");
     assert_eq!(once.outcomes, again.outcomes);
 
     let once = elastic::an_ec2_like_pool().run_seeds(1).runs.remove(0);
@@ -532,6 +553,26 @@ fn the_job_scenario_matches_the_golden_file() {
     golden_of(JOBS_FAMILY).assert_matches(&jobs_runs());
 }
 
+/// The hash of each pinned seed of the headline over jobs, which must pass.
+fn jobs_scenarios_runs() -> Vec<(String, TraceHash)> {
+    let passed = jobs_headline::the_headline_over_jobs().run_seeds(JOBS_SCENARIOS_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!("the_headline_over_jobs-jobs/seed-{}", run.seed);
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
+}
+
+/// Asserts that the hashes of the pinned seeds of the headline over jobs equal the golden
+/// file's (family `jobs_scenarios`). Catches any change to a decision of the server's job
+/// pass as agents die, return or are cut off under jobs, of the per-job agents, or of the
+/// action that kills agents mid-job, or to the trace text, and a run that differs between
+/// processes.
+#[test]
+fn the_headline_over_jobs_matches_the_golden_file() {
+    golden_of(JOBS_SCENARIOS_FAMILY).assert_matches(&jobs_scenarios_runs());
+}
+
 /// The hash of each pinned seed of the elastic scenario, which must pass.
 fn elastic_runs() -> Vec<(String, TraceHash)> {
     let passed = elastic::an_ec2_like_pool().run_seeds(ELASTIC_SEEDS);
@@ -654,6 +695,9 @@ fn regenerate_golden_hashes() {
         .unwrap();
     golden_of(FAULTS_FAMILY).regenerate(&faults_runs()).unwrap();
     golden_of(JOBS_FAMILY).regenerate(&jobs_runs()).unwrap();
+    golden_of(JOBS_SCENARIOS_FAMILY)
+        .regenerate(&jobs_scenarios_runs())
+        .unwrap();
     golden_of(ELASTIC_FAMILY)
         .regenerate(&elastic_runs())
         .unwrap();

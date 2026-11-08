@@ -94,8 +94,9 @@
 //! real agent reports a stopped run killed, and a cancelled one not at all. The resources a run holds are its start's `limits` (and
 //! one GPU per index it names).
 //!
-//! The process remembers every run a hello or heartbeat it sent listed as held, so the
-//! cell can tell a run the server cannot have seen listed ([`AgentNode::runs_unlisted`]).
+//! The process remembers every run a hello or heartbeat it sent listed as held, and every
+//! job a heartbeat listed, so the cell can tell a run or a job the server cannot have seen
+//! listed ([`AgentNode::runs_unlisted`]).
 //! Every verdict it reads on a result, held or not, is written into the cell's
 //! [`Ledger`] ([`crate::Acked`]).
 //!
@@ -307,9 +308,9 @@ impl AgentNode {
         self.io.prepare
     }
 
-    /// Whether the agent process runs a run that no hello or heartbeat it sent listed
-    /// as held, so the server cannot have seen it listed; `false` while the host has no
-    /// process.
+    /// Whether the agent process runs a run, or a job, that no hello or heartbeat it sent
+    /// listed as held, so the server cannot have seen it listed; `false` while the host
+    /// has no process.
     #[must_use]
     pub fn runs_unlisted(&self) -> bool {
         self.process.as_ref().is_some_and(Process::runs_unlisted)

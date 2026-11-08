@@ -27,7 +27,9 @@ use js_agent_wire::{Command, HeldState};
 use js_jobs::JobId;
 use js_types::Resources;
 
-use super::per_job::{Acks, Beats, Intent, Listing, Placed, made, note_start, speaks, verdicts};
+use super::per_job::{
+    Acks, Beats, Intent, Listing, Placed, made, note_start, note_stop, speaks, verdicts,
+};
 use super::real::RealAgent;
 use super::{AgentKind, AgentSpec, Io};
 use crate::bus::CallId;
@@ -53,6 +55,8 @@ pub(super) struct RealJobs {
     timers: BTreeMap<u64, JobId>,
     /// Every job a stop named.
     stopped: BTreeSet<JobId>,
+    /// Every job an answer's start named, launched or not.
+    handed: BTreeSet<JobId>,
     /// Every job whose result the cell wrote down as made.
     made: BTreeSet<JobId>,
     beats: Beats,
@@ -67,6 +71,7 @@ impl RealJobs {
             jobs: BTreeMap::new(),
             timers: BTreeMap::new(),
             stopped: BTreeSet::new(),
+            handed: BTreeSet::new(),
             made: BTreeSet::new(),
             beats: Beats::default(),
         })
@@ -162,7 +167,8 @@ impl RealJobs {
                 Command::JobStop { job_id } => match JobId::parse(job_id) {
                     Ok(job) => {
                         noted.read.stops.insert(job.clone());
-                        self.stopped.insert(job);
+                        let handed = self.handed.contains(&job);
+                        note_stop(self.stopped.insert(job), handed, io);
                     }
                     Err(_) => {
                         io.bump(Counter::ReplyInvalid);
@@ -179,10 +185,12 @@ impl RealJobs {
     /// A start of the job `intent` names, counted as the fake counts it.
     fn start(&mut self, intent: Intent, noted: &mut Noted, io: &mut Io) {
         let launched = self.jobs.contains_key(&intent.job);
+        self.handed.insert(intent.job.clone());
         note_start(&self.stopped, launched, &intent.job, io);
         noted.read.starts.push(JobStartSeen {
             job: intent.job.clone(),
             allocation: intent.allocation,
+            refused: self.stopped.contains(&intent.job),
         });
         noted.intents.push(intent);
     }

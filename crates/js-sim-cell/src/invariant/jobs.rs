@@ -47,7 +47,7 @@ pub(super) struct Indices {
     outstanding: BTreeMap<HostId, BTreeMap<JobId, FarmTime>>,
     /// When each host first read a verdict on each job's result.
     acked: BTreeMap<(HostId, JobId), FarmTime>,
-    /// When each host first read a start of each job.
+    /// When each host first read a start of each job that it did not refuse.
     started: BTreeMap<(HostId, JobId), FarmTime>,
     /// The first `Accepted` verdict on each job's result: the host that read it, and when.
     accepted: BTreeMap<JobId, (HostId, FarmTime)>,
@@ -166,7 +166,7 @@ impl Indices {
                     self.accept(job, reply, found);
                 }
             }
-            for start in &reply.starts {
+            for start in reply.starts.iter().filter(|start| !start.refused) {
                 let key = (reply.host.clone(), start.job.clone());
                 self.started.entry(key).or_insert(reply.at);
             }
@@ -326,7 +326,8 @@ impl Indices {
     /// `FreedOnlyWhenConfirmed` for one allocation read freed at `at`: the host's agent
     /// sent, by `at`, a heartbeat that did not list the job (or listed it retired), after
     /// the allocation was committed, after the agent read the job's start (when it read
-    /// one) and after it read a verdict on the job's result (when it read one); or the
+    /// one it did not refuse: a start after its stop launches nothing) and after it read a
+    /// verdict on the job's result (when it read one); or the
     /// server's listing read with the tables does not name the host (the provider reads it
     /// absent); or a whole-host prepare failed before any container of the placement was
     /// launched. A heartbeat sent before the agent knew of the job, or while it still held

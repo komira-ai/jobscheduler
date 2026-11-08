@@ -162,7 +162,7 @@ pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use jobs::{
     AllocationRead, AllocationRow, JOB_PREFIX, JobBeat, JobFront, JobRead, JobReply, JobStartSeen,
-    ResultMade,
+    LostAnswer, ResultMade,
 };
 pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
@@ -172,6 +172,6 @@ pub use observe::{
     StopCommand, StopSeen, Verdict,
 };
 pub use replay::{Failure, FailureReport, drive, run};
-pub use scenario::{Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
+pub use scenario::{Call, Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
 pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, Store, WHOLE_CLASS};
 pub use work::Work;

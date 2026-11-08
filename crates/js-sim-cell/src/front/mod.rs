@@ -9,8 +9,10 @@
 //! [`ClientPort`] (the cell's goes through [`crate::ServerNode::client_call`]), and is run
 //! to its end before the next step. The bus's faults ([`js_sim::Faults`], partitions)
 //! apply to the agent wire only, which is built to be resent; a client call is never
-//! dropped, delayed or reordered. A scenario about lost client answers (design section 8,
-//! row 1: a retried acquire books a second host) does not belong here.
+//! dropped, delayed or reordered by the bus. A lost answer is the client's own: a
+//! [`crate::JobFront`] made with a [`crate::LostAnswer`] switch reads the answer to its
+//! next submit as none once an action throws the switch, and submits again under the same
+//! job id (design section 8, row 1).
 //!
 //! # What a front reports
 //!

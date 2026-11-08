@@ -12,6 +12,11 @@ pub enum Counter {
     StartRepeated,
     /// A start delivered for a run the agent process was told to stop or cancel.
     StartAfterStop,
+    /// The first stop delivered for a job that no answer the agent process read handed it a
+    /// start of, before or beside the stop. Where the wire loses no answer (one heartbeat in
+    /// flight, every answer read in the order the server built it), the server committed
+    /// the cancel before it sent the job's start. Per-job agents only.
+    StopBeforeStart,
     /// A start the agent refused because it waited past its validity.
     StartDroppedLate,
     /// A result sent in a heartbeat after the first heartbeat that carried it.
@@ -19,8 +24,8 @@ pub enum Counter {
     /// An answer the agent ignored, wholly or in part, because it failed to decode or
     /// validate, or named a start the cell cannot account for.
     ReplyInvalid,
-    /// The agent was cut off from the server while it ran a run that no hello or
-    /// heartbeat it had sent listed: the server cannot have seen it listed. Bumped by
+    /// The agent was cut off from the server while it ran a run, or a job, that no hello
+    /// or heartbeat it had sent listed: the server cannot have seen it listed. Bumped by
     /// [`crate::actions::partition_agents`] at the cut.
     CutWithUnlistedRun,
     /// A heartbeat answered 409 `unknown-host`: the server had forgotten the host.
@@ -39,9 +44,10 @@ pub enum Counter {
 
 impl Counter {
     /// Every counter, in order.
-    pub const ALL: [Counter; 11] = [
+    pub const ALL: [Counter; 12] = [
         Counter::StartRepeated,
         Counter::StartAfterStop,
+        Counter::StopBeforeStart,
         Counter::StartDroppedLate,
         Counter::ResultResent,
         Counter::ReplyInvalid,
@@ -59,6 +65,7 @@ impl Counter {
         match self {
             Counter::StartRepeated => "start_repeated",
             Counter::StartAfterStop => "start_after_stop",
+            Counter::StopBeforeStart => "stop_before_start",
             Counter::StartDroppedLate => "start_dropped_late",
             Counter::ResultResent => "result_resent",
             Counter::ReplyInvalid => "reply_invalid",
@@ -125,6 +132,7 @@ mod tests {
             [
                 "start_repeated",
                 "start_after_stop",
+                "stop_before_start",
                 "start_dropped_late",
                 "result_resent",
                 "reply_invalid",

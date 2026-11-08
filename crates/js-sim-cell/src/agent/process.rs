@@ -551,8 +551,8 @@ impl Process {
         held
     }
 
-    /// Whether the process runs a run that no hello or heartbeat it sent listed, so the
-    /// server cannot have seen it listed.
+    /// Whether the process runs a run, or a job, that no hello or heartbeat it sent
+    /// listed, so the server cannot have seen it listed.
     pub(super) fn runs_unlisted(&self) -> bool {
         let running = self.agent.running();
         let runs = running.iter().any(|run| !self.book.listed.contains(run));

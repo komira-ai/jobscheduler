@@ -52,17 +52,21 @@ use crate::actions::{Action, submit_work};
 use crate::agreement::{self, Outcome};
 use crate::cell::{Cell, Setup};
 use crate::counters::{Counter, Counters};
+use crate::front::FrontFactory;
 use crate::jobs::JobFront;
 use crate::observe::ItemId;
 use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
 use crate::server::{ServerSpec, Shape, Store};
 use crate::work::Work;
 
+mod answer;
 mod cloud;
 mod expect;
 mod held_after_runs;
+mod jobs;
 mod launched_on;
 
+pub use answer::Call;
 pub(crate) use expect::ended;
 pub use expect::{Expect, HostIs};
 
@@ -116,6 +120,7 @@ pub struct Scenario {
     statements: Vec<Statement>,
     witnesses: Vec<Witness>,
     settle_within: Duration,
+    front: FrontFactory,
 }
 
 /// One seed that passed.
@@ -226,6 +231,7 @@ impl Scenario {
             statements: Vec::new(),
             witnesses: Vec::new(),
             settle_within: DEFAULT_SETTLE,
+            front: JobFront::factory(),
         }
     }
 
@@ -366,6 +372,14 @@ impl Scenario {
         self
     }
 
+    /// This scenario, its client made by `front` in place of [`JobFront::factory`]
+    /// ([`JobFront::losing_answers`] is one).
+    #[must_use]
+    pub fn front(mut self, front: FrontFactory) -> Self {
+        self.front = front;
+        self
+    }
+
     /// Runs seeds `0..seeds` in order: [`Scenario::run_seed_range`] from seed 0.
     ///
     /// # Panics
@@ -495,7 +509,7 @@ impl Scenario {
         let name = format!("{}-{}", self.name, setup.seed());
         let dir = TestDir::under(root.join("js-sim-cell"), &name);
         let mut cell = Cell::new(setup, self.server.clone(), dir, self.bus.clone())?;
-        cell.set_front(JobFront::factory().make(&self.server));
+        cell.set_front(self.front.make(&self.server));
         for hosts in &self.hosts {
             cell.set_worker_lag(self.worker_lag);
             self.add(&mut cell, hosts)?;

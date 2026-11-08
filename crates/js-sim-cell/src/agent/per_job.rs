@@ -11,7 +11,7 @@
 //! | `JobStart` | [`AgentHarness::start`]`(job)`: launched once; a start for a job id it has started is a repeat ([`Counter::StartRepeated`]), one for a job id a stop named is refused ([`Counter::StartAfterStop`]) |
 //! | `JobStop` of a job it runs | the job ends; its result, `killed`, rides in every heartbeat until acknowledged |
 //! | `JobStop` of a job whose result is not yet acknowledged | nothing: the result rides on |
-//! | `JobStop` of a job it does not hold | [`AgentHarness::cancel`]`(job)`: the id is retired, listed in `retired_jobs` until an answer's `retired_acks` names it, and a later start of it is refused |
+//! | `JobStop` of a job it does not hold | [`AgentHarness::cancel`]`(job)`: the id is retired (the first stop of a job no answer handed it a start of counts in [`Counter::StopBeforeStart`]), listed in `retired_jobs` until an answer's `retired_acks` names it, and a later start of it is refused |
 //! | a job of [`SIM_RUN_IMAGE`] runs out its time (its first argument, in milliseconds) | [`AgentHarness::complete`]`(job)`: its result, `succeeded`, rides in every heartbeat until acknowledged |
 //! | `job_acks` names a job with a verdict this version reads | [`AgentHarness::ack`]`(job)`: the result is dropped |
 //! | a heartbeat is sent, the connection drops or comes back, an answer arrives | [`AgentHarness::heartbeat`], `disconnect`, `reconnect`, `contact`; a result sent again counts in [`Counter::ResultResent`] |
@@ -23,7 +23,8 @@
 //! What the agent sent and read is written into the cell's ledger: each heartbeat
 //! ([`JobBeat`]), each answer with what its heartbeat listed ([`JobReply`]), each result made
 //! ([`ResultMade`]), and each launch, in the launches beside the runs', named
-//! `<job>/<allocation>`.
+//! `<job>/<allocation>`. A job it runs that no heartbeat has listed yet counts as a run
+//! the server cannot have seen listed (`AgentNode::runs_unlisted`), as a run does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -100,14 +101,14 @@ impl<'a> Acks<'a> {
 }
 
 /// What both engines keep of the heartbeats: those sent and not yet answered, the jobs
-/// whose result a heartbeat sent, and the jobs a heartbeat listed as running.
+/// whose result a heartbeat sent, and the jobs a heartbeat listed, running or with its result.
 #[derive(Default)]
 pub(super) struct Beats {
     /// The heartbeats sent and not yet answered.
     sent: BTreeMap<CallId, Sent>,
     /// Every job whose result a heartbeat sent at least once.
     reported: BTreeSet<JobId>,
-    /// Every job a heartbeat listed as running at least once.
+    /// Every job a heartbeat listed, running or with its result.
     listed: BTreeSet<JobId>,
 }
 
@@ -126,7 +127,7 @@ impl Beats {
             retired_ids,
             ..
         } = listing;
-        self.listed.extend(running.iter().cloned());
+        self.listed.extend(running.iter().chain(&results).cloned());
         let sent = Sent {
             at: io.now,
             listed: running.clone(),
@@ -224,6 +225,14 @@ pub(super) fn note_start(stopped: &BTreeSet<JobId>, launched: bool, job: &JobId,
     }
 }
 
+/// Counts a stop that is the first for its job (`first`) of a job no answer this process
+/// read handed it a start of (`handed` is `false`).
+pub(super) fn note_stop(first: bool, handed: bool, io: &mut Io) {
+    if first && !handed {
+        io.bump(Counter::StopBeforeStart);
+    }
+}
+
 /// The verdicts `acks` carries on job ids and verdicts this version reads.
 pub(super) fn verdicts(acks: &Acks<'_>) -> Vec<(JobId, Verdict)> {
     let read = acks
@@ -248,6 +257,8 @@ pub(super) struct PerJob {
     timers: BTreeMap<u64, JobId>,
     /// Every job a stop named.
     stopped: BTreeSet<JobId>,
+    /// Every job an answer's start named, launched or not.
+    handed: BTreeSet<JobId>,
     /// The jobs a stop ended while they ran: their result is `killed`.
     killed: BTreeSet<JobId>,
     /// The ids retired by a stop of a job not held, until an answer acknowledges them.
@@ -269,6 +280,7 @@ impl PerJob {
             jobs: BTreeMap::new(),
             timers: BTreeMap::new(),
             stopped: BTreeSet::new(),
+            handed: BTreeSet::new(),
             killed: BTreeSet::new(),
             retired: BTreeSet::new(),
             beats: Beats::default(),
@@ -344,7 +356,7 @@ impl PerJob {
     }
 
     /// Whether the agent runs a job that no heartbeat it sent listed, so the server cannot
-    /// have seen it listed.
+    /// have seen it listed (a hello lists no job).
     pub(super) fn runs_unlisted(&self) -> bool {
         let running = self.fake.observed().running;
         let mut jobs = self
@@ -406,9 +418,11 @@ impl PerJob {
             return io.bump(Counter::ReplyInvalid);
         };
         let job = intent.job.clone();
+        self.handed.insert(job.clone());
         read.starts.push(JobStartSeen {
             job: job.clone(),
             allocation: intent.allocation,
+            refused: self.stopped.contains(&job),
         });
         let before = self.fake.observed();
         let launched = before.launches.contains_key(job.as_str());
@@ -426,7 +440,8 @@ impl PerJob {
             return io.bump(Counter::ReplyInvalid);
         };
         read.stops.insert(job.clone());
-        self.stopped.insert(job.clone());
+        let first = self.stopped.insert(job.clone());
+        note_stop(first, self.handed.contains(&job), io);
         if self.fake.observed().running.contains(job.as_str()) {
             self.fake.complete(job.as_str());
             self.killed.insert(job.clone());

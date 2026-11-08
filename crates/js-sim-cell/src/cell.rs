@@ -60,7 +60,7 @@ use crate::agent::{AgentKind, AgentNode, AgentSpec};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::{Counter, Counters};
 use crate::elastic::Cloud;
-use crate::front::{ClientPort, Front};
+use crate::front::{Answer, ClientPort, Front};
 use crate::invariant::{Checker, Invariant, Touched, Violation};
 use crate::jobs::JobFront;
 use crate::jobs::read::Reader;
@@ -566,7 +566,7 @@ impl Cell {
     }
 
     /// Bumps [`Counter::CutWithUnlistedRun`] of agent `index` when its process runs a run
-    /// that no hello or heartbeat it sent listed ([`AgentNode::runs_unlisted`]): what a
+    /// or a job that no hello or heartbeat it sent listed ([`AgentNode::runs_unlisted`]): what a
     /// cut of the agent notes as it starts.
     pub(crate) fn note_cut(&mut self, index: usize) {
         let agent = self.agent_mut(index).filter(|agent| agent.runs_unlisted());
@@ -648,6 +648,12 @@ impl Cell {
         self.reread(true);
         self.check(Touched::nothing().server());
         answer
+    }
+
+    /// Every answer the client was given, in the order given ([`Front::answers`]).
+    #[must_use]
+    pub fn answers(&self) -> &[Answer] {
+        self.client.front.answers()
     }
 
     /// What the cell observes now.
