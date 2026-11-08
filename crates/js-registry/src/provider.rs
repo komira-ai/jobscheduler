@@ -137,13 +137,17 @@ impl Pool for RegisteredProvider {
     }
 
     fn start(&mut self, spec: StartSpec) -> StartAck {
-        self.registry.start(&self.classes, &spec)
+        let ack = self.registry.start(&self.classes, &spec);
+        // The start's tail counts go to the sink once the registry's lock is released.
+        self.registry.send_tail();
+        ack
     }
 
     fn stop(&mut self, lease: &LeaseId) -> StopAck {
-        StopAck::Stopped {
-            read_back: self.registry.stop(lease),
-        }
+        let read_back = self.registry.stop(lease);
+        // As for a start: the stop's tail counts go to the sink outside the lock.
+        self.registry.send_tail();
+        StopAck::Stopped { read_back }
     }
 
     fn observe(&mut self, lease: &LeaseId) -> Observed {
