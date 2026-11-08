@@ -13,7 +13,6 @@ mod common;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::Duration;
 
 use common::{open_manual, scratch};
 use js_state::sqlite::Options;
@@ -89,14 +88,14 @@ fn concurrent_writers_commit_every_write_once_in_groups_no_larger_than_the_bound
     );
 }
 
-// Catches a writer that waits the window for a group its first request already fills: with
-// a window no test could wait out, a batch as large as `max_group`, and a write after it,
-// each commit at once, one sync each.
+// A batch as large as `max_group` is a group of its own, and so is a lone write after it:
+// one sync each. This takes, in the integration build, the arm of a group its first request
+// fills; that such a group does not wait the window though another request is queued behind
+// it is shown by the unit test `a_first_request_that_fills_the_group_does_not_wait`.
 #[test]
 fn a_write_that_fills_its_group_commits_at_once() {
     let dir = scratch("store-commits-full");
     let options = Options {
-        window: Duration::from_secs(3600),
         max_group: 2,
         ..Options::default()
     };
