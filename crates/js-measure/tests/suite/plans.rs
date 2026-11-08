@@ -4,14 +4,17 @@
 //! each on the simulated farm analyses to a golden. The goldens are simulated runs, not
 //! measurements; nothing here reads a clock.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
 use js_analysis::{Options, analyze, parse_jsonl, to_markdown};
+use js_measure::farm::{RunStanding, Standing};
 use js_measure::{
-    Experiment, FakeClock, FakeFarm, HostShape, NoSetter, Plan, RunOutput, Workload, run_plan,
+    Acquired, Curve, Experiment, FakeClock, FakeFarm, Farm, FarmError, HostShape, LeaseAsk,
+    NoSetter, Plan, RunAsk, RunOutput, UsageRow, Workload, run_plan,
 };
 
 use crate::support::{GIB, T0};
@@ -107,17 +110,31 @@ fn cut(mut plan: Plan) -> Plan {
     plan
 }
 
+/// The simulated farm of `shipped`'s hosts on `clock`.
+fn farm<'a>(shipped: &Shipped, clock: &'a FakeClock) -> FakeFarm<'a> {
+    let hosts = (1..=shipped.hosts).map(|n| (format!("fake-{n}"), SHAPE));
+    FakeFarm::new(clock, hosts.collect())
+}
+
 /// Runs `plan` with the workload of `shipped` on a simulated farm of its hosts.
 fn simulate(shipped: &Shipped, plan: &Plan) -> Vec<RunOutput> {
-    let jobs = workload(shipped.name).expand().unwrap();
     let clock = FakeClock::at(T0);
-    let hosts = (1..=shipped.hosts).map(|n| (format!("fake-{n}"), SHAPE));
-    let farm = FakeFarm::new(&clock, hosts.collect());
+    simulate_on(shipped, plan, &farm(shipped, &clock), &clock)
+}
+
+/// Runs `plan` with the workload of `shipped` on `farm`.
+fn simulate_on(
+    shipped: &Shipped,
+    plan: &Plan,
+    farm: &dyn Farm,
+    clock: &FakeClock,
+) -> Vec<RunOutput> {
+    let jobs = workload(shipped.name).expand().unwrap();
     let experiment = Experiment {
         plan,
         jobs: &jobs,
-        farm: &farm,
-        clock: &clock,
+        farm,
+        clock,
         setter: &NoSetter,
         commit: "0000000",
         poll_ms: shipped.poll_ms,
@@ -316,32 +333,87 @@ fn the_report_workloads_are_the_job_mixes_the_results_page_describes() {
     assert!(large.submit_at_ms < last_small);
 }
 
-/// Asserts what the two arms of `whole-host-vs-backfill` ask for on the simulated farm:
-/// under `backfill` every job, the large one included, asks for `action`; under
-/// `whole-host` the large job asks for `whole-node` and the small ones for `action`.
-/// Catches an arm that turns the small stream whole-host too, which would leave nothing
-/// to fill in around the large job.
+/// A farm that records the class and CPU of every lease asked of it, then asks the
+/// simulated farm.
+struct Asks<'a> {
+    inner: FakeFarm<'a>,
+    seen: RefCell<Vec<(String, u64)>>,
+}
+
+impl Farm for Asks<'_> {
+    fn acquire(&self, ask: &LeaseAsk) -> Result<Acquired, FarmError> {
+        self.seen
+            .borrow_mut()
+            .push((ask.class.clone(), ask.cpu_millis));
+        self.inner.acquire(ask)
+    }
+    fn lease(&self, id: &str) -> Result<Standing, FarmError> {
+        self.inner.lease(id)
+    }
+    fn start_run(&self, lease: &str, ask: &RunAsk) -> Result<String, FarmError> {
+        self.inner.start_run(lease, ask)
+    }
+    fn run(&self, lease: &str, run: &str) -> Result<RunStanding, FarmError> {
+        self.inner.run(lease, run)
+    }
+    fn release(&self, lease: &str) -> Result<(), FarmError> {
+        self.inner.release(lease)
+    }
+    fn host(&self, id: &str) -> Result<HostShape, FarmError> {
+        self.inner.host(id)
+    }
+    fn usage_rows(&self, host: &str, from: u64, to: u64) -> Result<Vec<UsageRow>, FarmError> {
+        self.inner.usage_rows(host, from, to)
+    }
+    fn curve(&self, profile: &str) -> Result<Option<Curve>, FarmError> {
+        self.inner.curve(profile)
+    }
+}
+
+/// Asserts the leases the two arms of `whole-host-vs-backfill` ask the farm for, as the
+/// harness sends them in a run of the shipped plan (cut to 3 runs per arm after 1
+/// warm-up): under `backfill` every job, the large one (64 cores) included, asks for
+/// `action`; under `whole-host` the large job asks for `whole-node` and the 300 small ones
+/// for `action`. Catches an arm, or a change of how the harness applies an arm's class,
+/// that turns the small stream whole-host too, which would leave nothing to fill in
+/// around the large job, or that leaves the large job a share in both arms.
 #[test]
 fn only_the_large_job_differs_between_whole_host_and_backfill() {
-    let plan = plan("whole-host-vs-backfill");
-    let jobs = workload("whole-host-vs-backfill").expand().unwrap();
-    for arm in &plan.arms {
-        let classes: BTreeSet<(bool, String)> = jobs
-            .iter()
-            .map(|job| {
-                let class = arm.lease_class.as_ref().unwrap_or(&job.lease.class);
-                (job.name == "large-0", class.clone())
-            })
-            .collect();
-        let large = if arm.label == "whole-host" {
+    let shipped = &SHIPPED[2];
+    let plan = cut(plan(shipped.name));
+    let clock = FakeClock::at(T0);
+    let asks = Asks {
+        inner: farm(shipped, &clock),
+        seen: RefCell::new(Vec::new()),
+    };
+    let outputs = simulate_on(shipped, &plan, &asks, &clock);
+    let seen = asks.seen.borrow();
+    assert_eq!(seen.len(), outputs.len() * 301);
+    for (output, run) in outputs.iter().zip(seen.chunks(301)) {
+        let arm = output.record.arm.as_str();
+        let large = if arm == "whole-host" {
             "whole-node"
         } else {
             "action"
         };
-        let expected: BTreeSet<(bool, String)> =
-            [(false, "action".to_owned()), (true, large.to_owned())].into();
-        assert_eq!(classes, expected, "arm {}", arm.label);
+        let classes: BTreeSet<(bool, &str)> = run
+            .iter()
+            .map(|(class, cpu)| (*cpu == SHAPE.cpu_millis, class.as_str()))
+            .collect();
+        assert_eq!(
+            classes,
+            [(false, "action"), (true, large)].into(),
+            "arm {arm}"
+        );
+        assert_eq!(
+            run.iter()
+                .filter(|(_, cpu)| *cpu == SHAPE.cpu_millis)
+                .count(),
+            1
+        );
     }
+    let arms: BTreeSet<&str> = outputs.iter().map(|o| o.record.arm.as_str()).collect();
+    assert_eq!(arms, ["backfill", "whole-host"].into());
 }
 
 /// Asserts that every metric the results page names for a plan is in the plan's row of
@@ -395,6 +467,19 @@ fn the_results_page_names_every_column_the_harness_writes() {
     assert_eq!(unnamed(&page, all), Vec::<String>::new());
 }
 
+/// Asserts the row check the metric test rests on: a plan's row that lacks one of the
+/// plan's metrics reports it, a metric named in another row does not count for this one,
+/// and a plan the page has no row for is a failure.
+#[test]
+fn a_metric_missing_from_a_plans_row_is_reported() {
+    let page = "| `a` | x | `jobs` |\n| `b` | y | `makespan_ms` |\n";
+    let names = ["jobs", "makespan_ms"].map(str::to_owned);
+    assert_eq!(unnamed(table_row(page, "a"), &names), vec!["makespan_ms"]);
+    assert_eq!(unnamed(table_row(page, "b"), &names), vec!["jobs"]);
+    let missing = std::panic::catch_unwind(|| table_row(page, "c").to_owned());
+    assert!(missing.is_err());
+}
+
 /// Asserts the check the column test rests on: a name the page does not show as a code
 /// span is reported, a name it shows is not, and a name that appears only as plain text
 /// (not between backticks) is reported.
@@ -410,7 +495,9 @@ fn a_column_the_page_does_not_name_is_reported() {
 /// after 1 warm-up, on the farm sizes of [`SHIPPED`]) is the golden in `tests/golden`:
 /// every run recorded with its label, every metric summarised, and the comparisons with
 /// the baseline the results page names. The simulated farm gives every run of a cell the
-/// same numbers, so every spread is zero. Catches a change of the plans, the harness's
+/// same numbers, so every spread is zero, and it places every lease alike whatever its
+/// class, so the two arms of a plan give the same numbers and every comparison is 0%: the
+/// goldens hold the path from plan to report and its layout, not a difference of arms. Catches a change of the plans, the harness's
 /// numbers or the analysis that the goldens do not show. A failure writes what the run
 /// gave beside the target directory's other test files, to compare with the golden.
 #[test]
