@@ -13,6 +13,7 @@ use std::path::Path;
 use js_agent_wire::InstanceIdentity;
 use js_lease::{ManualClock, Timestamp};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
+use js_testkit::dir::TestDir;
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use serde_json::json;
 
@@ -53,24 +54,20 @@ fn asking(host: &str) -> Bytes {
     Bytes::from(hello.to_string())
 }
 
-/// The rows of the join token file of the agents made by `agents(name)`.
-fn rows(name: &str) -> usize {
-    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/agent_api_unit")
-        .join(name)
-        .join("joins");
+/// The rows of the join token file of the agents made by `agents(name)`, whose directory is
+/// `dir`.
+fn rows(dir: &Path) -> usize {
+    let file = dir.join("joins");
     std::fs::read_to_string(file)
         .unwrap()
         .matches("[[join]]")
         .count()
 }
 
-fn agents(name: &str) -> Arc<Agents> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/agent_api_unit")
-        .join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+/// The agents of the test `name`, over a new directory unique to this process that is
+/// removed when the returned [`TestDir`] drops.
+fn agents(name: &str) -> (Arc<Agents>, TestDir) {
+    let dir = TestDir::under(std::env::temp_dir(), &format!("agent_api_unit-{name}"));
     let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
     let shared = SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_string())).unwrap();
@@ -86,7 +83,7 @@ fn agents(name: &str) -> Arc<Agents> {
         SequentialSessions::new(),
         Arc::new(js_sched_placer::place::SchedPlacer::default()),
     );
-    Arc::new(Agents::over(registry, &shared, &dir))
+    (Arc::new(Agents::over(registry, &shared, &dir)), dir)
 }
 
 /// Of two hellos of one host with one fresh token, the first is admitted fresh, then the
@@ -98,7 +95,7 @@ fn agents(name: &str) -> Arc<Agents> {
 /// inside the seam of the first, so the order is fixed and nothing waits on timing.
 #[tokio::test]
 async fn a_refused_fresh_hello_does_not_free_a_token_an_again_hello_registered() {
-    let agents = agents("fresh_refused_again_accepted");
+    let (agents, _dir) = agents("fresh_refused_again_accepted");
     let minted = agents
         .joins
         .mint(instance(), Duration::from_secs(600))
@@ -134,7 +131,7 @@ async fn a_refused_fresh_hello_does_not_free_a_token_an_again_hello_registered()
 /// puts a revoked token back, for example by releasing the use as a rewrite of the entry.
 #[tokio::test]
 async fn a_revoke_between_admit_and_registry_leaves_the_token_gone() {
-    let agents = agents("revoke_between");
+    let (agents, _dir) = agents("revoke_between");
     let minted = agents
         .joins
         .mint(instance(), Duration::from_secs(600))
@@ -167,7 +164,7 @@ async fn a_revoke_between_admit_and_registry_leaves_the_token_gone() {
 /// token that is left good beside its credential.
 #[tokio::test]
 async fn of_two_first_hellos_one_credential_is_made_and_the_token_retired() {
-    let agents = agents("credential_race");
+    let (agents, dir) = agents("credential_race");
     let minted = agents
         .joins
         .mint(instance(), Duration::from_secs(600))
@@ -197,7 +194,7 @@ async fn of_two_first_hellos_one_credential_is_made_and_the_token_retired() {
     let digest = agents.joins.identify(credential.expose());
     assert!(digest.is_some());
     assert_eq!(agents.joins.registered_as(&digest.unwrap()), who);
-    assert_eq!(rows("credential_race"), 1);
+    assert_eq!(rows(&dir), 1);
 }
 
 /// The registry refuses the hello that issued a credential (the host id is bound to another
@@ -207,7 +204,7 @@ async fn of_two_first_hellos_one_credential_is_made_and_the_token_retired() {
 /// credential nobody received, which would strand the instance until its boot time ran out.
 #[tokio::test]
 async fn a_refused_hello_gives_the_credential_back_with_the_token() {
-    let agents = agents("credential_refused");
+    let (agents, dir) = agents("credential_refused");
     let minted = agents
         .joins
         .mint(instance(), Duration::from_secs(600))
@@ -232,7 +229,7 @@ async fn a_refused_hello_gives_the_credential_back_with_the_token() {
         (403, "host-bound")
     );
     assert!(agents.joins.identify(&minted.token).is_some());
-    assert_eq!(rows("credential_refused"), 1);
+    assert_eq!(rows(&dir), 1);
     let retry = serve_hello(
         &agents,
         who.clone(),
@@ -254,7 +251,7 @@ async fn a_refused_hello_gives_the_credential_back_with_the_token() {
 /// host, or a copy of the token, register again.
 #[tokio::test]
 async fn a_lost_welcome_leaves_no_way_in_and_the_revoke_clears_the_file() {
-    let agents = agents("credential_lost");
+    let (agents, dir) = agents("credential_lost");
     let minted = agents
         .joins
         .mint(instance(), Duration::from_secs(600))
@@ -285,7 +282,7 @@ async fn a_lost_welcome_leaves_no_way_in_and_the_revoke_clears_the_file() {
             (403, "join-token-expired")
         );
     }
-    assert_eq!(rows("credential_lost"), 1);
+    assert_eq!(rows(&dir), 1);
     assert_eq!(agents.joins.revoke(&instance()), Ok(1));
-    assert_eq!(rows("credential_lost"), 0);
+    assert_eq!(rows(&dir), 0);
 }

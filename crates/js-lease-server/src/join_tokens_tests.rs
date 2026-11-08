@@ -8,6 +8,8 @@ use std::thread;
 use js_lease::{ManualClock, Timestamp};
 use js_registry::SequentialSessions;
 
+use js_testkit::dir::TestDir;
+
 use super::*;
 
 const T0: u64 = 5_000_000;
@@ -19,13 +21,12 @@ fn instance(id: &str) -> InstanceIdentity {
     }
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/join_tokens_unit")
-        .join(name);
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir.join("leases.toml.joins")
+/// A new empty directory for the test `name`, unique to this process and removed on drop,
+/// and the join token file in it.
+fn scratch(name: &str) -> (TestDir, PathBuf) {
+    let dir = TestDir::under(std::env::temp_dir(), &format!("join_tokens_unit-{name}"));
+    let path = dir.join("leases.toml.joins");
+    (dir, path)
 }
 
 fn tokens(path: &Path) -> (JoinTokens, ManualClock) {
@@ -56,7 +57,7 @@ impl SessionSource for NoRandom {
 /// token that registers a second host, and one that locks its own host out.
 #[test]
 fn a_token_registers_one_host() {
-    let path = scratch("one_host");
+    let (_dir, path) = scratch("one_host");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let who = joins.identify(&minted.token).unwrap();
@@ -84,7 +85,7 @@ fn a_token_registers_one_host() {
 /// an off-by-one at the boundary and an expiry that cuts off a registered host.
 #[test]
 fn a_token_is_good_until_its_expiry() {
-    let path = scratch("expiry");
+    let (_dir, path) = scratch("expiry");
     let (joins, clock) = tokens(&path);
     let ttl = Duration::from_secs(60);
     let first = joins.mint(instance("i-1"), ttl).unwrap();
@@ -114,7 +115,7 @@ fn a_token_is_good_until_its_expiry() {
 /// instance.
 #[test]
 fn a_wrong_instance_is_refused_and_does_not_consume() {
-    let path = scratch("wrong_instance");
+    let (_dir, path) = scratch("wrong_instance");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let who = credential(&minted);
@@ -139,7 +140,7 @@ fn a_wrong_instance_is_refused_and_does_not_consume() {
 /// not made under one lock, which would let two hosts register with one token.
 #[test]
 fn of_racing_hosts_one_wins() {
-    let path = scratch("race");
+    let (_dir, path) = scratch("race");
     let (joins, _) = tokens(&path);
     let joins = Arc::new(joins);
     let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
@@ -164,7 +165,7 @@ fn of_racing_hosts_one_wins() {
 /// dropped after its time).
 #[test]
 fn an_unknown_credential_is_refused_as_expired() {
-    let path = scratch("unknown");
+    let (_dir, path) = scratch("unknown");
     let (joins, _) = tokens(&path);
     let who = Credential::of_token("never-minted");
     assert_eq!(
@@ -179,7 +180,7 @@ fn an_unknown_credential_is_refused_as_expired() {
 /// that drops an unused token, and a file that carries the secret.
 #[test]
 fn tokens_survive_a_restart_and_the_file_holds_no_token() {
-    let path = scratch("restart");
+    let (_dir, path) = scratch("restart");
     let (joins, _) = tokens(&path);
     let used = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let unused = joins.mint(instance("i-2"), DEFAULT_TTL).unwrap();
@@ -217,7 +218,7 @@ fn tokens_survive_a_restart_and_the_file_holds_no_token() {
 /// unbounded pile.
 #[test]
 fn minting_replaces_drops_and_is_bounded() {
-    let path = scratch("minting");
+    let (_dir, path) = scratch("minting");
     let (joins, clock) = tokens(&path);
     let first = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let second = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
@@ -261,7 +262,7 @@ fn minting_replaces_drops_and_is_bounded() {
 /// With no random bytes nothing is minted and nothing is dropped.
 #[test]
 fn no_random_bytes_make_no_token() {
-    let path = scratch("no_random");
+    let (_dir, path) = scratch("no_random");
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
     let joins = JoinTokens::open(path, clock, Box::new(NoRandom)).unwrap();
     assert_eq!(
@@ -275,7 +276,7 @@ fn no_random_bytes_make_no_token() {
 /// catches a use that is allowed although a restart would give the token back.
 #[test]
 fn a_failed_write_changes_nothing() {
-    let path = scratch("unwritable");
+    let (_dir, path) = scratch("unwritable");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let who = credential(&minted);
@@ -316,7 +317,7 @@ fn a_damaged_file_is_refused() {
     assert!(short.unwrap_err().contains("64 lower-case hex"));
     assert!(parse("version = [").is_err());
 
-    let path = scratch("damaged");
+    let (_dir, path) = scratch("damaged");
     fs::write(&path, [0xff, 0xfe]).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     let text = load(&path).err().unwrap().to_string();
@@ -355,7 +356,7 @@ fn held_expiry(path: &Path) -> u64 {
 /// that ends early.
 #[test]
 fn a_used_token_ends_at_the_bound_and_the_next_mint_drops_it() {
-    let path = scratch("bound");
+    let (_dir, path) = scratch("bound");
     let (joins, clock) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let who = credential(&minted);
@@ -386,7 +387,7 @@ fn a_used_token_ends_at_the_bound_and_the_next_mint_drops_it() {
 /// (a host that is up is cut off at the bound).
 #[test]
 fn serving_a_heartbeat_or_a_hello_renews_the_bound() {
-    let path = scratch("renew");
+    let (_dir, path) = scratch("renew");
     let (joins, clock) = tokens(&path);
     let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
     joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
@@ -412,7 +413,7 @@ fn serving_a_heartbeat_or_a_hello_renews_the_bound() {
 /// time, and a step that never lets the file move.
 #[test]
 fn a_renewal_is_written_only_when_it_gains_a_step() {
-    let path = scratch("step");
+    let (_dir, path) = scratch("step");
     let (joins, clock) = tokens(&path);
     let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
     joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
@@ -430,7 +431,7 @@ fn a_renewal_is_written_only_when_it_gains_a_step() {
 /// lives in memory alone, which a restart would take back.
 #[test]
 fn a_renewal_the_file_refuses_is_not_kept() {
-    let path = scratch("renew_unwritable");
+    let (_dir, path) = scratch("renew_unwritable");
     let (joins, clock) = tokens(&path);
     let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
     joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
@@ -448,7 +449,7 @@ fn a_renewal_the_file_refuses_is_not_kept() {
 /// burns the token and a release that frees another host's token.
 #[test]
 fn a_released_use_leaves_the_token_unused() {
-    let path = scratch("release");
+    let (_dir, path) = scratch("release");
     let (joins, _) = tokens(&path);
     let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
     assert_eq!(
@@ -486,7 +487,7 @@ fn held_in_memory(joins: &JoinTokens, who: &Credential) -> u64 {
 /// It catches a release that frees a token a registered host holds.
 #[test]
 fn a_release_after_a_hello_served_again_keeps_the_use() {
-    let path = scratch("release_after_again");
+    let (_dir, path) = scratch("release_after_again");
     let (joins, _) = tokens(&path);
     let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
     let here = instance("i-1");
@@ -514,7 +515,7 @@ fn a_release_after_a_hello_served_again_keeps_the_use() {
 /// same for every token (a stampede of whole-file writes) and one outside its bounds.
 #[test]
 fn renewals_of_tokens_used_together_come_due_apart() {
-    let path = scratch("spread");
+    let (_dir, path) = scratch("spread");
     let (joins, clock) = tokens(&path);
     let mut all = Vec::new();
     for n in 0..8 {
@@ -547,7 +548,7 @@ fn renewals_of_tokens_used_together_come_due_apart() {
 /// holds the use.
 #[test]
 fn a_release_the_file_refuses_keeps_the_use() {
-    let path = scratch("release_unwritable");
+    let (_dir, path) = scratch("release_unwritable");
     let (joins, _) = tokens(&path);
     let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
     joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
@@ -579,7 +580,7 @@ fn a_half_used_row_is_refused() {
 /// memory only, and one that fails on a repeat.
 #[test]
 fn a_revoke_drops_every_token_of_the_instance_and_is_idempotent() {
-    let path = scratch("revoke");
+    let (_dir, path) = scratch("revoke");
     let (joins, _) = tokens(&path);
     let used = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let other = joins.mint(instance("i-2"), DEFAULT_TTL).unwrap();
@@ -615,7 +616,7 @@ fn a_revoke_drops_every_token_of_the_instance_and_is_idempotent() {
 /// tokens and one that matches the instance id alone.
 #[test]
 fn a_revoke_drops_an_unused_token_and_matches_the_provider() {
-    let path = scratch("revoke_unused");
+    let (_dir, path) = scratch("revoke_unused");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let elsewhere = InstanceIdentity {
@@ -633,7 +634,7 @@ fn a_revoke_drops_an_unused_token_and_matches_the_provider() {
 /// would give back.
 #[test]
 fn a_revoke_the_file_refuses_changes_nothing() {
-    let path = scratch("revoke_unwritable");
+    let (_dir, path) = scratch("revoke_unwritable");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let who = credential(&minted);
@@ -651,7 +652,7 @@ fn a_revoke_the_file_refuses_changes_nothing() {
 /// would be `Unsaved`. It catches a revoke that rewrites the file when nothing changed.
 #[test]
 fn a_revoke_that_drops_nothing_writes_nothing() {
-    let path = scratch("revoke_no_write");
+    let (_dir, path) = scratch("revoke_no_write");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     fs::remove_file(&path).unwrap();
