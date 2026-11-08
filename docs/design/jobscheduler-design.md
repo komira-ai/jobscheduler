@@ -147,7 +147,7 @@ This table is where built and planned status is recorded; the picture above show
 | macOS runtime | Native run from an OCI bundle under a pool user and sandbox | Partly built | `js-agent/src/native/`, `js-mac-session`, `js-mac-pool`, `js-mac-provision`, `js-bundle` |
 | Job network policy | Per-job none, allow-list, open, and declared ports | Partly built: crun mechanism built, not wired; no job field | `js-agent/src/egress/`, `js-agent-wire` |
 | Object store | Not part of jobscheduler. Jobs write their output there through the client's grant; with a log sink, agents upload live logs there and `GetLogs` reads them (`live-logs.md`) | outside; live logs Planned (step 31) | |
-| Release machinery | Build, attest, publish, host-driven agent update | Built | `xtask`, `.github/workflows/release.yml`, `packaging/` |
+| Release machinery | Build, attest, publish, host-driven agent update | Built | `xtask`, `.github/workflows/release.yml`, `.github/workflows/artifacts.yml`, `packaging/` |
 
 ### 3.2 Jobs and allocations
 
@@ -827,7 +827,7 @@ In the design the scaler's demand logic folds into pass 2 of the placement walk 
 
 ![Release and update flow: push to main, ci, plan, build, sums, attest, verify, publish, the deploy step setting desired versions, then the host updater running the agent hook steps prepare, cutover, verify, rollback.](diagrams/release-update.svg)
 
-**Release** (`docs/release.md`, `.github/workflows/release.yml`): every push to main that changes shipped code is the next patch version once every `ci` job except the Mac one passes. Jobs, by their names in the workflow: `ci-passed` (waits for ci, polling), `plan` (version; refuses a commit with a later tag past it), `build` (static Linux x86_64 and macOS arm64 archives), `sums`, `attest`, `verify`, `publish` (draft, upload, ancestor check, publish creating the tag last), `deploy-tool`, `deploy` (the deploy step). The shipped set is computed from the dependency graph of the shipped binaries, not listed. Archives are byte-identical on rebuild (sorted names, commit time as mtime, zero owner, no gzip name). Docs-only pushes end at plan, green.
+**Release** (`docs/release.md`, `.github/workflows/release.yml`): every push to main that changes shipped code is the next patch version once every `ci` job except the Mac one passes. Jobs, by their names in the workflow: `ci-passed` (waits for ci, polling), `plan` (version; refuses a commit with a later tag past it), `artifacts` (calls `.github/workflows/artifacts.yml`, the one signer: `build` (static Linux x86_64 and arm64 and macOS arm64 archives, hostkeeper packages of js-agent), `sums`, `attest` (provenance, and a bundle beside each package), `verify`), `publish` (draft, upload, ancestor check, publish creating the tag last), `deploy-tool`, `deploy` (the deploy step). The shipped set is computed from the dependency graph of the shipped binaries, not listed. Archives are byte-identical on rebuild (sorted names, commit time as mtime, zero owner, no gzip name). Docs-only pushes end at plan, green.
 
 Shipped: Linux: `js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`; macOS arm64: `js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`. Not shipped: a Linux arm64 archive. Darwin binaries are not signed or notarized.
 

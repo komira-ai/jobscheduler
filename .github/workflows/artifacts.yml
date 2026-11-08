@@ -1,0 +1,352 @@
+# The files of a release, built and signed: the archives of the binaries (`*.tar.gz`), the
+# hostkeeper package of js-agent for each of linux-x86_64, linux-arm64 and macos-arm64
+# (`js-agent-<version>-<platform>.tar.zst`, made by `build`), `js-agent-index.json`, the index of
+# the three (made by `sums`), and one SHA256SUMS over all of them; on a push to main also their
+# build provenance (`attest`) and, beside each package, the bundle of that package's own
+# provenance attestation (`js-agent-<version>-<platform>.tar.zst.sigstore.json`), the file
+# hostkeeper verifies a package with.
+#
+# The signing is in THIS file for one reason: the signer identity of an attestation (the
+# certificate's signer URI, which `gh attestation verify --signer-workflow` and hostkeeper's
+# `[trusted_signers]` check) is the workflow file that ran the signing step, and every farm host
+# trusts exactly `komira-ai/jobscheduler/.github/workflows/artifacts.yml` on `refs/heads/main`,
+# as it trusts hostkeeper's and tierstore's files of the same name. Do not move or rename it.
+#
+# What starts it. Nothing but release.yml, which calls it (`workflow_call`) once `plan` has
+# chosen the version, with that version as `inputs.version`. A called workflow runs in its
+# caller's run, at the caller's commit and ref and under the caller's event, so a release run
+# (a push to main) signs the pushed commit on refs/heads/main, and the dry run of a pull request
+# that changes release.yml builds and sums the same files and signs nothing. It is not started
+# by a push of its own: the version is decided by `plan`, after `ci` has passed, and a build
+# made before that could carry a version a release finished meanwhile has taken.
+#
+# Only `attest` holds `id-token: write` and `attestations: write`, and only for a push to main
+# (its `if:`; crates/xtask/tests/release_workflow holds both). While it holds them no
+# repository code runs and nothing is built: it runs pinned actions, two `sha256sum --check`
+# and a `cp` per bundle. The files reach it through the run's artifact store, where a job that
+# ran repository code could have replaced them, so it first refuses sums other than the ones
+# `sums` made (their SHA-256 is a job output) and then files that differ from the sums.
+# `verify` then checks every file's attestation, and each package's bundle, the way a host does,
+# before release.yml's `publish` uploads them.
+name: artifacts
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "The release version X.Y.Z that release.yml's plan chose: the binaries print it and the files are named by it"
+        type: string
+        required: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The commit the run is at: the caller's, the pushed commit; for a pull request, its merge
+  # commit.
+  COMMIT: ${{ github.sha }}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The five Linux binaries build for two architectures, x86_64 and arm64, each natively
+        # on a hosted runner of its own architecture (no cross linker, no emulation), so the
+        # check step below runs every binary on the kind of host it is for. The lease server
+        # and js-mdm are Linux-only; the client, the agent, the js-bundle CLI and the Mac host
+        # tools (js-mac-session, js-mac-provision) also build for Apple silicon.
+        include:
+          # Static musl binaries: they run on gcr.io/distroless/cc-debian12 and on any
+          # Linux host of their architecture, whatever its libc. rustls links ring, which
+          # compiles C, hence musl-tools on both Linux legs.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mdm:js-mdm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mdm:js-mdm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            builds: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - name: Install musl tools
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+      # ring's C code for arm64 musl. On the arm64 runner the host (aarch64 glibc) and the target
+      # differ, so the cc crate looks for the compiler `aarch64-linux-musl-gcc`; musl-tools installs
+      # it as `musl-gcc` only (for x86_64 the cc crate falls back to `musl-gcc` by itself). The
+      # link gives musl-tools' compiler the name the crate looks for.
+      - name: Name musl-gcc as the arm64 musl compiler
+        if: ${{ matrix.target == 'aarch64-unknown-linux-musl' }}
+        run: sudo ln -s /usr/bin/musl-gcc /usr/local/bin/aarch64-linux-musl-gcc
+      # The archives are made with GNU tar's options; the runner has Homebrew's gnu-tar
+      # (`gtar`), and this installs it if an image does not.
+      - name: Install GNU tar
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        run: command -v gtar > /dev/null || brew install gnu-tar
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so
+      # the binaries print it; the repository keeps its own version.
+      - name: Stamp the release version
+        run: cargo xtask release stamp --to "$VERSION"
+      - name: Build and package
+        env:
+          BUILDS: ${{ matrix.builds }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          # Archives that depend only on the commit and the binaries: sorted names, the
+          # commit's time as the modification time, numeric owner 0/0, no name or time in
+          # the gzip header. A full re-run then makes the same files as the first run.
+          mtime="$(git log -1 --format=%ct "$COMMIT")"
+          # The oldest macOS the Apple silicon binaries must run on; a newer runner image
+          # must not raise it (the check step below reads each binary's minos).
+          case "$TARGET" in
+            *-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
+          esac
+          # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
+          tar=tar
+          if command -v gtar > /dev/null; then
+            tar=gtar
+          fi
+          for entry in $BUILDS; do
+            package="${entry%%:*}"
+            bin="${entry##*:}"
+            cargo build --locked --release --target "$TARGET" -p "$package" --bin "$bin"
+            name="$bin-$VERSION-$TARGET"
+            # The files of the archive (crates/xtask/src/release/stage.rs): the binary, LICENSE
+            # and, in the Linux js-lease-server archive of either architecture,
+            # updater.d/js-lease-server.toml.
+            cargo xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin"
+            "$tar" -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
+          done
+          ls -l dist
+      # The hostkeeper package of js-agent for this leg's platform (linux-x86_64, linux-arm64
+      # or macos-arm64), made of the js-agent binary built above and the files in
+      # packaging/js-agent/hostkeeper or packaging/js-agent-macos/hostkeeper
+      # (crates/xtask/src/release/hostkeeper_package.rs). It lands in dist beside the archives.
+      - name: Package js-agent for hostkeeper
+        run: cargo xtask release hostkeeper-package --binary "target/$TARGET/release/js-agent" --target "$TARGET" --version "$VERSION" --out dist
+      - name: Check the binaries
+        run: |
+          set -euo pipefail
+          for entry in $BUILDS; do
+            bin="${entry##*:}"
+            file "target/$TARGET/release/$bin"
+          done
+          case "$TARGET" in
+            *-apple-darwin)
+              for entry in $BUILDS; do
+                bin="${entry##*:}"
+                minos="$(otool -l "target/$TARGET/release/$bin" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
+                echo "$bin minos $minos"
+                if [ -z "$minos" ]; then
+                  echo "::error::$bin has no LC_BUILD_VERSION minos to check"
+                  exit 1
+                fi
+                if [ "$(printf '%s\n%s\n' "$minos" 11.0 | sort -V | tail -n 1)" != "11.0" ]; then
+                  echo "::error::$bin needs macOS $minos, above the pinned 11.0"
+                  exit 1
+                fi
+              done
+              ;;
+            *-linux-musl)
+              for entry in $BUILDS; do
+                bin="${entry##*:}"
+                # A static binary has no dynamic loader and no shared libraries.
+                if readelf -d "target/$TARGET/release/$bin" | grep -q NEEDED; then
+                  echo "::error::$bin links shared libraries"
+                  exit 1
+                fi
+              done
+              ;;
+          esac
+          # Every binary runs on the build host and prints the release version on the first
+          # line of --version; js-agent prints a `runtimes:` line after it.
+          for entry in $BUILDS; do
+            bin="${entry##*:}"
+            printed="$("target/$TARGET/release/$bin" --version)"
+            echo "$printed"
+            printed="$(printf '%s\n' "$printed" | sed -n 1p)"
+            case "$printed" in
+              *" $VERSION") ;;
+              *)
+                echo "::error::$bin prints '$printed', not the release version $VERSION"
+                exit 1
+                ;;
+            esac
+          done
+        env:
+          BUILDS: ${{ matrix.builds }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+
+  # The hostkeeper release index of js-agent over the three packages, then one SHA256SUMS over
+  # every asset (the archives, the packages and the index), checked before anything is
+  # attested or published.
+  sums:
+    needs: [build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ inputs.version }}
+    # The SHA-256 of the SHA256SUMS this job uploads: `attest` refuses sums other than these.
+    outputs:
+      sha256: ${{ steps.sums.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - run: rustup toolchain install
+      # js-agent-index.json: for each platform the package's file name, SHA-256 and size, in
+      # the form hostkeeper reads (crates/xtask/src/release/hostkeeper_index.rs). It refuses a
+      # directory that does not hold exactly the three packages of this version.
+      - name: Write the hostkeeper release index
+        run: cargo xtask release hostkeeper-index --dir dist --version "$VERSION"
+      - name: Write and check SHA256SUMS
+        id: sums
+        run: |
+          set -euo pipefail
+          cd dist
+          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-aarch64-unknown-linux-musl.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-aarch64-unknown-linux-musl.tar.gz js-agent-$VERSION-linux-arm64.tar.zst js-agent-$VERSION-linux-x86_64.tar.zst js-agent-$VERSION-macos-arm64.tar.zst js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-index.json js-bundle-$VERSION-aarch64-apple-darwin.tar.gz js-bundle-$VERSION-aarch64-unknown-linux-musl.tar.gz js-bundle-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-aarch64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz js-mac-session-$VERSION-aarch64-apple-darwin.tar.gz js-mdm-$VERSION-aarch64-unknown-linux-musl.tar.gz js-mdm-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::unexpected assets: '$actual' (expected '$expected')"
+            exit 1
+          fi
+          sha256sum -- *.tar.gz *.tar.zst js-agent-index.json > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          echo "assets:"
+          cat SHA256SUMS
+          sha256="$(sha256sum SHA256SUMS | cut -d ' ' -f 1)"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Push to main only: build provenance for every file, from SHA256SUMS, and a provenance
+  # attestation of each hostkeeper package alone, whose bundle is copied beside it as
+  # `<package>.sigstore.json`. See the top of this file.
+  attest:
+    needs: [sums]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - name: Refuse sums other than the build's
+        env:
+          SUMS_SHA256: ${{ needs.sums.outputs.sha256 }}
+        run: /usr/bin/sha256sum --check --strict <<< "$SUMS_SHA256  dist/SHA256SUMS"
+      - name: Refuse listed files that differ from the sums
+        working-directory: dist
+        run: /usr/bin/sha256sum --check --strict SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - id: provenance-linux-x86_64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/js-agent-${{ inputs.version }}-linux-x86_64.tar.zst
+      - name: Name the bundle of the package for linux-x86_64
+        env:
+          BUNDLE: ${{ steps.provenance-linux-x86_64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/js-agent-$VERSION-linux-x86_64.tar.zst.sigstore.json"
+      - id: provenance-linux-arm64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/js-agent-${{ inputs.version }}-linux-arm64.tar.zst
+      - name: Name the bundle of the package for linux-arm64
+        env:
+          BUNDLE: ${{ steps.provenance-linux-arm64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/js-agent-$VERSION-linux-arm64.tar.zst.sigstore.json"
+      - id: provenance-macos-arm64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/js-agent-${{ inputs.version }}-macos-arm64.tar.zst
+      - name: Name the bundle of the package for macos-arm64
+        env:
+          BUNDLE: ${{ steps.provenance-macos-arm64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/js-agent-$VERSION-macos-arm64.tar.zst.sigstore.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bundles
+          path: dist/*.sigstore.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Push to main only, after attest: the checks a user and a host make (docs/release.md),
+  # before anything is tagged. Every file listed in SHA256SUMS has a provenance attestation by
+  # this file on refs/heads/main at the commit, from a GitHub-hosted runner; and each package
+  # verifies from its bundle as well, the way hostkeeper verifies it.
+  verify:
+    needs: [attest]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bundles
+          path: dist
+      - name: Verify every archive, package and the index, and each package from its bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check --strict SHA256SUMS
+          signer=(--repo "$REPO" --signer-workflow "$REPO/.github/workflows/artifacts.yml" --source-ref refs/heads/main --source-digest "$COMMIT" --deny-self-hosted-runners)
+          for file in ./*.tar.gz ./*.tar.zst ./js-agent-index.json; do
+            gh attestation verify "$file" "${signer[@]}"
+          done
+          for package in ./*.tar.zst; do
+            gh attestation verify "$package" --bundle "$package.sigstore.json" "${signer[@]}"
+          done
