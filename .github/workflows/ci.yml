@@ -699,8 +699,15 @@ jobs:
   # (`--branch`, rustc's `-Zcoverage-options=branch`) is unstable, so this job alone
   # builds with a pinned nightly; every other job stays on the toolchain in
   # rust-toolchain.toml. The nightly may warn where stable does not, so `-D warnings` is
-  # off here (clippy enforces it). cargo-llvm-cov is the release binary, checked against
-  # its SHA-256 before use.
+  # off here (clippy enforces it). cargo-llvm-cov and cargo-nextest are release
+  # binaries, each checked against its SHA-256 before use.
+  #
+  # The tests run under cargo-nextest (`cargo llvm-cov nextest`): every test in a process
+  # of its own, as many at once as the runner has CPUs, whatever binary each is in.
+  # `cargo test` runs one test binary after another, so a binary whose few tests are long
+  # (the simulator scenarios of js-sim-cell, unoptimised and instrumented here) kept most
+  # of the runner idle while it ran; the tests and the lines and branches they cover are
+  # the same either way.
   coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -721,6 +728,8 @@ jobs:
       COVERAGE_TOOLCHAIN: nightly-2026-10-01
       LLVM_COV_VERSION: 0.9.1
       LLVM_COV_SHA256: b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
+      NEXTEST_VERSION: 0.9.146
+      NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -733,6 +742,9 @@ jobs:
       - name: Install cargo-llvm-cov (pinned version and checksum)
         run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v$LLVM_COV_VERSION/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$LLVM_COV_SHA256" --out "$HOME/.cargo/bin/cargo-llvm-cov" --extract tar.gz --member cargo-llvm-cov
       - run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --version
+      - name: Install cargo-nextest (pinned version and checksum)
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$NEXTEST_SHA256" --out "$HOME/.cargo/bin/cargo-nextest" --extract tar.gz --member cargo-nextest
+      - run: cargo "+$COVERAGE_TOOLCHAIN" nextest --version
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cargo-cache
         with:
@@ -764,8 +776,9 @@ jobs:
             find "$root/deps" -maxdepth 1 -type f ! -name '*.*' -delete
           fi
       - run: mkdir -p target/coverage
-      # `--profile coverage` (Cargo.toml): unoptimised code, whatever the `test` profile
-      # optimises for the test job; its output is under target/llvm-cov-target/coverage.
+      # `--cargo-profile coverage` (Cargo.toml; nextest's own `--profile` is another
+      # thing): unoptimised code, whatever the `test` profile optimises for the test
+      # job; its output is under target/llvm-cov-target/coverage.
       # The coverage profile must stay unoptimised: it inherits `dev`, so a
       # `[profile.dev.package.*]` override in Cargo.toml would leak into it and inline
       # away lines the report then counts as missed (crates/xtask/tests/profile_overrides.rs
@@ -773,7 +786,7 @@ jobs:
       # The tests and the report are two steps, so the lcov is written (and uploaded
       # below) even when a test fails.
       - name: Run the workspace tests under coverage
-        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --workspace --locked --no-fail-fast --profile coverage --branch --no-report
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --no-fail-fast --cargo-profile coverage --branch --no-report
       - name: Write the lcov report
         if: ${{ !cancelled() }}
         env:
