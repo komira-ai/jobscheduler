@@ -99,6 +99,7 @@ pub fn a_failed_read_changes_nothing<B: Backend>(backend: &B) {
                     failed_prepares: 1,
                     prepare_bars: BTreeMap::new(),
                     terminal: false,
+                    queue: None,
                 };
                 jobs.fail_prepare_with(&whole, failed, &|_| Vec::new())
                     .map(drop)

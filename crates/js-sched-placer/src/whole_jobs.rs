@@ -43,6 +43,7 @@ use std::time::Duration;
 use js_agent_wire::RefusalReason;
 use js_jobs::{Booked, Exclusion, FailedPrepare, JobId, JobRecord, MarkRecord, Needs};
 use js_registry::{WholeNodeConfig, prepare_exclusion};
+use js_sched::queue_status::{self, Outcome};
 use js_sched::{Bar, Event, Request, RestoredMark, RestoredWhole};
 use js_state::StoreTime;
 use js_types::HostId;
@@ -419,8 +420,9 @@ fn store_of(at: FarmTime) -> StoreTime {
 /// are its own with the host's exclusion merged in, the registry's table of causes
 /// ([`prepare_exclusion`], a back-off ending `reserve_backoff` after `now`) taking the
 /// stronger bar of the two on the host; and the job is terminal when the count reaches
-/// `max_replace`. The flag says whether the cause taints the host (the table gives it no
-/// exclusion): the caller taints it.
+/// `max_replace`; a job that is not terminal carries its requeue note
+/// ([`js_sched::queue_status::Outcome::Requeued`]). The flag says whether the cause taints the
+/// host (the table gives it no exclusion): the caller taints it.
 pub fn failed_prepare(
     job: &JobRecord,
     host: &HostId,
@@ -442,10 +444,15 @@ pub fn failed_prepare(
         let kept = prepare_bars.get(host).map(|kept| bar_of_exclusion(*kept));
         prepare_bars.insert(host.clone(), exclusion_of_bar(stronger(kept, bar)));
     }
+    let terminal = failed_prepares >= settings.max_replace;
+    let requeued = Outcome::Requeued { host: host.clone() };
     let failed = FailedPrepare {
         failed_prepares,
         prepare_bars,
-        terminal: failed_prepares >= settings.max_replace,
+        terminal,
+        queue: (!terminal)
+            .then(|| queue_status::note(&requeued, job.queue.code()))
+            .flatten(),
     };
     (failed, bar.is_none())
 }

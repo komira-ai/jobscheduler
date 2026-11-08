@@ -57,6 +57,18 @@
 //!    ([`Engine::job_failed`]): nothing is booked, the job stays queued and the next pass
 //!    places it. A job that books the whole host and runs on the host itself is not marked or
 //!    committed by the whole-host pass: it stays queued.
+//! 6. **Records why each job waits** (`docs/design/queue-status.md`): what pass 2 told of a
+//!    job since the last pass ([`SchedPlacer::note_outcomes`]), then the pass's own outcome
+//!    for it, decided by [`js_sched::queue_status::notes`] against the code the job showed.
+//!    A placement's notes ride in its commit ([`Placement::queue`]); a job the walk placed
+//!    nowhere waits for capacity, and a whole-host job that was not committed waits for a
+//!    whole host, naming the host its mark holds. A job whose status the notes would not
+//!    change is not written ([`js_jobs::QueueTrail::changed_by`]); the others are written
+//!    with [`js_jobs::JobStore::note_queue`], and one that fails is logged and counted and
+//!    written by a later pass: what pass 2 told of a job whose placement or status write did
+//!    not land is given back, for the job's status write after it in the pass or for the next
+//!    pass, before what pass 2 told since. The pass is the one writer of a job's queue status: pass 2
+//!    writes none.
 //!
 //! The start rides on the host's next heartbeat reply, built from the job table
 //! (the server's `per_job`): so the server's [`JobStarts`] hands no start on (it only collects
@@ -79,10 +91,11 @@ use js_jobs::{
 };
 use js_registry::{HostState, HostView, WholeNodeConfig};
 use js_sched::ceiling::within_ceiling;
+use js_sched::queue_status::{self, Outcome};
 use js_sched::{Event, Prediction, Request};
 use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, Qos, WorkKey};
-use js_types::{HostId, JobNetwork, Resources};
+use js_types::{HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
 use super::whole_jobs::{WholeJobStep, WholeJobs, backfill_wall};
@@ -118,6 +131,10 @@ fn is_fenced(error: &JobStoreError) -> bool {
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
 /// none is a lease of the registry's (term 1) or one taken up (term 0).
 pub const JOB_TERM: u64 = 2;
+
+/// A placement the walk decided: the job, its host, what it books there and what its commit
+/// writes beside the booking ([`Engine::walk_jobs`]).
+pub type Decided = (JobId, HostId, Booked, Placement);
 
 /// A job allocation the engine holds.
 #[derive(Debug, Clone)]
@@ -292,12 +309,15 @@ impl Engine {
     /// left out of the room of every job behind it in the walk. A job that books the
     /// whole host is not walked, nor is one whose constraints are no platform requirements
     /// (logged): neither closes a host.
+    ///
+    /// Returns the placements, and each walked job placed nowhere with whether some open host
+    /// could run it (it waits for room) or none could, both in queue order.
     pub fn walk_jobs(
         &mut self,
         queued: &[JobRecord],
         open: &BTreeMap<HostId, OpenHost>,
         now: FarmTime,
-    ) -> Vec<(JobId, HostId, Booked, Placement)> {
+    ) -> (Vec<Decided>, Vec<(JobId, bool)>) {
         let nodes: BTreeMap<HostId, (super::Node, &OpenHost)> = open
             .iter()
             .filter_map(|(host, offer)| {
@@ -346,13 +366,19 @@ impl Engine {
                 host
             },
         );
-        let decided = walkers.into_iter().zip(placed);
+        let decided = walkers.into_iter().zip(placed).zip(&usable);
         let mut placements = Vec::new();
-        for (walker, host) in decided.filter_map(|(walker, host)| Some((walker, host?))) {
-            let placement = self.backfill_placement(walker.wall, &host, now);
-            placements.push((walker.job, host, walker.booked, placement));
+        let mut waiting = Vec::new();
+        for ((walker, host), capable) in decided {
+            match host {
+                Some(host) => {
+                    let placement = self.backfill_placement(walker.wall, &host, now);
+                    placements.push((walker.job, host, walker.booked, placement));
+                }
+                None => waiting.push((walker.job, !capable.is_empty())),
+            }
         }
-        placements
+        (placements, waiting)
     }
 
     /// What the commit of a job placed on `host` writes beside its booking: when a whole-host job
@@ -601,9 +627,28 @@ impl SchedPlacer {
             engine.sync_jobs(&live);
             engine.whole_jobs(&input, now)
         };
+        let mut noted = Noted {
+            codes: queued
+                .iter()
+                .map(|job| (job.id.clone(), job.queue.code()))
+                .collect(),
+            outcomes: self.take_outcomes(),
+            taken: BTreeMap::new(),
+        };
+        let mut emptying: BTreeMap<JobId, HostId> = marks
+            .iter()
+            .map(|mark| (mark.job.clone(), mark.host.clone()))
+            .collect();
         let mut placed = Vec::new();
         for step in steps {
-            match self.write_step(jobs, &step, hosts.whole, (starts, metrics)) {
+            match &step {
+                WholeJobStep::Mark(mark) => {
+                    drop(emptying.insert(mark.job.clone(), mark.host.clone()))
+                }
+                WholeJobStep::Unmark(job) => drop(emptying.remove(job)),
+                WholeJobStep::Commit { .. } => {}
+            }
+            match self.write_step(jobs, &step, hosts.whole, (starts, metrics), &mut noted) {
                 Ok(job) => placed.extend(job),
                 Err(error) => {
                     warn!(?step, %error, "a write for a whole-host job was not committed; the job stays queued");
@@ -611,8 +656,9 @@ impl SchedPlacer {
                 }
             }
         }
-        let decided = self.engine().walk_jobs(&queued, hosts.open, now);
-        for (job, host, booked, placement) in decided {
+        let (decided, waiting) = self.engine().walk_jobs(&queued, hosts.open, now);
+        for (job, host, booked, mut placement) in decided {
+            placement.queue = noted.placed(&job, &host);
             match jobs.place_with(&job, host.clone(), booked, placement) {
                 Ok((record, _)) => {
                     told(&record, &host, (starts, metrics));
@@ -620,11 +666,34 @@ impl SchedPlacer {
                 }
                 Err(error) => {
                     self.engine().job_failed(&job);
+                    noted.unwritten(&job);
                     warn!(%job, %host, %error, "a queued job's placement was not committed; it stays queued");
                     // A store with a newer writer commits nothing more: the pass ends here
                     // and answers the error, for the caller to trip the fence on.
                     failed_write(error, metrics)?;
                 }
+            }
+        }
+        let mut waits: BTreeMap<JobId, Outcome> = waiting
+            .into_iter()
+            .map(|(job, capable)| (job, Outcome::Waiting { capable }))
+            .collect();
+        for job in &whole {
+            let host = emptying.get(&job.id).cloned();
+            waits.insert(job.id.clone(), Outcome::WholeHost { emptying: host });
+        }
+        let committed: BTreeSet<&JobId> = placed.iter().collect();
+        let unplaced = queued.iter().filter(|job| !committed.contains(&job.id));
+        for job in unplaced {
+            let notes = noted.waiting(&job.id, waits.remove(&job.id));
+            if !job.queue.changed_by(&notes) {
+                continue;
+            }
+            if let Err(error) = jobs.note_queue(&job.id, &notes) {
+                warn!(job = %job.id, %error, "a queued job's queue status was not written; the next pass writes it");
+                noted.unwritten(&job.id);
+                self.restore_outcomes(noted.outcomes.remove_entry(&job.id).into_iter().collect());
+                failed_write(error, metrics)?;
             }
         }
         Ok(placed)
@@ -639,6 +708,7 @@ impl SchedPlacer {
         step: &WholeJobStep,
         settings: Option<&WholeNodeConfig>,
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
+        noted: &mut Noted,
     ) -> Result<Option<JobId>, JobStoreError> {
         match step {
             WholeJobStep::Mark(mark) => {
@@ -655,12 +725,14 @@ impl SchedPlacer {
                 let placement = Placement {
                     prepare_timeout,
                     wall_limit_secs: None,
+                    queue: noted.placed(job, host),
                 };
                 let placed = jobs.place_with(job, host.clone(), Booked::WholeHost, placement);
                 let (record, allocation) = match placed {
                     Ok(placed) => placed,
                     Err(error) => {
                         self.engine().whole_job_failed(job);
+                        noted.unwritten(job);
                         return Err(error);
                     }
                 };
@@ -671,6 +743,46 @@ impl SchedPlacer {
                 Ok(Some(job.clone()))
             }
         }
+    }
+}
+
+/// What a pass records on each queued job's queue status (`docs/design/queue-status.md`): the
+/// code each showed when the pass read it, and what pass 2 told of each since the last pass.
+pub(super) struct Noted {
+    codes: BTreeMap<JobId, QueueCode>,
+    outcomes: BTreeMap<JobId, Vec<Outcome>>,
+    /// What pass 2 told of each job whose notes were taken this pass, until its write lands.
+    taken: BTreeMap<JobId, Vec<Outcome>>,
+}
+
+impl Noted {
+    /// The notes of `job`: what pass 2 told of it, then `last`, the pass's own outcome.
+    fn notes(&mut self, job: &JobId, last: Option<Outcome>) -> Vec<QueueNote> {
+        let current = self.codes.get(job).copied().unwrap_or_default();
+        let told = self.outcomes.remove(job).unwrap_or_default();
+        let mut outcomes = told.clone();
+        self.taken.insert(job.clone(), told);
+        outcomes.extend(last);
+        queue_status::notes(current, &outcomes)
+    }
+
+    /// What pass 2 told of `job`, whose write with its notes did not land, given back: to this
+    /// pass, for the job's queue status write after a placement that failed.
+    fn unwritten(&mut self, job: &JobId) {
+        let told = self.taken.remove(job).unwrap_or_default();
+        self.outcomes.insert(job.clone(), told);
+    }
+
+    /// The notes of `job`, placed on `host`, for its placement's commit.
+    fn placed(&mut self, job: &JobId, host: &HostId) -> Vec<QueueNote> {
+        let host = host.clone();
+        self.notes(job, Some(Outcome::Placed { host }))
+    }
+
+    /// The notes of the queued `job` the pass did not place, which waits as `wait` says (none
+    /// for a job the pass does not walk).
+    fn waiting(&mut self, job: &JobId, wait: Option<Outcome>) -> Vec<QueueNote> {
+        self.notes(job, wait)
     }
 }
 
@@ -717,6 +829,14 @@ impl SchedPlacer {
     pub fn booked_on(&self, host: &str) -> Option<js_types::sched::Resources> {
         let worker = js_types::sched::WorkerId::new(host);
         self.engine().sched.booked(&worker)
+    }
+
+    /// What pass 2 told of each job that the next pass has still to take
+    /// ([`SchedPlacer::note_outcomes`]), left as it is.
+    pub fn outcomes_noted(&self) -> BTreeMap<JobId, Vec<Outcome>> {
+        let taken = self.take_outcomes();
+        self.restore_outcomes(taken.clone());
+        taken
     }
 
     /// How many operations wait in the engine's scheduler: a job a pass did not place leaves

@@ -9,9 +9,10 @@ use std::time::Duration;
 use js_elastic::{
     AcquireId, Acquired, Demand, EventStream, Held, HostRef, Offer, ProviderError, Released, Secret,
 };
-use js_jobs::{AllocationRecord, JobRecord, JobStoreError};
+use js_jobs::{AllocationRecord, JobId, JobRecord, JobStoreError};
 use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
+use js_sched::queue_status::Outcome;
 
 /// What the scaler reads of the job tables at a tick: the demand and the hosts in use.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -90,6 +91,14 @@ pub trait Effects: Send + Sync {
     /// every offer was refused for. Zero by default: no catalog is fetched.
     fn catalog_fetches(&self) -> u64 {
         0
+    }
+
+    /// Hands what a step reached for queued jobs (a refused acquire made for a job's request,
+    /// a machine launched for one) to the placement pass, which records it on each job's
+    /// queue status (`docs/design/queue-status.md`, section 2). Called once a tick, after the
+    /// step. Nothing by default: a server that places no jobs records none.
+    fn pass_two(&self, outcomes: Vec<(JobId, Outcome)>) {
+        drop(outcomes);
     }
 
     /// Whether a read of the machine `id` by id says the provider no longer has it.

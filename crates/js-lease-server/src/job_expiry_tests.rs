@@ -254,6 +254,7 @@ fn a_whole_host_job_has_no_start_timeout_while_placed_and_counts_from_its_prepar
     let placement = Placement {
         prepare_timeout: Some(Duration::from_secs(600)),
         wall_limit_secs: None,
+        ..Placement::default()
     };
     let (_, allocation) = jobs
         .place_with(&id, host(), Booked::WholeHost, placement)

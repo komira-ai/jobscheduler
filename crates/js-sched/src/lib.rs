@@ -113,6 +113,8 @@
 //!   job now ([`acquire::pick`], pass 2 of design 5.6): providers in order, the pool's
 //!   limits and each provider's share, then price, fewest accelerators, least spare,
 //!   purchase order and offer id. Nothing calls it yet.
+//! - what a pass records of why a queued job waits ([`queue_status::note`]): the queue code
+//!   and event an outcome of pass 1 or pass 2 gives a job.
 //!
 //! Not yet: placement scoring beyond the spread (alignment, best fit), a reservation for
 //! a large `action` request (an action asking for most of a worker's cores waits, because spreading leaves no worker with the cores), reclaimed room and preemption, a budget for the
@@ -139,6 +141,7 @@ mod input;
 mod load;
 mod probe;
 mod queue;
+pub mod queue_status;
 pub use load::{
     Charge, Choice, DecidedBy, EVALUATIONS_PER_WORKER, FitShape, H_PLUS, HORIZON, HostFacts,
     LeaseFacts, Load, MAX_BALANCE, PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,

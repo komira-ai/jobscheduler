@@ -29,12 +29,17 @@
 //!   announced shape does not fit the job. The job is then demand as any other. Reservations are kept in
 //!   memory only: after a restart a queued job is matched again to a machine on its way by
 //!   what it fits, as before any reservation.
+//! - **Queue status** ([`pass_two`]). What a step reached for a job's request, each refused
+//!   acquire made for it and each machine launched for it, is handed to the placement pass
+//!   ([`Effects::pass_two`](super::Effects::pass_two)), which records it on the job's queue
+//!   status (`docs/design/queue-status.md`). The shell writes nothing to the job's row.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_elastic::Demand;
 use js_jobs::{AllocationRecord, JobId, JobRecord, Needs};
-use js_scaler::{HostFacts, Phase, Records, Waiting};
+use js_scaler::{HostFacts, Phase, Records, State, Waiting};
+use js_sched::queue_status::Outcome;
 use js_types::{AcceleratorNeed, HostId, RequestId, Resources};
 use sha2::{Digest, Sha256};
 
@@ -201,6 +206,23 @@ impl Reservations {
             })
             .collect()
     }
+}
+
+/// What the step that left `next` reached for the jobs of `jobs` (each waiting request's job,
+/// by request id), in the order it came: each refused acquire made for a job's request, then
+/// each machine launched for one. A refusal recorded with no request, and a request that
+/// names no job (a lease request's), are left out.
+pub(super) fn pass_two(next: &State, jobs: &BTreeMap<RequestId, JobId>) -> Vec<(JobId, Outcome)> {
+    let job_of = |request: &RequestId| jobs.get(request).cloned();
+    let refused = next.refusals.iter().filter_map(|refused| {
+        let job = job_of(refused.request.as_ref()?)?;
+        Some((job, Outcome::Refused(refused.clone())))
+    });
+    let launched = next.launched.iter().filter_map(|(machine, request)| {
+        let machine = machine.clone();
+        Some((job_of(request)?, Outcome::Launched { machine }))
+    });
+    refused.chain(launched).collect()
 }
 
 #[cfg(test)]

@@ -70,6 +70,7 @@ pub(super) fn full_job() -> JobRecord {
             ),
             (HostId::new("host-c").expect("a host"), Exclusion::ForLife),
         ]),
+        queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
 }
@@ -103,6 +104,7 @@ pub(super) fn bare_job() -> JobRecord {
         client: None,
         failed_prepares: 0,
         prepare_bars: BTreeMap::new(),
+        queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
 }

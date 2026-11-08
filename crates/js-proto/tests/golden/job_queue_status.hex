@@ -1,0 +1,8 @@
+# The bytes the queue status fields add to golden/job.hex: the encoding of common::job()
+# with the four fields of tests/queue_status.rs (queued_job) set, after the golden's bytes.
+# A field the previous schema has is not here; each line is one field.
+8a 02 07  08 03  12 01 71  18 07                        # 33 queue_status: code 3 (quota backoff), detail "q", since_ms 7
+90 02 02                                                # 34 attempts: 2
+9a 02 0a  08 01  10 05  1a 01 70  22 01 68              # 35 events[0]: at_ms 1, kind 5 (placed), detail "p", host_id "h"
+9a 02 04  08 02  10 04                                  # 35 events[1]: at_ms 2, kind 4 (failing over); an empty detail and no host are not written
+a0 02 01                                                # 36 dropped_events: 1

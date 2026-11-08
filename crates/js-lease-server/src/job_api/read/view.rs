@@ -17,18 +17,22 @@
 //!   the job ends. The message's `cancel_requested` means the cancel was asked for and the job
 //!   has not yet ended, or the job ended lost after the ask (`job.proto`), so a job that ended
 //!   any other way, cancelled included, shows it false ([`cancel_requested`]).
+//! - The record keeps the last queue code of a job in every state. The message shows it while
+//!   the job is queued, and on a job past the queue only when it is `placed`: a job that ended
+//!   without being placed shows none, since its last wait no longer holds ([`queue_status`]).
+//!   Its attempts and events are shown in every state.
 
 use std::time::Duration;
 
 use js_jobs::{
-    Isolation, JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy, ResourceUsage,
-    ResultReason, StartFailure,
+    Isolation, JobEvent, JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy,
+    ResourceUsage, ResultReason, StartFailure,
 };
 use js_proto::v1;
 use js_state::StoreTime;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
-    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ExecMode,
+    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ExecMode, JobEventKind, QueueCode,
 };
 
 use crate::job_api::validate::ISA_LEVEL_KEY;
@@ -231,6 +235,60 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
         host_silent_since_ms: None,
         cancel_requested: cancel_requested(job),
         client: job.client.as_ref().map(|client| client.as_str().to_owned()),
+        queue_status: queue_status(job),
+        attempts: job.queue.attempts(),
+        events: job.queue.events().iter().map(event).collect(),
+        dropped_events: job.queue.dropped_events(),
+    }
+}
+
+/// The queue status `job` shows: its record's code, detail and the time the code last
+/// changed; none while nothing was recorded, and none on a job past the queue that was never
+/// placed, whose last code (a wait) no longer holds.
+fn queue_status(job: &JobRecord) -> Option<v1::QueueStatus> {
+    let trail = &job.queue;
+    let holds = (job.state == JobState::Queued) | (trail.code() == QueueCode::Placed);
+    let code = queue_code(trail.code()).filter(|_| holds)?;
+    Some(v1::QueueStatus {
+        code: code.into(),
+        detail: trail.detail().to_owned(),
+        since_ms: trail.since().map_or(0, millis),
+    })
+}
+
+/// The job service's value of `code`; none for unspecified, which shows no status.
+fn queue_code(code: QueueCode) -> Option<v1::QueueStatusCode> {
+    use v1::QueueStatusCode as V;
+    let value = match code {
+        QueueCode::Unspecified => return None,
+        QueueCode::WaitingForCapacity => V::WaitingForCapacity,
+        QueueCode::WaitingForWholeHost => V::WaitingForWholeHost,
+        QueueCode::QuotaBackoff => V::QuotaBackoff,
+        QueueCode::FailingOver => V::FailingOver,
+        QueueCode::Placed => V::Placed,
+        QueueCode::WaitingForMachine => V::WaitingForMachine,
+    };
+    Some(value)
+}
+
+/// One event of a job's history as the job service shows it.
+fn event(event: &JobEvent) -> v1::JobEvent {
+    use v1::JobEventKind as V;
+    let kind = match event.kind {
+        JobEventKind::Unspecified => V::Unspecified,
+        JobEventKind::WaitingForCapacity => V::WaitingForCapacity,
+        JobEventKind::WaitingForWholeHost => V::WaitingForWholeHost,
+        JobEventKind::QuotaBackoff => V::QuotaBackoff,
+        JobEventKind::FailingOver => V::FailingOver,
+        JobEventKind::Placed => V::Placed,
+        JobEventKind::Requeued => V::Requeued,
+        JobEventKind::WaitingForMachine => V::WaitingForMachine,
+    };
+    v1::JobEvent {
+        at_ms: millis(event.at),
+        kind: kind.into(),
+        detail: event.detail.clone(),
+        host_id: event.host.as_ref().map(|host| host.as_str().to_owned()),
     }
 }
 
