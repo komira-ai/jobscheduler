@@ -7,8 +7,7 @@
       "args": ["sleep", "5"],
       "cpu_millis": 1000,
       "memory_bytes": 1073741824,
-      "wall_ms": 60000,
-      "class": "action"
+      "wall_ms": 60000
     }
   ]
 }

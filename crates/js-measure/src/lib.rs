@@ -23,8 +23,8 @@
 //! - `records.jsonl`: one [`Record`] per run: `setting`, `arm`, `run_index`, `seed`,
 //!   `commit`, `label` (`"warmup"` on a warm-up) and `metrics`, a map from the names in
 //!   [`metric::name`] to a number or `null` (not available).
-//! - `jobs.jsonl`: one row per job of each run with the job's own facts (the k of
-//!   `runtime_actual_over_predicted` per job, for the histogram).
+//! - `jobs.jsonl`: one row per job of each run with the job's own facts (its queue wait,
+//!   run time, booked and used CPU and peak memory).
 //! - `minutes.jsonl`: one row per host-minute of the run window with the CPU and RAM
 //!   share of the host.
 //!

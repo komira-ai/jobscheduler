@@ -8,7 +8,6 @@
       "cpu_millis": 2000,
       "memory_bytes": 4294967296,
       "wall_ms": 120000,
-      "class": "action",
       "stagger_ms": 100
     }
   ]

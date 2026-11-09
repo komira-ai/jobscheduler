@@ -1,8 +1,8 @@
 {
-  "parameter": "large_job_class",
+  "parameter": "large_job_request",
   "settings": ["steady-small-stream"],
   "arms": [
-    { "label": "backfill", "control": true, "lease_class": "action" },
+    { "label": "backfill", "control": true, "whole_host": false },
     { "label": "whole-host" }
   ],
   "runs_per_arm": 20,
