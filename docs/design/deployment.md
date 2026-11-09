@@ -1,7 +1,7 @@
 # Deployment: one service in Kubernetes (5.16)
 
 Companion to [docs/design.md](../design.md), sections 5.4, 5.8, 5.9 and 9.1. Section numbers refer to design.md; 5.16 is defined here. The
-decisions are D33 and D34 and the risks K28 to K31 ([risks-f.md](risks-f.md)). What it rests on in the merged code (read from `js-lease`, `js-lease-server` and
+decisions are D33 and D34 and the risks K28 to K31 ([risks-f.md](risks-f.md)). What it rests on in the merged code (read from `js-lease-server` and
 `js-agent` on `main`) is marked as merged; everything else is design.
 
 ## Target shape
@@ -9,12 +9,12 @@ decisions are D33 and D34 and the risks K28 to K31 ([risks-f.md](risks-f.md)). W
 jobscheduler runs as **one service** in a Kubernetes cluster: one process, one workload, the scheduler and both of its APIs.
 
 ```
-  kbf frontend ──(lease API, TLS)──┐                       ┌── default / aws capacity providers
-  js-cli       ──(lease API, TLS)──┤                       │   (standing access of the service, K7)
+  kbf frontend ──(job API, TLS)────┐                       ┌── default / aws capacity providers
+  js-cli       ──(job API, TLS)────┤                       │   (standing access of the service, K7)
                                    ▼                       │
                            ┌───────────────────────────────┴───┐        ┌──────────────────────────────┐
-                           │ jobscheduler service (one pod)    │──────▶ │ volume: lease file, binding  │
-                           │ lease table, reaper, pool scaler, │        │ file, lock file (one writer) │
+                           │ jobscheduler service (one pod)    │──────▶ │ volume: job store, binding   │
+                           │ job pass, tick, pool scaler,      │        │ file, lock file (one writer) │
                            │ registry, agent API               │        └──────────────────────────────┘
                            └───────────────────────────────────┘
                                    ▲
@@ -22,15 +22,15 @@ jobscheduler runs as **one service** in a Kubernetes cluster: one process, one w
   (generic half of the kbf daemons; the Mac Studio machines of the GPU pool, Linux hosts, VM hosts)
 ```
 
-- **Clients.** The kbf frontend is a client of the service. Its frontend asks for capacity (the lease API, 9.1) and places work inside what
-  it is granted; it makes no scheduler call per action. `js-cli` is another client. Neither runs inside the service.
+- **Clients.** The kbf frontend is a client of the service. Its frontend asked for capacity (the lease API, 9.1, now deleted) and placed work inside what
+  it was granted; it moves to submitting jobs (step 11). `js-cli` is another client. Neither runs inside the service.
 - **Agents.** The generic half of every kbf daemon is `js-agent`, on every machine that runs work. It registers with the service (5.8) with
   the join token of its pool and then heartbeats. Agents only dial out (D22), so a machine outside the cluster needs only a route to the
   service's address.
-- **One process.** The service is the merged `js-lease-server`, which already holds the lease table, the reaper tick, the registry of
+- **One process.** The service is the merged `js-lease-server`, which already holds the job tables, the tick, the registry of
   agents and both APIs (the job API on its `--job-listen` port, `/v1/agent/hello`, `/v1/agent/heartbeat`) behind one lock. The capacity providers, the pool scaler
   and the host registry of 5.7 and 5.8 join the same process as they are built. Nothing about the target needs a second binary.
-- **The stepping stone is the same binary.** Today `js-lease-server` runs on a single host with its lease file on local disk. Kubernetes
+- **The stepping stone is the same binary.** Today `js-lease-server` runs on a single host with its state files on local disk. Kubernetes
   changes where the process, the files and the secrets live, and nothing in the flags, the files or the wire. Moving is a copy of two
   files (below), not a migration of formats.
 
@@ -91,10 +91,9 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
 
 ## The state store
 
-Today the state of the service is files on local disk, beside each other: the **lease file** (`--state-file`, one TOML document
-holding the term, the next sequence and every lease), the **binding file** (`<state file>.agents`, which credential and instance each
+Today the state of the service is files on local disk, beside each other, named after `--state-file`: the **binding file** (`<state file>.agents`, which credential and instance each
 registered host id was admitted with, and the taint and the cordon it holds), the **job store** (`<state file>.jobs`, a SQLite file
-holding every job and allocation, opened when the job service is on), and their lock files. The crash-safety rules of `js-lease` are merged and must hold unchanged:
+holding every job and allocation, opened when the job service is on), and their lock files. The server no longer has a **lease file**: it never opens, locks, reads, writes or deletes one. A lease file left by an earlier release is ignored and stays as it was, so a rollback to that release reads it as it was left (its table and the term it takes are those of the file, not of anything the newer server did). `--boot initialise` and `--boot resume` are still accepted; they decide whether this is the first start and whether the records files are required, and `--boot resume` without a lease file starts. The six crash-safety rules below were written for the lease file. The atomic replace (1), the single writer (3) and the additive reading (6) still hold for the binding file; rules 2, 4 and 5 went with the lease table:
 
 1. **Atomic replace.** A change is written to a temporary file next to the target, fsynced, renamed over it, and the directory is
    fsynced, so a reader sees the old file or the new one and a crash loses neither.
@@ -108,12 +107,12 @@ holding every job and allocation, opened when the job service is on), and their 
    three-answer rule, 5.6).
 6. **Forward and backward readable.** A reader ignores fields it does not know and keeps them on write (R3).
 
-**Options for Kubernetes.** (a) *Single writer on a PersistentVolume*: the same two files on a block volume. (b) *An external store*: the
-lease table and the bindings in a database, with conditional writes (the `js-state` trait of D13).
+**Options for Kubernetes.** (a) *Single writer on a PersistentVolume*: the same files on a block volume. (b) *An external store*: the
+job tables and the bindings in a database, with conditional writes (the `js-state` trait of D13).
 
 **Choice: (a), D33.** Reasons:
 
-- It is the merged persistence, with the six rules above already tested. (b) rewrites the part of `js-lease` that every one of those rules
+- It is the merged persistence of the binding file and the job store (the lease file that carried the rules is gone). (b) rewrites the part of the server that every one of those rules
   lives in, and each rule would need proving again against a database.
 - One writer is already the design: the table is one lock and ids come from one term and one sequence. An external store would not by
   itself make two schedulers safe; two writers also need fencing and an election, which is a design of its own (below).
@@ -124,35 +123,29 @@ lease table and the bindings in a database, with conditional writes (the `js-sta
 **What it means.**
 
 - **The volume must be a block volume with a real local filesystem** (ext4 or xfs behind the volume driver). A network filesystem is
-  refused, because the rename, fsync and lock rules above are not safe to assume there. The lease file, the binding file and the lock file
+  refused, because the rename, fsync and lock rules above are not safe to assume there. The binding file, the job store and the lock file
   stay in one directory of one volume, so that the rename is atomic and the two files age together.
 - **Restart.** A restart reads both files and takes a new term; nothing is rebuilt from elsewhere. Soft state is rebuilt by the agents:
   the facts of each host (5.13) come back at the next hello.
 - **The state database.** The Postgres store a server is given (`--store`, `server.store`: a file holding the connection URL)
   holds the writer lock and the writer generation, the host bindings and join-token digests, and the scaler's records and hosts to
-  remove; the lease file stays a file. The server takes the lock before it reads anything else and holds it for its life, and its
+  remove. The server takes the lock before it reads anything else and holds it for its life, and its
   first start over an empty store imports the files that kept that state, once. The role, the
   URL file, backups, restores and the checks after a restore are in the
   [state-database runbook](../runbooks/state-database.md).
-- **Loss of the volume** is a loss of the leases and the jobs. With `--boot resume` the pod refuses to start; an operator restores the
-  files from a backup (the runbook, steps 5 and 6), or deliberately runs `--boot initialise`. After either, a client's release of a lease
-  the table does not hold fails 404 `unknown-lease`, so the client leases again and the work reruns under the platform-fault budget
-  (8.1), and a run a host lists that the server has no record of is answered `Cancel`. A host that lists a job the restored job store
+- **Loss of the volume** is a loss of the jobs. With `--boot resume` the pod refuses to start where a records file is required and missing; an operator restores the
+  files from a backup (the runbook, steps 5 and 6), or deliberately runs `--boot initialise`. After either, a run an older agent's host lists that the server has no record of is answered `Cancel`. A host that lists a job the restored job store
   does not know is told to stop it and takes no new start until its listing is clean; minted job and allocation ids are random, so a
   restore issues none of them again.
-- **A restore must not lower the term.** A backup holds a term below the ones the lost boots took, so booting it plainly would reissue
-  `(term, sequence)` pairs that stale holders still carry, and a release of an old id could match a different lease. No flag raises it
-  (the `--term-floor` and `--verify-state` this section once prescribed were not built): before the first boot the operator sets `term`
-  in the restored lease file to at least the highest term any lease id carried, and the boot takes the next one. After `--boot
-  initialise` the same applies, so ids of the lost table are never valid again.
+- **There is no term to lower.** The lease file took a new term at every boot, and a restore of an old one had to be raised by hand. The server issues no `(term, sequence)` id any more (job and allocation ids are random), so a restore needs nothing of the kind; a lease file in a restored directory is ignored.
 - **The binding file and the job store are part of the state.** Without the binding file the first hello for a host id after a restart
-  would take the host's lease from anyone holding a join token (K10). The lease file, the binding file and the job store are always
+  would take the host's lease from anyone holding a join token (K10). The binding file and the job store are always
   copied and restored together, with the server stopped.
 
 **(b) later.** An external store is the answer when one of these is true: the service must survive the loss of a node or a zone without a
 minutes-long outage; the table is large enough that the rewrite shows (K29); or a second replica is wanted. It needs the `js-state` trait
 and a database backend (D13), a leader for the tick, the reaper and the scaler (below), and a fence so that a paused old leader's writes
-fail. The lease file stays as the export format.
+fail. The files stay as the export format.
 
 ## High availability: what happens, and what is not covered
 
@@ -179,7 +172,7 @@ without contact, and a run-on one continues. Work already placed inside a lease 
 the scheduler is not in the data path (D22).
 
 **Single active writer, not leader election.** The one writer is made so by three independent things: one replica under `Recreate`; a
-volume that only one pod can use; and the lock on the lease file. A Kubernetes coordination lease is not used: with one replica there is
+volume that only one pod can use; and the lock on the binding file. A Kubernetes coordination lease is not used: with one replica there is
 nothing to elect, and such a lease is not a fence anyway, since a paused leader can still write. If (b) comes, the fence is the store's
 conditional write on the term (D11), with an election to choose who ticks.
 
@@ -213,19 +206,15 @@ and the agents' fence (above). Each step is reversible until the last.
    before the move, with the agents' pins overlapping (old and new accepted), and is not part of it.
 2. Stop the old server with `SIGTERM` and **disable** it, so no unit can restart it: two servers over two copies of the state are two
    tables.
-3. Copy the lease file, the binding file and the job store to the new volume (a one-off pod that mounts the claim). No check of the copied
-   files exists yet; the pod's `--boot resume` refuses a lease file whose `lease_count` disagrees with its tables.
-4. Start the pod with `--boot resume`. It takes the next term and observes each held lease once.
+3. Copy the binding file and the job store to the new volume (a one-off pod that mounts the claim; a lease file beside them is copied as it is and ignored by the pod). No check of the copied
+   files exists yet.
+4. Start the pod with `--boot resume`.
 5. Move the name: the address agents and clients use now points at the service's external entry. Agents re-hello on their own; a client
    retries.
-6. Check that every agent is registered and that the leases held before are held. Only then remove the old files from the old host. Until then the way back is: stop the pod, copy the lease file and the binding
-   file **back from the pod's volume** over the old host's files (never revive the old files as they were: the old host would boot with the
-   term the pod's first boot already took, and ids issued since would be reissued), point the name back and start the old unit. If only the
-   old files remain, first set `term` in the old lease file to at least the highest term the pod's leases carried (no flag does it; see
-   the runbook, step 6).
+6. Check that every agent is registered and that the jobs held before are held. Only then remove the old files from the old host. Until then the way back is: stop the pod, copy the binding file and the job store **back from the pod's volume** over the old host's files, point the name back and start the old unit. A lease-era release started this way reads the lease file on the old host as it was left when the move began: the new server never opened, changed or deleted it, so it holds the leases and the term it held then (runbook, step 6).
 
 ## Tests (13.1, 13.3)
 
-The state rules are the existing `js-lease` tests, unchanged. New: the readiness and lock cases of step 48; the boot grace of step 49 on
+The state rules are the tests of the files that remain. New: the readiness and lock cases of step 48; the boot grace of step 49 on
 the injected clock; the verify mode of step 50 (not built); the manifest test of step 51; the client cases of step 52; and the exercise of step 53,
 which is not run on shared CI. No test asserts elapsed time (R2): outages and graces are counted on the injected clock.

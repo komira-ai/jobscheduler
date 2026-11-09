@@ -104,7 +104,7 @@ the host's network). The container engine runtime refuses host isolation: it has
 tainted before it frees anything.
 
 **The scheduler taints a host job's machine itself.** When it grants a lease whose token carries a `host_jobs` claim, or sends a `Start`
-with `isolation = host`, it records the host as tainted in the lease file before the job starts. This is unconditional and does not wait
+with `isolation = host`, it records the host as tainted (in the binding file) before the job starts. This is unconditional and does not wait
 for the agent: the record is of what the scheduler granted, so an agent that is compromised by the job and reports clean still leaves a
 tainted host. The scheduler never untaints on a `Result`, a hello or a heartbeat. The lease granted keeps running; the host takes no
 other new lease or job. The agent's marker and report below are the second path, and the only one for a finding after a contained job.
@@ -127,7 +127,7 @@ Any finding taints the host, whatever the job declared. A check that cannot run 
 
 **Taint is sticky and reported by the agent.** The agent writes a taint marker under its state root before it reports, so a restart does
 not clear it, and it sends the taint in its `Heartbeat` (reason code, the lease id of the job, the check that found it) until the
-scheduler acknowledges it. The scheduler records the taint durably against the host id (an additive field of the lease file, R3) and
+scheduler acknowledges it. The scheduler records the taint durably against the host id (an additive field of the binding file, R3) and
 announces the phase `tainted` (5.3). A tainted host takes no new lease or job. Its running leases finish or are drained: the consumer is
 told, drains and releases (9.1). **The scheduler never clears a taint on the agent's word:** a later hello or heartbeat without the
 taint changes nothing; only the provider path below, or an operator, ends it.
@@ -141,7 +141,7 @@ taint changes nothing; only the provider path below, or an operator, ends it.
 | `default` (registered) | The host id enters the tainted set and any hello from it is refused with a constant code, even with a valid join credential, until an operator reimages the machine and clears the id. Clearing also drops the binding of the id to its first credential (5.8). |
 
 A tainted host id cannot rejoin: it is checked at admission before the credential. The tainted set survives a scheduler restart (it is in
-the lease file), and an operator's clear is the only way out.
+the binding file), and an operator's clear is the only way out.
 
 **Replacement is bounded.** A replacement is an acquire like any other: it follows `max_step`, `cooldown` and `max_machines`, and a pool
 whose hosts keep tainting (a bad job class) raises an alert after `max_taints_in_a_row` replacements without a clean job between them,

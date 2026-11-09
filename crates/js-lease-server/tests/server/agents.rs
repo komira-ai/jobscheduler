@@ -144,7 +144,7 @@ async fn agent_routes_take_post_only() {
 
 /// Asserts that a server started with no agent flag has no agent route (the client
 /// token gets the 404 of any unknown route, a join-shaped token the 401), lists its two
-/// static hosts as static, keeps no agent file beside the lease file, and counts no
+/// static hosts as static, keeps no agent file beside the state file, and counts no
 /// agent error. It catches the agent side leaking into the GPU service's path.
 #[tokio::test]
 async fn static_pool_alone_unchanged() {

@@ -53,8 +53,13 @@ The per-job messages ride in major 1 beside the lease and run messages. An agent
 `per-job` (`PER_JOB_CAPABILITY`), and the wire crate's rule is that a server sends `job_start` and `job_stop` only to an agent that
 reported it; an agent lists a job a job start began only under `jobs`, never in `held` or `results`
 (`crates/js-agent-wire/src/per_job.rs`). The agent side is built: the agent reports `per-job` (`crates/js-agent/src/contract.rs`)
-and carries out both commands. The server side is not: the lease server on main sends no `job_start` or `job_stop` and answers
-with empty `job_acks` and `retired_acks` (`crates/js-registry/src/runs.rs`). The capabilities
+and carries out both commands. The server side is built too: the lease server adds `job_start`, `job_stop`, `job_acks` and
+`retired_acks` to the reply of an agent that reported `per-job` (`add_jobs` in `crates/js-lease-server/src/agent_api.rs`). The server
+has no run path: the registry never queues a `start`, `stop` or `cancel` for a run. It answers the heartbeat of an agent that still
+keys its work by run, a previous release's, as a responder and nothing more (`answer` in `crates/js-registry/src/registry/beat.rs`):
+a `cancel` for each run the heartbeat lists in `held`, at most `MAX_COMMANDS`, and a `ResultAck` with `unknown-lease` for each entry of
+`results`, so that the agent kills what it holds and drops what it reports. The rest of the reply is empty apart from the taint
+acknowledgement, and the job half is added as above. The registry still records `held` from a hello and a heartbeat. The capabilities
 `one-job` (`ONE_JOB_CAPABILITY`) and `run-files` gate start fields an older agent would silently ignore.
 
 The fence of a job start is the pair it already carries, `job_id` with `allocation_id`; no field is added for it, and no existing
@@ -94,7 +99,6 @@ constant is in `crates/js-agent-wire/src/lib.rs`).
 | `BODY_LIMIT` (`js-lease-server/src/api.rs`) | 64 KiB | the request bodies of the agent routes; for hello and heartbeat `read` in `agent_api.rs` answers 413 `body-too-large` |
 | `REPLY_LIMIT` (`js-client/src/client.rs`) | 1 MiB | the largest answer the client reads |
 | `max_connections` (`js-lease-server/src/config.rs`) | 256 | connections the server holds at once (section 11) |
-| `MAX_LIVE_RUNS`, `MAX_FINISHED_RUNS` (`js-registry/src/runs.rs`) | 256, 256 | runs per host, as built (section 11) |
 
 `MAX_HELD` and `MAX_RESULTS` allow far more than a 64 KiB body can carry; the doc of `HEARTBEAT_BODY_BUDGET` says so. The agent
 lists at most `RETIRED_LISTED` 96 retired job ids (`crates/js-agent/src/lifecycle/machine/per_job.rs`) and fits its results to what
@@ -233,7 +237,7 @@ body limit, not the list caps and not the encoding, is what bounds a heartbeat**
 92 + 167n bytes of JSON (93 + 166n + n − 1 commas), so (65,536 − 92) ÷ 167 = 391 fit, and 22 + 136n of protobuf, so
 (65,536 − 22) ÷ 136 = 481 fit (both rounded down): 481 ÷ 391 = 1.23 times as many. Derived. Past those counts the beat is over the
 limit with no tail left to cut, the server answers 413 and the agent exits 2 (section 1), in either encoding; protobuf moves the
-point, it does not remove it. The registry sends a host at most `MAX_LIVE_RUNS` 256 live runs, and 256 held runs at 128-byte ids are
+point, it does not remove it. The registry once sent a host at most 256 live runs (its run table is deleted), and 256 held runs at 128-byte ids are
 92 + 167 × 256 = 42,844 bytes of JSON, inside the limit; a host that adds results, jobs and a load to that comes nearer. Derived.
 
 Log tails are where the two differ most. JSON writes a control character that has no short escape (anything but `\b`, `\t`,
@@ -305,7 +309,7 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
   from `tests/data/previous_release_starts.jsonl`; `tests/native_old_agent.rs` checks with a frozen copy that an agent from before
   the `native` body refuses a native start.
 - *Compatibility.* The capability rule above, used for `run-files`, `one-job` and `per-job` within major 1. The per-job set is
-  tested both ways against the previous release's bodies; its server side is not built yet (section 1).
+  tested both ways against the previous release's bodies; the server side is built (section 1).
 - *Size and CPU.* The JSON column of section 2. The busy case is 979,456 bytes a second, about 1 MB/s, for 256 hosts at the
   default interval, and the ceiling is set by the body limit in either encoding.
 - *Tooling.* None added.
@@ -442,10 +446,11 @@ previous-release side of those tests is a copy of that release's structs and its
 If the decision is (A):
 
 1. Record the decision in section 3.6 and step 20 of the design (the design's owner edits it; this note does not).
-2. Build the server side of the per-job set (step 28, which also drops the lease and run split from `js-agent-wire`) and decide how
-   the run messages leave major 1 before step 30 deletes the lease routes: a server without the run path must refuse a hello that
-   lacks `per-job` by a named refusal rather than admit an agent it cannot give work (open point 3), with a test of that refusal
-   against the previous release's hello fixture.
+2. Build the server side of the per-job set (step 28) and decide how the run messages leave major 1. The server without a run path
+   does not refuse a hello that lacks `per-job`: a refusal would raise the floor of what the wire accepts, and a format changes only
+   by addition. It admits the agent and answers its heartbeat with a cancel for each held run and an `unknown-lease` acknowledgement
+   for each result (open point 3), with a test of that reply against the previous release's heartbeat fixture. The run messages stay
+   in `js-agent-wire` for as long as an agent of that release runs.
 3. Move the previous-release fixtures to the first release whose agent sends the per-job lists, so the both-direction tests cover
    per-job bodies as a released agent wrote them (`tests/fixtures/v0.1.135` predate them; open point 7).
 4. Bound what a heartbeat lists besides tails so that a beat whose non-tail content passes the body limit cannot be built (section 1:
@@ -480,9 +485,10 @@ server, and the JSON fixtures and frozen copies.
 2. **How near real beats come to the body limit.** Nothing counts 413 `body-too-large` answers or the tails the agent cuts. Settled
    by reading `read` in `crates/js-lease-server/src/agent_api.rs` and `results_budget` in
    `crates/js-agent/src/lifecycle/machine/tails.rs` against the hosts' own logs, which this note does not do.
-3. **How the run messages leave major 1 (steps 28 and 30).** Does a server without the run path refuse a hello without `per-job`, and with
-   which code? Settled in `Registry::hello` (`crates/js-registry/src/registry.rs`) and `ProtocolRange::negotiate`
-   (`crates/js-agent-wire/src/protocol.rs`).
+3. **How the run messages leave major 1 (steps 28 and 30).** A server without the run path admits a hello without `per-job` and answers
+   the agent's heartbeats as a responder (section 1; `answer` in `crates/js-registry/src/registry/beat.rs`). It does not refuse the hello,
+   because that would raise a floor. When the run messages can be dropped from the wire is settled by the last release whose agent
+   keys its work by run, and by `ProtocolRange::negotiate` (`crates/js-agent-wire/src/protocol.rs`).
 4. **Presence of zero values under (B).** Which fields need proto3 `optional` so that zero and absent stay distinct (`exit_code`,
    `disk_gib`, `epoch` 0, a GPU `index` 0)? Settled field by field against the `Option` fields and `serde(default)`s of
    `crates/js-agent-wire/src`.

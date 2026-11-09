@@ -228,7 +228,7 @@ async fn a_second_process_cannot_take_the_writer_lock_on_sqlite() {
 
 /// Asserts that a store setting beside an elastic pool starts the server, whose scaler keeps
 /// its records in the store: the server holds the store, and its ticks write no records file
-/// beside the lease file. It catches a guard that still refuses an elastic pool with a store
+/// beside the state file. It catches a guard that still refuses an elastic pool with a store
 /// setting, and a scaler that still writes its file with one.
 #[tokio::test]
 async fn a_store_with_an_elastic_pool_starts_and_writes_no_records_file() {
@@ -245,7 +245,7 @@ async fn a_store_with_an_elastic_pool_starts_and_writes_no_records_file() {
 
 /// Asserts that agent registration from the flags, whose bindings and join tokens the store
 /// keeps, starts over a SQLite store with the dev flag and serves, and that a tick writes no
-/// agent state or join token file beside the lease file. It catches a guard that still
+/// agent state or join token file beside the state file. It catches a guard that still
 /// refuses agent registration with a store setting, and a store mode that writes the files.
 #[tokio::test]
 async fn agent_registration_starts_over_a_store_and_writes_no_files() {

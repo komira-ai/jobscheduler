@@ -18,7 +18,7 @@ use crate::jobs_support::{
 };
 use crate::support::{Harness, Kept, Scratch, base_args, config, kept_bindings, replace, start};
 
-/// The file of bindings beside the lease file.
+/// The file of bindings beside the state file.
 fn agent_file(scratch: &Scratch) -> PathBuf {
     let mut path = scratch.state().into_os_string();
     path.push(".agents");

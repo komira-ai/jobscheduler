@@ -20,8 +20,8 @@ no network layer, no pool config file, and no status page.
 The design adds, in this order:
 
 1. `js-elastic`: the provider-neutral version of the Lambda `Elastic` trait (acquire, list,
-   release) plus `Offer`, `Demand`, `Bootstrap` and `Secret`. The lease-level
-   trait of `js-provider` (now `js_provider::Pool`) does not change.
+   release) plus `Offer`, `Demand`, `Bootstrap` and `Secret`. (The lease-level
+   `js_provider::Pool` trait this step left alone has since been deleted with the lease table.)
 2. In `js-types`: the job types (`ContainerSpec`, `Requirements`) of section 3.1.
 3. A launch payload (`user_data` for Lambda) and a no-inbound firewall attach in the Lambda crate,
    and a bundled-roots HTTPS client so a pool needs no CA file. The service renders the payload;
@@ -176,20 +176,18 @@ family per architecture) and `allowed_machine_types` (`js-provider-gce`); there 
 
 ### 3.3 Providers
 
-Three things are called a provider in the code and must not be merged:
+Two things are called a provider in the code and must not be merged. A third, the lease-level `Pool` (the allocation port, formerly
+`Provider`, called by the lease table under its lock), is deleted along with the lease table; `crates/js-provider` keeps the `HostBook`
+table of hosts only.
 
 | name | file | calls | who calls it |
 |---|---|---|---|
-| lease-level `Pool` (the allocation port; formerly `Provider`) | `crates/js-provider/src/lib.rs` | `start`, `stop`, `observe`, `capacity` per lease, synchronous | the lease table, under its lock |
-| `CapacitySource` | `crates/js-lease-server/src/capacity.rs` | builds a `Pool` once at start | `Config` |
+| `StaticPoolSource` | `crates/js-lease-server/src/static_pool.rs` | reads the hosts file once and lists its hosts | `Config` |
 | `Elastic` | `crates/js-provider-lambdalabs/src/elastic.rs` | `acquire`, `list`, `release` of machines | nothing yet |
 
-An elastic provider does not implement `js_provider::Pool`. It launches machines; those
-machines register through the agent protocol and become hosts of the pool, which the
-registry already serves as a `Pool` (`crates/js-registry/src/provider.rs`). The lease
-table never waits on a cloud call. The Lambda crate says the same ("It does not implement
-the lease-level `Pool` trait of `js-provider`, which is called under the lease table's lock",
-`lib.rs`). The scaler calls the elastic trait from its own task with no lock held.
+An elastic provider launches machines; those machines register through the agent protocol and
+become hosts of the pool, which the registry serves (`crates/js-registry`). No lock waits on a
+cloud call: the scaler calls the elastic trait from its own task with no lock held.
 
 ### 3.4 Network (requirements 5, 6)
 
@@ -469,7 +467,7 @@ same for `default` and `tailscale`; it is read by the launch shell, never by a p
 Constructors live in the provider crates:
 
 - `js_pool_static::kind::build` reads `hosts_file` and returns `Built::Static(...)` over
-  today's `StaticPoolSource` (`capacity.rs`) and today's file format
+  today's `StaticPoolSource` (`static_pool.rs`) and today's file format
   (`crates/js-pool-static/example.toml`).
 - `js_provider_lambdalabs::kind::build` returns `Built::Elastic`. The crate doc says
   "Nothing here has a built-in address"; the constructor now holds the default API address
@@ -747,7 +745,7 @@ check pass succeeds (10.1).
 The file is never taken to be empty by default. A pool with `launch = "live"` whose file is
 missing does not start: a start with no records forgets the machines in flight and the day's
 spend, and could launch twice. The operator who says this is the first start does it with the
-flag that already says it for the lease file, `--boot initialise` (`boot = "initialise"`); every
+flag that already says it for the server's first start, `--boot initialise` (`boot = "initialise"`); every
 later start is `--boot resume`, which also refuses a missing records file. A pool in `plan`
 mode starts without the file.
 

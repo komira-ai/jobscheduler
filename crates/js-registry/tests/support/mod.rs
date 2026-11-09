@@ -242,6 +242,6 @@ pub fn placed_on(fx: &Fixture, name: &str, request: &Request) -> bool {
     let hosts = fx.registry.hosts();
     let host = hosts.iter().find(|host| host.id.as_str() == name).unwrap();
     let (_, node) = js_sched_placer::map::host(&host.placement_shape()).unwrap();
-    let needs = js_sched_placer::map::needs(request);
+    let needs = js_sched_placer::map::needs_of(&request.capabilities, &request.resources);
     needs.is_ok_and(|needs| needs.matches(&node))
 }

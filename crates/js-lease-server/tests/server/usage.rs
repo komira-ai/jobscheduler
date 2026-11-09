@@ -590,7 +590,7 @@ async fn a_sink_that_panics_on_a_reading_costs_the_beat_nothing() {
     assert_eq!(h.running.usage_counters().faults, 1);
 }
 /// Asserts that the server as started by its flags records into a file and offers admission
-/// the curves: the file `usage.db` appears beside the lease file, `usage_curves` is there,
+/// the curves: the file `usage.db` appears beside the state file, `usage_curves` is there,
 /// and a sink supplied by a test that learns none offers none. It catches a server that
 /// starts with the sink that records nothing, and curves that admission cannot reach.
 #[tokio::test]

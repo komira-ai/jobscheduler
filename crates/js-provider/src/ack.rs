@@ -1,17 +1,6 @@
 use js_types::{HostId, RefusalCode};
 
-/// The pool calls that can answer Unknown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Call {
-    /// [`crate::Pool::start`].
-    Start,
-    /// [`crate::Pool::stop`].
-    Stop,
-    /// [`crate::Pool::observe`].
-    Observe,
-}
-
-/// The answer to a start.
+/// The answer to a start on a [`HostBook`](crate::HostBook).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartAck {
     /// The lease holds this host.
@@ -19,45 +8,30 @@ pub enum StartAck {
         /// The host that was booked.
         host: HostId,
     },
-    /// The pool will not run it, for this reason.
+    /// The book will not take it, for this reason.
     Refused(RefusalCode),
-    /// No answer, or a partial one. The start may or may not have taken effect;
-    /// look the lease up with `observe` before any retry.
-    Unknown,
 }
 
-/// What a read of one lease found.
+/// What a read of one lease in a [`HostBook`](crate::HostBook) found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observed {
-    /// The pool confirms the lease, on this host.
+    /// The book holds the lease, on this host.
     Present {
         /// The host the lease holds.
         host: HostId,
     },
-    /// The pool answered that the lease does not exist.
+    /// The book holds no such lease.
     Absent,
-    /// No answer, a partial answer, or an error other than not-found.
+    /// No answer.
     Unknown,
 }
 
 impl Observed {
-    /// Whether the scheduler may free the booking: only after an explicit
+    /// Whether a booking may be freed: only after an explicit
     /// [`Observed::Absent`]. [`Observed::Unknown`] never frees it.
     pub fn frees_booking(&self) -> bool {
         matches!(self, Self::Absent)
     }
-}
-
-/// The answer to a stop.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StopAck {
-    /// The pool stopped the lease, or found it already gone, and read this back.
-    Stopped {
-        /// The state read after the stop.
-        read_back: Observed,
-    },
-    /// No answer. The stop may or may not have taken effect.
-    Unknown,
 }
 
 #[cfg(test)]

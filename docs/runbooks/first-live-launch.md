@@ -122,7 +122,7 @@ The reader refuses an unknown key, a `launch` other than `plan` or `live`, a day
 | 1.9 | `launch = "plan"` in the pool. A second lock: the provider is built disabled and in dry run unless `launch = "live"`. | `grep launch <config>` prints `plan`; `/v1/pools` shows `launch: plan`. | CI (`a_plan_pool_launches_nothing`) |
 | 1.10 | A client token file for the job service, and the `js` CLI on a machine that can reach `job_listen`. | `js job list --server https://js.example.ts.net:<job port> --token-file <file> --ca-cert <pem>` prints an empty list. | CI (CLI), LIVE (the route) |
 | 1.11 | `server.require_host_credential = true`: the first hello of a one-time join token must ask for a host credential, or it is refused (`join-token-credential-required`, 403) and the token stays unused. The pinned agent asks. | The line is in the config. A launched host's token is dead after its first hello (5.3). | CI (`the_switch_refuses_an_unasked_first_hello_of_a_one_time_token`), LIVE (the pinned agent asks) |
-| 1.12 | Where the records file will be: `<state_file>.scaler`, beside the lease file, in a directory only the service user can write. Back it up with the lease file. | `ls -l` of the directory. Nothing in the directory is deleted by hand during the run. | LIVE |
+| 1.12 | Where the records file will be: `<state_file>.scaler`, beside the state file, in a directory only the service user can write. Back it up with the binding file and the job store. | `ls -l` of the directory. Nothing in the directory is deleted by hand during the run. | LIVE |
 
 On fail: fix the item. Nothing has been spent.
 
@@ -140,7 +140,7 @@ curl -sS https://js.example.ts.net:<port>/healthz
 
 `/healthz` answers 200 `ok` while the tick loop runs, and 503 `tick loop stopped` once the table's
 tick loop or the scaler's task has stopped (a panic ends it). **CI** (`a_panic_in_the_scaler_ends_its_ticks_and_health_says_so`).
-It also answers 503 `store unreachable` while the tick's store paths (the lease file's write, the job
+It also answers 503 `store unreachable` while the tick's store paths (the job
 pass) have failed for `server.store_unreachable_after` (60 s by default); a restart does not mend a store
 that is down, so read the body before restarting. The `store` object of `/v1/pools` says why.
 The status routes need no token. They answer 404 on a `listen` address that is not private and to a peer
@@ -248,7 +248,7 @@ the Lambda console during the run, and the decisions of "Must land" that are not
    step changes a record). Set `boot = "initialise"` for this start only: the service otherwise refuses
    with `<state file>.scaler is missing, and a pool with launch = "live" does not start without its scaler
    records ...`. **CI** (`a_live_pool_with_no_records_file_starts_only_at_a_first_start`). `initialise`
-   creates the lease file if it is missing and takes an existing one as it is; do not use it later to
+   marks a first start and takes existing files as they are; do not use it later to
    get past a missing records file, which would forget the machines in flight and the day's spend.
    Check the diff: these two lines are the only changes. Restart the service.
 2. Read `/v1/pools` again: `launch` is `live`, `state` is `available`. After a restart the scaler does not

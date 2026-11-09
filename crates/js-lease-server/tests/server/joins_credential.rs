@@ -155,7 +155,7 @@ async fn an_older_agent_and_a_pool_token_keep_the_token_path() {
 /// credential, its heartbeats serve, and the retired token is still a 401. It catches a
 /// credential kept in memory only, and a retired token that a restart gives back. It runs
 /// with the tokens in the file and in the state store; in the store it also catches a
-/// credential kept in a file beside the lease file (none is written).
+/// credential kept in a file beside the state file (none is written).
 #[tokio::test]
 async fn the_credential_outlives_a_restart() {
     for kept in Kept::BOTH {

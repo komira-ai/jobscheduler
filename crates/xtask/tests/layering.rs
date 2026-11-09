@@ -113,7 +113,7 @@ fn the_copy_used_for_planted_defects_passes() {
 }
 
 /// Asserts that the lowest layer depending on a higher one is reported with both
-/// layers: `js-types` (types) on `js-lease` (runtime). Catches a lower layer growing
+/// layers: `js-types` (types) on `js-state` (runtime). Catches a lower layer growing
 /// an edge to a higher one.
 #[test]
 fn a_dependency_up_a_layer_is_reported() {
@@ -121,11 +121,11 @@ fn a_dependency_up_a_layer_is_reported() {
     copy.edit(
         "crates/js-types/Cargo.toml",
         "thiserror.workspace = true",
-        "thiserror.workspace = true\njs-lease = { path = \"../js-lease\" }",
+        "thiserror.workspace = true\njs-state = { path = \"../js-state\" }",
     );
     assert_eq!(
         copy.found(),
-        ["js-types (layer types) depends on js-lease (layer runtime), a higher layer"]
+        ["js-types (layer types) depends on js-state (layer runtime), a higher layer"]
     );
 }
 
@@ -138,15 +138,15 @@ fn build_and_target_dependencies_are_edges_and_dev_dependencies_are_not() {
     copy.edit(
         "crates/js-provider/Cargo.toml",
         "[lints]",
-        "[build-dependencies]\njs-lease = { path = \"../js-lease\" }\n\n\
+        "[build-dependencies]\njs-state = { path = \"../js-state\" }\n\n\
          [target.'cfg(unix)'.dependencies]\njs-lease-server = { path = \"../js-lease-server\" }\n\n\
          [dev-dependencies]\njs-cli = { path = \"../js-cli\" }\n\n[lints]",
     );
     assert_eq!(
         copy.found(),
         [
-            "js-provider (layer pure) depends on js-lease (layer runtime), a higher layer",
             "js-provider (layer pure) depends on js-lease-server (layer server), a higher layer",
+            "js-provider (layer pure) depends on js-state (layer runtime), a higher layer",
         ]
     );
 }
@@ -176,13 +176,13 @@ fn a_crate_must_be_in_exactly_one_layer() {
     copy.edit(
         "layers.toml",
         "crates = [\"js-lease-server\"]",
-        "crates = [\"js-lease-server\", \"js-lease\"]",
+        "crates = [\"js-lease-server\", \"js-state\"]",
     );
     assert_eq!(
         copy.found(),
         [
             "js-client is in no layer of layers.toml",
-            "js-lease is in more than one layer of layers.toml",
+            "js-state is in more than one layer of layers.toml",
         ]
     );
 }
@@ -862,9 +862,9 @@ version = "0.1.0"
 }
 
 /// The crates that may build against `js-pool-static` outside tests: `js-lease-server`,
-/// whose `kinds.rs` and `static_pool.rs` build the pool from the hosts file.
-/// The booking table (`HostBook`, `Candidate`, `Held`, `SeatError`) is `js-provider`'s,
-/// so no other crate needs the pool crate to book a host.
+/// whose `kinds.rs` and `static_pool.rs` read the hosts file with it.
+/// The booking table (`HostBook`, `Candidate`, `SeatError`) is `js-provider`'s,
+/// so no other crate needs the pool crate to list a host.
 const MAY_DEPEND_ON_POOL_STATIC: &[&str] = &["js-lease-server"];
 
 /// Every workspace crate under `root/crates` that names `js-pool-static` as a normal
@@ -912,7 +912,7 @@ fn normal_dependents_of_pool_static(root: &Path) -> Vec<String> {
 /// Asserts that in this workspace only the crates of [`MAY_DEPEND_ON_POOL_STATIC`] have
 /// `js-pool-static` as a normal dependency. Catches production code (such as
 /// `js-registry`'s) reaching the booking table through the pool crate again, which would
-/// keep that crate from becoming a test fake.
+/// widen the crate that reads the hosts file into a dependency of the registry.
 #[test]
 fn only_the_hosts_file_wiring_depends_on_js_pool_static() {
     assert_eq!(

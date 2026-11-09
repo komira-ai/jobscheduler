@@ -12,7 +12,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 
 | flag | in the file |
 |---|---|
-| `--listen`, `--state-file`, `--boot`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
+| `--listen`, `--state-file` (the base path of the server's files: `.jobs`, `.agents`, `.joins`, `.scaler`; there is no lease file), `--boot` (`initialise` or `resume`; it governs the first start and whether the records files are required), `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
 | `--default-ttl`, `--max-ttl` | removed: a lease has no time to live (it ends when released or at its maximum wall time). Either flag, and the keys `server.default_ttl` and `server.max_ttl`, are refused at start naming the flag or the key |
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is deprecated and does nothing: js-sched is the only placement, `"js-sched"` is accepted with a warning and `"registry"` is refused at start; a joined pool whose capabilities name no `arch` is refused, as with the flag, and an elastic pool, whose floor names none, is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent); refused unless a pool registers agents |
@@ -24,7 +24,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--metrics-listen` | `server.metrics_listen`, off unless given: the address the operator's metrics are served on (see "The metrics port" below); a private address only, plain HTTP, no token; an address that is not a private one is refused at start naming the flag or the key; needs no agent registration |
 | `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
 | `--store`, `--allow-sqlite-store` | `server.store` and `server.allow_sqlite_store` (`false` unless given; `true` is refused without `server.store`, as the flag is without `--store`): the store the server's state is to be kept in, and the gate of its SQLite backend; see "The store" below |
-| `--store-unreachable-after` | `server.store_unreachable_after`, `"60s"` unless given: how long the store paths of the tick (the lease file's write, the job pass) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both; zero or an unparsable value is refused at start naming the flag or the key |
+| `--store-unreachable-after` | `server.store_unreachable_after`, `"60s"` unless given: how long the store paths of the tick (the job pass) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both; zero or an unparsable value is refused at start naming the flag or the key |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler, and the store's `store:unreachable`, is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
 | `--client-token NAME=PATH` or `NAME:ROLE=PATH` (repeatable) | a `[[client]]` table with `name`, `token_file` and, optionally, `role` (`"client"`, the default, or `"operator"`): one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
@@ -71,7 +71,7 @@ changing its role, takes a restart (a restart ends no job); `default`'s token is
   at start naming the flag.
 - **Agents.** The flag needs `--agent-pool-config` (the key, a pool that registers agents): the job store is held by the agent side,
   and jobs run on hosts that register.
-- **The job store.** Turning the port on opens the job store: today a SQLite file beside the lease file, `<state file>.jobs`, owned
+- **The job store.** Turning the port on opens the job store: today a SQLite file named after the state file, `<state file>.jobs`, owned
   by the server's user and owner-only (mode 0600), with SQLite's own files beside it. It is the single-node development backend: the
   file moves into the shared store when the server's state does. A file that cannot be made owner-only or opened as a state store
   is refused at start naming `--job-listen`. With the store open, the heartbeat of an agent that reports the `per-job` capability is
@@ -148,11 +148,11 @@ file, the job store and the usage file are kept as without it.
   refused at start with exit status 2: `--store: <file> names a sqlite: store, which is accepted only with --allow-sqlite-store: SQLite
   is for tests and single-node development`. With a Postgres store the flag is accepted and does nothing, so one file serves both kinds
   of environment. Like every flag, it is refused beside `--config`.
-- **The lock.** The server takes the store's writer lock before anything else (before it reads or locks the lease file and before it
+- **The lock.** The server takes the store's writer lock before anything else (before it reads any file of the state file's family and before it
   binds a listener) and holds it for its life: a session-level advisory lock on a connection of its own on Postgres, the lock file
   beside the store's file on SQLite. It tries once and does not wait.
 - **A refused start.** A second server on the same store exits 2 with one line, `--store: another process holds the store's writer
-  lock`, having bound nothing and opened neither the store nor the lease file. A lock that cannot be tried (the server is down, the
+  lock`, having bound nothing and opened neither the store nor any file of the state file's family. A lock that cannot be tried (the server is down, the
   login is refused) is `--store: the store's writer lock could not be taken: ...`, also exit 2.
 - **A lost lock.** Every tick asks the lock's session first. When the session is gone (the database restarted, an administrator ended
   it, the connection broke), the lock is gone with it: the tick does nothing more, the server stops serving and ticking, writes
@@ -171,7 +171,7 @@ file, the job store and the usage file are kept as without it.
   with a pool token, a heartbeat's taint). A heartbeat that brings no new taint, a known host's hello and the host book make no store
   call (a known host's hello commits only when its stored binding still holds a cordon that lapsed since the last tick); a host
   credential's renewed time is committed by the tick. A live pool that is not at its first start does not start without the records
-  key, as it does not without the file. The lease file, the job store and the usage database stay where they are.
+  key, as it does not without the file. The job store and the usage database stay where they are.
 - **The first start.** Right after the lock, a start over a store with no `meta/server-state-imported` marker and nothing under
   `hosts/` or `acquires/` imports the four files once: it reads them with the readers a server without the setting uses (a missing
   file is empty; a file of a bad version, a damaged file or one others can use is refused at start, naming it, and nothing is
@@ -179,7 +179,7 @@ file, the job store and the usage file are kept as without it.
   even when there are no files. A start that finds the marker reads none of the files and names each one still there once at info
   level. A store that holds server state without the marker gets the marker only. The server never deletes or changes the files: they
   hold what it held at the cutover and go stale from its first write after it, so a rollback to a build without the setting finds
-  them as they were then; an operator removes them. The lease file is not imported.
+  them as they were then; an operator removes them. The lease file is not imported, and the server never opens it: a lease file left by an earlier release is ignored and stays as it was, so a rollback to that release reads it as it was left.
 
 ```toml
 [server]

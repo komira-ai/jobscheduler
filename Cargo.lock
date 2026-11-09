@@ -1425,20 +1425,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "js-lease"
-version = "0.1.0"
-dependencies = [
- "js-provider",
- "js-system-clock",
- "js-testkit",
- "js-types",
- "serde",
- "thiserror",
- "toml",
- "tracing",
-]
-
-[[package]]
 name = "js-lease-server"
 version = "0.1.0"
 dependencies = [

@@ -628,14 +628,14 @@ pub async fn beat(h: &Harness, token: &str, session: &Session) -> Reply {
     .await
 }
 
-/// The path of the scaler's records beside the lease file of `scratch`.
+/// The path of the scaler's records beside the state file of `scratch`.
 pub fn records_path(scratch: &Scratch) -> std::path::PathBuf {
     let mut name = scratch.state().file_name().unwrap().to_os_string();
     name.push(".scaler");
     scratch.state().with_file_name(name)
 }
 
-/// The path of the hosts the registry refused to remove, beside the lease file of `scratch`.
+/// The path of the hosts the registry refused to remove, beside the state file of `scratch`.
 pub fn unremoved_path(scratch: &Scratch) -> std::path::PathBuf {
     let mut name = records_path(scratch).into_os_string();
     name.push(".unremoved");
@@ -654,13 +654,13 @@ fn kept_at(h: &Harness, path: std::path::PathBuf, key: &str) -> Option<String> {
     }
 }
 
-/// The text of the scaler's records `h` keeps: the file beside the lease file, or the value
+/// The text of the scaler's records `h` keeps: the file beside the state file, or the value
 /// of [`RECORDS_KEY`].
 pub fn kept_records(h: &Harness) -> Option<String> {
     kept_at(h, records_path(&h.scratch), RECORDS_KEY)
 }
 
-/// The text of the hosts to remove `h` keeps: the file beside the lease file, or the value of
+/// The text of the hosts to remove `h` keeps: the file beside the state file, or the value of
 /// [`UNREMOVED_KEY`].
 pub fn kept_unremoved(h: &Harness) -> Option<String> {
     kept_at(h, unremoved_path(&h.scratch), UNREMOVED_KEY)

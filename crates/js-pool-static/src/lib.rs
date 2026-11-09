@@ -1,30 +1,17 @@
-//! A static pool provider: hosts an operator lists in a TOML file, leased one whole
-//! host at a time.
+//! A static pool: the hosts an operator lists in a TOML file, as the server shows them.
 //!
-//! The pool serves `gpu-host` ([`js_types::ResourceClass::gpu_host`], admitted
-//! `BookAll`) unless [`StaticPool::with_classes`] names others, such as `whole-node`
-//! ([`js_types::ResourceClass::whole_node`], admitted `Whole`). In both a lease holds
-//! a whole host, so nothing else runs on it. The pool refuses an admission mode that
-//! does not book a whole host with `UnsupportedClass` rather than leasing a whole
-//! host anyway. A static pool has no agent, so a `Whole` lease is held at once: the
-//! table shows the host quiet and there is nothing to wait for. Its rules, in design
-//! terms:
+//! The pool reads the file once and lists each host with its shape and the memory it was
+//! listed with. It books nothing and holds no lease: no work is placed through it, it has
+//! no lease file, and a restart loses nothing. The server (`js-lease-server`) lists these
+//! hosts beside the hosts that register themselves, and refuses a hello for any of their
+//! ids. The pool serves `gpu-host` ([`js_types::ResourceClass::gpu_host`]) unless
+//! [`StaticPool::with_classes`] names others.
 //!
-//! - **Fit (6.1).** A host fits when its shape offers at least the requested
-//!   resources, with the requested GPU class, and reports every required capability.
-//! - **Rank (6.1).** The first free host by id (byte order of the id) among those that
-//!   fit. There is no load term: with whole-host leases every free fitting host is
-//!   equal, so the id order makes placement deterministic.
-//! - **Stopped leases.** A stopped lease id never starts again: a late or duplicate
-//!   start after the stop is refused with `LeaseEnded`, books nothing, and the lease
-//!   observes `Absent`. A stop of a lease the pool never held is remembered the same way.
-//! - **Absence (5.6).** The pool owns its state, so it knows absence exactly:
-//!   [`js_provider::Pool::observe`] answers `Present` or `Absent`, never
-//!   `Unknown`, and a stop frees the host at once.
-//! - **Seating.** The pool's bookings live in memory and a restart loses them.
-//!   [`StaticPool::seat`] books a named host for a named lease without a start, so a
-//!   caller that has the bookings elsewhere (a lease file) can put them back; it refuses
-//!   a host the pool does not list or another lease holds ([`js_provider::SeatError`]).
+//! - **Shape.** Each host is listed with the shape the file gives it, and with its memory
+//!   cut to the file's `memory_schedulable_percent` (or the percent the caller passes, which
+//!   replaces the file's), rounded down. The cut is made once, when the file is read.
+//! - **Order.** [`StaticPool::hosts`] lists the hosts in byte order of their ids, each free
+//!   of any lease.
 //!
 //! # Configuration
 //!

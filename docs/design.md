@@ -9,7 +9,7 @@ ucdk repository (komira-ai/ucdk) at commit f28c240. Every statement about existi
 marked (not found) means a search of the named place did not find the thing; it is a keyword result, not a proof of absence. Crates of
 jobscheduler itself are named `js-*`; the map is in 10.2.
 
-Code now exists on `main` of this repository: `js-types`, `js-provider`, `js-pool-static`, `js-provider-fake`, `js-conformance`, `js-lease`,
+Code now exists on `main` of this repository: `js-types`, `js-provider`, `js-pool-static`, `js-conformance`,
 `js-lease-server`, `js-cli`, `js-coverage`, `js-agent-wire` (the agent wire, protocol major 1), `js-registry` and `js-agent` (session,
 facts and a lifecycle over a `Runtime` trait; a docker and podman backend is in review). Section 5.9 says what each becomes; 10.2 marks which crates are merged. Everything else
 describes future work. What exists in kbf today (the former section 4) is in [design/kbf-today.md](design/kbf-today.md); references of the
@@ -134,7 +134,7 @@ Non-goals:
   `kbf_sched::input::Request` (`crates/kbf-sched/src/input.rs`) and the scheduler calls it an operation.
 - **Attempt.** One try at a request on one host. Retries and reruns create attempts. Exactly one attempt's result is accepted.
 - **Lease.** Two levels (9.1). A *machine lease* is the scheduler's grant of a host, or a share of one, to a consumer until it is released or its max wall time ends
-  (`js-lease`). A *placement* is a consumer's grant of resources inside its lease to one attempt, identified by (term, sequence)
+  (the lease table that held it was deleted; the job service replaced it). A *placement* is a consumer's grant of resources inside its lease to one attempt, identified by (term, sequence)
   (`LeaseId`, `crates/kbf-types/src/lease.rs`). Per R1, a machine lease covers a node or half a node. A lease is recorded durably before
   anything is told to start (commit before start, `Scheduler::lease_committed` in `crates/kbf-sched/src/scheduler.rs`).
 - **Agent.** The process on a machine that runs work: `js-agent`. It dials out, says hello, heartbeats, and runs and stops containers
@@ -204,7 +204,7 @@ Three things take part, and each has one job.
 - A **capacity provider** supplies machines: the `default` provider is the hosts that registered themselves, an elastic one launches and
   terminates them and the machine registers itself. It never runs work (5.5).
 - A **pool** is the scheduler's view of the machines of one provider that fit one shape: its hosts are the machines whose agents have said
-  hello. The lease table books hosts from pools (5.9).
+  hello. The scheduler places jobs on the hosts of its pools (5.9).
 
 On the agent wire a lease is granted by one party and the rules of 5.4 apply per session to that party. The control stream's `Heartbeat`
 lists machine leases (granted by the scheduler); a work session's lists placements (term, sequence), granted by the leasee. The scheduler
@@ -360,7 +360,7 @@ Semantics, each with a conformance case (13.2):
   scope. It is the record after a restart: the
   scheduler re-adopts each listed instance that matches a pool and an acquire record, and the reaper releases the rest (12.1).
 - **`observe`** is `Present`, `Absent` after an explicit not-found, or `Unknown`. Only `Absent` frees a booking.
-- **Commit before acquire.** The lease table records an `acquire` intent (acquire id, pool, shape) durably before it calls
+- **Commit before acquire.** The design's lease table records an `acquire` intent (acquire id, pool, shape) durably before it calls
   `acquire`, as it records a lease `pending` before it calls `start` (4.1). A crash between the two leaves an intent that `list` resolves.
 - **No call under the table lock.** `acquire` takes minutes. The table records the lease as `acquiring` and returns at once; the pool
   scaler (5.8) makes the call outside the lock and the result arrives as an event (D19).
@@ -392,7 +392,7 @@ only after `release` reads back Absent; a provider outage freezes its pool; a co
 the operation; a VM that vanishes under a run is a failed run (5.14).
 
 ### 5.7 Configuration
-The scheduler is configured by one file named by a flag (`--config`; R4), in the TOML style of `js-pool-static` (`deny_unknown_fields`,
+The scheduler is configured by one file named by a flag (`--config`; R4), in the TOML style of the `js-pool-static` hosts file (`deny_unknown_fields`,
 unique names). Every value is configuration; none is compiled in. A secret is a path to a file, never a value. The one environment
 exception is the cloud's own credential chain (`AWS_*`, ambient role credentials), which R4 permits as a provider-standard variable.
 
@@ -467,13 +467,15 @@ tainted-set check, join credentials and the deny file, instance identity, lifecy
 [design/registration.md](design/registration.md). Proof of admission travels with the hello in message metadata, never in a log line.
 
 ### 5.9 The merged code and what it becomes
-The merged slice is a GPU-host lease service (the whole-node class before its reservation, quiet gate and caps, 5.17): the lease table (`js-lease`) books a whole host from a pool (`js-pool-static`) for a client
-until released or its max wall time, through the `js-provider` trait. That is level 1 of two-level leasing (9.1) already. What it lacks is the machine side: nothing
-on `main` launches or terminates a machine, and there is no agent wire. The GPU-host service keeps working through every follow-up; each
-change below is additive and leaves the `--pool-config` file, the routes and the lease file readable. The operator-listed pool behind that
-file is a stepping stone: `js-pool-static` stays as the `static` test provider, and the GPU machines move to running `js-agent` and
-registering with a `default` provider (step 54). `RegisteredProvider` (`js-registry`) is the core of the `DefaultProvider`, and
-`LayeredProvider`'s fixed order (static, then registered) becomes the configured hierarchy ([design/merged-code.md](design/merged-code.md)).
+The merged slice began as a GPU-host lease service (the whole-node class before its reservation, quiet gate and caps, 5.17): a lease table
+(`js-lease`) booked a whole host from a pool (`js-pool-static`) for a client until released or its max wall time, through the `js-provider`
+`Pool` trait. That is level 1 of two-level leasing (9.1). The lease table, the lease file, the `Pool` trait and the registry's runs are
+deleted, and so are the lease and run routes: the server serves the job service, and places jobs on the hosts that register. What
+remains of the slice is the host side: `js-provider` keeps `HostBook`, the table of hosts and their shapes, `js-pool-static` reads the
+operator's hosts file (`--pool-config`) and the server lists those hosts beside the registered ones, and `js-registry` keeps the
+registered hosts. The server ignores a lease file left by an earlier release and leaves it as it was, so a rollback to that release
+reads it as it was left. `js-pool-static` stays until step 54 (D36), and the GPU machines move to running `js-agent` and registering with
+a `default` provider.
 
 The map of each merged item to what it becomes, with the follow-up step, is in [design/merged-code.md](design/merged-code.md).
 
@@ -512,7 +514,7 @@ macOS VM sizing question (fixed size classes or sizing per run; the boot cost pe
 Text in [design/deployment.md](design/deployment.md). The target is one jobscheduler service in a Kubernetes cluster: the scheduler, the
 job API and the agent API in one process. The kbf frontend is a client that asks it for capacity; `js-agent`, the generic half of the
 kbf daemons, registers with it from every machine. Today's single-host `js-lease-server` is the stepping stone and the same binary. It
-runs as a `Deployment` of one replica under `Recreate`, with the lease file and the binding file on a volume that only one pod can use
+runs as a `Deployment` of one replica under `Recreate`, with the binding file and the job store on a volume that only one pod can use
 (D33), secrets and configuration as mounted files and TLS end to end. Durable, not highly available: a restart or a node loss is a bounded
 outage, leases survive in the file, agents re-hello, and a boot grace keeps leases from ending during an outage (D34). Servers upgrade first.
 
@@ -651,7 +653,7 @@ account is in [design/retries-and-runs.md](design/retries-and-runs.md).
 
 ### 8.2 Phases of a request
 Before a lease a request is *Queued* (waiting for capacity or fit). For a pool that scales, Queued includes waiting for a host to boot: the
-lease table shows the machine lease as `acquiring`, and no separate request phase exists for it. Then Leased, Running, and Completed,
+lease table of the design shows the machine lease as `acquiring`, and no separate request phase exists for it. Then Leased, Running, and Completed,
 Failed or Refused (4.1). Queued time, boot included, counts toward `UNSERVABLE_WAIT`; a pool at `max_machines` with no host that fits the request
 is unservable. A request no host of the pool (and no elastic entry) could ever serve is not queued at all: it is refused with
 `no-capable-host` (D35). There is no Held phase: it would exist only for tenant caps and budgets, which jobscheduler does
@@ -665,8 +667,8 @@ and its fields are in [design/retries-and-runs.md](design/retries-and-runs.md)).
 
 ### 9.1 Two-level leasing
 - **Level 1.** A consumer (kbf, the ucdk adapter, a person with `js-cli`) leases capacity from the scheduler: a machine, or a share of
-  one. The request names a class, label selectors that pick pools (6.2), the shape it needs, and a max wall time. The lease service of `js-lease`
-  and `js-lease-server` is this level: acquire, release, a max wall time, a reaper. The answer carries the lease id, the host
+  one. The request names a class, label selectors that pick pools (6.2), the shape it needs, and a max wall time. The lease service that `js-lease` and
+  `js-lease-server` once were was this level (acquire, release, a max wall time, a reaper); it is deleted, and the job service of `js-lease-server` replaced it. The answer carries the lease id, the host
   and pool, and what the consumer needs to reach the agent.
 - **Level 2.** The consumer sends `Start` and `Stop` to the agent on its host (5.2). It makes no scheduler call per action.
 
@@ -747,14 +749,12 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | jobscheduler crate | From | Notes |
 |---|---|---|
 | `js-types` (merged) | generic half of `crates/kbf-types` | `Resources` as a named vector plus the separate lease-count cap, ids, `ResourceClass`, `Shape`, labels; later farm time, `Qos`, `NodePhase`, `StateMachine`, `Effect`, control record; the wall-clock `Timestamp`, the `Clock` and `Monotonic` traits and `ManualClock`; `StartSpec` and its rules, `RefusalCode`, and the booking values `Held`, `Candidate` and `HostCapacity` |
-| `js-provider` (merged) | new | merged as `Provider`, now renamed `Pool` (the allocation port); `CapacityProvider` lives in `js-elastic`; re-exports `StartSpec` and the booking values from `js-types`; `HostBook`, the booking table the static pool and the registry share |
-| `js-pool-static` (merged) | new | the pool of operator-listed hosts; kept as the `static` capacity provider, **for tests only**, and as the stepping stone of the GPU lease service (5.7, 5.9) |
-| `js-provider-fake` (merged) | new | the merged fake provider; becomes the fake aws at step 28 (13.1) |
+| `js-provider` (merged) | new | `HostBook`, the table of hosts and their shapes that the static pool and the registry share; re-exports `StartSpec` and the booking values from `js-types`. The `Pool` trait (the allocation port) it was merged with is deleted; `CapacityProvider` lives in `js-elastic` |
+| `js-pool-static` (merged) | new | the operator's hosts file (`--pool-config`) and the listing of its hosts; kept **for tests and conformance** until step 54 (D36); it books nothing and holds no lease (5.7, 5.9) |
 | `js-conformance` (merged) | new | the machinery; gains the two suites and their broken providers (13.2) |
-| `js-lease` (merged) | new | the lease table: states, max wall time, reaper, lease file; gains `acquiring` and the pool name (5.9); re-exports the clocks of `js-types` and `js-system-clock` |
 | `js-system-clock` | new | the system's wall and monotonic clocks (`SystemClock`, `SystemMonotonic`) behind the `js-types` clock traits |
-| `js-registry` (merged) | new | the registered hosts: `RegisteredProvider` is the core of the `DefaultProvider` (5.5, providers.md), and `StaticCapacity` is the `static` `CapacityProvider` over them |
-| `js-lease-server` (merged) | new | level 1 over HTTP; `CapacitySource`; `LayeredProvider` (static, then registered) becomes the configured hierarchy; gains the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
+| `js-registry` (merged) | new | the registered hosts (presence, admission, sessions, taint, cordon), and `StaticCapacity`, the `static` `CapacityProvider` over them |
+| `js-lease-server` (merged) | new | the job service and the operator routes; lists the hosts of the hosts file beside the registered ones; the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
 | `js-cli` (merged) | new | the level-1 client; gains pool selection |
 | `js-proto` (merged) | new | the job service as protobuf (package `jobscheduler.v1`: jobs, hosts, pools, providers, usage) with its generated messages and gRPC client and server traits (runtime layer); no server implements it yet |
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
@@ -851,7 +851,7 @@ A test checks the policy document the provider documents against it.
 ## 13. Testing
 
 ### 13.1 Fake providers
-The merged `js-provider-fake` becomes the fake capacity provider, a fake aws in memory with a controllable clock and scripted outcomes:
+The fake capacity provider is a fake aws in memory (the `js-provider-fake` merged earlier was a fake of the deleted `Pool` port and is gone) with a controllable clock and scripted outcomes:
 launch failure, slow boot, an `acquire` accepted but answered Unknown, a `release` answered Unknown, an instance that disappears
 (reclaim), a leaked instance in `list`, a quota refusal, and a duplicate acquire id; a launched machine whose fake agent registers late, never, or
 with a wrong proof; and a fake `default` provider whose hosts register, go lost, deregister and taint on script (the fake aws is elastic, the
@@ -916,8 +916,8 @@ Each step is one small PR (or a short series, each green alone) that leaves kbf 
 with what an operator sees. Steps 0 to 22 (golden gates, moves inside kbf, crates moving out, the wire and the agent) and their gates are
 in [design/extraction-steps.md](design/extraction-steps.md). Steps 3 to 18 move kbf's per-request scheduler into `js-sched`; they apply
 only if D15 keeps per-request placement in the core. The merged slice was built ahead of the ladder: `js-types` is the vocabulary of
-step 16a; `js-provider` and `js-provider-fake` are the host-booking part of step 23 and the fake of step 12; `js-conformance` is step
-20b's machinery; `js-lease`, `js-lease-server` and `js-cli` are level 1 (9.1), which the ladder did not anticipate.
+step 16a; `js-provider` is the host-booking part of step 23; `js-conformance` is step
+20b's machinery; `js-lease-server` and `js-cli` began as level 1 (9.1), which the ladder did not anticipate.
 
 Steps 23 to 35 (Phase D, new capability; Phase E, capacity providers and pools, with steps 30c and 31c for the `default` provider
 and the hierarchy) and **Phase F, steps 36 to 47 (capabilities as data
@@ -1009,8 +1009,8 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
 - **K12. Instance reclaim mid-lease.** The lease is given up, the work reruns against the platform-fault budget (8.1), and the consumer
   re-leases (9.1).
 - **K13. Time.** Scaling that reads a clock outside `tick` is not reproducible; it runs only in `tick` with an injected clock (12.1, 13.5).
-- **K14. Slow acquire under the table lock.** The merged server holds the lock across provider calls (`capacity.rs`); a cloud call would
-  stall every request. Mitigated by asynchronous acquire (D19, step 29).
+- **K14. Slow acquire under the table lock.** The merged server held its lock across provider calls (the lease table is deleted); a cloud call under a lock
+  would stall every request. Mitigated by asynchronous acquire (D19, step 29).
 - **K15. Two-level leasing.** A consumer can double-book inside its lease, and the level-2 invariants are no longer the scheduler's. The
   agent bounds each run by its limits, so work cannot exceed the host; the consumer owns the rest, and its tests prove it.
 - **K16. Reuse leaks state between jobs.** A file, process, mount or user left by one job is seen by the next, perhaps another

@@ -36,7 +36,7 @@ impl Backfill {
     /// Backfill on: the executor ends every operation at its max wall time
     /// ([`crate::Scheduler::set_max_wall`]), for a max wall time no longer than `ceiling`.
     /// Pass the ceiling the executor enforces (the lease server: `server.max_lease_wall`,
-    /// or [`Duration::MAX`] when it sets none, since its lease table ends every lease at
+    /// or [`Duration::MAX`] when it sets none, since the executor ends every operation at
     /// its wall). A max wall time above `ceiling` is taken as none, so that work never
     /// backfills.
     #[must_use]

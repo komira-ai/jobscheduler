@@ -54,7 +54,7 @@ arch = "{}"
 
 /// Where the server keeps what the setting `--store` holds.
 pub enum Store {
-    /// A SQLite file beside the lease file, with `--allow-sqlite-store`.
+    /// A SQLite file beside the state file, with `--allow-sqlite-store`.
     Sqlite,
     /// A Postgres database of the test's own, on the server `KBF_TEST_POSTGRES_URL` names.
     Postgres(TestDatabase),

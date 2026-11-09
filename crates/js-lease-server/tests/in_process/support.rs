@@ -114,14 +114,14 @@ pub fn args(scratch: &Scratch, boot: &str, agents: bool) -> Vec<OsString> {
     args
 }
 
-/// The configuration of [`args`], its lease table timed on `monotonic`.
+/// The configuration of [`args`], its metrics timed on `monotonic`.
 pub fn config(scratch: &Scratch, boot: &str, agents: bool, monotonic: &Stepping) -> Config {
     let cli = Cli::try_parse_from(args(scratch, boot, agents)).unwrap();
     let config = Config::from_cli(cli).unwrap();
     config.with_monotonic(Arc::new(monotonic.clone()))
 }
 
-/// A monotonic clock that moves by `step` at every reading, so a step of the lease table
+/// A monotonic clock that moves by `step` at every reading, so a step
 /// timed with one reading before and one after lasts exactly `step`, and no real clock is
 /// read.
 #[derive(Debug, Clone)]

@@ -128,7 +128,7 @@ pub struct ServerSpec {
     interval: Duration,
     grace: Duration,
     lost_retention: Duration,
-    /// Whether the server boots over the lease file a server before it left
+    /// Whether the server boots over the files a server before it left
     /// (`--boot resume`), rather than a first boot (`--boot initialise`).
     resume: bool,
     /// The elastic pool, for a server of [`ServerSpec::elastic_pool`].
@@ -239,7 +239,7 @@ impl ServerSpec {
         self
     }
 
-    /// This server, booting over the lease file a server before it left in the same
+    /// This server, booting over the files a server before it left in the same
     /// directory (`--boot resume`): how [`super::ServerNode::restart`] starts it again.
     #[must_use]
     pub(crate) fn resuming(mut self) -> Self {
@@ -303,7 +303,7 @@ impl ServerSpec {
     }
 
     /// Writes the pool file, the two token files and the store file into `dir` and returns
-    /// the server's command line: the lease file in `dir`, a first boot (or a resumed one,
+    /// the server's command line: the state file in `dir`, a first boot (or a resumed one,
     /// for a server started again), registration into the pool with [`JOIN_TOKEN`], the
     /// hello burst, the job service's address, the store
     /// (`--store`, a SQLite file in `dir` with `--allow-sqlite-store`), and usage off.
@@ -375,7 +375,7 @@ impl ServerSpec {
     }
 
     /// The server's configuration, read from [`ServerSpec::args`] by its own parser, with
-    /// the lease table's save timings read from `clock`, so nothing reads the system's
+    /// the metrics' timings read from `clock`, so nothing reads the system's
     /// monotonic clock.
     ///
     /// # Errors
@@ -410,8 +410,8 @@ impl ServerSpec {
     /// The configuration of the server of `cloud`'s elastic pool, serving the job service,
     /// over the store `at`: the client token file, the store file and the
     /// configuration file written into `dir` ([`elastic::config::text`]), read by the
-    /// server with the cell's `sim-cloud` kind over `cloud`, on `clock`, the lease table
-    /// timing its saves on `clock`, and the scaler drawing its acquire ids from `entropy`.
+    /// server with the cell's `sim-cloud` kind over `cloud`, on `clock`, the metrics
+    /// timed on `clock`, and the scaler drawing its acquire ids from `entropy`.
     ///
     /// # Errors
     ///
@@ -442,7 +442,7 @@ impl ServerSpec {
     }
 }
 
-/// The `--boot` value: `resume` over the lease file a server before left, else
+/// The `--boot` value: `resume` over the files a server before left, else
 /// `initialise`.
 fn boot(resume: bool) -> &'static str {
     if resume { "resume" } else { "initialise" }
@@ -468,7 +468,7 @@ fn write(dir: &Path, name: &str, text: &str, flag: &'static str) -> Result<OsStr
     Ok(path.into_os_string())
 }
 
-/// The lease table's monotonic clock: the virtual time, read from the cell's clock.
+/// The server's monotonic clock: the virtual time, read from the cell's clock.
 #[derive(Clone, Debug)]
 struct Virtual(ManualClock);
 
@@ -483,7 +483,7 @@ mod tests {
     use super::*;
     use js_types::Timestamp;
 
-    /// Asserts that the lease table's monotonic clock reads the cell's clock in
+    /// Asserts that the server's monotonic clock reads the cell's clock in
     /// milliseconds, and moves when the cell's clock does.
     #[test]
     fn the_monotonic_clock_reads_the_cells_clock() {

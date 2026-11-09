@@ -131,7 +131,7 @@ async fn job_server(
     Harness::over(scratch, checked.with_job_sources(store_clock, ids)).await
 }
 
-/// The job store's file beside the lease file of `scratch`.
+/// The job store's file beside the state file of `scratch`.
 fn jobs_file(scratch: &Scratch) -> PathBuf {
     scratch.path("leases.toml.jobs")
 }

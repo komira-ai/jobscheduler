@@ -267,7 +267,7 @@ fn a_commit_after_another_process_took_the_lock_is_refused() {
 /// refuses another credential (403 `host-bound`) and the host still shows its taint, a used
 /// one-time token is refused for another host as used and goes on serving its own, and the
 /// store holds the token's digest and never its text, with no `.agents` or `.joins` file
-/// beside the lease file. It catches a Postgres store that loses what SQLite keeps.
+/// beside the state file. It catches a Postgres store that loses what SQLite keeps.
 #[test]
 fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
     let database = test_database();
@@ -327,7 +327,7 @@ fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
 }
 
 /// Asserts the first start's import over Postgres: with a bindings file, a records file and a
-/// file of hosts to remove beside the lease file, the first start leaves the store holding
+/// file of hosts to remove beside the state file, the first start leaves the store holding
 /// the binding, the records file's text, the hosts and the marker; a restart writes nothing
 /// to the store (its revision is the same) and still holds them, though the bindings file
 /// was removed in between. It catches an import that the Postgres backend does not commit

@@ -144,9 +144,8 @@ impl StartSpec {
     }
 
     /// This spec carrying the id the consumer gave the request. A pool that queues
-    /// reads it to tell a repeat of a request from a new one. The lease table keeps it
-    /// with the lease it was acquired under, so a repeated acquire of the id finds that
-    /// lease and a waiting one is presented again with the same id; a spec without one is
+    /// reads it to tell a repeat of a request from a new one. A caller that keeps it
+    /// with the request it was made for can find that request again from the id; a spec without one is
     /// unchanged.
     pub fn with_request_id(mut self, id: RequestId) -> Self {
         self.request_id = Some(id);

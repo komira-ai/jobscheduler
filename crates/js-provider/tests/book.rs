@@ -1,4 +1,4 @@
-//! The booking table the static pool and the registry of self-registered hosts share.
+//! The booking table the hosts file's pool and the registry of self-registered hosts share.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -112,6 +112,66 @@ fn stop_reads_absent_and_seat_refuses_unlisted() {
         book.seat(&host("zz"), LeaseId::new(1, 6)),
         Err(SeatError::Unlisted(host("zz")))
     );
+}
+
+/// Asserts that a seated lease is booked as a start would have booked it: it reads `Present`
+/// on its host, `booked` lists it, a start places the next lease around it, a second seat
+/// of the same pair changes nothing, and a stop frees the host.
+#[test]
+fn a_seated_lease_is_booked_like_a_started_one() {
+    let mut book = book();
+    let lease = LeaseId::new(3, 7);
+    book.seat(&host("a"), lease).unwrap();
+    book.seat(&host("a"), lease).unwrap();
+    assert_eq!(book.read(&lease), Observed::Present { host: host("a") });
+    assert_eq!(book.booked(), BTreeMap::from([(host("a"), lease)]));
+
+    let next = book.start_where(&spec(1), None, &|_, _| true);
+    assert_eq!(next, StartAck::Started { host: host("b") });
+    assert_eq!(book.stop(&lease), Observed::Absent);
+    assert_eq!(book.read(&lease), Observed::Absent);
+    assert_eq!(book.booked().len(), 1);
+}
+
+/// Asserts that a seat the table cannot honour books nothing and says why: a host it does
+/// not list, a host another lease holds, a lease that holds another host, and a lease that
+/// was stopped.
+#[test]
+fn a_seat_that_cannot_be_honoured_is_refused() {
+    let mut book = book();
+    let (a, b) = (LeaseId::new(1, 1), LeaseId::new(1, 2));
+    book.seat(&host("a"), a).unwrap();
+
+    let unlisted = book.seat(&host("gpu-99"), b).unwrap_err();
+    assert_eq!(unlisted, SeatError::Unlisted(host("gpu-99")));
+    let taken = book.seat(&host("a"), b).unwrap_err();
+    let holder = SeatError::Taken {
+        host: host("a"),
+        holder: a,
+    };
+    assert_eq!(taken, holder);
+    let elsewhere = book.seat(&host("b"), a).unwrap_err();
+    let held = SeatError::Elsewhere {
+        lease: a,
+        host: host("a"),
+    };
+    assert_eq!(elsewhere, held);
+    book.stop(&b);
+    assert_eq!(book.seat(&host("b"), b).unwrap_err(), SeatError::Ended(b));
+
+    assert_eq!(book.booked(), BTreeMap::from([(host("a"), a)]));
+    for err in [unlisted, taken, elsewhere] {
+        assert!(!err.to_string().is_empty());
+    }
+    assert_eq!(SeatError::Ended(b).to_string(), "lease 1-2 was stopped");
+}
+
+/// Asserts that a listed host shows the shape it was listed with, and an unlisted one none.
+#[test]
+fn a_listed_host_shows_its_shape() {
+    let book = book();
+    assert_eq!(book.shape_of(&host("a")), Some(&shape(2000)));
+    assert_eq!(book.shape_of(&host("zz")), None);
 }
 
 /// Asserts that removing a free host unlists it and answers true, that a booked host is

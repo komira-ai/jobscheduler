@@ -1,5 +1,5 @@
 //! `--job-listen` and `server.job_listen`: the setting, the TLS rule it shares with
-//! `--listen`, an address in use, and the job store the server opens beside the lease file
+//! `--listen`, an address in use, and the job store the server opens beside the state file
 //! when the job service is on (and only then).
 
 use std::ffi::OsString;
@@ -191,7 +191,7 @@ async fn job_listen_in_use_is_refused_naming_the_flag() {
 }
 
 /// Asserts that without `--job-listen` no job store is opened: after a start, an agent's
-/// join and a stop, no file of the job store is beside the lease file, and the server
+/// join and a stop, no file of the job store is beside the state file, and the server
 /// serves no job port. It catches a store opened (and a file made) by a server whose job
 /// service is off.
 #[tokio::test]

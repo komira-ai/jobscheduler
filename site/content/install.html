@@ -36,7 +36,7 @@
   </li>
   <li>
     <h3>Start the server <span class="tag tag-ok">works today</span></h3>
-    <p>The server needs a token for clients (a regular file owned by the server's user, mode 0600 or 0400, one token of printable ASCII, at least 32 bytes), a state file, and a pool file for the agents that will join. The paths below are examples. The first start says <code>--boot initialise</code>, which may create the state file; every later start says <code>--boot resume</code>, which refuses a missing one.</p>
+    <p>The server needs a token for clients (a regular file owned by the server's user, mode 0600 or 0400, one token of printable ASCII, at least 32 bytes), a state file, and a pool file for the agents that will join. The paths below are examples. The first start says <code>--boot initialise</code>; every later start says <code>--boot resume</code>, for which the records of a live elastic pool must exist.</p>
     <div class="code"><pre><span class="c"># agent-pool.toml: the pool the agents join</span>
 name = "hosts"
 class = "whole-node"
