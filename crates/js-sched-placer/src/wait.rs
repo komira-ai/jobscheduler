@@ -269,11 +269,17 @@ impl Engine {
     /// Drops at `now` the requests not presented for `grace` from the list and the queue;
     /// the reservations put back that were dropped since this was last asked.
     pub fn whole_expire(&mut self, grace: Duration, now: FarmTime) -> u64 {
+        self.whole_expired(grace, now).0
+    }
+
+    /// [`Engine::whole_expire`], with whether it dropped a request.
+    pub(crate) fn whole_expired(&mut self, grace: Duration, now: FarmTime) -> (u64, bool) {
         let gone = self.wait.expire(stamp(now), millis(grace));
+        let changed = !gone.is_empty();
         for id in gone {
             self.leave(&id);
         }
-        std::mem::take(&mut self.wait.dropped)
+        (std::mem::take(&mut self.wait.dropped), changed)
     }
 
     /// Takes `id` off the list and out of the queue; whether it waited.

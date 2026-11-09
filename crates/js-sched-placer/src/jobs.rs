@@ -94,7 +94,7 @@ use js_sched::ceiling::within_ceiling;
 use js_sched::queue_status::{self, Outcome};
 use js_sched::{Event, Prediction, Request};
 use js_types::Timestamp;
-use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, Qos, WorkKey};
+use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WorkKey};
 use js_types::{HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
@@ -354,6 +354,10 @@ impl Engine {
         // The hosts a host-isolation job was placed on in this walk: tainted from its commit on,
         // so open to no job behind it.
         let mut tainted: BTreeSet<HostId> = BTreeSet::new();
+        // Whether the scheduler was ticked at `now` after the last change the walk made to it
+        // (the capacity fed above, a placement held): a round with no host to try changes
+        // nothing a tick would not, so it is left out ([`Engine::try_job`]).
+        let mut settled = false;
         let placed = js_sched::walk_in_order(
             &order,
             &hosts,
@@ -361,7 +365,7 @@ impl Engine {
             |at, room| {
                 let walker = &walkers[*at];
                 let room: BTreeSet<HostId> = room.difference(&tainted).cloned().collect();
-                let host = self.try_job(walker, (&room, &usable[*at]), now);
+                let host = self.try_job(walker, (&room, &usable[*at]), now, &mut settled);
                 tainted.extend(host.clone().filter(|_| walker.host_isolation));
                 host
             },
@@ -401,11 +405,19 @@ impl Engine {
     /// it, those of them in `capable` (the hosts it can run on, with a ceiling that covers it)
     /// where no allocation the engine holds has a host port it declares: the host it was
     /// placed on, held in the engine, or `None`, its operation forgotten.
+    ///
+    /// When no host is left to try, no round is run: one held to no host places nothing, and
+    /// what else it does (it numbers an operation, ticks the scheduler at `now` and forgets the
+    /// operation) is done without it. The operation's number is taken all the same, so every
+    /// operation after it is numbered as if the round had run; and the scheduler is ticked
+    /// only when it was not ticked at `now` since the last change the walk made (`settled`),
+    /// since a second tick at the same time with nothing changed in between does nothing.
     fn try_job(
         &mut self,
         walker: &Walker,
         (room, capable): (&BTreeSet<HostId>, &BTreeSet<&HostId>),
         now: FarmTime,
+        settled: &mut bool,
     ) -> Option<HostId> {
         // The whole-node requests are placed first, numbered in their own term.
         self.whole_tick(now);
@@ -414,9 +426,25 @@ impl Engine {
             .recover(JOB_TERM, operation, operation.0, Vec::new());
         let free = room.iter().filter(|host| capable.contains(host));
         let free = free.filter(|host| !self.port_held_on(host, &walker.host_ports));
-        let only = free.map(map::worker).collect();
+        let only: BTreeSet<_> = free.map(map::worker).collect();
+        if only.is_empty() {
+            let next = OperationId(operation.0.saturating_add(1));
+            self.sched.recover(JOB_TERM, next, operation.0, Vec::new());
+            if !*settled {
+                self.feed(now, Event::Tick);
+                *settled = true;
+            }
+            return None;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.job_rounds = self.job_rounds.saturating_add(1);
+        }
         let request = (operation, walker.request.clone());
         let granted = self.place_one(request, (walker.wall, walker.charge), only, now);
+        // A placement held below changes the scheduler; a round that placed nothing ticked it
+        // at `now` and changed nothing after.
+        *settled = granted.is_none();
         let placed = granted.and_then(|(lease, worker)| {
             let host = room.iter().find(|host| map::worker(host) == worker);
             host.map(|host| (lease, host.clone()))
@@ -586,6 +614,11 @@ impl SchedPlacer {
     /// whole host is committed with the pool's `prepare_timeout` as its allocation's prepare
     /// deadline.
     ///
+    /// The tables are read again only when the job store wrote since the last pass read them
+    /// ([`js_jobs::JobStore::written`]); otherwise the rows that pass read are the rows the
+    /// store holds, and are used again. What the pass found is kept for the next
+    /// [`SchedPlacer::place_jobs_if_changed`] ([`super::jobs_seen`]).
+    ///
     /// # Errors
     /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A write the
     /// store answers with [`js_state::StoreError::Fenced`] is answered too, and the pass ends
@@ -594,12 +627,22 @@ impl SchedPlacer {
         &self,
         jobs: &JobStore<S, I>,
         hosts: &JobHosts<'_>,
-        (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
+        sinks: (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
         let _pass = self.pass();
-        let live = jobs.live_allocations()?;
-        let queued = jobs.queued()?;
-        let marks = jobs.marks()?;
+        let now = self.seen_now(jobs, hosts);
+        self.pass_seen(jobs, hosts, sinks, now)
+    }
+
+    /// The steps of a pass ([`SchedPlacer::place_jobs_with`]), under the pass's lock.
+    pub(super) fn place_queued<S: js_state::Store, I: IdSource>(
+        &self,
+        jobs: &JobStore<S, I>,
+        hosts: &JobHosts<'_>,
+        (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
+    ) -> Result<Vec<JobId>, JobStoreError> {
+        let tables = self.tables(jobs)?;
+        let (live, queued, marks) = (&tables.live, &tables.queued, &tables.marks);
         let now = self.now();
         let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
@@ -616,7 +659,7 @@ impl SchedPlacer {
             .collect();
         let input = WholeJobs {
             queued: &whole,
-            marks: &marks,
+            marks,
             hello: hosts.hello,
             open: &open,
             settings: hosts.whole,
@@ -624,7 +667,7 @@ impl SchedPlacer {
         };
         let steps = {
             let mut engine = self.engine();
-            engine.sync_jobs(&live);
+            engine.sync_jobs(live);
             engine.whole_jobs(&input, now)
         };
         let mut noted = Noted {
@@ -656,7 +699,7 @@ impl SchedPlacer {
                 }
             }
         }
-        let (decided, waiting) = self.engine().walk_jobs(&queued, hosts.open, now);
+        let (decided, waiting) = self.engine().walk_jobs(queued, hosts.open, now);
         for (job, host, booked, mut placement) in decided {
             placement.queue = noted.placed(&job, &host);
             match jobs.place_with(&job, host.clone(), booked, placement) {
@@ -837,6 +880,12 @@ impl SchedPlacer {
         let taken = self.take_outcomes();
         self.restore_outcomes(taken.clone());
         taken
+    }
+
+    /// How many placement rounds the walks over the queued jobs have run in the engine
+    /// built last ([`Engine::walk_jobs`]): a job with no host left to try runs none.
+    pub fn job_rounds(&self) -> u64 {
+        self.engine().job_rounds
     }
 
     /// How many operations wait in the engine's scheduler: a job a pass did not place leaves

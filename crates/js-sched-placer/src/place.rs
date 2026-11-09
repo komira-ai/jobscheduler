@@ -89,6 +89,7 @@ use js_types::{RefusalCode, StartSpec};
 
 use tracing::warn;
 
+use super::engine::jobs_seen::{Read, Seen};
 use super::engine::{Engine, Settings};
 
 /// Places the starts of a registry with `js-sched`, and counts the starts it could not
@@ -114,7 +115,19 @@ pub struct SchedPlacer {
     removals: AtomicU64,
     /// What pass 2 told of each job since the last pass over the queued jobs, in the order it
     /// came ([`SchedPlacer::note_outcomes`]); the pass takes them all. Its lock is a leaf.
-    outcomes: Mutex<BTreeMap<JobId, Vec<Outcome>>>,
+    pub(crate) outcomes: Mutex<BTreeMap<JobId, Vec<Outcome>>>,
+    /// How many times the registry changed the engine: the calls the passes over the queued
+    /// jobs depend on ([`SchedPlacer::engine_changes`]).
+    changes: AtomicU64,
+    /// What the last pass over the queued jobs that ran found, while it failed nothing
+    /// ([`super::engine::jobs_seen`]). Its lock is a leaf.
+    pub(crate) seen: Mutex<Option<Seen>>,
+    /// The job tables the last pass read ([`SchedPlacer::tables`]). Its lock is a leaf, held
+    /// while the tables are read.
+    pub(crate) tables: Mutex<Option<Read>>,
+    /// How many passes over the queued jobs were skipped, counted for the tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) skipped: AtomicU64,
     /// How many engines this placer built, counted for the tests that hold it to one.
     #[cfg(any(test, feature = "test-support"))]
     built: AtomicU64,
@@ -148,6 +161,11 @@ impl SchedPlacer {
             gone: Mutex::default(),
             removals: AtomicU64::new(0),
             outcomes: Mutex::default(),
+            changes: AtomicU64::new(0),
+            seen: Mutex::default(),
+            tables: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            skipped: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             built: AtomicU64::new(1),
         }
@@ -156,6 +174,41 @@ impl SchedPlacer {
     /// The engine, under its lock.
     pub fn engine(&self) -> MutexGuard<'_, Engine> {
         self.engine.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `change` made to the engine under its lock, then counted
+    /// ([`SchedPlacer::engine_changes`]) when it answers that it changed something: after the
+    /// change, so a pass that read the count before it reads the engine before the change or
+    /// counts it.
+    fn changing<T>(&self, change: impl FnOnce(&mut Engine) -> (T, bool)) -> T {
+        let mut engine = self.engine();
+        let (answer, changed) = change(&mut engine);
+        if changed {
+            self.changes.fetch_add(1, Ordering::SeqCst);
+        }
+        drop(engine);
+        answer
+    }
+
+    /// `change` made to the engine under its lock, and counted ([`SchedPlacer::changing`]).
+    fn changed<T>(&self, change: impl FnOnce(&mut Engine) -> T) -> T {
+        self.changing(|engine| (change(engine), true))
+    }
+
+    /// How many times the registry changed the engine, through the [`Placer`] calls that can
+    /// change what a pass over the queued jobs reads of it: every call that changes the
+    /// engine counts, except a heartbeat with no load reading that gives no lease up, and a
+    /// sweep or an expiry of the whole-node records that drops nothing. The passes' own
+    /// changes are not counted ([`super::engine::jobs_seen`]).
+    pub fn engine_changes(&self) -> u64 {
+        self.changes.load(Ordering::SeqCst)
+    }
+
+    /// How many passes over the queued jobs were skipped
+    /// ([`SchedPlacer::place_jobs_if_changed`]).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn passes_skipped(&self) -> u64 {
+        self.skipped.load(Ordering::Relaxed)
     }
 
     /// The lock of one pass over the queued jobs.
@@ -351,11 +404,12 @@ impl Placer for SchedPlacer {
         // A whole-node request the engine queues books the host of its pending grant, or
         // none while it has none among `open`: it waits, which is no decline.
         let now = self.now();
-        let committed = self.engine().commit_whole(spec, open, now);
+        let committed = self.changed(|engine| engine.commit_whole(spec, open, now));
         if let Some(committed) = committed {
             return committed;
         }
         let granted = self.grant(spec, open, marked, every);
+        self.changes.fetch_add(1, Ordering::SeqCst);
         if spec.request().probe_host.is_some() {
             return granted.ok().flatten();
         }
@@ -372,7 +426,7 @@ impl Placer for SchedPlacer {
                     .position(|c| !marked.contains_key(&c.host) && self.within_share(c, spec));
                 first.inspect(|at| {
                     // The registry books it there: the engine holds it from now on.
-                    self.engine().adopt(&open[*at], spec);
+                    self.changed(|engine| engine.adopt(&open[*at], spec));
                     let count = self.unmappable.fetch_add(1, Ordering::Relaxed) + 1;
                     let cause = err.to_string();
                     warn!(lease = %spec.lease(), %cause, count, "placement fell back to the first host");
@@ -402,27 +456,27 @@ impl Placer for SchedPlacer {
     fn host_up(&self, host: &HostId, shape: &Shape) {
         self.removed().remove(host);
         let now = self.now();
-        self.engine().host_up(host, shape, now);
+        self.changed(|engine| engine.host_up(host, shape, now));
     }
 
     fn heard(&self, host: &HostId, load: Option<&NodeLoad>) {
         let now = self.now();
-        self.engine().heard(host, load, now);
+        self.changing(|engine| ((), engine.heard_changed(host, load, now)));
     }
 
     fn ended(&self, lease: LeaseId) {
-        self.engine().ended(lease);
+        self.changed(|engine| engine.ended(lease));
     }
 
     /// The engine takes the lease up on its host ([`Engine::seat`]).
     fn seated(&self, seated: &SeatedLease) {
-        self.engine().seat(seated);
+        self.changed(|engine| engine.seat(seated));
     }
 
     /// Recorded for the job pass ([`SchedPlacer::gone`]) as well as told to the engine: a
     /// removed host's job allocations are freed only by the pass, never here.
     fn host_gone(&self, host: &HostId) {
-        self.engine().host_gone(host);
+        self.changed(|engine| engine.host_gone(host));
         let removal = self.removals.fetch_add(1, Ordering::Relaxed);
         self.removed().insert(host.clone(), removal);
     }
@@ -437,9 +491,10 @@ impl Placer for SchedPlacer {
     /// list ([`super::engine::wait`]): it runs the pass, and holds the marks it makes.
     fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
         let now = self.now();
-        let mut engine = self.engine();
-        engine.whole_pass(round.clone(), now);
-        Some(engine.whole_held(now))
+        self.changed(|engine| {
+            engine.whole_pass(round.clone(), now);
+            Some(engine.whole_held(now))
+        })
     }
 
     /// The engine keeps the deadline of each lease it committed from its whole-node queue
@@ -450,24 +505,24 @@ impl Placer for SchedPlacer {
     }
 
     fn prepare_ready(&self, lease: &LeaseId) {
-        self.engine().prepare_ready(lease);
+        self.changed(|engine| engine.prepare_ready(lease));
     }
 
     fn prepare_again(&self, lease: &LeaseId) {
         let now = self.now();
-        self.engine().prepare_again(lease, now);
+        self.changed(|engine| engine.prepare_again(lease, now));
     }
 
     /// The engine counts the failure, bars the host and lets the lease go for a lease it
     /// committed from its queue ([`super::engine::prepare`]).
     fn prepare_failed(&self, lease: &LeaseId, failure: &PrepareFailure) -> bool {
         let now = self.now();
-        self.engine().prepare_failed(lease, failure, now)
+        self.changed(|engine| engine.prepare_failed(lease, failure, now))
     }
 
     fn whole_start(&self, key: &RequestKey) -> bool {
         let now = self.now();
-        self.engine().whole_start(key, now)
+        self.changed(|engine| engine.whole_start(key, now))
     }
 
     fn whole_record(&self, key: &RequestKey) -> Option<RequestRecord> {
@@ -475,12 +530,12 @@ impl Placer for SchedPlacer {
     }
 
     fn whole_forget(&self, id: &RequestId) {
-        self.engine().whole_forget(id);
+        self.changed(|engine| engine.whole_forget(id));
     }
 
     fn whole_sweep(&self, horizon: Duration) {
         let now = self.now();
-        self.engine().whole_sweep(horizon, now);
+        self.changing(|engine| ((), engine.whole_swept(horizon, now)));
     }
 
     /// The marks and pending grants of the engine's whole-node requests
@@ -507,8 +562,7 @@ impl Placer for SchedPlacer {
         since: Timestamp,
     ) -> bool {
         let now = self.now();
-        self.engine()
-            .whole_restore(id, kept, (terminal, since), now);
+        self.changed(|engine| engine.whole_restore(id, kept, (terminal, since), now));
         true
     }
 
@@ -522,25 +576,27 @@ impl Placer for SchedPlacer {
     ) -> Presented {
         let now = self.now();
         let presented = (id, lease, request);
-        self.engine()
-            .whole_present(presented, capable, regain_grace, now)
+        self.changed(|engine| engine.whole_present(presented, capable, regain_grace, now))
     }
 
     fn whole_expire(&self, regain_grace: Duration) -> u64 {
         let now = self.now();
-        self.engine().whole_expire(regain_grace, now)
+        self.changing(|engine| {
+            let (dropped, changed) = engine.whole_expired(regain_grace, now);
+            (dropped, changed | (dropped > 0))
+        })
     }
 
     fn whole_cancel(&self, id: &RequestId) -> bool {
-        self.engine().whole_cancel(id)
+        self.changed(|engine| engine.whole_cancel(id))
     }
 
     fn whole_cancel_lease(&self, lease: &LeaseId) -> Option<RequestId> {
-        self.engine().whole_cancel_lease(lease)
+        self.changed(|engine| engine.whole_cancel_lease(lease))
     }
 
     fn whole_bind(&self, id: &RequestId, lease: LeaseId) -> bool {
-        self.engine().whole_bind(id, lease)
+        self.changed(|engine| engine.whole_bind(id, lease))
     }
 
     fn whole_waiter(&self, id: &RequestId) -> Option<Waiter> {
@@ -561,20 +617,20 @@ impl Placer for SchedPlacer {
 
     fn whole_restore_place(&self, id: &RequestId, since: Timestamp) -> bool {
         let now = self.now();
-        self.engine().whole_restore_place(id, since, now)
+        self.changed(|engine| engine.whole_restore_place(id, since, now))
     }
 
     fn whole_revive(&self, mark: &Reservation, claim_by: Timestamp) -> bool {
-        self.engine().whole_revive(mark, claim_by)
+        self.changed(|engine| engine.whole_revive(mark, claim_by))
     }
 
     fn whole_drop_host(&self, host: &HostId) {
         let now = self.now();
-        self.engine().whole_drop_host(host, now);
+        self.changed(|engine| engine.whole_drop_host(host, now));
     }
 
     fn whole_commit(&self, lease: LeaseId, key: &RequestKey) {
-        self.engine().whole_commit(lease, key);
+        self.changed(|engine| engine.whole_commit(lease, key));
     }
 
     fn whole_held_by_other(&self, id: &RequestId, lease: &LeaseId) -> bool {

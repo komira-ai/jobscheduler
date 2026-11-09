@@ -71,6 +71,8 @@ use crate::map::{self, MapError};
 
 #[path = "jobs.rs"]
 pub mod jobs;
+#[path = "jobs_seen.rs"]
+pub(crate) mod jobs_seen;
 #[path = "kept.rs"]
 pub mod kept;
 #[path = "ledger.rs"]
@@ -183,6 +185,10 @@ pub struct Engine {
     /// The start, wall time and whole-node standing of each lease of the registry the engine
     /// holds, as far as it knows them ([`kept`]).
     kept: BTreeMap<LeaseId, kept::Kept>,
+    /// How many placement rounds the walks over the queued jobs ran, for the tests that
+    /// count them ([`jobs`]).
+    #[cfg(any(test, feature = "test-support"))]
+    job_rounds: u64,
 }
 
 /// How many readings of a host are kept for a rebuild: two windows, the most the
@@ -238,6 +244,8 @@ impl Engine {
             phased: BTreeSet::new(),
             lives,
             kept: BTreeMap::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            job_rounds: 0,
         };
         for candidate in every {
             engine.host_up(&candidate.host, &candidate.shape, now);
@@ -380,6 +388,20 @@ impl Engine {
     /// as the engine numbers them, and a lease the engine does not hold is left out of it. The
     /// scheduler takes no heartbeat of a host that is no worker of it.
     pub fn heard(&mut self, host: &HostId, load: Option<&NodeLoad>, now: FarmTime) {
+        let _ = self.heard_changed(host, load, now);
+    }
+
+    /// [`Engine::heard`], answering whether the heartbeat changed what a pass over the queued
+    /// jobs reads of the engine: it brought a load reading, or the scheduler gave a lease up
+    /// for it (moved it back to its queue, or answered with an effect). A heartbeat that does
+    /// neither only says the host is alive, which every pass says again of the hosts it offers.
+    pub(crate) fn heard_changed(
+        &mut self,
+        host: &HostId,
+        load: Option<&NodeLoad>,
+        now: FarmTime,
+    ) -> bool {
+        let before = (self.sched.leases_held(), self.sched.queued_len());
         let here = self.on.get(host);
         let ours = |lease: &SchedLeaseId| {
             let registry = LeaseId::new(lease.term, lease.seq);
@@ -411,13 +433,15 @@ impl Engine {
             running,
             load: translated,
         };
-        self.feed(now, beat);
+        let effects = self.feed(now, beat);
+        let after = (self.sched.leases_held(), self.sched.queued_len());
         if let Some(load) = load {
             let kept = self.readings.entry(host.clone()).or_default();
             kept.push((self.now, load.clone()));
             let over = kept.len().saturating_sub(KEPT_READINGS);
             *kept = kept.split_off(over);
         }
+        load.is_some() | !effects.is_empty() | (before != after)
     }
 
     /// The registry stopped `lease`: the engine releases it, whether it still holds it or
