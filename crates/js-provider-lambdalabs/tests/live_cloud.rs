@@ -23,7 +23,8 @@ use cloud::{USAGE, main_with};
 
 use cloud::{EXTRA, KeyFiles, LambdaCloud};
 
-/// A directory for one test, removed when dropped.
+/// A directory for one test, named `<name>-<pid>-<n>` so no other test process shares it, and
+/// removed when dropped.
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -31,7 +32,11 @@ impl Scratch {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("lambdalabs-live-cloud")
-            .join(format!("{name}-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
+            .join(format!(
+                "{name}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Self(dir)

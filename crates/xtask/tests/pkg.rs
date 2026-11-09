@@ -3,7 +3,7 @@
 //! `control.tar.gz` and `data.tar.gz`.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
@@ -698,13 +698,10 @@ fn the_binary_must_be_a_static_x86_64_elf_executable() {
 }
 
 /// The directory a test writes its files in, with the files `check` reads and a deb of them.
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("xtask-pkg")
-        .join(name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("clear scratch");
-    }
+/// Removed when the returned value is dropped.
+fn scratch(name: &str) -> js_testkit::dir::TestDir {
+    let dir =
+        js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), &format!("xtask-pkg-{name}"));
     std::fs::create_dir_all(dir.join("packaging")).expect("scratch");
     std::fs::write(dir.join("js-agent"), static_elf()).expect("binary");
     std::fs::write(dir.join("packaging/js-agent.service"), b"unit").expect("unit");

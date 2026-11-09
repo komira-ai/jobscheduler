@@ -28,6 +28,8 @@ fn root() -> PathBuf {
 /// `cargo` in `bin/`.
 struct Rig {
     dir: PathBuf,
+    /// Removes the directory when the rig is dropped.
+    _scratch: js_testkit::dir::TestDir,
 }
 
 /// What one run of the script did.
@@ -44,8 +46,11 @@ struct Ran {
 
 impl Rig {
     fn new(name: &str) -> Rig {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("provider-live-{name}"));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = js_testkit::dir::TestDir::under(
+            env!("CARGO_TARGET_TMPDIR"),
+            &format!("provider-live-{name}"),
+        );
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("bin")).unwrap();
         let cargo = dir.join("bin/cargo");
         fs::write(
@@ -57,7 +62,10 @@ impl Rig {
         )
         .unwrap();
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
-        Rig { dir }
+        Rig {
+            dir,
+            _scratch: scratch,
+        }
     }
 
     /// A file in the scratch directory, made readable.

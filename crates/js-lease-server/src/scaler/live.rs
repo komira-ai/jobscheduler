@@ -232,7 +232,6 @@ impl Effects for Live {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
     use std::sync::Once;
 
     use js_elastic::{
@@ -243,6 +242,7 @@ mod tests {
     use js_lease::{ManualClock, Timestamp};
     use js_registry::{PoolConfig, Registry, SequentialSessions};
     use js_state::fake::Fake;
+    use js_testkit::dir::TestDir;
     use js_types::{ExecMode, Model, ResourceClass, Resources, Shape, accelerator_of};
 
     use super::*;
@@ -337,13 +337,9 @@ mod tests {
         HostName::derive(&scheduler(), &acquire).to_string()
     }
 
-    fn dir(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/scaler_live_unit")
-            .join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A new empty directory for the test `name`, unique to this process and removed on drop.
+    fn dir(name: &str) -> TestDir {
+        TestDir::under(std::env::temp_dir(), &format!("scaler_live_unit-{name}"))
     }
 
     /// What a whole-host job asks for in these tests.
@@ -362,7 +358,7 @@ mod tests {
         }
     }
 
-    fn live(name: &str) -> (Live, PathBuf) {
+    fn live(name: &str) -> (Live, TestDir) {
         quiet_logs();
         let dir = dir(name);
         let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
@@ -577,7 +573,7 @@ mod tests {
 
     /// A live scheduler whose files are in a directory that is not there. `name` is the
     /// test's own: two tests sharing one scratch directory would remove it under each other.
-    fn live_at_missing_dir(name: &str) -> (Live, PathBuf) {
+    fn live_at_missing_dir(name: &str) -> (Live, TestDir) {
         let (mut live, dir) = live(name);
         live.kept = ScalerKeeper::Files {
             records: RecordsFile::new(dir.join("absent").join("records")),

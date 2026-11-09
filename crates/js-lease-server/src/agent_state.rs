@@ -500,6 +500,8 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use js_testkit::dir::TestDir;
+
     use super::*;
 
     fn bound(token: &str, instance: Option<(&str, &str)>) -> Binding {
@@ -522,8 +524,7 @@ mod tests {
     /// file; the closure runs in the place of that read and finds the lock taken or not.
     #[test]
     fn the_snapshot_is_taken_under_the_lock() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_state_unit");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::under(std::env::temp_dir(), "agent_state_unit-snapshot");
         let path = dir.join("snapshot.agents");
         let store = BindingStore::new(path.clone(), BTreeMap::new());
         let mut bindings = BTreeMap::new();
@@ -657,12 +658,9 @@ mod tests {
     #[test]
     fn a_stale_temporary_file_does_not_decide_the_mode() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_state_unit");
-        fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::under(std::env::temp_dir(), "agent_state_unit-stale");
         let path = dir.join("stale.state");
         let temp = dir.join("stale.state.tmp");
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir_all(&temp);
         fs::write(&temp, "left by a crash").unwrap();
         fs::set_permissions(&temp, fs::Permissions::from_mode(0o644)).unwrap();
         replace(&path, b"new").unwrap();
