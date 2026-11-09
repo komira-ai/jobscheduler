@@ -116,14 +116,13 @@ pub type EventStream = Box<dyn Iterator<Item = ProviderEvent> + Send>;
 /// time limit of the client under it; `catalog` answers with a future, and a provider whose
 /// catalog call blocks moves it off the caller's executor thread itself. The trait must
 /// not be called (nor a catalog awaited) with a lock held that other work waits on (the
-/// lease table's is one): an acquire takes a request or two, and a slow provider makes
+/// registry's is one): an acquire takes a request or two, and a slow provider makes
 /// every call slow. A scheduler reads catalogs through a cache that a refresh fills
 /// (`CatalogCache`), not by calling `catalog` for each question. [`CapacityProvider::id`],
 /// [`CapacityProvider::can_launch`], [`CapacityProvider::capabilities`],
 /// [`CapacityProvider::capacity`] and
 /// [`CapacityProvider::verify_instance`] answer from the provider's own code and records
-/// and make no call. It is not the lease-level `Pool` of `js-provider`, the allocation
-/// port that books hosts that already exist.
+/// and make no call.
 ///
 /// What each call means is pinned by the cases of the `conformance` module (behind the
 /// crate's `conformance` feature), which every provider crate runs against its provider.

@@ -18,7 +18,7 @@ fn loaded(name: &str, lines: &str) -> (Scratch, Result<js_lease_server::Config, 
 }
 
 /// Asserts the defaults of a file with no usage key: usage on, in `usage.db` beside the
-/// lease file, with a budget of 256 MiB and a history kept 90 days, as with no usage flag.
+/// state file, with a budget of 256 MiB and a history kept 90 days, as with no usage flag.
 /// It catches a default that lands in the working directory, a budget of zero, and a
 /// history kept for another time.
 #[test]

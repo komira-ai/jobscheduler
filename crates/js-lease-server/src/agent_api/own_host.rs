@@ -85,11 +85,11 @@ struct Reading {
     /// not for `live`. Absent until the host says hello after a server restart.
     #[serde(skip_serializing_if = "Option::is_none")]
     session_started_ms: Option<u64>,
-    /// The leases the host holds, all of them (more than one only for a class that shares).
+    /// The number of leases on the host: always 0, since no lease is booked on a host any
+    /// more. It stays in the reading because an agent of the previous release requires it.
     leases: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lease: Option<String>,
-    /// The host holds no lease but has runs to finish.
+    /// Whether the host holds no lease but has runs to finish. It stays in the reading for
+    /// the same reason as `leases`.
     releasing: bool,
     /// How the host is set aside, as `GET /v1/hosts` lists it: `reserved`, `held`, `draining` or
     /// `releasing`. Absent for a host that is not set aside.
@@ -122,7 +122,6 @@ impl Reading {
             epoch: host.epoch,
             session_started_ms: own.session_started.map(|at| at.millis()),
             leases: host.leases.len(),
-            lease: host.lease.map(|lease| lease.to_string()),
             releasing: host.releasing,
             mark: host.mark.map(mark_text),
             cordon: own.cordon_until.map(|until| CordonView {

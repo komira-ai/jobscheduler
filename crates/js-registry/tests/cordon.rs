@@ -161,6 +161,20 @@ fn a_cordon_survives_what_is_persisted() {
     );
 }
 
+/// Asserts that putting back a host the registry already knows leaves it as it is: a cordon
+/// the binding carries does not replace the one in force. It catches a restore that overwrites
+/// the record of a host that has already joined.
+#[test]
+fn restoring_a_host_the_registry_knows_leaves_its_cordon_as_it_is() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    fx.registry.cordon(&host("a"), secs(100)).unwrap();
+    let later = Binding::new(cred("t"), None).with_cordon(Some(9_000_000));
+    fx.registry.restore_tainted(&host("a"), later);
+    assert_eq!(fx.registry.hosts().len(), 1);
+    assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_100_000)));
+}
+
 /// Asserts that a cordoned host that falls silent is not forgotten while its cordon is in
 /// force, however long the retention, and is forgotten like any lost host once the cordon
 /// has lapsed and the retention has passed. It catches a cordon that a silent host loses

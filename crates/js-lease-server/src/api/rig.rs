@@ -210,3 +210,18 @@ impl Lines {
         String::from_utf8(std::mem::take(&mut *held)).unwrap()
     }
 }
+
+/// Asserts that a writer of `Lines` keeps what is written and flushed to any of its clones, and
+/// that a take empties it. It catches a clone that writes to a buffer of its own and a take
+/// that leaves the text behind.
+#[test]
+fn lines_written_through_a_clone_are_taken_once() {
+    use io::Write as _;
+    let lines = Lines::default();
+    let mut writer = lines.make_writer();
+    writer.write_all(b"one ").unwrap();
+    writer.write_all(b"two").unwrap();
+    writer.flush().unwrap();
+    assert_eq!(lines.take(), "one two");
+    assert_eq!(lines.take(), "");
+}

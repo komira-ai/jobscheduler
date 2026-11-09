@@ -469,10 +469,10 @@ fn backfilled(wall_secs: u64) -> Option<Option<u64>> {
 }
 
 /// Catches: a job backfilled on a marked host that outlives the mark's tail (the marked host
-/// would wait for it), or a job that ends within the tail held back or cut. The mark's tail
-/// ends at 600 s and the pass is at 20 s: a 100 s job is placed on the marked host with its own
-/// wall limit; a one-hour job is not placed there and waits. The cut of a wall limit to the
-/// time left in the tail is `backfill_wall`, which `whole_jobs_tests` holds.
+/// would wait for it), or a job that ends within the tail held back or given another wall
+/// limit than its own. The mark's tail ends at 600 s and the pass is at 20 s: a 100 s job is
+/// placed on the marked host with its own wall limit; a one-hour job is not placed there and
+/// waits.
 #[test]
 fn a_job_is_backfilled_on_a_marked_host_only_when_it_ends_within_the_tail() {
     assert_eq!(backfilled(100), Some(None));

@@ -200,7 +200,7 @@ mod tests {
     /// held is refused naming the flag, with the store's own reason. It catches a store
     /// opened with the default retention whatever the setting says, and one opened twice.
     #[test]
-    fn the_store_is_opened_once_beside_the_lease_file_with_its_retention() {
+    fn the_store_is_opened_once_beside_the_state_file_with_its_retention() {
         let dir = scratch("opened");
         let state = dir.path().join("leases.toml");
         let jobs = open(&state, setup(259_200), &JobSources::default())

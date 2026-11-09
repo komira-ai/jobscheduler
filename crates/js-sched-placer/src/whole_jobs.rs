@@ -33,9 +33,7 @@
 //!
 //! A failed prepare of a job is decided by [`failed_prepare`] (the registry's table of causes
 //! and `max_replace`); the count and the bars it gives are written
-//! to the job's row with the requeue, so a restart loses neither. A job placed by backfill on
-//! a host a whole-host job marks has its wall limit cut to the time left in the mark's tail
-//! ([`backfill_wall`]).
+//! to the job's row with the requeue, so a restart loses neither.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -51,7 +49,6 @@ use js_types::Timestamp;
 use js_types::sched::{
     FarmTime, LeaseKind, OperationId, Qos, Resources, WaiterId, WorkKey, WorkerId,
 };
-use js_whole::cost::DEFAULT_BACKFILL_MARGIN_MS;
 
 use super::{Engine, Placed};
 use crate::map;
@@ -474,16 +471,6 @@ pub fn failed_prepare(
             .flatten(),
     };
     (failed, bar.is_none())
-}
-
-/// The wall limit of a job placed by backfill on a host marked with a tail ending at
-/// `tail_end`, at `now`: `requested`, cut to the time left in the tail less the backfill
-/// margin ([`DEFAULT_BACKFILL_MARGIN_MS`]), never longer; zero when less than the margin is
-/// left.
-pub fn backfill_wall(requested: Duration, tail_end: FarmTime, now: FarmTime) -> Duration {
-    let left = tail_end.saturating_duration_since(now);
-    let margin = Duration::from_millis(DEFAULT_BACKFILL_MARGIN_MS);
-    requested.min(left.saturating_sub(margin))
 }
 
 #[cfg(test)]

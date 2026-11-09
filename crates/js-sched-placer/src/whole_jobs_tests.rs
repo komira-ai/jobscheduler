@@ -12,7 +12,7 @@ use js_sched::{Bar, Event, OpState, WholeState};
 use js_state::StoreTime;
 use js_types::sched::{LeaseKind, WorkKey};
 
-use super::{PrepareCause, WholeJobStep, WholeJobs, backfill_wall, failed_prepare};
+use super::{PrepareCause, WholeJobStep, WholeJobs, failed_prepare};
 use crate::engine::Engine;
 use crate::engine::rig::{
     Tables, at, beat, engine, host, hosts, mark, run, run_with, settings, store,
@@ -528,20 +528,4 @@ fn a_failed_prepare_adds_to_the_count_and_keeps_the_stronger_bar() {
         expected.insert(host("other"), Exclusion::ForLife);
         assert_eq!(failed.prepare_bars, expected, "{earlier:?}");
     }
-}
-
-/// Catches: a backfilled job's wall limit not cut to the time left in the tail less the
-/// margin, cut when it is already shorter (it would be lengthened), and a limit that goes
-/// below zero when the tail is nearly spent. A tail with 200 s left less the 60 s margin
-/// leaves 140 s: a ten-minute request is cut to it, a 100 s request is kept; with a minute
-/// or less left, or the tail past, the limit is zero.
-#[test]
-fn a_backfilled_wall_is_cut_to_the_tail_less_the_margin_and_never_lengthened() {
-    let secs = Duration::from_secs;
-    let tail = at(200_000);
-    assert_eq!(backfill_wall(secs(600), tail, at(0)), secs(140));
-    assert_eq!(backfill_wall(secs(100), tail, at(0)), secs(100));
-    assert_eq!(backfill_wall(secs(600), at(60_000), at(0)), secs(0));
-    assert_eq!(backfill_wall(secs(600), at(30_000), at(0)), secs(0));
-    assert_eq!(backfill_wall(secs(600), tail, at(300_000)), secs(0));
 }

@@ -213,8 +213,8 @@ kills is a silent loss for a tenant who did nothing wrong, and it would let one 
    taints the host in the registry. A start timeout counts a starting whole-host job from its allocation's prepare deadline, and a
    placed one has none. A cancel of a placed whole-host job is an intent: no stop is sent, the allocation stays booked and is not named,
    and when the agent has left `preparing` (or reports the allocation ready or refused) the job is cancelled and the allocation freed in
-   one commit, so the host serves again. A job backfilled on a marked host has the wall limit of its allocation cut to the time left in
-   the tail less the backfill margin, and its start carries that limit.
+   one commit, so the host serves again. A job is backfilled on a marked host only if its wall limit ends, with the backfill margin to
+   spare, by the start the mark expects, so the allocation keeps the job's own wall limit.
 
 ## 6. Caps: whole-node requests cannot starve a pool
 
