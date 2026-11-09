@@ -274,10 +274,11 @@ fn four_hosts_ten_jobs() -> (Vec<Candidate>, BTreeMap<HostId, OpenHost>, Vec<Job
 
 /// Catches: the walk matching every open host again for each job of a pass (the matches made
 /// per round), and a walk that leaves the scheduler holding its matches after it, so the rounds
-/// of later lease starts would keep them too. Four hosts and ten jobs of two platforms: the
-/// held walk matches each host once per platform, eight in all, where the walk that matches
-/// each round matches each host for each job, forty; both place the same five jobs. The next
-/// pass, over the five that wait (one platform), matches each host once: four. After it, each
+/// of later lease starts would keep them too. Four hosts and ten jobs of two platforms: a job
+/// no open host can run gets no round, so only the five `x86_64` jobs are matched. The held
+/// walk matches each host once for their platform, four in all, where the walk that matches
+/// each round matches each host for each of them, twenty; both place the same five jobs. The
+/// next pass, over the five that wait (no host can run them), matches nothing. After it, each
 /// of two rounds outside a walk matches every host again.
 #[test]
 fn a_pass_matches_each_open_host_once_per_platform() {
@@ -297,13 +298,13 @@ fn a_pass_matches_each_open_host_once_per_platform() {
     assert_eq!(walked.1.len(), 5);
     let held_count = held.sched().match_evaluations() - before.0;
     let fresh_count = fresh.sched().match_evaluations() - before.1;
-    assert_eq!((held_count, fresh_count), (8, 40));
+    assert_eq!((held_count, fresh_count), (4, 20));
     let waiting: Vec<JobRecord> = queued.into_iter().skip(1).step_by(2).collect();
     let next = held.sched().match_evaluations();
     let (placed, still) = held.walk_jobs(&waiting, &open, at(2_000));
     assert!(placed.is_empty());
     assert_eq!(still.len(), 5);
-    assert_eq!(held.sched().match_evaluations() - next, 4);
+    assert_eq!(held.sched().match_evaluations() - next, 0);
     let resources = Resources::new(1000, GIB, 0, None).unwrap();
     let charge = js_sched::Prediction {
         cpu_millis: 1000,
