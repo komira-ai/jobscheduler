@@ -18,6 +18,7 @@ use js_provider::{Pool, StartSpec};
 use js_registry::{
     Credential, PoolConfig, Registry, SequentialSessions, WholeCounts, WholeNodeConfig,
 };
+use js_testkit::dir::TestDir;
 use js_types::{
     Admission, Capabilities, ClassId, ProviderId, Request, RequestId, ResourceClass, Resources,
     Shape,
@@ -61,7 +62,8 @@ fn request(class: &str, wall_s: u64) -> Request {
 /// the engine can describe the host.
 pub(super) struct Rig {
     pub(super) shared: Arc<Shared>,
-    name: String,
+    /// The scratch directory of the server's files, removed with the rig.
+    dir: TestDir,
     clock: ManualClock,
     asker: js_registry::RegisteredProvider,
     pub(super) registry: Registry,
@@ -75,6 +77,8 @@ enum Start {
     Fresh,
     Again {
         clock: ManualClock,
+        /// The directory of the earlier rig.
+        dir: TestDir,
         /// Whether the host `a` says hello again, holding the lease it held.
         host_back: bool,
     },
@@ -101,42 +105,55 @@ impl Rig {
     /// file. With `host_back` the host `a` says hello again holding the lease it held;
     /// without it the host never returns.
     pub(super) async fn restart(self, host_back: bool) -> Self {
-        let (name, clock) = (self.name.clone(), self.clock.clone());
-        drop(self);
-        Self::build(&name, false, Start::Again { clock, host_back }, None).await
+        let (dir, clock) = self.into_files();
+        Self::build(
+            "restart",
+            false,
+            Start::Again {
+                clock,
+                dir,
+                host_back,
+            },
+            None,
+        )
+        .await
+    }
+
+    /// Drops the server and keeps what a restart carries over: the directory and the clock.
+    fn into_files(self) -> (TestDir, ManualClock) {
+        (self.dir, self.clock)
     }
 
     /// A server resumed over a lease file whose text is `text`, on a fresh clock, with
     /// the host `a` back.
     pub(super) async fn over_file(name: &str, text: &str) -> Self {
         let dir = Self::dir(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("leases.toml"), text).unwrap();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let start = Start::Again {
             clock,
+            dir,
             host_back: true,
         };
         Self::build(name, false, start, None).await
     }
 
-    fn dir(name: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/whole_view_unit")
-            .join(name)
+    /// A new empty directory for the rig of the test `name`, unique to this process.
+    fn dir(name: &str) -> TestDir {
+        TestDir::under(std::env::temp_dir(), &format!("whole_view_unit-{name}"))
     }
 
     async fn build(name: &str, status: bool, start: Start, logs: Option<Arc<LogGrants>>) -> Self {
-        let dir = Self::dir(name);
-        let (clock, boot, host_back) = match start {
+        let (clock, boot, host_back, dir) = match start {
             Start::Fresh => {
-                let _ = std::fs::remove_dir_all(&dir);
-                std::fs::create_dir_all(&dir).unwrap();
                 let clock = ManualClock::new(Timestamp::from_millis(T0));
-                (clock, Boot::Initialise, true)
+                (clock, Boot::Initialise, true, Self::dir(name))
             }
-            Start::Again { clock, host_back } => (clock, Boot::Resume, host_back),
+            Start::Again {
+                clock,
+                dir,
+                host_back,
+            } => (clock, Boot::Resume, host_back, dir),
         };
         let shared_clock = SharedClock::new(clock.clone());
         let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
@@ -230,7 +247,7 @@ impl Rig {
         let shared = Arc::new(shared.with_status(served));
         Self {
             shared,
-            name: name.to_string(),
+            dir,
             clock,
             asker,
             registry,
@@ -282,7 +299,7 @@ impl Rig {
 
     /// The lease file this rig's server writes.
     pub(super) fn file(&self) -> std::path::PathBuf {
-        Self::dir(&self.name).join("leases.toml")
+        self.dir.join("leases.toml")
     }
 
     pub(super) fn advance(&self, seconds: u64) {

@@ -33,12 +33,18 @@ pub struct Scratch {
 }
 
 impl Scratch {
-    /// An empty directory named `name`.
+    /// An empty directory `<name>-<pid>-<n>`: the process id keeps it apart from the
+    /// directories of tests running in other processes (cargo-nextest runs each test in
+    /// its own), the counter from the others of this process.
     pub fn new(name: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("js-provider-lambdalabs")
-            .join(format!("{name}-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
+            .join(format!(
+                "{name}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Self { dir }
@@ -47,6 +53,11 @@ impl Scratch {
     /// The path of the entry `name`.
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
+    }
+
+    /// The directory itself.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Writes `bytes` to the file `name` with `mode` and returns its path.

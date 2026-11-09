@@ -7,6 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use js_lease::{ManualClock, Timestamp};
 use js_registry::SequentialSessions;
 
+use js_testkit::dir::TestDir;
+
 use super::*;
 
 const T0: u64 = 5_000_000;
@@ -19,13 +21,15 @@ fn instance(id: &str) -> InstanceIdentity {
     }
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/join_credential_unit")
-        .join(name);
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir.join("leases.toml.joins")
+/// A new empty directory for the test `name`, unique to this process and removed on drop,
+/// and the join token file in it.
+fn scratch(name: &str) -> (TestDir, PathBuf) {
+    let dir = TestDir::under(
+        std::env::temp_dir(),
+        &format!("join_credential_unit-{name}"),
+    );
+    let path = dir.join("leases.toml.joins");
+    (dir, path)
 }
 
 fn tokens(path: &Path) -> (JoinTokens, ManualClock) {
@@ -90,7 +94,7 @@ fn expiry_in_file(path: &Path) -> u64 {
 /// refuse as another one.
 #[test]
 fn the_first_hello_swaps_the_token_for_a_credential() {
-    let path = scratch("swap");
+    let (_dir, path) = scratch("swap");
     let (joins, _) = tokens(&path);
     let one = swapped(&joins, "i-1", "host-a");
     assert_eq!(one.secret.expose().len(), 64);
@@ -138,7 +142,7 @@ fn the_first_hello_swaps_the_token_for_a_credential() {
 /// its hand, and one that swaps a token in the middle of its life.
 #[test]
 fn a_hello_that_asks_for_nothing_leaves_the_token() {
-    let path = scratch("quiet");
+    let (_dir, path) = scratch("quiet");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let token = Credential::of_token(&minted.token);
@@ -170,7 +174,7 @@ fn a_hello_that_asks_for_nothing_leaves_the_token() {
 /// memory only (a restart would lock the host out), and a file that gives the token back.
 #[test]
 fn the_file_holds_digests_only_and_a_restart_reads_it_back() {
-    let path = scratch("file");
+    let (_dir, path) = scratch("file");
     let (joins, clock) = tokens(&path);
     let one = swapped(&joins, "i-1", "host-a");
     let text = fs::read_to_string(&path).unwrap();
@@ -207,7 +211,7 @@ fn the_file_holds_digests_only_and_a_restart_reads_it_back() {
 /// life, and one that stays in the file after its time.
 #[test]
 fn the_credential_has_the_silence_bound_of_a_token() {
-    let path = scratch("bound");
+    let (_dir, path) = scratch("bound");
     let (joins, clock) = tokens(&path);
     let one = swapped(&joins, "i-1", "host-a");
     let bound = duration_ms(CREDENTIAL_TTL);
@@ -234,7 +238,7 @@ fn the_credential_has_the_silence_bound_of_a_token() {
 /// that leaves a credential good after the host is released.
 #[test]
 fn a_revoke_drops_the_credential_with_its_instance() {
-    let path = scratch("revoke");
+    let (_dir, path) = scratch("revoke");
     let (joins, _) = tokens(&path);
     let one = swapped(&joins, "i-1", "host-a");
     let two = swapped(&joins, "i-2", "host-b");
@@ -257,7 +261,7 @@ fn a_revoke_drops_the_credential_with_its_instance() {
 /// the credential of a host that is still running.
 #[test]
 fn a_mint_for_the_instance_keeps_the_live_credential() {
-    let path = scratch("mint");
+    let (_dir, path) = scratch("mint");
     let (joins, _) = tokens(&path);
     let one = swapped(&joins, "i-1", "host-a");
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
@@ -277,7 +281,7 @@ fn a_mint_for_the_instance_keeps_the_live_credential() {
 /// the host. It catches a token retired without a credential to take its place.
 #[test]
 fn a_credential_that_cannot_be_made_retires_nothing() {
-    let path = scratch("no_random");
+    let (_dir, path) = scratch("no_random");
     let (joins, clock) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let token = Credential::of_token(&minted.token);
@@ -302,7 +306,7 @@ fn a_credential_that_cannot_be_made_retires_nothing() {
 /// credential nobody holds.
 #[test]
 fn a_credential_the_file_refuses_retires_nothing() {
-    let path = scratch("unwritable");
+    let (_dir, path) = scratch("unwritable");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let token = Credential::of_token(&minted.token);
@@ -325,7 +329,7 @@ fn a_credential_the_file_refuses_retires_nothing() {
 /// never received, and a release that frees another host's credential.
 #[test]
 fn a_release_takes_the_credential_back_and_returns_the_token() {
-    let path = scratch("release");
+    let (_dir, path) = scratch("release");
     let (joins, clock) = tokens(&path);
     let one = swapped(&joins, "i-1", "host-a");
     let two = swapped(&joins, "i-2", "host-b");
@@ -357,7 +361,7 @@ fn a_release_takes_the_credential_back_and_returns_the_token() {
 /// would read.
 #[test]
 fn a_release_the_file_refuses_keeps_the_credential() {
-    let path = scratch("release_unwritable");
+    let (_dir, path) = scratch("release_unwritable");
     let (joins, _) = tokens(&path);
     let one = swapped(&joins, "i-1", "host-a");
     fs::remove_file(&path).unwrap();
@@ -401,7 +405,7 @@ fn a_damaged_credential_row_is_refused() {
 /// derived `Debug` on the credential, which a log line of the result would print.
 #[test]
 fn an_admission_prints_no_secret() {
-    let path = scratch("debug");
+    let (_dir, path) = scratch("debug");
     let (joins, _) = tokens(&path);
     let one = swapped(&joins, "i-1", "host-a");
     let admitted = Admitted {
@@ -420,7 +424,7 @@ fn an_admission_prints_no_secret() {
 /// refusal that is not told apart from the others.
 #[test]
 fn a_required_credential_refuses_an_unasked_first_hello_and_keeps_the_token() {
-    let path = scratch("required");
+    let (_dir, path) = scratch("required");
     let (joins, _) = tokens(&path);
     let joins = joins.requiring_credential(true);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
@@ -442,7 +446,7 @@ fn a_required_credential_refuses_an_unasked_first_hello_and_keeps_the_token() {
 /// catches a switch that locks out hosts that are already registered.
 #[test]
 fn a_required_credential_leaves_a_registered_host_alone() {
-    let path = scratch("required_later");
+    let (_dir, path) = scratch("required_later");
     let (joins, _) = tokens(&path);
     let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
     let token = Credential::of_token(&minted.token);

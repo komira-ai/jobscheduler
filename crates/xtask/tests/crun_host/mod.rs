@@ -122,6 +122,8 @@ pub struct Rig {
     pub root: PathBuf,
     pub shim: PathBuf,
     pub tools: PathBuf,
+    /// Removes the host directory when the rig is dropped.
+    _scratch: js_testkit::dir::TestDir,
     /// Rules a test puts before the defaults.
     pub front: Vec<String>,
 }
@@ -134,12 +136,11 @@ impl Rig {
             !rustix::process::geteuid().is_root(),
             "these tests must not run as root"
         );
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("crun-host-setup")
-            .join(name);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).expect("clear scratch");
-        }
+        let scratch = js_testkit::dir::TestDir::under(
+            env!("CARGO_TARGET_TMPDIR"),
+            &format!("crun-host-setup-{name}"),
+        );
+        let dir = scratch.path().to_path_buf();
         let (root, shim, tools) = (dir.join("root"), dir.join("shim"), dir.join("tools"));
         for sub in [&shim, &tools] {
             std::fs::create_dir_all(sub).expect("directory");
@@ -154,6 +155,7 @@ impl Rig {
             root,
             shim,
             tools,
+            _scratch: scratch,
             front: Vec::new(),
         };
         rig.guard();
