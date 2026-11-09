@@ -658,6 +658,34 @@ quota_remount_checks() {
   quota_dependents || return 1
 }
 
+# quota_loaded: after the reload, 0 when systemd will mount with the edited Options=: it loaded the unit from the edited
+# file alone (FragmentPath is that file, DropInPaths is empty) and the Options= of the loaded text (`systemctl cat`)
+# has prjquota; otherwise it says why. (`systemctl show -p Options` proves nothing: for a mounted unit it gives the live
+# mount's options, which lack prjquota until the remount.)
+quota_loaded() {
+  local show line frag="" drop="" keys=0 text MU_COUNT MU_OPTIONS MU_TYPE MU_CONTINUED
+  show=$(systemctl show -p FragmentPath,DropInPaths -- "$MOUNT_UNIT" 2>/dev/null) || show=""
+  while IFS= read -r line; do
+    case $line in
+      FragmentPath=*) frag=${line#*=} keys=$((keys | 1)) ;;
+      DropInPaths=*) drop=${line#*=} keys=$((keys | 2)) ;;
+    esac
+  done <<<"$show"
+  if [ "$keys" != 3 ]; then
+    say "  FAILED: cannot read the files systemd loaded for $MOUNT_UNIT (systemctl show -p FragmentPath,DropInPaths): nothing was unmounted"
+  elif [ "$frag" != "${MOUNT_UNIT_FILE#"$ROOT"}" ]; then
+    say "  FAILED: systemd loaded $MOUNT_UNIT from '$frag', not from the edited ${MOUNT_UNIT_FILE#"$ROOT"}: nothing was unmounted"
+  elif [ -n "$drop" ]; then
+    say "  FAILED: systemd loaded drop-ins for $MOUNT_UNIT ($drop), which can override Options=: nothing was unmounted"
+  else
+    text=$(systemctl cat -- "$MOUNT_UNIT" 2>/dev/null) || text=""
+    mount_unit_options "$text"
+    options_has "$MU_OPTIONS" "$QUOTA_OPTION" && return 0
+    say "  FAILED: the Options= systemd loaded for $MOUNT_UNIT (systemctl cat) is '$MU_OPTIONS', without $QUOTA_OPTION: nothing was unmounted"
+  fi
+  return 1
+}
+
 step_scratch_quota() {
   say "scratch filesystem quota ($QUOTA_OPTION on $SCRATCH)"
   if [ "$SKIP_QUOTA" = 1 ]; then
@@ -713,15 +741,10 @@ step_scratch_quota() {
       || { ABORT=1; return 0; }
   fi
   act "systemctl daemon-reload" systemctl daemon-reload || { ABORT=1; return 0; }
-  if [ "$RUN_MODE" = apply ]; then
-    local effective
-    effective=$(systemctl show -p Options --value -- "$MOUNT_UNIT" 2>/dev/null) || effective=""
-    if ! options_has "$effective" "$QUOTA_OPTION"; then
-      say "  FAILED: the effective Options= of $MOUNT_UNIT is '$effective', without $QUOTA_OPTION (a file the edit missed): nothing was unmounted"
-      mark_failed
-      ABORT=1
-      return 0
-    fi
+  if [ "$RUN_MODE" = apply ] && ! quota_loaded; then
+    mark_failed
+    ABORT=1
+    return 0
   fi
   [ "$remount" = 1 ] || return 0
   act "unmount $SCRATCH (systemctl stop $MOUNT_UNIT)" systemctl stop "$MOUNT_UNIT" || { ABORT=1; return 0; }
