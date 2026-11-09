@@ -897,7 +897,7 @@ dependencies = [
 [[package]]
 name = "hostkeeper-config"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=cd015c39cc62c768f8c96d2771b9c077bf1a8270#cd015c39cc62c768f8c96d2771b9c077bf1a8270"
 dependencies = [
  "libc",
  "serde",
@@ -909,7 +909,7 @@ dependencies = [
 [[package]]
 name = "hostkeeper-hook"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=cd015c39cc62c768f8c96d2771b9c077bf1a8270#cd015c39cc62c768f8c96d2771b9c077bf1a8270"
 dependencies = [
  "rustix",
  "serde",
@@ -921,7 +921,7 @@ dependencies = [
 [[package]]
 name = "hostkeeper-placed"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=cd015c39cc62c768f8c96d2771b9c077bf1a8270#cd015c39cc62c768f8c96d2771b9c077bf1a8270"
 dependencies = [
  "hostkeeper-config",
  "libc",
@@ -933,7 +933,7 @@ dependencies = [
 [[package]]
 name = "hostkeeper-steps"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=cd015c39cc62c768f8c96d2771b9c077bf1a8270#cd015c39cc62c768f8c96d2771b9c077bf1a8270"
 dependencies = [
  "hostkeeper-config",
  "hostkeeper-hook",
@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "hostkeeper-unpack"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=cd015c39cc62c768f8c96d2771b9c077bf1a8270#cd015c39cc62c768f8c96d2771b9c077bf1a8270"
 dependencies = [
  "hex",
  "hostkeeper-config",
@@ -1114,7 +1114,9 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "hex",
+ "hostkeeper-config",
  "hostkeeper-hook",
+ "hostkeeper-steps",
  "js-agent-usage",
  "js-agent-wire",
  "js-bundle",

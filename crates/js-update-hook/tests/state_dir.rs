@@ -719,3 +719,153 @@ fn peek_makes_nothing_in_the_directory() {
     assert!(peek::<Note>(tmp.path(), &as_root).unwrap().is_none());
     assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
 }
+
+/// `Held::open_or_make` with the stat of a root-run hook.
+fn open_or_make(dir: &Path) -> Result<Held<Note>, StateError<Note>> {
+    Held::open_or_make(dir, &as_root)
+}
+
+/// The names in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A state directory that is not there is made, a real directory of mode 0700, held to the
+/// checks, locked, with no record in it: the first step of a first install. Catches a hook that refuses its first step because nothing made
+/// its directory, and one that makes the directory open to others.
+#[test]
+fn open_or_make_makes_a_missing_state_directory_mode_0700_and_locks_it() {
+    let tmp = cell("state-make-missing");
+    let state = tmp.path().join("state");
+    let held = open_or_make(&state).unwrap();
+    let meta = fs::symlink_metadata(&state).unwrap();
+    assert!(meta.is_dir());
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o700);
+    assert_eq!(names(&state), [LOCK_FILE]);
+    assert!(held.load().unwrap().is_none());
+    assert!(!directory_free(&state), "the directory it made is locked");
+    // A second step meanwhile is refused by the lock, as for a directory that was there.
+    let error = open_or_make(&state).unwrap_err();
+    assert_eq!(error.reason(), TestReason::Locked);
+}
+
+/// A state directory that is there is opened as `open` opens it: its record kept, its mode and
+/// its contents unchanged, nothing made.
+#[test]
+fn open_or_make_opens_a_state_directory_that_is_there_and_changes_nothing() {
+    let tmp = cell("state-make-there");
+    let state = tmp.path().join("state");
+    dir_with_mode(&state, 0o700);
+    state_support::write_record(&state, &state_support::record_of(3));
+    let held = open_or_make(&state).unwrap();
+    assert_eq!(
+        held.load().unwrap(),
+        Some(Note {
+            schema: 3,
+            name: "kept".to_owned()
+        })
+    );
+    assert_eq!(names(&state), [LOCK_FILE, RECORD_FILE]);
+    assert_eq!(
+        fs::metadata(&state).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+}
+
+/// Only the state directory itself is made: a directory above it that is not there is the file
+/// error naming that directory, as for `open`, and nothing is made anywhere.
+#[test]
+fn open_or_make_makes_no_directory_above_the_state_directory() {
+    let tmp = cell("state-make-no-parent");
+    let gone = tmp.path().join("gone");
+    let error = open_or_make(&gone.join("state")).unwrap_err();
+    assert!(
+        matches!(&error, StateError::Io { path, source } if *path == gone && source.kind() == io::ErrorKind::NotFound),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("{}: No such file or directory (os error 2)", gone.display())
+    );
+    assert_eq!(error.reason(), TestReason::StateInvalid);
+    assert!(names(tmp.path()).is_empty());
+}
+
+/// A parent the check refuses is refused before anything is made in it, naming the parent.
+#[test]
+fn open_or_make_makes_nothing_in_a_parent_the_check_refuses() {
+    let tmp = cell("state-make-bad-parent");
+    let parent = tmp.path().join("parent");
+    fs::create_dir(&parent).unwrap();
+    let stat = seeing(&parent, stat_of(false, true, 0, 0, 0o777));
+    let error = Held::<Note>::open_or_make(&parent.join("state"), &stat).unwrap_err();
+    assert!(
+        matches!(&error, StateError::Ancestor { path, problem: DirProblem::Writable { mode: 0o777 } } if *path == parent),
+        "{error:?}"
+    );
+    assert!(names(&parent).is_empty());
+}
+
+/// A link at the state directory's name, dangling or not, is refused as a link and not
+/// followed: nothing is made where it points.
+#[test]
+fn open_or_make_refuses_a_link_in_the_place_of_the_state_directory_and_makes_nothing() {
+    let tmp = cell("state-make-link");
+    let link = tmp.path().join("state");
+    let target = tmp.path().join("nowhere");
+    symlink(&target, &link).unwrap();
+    let error = open_or_make(&link).unwrap_err();
+    assert!(
+        matches!(&error, StateError::Dir { path, problem: DirProblem::Symlink } if *path == link),
+        "{error:?}"
+    );
+    assert!(!target.exists());
+    assert_eq!(names(tmp.path()), ["state"]);
+}
+
+/// A file at the state directory's name is refused as not a directory, and left as it was.
+#[test]
+fn open_or_make_refuses_a_file_in_the_place_of_the_state_directory() {
+    let tmp = cell("state-make-file");
+    let file = tmp.path().join("state");
+    fs::write(&file, "x").unwrap();
+    let error = open_or_make(&file).unwrap_err();
+    assert!(
+        matches!(&error, StateError::Dir { path, problem: DirProblem::NotDirectory } if *path == file),
+        "{error:?}"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "x");
+}
+
+/// A state directory that cannot be made (its name is longer than a name may be) is the file
+/// error naming it, with the system's words.
+#[test]
+fn a_state_directory_that_cannot_be_made_is_an_io_error_naming_it() {
+    let tmp = cell("state-make-refused");
+    let state = tmp.path().join("s".repeat(300));
+    let error = open_or_make(&state).unwrap_err();
+    assert!(
+        matches!(&error, StateError::Io { path, source } if *path == state && source.raw_os_error() == Some(rustix::io::Errno::NAMETOOLONG.raw_os_error())),
+        "{error:?}"
+    );
+    assert_eq!(error.reason(), TestReason::StateInvalid);
+    assert!(names(tmp.path()).is_empty());
+}
+
+/// `open` and `peek` make no directory: a state directory that is not there stays so.
+#[test]
+fn open_and_peek_make_no_missing_state_directory() {
+    let tmp = cell("state-open-makes-nothing");
+    let state = tmp.path().join("state");
+    assert!(matches!(open(&state), Err(StateError::Io { .. })));
+    assert!(matches!(
+        peek::<Note>(&state, &as_root),
+        Err(StateError::Io { .. })
+    ));
+    assert!(names(tmp.path()).is_empty());
+}
