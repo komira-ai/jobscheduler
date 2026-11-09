@@ -1,5 +1,7 @@
 //! The read side: queries on a connection of their own, which in WAL mode never wait
-//! for the writer and never see a transaction that has not committed.
+//! for the writer and never see a transaction that has not committed. Every statement is
+//! taken from the connection's statement cache, so each is prepared once per connection
+//! and not once per call.
 
 use std::ops::Bound;
 
@@ -13,6 +15,13 @@ use crate::types::{
     Change, Changes, Direction, Event, Revision, ScanPage, ScanRange, StoreError, Version,
     Versioned,
 };
+
+/// How many statements the reader's cache holds: one for each the reader runs, so none is
+/// evicted and prepared again. They are [`get`]'s, [`scan_prefix`]'s, the twelve shapes of
+/// [`scan_range`]'s (a lower bound included or not, an upper bound included, excluded or
+/// absent, and either direction), and the three of [`changes`]: the head, the page and the
+/// feed's floor.
+pub(super) const STATEMENTS: usize = 17;
 
 fn versioned(value: Vec<u8>, version: i64, expires: Option<i64>) -> Versioned {
     Versioned {
@@ -54,8 +63,9 @@ pub(super) fn get(
     key: &str,
     now: StoreTime,
 ) -> Result<Option<Versioned>, StoreError> {
-    let sql = "SELECT value, version, expires_at FROM kv WHERE key = ?1";
-    let row = conn.query_row(sql, [key], stored).optional()?;
+    let mut statement =
+        conn.prepare_cached("SELECT value, version, expires_at FROM kv WHERE key = ?1")?;
+    let row = statement.query_row([key], stored).optional()?;
     Ok(match row {
         Some((value, version, expires)) if is_live(expires, now) => {
             Some(versioned(value, version, expires))
@@ -69,8 +79,9 @@ pub(super) fn scan_prefix(
     prefix: &str,
     now: StoreTime,
 ) -> Result<Vec<(String, Versioned)>, StoreError> {
-    let mut statement = conn
-        .prepare("SELECT key, value, version, expires_at FROM kv WHERE key >= ?1 ORDER BY key")?;
+    let mut statement = conn.prepare_cached(
+        "SELECT key, value, version, expires_at FROM kv WHERE key >= ?1 ORDER BY key",
+    )?;
     let mut rows = statement.query([prefix])?;
     let mut found = Vec::new();
     while let Some(row) = rows.next()? {
@@ -123,7 +134,7 @@ pub(super) fn scan_range(
         clauses.join(" AND ")
     );
     let take = scan.limit.get().saturating_add(1);
-    let mut statement = conn.prepare(&sql)?;
+    let mut statement = conn.prepare_cached(&sql)?;
     let mut rows = statement.query(rusqlite::params_from_iter(params))?;
     let mut found = Vec::new();
     while found.len() < take
@@ -164,18 +175,23 @@ pub(super) fn changes_after_head(
     let tx = Transaction::new(conn, TransactionBehavior::Deferred)?;
     let head = schema::head(&tx)?;
     between();
-    let mut statement = tx.prepare(
-        "SELECT revision, key, kind, value FROM feed WHERE revision > ?1 ORDER BY revision LIMIT ?2",
+    // The page stops after `limit` rows here rather than in a `LIMIT ?2`: SQLite plans a
+    // bound `LIMIT` with the value bound to it, so it would prepare the cached statement
+    // again on every page whose limit is bound anew.
+    let mut statement = tx.prepare_cached(
+        "SELECT revision, key, kind, value FROM feed WHERE revision > ?1 ORDER BY revision",
     )?;
-    let bounds = [to_sql(after.0), to_sql(limit as u64)];
-    let page = statement.query_map(bounds, change_of)?;
-    let rows = page.collect::<rusqlite::Result<Vec<Change>>>()?;
+    let page = statement.query_map([to_sql(after.0)], change_of)?;
+    let rows = page
+        .take(limit)
+        .collect::<rusqlite::Result<Vec<Change>>>()?;
     // The floor is read in the same snapshot as the head and the rows, so a trim that
     // commits meanwhile is in none of the three. Every revision takes exactly one feed
     // row here, so the rows trimmed away are those below the oldest one kept: the floor
     // is one below it, or the head when the feed is empty.
-    let oldest: Option<i64> =
-        tx.query_row("SELECT min(revision) FROM feed", [], |row| row.get(0))?;
+    let oldest: Option<i64> = tx
+        .prepare_cached("SELECT min(revision) FROM feed")?
+        .query_row([], |row| row.get(0))?;
     let floor = oldest.map_or_else(|| uint(head), |oldest| uint(oldest).saturating_sub(1));
     if after.0 < floor {
         return Err(StoreError::StaleCursor {

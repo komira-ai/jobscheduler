@@ -202,6 +202,7 @@ impl SqliteStore {
         let reader = Connection::open(path)?;
         schema::configure(&reader)?;
         reader.pragma_update(None, "query_only", true)?;
+        reader.set_prepared_statement_cache_capacity(read::STATEMENTS);
 
         let (requests, queue) = mpsc::sync_channel(options.max_group.max(1));
         let writer = Writer {
@@ -357,6 +358,8 @@ impl Store for SqliteStore {
     }
 }
 
+#[cfg(test)]
+mod cache_tests;
 #[cfg(test)]
 mod group_tests;
 #[cfg(test)]
