@@ -12,6 +12,7 @@ mod host_end;
 mod ids;
 pub(crate) mod loss;
 mod machine;
+mod matches;
 pub(crate) mod memory;
 mod outage;
 mod phase;
@@ -53,7 +54,7 @@ use crate::fence::HANDOVER_GRACE;
 use crate::headroom::MemoryPercent;
 use crate::input::Request;
 use crate::requeue::{Requeue, RequeueReason};
-use crate::servable::{Attempt, Placed, Servable, Verdict};
+use crate::servable::{Attempt, Matches, Placed, Servable, Verdict};
 use crate::unservable::Unservable;
 use memory::{MemoryLadder, MemoryState};
 
@@ -280,6 +281,11 @@ pub struct Scheduler {
     drain: whole::Drain,
     /// Backfill on held workers ([`Scheduler::with_backfill`]).
     backfill: gate::Gate,
+    /// The platform matches the last placement round left, while they are held
+    /// ([`Scheduler::hold_matches`]); none otherwise.
+    matches: Matches,
+    /// Whether the matches are held from one round to the next.
+    hold_matches: bool,
 }
 
 impl Scheduler {
@@ -320,6 +326,8 @@ impl Scheduler {
             capped_walls: BTreeMap::new(),
             drain: whole::Drain::default(),
             backfill: gate::Gate::default(),
+            matches: Matches::default(),
+            hold_matches: false,
         }
     }
 
@@ -610,7 +618,8 @@ impl Scheduler {
         let now = self.now;
         let left = usize::try_from(self.seqs_left()).unwrap_or(usize::MAX);
         let round = PLACEMENT_ROUND.min(left);
-        let mut servable = Servable::new(&self.workers, &self.cordons, now);
+        let kept = std::mem::take(&mut self.matches);
+        let mut servable = Servable::resume(&self.workers, &self.cordons, now, kept);
         let mut placed = Vec::new();
         let mut verdicts = Vec::new();
         let mut stuck = Vec::new();
@@ -848,6 +857,7 @@ impl Scheduler {
                 verdicts.push((id, verdict));
             }
         }
+        self.keep_matches(servable.into_matches());
         for id in stuck {
             self.undo_key_raise(id);
         }

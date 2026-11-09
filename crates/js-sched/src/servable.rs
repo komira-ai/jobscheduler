@@ -12,7 +12,8 @@
 //! free room holds the vector and no whole-machine lease holds it; for a
 //! `whole_machine` lease, if it holds no lease at all. Matches are memoised per
 //! distinct platform request and kind within the round, so a queue of many actions
-//! with the same platform matches each live worker once.
+//! with the same platform matches each live worker once; while the scheduler's caller
+//! holds them, a later round over the same live workers takes them too ([`matches`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,6 +38,11 @@ use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad
 use crate::probe::{ProbeHost, ProbeRefusal, admit_probe};
 use crate::scheduler::Worker;
 use crate::unservable::Unservable;
+
+mod matches;
+
+pub(crate) use matches::Matches;
+use matches::Memo;
 
 /// Whether some live worker could run a request, ignoring what is booked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,9 +156,10 @@ pub(crate) struct Servable {
     /// Live workers placement skips because they are cordoned or not serving, in name
     /// order.
     cordoned: Vec<WorkerId>,
-    /// For each platform request and lease kind seen this round, the indices into
-    /// `live` of the workers that serve the kind and satisfy the request.
-    memo: Vec<((js_caps::Request, LeaseKind), Vec<usize>)>,
+    /// For each platform request and lease kind seen this round, or kept from an earlier
+    /// round over the same `live`, the indices into `live` of the workers that serve the
+    /// kind and satisfy the request.
+    memo: Memo,
     /// The max wall time of the request being placed or held for ([`Servable::for_wall`]).
     wall: Option<Duration>,
 }
@@ -208,9 +215,27 @@ impl Servable {
             now,
             live,
             cordoned,
-            memo: Vec::new(),
+            memo: Memo::default(),
             wall: None,
         }
+    }
+
+    /// As [`Servable::new`], taking `kept`, the matches an earlier round left, if they are of
+    /// this round's live workers ([`Matches::for_round`]).
+    pub(crate) fn resume(
+        workers: &BTreeMap<WorkerId, Worker>,
+        cordons: &Cordons,
+        now: FarmTime,
+        kept: Matches,
+    ) -> Self {
+        let mut servable = Self::new(workers, cordons, now);
+        servable.memo = kept.for_round(&servable.live);
+        servable
+    }
+
+    /// The matches this round made or took, for a later round.
+    pub(crate) fn into_matches(self) -> Matches {
+        Matches::kept(self.live, self.memo)
     }
 
     /// From now on a worker whose host ends before `wall` has run out is not chosen for
@@ -228,22 +253,7 @@ impl Servable {
     /// Where in `memo` the live workers that serve `request`'s kind and satisfy its
     /// platform are listed.
     fn matching(&mut self, workers: &BTreeMap<WorkerId, Worker>, request: &Request) -> usize {
-        let key = (request.needs.clone(), request.kind);
-        if let Some(at) = self.memo.iter().position(|(seen, _)| *seen == key) {
-            return at;
-        }
-        let matching = self
-            .live
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| {
-                let caps = &workers[*name].caps;
-                serves(caps, request.kind) && request.needs.matches(caps)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        self.memo.push((key, matching));
-        self.memo.len() - 1
+        self.memo.find(&self.live, workers, request)
     }
 
     /// The least loaded live worker not in `reserved` that serves `request`'s kind,
@@ -381,8 +391,8 @@ impl Servable {
         }
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, (avoid, barred));
-        self.memo[at]
-            .1
+        self.memo
+            .listed(at)
             .iter()
             .map(|&i| &self.live[i])
             .filter(|name| !skip.contains(*name))
@@ -623,8 +633,8 @@ impl Servable {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, (attempt.avoid, attempt.barred));
         let (now, wall) = (self.now, self.wall);
-        self.memo[at]
-            .1
+        self.memo
+            .listed(at)
             .iter()
             .map(|&i| &self.live[i])
             .filter(|name| {
@@ -723,7 +733,7 @@ impl Servable {
         request: &Request,
     ) -> bool {
         let at = self.matching(workers, request);
-        self.memo[at].1.iter().any(|&i| {
+        self.memo.listed(at).iter().any(|&i| {
             let w = &workers[&self.live[i]];
             w.capacity.fits(&request.demand())
                 && w.capacity.memory_bytes > request.resources.memory_bytes
@@ -796,8 +806,8 @@ impl Servable {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, (avoid, &NO_BARS));
         let (now, wall) = (self.now, self.wall);
-        self.memo[at]
-            .1
+        self.memo
+            .listed(at)
             .iter()
             .map(|&i| &self.live[i])
             .filter(|name| {
@@ -818,8 +828,8 @@ impl Servable {
         reserved: &BTreeSet<WorkerId>,
     ) -> Vec<&WorkerId> {
         let at = self.matching(workers, request);
-        self.memo[at]
-            .1
+        self.memo
+            .listed(at)
             .iter()
             .map(|&i| &self.live[i])
             .filter(|name| {
@@ -829,9 +839,9 @@ impl Servable {
     }
 
     /// The workers of `avoid` that placement skips for `request`, whose matching live
-    /// workers are `memo[at]`: all of them while a matching worker outside `avoid` and not
-    /// `barred` (a hard bar, which the request is never granted) could run the request
-    /// once its bookings end, else none.
+    /// workers the memo lists at `at`: all of them while a matching worker outside `avoid`
+    /// and not `barred` (a hard bar, which the request is never granted) could run the
+    /// request once its bookings end, else none.
     fn avoided<'a>(
         &self,
         at: usize,
@@ -840,11 +850,16 @@ impl Servable {
         (avoid, barred): (&'a BTreeSet<WorkerId>, &BTreeSet<WorkerId>),
     ) -> &'a BTreeSet<WorkerId> {
         static NONE: BTreeSet<WorkerId> = BTreeSet::new();
-        let elsewhere = self.memo[at].1.iter().map(|&i| &self.live[i]).any(|name| {
-            !avoid.contains(name)
-                && !barred.contains(name)
-                && workers[name].capacity.fits(&request.demand())
-        });
+        let elsewhere = self
+            .memo
+            .listed(at)
+            .iter()
+            .map(|&i| &self.live[i])
+            .any(|name| {
+                !avoid.contains(name)
+                    && !barred.contains(name)
+                    && workers[name].capacity.fits(&request.demand())
+            });
         if elsewhere { avoid } else { &NONE }
     }
 
@@ -935,7 +950,7 @@ impl Servable {
             });
         }
         let at = self.matching(workers, request);
-        let matching = &self.memo[at].1;
+        let matching = self.memo.listed(at);
         if matching.is_empty() {
             let (closest, unmet) = self
                 .live
