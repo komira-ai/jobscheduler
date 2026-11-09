@@ -111,9 +111,8 @@ A change that moves a shipped file out of a shipped directory, or deletes one, r
 is a change of the crate.
 
 These do not release: `docs/**` and every `*.md`, `.github/**`, a crate's `tests/`, benches and
-examples, and the crates that no shipped binary depends on (`xtask`, `js-coverage`, `js-conformance`)
-or that only their tests do (`js-provider-fake`). A push that changes only those ends the run at
-`plan`. A later push that does ship releases everything since the latest tag, including code an
+examples, and the crates that no shipped binary depends on (`xtask`, `js-coverage`,
+`js-conformance`). A push that changes only those ends the run at `plan`. A later push that does ship releases everything since the latest tag, including code an
 earlier push left unreleased.
 
 ## Which version

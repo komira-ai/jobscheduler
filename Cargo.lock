@@ -1124,6 +1124,7 @@ dependencies = [
  "js-cli",
  "js-client",
  "js-contain",
+ "js-jobs",
  "js-lease-server",
  "js-logmint",
  "js-logstore",
@@ -1131,11 +1132,11 @@ dependencies = [
  "js-mac-provision",
  "js-mac-session",
  "js-oci",
- "js-provider",
  "js-provider-ec2",
  "js-provider-gce",
  "js-registry",
  "js-sched-placer",
+ "js-state",
  "js-testkit",
  "js-treestore",
  "js-types",
@@ -1311,11 +1312,7 @@ dependencies = [
  "js-agent",
  "js-agent-wire",
  "js-caps",
- "js-lease-server",
- "js-pool-static",
  "js-proto",
- "js-provider",
- "js-provider-fake",
  "js-registry",
  "js-sched",
  "js-sched-placer",
@@ -1431,9 +1428,7 @@ dependencies = [
 name = "js-lease"
 version = "0.1.0"
 dependencies = [
- "js-pool-static",
  "js-provider",
- "js-provider-fake",
  "js-system-clock",
  "js-testkit",
  "js-types",
@@ -1441,7 +1436,6 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1721,14 +1715,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "js-provider-fake"
-version = "0.1.0"
-dependencies = [
- "js-provider",
- "js-types",
 ]
 
 [[package]]

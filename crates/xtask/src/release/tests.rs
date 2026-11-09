@@ -620,8 +620,8 @@ fn this_repositorys_shipped_crates() {
             "{member} ships"
         );
     }
-    // The fake provider is a dev-dependency of the binaries: only their tests link it.
-    for member in ["xtask", "js-coverage", "js-conformance", "js-provider-fake"] {
+    // The tools and the conformance suites are not shipped: only tests link them.
+    for member in ["xtask", "js-coverage", "js-conformance"] {
         assert!(
             !shipped.contains(&format!("crates/{member}")),
             "{member} does not"

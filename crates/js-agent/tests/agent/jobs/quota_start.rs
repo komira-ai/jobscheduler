@@ -2,17 +2,21 @@
 //! that are checked, the capabilities the hello carries, and the agreement of the agent's
 //! booking with the server's.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::Capacity;
 use js_agent::quota::FakeQuota;
 use js_agent_wire::Hello;
-use js_provider::{Pool, StartAck, StartSpec};
+use js_jobs::{
+    Constraints, JobFiles, JobId, JobSpec, JobStore, Needs, NetworkPolicy, NewJob, RandomIds,
+};
 use js_registry::{Credential, PoolConfig, Registry, SequentialSessions};
+use js_sched_placer::engine::jobs::{JobHosts, NoStarts, OpenHost, PassMetrics};
+use js_state::fake::{Fake, Flaw};
 use js_types::{
-    Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape,
+    Admission, ClassId, HostId, ImageDigestRef, Labels, ProviderId, ResourceClass, Resources, Shape,
 };
 use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
@@ -249,10 +253,51 @@ fn arch_of(hello: &Hello) -> &str {
     &hello.capabilities["arch"]
 }
 
-/// How many runs without `disk_bytes` the server admits onto the host that said `hello`, in
-/// a pool that books the hello's disk and names `scratch-quota`.
+/// A pass's metrics, which the quota tests do not read.
+struct Unread;
+
+impl PassMetrics for Unread {
+    fn job_placed(&self, _: Duration) {}
+
+    fn store_write_failed(&self) {}
+}
+
+/// The job `id`, asking for a CPU, a MiB and `disk_bytes` of disk, with a wall
+/// limit of ten minutes.
+fn queued_job(id: &str, disk_bytes: u64) -> NewJob {
+    let resources = Resources::new(1000, 1 << 20, 0, None)
+        .unwrap()
+        .with_disk_bytes(disk_bytes);
+    let image = format!("team/app@sha256:{}", "a".repeat(64));
+    let spec = JobSpec {
+        image: ImageDigestRef::parse(&image).unwrap(),
+        command: vec!["run".to_owned()],
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        needs: Needs::Shape(resources),
+        constraints: Constraints::default(),
+        wall_limit_secs: 600,
+        network: NetworkPolicy::None,
+        ports: Vec::new(),
+        files: JobFiles::default(),
+        labels: Labels::default(),
+    };
+    NewJob {
+        id: Some(JobId::parse(id).unwrap()),
+        spec,
+        priority: 0,
+        client: None,
+    }
+}
+
+/// How many jobs the server places onto the host that said `hello`, each declaring the disk
+/// the hello's `scratch-default-gib` names (what the agent books for a run that declares
+/// none), in a pool that books the hello's disk and names `scratch-quota`: the hello goes to
+/// the registry, twenty jobs of one CPU each are queued, and one pass of the production
+/// placer over the job tables places what the host's disk holds (the pool's eight cores
+/// hold more than any case here offers disk for).
 fn server_admits(hello: &Hello) -> usize {
-    let resources = Resources::new(1000, 1 << 30, 0, None)
+    let resources = Resources::new(8000, 16 << 30, 0, None)
         .unwrap()
         .with_disk_bytes(hello.shape.disk_bytes);
     let caps: BTreeMap<String, String> = [
@@ -265,32 +310,31 @@ fn server_admits(hello: &Hello) -> usize {
     .collect();
     let class = ResourceClass::new(ClassId::new("box").unwrap(), Admission::BookAll, 0);
     let name = ProviderId::new(&hello.pool).unwrap();
-    let config = PoolConfig::new(name, class.clone(), Shape::new(resources, caps), 2);
+    let config = PoolConfig::new(name, class, Shape::new(resources, caps), 2);
     let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
     let placer = placer(&clock);
-    let registry = Registry::with_sessions(config, clock, SequentialSessions::new(), placer);
+    let shared: Arc<dyn js_registry::Placer> = placer.clone();
+    let registry = Registry::with_sessions(config, clock, SequentialSessions::new(), shared);
     registry.hello(hello, &Credential::of_token("t")).unwrap();
-    let request = Request {
-        class: class.id().clone(),
-        resources: Resources::new(1000, 1, 0, None).unwrap(),
-        capabilities: [("os".to_owned(), "linux".to_owned())].into(),
-        max_wall: Duration::from_secs(600),
-        labels: BTreeMap::new(),
-        validation_run: None,
-        probe_host: None,
-    };
-    let lease = LeaseId::new(1, 1);
-    let spec = StartSpec::new(lease, request, &[class]).unwrap();
-    let started = registry.provider().start(spec);
-    assert!(matches!(started, StartAck::Started { .. }), "{started:?}");
+
+    let default_gib: u64 = hello.capabilities["scratch-default-gib"].parse().unwrap();
+    let store_clock = Arc::new(js_state::ManualClock::default());
+    let store = Arc::new(Fake::with_flaw(store_clock, Flaw::None));
+    let jobs = JobStore::new(store, RandomIds).unwrap();
+    for n in 0..20 {
+        let job = queued_job(&format!("job-{n}"), default_gib * GIB);
+        jobs.insert_queued(job).unwrap();
+    }
     let host = HostId::new(&hello.host_id).unwrap();
-    (0..20)
-        .take_while(|n| {
-            let mut run = small_job(&format!("r{n}"));
-            run.lease_id = String::new();
-            registry.queue_run(&host, &lease, run).is_ok()
-        })
-        .count()
+    let open = BTreeMap::from([(host.clone(), OpenHost::default())]);
+    let said_hello = BTreeSet::from([host]);
+    let hosts = JobHosts {
+        open: &open,
+        hello: &said_hello,
+        whole: None,
+    };
+    let placed = placer.place_jobs_with(&jobs, &hosts, (&NoStarts, &Unread));
+    placed.unwrap().len()
 }
 
 /// Asserts that a pool that books no disk and names no quota refuses the hello of an agent
@@ -346,13 +390,14 @@ fn agent_starts(hello: &Hello, extra: &[&str]) -> usize {
 }
 
 /// Asserts that the server never admits what the agent refuses: for the hello a real agent
-/// sends (its capabilities and shape, read from the hello itself), the number of runs
-/// without `disk_bytes` that the server's registry admits onto the host equals the number
-/// the agent's lifecycle starts, for three offers and two defaults, and both are the offer
-/// divided by the default, and a pool that books no disk and names no quota refuses that
-/// hello instead of booking 0 for it. A server that books another number for a run without disk (say,
-/// 0, or the default in other units) would send a run the agent then refuses; an agent that
-/// booked less would run what the server believes does not fit.
+/// sends (its capabilities and shape, read from the hello itself), the number of jobs
+/// declaring the default disk that the server's placer places onto the host equals the
+/// number of runs without `disk_bytes` the agent's lifecycle starts, for three offers and
+/// two defaults, and both are the offer divided by the default, and a pool that books no
+/// disk and names no quota refuses that hello instead of booking 0 for it. A server that
+/// books another number for a job's disk (say, 0, or the default in other units) would send
+/// a job the agent then refuses; an agent that booked less would run what the server
+/// believes does not fit.
 #[test]
 fn server_never_admits_what_agent_refuses() {
     let cases: [(u64, &[&str], usize); 3] = [

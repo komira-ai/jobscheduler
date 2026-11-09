@@ -1,7 +1,6 @@
 //! The host-agent conformance suite: what any agent must do, whatever wire it speaks.
 //!
-//! The allocation-port suite of the crate root puts a [`js_provider::Pool`] under test. This
-//! module puts a host agent under test, and it is wire-neutral: the scenarios speak only
+//! This module puts a host agent under test, and it is wire-neutral: the scenarios speak only
 //! to [`AgentHarness`], a small set of operations (deliver a Start, deliver a Cancel,
 //! drop the connection, advance an injected clock, read what the agent reported). One
 //! harness per transport implements the trait over that transport's messages; the

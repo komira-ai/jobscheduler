@@ -13,7 +13,6 @@ publish.workspace = true
 js-agent = { path = "../js-agent" }
 js-caps = { path = "../js-caps" }
 js-types = { path = "../js-types" }
-js-provider = { path = "../js-provider" }
 js-sched = { path = "../js-sched" }
 # The in-memory store the reference core runs on (`core` module); test-only by nature, like
 # this crate.
@@ -26,10 +25,7 @@ tokio = { workspace = true, features = ["io-util", "rt"] }
 tonic = { workspace = true, features = ["transport"] }
 
 [dev-dependencies]
-js-provider-fake = { path = "../js-provider-fake" }
 js-agent-wire = { path = "../js-agent-wire" }
-js-lease-server = { path = "../js-lease-server" }
-js-pool-static = { path = "../js-pool-static" }
 js-registry = { path = "../js-registry" }
 # The production placer every registry here is built with.
 js-sched-placer = { path = "../js-sched-placer" }

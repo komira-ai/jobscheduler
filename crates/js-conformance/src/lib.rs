@@ -1,40 +1,8 @@
-//! The conformance suite of the lease-level allocation port, [`js_provider::Pool`]
-//! (design 13.2). The words "provider" below name what implements it under test; the
-//! machine providers of `js_elastic::CapacityProvider` have their own suite,
-//! `js_elastic::conformance`.
+//! The conformance suites of the job scheduler: what a host agent must do, what the job
+//! service must answer, and what the reference core must keep.
 //!
-//! A provider is put under test by implementing [`Subject`], then calling [`run`].
-//! The suite starts leases, stops them, scripts Unknown answers and compares what the
-//! provider answered with what its booking table shows. The hooks read the provider's
-//! booking table ([`Subject::booked`]), not its call answers, so a provider whose
-//! answers disagree with its own table fails. The table is not an independent witness:
-//! a provider whose table itself is wrong is caught only by the checks that compare it
-//! with the request (a request no host satisfies is refused and books nothing, a
-//! started lease sits on a host the request fits on, no host holds two leases, a
-//! stopped lease's host is free). An independent read, such as a cloud provider's API
-//! queried apart from its adapter (design 13.2), is a stronger hook that a provider
-//! with a cloud behind it should supply.
-//!
-//! Every check builds a fresh subject over [`standard_hosts`] and compares what it
-//! saw with what the contract says it must see. Where a lease lands is the provider's
-//! rank (design 6.1), so no check names a host: the checks read the placement from the
-//! table and assert a host the request fits on, and distinct hosts across concurrent
-//! leases. A check a provider cannot take part in (a static pool never answers Unknown,
-//! so it cannot be scripted to) reports [`Verdict::NotApplicable`] and is listed by
-//! [`Report::not_applicable`], never silently skipped.
-//!
-//! The suite is shown able to fail by the broken fakes of `js-provider-fake`: each of
-//! the nine checks that read provider behaviour has a defect that fails it (see this
-//! crate's tests); a defect fails every check that reads the thing it breaks, and the
-//! tests name them. The four `Refuses...` checks guard `StartSpec::new`, which every
-//! provider shares, not providers: they read only the provider's class list, and fail
-//! only when a rule is dropped from `StartSpec::new` or a provider lists the wrong
-//! classes. The rules themselves are unit-tested in `js-provider`.
-//!
-//! The host-agent suite, which is wire-neutral and takes a harness per transport instead
-//! of a [`Subject`], is the [`agent`] module. It sits here, beside the provider suite,
-//! because both are conformance suites that a defect is shown red against, and it needs
-//! nothing the crate does not already have.
+//! The host-agent suite, which is wire-neutral and takes a harness per transport, is the
+//! [`agent`] module.
 //!
 //! The job-service suite, which holds a server of `jobscheduler.v1.JobService` (the real one
 //! or a fake that a client's tests talk to) to the answers of the real service, is the
@@ -42,128 +10,18 @@
 //! scheduler's and the agent's moves, the clock, the retention sweep) and ships an in-memory
 //! reference service ([`jobs::ReferenceJobs`]) that each of its scenarios is shown able to
 //! fail against.
-//!
-//! # Follow-ups
-//!
-//! - Labels on created resources (design 13.2: labels are present on every created
-//!   resource) are not checked. The static pool and the fake create nothing, so the
-//!   rule has no resource to read; the check belongs with the first provider that
-//!   creates resources.
 
 pub mod agent;
-mod checks;
 pub mod core;
 pub mod jobs;
-
-use std::collections::BTreeMap;
-
-use js_provider::{Call, Pool};
-use js_types::{Capabilities, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
-
-pub use checks::Check;
-
-/// A provider under test, with the hooks that read its real state.
-pub trait Subject {
-    /// The provider, as the scheduler would call it.
-    fn provider(&mut self) -> &mut dyn Pool;
-
-    /// The booked hosts and the lease on each, read from the provider's own state.
-    fn booked(&self) -> BTreeMap<HostId, LeaseId>;
-
-    /// Arranges for the next `call` to answer Unknown, with the effect landing when
-    /// `landed` is set. Returns `false` when the provider cannot be made to answer
-    /// Unknown, as a provider that owns its state and always knows.
-    fn script_unknown(&mut self, call: Call, landed: bool) -> bool;
-
-    /// The class the checks lease. Defaults to the shipped `gpu-host`; a provider that
-    /// serves another class names it here, and the checks that assume an immediate
-    /// `Started` and Present report [`Verdict::NotApplicable`] for a class whose leases
-    /// wait to be observed ready.
-    fn class(&self) -> ResourceClass {
-        ResourceClass::gpu_host()
-    }
-
-    /// Makes the provider list `class` among its classes while it cannot lease it, as a
-    /// whole-host provider cannot lease a class that books by the GPU. Returns `false`
-    /// when the provider cannot be made to list such a class.
-    fn list_unleasable_class(&mut self, class: ResourceClass) -> bool;
-}
 
 /// What one check found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// The provider did what the contract says.
+    /// The subject did what the contract says.
     Passed,
-    /// The provider differed from the contract; the text says how.
+    /// The subject differed from the contract; the text says how.
     Failed(String),
-    /// The provider cannot take part in this check.
+    /// The subject cannot take part in this check.
     NotApplicable,
-}
-
-/// The verdicts of one run, in [`Check::ALL`] order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Report {
-    /// Each check with its verdict.
-    pub results: Vec<(Check, Verdict)>,
-}
-
-impl Report {
-    /// The checks that failed.
-    pub fn failed(&self) -> Vec<Check> {
-        self.with(|verdict| matches!(verdict, Verdict::Failed(_)))
-    }
-
-    /// The checks the provider could not take part in.
-    pub fn not_applicable(&self) -> Vec<Check> {
-        self.with(|verdict| matches!(verdict, Verdict::NotApplicable))
-    }
-
-    fn with(&self, keep: impl Fn(&Verdict) -> bool) -> Vec<Check> {
-        let kept = self.results.iter().filter(|(_, verdict)| keep(verdict));
-        kept.map(|(check, _)| *check).collect()
-    }
-}
-
-/// Runs every check, each on a fresh subject from `make`. The subject must hold the
-/// hosts of [`standard_hosts`] and serve the `gpu-host` class.
-pub fn run<S: Subject>(make: impl Fn() -> S) -> Report {
-    let results = Check::ALL.iter().map(|check| (*check, check.run(make())));
-    Report {
-        results: results.collect(),
-    }
-}
-
-/// The hosts every subject is built over: `h1` and `h2`, each with one
-/// `conformance-gpu`, 8000 CPU millis, 1 GiB of memory and no capabilities.
-pub fn standard_hosts() -> Vec<(HostId, Shape)> {
-    let offered = Resources::new(8000, 1 << 30, 1, Some("conformance-gpu".to_string()));
-    let shape = Shape::new(
-        offered.expect("constant resources are valid"),
-        Capabilities::new(),
-    );
-    let names = ["h1", "h2"];
-    let ids = names
-        .iter()
-        .map(|name| HostId::new(name).expect("constant id is valid"));
-    ids.map(|id| (id, shape.clone())).collect()
-}
-
-/// A request that fits one standard host: class `gpu-host`, one conformance GPU, a
-/// ten minute wall time cap and no labels.
-pub fn standard_request() -> Request {
-    request_of(&ResourceClass::gpu_host())
-}
-
-/// [`standard_request`] for `class`.
-pub fn request_of(class: &ResourceClass) -> Request {
-    let wanted = Resources::new(1000, 1, 1, Some("conformance-gpu".to_string()));
-    Request {
-        class: class.id().clone(),
-        resources: wanted.expect("constant resources are valid"),
-        capabilities: Capabilities::new(),
-        max_wall: std::time::Duration::from_secs(600),
-        labels: BTreeMap::new(),
-        validation_run: None,
-        probe_host: None,
-    }
 }

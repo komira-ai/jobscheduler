@@ -942,35 +942,35 @@ fn a_normal_dependency_on_js_pool_static_is_reported() {
 
     let copy = Copy::new("pool-static-target");
     copy.edit(
-        "crates/js-provider-fake/Cargo.toml",
+        "crates/js-analysis/Cargo.toml",
         "[lints]",
         &format!("[target.'cfg(unix)'.dependencies]\n{pool}\n\n[lints]"),
     );
     assert_eq!(
         normal_dependents_of_pool_static(&copy.dir),
-        ["js-lease-server", "js-provider-fake"]
+        ["js-analysis", "js-lease-server"]
     );
 
     let copy = Copy::new("pool-static-build");
     copy.edit(
-        "crates/js-provider-fake/Cargo.toml",
+        "crates/js-analysis/Cargo.toml",
         "[lints]",
         &format!("[build-dependencies]\n{pool}\n\n[lints]"),
     );
     assert_eq!(
         normal_dependents_of_pool_static(&copy.dir),
-        ["js-lease-server", "js-provider-fake"]
+        ["js-analysis", "js-lease-server"]
     );
 
     let copy = Copy::new("pool-static-target-build");
     copy.edit(
-        "crates/js-provider-fake/Cargo.toml",
+        "crates/js-analysis/Cargo.toml",
         "[lints]",
         &format!("[target.'cfg(unix)'.build-dependencies]\n{pool}\n\n[lints]"),
     );
     assert_eq!(
         normal_dependents_of_pool_static(&copy.dir),
-        ["js-lease-server", "js-provider-fake"]
+        ["js-analysis", "js-lease-server"]
     );
 
     let copy = Copy::new("pool-static-renamed");
@@ -986,7 +986,7 @@ fn a_normal_dependency_on_js_pool_static_is_reported() {
 
     let copy = Copy::new("pool-static-dev-only");
     copy.edit(
-        "crates/js-provider-fake/Cargo.toml",
+        "crates/js-analysis/Cargo.toml",
         "[lints]",
         &format!("[dev-dependencies]\n{pool}\n\n[lints]"),
     );
