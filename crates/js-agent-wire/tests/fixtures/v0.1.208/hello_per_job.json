@@ -1,0 +1,34 @@
+{
+  "protocol": {
+    "min": 1,
+    "max": 1
+  },
+  "host_id": "builder-01",
+  "pool": "builders",
+  "agent_version": "0.1.208",
+  "shape": {
+    "cpu_millis": 16000,
+    "memory_bytes": 68719476736,
+    "gpus": 0,
+    "disk_bytes": 536870912000
+  },
+  "capabilities": {
+    "arch": "x86_64",
+    "egress": "none",
+    "exec": "container",
+    "log-upload": "true",
+    "os": "linux",
+    "per-job": "true",
+    "run-files": "true",
+    "runtime": "container",
+    "scratch-default-gib": "20",
+    "scratch-quota": "project",
+    "start-fence": "true"
+  },
+  "gpu_devices": [],
+  "labels": {
+    "rack": "r1"
+  },
+  "phase": "serving",
+  "held": []
+}

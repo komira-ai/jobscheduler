@@ -27,6 +27,8 @@ js-elastic = { path = "../js-elastic", features = ["conformance"] }
 # (tests/support).
 js-sched = { path = "../js-sched" }
 js-sched-placer = { path = "../js-sched-placer", features = ["test-support"] }
+# tests/previous_release_heartbeat.rs reads the previous release's wire bodies, which are JSON.
+serde_json.workspace = true
 
 [lints]
 workspace = true

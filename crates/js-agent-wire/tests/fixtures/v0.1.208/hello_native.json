@@ -1,0 +1,35 @@
+{
+  "protocol": {
+    "min": 1,
+    "max": 1
+  },
+  "host_id": "mac-01",
+  "pool": "builders",
+  "agent_version": "0.1.208",
+  "shape": {
+    "cpu_millis": 16000,
+    "memory_bytes": 68719476736,
+    "gpus": 0,
+    "disk_bytes": 536870912000
+  },
+  "capabilities": {
+    "arch": "aarch64",
+    "egress": "none",
+    "exec": "sandbox-exec",
+    "log-upload": "true",
+    "os": "macos",
+    "run-files": "true",
+    "runtime": "sandbox-exec"
+  },
+  "gpu_devices": [],
+  "labels": {
+    "rack": "r1"
+  },
+  "phase": "serving",
+  "held": [
+    {
+      "run_id": "run-1",
+      "state": "running"
+    }
+  ]
+}
