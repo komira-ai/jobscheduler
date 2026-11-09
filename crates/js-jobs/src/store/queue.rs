@@ -1,4 +1,4 @@
-//! What the placement engine reads of the tables on each pass (design sections 5.3, step 5,
+//! What the placement engine reads of the tables on a pass (design sections 5.3, step 5,
 //! and 6.2): the queued jobs in queue order ([`JobStore::queued`]), and every live
 //! allocation ([`JobStore::live_allocations`]).
 
@@ -25,15 +25,16 @@ pub fn queue_order(a: &JobRecord, b: &JobRecord) -> Ordering {
 }
 
 impl<S: Store, I: IdSource> JobStore<S, I> {
-    /// Every queued job, in queue order ([`queue_order`]). It reads the rows of the jobs that
-    /// have not ended, through their `active` entries, and the rows this build cannot read. A
+    /// Every queued job, in queue order ([`queue_order`]). It reads the rows of the queued
+    /// jobs, through their `queued` entries, and the rows this build cannot read; the row is
+    /// judged, not the entry, so a row an entry names that is no longer queued is left out. A
     /// row a later build wrote is left out and logged, as [`JobStore::list_jobs`] leaves it out.
     ///
     /// # Errors
-    /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Store`].
+    /// [`JobStoreError::Corrupt`] when a row it reads does not parse; [`JobStoreError::Store`].
     pub fn queued(&self) -> Result<Vec<JobRecord>, JobStoreError> {
         let mut queued = Vec::new();
-        let spans = [Span::all(keys::ACTIVE), Span::all(keys::UNREAD_JOB)];
+        let spans = [Span::all(keys::QUEUED), Span::all(keys::UNREAD_JOB)];
         for (key, row) in self.indexed_rows(&spans)? {
             match decode_job(&row.value).and_then(|job| same_key(&key, keys::job(&job.id), job)) {
                 Ok(job) => queued.extend((job.state == JobState::Queued).then_some(job)),

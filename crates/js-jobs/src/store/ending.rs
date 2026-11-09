@@ -240,7 +240,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 due.push(allocation.job);
             }
         }
-        if due.is_empty() || self.store.txn(txn)?.is_err() {
+        if due.is_empty() || self.write(txn)?.is_err() {
             return Ok(Vec::new());
         }
         Ok(due)
