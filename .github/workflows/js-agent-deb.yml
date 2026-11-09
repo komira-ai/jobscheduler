@@ -1,7 +1,7 @@
 # The js-agent deb (packaging/js-agent): built from the musl binary by nfpm (pinned by
 # SHA-256, restored from the actions cache under its version and SHA-256 and downloaded only
-# when not cached, as ci.yml's header says), checked against the list of what it may contain (`cargo xtask pkg check-deb`),
-# and attested. It publishes nothing: no release, no package repository, no registry, no
+# when not cached, as ci.yml's header says), checked against the list of what it may contain
+# (`cargo xtask pkg check-deb`), and attested. It publishes nothing: no release, no package repository, no registry, no
 # bucket. The deb is a workflow artifact for seven days, and its provenance attestation is
 # stored by GitHub; getting it anywhere else is a separate, deliberate step.
 #

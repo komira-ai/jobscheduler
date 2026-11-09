@@ -19,7 +19,7 @@
 //! Fetch itself (src/fetch.rs, tests/fetch.rs) checks the SHA-256 of whichever archive it
 //! uses, downloads only when no file is at `--cache`, and keeps a download there only after
 //! it matched; so this rule and those tests together make every job use the actions cache
-//! when it can, and only a checked archive ever reach it.
+//! when it can, and only a checked archive ever reaches it.
 
 mod lint;
 

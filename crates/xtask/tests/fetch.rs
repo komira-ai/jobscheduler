@@ -579,3 +579,30 @@ fn the_verb_with_a_cold_cache_and_a_failed_download_exits_1_in_one_line() {
     assert!(err.ends_with("; nothing was installed\n"), "{err}");
     assert!(!cache.exists() && !out.exists());
 }
+
+/// Asserts that when the file cannot be installed (`--out`'s directory is a file), the fetch
+/// fails naming `--out`, whether the archive came from the cache or from a download; after
+/// the download the checked archive is still kept, as the later save would find it.
+#[test]
+fn an_install_that_fails_is_an_error_on_a_hit_and_on_a_miss() {
+    let archive = tool_tar_gz();
+    let pin = Sha256::of(&archive);
+    for hit in [true, false] {
+        let (url, ca, requests) = counted("200 OK", archive.clone());
+        let dir = scratch(&format!("cache-install-{hit}"));
+        let cache = dir.join("tool.tar.gz");
+        if hit {
+            std::fs::write(&cache, &archive).expect("seed the cache");
+        }
+        let blocker = dir.join("bin");
+        std::fs::write(&blocker, b"a file, not a directory").expect("write");
+        let out = blocker.join("tool");
+        let err = fetch::fetch(&url, &pin, &member(), &out, Some(&cache), &[ca]).unwrap_err();
+        assert!(
+            matches!(&err, fetch::Error::Install { path, .. } if path == &out),
+            "{hit}: {err:?}"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), usize::from(!hit));
+        assert_eq!(std::fs::read(&cache).expect("cache"), archive);
+    }
+}
