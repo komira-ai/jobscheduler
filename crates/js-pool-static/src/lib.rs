@@ -2,7 +2,7 @@
 //!
 //! The pool reads the file once and lists each host with its shape and the memory it was
 //! listed with. It books nothing and holds no lease: no work is placed through it, it has
-//! no lease file, and a restart loses nothing. The server (`js-lease-server`) lists these
+//! no lease file, and a restart loses nothing. The job scheduler's server lists these
 //! hosts beside the hosts that register themselves, and refuses a hello for any of their
 //! ids. The pool serves `gpu-host` ([`js_types::ResourceClass::gpu_host`]) unless
 //! [`StaticPool::with_classes`] names others.
