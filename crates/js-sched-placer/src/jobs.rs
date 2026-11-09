@@ -2,14 +2,18 @@
 //! 5.3, steps 5 and 6, 5.4, 6.2 and 6.7, and section 8, rows 11, 12, 17 and 25).
 //!
 //! With the job tables, the server runs a **pass** over the
-//! queue on each tick and after each heartbeat of a host that speaks the per-job messages
-//! (the server's `Agents::place_jobs`): a job end, a cancel, a confirmed container, a host that
-//! joins and a heartbeat that changes a host's load all come to the server as one of those. A
-//! pass ([`SchedPlacer::place_jobs_with`]):
+//! queue on each tick (the server's `Agents::place_jobs`) and after each heartbeat of a host
+//! that speaks the per-job messages (`Agents::place_jobs_after_beat`): a job end, a cancel, a
+//! confirmed container, a host that joins and a heartbeat that changes a host's load all come to
+//! the server as one of those. The tick's pass always runs; a heartbeat's runs only when
+//! something it depends on changed since the last pass ([`SchedPlacer::place_jobs_if_changed`],
+//! `jobs_seen`). A pass ([`SchedPlacer::place_jobs_with`]):
 //!
 //! 1. **Reads the tables as they stand**: every live (booked or releasing) allocation, every
-//!    queued job in queue order and every mark. The engine holds no list of its own that a job
-//!    must stay on, so no timer can drop a queued job and none is ever presented again (row
+//!    queued job in queue order and every mark; read again only when the job store wrote since
+//!    the last pass read them, and otherwise the rows that pass read, which are the rows the
+//!    store holds ([`js_jobs::JobStore::written`]). The engine holds no list of its own that a
+//!    job must stay on, so no timer can drop a queued job and none is ever presented again (row
 //!    12).
 //! 2. **Brings the engine's bookings to the allocation table** ([`Engine::sync_jobs`]): the
 //!    allocation table is the one record of what a job books on a host: its resources and
@@ -617,7 +621,7 @@ impl SchedPlacer {
     /// The tables are read again only when the job store wrote since the last pass read them
     /// ([`js_jobs::JobStore::written`]); otherwise the rows that pass read are the rows the
     /// store holds, and are used again. What the pass found is kept for the next
-    /// [`SchedPlacer::place_jobs_if_changed`] ([`super::jobs_seen`]).
+    /// [`SchedPlacer::place_jobs_if_changed`] (`jobs_seen`).
     ///
     /// # Errors
     /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A write the

@@ -120,7 +120,7 @@ pub struct SchedPlacer {
     /// jobs depend on ([`SchedPlacer::engine_changes`]).
     changes: AtomicU64,
     /// What the last pass over the queued jobs that ran found, while it failed nothing
-    /// ([`super::engine::jobs_seen`]). Its lock is a leaf.
+    /// (`engine::jobs_seen`). Its lock is a leaf.
     pub(crate) seen: Mutex<Option<Seen>>,
     /// The job tables the last pass read ([`SchedPlacer::tables`]). Its lock is a leaf, held
     /// while the tables are read.
@@ -199,7 +199,7 @@ impl SchedPlacer {
     /// change what a pass over the queued jobs reads of it: every call that changes the
     /// engine counts, except a heartbeat with no load reading that gives no lease up, and a
     /// sweep or an expiry of the whole-node records that drops nothing. The passes' own
-    /// changes are not counted ([`super::engine::jobs_seen`]).
+    /// changes are not counted (`engine::jobs_seen`).
     pub fn engine_changes(&self) -> u64 {
         self.changes.load(Ordering::SeqCst)
     }

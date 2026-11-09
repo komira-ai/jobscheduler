@@ -71,21 +71,21 @@ impl Offered {
 /// A placer whose registry told it of the hosts `a` and `b` (8 cores each), and job tables.
 struct Rig {
     placer: SchedPlacer,
+    clock: ManualClock,
     tables: Tables,
     failures: Failures,
 }
 
 impl Rig {
     fn new() -> Rig {
-        let placer = SchedPlacer::new(
-            Settings::default(),
-            ManualClock::new(Timestamp::from_millis(0)),
-        );
+        let clock = ManualClock::new(Timestamp::from_millis(0));
+        let placer = SchedPlacer::new(Settings::default(), clock.clone());
         for name in ["a", "b"] {
             placer.host_up(&host(name), &candidate(name, &[]).shape);
         }
         Rig {
             placer,
+            clock,
             tables: Tables::new(),
             failures: Failures::default(),
         }
@@ -248,6 +248,30 @@ fn a_pass_that_failed_a_read_or_a_write_is_run_again() {
     rig.skipped(&both);
 }
 
+/// Asserts that a pass whose read failed is not kept as what the next pass may skip on: a job
+/// is submitted, the pass that sees the write fails its read, and the next pass, which finds
+/// the job store, the engine and the hosts as the failed pass found them (a failed read writes
+/// nothing), runs and places the job. Were the failed pass kept, the next would be skipped.
+#[test]
+fn a_pass_whose_read_failed_is_run_again_with_nothing_else_changed() {
+    let rig = Rig::new();
+    let both = Offered::both();
+    rig.ran(&both, &[]);
+    rig.skipped(&both);
+    rig.queue_whole_cores("one");
+    rig.tables.store.fail_read_after(0);
+    let written = rig.tables.jobs.written();
+    assert!(rig.beat(&both).is_err(), "the read was to fail");
+    assert_eq!(
+        rig.tables.jobs.written(),
+        written,
+        "a failed read writes nothing"
+    );
+    rig.ran(&both, &["one"]);
+    rig.ran(&both, &[]);
+    rig.skipped(&both);
+}
+
 /// Asserts that a pass reads the job tables again only after a write of the job store: a
 /// second pass with none between reads nothing, whether the tick's (which always runs) or one
 /// after a heartbeat with a reading; and that the rows read from one job store never stand
@@ -316,4 +340,78 @@ fn only_a_call_that_changes_the_engine_counts() {
     });
     counted("a lease ended", 1, &|| rig.placer.ended(LeaseId::new(1, 9)));
     counted("a removed host", 1, &|| rig.placer.host_gone(&host("c")));
+}
+
+/// The start of the whole-node request `name` as lease `1-<seq>`.
+fn whole_start(seq: u64, name: &str) -> js_types::StartSpec {
+    let class = js_types::ResourceClass::whole_node();
+    let request = js_types::Request {
+        class: class.id().clone(),
+        resources: js_types::Resources::new(1000, 1 << 20, 0, None).unwrap(),
+        capabilities: BTreeMap::new(),
+        max_wall: Duration::from_secs(600),
+        labels: BTreeMap::new(),
+        validation_run: None,
+        probe_host: None,
+    };
+    let spec = js_types::StartSpec::new(LeaseId::new(1, seq), request, &[class]).unwrap();
+    spec.with_request_id(js_types::RequestId::new(name).unwrap())
+}
+
+/// Asserts that a sweep and an expiry of the whole-node records count once they drop
+/// something, and not before: a request a restart put back is swept past the idle horizon,
+/// and a presented request expires past its grace; each counts once, and the next pass after
+/// a heartbeat runs.
+#[test]
+fn a_sweep_or_an_expiry_that_drops_a_request_counts() {
+    let rig = Rig::new();
+    let both = Offered::both();
+    rig.ran(&both, &[]);
+    rig.skipped(&both);
+    let horizon = Duration::from_secs(60);
+    let kept = js_registry::WholeKept::default();
+    let restored = js_types::RequestId::new("restored").unwrap();
+    assert!(
+        rig.placer
+            .whole_restore(&restored, &kept, false, Timestamp::from_millis(0))
+    );
+    rig.ran(&both, &[]);
+    rig.skipped(&both);
+    let before = rig.placer.engine_changes();
+    rig.placer.whole_sweep(horizon);
+    assert_eq!(
+        rig.placer.engine_changes(),
+        before,
+        "nothing is past the horizon yet"
+    );
+    rig.clock.set(Timestamp::from_millis(61_000));
+    rig.placer.whole_sweep(horizon);
+    assert_eq!(
+        rig.placer.engine_changes(),
+        before + 1,
+        "the sweep dropped the request"
+    );
+    rig.ran(&both, &[]);
+    rig.skipped(&both);
+
+    let start = whole_start(7, "presented");
+    let id = js_types::RequestId::new("presented").unwrap();
+    let grace = Duration::from_secs(60);
+    let _ = rig
+        .placer
+        .whole_present(&id, start.lease(), start.request(), true, grace);
+    rig.ran(&both, &[]);
+    rig.skipped(&both);
+    let before = rig.placer.engine_changes();
+    assert_eq!(rig.placer.whole_expire(grace), 0, "within its grace");
+    assert_eq!(rig.placer.engine_changes(), before);
+    rig.clock.set(Timestamp::from_millis(200_000));
+    rig.placer.whole_expire(grace);
+    assert_eq!(
+        rig.placer.engine_changes(),
+        before + 1,
+        "the expiry dropped the request"
+    );
+    rig.ran(&both, &[]);
+    rig.skipped(&both);
 }

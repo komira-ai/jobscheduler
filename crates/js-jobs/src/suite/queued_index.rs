@@ -121,9 +121,12 @@ pub fn a_queued_job_stays_under_the_active_space_an_earlier_build_reads<B: Backe
 }
 
 /// Every write of the job store moves where its writes stand, whatever the store answered (a
-/// commit, a conflict, a failure); no read does; and two job stores over the same store never
+/// commit, a conflict, a failure), the index backfill's among them; no read does; and two job stores over the same store never
 /// read the same, so one's reading cannot stand for the other's tables.
-pub fn every_write_moves_the_written_mark_and_no_read_does<B: Backend>(backend: &B) {
+pub fn every_write_moves_the_written_mark_and_no_read_does<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
     let name = "every_write_moves_the_written_mark_and_no_read_does";
     let rig = rig(backend);
     let mut last = rig.jobs.written();
@@ -157,6 +160,36 @@ pub fn every_write_moves_the_written_mark_and_no_read_does<B: Backend>(backend: 
         .expect("running");
     rig.jobs.end_job(&id, exited(0)).expect("ended");
     rig.jobs.free(&id, EndReason::Exited).expect("freed");
+    // A second writer rewrites the job row after the call read it: the commit conflicts.
+    let raced = rig.queue("wr-raced");
+    let inner = rig.store.inner();
+    let row = rig.raw("job/wr-raced").expect("a job").value;
+    rig.store.before_next(move || {
+        inner
+            .txn(Txn::new().put("job/wr-raced", row, Cond::Any))
+            .expect("reachable")
+            .expect("commits");
+    });
+    let before = rig.jobs.written();
+    let stale = rig.jobs.place(&raced, host("host-a"), share());
+    assert!(
+        stale.is_err(),
+        "{name}: a placement over a changed row was not stale"
+    );
+    assert_ne!(rig.jobs.written(), before, "{name}: a conflicted commit");
+    // An entry the tables do not call for, put past the job store: the backfill deletes it.
+    rig.store
+        .inner()
+        .txn(Txn::new().put("idx/job/queued/wr-gone", Vec::new(), Cond::Any))
+        .expect("reachable")
+        .expect("an unconditional put commits");
+    let before = rig.jobs.written();
+    let repaired = rig.jobs.backfill_indexes().expect("the backfill runs");
+    assert_eq!(
+        repaired.removed, 1,
+        "{name}: the backfill left the stray entry"
+    );
+    assert_ne!(rig.jobs.written(), before, "{name}: a backfill that wrote");
     let read = rig.jobs.written();
     let _ = rig.jobs.get_job(&id).expect("reads");
     let _ = rig.jobs.get_allocation(&id).expect("reads");
