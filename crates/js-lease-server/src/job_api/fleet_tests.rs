@@ -125,13 +125,7 @@ fn server(name: &str, agents: bool) -> Server {
     let usage = Arc::new(Fake::with_flaw(Arc::default(), Flaw::None));
     let usage_store: Arc<dyn Store> = usage.clone();
     let sink = Arc::new(NodeUsage::over(usage_store, 1 << 20, 0, no_names()).unwrap());
-    let status = PoolStatus::new(
-        None,
-        Some(registry.clone()),
-        None,
-        Vec::new(),
-        shared_clock.clone(),
-    );
+    let status = PoolStatus::new(None, None, Vec::new(), shared_clock.clone());
     let history: Arc<dyn History> = Arc::new(SinkHistory(sink.clone()));
     let fleet = Ctx::served(shared.clone(), Arc::new(status), Some(history))
         .with_job_history(Some(job_history));

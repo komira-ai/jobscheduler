@@ -1,7 +1,7 @@
 //! The in-process server (`js_lease_server::in_process`, cargo feature `in-process`): the
 //! routers answer with no listener, one `tick()` runs the pool checks, the lease table with
 //! the agent registry, and the scaler in that order on the injected clock, and the seam ends
-//! in the same lease and host listings as the tick loop does after the same inputs.
+//! in the same job and host listings as the tick loop does after the same inputs.
 //!
 //! Time is the test's clock ([`support::clock`]) and the lease table's timings a clock of
 //! the test's own ([`support::Stepping`]); nothing sleeps and nothing measures elapsed time.
@@ -20,15 +20,19 @@ mod providers;
 #[path = "in_process/support.rs"]
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use js_jobs::ScriptedIds;
 use js_lease_server::in_process::InProcess;
+use js_lease_server::{Cli, Config};
 use js_registry::HostState;
-use serde_json::json;
+use js_state::ManualClock as StoreClock;
+use serde_json::{Value, json};
 
 use crate::support::{
-    Cell, JOIN, Listening, Reply, Scratch, Stepping, T0, TOKEN, beat_body, clock, config,
-    hello_body, ids, lease_body, lease_body_with_wall, routed,
+    Cell, JOIN, Listening, Reply, Scratch, Stepping, TOKEN, args, beat_body, clock, hello_body,
+    hello_body_draining, routed,
 };
 
 fn secs(n: u64) -> Duration {
@@ -81,66 +85,16 @@ async fn an_in_process_server_answers_a_hello_and_a_heartbeat_with_no_socket() {
     assert_eq!(cell.server.agent_errors(), 0);
 }
 
-/// Asserts that a lease granted through the client router ends at its wall end by the
-/// injected clock and only at a tick: one second before its end a tick keeps it, past its end
-/// it is still listed until `tick()`, and the tick frees it; that no tick failed to write the
-/// lease file; and that the table's steps were timed on the monotonic clock the caller gave
-/// (each takes exactly its 1500 ms step, which no real clock would give). It catches a seam
-/// that reads another clock than the one given, one whose `tick()` does not tick the table,
-/// and one that times the table on the system's clock.
-#[tokio::test]
-async fn an_in_process_tick_ends_a_lease_past_its_wall_end_on_the_injected_clock() {
-    let scratch = Scratch::new("expire");
-    let (clock, shared) = clock();
-    let monotonic = Stepping::of(Duration::from_millis(1500));
-    let server =
-        InProcess::start(config(&scratch, "initialise", false, &monotonic), shared).unwrap();
-    let client = server.client_router();
-    let granted = routed(
-        &client,
-        "POST",
-        "/v1/leases",
-        Some(TOKEN),
-        Some(&lease_body_with_wall(60)),
-    )
-    .await;
-    assert_eq!(granted.status, 201, "{:?}", granted.body);
-    assert_eq!(granted.body["ends_at_ms"], T0 + 60_000);
-    let list = || routed(&client, "GET", "/v1/leases", Some(TOKEN), None);
-
-    clock.advance(secs(59));
-    server.tick().await;
-    assert_eq!(ids(&list().await), vec!["1-1"]);
-    clock.advance(secs(2));
-    assert_eq!(ids(&list().await), vec!["1-1"]);
-    server.tick().await;
-    assert!(ids(&list().await).is_empty());
-    assert_eq!(server.save_errors(), 0);
-    let report = server.timings().report();
-    assert!(
-        report.contains("wait-acquire: 1 timed, 1 over 1 s, longest 1500 ms"),
-        "{report}"
-    );
-    assert!(server.registry().is_none());
-    assert!(server.scaler().is_none());
-}
-
 /// Asserts that a host that said hello reads live through `registry()` while it is inside
 /// the grace (15 s, the pool's default) by the injected clock, still live after a tick one
-/// second before its end, and lost after the clock passes it and a tick has run; and that the
-/// lease placed on it stays booked to it (a lost host keeps its booking). It catches a seam
-/// whose registry reads another clock than the one given, and one whose tick drops the lease
-/// of a silent host or forgets the host.
+/// second before its end, and lost after the clock passes it and a tick has run. It catches
+/// a seam whose registry reads another clock than the one given, and one whose tick does
+/// not run the registry or forgets the host.
 #[tokio::test]
 async fn an_in_process_tick_runs_the_registry_so_a_silent_host_reads_lost() {
     let cell = Cell::start("lost", true);
     let welcome = cell.agent("/v1/agent/hello", &hello_body("host-a")).await;
     assert_eq!(welcome.status, 200, "{:?}", welcome.body);
-    // The shipped pool's two hosts first, then the registered one.
-    for _ in 0..3 {
-        let granted = cell.call("POST", "/v1/leases", Some(&lease_body())).await;
-        assert_eq!(granted.status, 201, "{:?}", granted.body);
-    }
     let registry = cell.server.registry().unwrap();
     let state = || {
         let hosts = registry.hosts();
@@ -150,36 +104,37 @@ async fn an_in_process_tick_runs_the_registry_so_a_silent_host_reads_lost() {
             hosts[0].lease.map(|lease| lease.to_string()),
         )
     };
-    assert_eq!(state(), (HostState::Live, Some("1-3".to_owned())));
+    assert_eq!(state(), (HostState::Live, None));
 
     cell.clock.advance(secs(14));
     cell.server.tick().await;
-    assert_eq!(state(), (HostState::Live, Some("1-3".to_owned())));
+    assert_eq!(state(), (HostState::Live, None));
     cell.clock.advance(secs(2));
     cell.server.tick().await;
-    assert_eq!(state(), (HostState::Lost, Some("1-3".to_owned())));
+    assert_eq!(state(), (HostState::Lost, None));
     assert_eq!(cell.server.agent_errors(), 0);
 }
 
-/// A lease request with a maximum wall time of 60 s.
-fn wall_of_60() -> serde_json::Value {
-    lease_body_with_wall(60)
-}
-
-/// A lease request with a maximum wall time of 70 s.
-fn wall_of_70() -> serde_json::Value {
-    lease_body_with_wall(70)
+/// The body of a job `id`: one core and one GiB, as the registered host has room for.
+fn job_body(id: &str) -> Value {
+    json!({
+        "spec": {
+            "jobId": id,
+            "image": "team/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "command": "run",
+            "needs": { "cpuMillis": "1000", "memoryBytes": "1073741824" },
+            "wallLimitSeconds": "600",
+        }
+    })
 }
 
 /// The inputs both servers of the comparison get, in order.
 #[derive(Clone, Copy)]
 enum Input {
-    /// A client request, with the client token.
-    Client(
-        &'static str,
-        &'static str,
-        Option<fn() -> serde_json::Value>,
-    ),
+    /// A submit of the job of this id to the job service.
+    Submit(&'static str),
+    /// A cancel of the job of this id.
+    Cancel(&'static str),
     /// A hello of `host-a`.
     Hello,
     /// A heartbeat of `host-a` on the session of its hello.
@@ -190,7 +145,22 @@ enum Input {
     Tick,
 }
 
-/// What a server lists after a tick: its leases and its hosts.
+/// The configuration of both servers of the comparison: the job service on, its tables
+/// stamped by one fixed store clock and its ids from one fixed source, so that the two
+/// servers write equal rows.
+fn equal_config(scratch: &Scratch, monotonic: &Stepping) -> Config {
+    let mut flags = args(scratch, "initialise", true);
+    flags.push("--job-listen".into());
+    flags.push("127.0.0.1:0".into());
+    let cli = Cli::try_parse_from(flags).unwrap();
+    let ids = Arc::new(ScriptedIds::new([1; 16], []));
+    Config::from_cli(cli)
+        .unwrap()
+        .with_monotonic(Arc::new(monotonic.clone()))
+        .with_job_sources(Arc::new(StoreClock::default()), ids)
+}
+
+/// What a server lists after a tick: its jobs and its hosts.
 type Listing = (Reply, Reply);
 
 /// Runs `inputs` on the server the listening way (a loopback port and a `ChannelTicker`) and
@@ -199,17 +169,24 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
     let scratch = Scratch::new("equal-loop");
     let (clock, shared) = clock();
     let monotonic = Stepping::of(Duration::from_millis(1));
-    let server = Listening::start(config(&scratch, "initialise", true, &monotonic), shared).await;
+    let server = Listening::start(equal_config(&scratch, &monotonic), shared).await;
     let mut welcome = None;
     let mut seen = Vec::new();
     for input in inputs {
         match *input {
-            Input::Client(method, path, body) => {
-                let body = body.map(|body| body());
-                server.request(method, path, TOKEN, body.as_ref()).await;
+            Input::Submit(id) => {
+                let submitted = server
+                    .job_request("POST", "/v1/jobs", Some(&job_body(id)))
+                    .await;
+                assert_eq!(submitted.status, 201, "{:?}", submitted.body);
+            }
+            Input::Cancel(id) => {
+                let path = format!("/v1/jobs/{id}:cancel");
+                let cancelled = server.job_request("POST", &path, Some(&json!({}))).await;
+                assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
             }
             Input::Hello => {
-                let hello = hello_body("host-a");
+                let hello = hello_body_draining("host-a");
                 welcome = Some(
                     server
                         .request("POST", "/v1/agent/hello", JOIN, Some(&hello))
@@ -217,7 +194,8 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
                 );
             }
             Input::Beat => {
-                let beat = beat_body("host-a", welcome.as_ref().unwrap());
+                let mut beat = beat_body("host-a", welcome.as_ref().unwrap());
+                beat["phase"] = json!("draining");
                 let reply = server
                     .request("POST", "/v1/agent/heartbeat", JOIN, Some(&beat))
                     .await;
@@ -226,9 +204,9 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
             Input::Advance(n) => clock.advance(secs(n)),
             Input::Tick => {
                 server.ticks.step().await;
-                let leases = server.request("GET", "/v1/leases", TOKEN, None).await;
+                let jobs = server.job_request("GET", "/v1/jobs", None).await;
                 let hosts = server.request("GET", "/v1/hosts", TOKEN, None).await;
-                seen.push((leases, hosts));
+                seen.push((jobs, hosts));
             }
         }
     }
@@ -238,84 +216,105 @@ async fn through_the_tick_loop(inputs: &[Input]) -> Vec<Listing> {
 
 /// Runs `inputs` on the server in process and returns what it lists after each tick.
 async fn through_the_seam(inputs: &[Input]) -> Vec<Listing> {
-    let cell = Cell::start("equal-seam", true);
+    let scratch = Scratch::new("equal-seam");
+    let (clock, shared) = clock();
+    let monotonic = Stepping::of(Duration::from_millis(1));
+    let server = InProcess::start(equal_config(&scratch, &monotonic), shared).unwrap();
+    let agents = server.agent_router();
+    let jobs = server.job_router().expect("the job service is on");
+    let client = server.client_router();
     let mut welcome = None;
     let mut seen = Vec::new();
     for input in inputs {
         match *input {
-            Input::Client(method, path, body) => {
-                let body = body.map(|body| body());
-                cell.call(method, path, body.as_ref()).await;
+            Input::Submit(id) => {
+                let body = job_body(id);
+                let submitted = routed(&jobs, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await;
+                assert_eq!(submitted.status, 201, "{:?}", submitted.body);
+            }
+            Input::Cancel(id) => {
+                let path = format!("/v1/jobs/{id}:cancel");
+                let body = json!({});
+                let cancelled = routed(&jobs, "POST", &path, Some(TOKEN), Some(&body)).await;
+                assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
             }
             Input::Hello => {
-                welcome = Some(cell.agent("/v1/agent/hello", &hello_body("host-a")).await)
+                let hello = hello_body_draining("host-a");
+                let path = "/v1/agent/hello";
+                welcome = Some(routed(&agents, "POST", path, Some(JOIN), Some(&hello)).await);
             }
             Input::Beat => {
-                let beat = beat_body("host-a", welcome.as_ref().unwrap());
-                let reply = cell.agent("/v1/agent/heartbeat", &beat).await;
+                let mut beat = beat_body("host-a", welcome.as_ref().unwrap());
+                beat["phase"] = json!("draining");
+                let path = "/v1/agent/heartbeat";
+                let reply = routed(&agents, "POST", path, Some(JOIN), Some(&beat)).await;
                 assert_eq!(reply.status, 200, "{:?}", reply.body);
             }
-            Input::Advance(n) => cell.clock.advance(secs(n)),
+            Input::Advance(n) => clock.advance(secs(n)),
             Input::Tick => {
-                cell.server.tick().await;
-                let leases = cell.call("GET", "/v1/leases", None).await;
-                let hosts = cell.call("GET", "/v1/hosts", None).await;
-                seen.push((leases, hosts));
+                server.tick().await;
+                let listed = routed(&jobs, "GET", "/v1/jobs", Some(TOKEN), None).await;
+                let hosts = routed(&client, "GET", "/v1/hosts", Some(TOKEN), None).await;
+                seen.push((listed, hosts));
             }
         }
     }
     seen
 }
 
-/// Asserts that the tick loop and the seam, over equal (fresh) lease files, equal clocks and
-/// equal inputs, list equal leases and equal hosts after every one of five ticks. The inputs
-/// fill the shipped pool's two hosts and the registered one (one lease with a longer wall
-/// time than the others), let the others end, lease a freed host again, let the longer
-/// lease end too, and let the registered host go silent past its grace, so the listings
-/// change at every tick: a lease is placed, ended and freed, and the host goes from live to lost. It catches a seam whose tick does less, more,
-/// or another thing than the tick loop's (a part of `Shared::tick` skipped or done twice),
-/// and routers that answer otherwise than the listener.
+/// Asserts that the tick loop and the seam, over equal (fresh) state files, equal clocks and
+/// equal inputs, list equal jobs and equal hosts after every one of five ticks. The inputs
+/// register a host, submit two jobs, cancel one, and let the registered host go silent past
+/// its grace, so the listings change at every tick: a job is queued, a second one joins it,
+/// the first is cancelled, and the host goes from live to lost (the host says it is draining, so the scheduler places neither job). It catches a
+/// seam whose tick does less, more, or another thing than the tick loop's (a part of `Shared::tick` skipped
+/// or done twice), and routers that answer otherwise than the listeners.
 #[tokio::test]
-async fn the_tick_loop_and_the_seam_leave_equal_lease_listings_after_equal_ticks() {
-    use Input::{Advance, Beat, Client, Hello, Tick};
-    let acquire = Client("POST", "/v1/leases", Some(wall_of_60));
-    let longer = Client("POST", "/v1/leases", Some(wall_of_70));
+async fn the_tick_loop_and_the_seam_leave_equal_job_listings_after_equal_ticks() {
+    use Input::{Advance, Beat, Cancel, Hello, Submit, Tick};
     let inputs = [
         Hello,
-        longer,
-        acquire,
+        Submit("job-a"),
         Tick,
-        acquire,
+        Submit("job-b"),
         Advance(10),
         Beat,
         Tick,
-        Advance(40),
-        Beat,
+        Cancel("job-a"),
         Tick,
         Advance(11),
         Beat,
         Tick,
-        acquire,
         Advance(20),
         Tick,
     ];
     let looped = through_the_tick_loop(&inputs).await;
     let seamed = through_the_seam(&inputs).await;
     assert_eq!(looped.len(), 5);
-    let leases = |seen: &[Listing]| {
+    let jobs = |seen: &[Listing]| {
         seen.iter()
-            .map(|(leases, _)| ids(leases))
+            .map(|(jobs, _)| {
+                assert_eq!(jobs.status, 200, "{:?}", jobs.body);
+                let listed = jobs.body["jobs"].as_array().unwrap();
+                let state = |job: &Value| {
+                    let id = job["id"].as_str().unwrap().to_owned();
+                    (id, job["state"].as_str().unwrap().to_owned())
+                };
+                listed.iter().map(state).collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>()
     };
     // What the listings hold, so that equal listings are not equal for being empty.
-    let expected: Vec<Vec<&str>> = vec![
-        vec!["1-1", "1-2"],
-        vec!["1-1", "1-2", "1-3"],
-        vec!["1-1", "1-2", "1-3"],
-        vec!["1-1"],
-        vec!["1-4"],
+    let queued = |id: &str| (id.to_owned(), "JOB_STATE_QUEUED".to_owned());
+    let cancelled = |id: &str| (id.to_owned(), "JOB_STATE_CANCELLED".to_owned());
+    let expected = vec![
+        vec![queued("job-a")],
+        vec![queued("job-a"), queued("job-b")],
+        vec![cancelled("job-a"), queued("job-b")],
+        vec![cancelled("job-a"), queued("job-b")],
+        vec![cancelled("job-a"), queued("job-b")],
     ];
-    assert_eq!(leases(&looped), expected);
+    assert_eq!(jobs(&looped), expected);
     let states: Vec<String> = looped
         .iter()
         .map(|(_, hosts)| {
@@ -328,49 +327,62 @@ async fn the_tick_loop_and_the_seam_leave_equal_lease_listings_after_equal_ticks
     assert_eq!(seamed, looped);
 }
 
-/// Asserts that a lease survives a restart through the seam: after `shutdown`, a second
-/// server over the same lease file with `--boot resume` lists it. Before that, a second
-/// server is refused naming `--state-file` while the first still holds the file, and again
+/// Asserts that a job survives a restart through the seam: after `shutdown`, a second
+/// server over the same state file with `--boot resume` lists it. Before that, a second
+/// server is refused naming the state file's job tables while the first still holds them, and again
 /// while a clone of the first's router outlives the shut-down handle (the clone holds the
-/// table, as the module doc says), so the start after the clone is dropped is one the lock
-/// would have refused. It catches a `shutdown` that leaves the lock on the lease file held,
-/// and a lease file the seam does not write.
+/// tables, as the module doc says), so the start after the clone is dropped is one the lock
+/// would have refused. It catches a `shutdown` that leaves the lock on the state file held,
+/// and job tables the seam does not write.
 #[tokio::test]
 async fn a_second_in_process_server_starts_over_the_state_file_after_the_first_is_shut_down() {
+    // The job tables are the first of the state file's files a second server takes.
+    const HELD: &str = "--job-listen: state file";
     let scratch = Scratch::new("restart");
     let monotonic = Stepping::of(Duration::from_millis(1));
-    let (_clock, shared) = clock();
-    let first =
-        InProcess::start(config(&scratch, "initialise", false, &monotonic), shared).unwrap();
-    let client = first.client_router();
-    let granted = routed(
-        &client,
+    let start = |boot: &str| {
+        let mut flags = args(&scratch, boot, true);
+        flags.push("--job-listen".into());
+        flags.push("127.0.0.1:0".into());
+        // The usage file has its own lock, which would be the one a second server names.
+        flags.push("--usage-off".into());
+        let cli = Cli::try_parse_from(flags).unwrap();
+        let config = Config::from_cli(cli)
+            .unwrap()
+            .with_monotonic(Arc::new(monotonic.clone()));
+        let (_clock, shared) = clock();
+        InProcess::start(config, shared)
+    };
+    let first = start("initialise").unwrap();
+    let hello = routed(
+        &first.agent_router(),
         "POST",
-        "/v1/leases",
-        Some(TOKEN),
-        Some(&lease_body()),
+        "/v1/agent/hello",
+        Some(JOIN),
+        Some(&hello_body("host-a")),
     )
     .await;
-    assert_eq!(granted.status, 201, "{:?}", granted.body);
+    assert_eq!(hello.status, 200, "{:?}", hello.body);
+    let jobs = first.job_router().expect("the job service is on");
+    let body = job_body("job-kept");
+    let submitted = routed(&jobs, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await;
+    assert_eq!(submitted.status, 201, "{:?}", submitted.body);
 
-    let resume = || {
-        let (_clock, shared) = clock();
-        InProcess::start(config(&scratch, "resume", false, &monotonic), shared)
-    };
-    let refused = resume()
+    let refused = start("resume")
         .err()
-        .expect("the first server holds the lease file");
-    assert!(refused.to_string().starts_with("--state-file"), "{refused}");
+        .expect("the first server holds the state file");
+    assert!(refused.to_string().starts_with(HELD), "{refused}");
     first.shutdown();
-    let still = resume()
+    let still = start("resume")
         .err()
-        .expect("the router's clone holds the lease file");
-    assert!(still.to_string().starts_with("--state-file"), "{still}");
-    drop(client);
+        .expect("the router's clone holds the state file");
+    assert!(still.to_string().starts_with(HELD), "{still}");
+    drop(jobs);
 
-    let second = resume().unwrap();
-    let client = second.client_router();
-    let listed = routed(&client, "GET", "/v1/leases", Some(TOKEN), None).await;
-    assert_eq!(ids(&listed), vec!["1-1"]);
-    assert_eq!(listed.body["leases"][0]["host"], granted.body["host"]);
+    let second = start("resume").unwrap();
+    let jobs = second.job_router().expect("the job service is on");
+    let listed = routed(&jobs, "GET", "/v1/jobs", Some(TOKEN), None).await;
+    assert_eq!(listed.status, 200, "{:?}", listed.body);
+    assert_eq!(listed.body["jobs"][0]["id"], "job-kept");
+    assert_eq!(listed.body["jobs"][0]["state"], "JOB_STATE_QUEUED");
 }

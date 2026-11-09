@@ -361,7 +361,7 @@ async fn the_program_refuses_a_flag_beside_config_and_flags_alone_still_start() 
     let h = Harness::new("one_file_flags_only").await;
     let served: SocketAddr = h.addr();
     assert!(served.ip().is_loopback());
-    let reply = h.call("GET", "/v1/leases", None).await;
+    let reply = h.call("GET", "/v1/hosts", None).await;
     assert_eq!(reply.status, 200);
 }
 

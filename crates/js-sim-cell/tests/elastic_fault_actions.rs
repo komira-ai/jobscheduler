@@ -221,7 +221,7 @@ fn add_foreign_machine_adds_a_machine_the_scheduler_did_not_launch() {
     assert_eq!(cloud.fake().launched(), 2);
     assert_eq!(cloud.fake().running().len(), 2);
     assert_eq!(
-        Expect::machines_launched(elastic::POOL, 0).unmet(&mut cell),
+        Expect::machines_launched(elastic::POOL, 0).unmet(&cell),
         None
     );
     assert_eq!(

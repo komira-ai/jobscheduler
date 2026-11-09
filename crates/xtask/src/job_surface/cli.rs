@@ -36,8 +36,10 @@ use super::words::{camel_words, kebab, lower_words, short_names, singular, snake
 /// The flags `js` itself has, and clap's own: no request field may take one.
 pub const RESERVED: [&str; 6] = ["server", "token-file", "ca-cert", "json", "help", "version"];
 
-/// The first words of the commands `js` writes by hand, and clap's own.
-pub const TAKEN: [&str; 2] = ["lease", "help"];
+/// The first words `js` keeps for itself: `join-token`, the command it writes by hand;
+/// `lease`, the removed command group, so that a script still typing it gets a usage error
+/// and never reaches a generated command; and clap's own `help`.
+pub const TAKEN: [&str; 3] = ["join-token", "lease", "help"];
 
 /// One command of the table.
 #[derive(Debug, Clone, PartialEq)]
@@ -217,7 +219,7 @@ fn check(command: &Command, before: &[Command]) -> Result<(), GenError> {
     match (empty, taken, clash) {
         (true, _, _) => Err(refuse("its name has no noun after the verb".to_owned())),
         (false, true, _) => Err(refuse(format!(
-            "`js {path}` is a command js writes by hand"
+            "`js {path}` starts with a word js keeps for itself"
         ))),
         (false, false, Some(other)) => {
             Err(refuse(format!("`js {path}` is where {} is", other.rpc)))

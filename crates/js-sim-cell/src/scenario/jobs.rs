@@ -249,7 +249,7 @@ mod tests {
     }
 
     /// Catches: a job launched under two allocations not named, one launched once named,
-    /// and a launch that names no allocation (a run of the lease routes) taken for a job.
+    /// and a launch that names no allocation taken for a job.
     #[test]
     fn a_job_launched_under_two_allocations_is_named() {
         let once = Observations::quiet()

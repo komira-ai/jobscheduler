@@ -40,7 +40,7 @@ pub const FAMILY: &str = "store";
 pub const GOLDEN_SEEDS: u64 = 2;
 
 /// The restart's name, as [`restart`] names it before the store's.
-const RESTART: &str = "a_restart_over_the_store_keeps_every_host_binding_and_lease";
+const RESTART: &str = "a_restart_over_the_store_keeps_every_host_binding";
 
 /// The restart: six hosts of the pool's shared token, one host joined with a minted token
 /// before the restart, and twelve runs of a minute, two waves over the hosts, so the first
@@ -91,7 +91,7 @@ const SCALER_RESTART_AT: Duration = Duration::from_secs(60);
 const SCALER_SETTLE: Duration = Duration::from_secs(900);
 
 /// Proves that a restart of the server over its store keeps every host binding and every
-/// lease (design section 6.7): six hosts of the pool's token and one joined with a minted
+/// job (design section 6.7): six hosts of the pool's token and one joined with a minted
 /// token are seated before the restart with runs in flight; after it every one of them says
 /// hello again and is seated once, under the same host id; the token used before the
 /// restart is refused as used to another host after it (`h007` is answered 403 and never
@@ -100,10 +100,10 @@ const SCALER_SETTLE: Duration = Duration::from_secs(900);
 /// cell's agents keep no host credential, so the binding is seen as the host seated again
 /// under its token. Red for a store that loses a token's use (`h007` would be seated), one
 /// that loses a mint (`h008` would be refused), one that loses a binding or a taint the
-/// listing shows, and a restart that books a lease on another host (`no-double-booking`).
+/// listing shows, and a restart that books a job on another host (`no-double-booking`).
 pub fn restart(store: Store) -> Scenario {
     let spec = ServerSpec::registered_pool(POOL, Shape::gpu_host(), RESTART_POOL_HOSTS + 3);
-    Scenario::new("a_restart_over_the_store_keeps_every_host_binding_and_lease")
+    Scenario::new("a_restart_over_the_store_keeps_every_host_binding")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
         .over_store(store)
@@ -198,7 +198,7 @@ pub fn scaler(store: Store) -> Scenario {
     let pool = ElasticPool::ec2_like(POOL, offers, SCALER_MAX);
     let shape = Shape {
         capabilities: BTreeMap::new(),
-        ..Shape::gpu_host()
+        ..Shape::cpu_host()
     };
     Scenario::new("the_scaler_records_survive_a_restart_and_launch_nothing_twice")
         .scratch(env!("CARGO_TARGET_TMPDIR"))

@@ -8,7 +8,6 @@ use std::sync::mpsc::Receiver;
 
 use js_elastic_fake::ElasticFake;
 use js_lease_server::{REGISTRY_FLOOR, REGISTRY_QUIET, RecordsFile};
-use js_provider::{Pool, StartAck};
 use js_provider_lambdalabs::{FakeLambda, TerminateEffect};
 use js_scaler::{Phase, State};
 use serde_json::json;
@@ -16,8 +15,8 @@ use serde_json::json;
 use crate::agents_support::{Session, hosts};
 use crate::config_support::{API_KEY, OAUTH_SECRET, oauth_file};
 use crate::scaler_support::{
-    account, beat, elastic_cloud, hello_body_of, lagging, quiet, records_path, spec, start,
-    text_with, token_in,
+    account, beat, cancel, elastic_cloud, hello_body_of, lagging, quiet, records_path, start,
+    submit, text_with, token_in,
 };
 use crate::support::{Harness, Reply, Scratch, TOKEN, request};
 use crate::tailnet::{AUTH_KEY, Fake, Reply as Canned, TOKEN as TAILNET_TOKEN};
@@ -34,8 +33,8 @@ pub const DELETE_DEVICE: &str = "DELETE /api/v2/device/d1";
 /// How far the clock moves between two ticks of [`Rig::complete_view`], in seconds.
 const STEP: u64 = 10;
 
-/// The request id of the one request the consumer in these tests makes.
-const REQUEST: &str = "r1";
+/// The id of the one job the consumer in these tests submits.
+const JOB: &str = "j1";
 
 /// A server with a launching pool `burst` of the fake cloud, the account behind it and the
 /// fake Tailscale API.
@@ -301,18 +300,13 @@ impl Rig {
         );
     }
 
-    /// The consumer presents its request: the answer the registry gives it.
-    pub fn present(&self) -> StartAck {
-        self.registry().provider().start(spec(1, REQUEST))
-    }
-
-    /// The first half of the sequence: the scaler is told what the pool offers, a request
+    /// The first half of the sequence: the scaler is told what the pool offers, a job
     /// waits, the next tick launches a machine and the one after sees it booting. Returns
     /// the machine's name and the join token in its user data, and has the fake Tailscale
     /// API list the machine's device.
     pub async fn launch(&self) -> (String, String) {
         self.tick().await;
-        self.wait();
+        self.wait().await;
         self.tick().await;
         assert_eq!(self.launched(), 1);
         let name = self.name();
@@ -322,16 +316,22 @@ impl Rig {
         (name, self.token(0))
     }
 
-    /// Presents the request and asserts that it found no host and waits.
-    pub fn wait(&self) {
-        assert!(matches!(self.present(), StartAck::Unknown));
-        assert_eq!(self.registry().waiting().len(), 1);
+    /// Submits the job and asserts that it is queued: the first submit is created (201), a
+    /// later one finds the same job still there (409, the job id is taken).
+    pub async fn wait(&self) {
+        let reply = submit(&self.h, JOB).await;
+        assert!(
+            matches!(reply.status, 201 | 409),
+            "{}: {}",
+            reply.status,
+            reply.body
+        );
     }
 
-    /// The consumer gives its request up: the registry drops it from the wait list.
-    pub fn withdraw(&self) {
-        let id = js_types::RequestId::new(REQUEST).unwrap();
-        assert!(self.registry().cancel_request(&id));
+    /// The consumer gives its job up: it is cancelled and leaves the queue.
+    pub async fn withdraw(&self) {
+        let cancelled = cancel(&self.h, JOB).await;
+        assert_eq!(cancelled.status, 200, "{}", cancelled.body);
     }
 
     /// The user data of the `n`th launch the account saw.
@@ -433,26 +433,6 @@ impl Rig {
     /// A heartbeat of `me` with `bearer`.
     pub async fn beat(&self, bearer: &str, me: &Session) -> Reply {
         beat(&self.h, bearer, me).await
-    }
-
-    /// What an agent does about the exclusive lease the registry committed to its host:
-    /// it hears the lease in a heartbeat reply and reports itself ready for it. Returns
-    /// the lease it heard.
-    pub async fn ready(&self, credential: &str, me: &Session) -> String {
-        let heard = self.beat(credential, me).await;
-        assert_eq!(heard.status, 200, "{}", heard.body);
-        let lease = heard.json()["exclusive"]
-            .as_str()
-            .expect("the reply names the lease the host is committed to")
-            .to_owned();
-        let mut message = me.beat();
-        message["exclusive_ready"] = json!(lease);
-        let bytes = message.to_string().into_bytes();
-        let addr = self.h.running.agent_addr().unwrap();
-        let path = "/v1/agent/heartbeat";
-        let sent = request(addr, "POST", path, Some(credential), Some(&bytes)).await;
-        assert_eq!(sent.status, 200, "{}", sent.body);
-        lease
     }
 
     /// The `mark` the registry lists for `host`.

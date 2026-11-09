@@ -34,8 +34,7 @@ lost. The taint survives the host's own hello and a server restart.
 A server build from before host jobs reads a host job's row as a contained job and does not read
 the taint rows, so do not roll the server back to such a build while a host job is recorded.
 
-The lease-era run API (`POST /v1/leases/{id}/runs`) still refuses host isolation with 422
-`host-jobs-not-allowed`. Host jobs are jobs only.
+Host jobs are jobs only.
 
 ## Taking a host out of service afterwards
 

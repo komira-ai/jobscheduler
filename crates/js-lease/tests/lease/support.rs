@@ -141,7 +141,13 @@ pub fn provider_classes() -> Vec<ResourceClass> {
 }
 
 pub fn open_err(path: &Path) -> OpenError {
-    match LeaseTable::open(fake(), clock(), settings(), path, Boot::Initialise) {
+    match LeaseTable::open(
+        fake(),
+        clock(),
+        settings(),
+        path.to_path_buf(),
+        Boot::Initialise,
+    ) {
         Err(err) => err,
         Ok(_) => panic!("opened over {}", path.display()),
     }

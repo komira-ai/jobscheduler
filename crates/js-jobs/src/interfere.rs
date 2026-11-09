@@ -1,6 +1,7 @@
 //! [`Interfere`]: a store that delegates to another and, when told, fails a commit or lets a
-//! second writer commit first. Test support: the suite uses it to show that an operation
-//! writes nothing when its commit fails and that it pins the versions it read.
+//! second writer commit first, and keeps the keys read through it. Test support: the suite uses
+//! it to show that an operation writes nothing when its commit fails and that it pins the
+//! versions it read, and the server's tests to count what a pass reads.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -18,7 +19,7 @@ type Hook = Box<dyn FnOnce() + Send>;
 /// A store that passes every call to the store it wraps, except that the commit
 /// [`Interfere::fail_after`] names, and the read [`Interfere::fail_read_after`] names, fail
 /// without reaching it, and a hook [`Interfere::before_next`] sets runs just before the next
-/// commit does.
+/// commit does. Every read that reaches the wrapped store is logged ([`Interfere::take_reads`]).
 pub struct Interfere<S> {
     inner: Arc<S>,
     /// How many commits pass before one fails; `None`: none fails.
@@ -29,6 +30,18 @@ pub struct Interfere<S> {
     /// The error a failed commit or read answers; [`StoreError::Failed`] with [`INJECTED`]
     /// until [`Interfere::fail_with`] says another.
     error: Mutex<StoreError>,
+    /// What each read that reached the wrapped store asked for, in order, since the last
+    /// [`Interfere::take_reads`].
+    reads: Mutex<Vec<Read>>,
+}
+
+/// One read a store was asked for: the key of a get, or the prefix of a scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Read {
+    /// A get of the key.
+    Get(String),
+    /// A prefix or range scan under the prefix.
+    Scan(String),
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -45,6 +58,7 @@ impl<S: Store> Interfere<S> {
             fail_read_at: Mutex::new(None),
             before: Mutex::new(None),
             error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
+            reads: Mutex::new(Vec::new()),
         }
     }
 
@@ -90,6 +104,20 @@ impl<S: Store> Interfere<S> {
         *lock(&self.before) = Some(Box::new(hook));
     }
 
+    /// The reads that reached the wrapped store since the last call, in the order they came,
+    /// taken: the next call answers only the reads made after this one. A read failed by
+    /// [`Interfere::fail_read_after`] never reached it and is not logged.
+    pub fn take_reads(&self) -> Vec<Read> {
+        std::mem::take(&mut *lock(&self.reads))
+    }
+
+    /// Logs `read` once it passed [`Interfere::fail_read_after`].
+    fn log(&self, read: Read) -> Result<(), StoreError> {
+        self.countdown(&self.fail_read_at)?;
+        lock(&self.reads).push(read);
+        Ok(())
+    }
+
     /// The error of [`Interfere::fail_with`] when this call is the one `slot` counts down to.
     fn countdown(&self, slot: &Mutex<Option<usize>>) -> Result<(), StoreError> {
         let mut left = lock(slot);
@@ -119,17 +147,17 @@ impl<S: Store> Store for Interfere<S> {
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
-        self.countdown(&self.fail_read_at)?;
+        self.log(Read::Get(key.to_owned()))?;
         self.inner.get(key)
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-        self.countdown(&self.fail_read_at)?;
+        self.log(Read::Scan(prefix.to_owned()))?;
         self.inner.scan_prefix(prefix)
     }
 
     fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
-        self.countdown(&self.fail_read_at)?;
+        self.log(Read::Scan(scan.prefix.to_owned()))?;
         self.inner.scan_range(scan)
     }
 
@@ -162,7 +190,7 @@ mod tests {
     use js_state::fake::{Fake, Flaw};
     use js_state::{Cond, ManualClock, Revision, Store, StoreError, Txn};
 
-    use super::{INJECTED, Interfere};
+    use super::{INJECTED, Interfere, Read};
 
     fn wrapped() -> Interfere<Fake> {
         Interfere::new(Fake::with_flaw(
@@ -242,6 +270,28 @@ mod tests {
         store.fail_read_after(0);
         assert_eq!(store.get("a"), Err(StoreError::Failed(INJECTED.to_owned())));
         put(&store, "b").expect("a commit does not count as a read");
+    }
+
+    // Catches a read log that misses a kind of read, logs a read that failed before it reached
+    // the store, or answers a read twice: each read is logged once, in order, and taken.
+    #[test]
+    fn each_read_that_reaches_the_store_is_logged_once() {
+        let store = wrapped();
+        put(&store, "a").expect("commits");
+        assert_eq!(store.take_reads(), [], "a commit is no read");
+        store.get("a").expect("reads");
+        store.scan_prefix("p/").expect("reads");
+        let range = js_state::ScanRange::new("r/", std::num::NonZeroUsize::MIN);
+        store.scan_range(range).expect("reads");
+        store.fail_read_after(0);
+        assert!(store.get("b").is_err());
+        let logged = [
+            Read::Get("a".to_owned()),
+            Read::Scan("p/".to_owned()),
+            Read::Scan("r/".to_owned()),
+        ];
+        assert_eq!(store.take_reads(), logged);
+        assert_eq!(store.take_reads(), []);
     }
 
     // Catches an injected error that is not the one told: a failed commit and a failed read

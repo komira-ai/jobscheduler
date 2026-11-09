@@ -20,9 +20,7 @@ use js_jobs::{
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, JobTables, Scaler, SharedClock};
-use js_registry::{
-    Busy, HostMark, HostState, HostView, SequentialSessions, SessionSource, Waiting,
-};
+use js_registry::{Busy, HostMark, HostState, HostView, SequentialSessions, SessionSource};
 use js_scaler::{
     AcquirePlan, Health, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer,
 };
@@ -39,8 +37,6 @@ pub const START: u64 = 1_000_000_000_000;
 pub struct World {
     /// Every call that changes something, as text, in order.
     pub log: Vec<String>,
-    /// The registry's wait list of whole-node lease requests.
-    pub waiting: Vec<Waiting>,
     /// The queued jobs, in queue order.
     pub queued: Vec<JobRecord>,
     /// The live job allocations.
@@ -147,9 +143,8 @@ impl World {
 }
 
 impl Effects for Handle {
-    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>) {
-        let world = self.world();
-        (world.hosts.clone(), world.waiting.clone())
+    fn hosts(&self) -> Vec<HostView> {
+        self.world().hosts.clone()
     }
 
     fn jobs(&self) -> Result<JobTables, JobStoreError> {
@@ -171,10 +166,7 @@ impl Effects for Handle {
 
     fn holds_work(&self, host: &str) -> bool {
         let world = self.world();
-        let on = world.hosts.iter().find(|view| view.id.as_str() == host);
-        let leased = on.is_some_and(|view| view.lease.is_some());
-        let allocated = world.live.iter().any(|live| live.host.as_str() == host);
-        leased | allocated
+        world.live.iter().any(|live| live.host.as_str() == host)
     }
 
     fn remove(&self, host: &str) -> Result<(), Busy> {
@@ -427,7 +419,6 @@ pub fn new_world() -> Arc<Mutex<World>> {
     trace_everything();
     Arc::new(Mutex::new(World {
         log: Vec::new(),
-        waiting: Vec::new(),
         queued: Vec::new(),
         live: Vec::new(),
         jobs_fail: false,
@@ -564,16 +555,6 @@ pub fn request_demand() -> Requirements {
         }),
         network: JobNetwork::None,
         host_ports: Vec::new(),
-    }
-}
-
-/// A whole-node lease request `id` on the registry's wait list, for one a10.
-pub fn request(id: &str) -> Waiting {
-    Waiting {
-        id: js_types::RequestId::new(id).unwrap(),
-        demand: request_demand(),
-        since: Timestamp::from_millis(START),
-        reserved: None,
     }
 }
 

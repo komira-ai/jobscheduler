@@ -13,8 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 
 use crate::support::{
-    Harness, Scratch, TOKEN, args_with, config, exchange, guard, lease_body, replace, start,
-    unanswered,
+    Harness, Scratch, TOKEN, args_with, config, exchange, guard, replace, start, unanswered,
 };
 use js_lease_server::{Limits, SharedClock, channel_ticker};
 
@@ -82,7 +81,7 @@ async fn tls_server_limited(name: &str, listen: &str, limits: Option<Limits>) ->
 }
 
 /// Asserts that a client trusting the certificate gets answers over TLS (health,
-/// authentication, a lease), that a client speaking plain HTTP or garbage to the port
+/// authentication, the host list), that a client speaking plain HTTP or garbage to the port
 /// is dropped without an answer, and that the server serves on afterwards.
 #[tokio::test]
 async fn tls_round_trip() {
@@ -92,19 +91,10 @@ async fn tls_round_trip() {
 
     let health = tls_request(addr, &connector, "GET", "/healthz", None, None).await;
     assert_eq!((health.status, health.body.as_str()), (200, "ok"));
-    let denied = tls_request(addr, &connector, "GET", "/v1/leases", None, None).await;
+    let denied = tls_request(addr, &connector, "GET", "/v1/hosts", None, None).await;
     assert_eq!(denied.status, 401);
-    let body = lease_body().to_string().into_bytes();
-    let made = tls_request(
-        addr,
-        &connector,
-        "POST",
-        "/v1/leases",
-        Some(TOKEN),
-        Some(&body),
-    )
-    .await;
-    assert_eq!(made.status, 201, "{}", made.body);
+    let hosts = tls_request(addr, &connector, "GET", "/v1/hosts", Some(TOKEN), None).await;
+    assert_eq!(hosts.status, 200, "{}", hosts.body);
 
     let plain = unanswered(addr, "GET", "/healthz").await;
     assert_eq!(plain.status, 0);
@@ -116,7 +106,7 @@ async fn tls_round_trip() {
     let _ = junk.read_to_end(&mut seen).await;
     assert!(!seen.starts_with(b"HTTP/"));
 
-    let again = tls_request(addr, &connector, "GET", "/v1/leases", Some(TOKEN), None).await;
+    let again = tls_request(addr, &connector, "GET", "/v1/hosts", Some(TOKEN), None).await;
     assert_eq!(again.status, 200);
 }
 
@@ -195,7 +185,7 @@ async fn a_stalled_handshake_delays_nobody() {
 
     let health = tls_request(h.addr(), &connector, "GET", "/healthz", None, None).await;
     assert_eq!(health.status, 200);
-    let listed = tls_request(h.addr(), &connector, "GET", "/v1/leases", Some(TOKEN), None).await;
+    let listed = tls_request(h.addr(), &connector, "GET", "/v1/hosts", Some(TOKEN), None).await;
     assert_eq!(listed.status, 200);
     assert!(silent.peer_addr().is_ok());
 }

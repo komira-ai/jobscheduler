@@ -1,6 +1,6 @@
-//! A copy of what the scheduler holds and queues, for the operator API's `GET
-//! /v1/leases` and `GET /v1/queue`: plain values, taken in one call, so the caller
-//! releases the scheduler's lock before it renders anything.
+//! A copy of what the scheduler holds and queues, for a caller that lists the leases and the
+//! queue: plain values, taken in one call, so the caller releases the scheduler's lock
+//! before it renders anything.
 //!
 //! Ages are as of the scheduler's newest input ([`Snapshot::now`]), which is at most a
 //! tick old, so they never run ahead of what the scheduler has seen. The copy is

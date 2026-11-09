@@ -68,5 +68,4 @@ pub fn the_headline_over_jobs() -> Scenario {
         .expect(Expect::each_job_launched_once())
         .expect(Expect::no_allocation_live())
         .settle_within(SETTLE)
-        .over_jobs()
 }

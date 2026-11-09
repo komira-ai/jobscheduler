@@ -503,7 +503,6 @@ pub(crate) fn open(
         store,
         store_health,
     } = prepared;
-    let registry = agents.as_ref().map(|agents| agents.registry.clone());
     let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
     if let Some(scaler) = &scaler {
         scaler.listening(Some(2 * tick), &bookings);
@@ -535,7 +534,7 @@ pub(crate) fn open(
     }
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
     let store_health = Arc::new(store_health);
-    let pools = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
+    let pools = Status::new(pool, scaler.clone(), warnings, clock.clone());
     let pools = Arc::new(
         pools
             .with_logs(logs)
@@ -816,9 +815,8 @@ impl Running {
 
     /// The curves learned from runs that ended cleanly, for admission to read as its
     /// `CurveSource`. A curve is kept under the profile name the caller supplied for the runs,
-    /// not under the work key, so admission finds it through the names the caller gave
-    /// (`Config::with_curve_names`); without them every work key is charged flat.
-    /// `None` without agent registration, with `--usage-off`, or with a sink that learns
+    /// not under the work key, and the server maps no work key to a profile name, so every
+    /// work key is charged flat. `None` without agent registration, with `--usage-off`, or with a sink that learns
     /// none.
     pub fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
         self.shared.usage_curves()

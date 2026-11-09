@@ -23,16 +23,13 @@
 //! submits an item.
 //!
 //! A front also keeps every answer it was given, raw ([`Answer`]: the call, its time, its
-//! status and its body), for one purpose only: an expectation that carries what a test
-//! of the server's HTTP surface asserted about a status or an error body
-//! ([`crate::Expect::answer`]). No invariant reads them.
+//! status and its body), for a test of the front itself. No invariant reads them.
 //!
-//! [`LeaseFront`] is the front of the lease routes and [`crate::JobFront`] that of the job
-//! service. A front is chosen by a [`FrontFactory`] (the scenario builder takes one;
-//! [`LeaseFront::factory`] is the default), so a front is added beside the others without
-//! editing them.
+//! [`crate::JobFront`] is the one front. A front is chosen by a [`FrontFactory`] (the
+//! scenario builder takes one; [`crate::JobFront::factory`] is the default).
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, Response};
@@ -42,33 +39,25 @@ use crate::observe::{ClientEvent, ItemId};
 use crate::server::ServerSpec;
 use crate::work::Work;
 
-mod lease;
-
-pub(crate) use lease::listed;
-pub use lease::{LeaseFront, POLL_EVERY, REQUEST_PREFIX};
+/// How often the front polls while any item is not done: the server's tick.
+pub const POLL_EVERY: Duration = Duration::from_secs(5);
 
 /// What a front's call was for, as its [`Answer`] names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CallKind {
-    /// The acquire of a lease.
-    Acquire,
-    /// A read of the lease list, for a pending lease.
-    List,
-    /// The run queued on a held lease.
+    /// The submit of the work.
     Queue,
-    /// A read of the run.
+    /// A read of the work or of its result.
     Read,
-    /// The stop of the run, for a cancel.
+    /// The stop of the work, for a cancel.
     Cancel,
-    /// The release of the lease.
-    Release,
 }
 
 impl CallKind {
     /// A stable kebab-case name.
     #[must_use]
     pub fn name(self) -> &'static str {
-        ["acquire", "list", "queue", "read", "cancel", "release"][self as usize]
+        ["queue", "read", "cancel"][self as usize]
     }
 }
 

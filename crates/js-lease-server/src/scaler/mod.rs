@@ -8,10 +8,9 @@
 //! of it and swaps the copy in when it is done, so the status page and the checks never
 //! wait for a provider's call.
 //!
-//! What waits for a machine and which hosts are in use are read from both the job tables
-//! (the `jobs` module) and the registry's lease side, until the lease API is deleted: the
-//! registry's waiting whole-node requests and then each queued job without an allocation
-//! are waiting requests, and a host is busy while a live allocation or a lease is on it. A
+//! What waits for a machine and which hosts are in use are read from the job tables (the
+//! `jobs` module): each queued job without an allocation is a waiting request, and a host
+//! is busy while a live allocation is on it. A
 //! tick whose read of the tables fails does nothing else, since an unknown host is not an
 //! idle one.
 //!
@@ -59,8 +58,8 @@
 //!   No mint, launch, drain, release or revoke runs before the file holds the records they
 //!   depend on.
 //! - A machine is not released while its host holds work, read again just before the release
-//!   ([`Effects::holds_work`]): a lease the registry books on it or a live job allocation.
-//!   The registry's own marks look at its leases and runs only, so a job placed between the
+//!   ([`Effects::holds_work`]): a live job allocation. The registry's own marks look at its
+//!   leases and runs only, so a job placed between the
 //!   tick's read and a mark is caught here, and the release waits until the job is done.
 //! - A join token that could not be minted sends no launch: the shell answers the step's
 //!   acquire with a deferral, and the step plans it again, minting again.
@@ -113,7 +112,7 @@ use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
     AcquireResult, Action, Budgets, HostFacts, Input, Millis, OfferCooldown, Phase, PoolInput,
-    Records, ReleaseResult, Settings, State, Waiting, launchable, step,
+    Records, ReleaseResult, Settings, State, launchable, step,
 };
 use js_sched::failover::Refused;
 use js_types::{ExecMode, HostId, RequestId};
@@ -683,7 +682,7 @@ impl Core {
             }
         };
         let pool = &self.settings.pool;
-        let (views, requests) = self.effects.registry();
+        let views = self.effects.hosts();
         let complete = self.registry_complete(&memory.state.records, &views, now);
         let not_found = self.not_found(&memory.state, &views);
         let at = self.clock.now();
@@ -719,18 +718,11 @@ impl Core {
         memory
             .reserved
             .settle(&queued, &memory.state.records, (&hosts, &open));
-        // A launch is set aside for a job only when its request id names no lease request
-        // as well: a job and a lease request that share an id are matched by fit alone.
-        let leases: BTreeSet<RequestId> = requests.iter().map(|each| each.id.clone()).collect();
         let ids = queued
             .iter()
-            .filter(|queued| !leases.contains(&queued.request))
             .map(|queued| (queued.request.clone(), queued.job.clone()))
             .collect();
-        // The registry's wait list first, as before the job tables were read, then the jobs
-        // in queue order.
-        let mut waiting: Vec<Waiting> = requests.into_iter().map(view::waiting).collect();
-        waiting.extend(memory.reserved.waiting(queued));
+        let waiting = memory.reserved.waiting(queued);
         let draws = (0..self.settings.max_step).filter_map(|_| self.entropy.fresh());
         let input = Input {
             scheduler: self.scheduler.clone(),
@@ -805,7 +797,7 @@ impl Core {
                     if memory.unrevoked.contains(&host) {
                         debug!(%host, "the token is not revoked yet; the machine is not released");
                     } else if self.effects.holds_work(&host) {
-                        warn!(%host, "the host holds a lease or a job allocation; the machine is not released until it ends");
+                        warn!(%host, "the host holds a job allocation; the machine is not released until it ends");
                     } else {
                         let answer = self.effects.release(&id);
                         say_release(&host, &answer);

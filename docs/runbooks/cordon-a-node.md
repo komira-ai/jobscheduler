@@ -1,9 +1,8 @@
-# Keeping leases off one node for a window (`js-agent cordon`)
+# Keeping jobs off one node for a window (`js-agent cordon`)
 
-A measurement needs a node that no lease lands on for an hour or two, and that goes back into
+A measurement needs a node that no job lands on for an hour or two, and that goes back into
 service afterwards. The lease server lets a host cordon itself: while a cordon is in force the host
-takes no new lease (a lease it holds, and its runs, go on), except a probe an operator pins to it
-(`js lease acquire --probe-host`; `docs/design/placement.md`, 6.7). `js-agent cordon` is the client for it,
+is placed no new job (a job it runs goes on). `js-agent cordon` is the client for it,
 for an operator's script, on Linux and on macOS.
 
 ## What it does

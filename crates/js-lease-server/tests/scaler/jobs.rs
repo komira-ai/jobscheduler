@@ -1,8 +1,7 @@
 //! The scaler's demand and busy hosts read from the job tables through the shell, over a
 //! fake world: a queued job launches one machine and is held to it, a host with a live job
-//! allocation is never idled, a whole-host job launches one machine of the pool's shape, the
-//! registry's lease side still counts beside the jobs, and a tick that cannot read the tables
-//! does nothing. Time is an injected clock; nothing sleeps.
+//! allocation is never idled, a whole-host job launches one machine of the pool's shape, a
+//! registry lease alone is not busy, and a tick that cannot read the tables does nothing. Time is an injected clock; nothing sleeps.
 
 use std::time::Duration;
 
@@ -12,8 +11,7 @@ use js_scaler::{Phase, Records};
 use js_types::{LeaseId, Model, Resources, accelerator_of};
 
 use crate::fakes::{
-    Rig, allocation, allocation_of, job, job_with, live, offer, record, records, request, rig,
-    spec_of, view,
+    Rig, allocation, allocation_of, job, job_with, live, offer, record, records, rig, spec_of, view,
 };
 
 fn mins(n: u64) -> Duration {
@@ -177,47 +175,40 @@ async fn whole_host_job_launch_sized_to_shape() {
     assert_eq!(acquired(&rig).len(), 1, "{:?}", rig.log());
 }
 
-/// Asserts that the registry's lease side still counts beside the job tables, until the
-/// lease API is deleted: a whole-node lease request on the wait list, with no job queued,
-/// launches one machine and no more; a registered host with only a registry lease is not
-/// drained however long; and with both a lease request and a job waiting, each gets a
-/// machine of its own. It catches the lease side dropped while leases are still served,
-/// which leaves lease requests without machines and drains hosts under leases.
+/// Asserts that a lease the registry books on a registered host does not make it busy: with
+/// no job allocation on it the host is drained as idle, however long the ticks go on; with a
+/// live job allocation on it, the lease still booked, it is never drained. It catches a
+/// booked lease read as work, which keeps a machine nothing runs on, and an allocation not
+/// read as work.
 #[tokio::test]
-async fn the_registrys_lease_side_still_counts() {
-    let rig = rig(Records::default(), live());
-    rig.world().waiting = vec![request("r1")];
-    for _ in 0..3 {
-        rig.scaler.tick().await;
-        rig.advance(Duration::from_secs(5));
-    }
-    assert_eq!(acquired(&rig).len(), 1, "{:?}", rig.log());
-
-    let both = rig_with_limit(2);
-    both.world().waiting = vec![request("r1")];
-    both.world().queued = vec![job("j1")];
-    both.scaler.tick().await;
-    assert_eq!(acquired(&both).len(), 2, "{:?}", both.log());
-
-    let held = crate::fakes::rig(
+async fn a_lease_alone_no_longer_counts_as_busy() {
+    let idle = rig(
         records(vec![record("js-leased", Phase::Registered)]),
         live(),
     );
     let mut leased = view("js-leased");
     leased.lease = Some(LeaseId::new(1, 1));
-    held.world().hosts = vec![leased];
+    idle.world().hosts = vec![leased.clone()];
     for _ in 0..6 {
-        held.scaler.tick().await;
-        held.advance(mins(60));
+        idle.scaler.tick().await;
+        if drained(&idle, "js-leased") {
+            break;
+        }
+        idle.advance(mins(60));
     }
-    assert!(!drained(&held, "js-leased"), "{:?}", held.log());
-}
+    assert!(drained(&idle, "js-leased"), "{:?}", idle.log());
 
-/// A rig whose pool launches up to `max_step` machines a step.
-fn rig_with_limit(max_step: usize) -> Rig {
-    let mut settings = live();
-    settings.max_step = max_step;
-    rig(Records::default(), settings)
+    let working = rig(
+        records(vec![record("js-leased", Phase::Registered)]),
+        live(),
+    );
+    working.world().hosts = vec![leased];
+    working.world().live = vec![allocation("j1", "js-leased")];
+    for _ in 0..3 {
+        working.scaler.tick().await;
+        working.advance(mins(30));
+    }
+    assert!(!drained(&working, "js-leased"), "{:?}", working.log());
 }
 
 /// Asserts that a job read queued and also found among the live allocations (it was placed

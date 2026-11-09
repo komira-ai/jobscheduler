@@ -50,25 +50,21 @@ GET /healthz
 POST /v1/leases
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 201 {"id":"1-1","host":"gpu-01","ends_at_ms":8200000} [type application/json; headers connection,content-length,content-type,date]
-POST /v1/leases
-  no token: 401 [type -; headers connection,content-length,date]
-  wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 201 {"id":"1-2","host":"gpu-02","ends_at_ms":8200000} [type application/json; headers connection,content-length,content-type,date]
-POST /v1/leases
-  no token: 401 [type -; headers connection,content-length,date]
-  wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 409 {"error":"no-capacity"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/hosts
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/leases/1-1/renew
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases/1-1/runs
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
@@ -121,12 +117,8 @@ GET /v1/nothing
 DELETE /v1/leases/1-1
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"state":"freed"} [type application/json; headers connection,content-length,content-type,date]
-DELETE /v1/leases/1-1
-  no token: 401 [type -; headers connection,content-length,date]
-  wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"unknown-lease"} [type application/json; headers connection,content-length,content-type,date]
-PUT /v1/leases
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+PUT /v1/hosts
   no token: 401 [type -; headers allow,connection,content-length,date]
   wrong token: 401 [type -; headers allow,connection,content-length,date]
   valid token: 405 [type -; headers allow,connection,content-length,date]
@@ -266,43 +258,39 @@ GET /healthz
 POST /v1/leases
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 201 {"id":"1-1","host":"gpu-01","ends_at_ms":8200000} [type application/json; headers connection,content-length,content-type,date]
-POST /v1/leases
-  no token: 401 [type -; headers connection,content-length,date]
-  wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 201 {"id":"1-2","host":"gpu-02","ends_at_ms":8200000} [type application/json; headers connection,content-length,content-type,date]
-POST /v1/leases
-  no token: 401 [type -; headers connection,content-length,date]
-  wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 409 {"error":"no-capacity"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/hosts
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/leases/1-1/renew
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases/1-1/runs
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 400 {"error":"bad-request","reason":"the body is JSON, but not what this route takes (line 1, column 2)"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases/1-1/runs
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"runs":[]} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 200 {"runs":[]} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases/1-1/runs/r1
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"unknown-run"} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 404 {"error":"unknown-run"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/leases/1-1/runs/r1
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"unknown-run"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/agent/hello
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
@@ -337,12 +325,8 @@ GET /v1/nothing
 DELETE /v1/leases/1-1
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"state":"freed"} [type application/json; headers connection,content-length,content-type,date]
-DELETE /v1/leases/1-1
-  no token: 401 [type -; headers connection,content-length,date]
-  wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"unknown-lease"} [type application/json; headers connection,content-length,content-type,date]
-PUT /v1/leases
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+PUT /v1/hosts
   no token: 401 [type -; headers allow,connection,content-length,date]
   wrong token: 401 [type -; headers allow,connection,content-length,date]
   valid token: 405 [type -; headers allow,connection,content-length,date]
@@ -475,104 +459,19 @@ POST /v1/leases/1-1/hold
 
 == keep-alive ==
 GET /healthz (token none, close asked false): 200 ok [type text/plain; charset=utf-8; headers content-length,content-type,date] [connection -]
-GET /v1/leases (token valid, close asked false): 200 {"leases":[]} [type application/json; headers content-length,content-type,date] [connection -]
-GET /v1/leases (token wrong, close asked false): 401 [type -; headers content-length,date] [connection -]
 GET /v1/hosts (token valid, close asked false): 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers content-length,content-type,date] [connection -]
-GET /v1/leases (token valid, close asked true): 200 {"leases":[]} [type application/json; headers connection,content-length,content-type,date] [connection close]
+GET /v1/hosts (token wrong, close asked false): 401 [type -; headers content-length,date] [connection -]
+GET /v1/hosts (token valid, close asked false): 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers content-length,content-type,date] [connection -]
+GET /v1/hosts (token valid, close asked true): 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date] [connection close]
 bytes after the last reply: 0
 
 == state-files ==
 without agent flags
   before start: pool.toml state/ token
   after start: pool.toml state/ state/leases.toml state/leases.toml.lock token
-  after acquire: pool.toml state/ state/leases.toml state/leases.toml.lock token
   after shutdown: pool.toml state/ state/leases.toml state/leases.toml.lock token
 with agent flags
   before start: agent-pool.toml agent-tokens pool.toml state/ token
   after start: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
-  after acquire: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
   after an agent joins: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
   after shutdown: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock state/usage.db state/usage.db.lock token
-
-== lease-file ==
-after start
-version = 1
-term = 1
-next_sequence = 1
-lease_count = 0
-lease = []
-
-after acquire
-version = 1
-term = 1
-next_sequence = 2
-lease_count = 1
-
-[[lease]]
-term = 1
-sequence = 1
-state = "held"
-host = "gpu-01"
-acquired_at_ms = 1000000
-expires_at_ms = 8200000
-ends_at_ms = 8200000
-
-[lease.labels]
-team = "infra"
-
-after tick
-version = 1
-term = 1
-next_sequence = 2
-lease_count = 1
-
-[[lease]]
-term = 1
-sequence = 1
-state = "held"
-host = "gpu-01"
-acquired_at_ms = 1000000
-expires_at_ms = 8200000
-ends_at_ms = 8200000
-
-[lease.labels]
-team = "infra"
-
-after release
-version = 1
-term = 1
-next_sequence = 2
-lease_count = 0
-lease = []
-
-after second acquire
-version = 1
-term = 1
-next_sequence = 3
-lease_count = 1
-
-[[lease]]
-term = 1
-sequence = 2
-state = "held"
-host = "gpu-01"
-acquired_at_ms = 1110000
-expires_at_ms = 8310000
-ends_at_ms = 8310000
-
-[lease.labels]
-team = "infra"
-
-after a tick after the wall end
-version = 1
-term = 1
-next_sequence = 3
-lease_count = 0
-lease = []
-
-after shutdown
-version = 1
-term = 1
-next_sequence = 3
-lease_count = 0
-lease = []

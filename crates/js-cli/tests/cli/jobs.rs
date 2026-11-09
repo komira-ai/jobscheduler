@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tonic::Code;
 
 use crate::fake_jobs::{Answer, Fake, refusing};
-use crate::support::{Never, Outcome, Scratch, TOKEN, run, services};
+use crate::support::{Outcome, Scratch, TOKEN, run, services};
 
 /// A loopback origin over plain http; the in-memory dialer never dials it.
 const PLAIN: &str = "http://localhost:7070";
@@ -39,7 +39,7 @@ pub(crate) fn js(scratch: &Scratch, dialer: Dialer, words: &[&str]) -> Outcome {
     ];
     args.push(token.into());
     args.extend(words.iter().map(OsString::from));
-    run(args, services(Arc::new(Never)).with_dialer(dialer))
+    run(args, services().with_dialer(dialer))
 }
 
 /// The one request `fake` read, decoded as `T`, and its call.
@@ -615,9 +615,9 @@ fn answers_print_as_lines_or_proto3_json() {
 }
 
 /// Asserts that the global flags may follow a job command, and that without `--server` or
-/// `--token-file` a job command is exit 2 naming the flag, as for the lease commands.
+/// `--token-file` a job command is exit 2 naming the flag, as for `join-token`.
 #[test]
-fn the_global_flags_mean_what_they_mean_for_leases() {
+fn the_global_flags_may_follow_a_job_command() {
     let scratch = Scratch::new("jobs_globals");
     let token = scratch.write("token", TOKEN, 0o600);
     let fake = Fake::new();
@@ -632,7 +632,7 @@ fn the_global_flags_mean_what_they_mean_for_leases() {
     ]
     .map(OsString::from)
     .to_vec();
-    let got = run(args, services(Arc::new(Never)).with_dialer(fake.dialer()));
+    let got = run(args, services().with_dialer(fake.dialer()));
     assert_eq!((got.code, got.err.as_str()), (0, ""));
     assert_eq!(fake.seen()[0].path, call("ListHosts"));
     let no_server = run(
@@ -645,7 +645,7 @@ fn the_global_flags_mean_what_they_mean_for_leases() {
         ]
         .map(OsString::from)
         .to_vec(),
-        services(Arc::new(Never)),
+        services(),
     );
     assert_eq!(
         (no_server.code, no_server.err.as_str()),
@@ -655,7 +655,7 @@ fn the_global_flags_mean_what_they_mean_for_leases() {
         ["js", "--server", PLAIN, "pool", "list"]
             .map(OsString::from)
             .to_vec(),
-        services(Arc::new(Never)),
+        services(),
     );
     assert_eq!(
         (no_token.code, no_token.err.as_str()),
@@ -674,7 +674,7 @@ fn the_global_flags_mean_what_they_mean_for_leases() {
         ]
         .map(OsString::from)
         .to_vec(),
-        services(Arc::new(Never)).with_dialer(fake.dialer()),
+        services().with_dialer(fake.dialer()),
     );
     assert_eq!(got.code, 2, "{}", got.err);
     assert!(got.err.starts_with("js: --token-file: "), "{}", got.err);
@@ -789,12 +789,7 @@ fn logged(
     args.extend(words.iter().map(OsString::from));
     let seen = Arc::clone(log);
     let dialer = fake.dialer_with(move || seen.lock().unwrap().push("dial".to_owned()));
-    js_cli::run_with(
-        args,
-        out,
-        err,
-        services(Arc::new(Never)).with_dialer(dialer),
-    )
+    js_cli::run_with(args, out, err, services().with_dialer(dialer))
 }
 
 /// Asserts that the drawn id is printed before anything is dialled, as text and as JSON, and

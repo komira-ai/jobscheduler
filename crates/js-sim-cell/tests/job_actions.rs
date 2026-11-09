@@ -26,7 +26,7 @@ fn ms(n: u64) -> FarmTime {
 
 /// A server of `hosts` hosts serving the job service.
 fn spec(hosts: usize) -> ServerSpec {
-    ServerSpec::registered_pool("burst", Shape::gpu_host(), hosts).jobs()
+    ServerSpec::registered_pool("burst", Shape::gpu_host(), hosts)
 }
 
 /// A cell of `hosts` correct agents of [`spec`], its client `front`.

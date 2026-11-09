@@ -1,8 +1,6 @@
-//! The lease server as the harness sees it: the few calls it makes, as a trait with two
+//! The job server as the harness sees it: the few calls it makes, as a trait with two
 //! implementations, [`crate::http::HttpFarm`] (the live server) and [`crate::fake::FakeFarm`]
 //! (a simulated one with a fake clock).
-
-use js_client::LogTail;
 
 /// Why a call to the farm failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -23,97 +21,69 @@ pub enum FarmError {
     Malformed(String),
 }
 
-/// A lease asked for: the whole host is `cpu_millis` and `memory_bytes` of the class.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeaseAsk {
-    /// The lease class.
-    pub class: String,
-    /// CPU booked, in thousandths of a core.
-    pub cpu_millis: u64,
-    /// Memory booked, in bytes.
-    pub memory_bytes: u64,
-    /// The longest the lease may live, in seconds.
-    pub max_wall_seconds: u64,
+/// The end of what a job printed: the tails of its two streams.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogTail {
+    /// The tail of the job's standard output.
+    pub stdout: String,
+    /// The tail of the job's standard error.
+    pub stderr: String,
+    /// Whether the job printed more than the two tails hold.
+    pub truncated: bool,
 }
 
-/// The answer to a lease request.
+/// A job asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Acquired {
-    /// The lease is held now.
-    Held {
-        /// The lease id.
-        id: String,
-        /// The host it holds.
-        host: String,
-    },
-    /// The server has not placed it yet.
-    Pending {
-        /// The lease id.
-        id: String,
-    },
-}
-
-/// Where a lease stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Standing {
-    /// Held on this host.
-    Held {
-        /// The host.
-        host: String,
-    },
-    /// Not placed yet.
-    Pending,
-    /// Not listed, or ended.
-    Gone,
-}
-
-/// A run asked for on a held lease.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunAsk {
-    /// The container image.
+pub struct JobAsk {
+    /// The container image, pinned by digest.
     pub image: String,
     /// Its arguments.
     pub args: Vec<String>,
-    /// CPU limit, in thousandths of a core.
+    /// CPU asked for, in thousandths of a core; sent unless the job takes the whole host.
     pub cpu_millis: u64,
-    /// Memory limit, in bytes.
+    /// Memory asked for, in bytes; sent unless the job takes the whole host.
     pub memory_bytes: u64,
-    /// Wall limit, in milliseconds.
-    pub wall_ms: u64,
-    /// The profile the server learns the run's cost under, when the workload names one.
-    pub profile: Option<String>,
+    /// Whether the job needs a whole host, in place of `cpu_millis` and `memory_bytes`.
+    pub whole_host: bool,
+    /// The longest the job may run, in seconds.
+    pub wall_limit_seconds: u64,
 }
 
-/// How far a run has come.
+/// How far a job has come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// Queued or starting.
+    /// Queued, placed or starting.
     Waiting,
-    /// Running (or being stopped).
+    /// Running.
     Running,
-    /// Over: exited, ended or never started.
+    /// Over: it ended in any state.
     Over,
 }
 
-/// A run as the server shows it.
+/// A job as the server shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunStanding {
-    /// The server's state name.
+pub struct JobStanding {
+    /// The server's state name (`JOB_STATE_RUNNING`, ...).
     pub state: String,
+    /// The host the job is placed on, once it is.
+    pub host: Option<String>,
     /// How it ended, once it has (`succeeded`, `out_of_memory`, ...).
     pub outcome: Option<String>,
-    /// The end of what the job printed, when the server holds it (a contained run that
-    /// exited); `None` is not an empty output.
+    /// The end of what the job printed, once it has ended.
     pub log_tail: Option<LogTail>,
 }
 
-impl RunStanding {
-    /// The phase of the state name.
+impl JobStanding {
+    /// The phase of the state name; a state this harness does not know reads as waiting.
     #[must_use]
     pub fn phase(&self) -> Phase {
         match self.state.as_str() {
-            "running" | "stopping" => Phase::Running,
-            "exited" | "ended" | "never-started" => Phase::Over,
+            "JOB_STATE_RUNNING" => Phase::Running,
+            "JOB_STATE_SUCCEEDED"
+            | "JOB_STATE_FAILED"
+            | "JOB_STATE_CANCELLED"
+            | "JOB_STATE_LOST"
+            | "JOB_STATE_FAILED_TO_START" => Phase::Over,
             _ => Phase::Waiting,
         }
     }
@@ -137,48 +107,27 @@ pub struct UsageRow {
     pub cpu_millis: u64,
     /// Largest working set of the minute, in bytes.
     pub ws_bytes: u64,
-    /// Leases that ran on the host in the minute.
+    /// Allocations that ran on the host in the minute, as the usage row counts them.
     pub leases: u64,
-}
-
-/// The cost curve the server has learned for a profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Curve {
-    /// Runs it was fitted from.
-    pub runs: u64,
-    /// Working set of each minute of a run's life, in bytes.
-    pub ws_bytes: Vec<u64>,
-    /// CPU of each minute, in thousandths of a core; empty when the fit learned no cores.
-    pub cores_milli: Vec<u64>,
 }
 
 /// The calls the harness makes. Every method is one request.
 pub trait Farm {
-    /// Asks for a lease.
+    /// Submits a job and returns its id.
     ///
     /// # Errors
     /// [`FarmError`] when the server refuses or cannot be read.
-    fn acquire(&self, ask: &LeaseAsk) -> Result<Acquired, FarmError>;
-    /// Where a lease stands.
+    fn submit(&self, ask: &JobAsk) -> Result<String, FarmError>;
+    /// Where a job stands; once it has ended, how it ended and what it printed.
     ///
     /// # Errors
     /// [`FarmError`] when the server cannot be read.
-    fn lease(&self, id: &str) -> Result<Standing, FarmError>;
-    /// Queues a run on a held lease and returns its id.
+    fn job(&self, id: &str) -> Result<JobStanding, FarmError>;
+    /// Cancels a job.
     ///
     /// # Errors
     /// [`FarmError`] when the server refuses.
-    fn start_run(&self, lease: &str, ask: &RunAsk) -> Result<String, FarmError>;
-    /// Where a run stands.
-    ///
-    /// # Errors
-    /// [`FarmError`] when the server cannot be read.
-    fn run(&self, lease: &str, run: &str) -> Result<RunStanding, FarmError>;
-    /// Releases a lease.
-    ///
-    /// # Errors
-    /// [`FarmError`] when the server refuses.
-    fn release(&self, lease: &str) -> Result<(), FarmError>;
+    fn cancel(&self, id: &str) -> Result<(), FarmError>;
     /// The size of a host.
     ///
     /// # Errors
@@ -189,9 +138,4 @@ pub trait Farm {
     /// # Errors
     /// [`FarmError`] when the server cannot be read.
     fn usage_rows(&self, host: &str, from: u64, to: u64) -> Result<Vec<UsageRow>, FarmError>;
-    /// The curve for a profile, `None` when the server has learned none.
-    ///
-    /// # Errors
-    /// [`FarmError`] when the server cannot be read.
-    fn curve(&self, profile: &str) -> Result<Option<Curve>, FarmError>;
 }

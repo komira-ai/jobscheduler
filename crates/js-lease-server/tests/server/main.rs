@@ -1,8 +1,8 @@
 //! Behaviour of the lease server through its public interface and over real sockets on
 //! 127.0.0.1: the routes, the authentication, the refusals to start, the tick loop,
 //! TLS, and the program itself run as a child process; and, with agent registration on,
-//! the agent routes, the layering of the sources of hosts, the restart, and the container
-//! runs a lease holder queues on a registered host; and the store setting with its writer
+//! the agent routes, the layering of the sources of hosts, the restart, and the jobs the
+//! job service places on a registered host; and the store setting with its writer
 //! lock, on SQLite and on a Postgres test database. `logs_round_trip` is the one module that
 //! drives the server in process instead: the live-log round trip against the S3-compatible
 //! test store with STS, `#[ignore]`d unless CI's `test` job, which runs the store, runs it.
@@ -44,11 +44,14 @@ mod elastic_fake_e2e;
 mod estimate_feed;
 mod gpu_path_pin;
 mod guard_names;
+mod host_taints;
 mod hosts_store;
+mod job_hosts;
 mod job_listen;
 mod job_port;
 mod job_retention;
 mod job_wall;
+mod jobs_support;
 mod joins;
 mod joins_credential;
 mod joins_revoke;
@@ -69,12 +72,6 @@ mod pools_status;
 mod pools_support;
 mod restart;
 mod routes;
-mod runs;
-mod runs_files;
-mod runs_more;
-mod runs_native;
-mod runs_routes;
-mod runs_support;
 mod scaler_network;
 mod scaler_registry;
 mod scaler_start;
@@ -91,10 +88,7 @@ mod support;
 #[path = "../network/fake.rs"]
 mod tailnet;
 mod ticks;
-mod timings;
 mod tls;
 mod tls_reload;
 mod usage;
-mod usage_keys;
 mod usage_support;
-mod whole_request_id;

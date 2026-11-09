@@ -7,10 +7,9 @@
 //! bodies.
 //!
 //! The world is `cell/real_agents.rs`: six hosts of one GPU, twelve runs of 60 s. The
-//! stale start is the bus configuration of the harness's own negative case
-//! (`broken_agent.rs`): eight hosts, sixteen runs, every item cancelled while its start is
-//! on a bus that delays a message by more than the heartbeat interval and lets a later one
-//! overtake it.
+//! repeated start is the configuration of the harness's own negative case
+//! (`broken_agent.rs`): two hosts, four runs of 200 ms, and workers that take longer than
+//! the heartbeat interval to act on a reply.
 //!
 //! The family is shown able to fail by a fake that forgets an unacknowledged result when
 //! its connection drops: on the lossy wire it disagrees with the real agent.
@@ -27,8 +26,8 @@ use js_sim_cell::actions::{
     agents, cancel_work, items, kill_agents, partition_agents, replace_agents, set_bus_faults,
 };
 use js_sim_cell::{
-    Counter, Disagreement, Expect, HowEnded, ItemId, Outcome, RunId, Scenario, ServerSpec, Shape,
-    Side, Work, compare, differences,
+    Counter, Disagreement, Expect, HowEnded, ItemId, Outcome, Scenario, ServerSpec, Shape, Side,
+    Work, compare, differences,
 };
 
 use crate::real_agents::{GIVE_UP, HOSTS, POOL, RUN, RUNS, SETTLE, with_hosts, world};
@@ -54,20 +53,15 @@ const KILLED: std::ops::Range<usize> = 0..2;
 const KILL_AT: Duration = Duration::from_secs(30);
 const REPLACE_AT: Duration = Duration::from_secs(40);
 
-/// The stale start, as `broken_agent.rs` sets it.
-const STALE_HOSTS: usize = 8;
-const STALE_RUNS: u32 = 16;
-const STALE_RUN: Duration = Duration::from_secs(30);
-const STALE_GIVE_UP: Duration = Duration::from_secs(300);
-const STALE_INTERVAL: Duration = Duration::from_secs(1);
-const STALE_GRACE: Duration = Duration::from_secs(6);
-const STALE_FAULTS_AT: Duration = Duration::from_secs(2);
-const STALE_MIN_DELAY: Duration = Duration::from_millis(1_000);
-const STALE_MAX_DELAY: Duration = Duration::from_millis(4_000);
-const STALE_REORDER_PERCENT: u32 = 100;
-const STALE_CANCEL_AT: Duration = Duration::from_millis(6_500);
-const STALE_QUIET_AT: Duration = Duration::from_secs(30);
-const STALE_SETTLE: Duration = Duration::from_secs(120);
+/// The repeated start, as `broken_agent.rs` sets it: runs shorter than the heartbeat
+/// interval and workers slower than it.
+const REPEAT_HOSTS: usize = 2;
+const REPEAT_RUNS: u32 = 4;
+const REPEAT_RUN: Duration = Duration::from_millis(200);
+const REPEAT_INTERVAL: Duration = Duration::from_secs(1);
+const REPEAT_GRACE: Duration = Duration::from_secs(3);
+const REPEAT_WORKER_LAG: Duration = Duration::from_millis(1_500);
+const REPEAT_SETTLE: Duration = Duration::from_secs(120);
 
 /// Asserts that the fake and the real side of `make` agree on every item of every seed,
 /// printing each disagreement (with the trace lines of both runs) when they do not.
@@ -104,27 +98,18 @@ fn replaced(side: Side) -> Scenario {
         .at(REPLACE_AT, replace_agents(agents(KILLED)))
 }
 
-fn stale_start(side: Side) -> Scenario {
-    let spec = ServerSpec::registered_pool(POOL, Shape::gpu_host(), STALE_HOSTS)
-        .heartbeat(STALE_INTERVAL, STALE_GRACE);
-    let late = Faults {
-        min_delay: STALE_MIN_DELAY,
-        max_delay: STALE_MAX_DELAY,
-        reorder: Chance::percent(STALE_REORDER_PERCENT),
-        ..Faults::default()
-    };
-    let work = Work::run_for(STALE_RUN).give_up_after(STALE_GIVE_UP);
-    let scenario = Scenario::new("for_a_stale_start_after_a_cancel")
+fn repeated_start(side: Side) -> Scenario {
+    let spec = ServerSpec::registered_pool(POOL, Shape::gpu_host(), REPEAT_HOSTS)
+        .heartbeat(REPEAT_INTERVAL, REPEAT_GRACE);
+    let scenario = Scenario::new("for_a_start_sent_again_to_a_slow_worker")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
-        .work(STALE_RUNS, work)
-        .at(STALE_FAULTS_AT, set_bus_faults(late))
-        .at(STALE_CANCEL_AT, cancel_work(items(0..STALE_RUNS)))
-        .at(STALE_QUIET_AT, set_bus_faults(Faults::default()))
+        .worker_lag(REPEAT_WORKER_LAG)
+        .work(REPEAT_RUNS, Work::run_for(REPEAT_RUN))
         .expect(Expect::all_items_terminal())
-        .witness("start_after_stop", |c| c.get(Counter::StartAfterStop) >= 1)
-        .settle_within(STALE_SETTLE);
-    with_hosts(scenario, side, STALE_HOSTS)
+        .witness("start_repeated", |c| c.get(Counter::StartRepeated) >= 1)
+        .settle_within(REPEAT_SETTLE);
+    with_hosts(scenario, side, REPEAT_HOSTS)
 }
 
 /// Asserts that with no fault every item ends the same way with fake agents and with real
@@ -163,15 +148,14 @@ fn fake_and_real_agents_give_the_client_the_same_outcomes_when_an_agent_is_repla
     agree(replaced);
 }
 
-/// Asserts that when every item is cancelled while its starts are on a bus that delays a
-/// message past the heartbeat interval and lets a later one overtake it, every item ends
-/// the same way with fake agents and with real ones, over eight seeds, and on each side
-/// some start arrived after the stop that follows it. Catches a fake that runs a start the
-/// real agent refuses after a stop (design section 7, "Stop of an unknown job" and
-/// "Duplicate start"), or refuses one the real agent runs.
+/// Asserts that when the server sends a start again because the worker had not acted on it
+/// when the next heartbeat left, every item ends the same way with fake agents and with real
+/// ones, over eight seeds, and on each side some start was repeated. Catches a fake that
+/// runs a repeated start the real agent ignores (design section 7, "Duplicate start"), or
+/// ignores one the real agent runs.
 #[test]
-fn fake_and_real_agents_give_the_client_the_same_outcomes_for_a_stale_start_after_a_cancel() {
-    agree(stale_start);
+fn fake_and_real_agents_give_the_client_the_same_outcomes_for_a_start_sent_again() {
+    agree(repeated_start);
 }
 
 /// Asserts that the fake that forgets an unacknowledged result when its connection drops
@@ -194,28 +178,24 @@ fn a_fake_agent_with_a_defect_disagrees_with_the_real_agent_on_a_lossy_wire() {
     );
 }
 
-fn outcome(terminal: Option<HowEnded>, run: &str) -> Outcome {
-    Outcome {
-        terminal,
-        run: Some(RunId::new(run)),
-    }
+fn outcome(terminal: Option<HowEnded>) -> Outcome {
+    Outcome { terminal }
 }
 
 /// Asserts that the comparison, given two outcome maps that differ in one item's terminal
-/// (and in the run ids the server gave, which are not compared), returns that item and
-/// nothing else; and that an item one side lacks counts as one that never ended there.
+/// returns that item and nothing else; and that an item one side lacks counts as one that never ended there.
 /// Catches a comparison that ignores a difference or reports an item that agrees.
 #[test]
 fn an_agreement_check_reports_a_run_whose_outcomes_differ() {
     let fake = BTreeMap::from([
-        (ItemId(0), outcome(Some(HowEnded::Succeeded), "f0")),
-        (ItemId(1), outcome(Some(HowEnded::Succeeded), "f1")),
-        (ItemId(2), outcome(None, "f2")),
+        (ItemId(0), outcome(Some(HowEnded::Succeeded))),
+        (ItemId(1), outcome(Some(HowEnded::Succeeded))),
+        (ItemId(2), outcome(None)),
     ]);
     let mut real = BTreeMap::from([
-        (ItemId(0), outcome(Some(HowEnded::Succeeded), "r0")),
-        (ItemId(1), outcome(Some(HowEnded::Lost), "r1")),
-        (ItemId(2), outcome(None, "r2")),
+        (ItemId(0), outcome(Some(HowEnded::Succeeded))),
+        (ItemId(1), outcome(Some(HowEnded::Lost))),
+        (ItemId(2), outcome(None)),
     ]);
     assert_eq!(differences(&fake, &real), [ItemId(1)]);
     assert!(differences(&fake, &fake).is_empty());
@@ -231,7 +211,7 @@ fn an_agreement_check_reports_a_run_whose_outcomes_differ() {
 
 /// Asserts that a seed whose items end differently is reported once, naming the scenario,
 /// the seed, each item with its outcome on each side (an item one side never had reads
-/// `terminal none (run none)`) and the last forty trace lines of both runs. The two sides
+/// `terminal none`) and the last forty trace lines of both runs. The two sides
 /// here are two scenarios of fake agents, one of which cancels its items at once and
 /// submits one more. Catches a report that loses the item, the seed or the traces a
 /// finding needs.
@@ -280,7 +260,7 @@ fn a_comparison_names_each_item_that_ended_differently_with_both_traces() {
         "{text}"
     );
     assert!(
-        text.contains("\n  item 2: fake terminal none (run none), real terminal cancelled"),
+        text.contains("\n  item 2: fake terminal none, real terminal cancelled"),
         "{text}"
     );
     assert!(

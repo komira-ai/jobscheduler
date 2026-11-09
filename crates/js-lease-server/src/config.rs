@@ -11,7 +11,6 @@ use js_jobs::Retention;
 use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 
 use js_registry::{OsSessions, SessionSource};
-use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
 use crate::agent_pool;
@@ -27,7 +26,7 @@ use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
 use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
-use crate::usage::{KeySource, ProfileKey, UsageSink};
+use crate::usage::{KeySource, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
@@ -173,12 +172,6 @@ pub struct Cli {
     /// nothing to estimate from.
     #[arg(long, conflicts_with = "usage_off")]
     pub estimate_feed: bool,
-    /// Removed: a lease has no time to live. Any use is a startup error.
-    #[arg(long, hide = true, value_name = "DURATION")]
-    pub default_ttl: Option<String>,
-    /// Removed: a lease has no time to live. Any use is a startup error.
-    #[arg(long, hide = true, value_name = "DURATION")]
-    pub max_ttl: Option<String>,
     /// How often the table is ticked (expiries, retries, pending starts).
     #[arg(long, default_value = "5s", value_parser = parse_duration)]
     pub tick: Duration,
@@ -493,28 +486,11 @@ pub(crate) enum Hosts {
     },
 }
 
-/// The refusal of a removed ttl flag: the lease's time to live is gone.
-fn removed_flag(flag: &'static str) -> StartupError {
-    StartupError::new(flag, REMOVED_FLAG)
-}
-
-/// The reason a removed ttl flag is refused; the error reads `--default-ttl: was removed: ...`.
-const REMOVED_FLAG: &str = "was removed: a lease has no time to live (it ends when released or at \
-     its maximum wall time); remove the flag";
-
 impl Config {
-    /// Checks `cli`: no removed ttl flag is given, a listen address that is not loopback has
+    /// Checks `cli`: a listen address that is not loopback has
     /// TLS flags, the token files are owner-only and hold tokens, the pool files are
     /// valid, and at least one source of hosts is configured.
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
-        for (flag, value) in [
-            ("--default-ttl", &cli.default_ttl),
-            ("--max-ttl", &cli.max_ttl),
-        ] {
-            if value.is_some() {
-                return Err(removed_flag(flag));
-            }
-        }
         let given = flags::recorded(&cli)?;
         if let Some(path) = &cli.config {
             if let Some(flag) = given.first() {
@@ -881,23 +857,10 @@ impl Config {
         self
     }
 
-    /// The same configuration naming the key of a run with `keys` instead of the profile
-    /// name the client gave when it queued the run (the default).
+    /// The same configuration naming the key of a run with `keys`; without it no run has a
+    /// key, and none is learned from.
     pub fn with_key_source(mut self, keys: Arc<dyn KeySource>) -> Self {
         self.usage.keys = Some(keys);
-        self
-    }
-
-    /// The same configuration telling admission's curve reads (`usage_curves`) which
-    /// profile a work key has. The server never derives a profile name from a work key:
-    /// the name is the one the caller supplied for the run (see [`KeySource`]), so only
-    /// the caller knows which work key has which. Without it every work key is charged
-    /// flat.
-    pub fn with_curve_names(
-        mut self,
-        names: impl Fn(&WorkKey) -> Option<ProfileKey> + Send + Sync + 'static,
-    ) -> Self {
-        self.usage.names = Some(Arc::new(names));
         self
     }
 }

@@ -7,7 +7,6 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use js_provider::StartAck;
 use js_provider_lambdalabs::{ApiError, Call, ErrorCode};
 use js_scaler::{Blocked, Phase};
 
@@ -30,21 +29,21 @@ async fn a_host_that_never_says_hello_is_released_at_boot_timeout_and_the_pool_c
     let (name, token) = rig.launch().await;
 
     rig.advance(14 * 60);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Booting);
     assert_eq!(rig.account.count(Call::Terminate), 0);
     assert_eq!(rig.account.launched(), 1);
 
     rig.advance(60);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Releasing);
     assert_eq!(rig.account.count(Call::Terminate), 1);
     assert_eq!(rig.hello(&token, &name, &name).await.status, 401);
     assert_eq!(rig.asked(DELETE_DEVICE), 0);
 
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Gone);
     assert_eq!(rig.asked(DELETE_DEVICE), 1);
@@ -52,7 +51,7 @@ async fn a_host_that_never_says_hello_is_released_at_boot_timeout_and_the_pool_c
     assert_eq!(rig.account.launched(), 1);
 
     rig.advance(9 * 60);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.state().blocked["burst"], Blocked::BootFailed);
     assert_eq!(
@@ -61,7 +60,7 @@ async fn a_host_that_never_says_hello_is_released_at_boot_timeout_and_the_pool_c
         "no launch while the pool cools off"
     );
     rig.advance(61);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.account.launched(), 2);
     let records = rig.state().records.instances;
@@ -76,7 +75,7 @@ async fn a_host_that_never_says_hello_is_released_at_boot_timeout_and_the_pool_c
 /// one from another get the 401 of an unknown token, and the registry holds one host.
 async fn lose_the_welcome(rig: &Rig) -> (String, String) {
     let (name, token) = rig.launch().await;
-    rig.withdraw();
+    rig.withdraw().await;
     let lost = rig.agent_says_hello(&token, &name).await;
     assert_eq!(lost.status, 200, "{}", lost.body);
     drop(lost);
@@ -158,14 +157,14 @@ async fn a_refused_launch_leaves_no_machine_no_token_and_a_cooling_pool() {
     };
     rig.account.fail_next(Call::Launch, denied);
     rig.tick().await;
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.account.launched(), 0);
     assert_eq!(rig.phase(), Phase::Launching);
     assert_eq!(joins_held(&rig.h), 1);
     assert_eq!(rig.asked(KEYS), 1);
 
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert!(rig.state().records.instances.is_empty());
     assert!(rig.file().instances.is_empty());
@@ -179,7 +178,7 @@ async fn a_refused_launch_leaves_no_machine_no_token_and_a_cooling_pool() {
     assert!(rig.account.instances().is_empty());
 
     rig.advance(9 * 60);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(
         rig.account.count(Call::Launch),
@@ -187,7 +186,7 @@ async fn a_refused_launch_leaves_no_machine_no_token_and_a_cooling_pool() {
         "no second try while cooling off"
     );
     rig.advance(61);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.account.launched(), 1);
     assert_eq!(rig.account.count(Call::Launch), 2);
@@ -202,7 +201,7 @@ async fn crash_after_a_lost_answer(name: &str, ticks: usize) -> (Rig, String, St
     let lost = ApiError::Transport("connection reset".to_owned());
     rig.account.lose_response(Call::Launch, lost);
     rig.tick().await;
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.account.launched(), 1);
     assert_eq!(rig.phase(), Phase::Launching);
@@ -221,7 +220,7 @@ async fn assert_adopted(rig: &Rig, name: &str, token: &str) {
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Booting);
     for _ in 0..3 {
-        rig.wait();
+        rig.wait().await;
         rig.tick().await;
     }
     assert_eq!(rig.account.launched(), 1);
@@ -279,7 +278,7 @@ async fn a_machine_is_not_terminated_before_its_token_is_revoked_and_a_restart_f
  {
     let rig = Rig::start("e2e_crash_releasing").await;
     let (name, token) = rig.launch().await;
-    rig.withdraw();
+    rig.withdraw().await;
     let (me, credential) = rig.join(&token, &name).await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Registered);
@@ -314,10 +313,12 @@ async fn a_machine_is_not_terminated_before_its_token_is_revoked_and_a_restart_f
     let again = rig.agent_says_hello(&credential, &name).await;
     let me = session(&again, &name);
     assert_eq!(rig.mark(&name).await, "releasing");
-    assert!(!matches!(rig.present(), StartAck::Started { .. }));
+    let queued = crate::scaler_support::submit(&rig.h, "j2").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     let counts = rig.registry().whole_counts();
     assert_eq!((counts.reserved, counts.held), (0, 0));
-    rig.withdraw();
+    let cancelled = crate::scaler_support::cancel(&rig.h, "j2").await;
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
     assert_eq!(rig.account.count(Call::Terminate), 0);
 
     rig.tick().await;
@@ -343,7 +344,7 @@ async fn nothing_is_launched_while_the_record_cannot_be_written() {
     let path = records_path(&rig.h.scratch);
     std::fs::create_dir(&path).unwrap();
     for _ in 0..3 {
-        rig.wait();
+        rig.wait().await;
         rig.tick().await;
     }
     let scaler = rig.h.running.scaler().unwrap();
@@ -354,7 +355,7 @@ async fn nothing_is_launched_while_the_record_cannot_be_written() {
     assert_eq!(joins_held(&rig.h), 0);
 
     std::fs::remove_dir(&path).unwrap();
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.account.launched(), 1);
     assert_eq!(rig.phase(), Phase::Launching);

@@ -35,7 +35,7 @@
     <p class="source-note">From <code>docs/release.md</code>, "Downloading and verifying". <code>git rev-parse</code> needs a clone with the tags.</p>
   </li>
   <li>
-    <h3>Start the lease server <span class="tag tag-ok">works today</span></h3>
+    <h3>Start the server <span class="tag tag-ok">works today</span></h3>
     <p>The server needs a token for clients (a regular file owned by the server's user, mode 0600 or 0400, one token of printable ASCII, at least 32 bytes), a state file, and a pool file for the agents that will join. The paths below are examples. The first start says <code>--boot initialise</code>, which may create the state file; every later start says <code>--boot resume</code>, which refuses a missing one.</p>
     <div class="code"><pre><span class="c"># agent-pool.toml: the pool the agents join</span>
 name = "hosts"
@@ -44,13 +44,14 @@ max_machines = 4
 [shape]
 cpu_millis = 8000
 memory_bytes = 17179869184</pre></div>
-    <div class="code"><pre><span class="p">$</span> js-lease-server --listen 127.0.0.1:7300 --state-file /var/lib/jobscheduler/leases.toml --boot initialise \
+    <div class="code"><pre><span class="p">$</span> js-lease-server --listen 127.0.0.1:7300 --state-file /var/lib/jobscheduler/state --boot initialise \
     --token-file /etc/jobscheduler/client-token \
+    --job-listen 127.0.0.1:7301 \
     --agent-pool-config /etc/jobscheduler/agent-pool.toml \
     --agent-token-file /etc/jobscheduler/join-tokens</pre></div>
     <p>The pool's join tokens are in the file after <code>--agent-token-file</code>, one per line, each as strong as the client token, in an owner-only file. The default listen address is <code>127.0.0.1:7300</code>; off the loopback the server needs both <code>--tls-cert</code> and <code>--tls-key</code> and refuses to start without them. A start the server refuses prints the flag at fault and exits with status 2.</p>
-    <p>There is one client token and so one trust domain: share it only with parties that trust each other with every host of the pool.</p>
-    <p class="source-note">From the module documentation of <code>crates/js-lease-server/src/lib.rs</code> (the flags table and "Who may do what") and <code>crates/js-lease-server/src/agent_pool.rs</code> (the keys of the pool file). The server's flag reference is that documentation; the repository has no page that renders it.</p>
+    <p>The job service is off unless <code>--job-listen</code> is given, and its routes are not served on <code>--listen</code>. The token file is the token of the client <code>default</code>, an operator. <code>--client-token NAME=PATH</code> adds a client of the role <code>client</code>, which reads and cancels only its own jobs. There is one client token and so one trust domain for the host and pool routes: share it only with parties that trust each other with every host of the pool.</p>
+    <p class="source-note">From the module documentation of <code>crates/js-lease-server/src/lib.rs</code> (the flags table, "The job service" and "Who may do what") and <code>crates/js-lease-server/src/agent_pool.rs</code> (the keys of the pool file). The server's flag reference is that documentation; the repository has no page that renders it.</p>
   </li>
   <li>
     <h3>Install the agent on a Linux host <span class="tag tag-ok">works today</span></h3>
@@ -67,11 +68,11 @@ memory_bytes = 17179869184</pre></div>
     <p class="source-note">From <code>packaging/js-agent/js-agent.service</code> (its header), <code>packaging/js-agent/nfpm.yaml</code>, <code>.github/workflows/js-agent-deb.yml</code> (its header), <code>packaging/js-agent/crun_host_setup.sh</code> (its header) and the flags table of <code>crates/js-agent/src/lib.rs</code>.</p>
   </li>
   <li>
-    <h3>Lease a host <span class="tag tag-ok">works today</span></h3>
-    <p>With the agent heard by the server, a client leases the host:</p>
-    <div class="code"><pre><span class="p">$</span> js --server http://127.0.0.1:7300 --token-file ~/.js-token lease acquire --class whole-node --max-wall 2h
-<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file ~/.js-token lease list</pre></div>
-    <p><code>acquire</code> prints <code>lease &lt;id&gt; host &lt;host&gt; ends &lt;ms&gt;</code>. A whole-node lease is answered <code>pending</code> until the host's agent reports it ready, and the client looks at the list every two seconds for at most <code>--wait-pending</code>, 60 seconds by default, then releases a lease that is still pending. The token file is a regular file owned by you, mode 0600 or 0400.</p>
+    <h3>Submit a job <span class="tag tag-ok">works today</span></h3>
+    <p>With the agent heard by the server, a client submits a job to the job service:</p>
+    <div class="code"><pre><span class="p">$</span> js --server http://127.0.0.1:7301 --token-file ~/.js-token job submit --id build-1 --spec.image registry.example/app@sha256:&lt;64 hex digits&gt; --spec.wall-limit-seconds 2h
+<span class="p">$</span> js --server http://127.0.0.1:7301 --token-file ~/.js-token job wait --job-id build-1</pre></div>
+    <p><code>submit</code> prints one <code>path: value</code> line for each field of the answer that is set, such as <code>job.state: queued</code>. The image must be pinned by digest: a tag alone is refused. <code>wait</code> reads the job every two seconds until it has ended, and exits 0 only when the job succeeded. The token file is a regular file owned by you, mode 0600 or 0400.</p>
     <p class="source-note">From the module documentation of <code>crates/js-cli/src/lib.rs</code>.</p>
   </li>
 </ol>

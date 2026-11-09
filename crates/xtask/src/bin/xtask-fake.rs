@@ -17,13 +17,14 @@
 //! - Run as `testbin`, it is a test binary: it prints the environment's `XTASK_FAKE_TEST_OUTPUT`
 //!   and exits with `XTASK_FAKE_TEST_STATUS` (default 0).
 //!
-//! - Run as `js-lease-server`, it is the lease server of `site-demo`: it exits 5 unless its working
-//!   directory holds `hosts.toml` and the `--token-file` it is given with mode 0600, then listens on
-//!   `--listen` (default 127.0.0.1:0, a port of the system's choosing), prints `listening on <address>`
-//!   with the address it bound, answers every request `200 ok` (`503` under `server-unhealthy`), and
-//!   exits 0 after a `GET /quit`.
-//! - Run as `js`, it is the client of `site-demo`: it answers `lease acquire`, `lease list` and `lease release <id>` from the file `fake-lease` in its
-//!   working directory (acquire makes it, release removes it, list prints it when it exists).
+//! - Run as `js-lease-server`, it is the server of `site-demo`: it exits 5 unless its working
+//!   directory holds `pool.toml` and the `--token-file` it is given with mode 0600 and it is given
+//!   `--job-listen`, then listens on `--listen` (default 127.0.0.1:0, a port of the system's choosing)
+//!   and on `--job-listen`, prints `listening for the job service addr=<address>` with the address
+//!   the job service bound and `listening on <address>` with the address it bound, answers every request
+//!   `200 ok` (`503` under `server-unhealthy`), and exits 0 after a `GET /quit`.
+//! - Run as `js`, it is the client of `site-demo`: `job submit` prints the refusal the real client
+//!   prints when no host could serve the job and exits 3, and `job list` prints nothing.
 //!
 //! `XTASK_FAKE_DEFECT`, or the first line of a file named `defect` next to the program, asks for one
 //! failure of the real programs: `build-fails` (every build
@@ -34,7 +35,8 @@
 //! `show-fails` (`systemctl show` exits 1) or `show-garbled` (it prints what is not
 //! `Key=Value`), `server-dies` (the server exits 3 with a line on stderr), `server-unannounced` (it serves, but
 //! prints `bound <address>` instead of `listening on <address>`), `server-unhealthy` (it answers
-//! 503 to everything), `js-fails` (the client exits 4 with a line on stderr) or `js-no-lease` (acquire prints no lease).
+//! 503 to everything), `js-fails` (the client exits 4 with a line on stderr), `js-accepts` (submit succeeds and prints the job),
+//! `js-list-fails` (list exits 4 with a line on stderr) or `server-no-job-address` (the server serves but does not say where the job service listens).
 
 use std::io::Write as _;
 use std::path::Path;
@@ -141,8 +143,8 @@ fn systemctl(args: &[String], defect: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The fake lease server: checks its files, listens and answers `200 ok` to everything.
-fn lease_server(args: &[String]) -> ExitCode {
+/// The fake server: checks its files, listens and answers `200 ok` to everything.
+fn server(args: &[String]) -> ExitCode {
     use std::io::{Read as _, Write as _};
     use std::os::unix::fs::PermissionsExt as _;
     let token = args
@@ -152,10 +154,16 @@ fn lease_server(args: &[String]) -> ExitCode {
     let mode = token
         .and_then(|t| std::fs::metadata(t).ok())
         .map(|m| m.permissions().mode() & 0o777);
-    if mode != Some(0o600) || !Path::new("hosts.toml").is_file() {
-        eprintln!("the fake server wants hosts.toml and a 0600 token file");
+    let job_listen = args
+        .iter()
+        .position(|a| a == "--job-listen")
+        .and_then(|i| args.get(i + 1));
+    let Some(job_listen) =
+        job_listen.filter(|_| mode == Some(0o600) && Path::new("pool.toml").is_file())
+    else {
+        eprintln!("the fake server wants pool.toml, a 0600 token file and --job-listen");
         return ExitCode::from(5);
-    }
+    };
     if defect() == "server-dies" {
         eprintln!("cannot start: the fake server was asked to die");
         return ExitCode::from(3);
@@ -166,6 +174,13 @@ fn lease_server(args: &[String]) -> ExitCode {
         .and_then(|i| args.get(i + 1))
         .map_or("127.0.0.1:0", String::as_str);
     let listener = std::net::TcpListener::bind(listen).expect("bind");
+    let job_listener = std::net::TcpListener::bind(job_listen).expect("bind the job service");
+    if defect() != "server-no-job-address" {
+        eprintln!(
+            "INFO js_lease_server::server: listening for the job service addr={} tls=false",
+            job_listener.local_addr().expect("job address")
+        );
+    }
     let announce = if defect() == "server-unannounced" {
         "bound"
     } else {
@@ -191,30 +206,27 @@ fn lease_server(args: &[String]) -> ExitCode {
     }
 }
 
-/// The fake client: answers from the file `fake-lease`.
-fn lease_client(args: &[String]) -> ExitCode {
+/// The fake client: `job submit` is refused for want of a host, `job list` is empty.
+fn job_client(args: &[String]) -> ExitCode {
     if defect() == "js-fails" {
         eprintln!("js: the fake client was asked to fail");
         return ExitCode::from(4);
     }
-    let lease = Path::new("fake-lease");
-    // After the four global arguments: `lease <verb> [id]`.
+    // After the four global arguments: `job <verb> ...`.
     let rest = args.get(4..).unwrap_or_default();
     match rest.get(1).map(String::as_str) {
-        Some("acquire") if defect() == "js-no-lease" => println!("nothing for you"),
-        Some("acquire") => {
-            std::fs::write(lease, "1-1").expect("write the lease");
-            println!("lease 1-1 host gpu-01 ends 1793617960284");
+        Some("submit") if defect() == "js-accepts" => println!("job.id: demo-1"),
+        Some("submit") => {
+            eprintln!(
+                "js: refused: no-capable-host: no host and no catalog could ever serve the job"
+            );
+            return ExitCode::from(3);
         }
-        Some("list") => {
-            if lease.exists() {
-                println!("1-1 held host gpu-01 ends 1793617960284");
-            }
+        Some("list") if defect() == "js-list-fails" => {
+            eprintln!("js: the fake client was asked to fail the list");
+            return ExitCode::from(4);
         }
-        Some("release") => {
-            std::fs::remove_file(lease).expect("the lease");
-            println!("lease {} freed", rest[2]);
-        }
+        Some("list") => {}
         _ => return ExitCode::from(2),
     }
     ExitCode::SUCCESS
@@ -228,9 +240,9 @@ fn main() -> ExitCode {
     if name == "sudo" {
         sudo(&me, &args)
     } else if name == "js-lease-server" {
-        lease_server(&args)
+        server(&args)
     } else if name == "js" {
-        lease_client(&args)
+        job_client(&args)
     } else if name == "testbin" {
         testbin()
     } else {

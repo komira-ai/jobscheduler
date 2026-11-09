@@ -28,7 +28,7 @@ jobscheduler runs as **one service** in a Kubernetes cluster: one process, one w
   the join token of its pool and then heartbeats. Agents only dial out (D22), so a machine outside the cluster needs only a route to the
   service's address.
 - **One process.** The service is the merged `js-lease-server`, which already holds the lease table, the reaper tick, the registry of
-  agents and both APIs (`/v1/leases...`, `/v1/agent/hello`, `/v1/agent/heartbeat`) behind one lock. The capacity providers, the pool scaler
+  agents and both APIs (the job API on its `--job-listen` port, `/v1/agent/hello`, `/v1/agent/heartbeat`) behind one lock. The capacity providers, the pool scaler
   and the host registry of 5.7 and 5.8 join the same process as they are built. Nothing about the target needs a second binary.
 - **The stepping stone is the same binary.** Today `js-lease-server` runs on a single host with its lease file on local disk. Kubernetes
   changes where the process, the files and the secrets live, and nothing in the flags, the files or the wire. Moving is a copy of two

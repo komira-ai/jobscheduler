@@ -2,8 +2,8 @@
   <div class="wrap hero-grid">
     <div>
       <p class="eyebrow"><span class="pill">Early development</span> <span class="muted">open source, Apache 2.0</span></p>
-      <h1 class="display">Leases on <em>whole hosts</em>, and a core that places work by load.</h1>
-      <p class="lede">jobscheduler is a generic scheduler for jobs and compute. A client leases a host from a lease server until it releases the lease or its maximum wall time ends. An agent on each host tells the server what the host offers, keeps telling it that the host is alive, and runs the container or native jobs the client queues on the lease.</p>
+      <h1 class="display">Jobs on <em>whole hosts</em>, and a core that places work by load.</h1>
+      <p class="lede">jobscheduler is a generic scheduler for jobs and compute. A client submits a job to a server, which admits it when a host, or a machine provider of the pool, could ever serve it, and records it as queued. An agent on each host tells the server what the host offers, keeps telling it that the host is alive, and runs the container or native jobs the server places on it.</p>
       <p class="source-note">Sources: <code>README.md</code>, the module documentation of <code>crates/js-lease-server/src/lib.rs</code> and of <code>crates/js-agent/src/lib.rs</code>.</p>
       <div class="install-block">
         <p class="install-label"><strong>Install</strong> <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux x86_64 and arm64, and Apple silicon, from a release</span></p>
@@ -18,30 +18,23 @@
 <section class="band" id="demo">
   <div class="wrap">
     <p class="kicker">A real run</p>
-    <h2>Lease a host on one machine</h2>
-    <p>This is a recording of one run on one machine: the lease server started from a file that lists one host, and the <code>js</code> client leasing that host, listing the lease and releasing it. There is no agent, so the host is held at once. The lease id and the end time are as they were recorded.</p>
-    <div class="code transcript"><pre><span class="c"># hosts.toml: one host, listed by hand; there is no agent</span>
-[[host]]
-id = "gpu-01"
-gpu_class = "nvidia-a100"
+    <h2>Submit a job to a server on one machine</h2>
+    <p>This is a recording of one run on one machine: the server started with its job service on and a pool file, and the <code>js</code> client submitting a GPU job and listing the jobs. No agent joins the pool, so no host could ever serve the job: the server refuses it as <code>no-capable-host</code> and records nothing, and the list is empty. A new recording is the same, word for word.</p>
+    <div class="code transcript"><pre><span class="c"># pool.toml: the pool agents would join; no agent has</span>
+name = "gpu"
+class = "gpu-host"
+max_machines = 1
 
-[host.resources]
+[shape]
 cpu_millis = 64000
 memory_bytes = 549755813888
 gpus = 8
-
-[host.capabilities]
-isa = "x86-64-v3"
-driver = "550"
+gpu_class = "nvidia-a100"
 <span class="p">$</span> printf 'a-local-token-of-at-least-32-bytes\n' &gt; client-token &amp;&amp; chmod 600 client-token
-<span class="p">$</span> js-lease-server --state-file leases.toml --boot initialise --token-file client-token --pool-config hosts.toml &amp;
-<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease acquire --class gpu-host --gpus 1 --gpu-class nvidia-a100 --max-wall 1h
-lease 1-1 host gpu-01 ends 1793617960284
-<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease list
-1-1 held host gpu-01 ends 1793617960284
-<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease release 1-1
-lease 1-1 freed
-<span class="p">$</span> js --server http://127.0.0.1:7300 --token-file client-token lease list</pre></div>
+<span class="p">$</span> js-lease-server --state-file state --boot initialise --token-file client-token --agent-pool-config pool.toml --job-listen 127.0.0.1:7301 &amp;
+<span class="p">$</span> js --server http://127.0.0.1:7301 --token-file client-token job submit --id demo-1 --spec.image registry.example/train@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 --spec.needs.gpus 1 --spec.needs.gpu-class nvidia-a100 --spec.wall-limit-seconds 1h
+js: refused: no-capable-host: no host and no catalog could ever serve the job
+<span class="p">$</span> js --server http://127.0.0.1:7301 --token-file client-token job list</pre></div>
     <p><code>cargo xtask site-demo</code> in the repository builds both programs and runs these commands again; the recording is <code>site/test/demo.transcript</code>. The <a href="install.html">install page</a> has the steps for a pool of agents.</p>
   </div>
 </section>
@@ -49,12 +42,12 @@ lease 1-1 freed
 <section class="band" id="what">
   <div class="wrap">
     <p class="kicker">What it does</p>
-    <h2>A lease, an agent, a placement core</h2>
+    <h2>A job, an agent, a placement core</h2>
     <ul class="why-grid">
-      <li><h3>A lease is a host for a bounded time</h3><p>A client posts to <code>/v1/leases</code> with a class and a maximum wall time, and releases the lease when it is done. Nothing a client does keeps a lease alive: the lease ends at its maximum wall time at the latest.</p></li>
+      <li><h3>A job is recorded before it is placed</h3><p>A client runs <code>js job submit</code> with an image pinned by digest and a wall limit above 0, and the server records the job as queued before it answers. The same id with the same job answers from the job the first submit made. <code>js job cancel</code> cancels a job.</p></li>
       <li><h3>An agent on every host</h3><p><code>js-agent</code> offers the host's CPU, memory and GPUs, heartbeats, and runs container jobs on Linux (through Docker, Podman or crun) and native jobs on a Mac.</p></li>
-      <li><h3>A whole node, quiet, when asked</h3><p>A <code>whole-node</code> lease books every dimension of one host, and its client gets the host only when nothing else is on it. A request that names a request id is queued, and one host is reserved and drained for it.</p></li>
-      <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits a lease to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The lease server calls it for every lease on a host that registered itself, to pick among the hosts with room by the hosts' load readings, then by how tightly a lease fits.</p></li>
+      <li><h3>A whole node, quiet, when asked</h3><p>A job that needs the whole host is placed with the whole host booked, and starts when its host's agent reports the host quiet. A host that holds such a job's mark takes no other job, except as backfill.</p></li>
+      <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits an action to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The server places every job with it, as the only placement; it keeps one scheduler for the life of the server and tells it of every hello and every accepted heartbeat with its load reading.</p></li>
     </ul>
     <p><a href="concepts.html">The concepts page</a> says how each of these works and where it stops.</p>
   </div>
@@ -67,16 +60,17 @@ lease 1-1 freed
     <div class="table-wrap"><table>
     <thead><tr><th>Thing</th><th>State</th></tr></thead>
     <tbody>
-    <tr><td>Lease API: acquire, release, list; the <code>js</code> client; a bearer token; TLS</td><td><span class="tag tag-ok">works today</span></td></tr>
+    <tr><td>Job API: submit, get, list, cancel; the <code>js</code> client; a bearer token; TLS</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Agents that register with a join token and run container jobs on Linux or native jobs on a Mac</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Pools of class <code>whole-node</code> or <code>gpu-host</code></td><td><span class="tag tag-ok">works today</span></td></tr>
-    <tr><td>The reservation and drain of a whole node for a queued request</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">for an acquire that names a <code>request_id</code></span></td></tr>
+    <tr><td>The reservation and drain of a whole node for a queued job</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">for a job that needs the whole host</span></td></tr>
     <tr><td>An elastic pool on Lambda Labs</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">launches nothing until the pool file says <code>live</code></span></td></tr>
-    <tr><td><code>js-sched</code> picking the host of a lease</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the only placement; <code>--placement</code> is deprecated and does nothing</span></td></tr>
-    <tr><td>Placement by load, in the <code>js-sched</code> crate</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">used by the lease server for every lease on a registered host</span></td></tr>
+    <tr><td><code>js-sched</code> placing the jobs</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the only placement; <code>--placement</code> is deprecated and does nothing</span></td></tr>
+    <tr><td>Placement by load, in the <code>js-sched</code> crate</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">used by the lease server for every job on a registered host</span></td></tr>
     <tr><td>A pool that books part of a host</td><td><span class="tag tag-planned">not built: refused when the pool file loads</span></td></tr>
-    <tr><td>One token for each tenant</td><td><span class="tag tag-planned">not built: one shared token</span></td></tr>
-    <tr><td>An idempotency key on acquire</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the <code>request_id</code> of <code>POST /v1/leases</code></span></td></tr>
+    <tr><td>A token for each client of the job service</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">a client of the role <code>client</code> reads and cancels only its own jobs</span></td></tr>
+    <tr><td>A token for each tenant of the host and pool routes</td><td><span class="tag tag-planned">not built: one shared token</span></td></tr>
+    <tr><td>An idempotent submit</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the id of the job: the same id with the same job answers from the job the first submit made</span></td></tr>
     <tr><td>A lease server for macOS</td><td><span class="tag tag-planned">none: Linux x86_64 and arm64 only</span></td></tr>
     <tr><td>A published package or image of the agent</td><td><span class="tag tag-planned">none: the Debian and macOS packages are built, and not published</span></td></tr>
     <tr><td>kbf running its actions on the agent</td><td><span class="tag tag-planned">design only</span></td></tr>

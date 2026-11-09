@@ -72,7 +72,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             txn.delete(keys::taint(host), Cond::Any)
         });
         // A delete at `Cond::Any` has no precondition, so the commit is never a conflict.
-        let _committed = self.store.txn(txn)?;
+        let _committed = self.write(txn)?;
         Ok(())
     }
 }

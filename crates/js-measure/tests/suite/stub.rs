@@ -1,21 +1,16 @@
 //! A farm whose every answer is a value the test sets, for the paths a simulated farm
-//! does not take: refusals, lost leases, a run that never ends.
+//! does not take: refusals, a job that never ends, a cancel the server refuses.
 
 use std::cell::RefCell;
 
-use js_measure::farm::RunStanding;
-use js_measure::{Acquired, Curve, Farm, FarmError, HostShape, LeaseAsk, RunAsk, UsageRow};
+use js_measure::{Farm, FarmError, HostShape, JobAsk, JobStanding, UsageRow};
 
-use js_measure::farm::Standing;
-
-/// The answers, and the leases released so far.
+/// The answers, and the jobs cancelled so far.
 pub struct Stub {
-    pub acquire: Result<Acquired, FarmError>,
-    pub lease: Result<Standing, FarmError>,
-    pub start: Result<String, FarmError>,
-    pub run: Result<RunStanding, FarmError>,
-    pub released: RefCell<Vec<String>>,
-    pub release_fails: bool,
+    pub submit: Result<String, FarmError>,
+    pub job: Result<JobStanding, FarmError>,
+    pub cancelled: RefCell<Vec<String>>,
+    pub cancel_fails: bool,
 }
 
 pub fn refused() -> FarmError {
@@ -25,62 +20,56 @@ pub fn refused() -> FarmError {
     }
 }
 
-pub fn running(state: &str) -> RunStanding {
-    RunStanding {
+/// A job in `state` on `host`, with no outcome and no output.
+pub fn standing(state: &str, host: Option<&str>) -> JobStanding {
+    JobStanding {
         state: state.to_owned(),
+        host: host.map(str::to_owned),
         outcome: None,
         log_tail: None,
     }
 }
 
+/// A job that ended in `state` with `outcome` and no output.
+pub fn ended(state: &str, outcome: &str) -> JobStanding {
+    JobStanding {
+        outcome: Some(outcome.to_owned()),
+        ..standing(state, Some("h1"))
+    }
+}
+
 impl Stub {
-    /// A farm that holds a lease at once and whose run runs for ever.
-    pub fn held() -> Self {
+    /// A farm whose job is placed at once and runs for ever.
+    pub fn running() -> Self {
         Self {
-            acquire: Ok(Acquired::Held {
-                id: "l1".to_owned(),
-                host: "h1".to_owned(),
-            }),
-            lease: Ok(Standing::Gone),
-            start: Ok("r1".to_owned()),
-            run: Ok(running("running")),
-            released: RefCell::new(Vec::new()),
-            release_fails: false,
+            submit: Ok("j1".to_owned()),
+            job: Ok(standing("JOB_STATE_RUNNING", Some("h1"))),
+            cancelled: RefCell::new(Vec::new()),
+            cancel_fails: false,
         }
     }
 
-    /// A farm that leaves every lease pending.
-    pub fn pending() -> Self {
+    /// A farm whose job stays queued.
+    pub fn queued() -> Self {
         Self {
-            acquire: Ok(Acquired::Pending {
-                id: "l1".to_owned(),
-            }),
-            lease: Ok(Standing::Pending),
-            ..Self::held()
+            job: Ok(standing("JOB_STATE_QUEUED", None)),
+            ..Self::running()
         }
     }
 }
 
 impl Farm for Stub {
-    fn acquire(&self, _ask: &LeaseAsk) -> Result<Acquired, FarmError> {
-        self.acquire.clone()
+    fn submit(&self, _ask: &JobAsk) -> Result<String, FarmError> {
+        self.submit.clone()
     }
 
-    fn lease(&self, _id: &str) -> Result<Standing, FarmError> {
-        self.lease.clone()
+    fn job(&self, _id: &str) -> Result<JobStanding, FarmError> {
+        self.job.clone()
     }
 
-    fn start_run(&self, _lease: &str, _ask: &RunAsk) -> Result<String, FarmError> {
-        self.start.clone()
-    }
-
-    fn run(&self, _lease: &str, _run: &str) -> Result<RunStanding, FarmError> {
-        self.run.clone()
-    }
-
-    fn release(&self, lease: &str) -> Result<(), FarmError> {
-        self.released.borrow_mut().push(lease.to_owned());
-        match self.release_fails {
+    fn cancel(&self, id: &str) -> Result<(), FarmError> {
+        self.cancelled.borrow_mut().push(id.to_owned());
+        match self.cancel_fails {
             true => Err(refused()),
             false => Ok(()),
         }
@@ -91,10 +80,6 @@ impl Farm for Stub {
     }
 
     fn usage_rows(&self, _host: &str, _from: u64, _to: u64) -> Result<Vec<UsageRow>, FarmError> {
-        Err(refused())
-    }
-
-    fn curve(&self, _profile: &str) -> Result<Option<Curve>, FarmError> {
         Err(refused())
     }
 }

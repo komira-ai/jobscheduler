@@ -12,8 +12,8 @@
 //!     .run_seeds(4)
 //! ```
 //!
-//! A scenario states its world (the server, the hosts, the bus's faults at the start, the
-//! client's [`FrontFactory`]), what happens and when ([`Scenario::work`] at time zero,
+//! A scenario states its world (the server, the hosts, the bus's faults at the start; the
+//! client is always the [`JobFront`]), what happens and when ([`Scenario::work`] at time zero,
 //! [`Action`]s at virtual times), and what it expects beyond the invariants ([`Expect`]
 //! at the end, or at a virtual time with [`Scenario::expect_at`], and
 //! [`Scenario::witness`]). Every invariant of [`crate::Invariant::ALL`] is checked in
@@ -52,7 +52,7 @@ use crate::actions::{Action, submit_work};
 use crate::agreement::{self, Outcome};
 use crate::cell::{Cell, Setup};
 use crate::counters::{Counter, Counters};
-use crate::front::{FrontFactory, LeaseFront};
+use crate::front::FrontFactory;
 use crate::jobs::JobFront;
 use crate::observe::ItemId;
 use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
@@ -62,15 +62,13 @@ use crate::work::Work;
 mod answer;
 mod cloud;
 mod expect;
-mod facts;
+mod held_after_runs;
 mod jobs;
 mod launched_on;
-mod tries;
 
 pub use answer::Call;
 pub(crate) use expect::ended;
 pub use expect::{Expect, HostIs};
-pub use facts::{Booked, HostRef, Listed, RecordFact};
 
 /// How long a scenario runs after its last action unless [`Scenario::settle_within`]
 /// says otherwise.
@@ -115,6 +113,7 @@ pub struct Scenario {
     server: ServerSpec,
     hosts: Vec<Hosts>,
     bus: Faults,
+    worker_lag: Duration,
     actions: Vec<(FarmTime, Rc<dyn Action>)>,
     expects: Vec<Expect>,
     timed: Vec<(FarmTime, Expect)>,
@@ -225,13 +224,14 @@ impl Scenario {
             server: ServerSpec::registered_pool("pool", Shape::gpu_host(), 0),
             hosts: Vec::new(),
             bus: Faults::default(),
+            worker_lag: Duration::ZERO,
             actions: Vec::new(),
             expects: Vec::new(),
             timed: Vec::new(),
             statements: Vec::new(),
             witnesses: Vec::new(),
             settle_within: DEFAULT_SETTLE,
-            front: LeaseFront::factory(),
+            front: JobFront::factory(),
         }
     }
 
@@ -261,20 +261,6 @@ impl Scenario {
         self
     }
 
-    /// This scenario over the job service: its server also serves jobs
-    /// ([`ServerSpec::jobs`]), its agents speak the per-job
-    /// messages, and its client is a [`crate::JobFront`], which submits each unit of work as
-    /// a job. Its name is followed by `-jobs`, so its runs are named apart from the same
-    /// scenario's over the lease front. After [`Scenario::server`], which would put the
-    /// lease routes' server back.
-    #[must_use]
-    pub fn over_jobs(mut self) -> Self {
-        self.name = format!("{}-jobs", self.name);
-        self.server = self.server.jobs();
-        self.front = JobFront::factory();
-        self
-    }
-
     /// This scenario, with `count` more hosts of `pool` with correct fake agents: the
     /// scale agent.
     #[must_use]
@@ -299,6 +285,14 @@ impl Scenario {
     fn add_hosts(mut self, pool: &str, count: usize, kind: Kind) -> Self {
         let pool = pool.to_owned();
         self.hosts.push(Hosts { pool, count, kind });
+        self
+    }
+
+    /// This scenario, with agents whose worker takes `lag` to act on a reply they read
+    /// ([`crate::AgentSpec::worker_lag`]).
+    #[must_use]
+    pub fn worker_lag(mut self, lag: Duration) -> Self {
+        self.worker_lag = lag;
         self
     }
 
@@ -378,7 +372,8 @@ impl Scenario {
         self
     }
 
-    /// This scenario, its client made by `front` in place of [`LeaseFront::factory`].
+    /// This scenario, its client made by `front` in place of [`JobFront::factory`]
+    /// ([`JobFront::losing_answers`] is one).
     #[must_use]
     pub fn front(mut self, front: FrontFactory) -> Self {
         self.front = front;
@@ -516,6 +511,7 @@ impl Scenario {
         let mut cell = Cell::new(setup, self.server.clone(), dir, self.bus.clone())?;
         cell.set_front(self.front.make(&self.server));
         for hosts in &self.hosts {
+            cell.set_worker_lag(self.worker_lag);
             self.add(&mut cell, hosts)?;
         }
         for (at, action) in &self.actions {

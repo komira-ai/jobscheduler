@@ -1,7 +1,6 @@
-//! What the tests share: a lease server in this process, the CLI entry with captured
-//! streams, and the waiters the tests drive.
+//! What the tests share: a server in this process, the CLI entry with captured streams,
+//! and servers that answer canned replies.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -9,41 +8,22 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use js_cli::{Services, Waiter};
-use js_lease::{Booking, ManualClock, Timestamp};
+use js_cli::Services;
+use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{
-    CapacitySource, Cli as ServerCli, Config, Running, Seated, SharedClock, StartupError,
-    TickHandle, channel_ticker, start,
+    Cli as ServerCli, Config, Running, SharedClock, TickHandle, channel_ticker, start,
 };
 use js_pool_static::EXAMPLE_CONFIG;
-use js_provider::Call;
-use js_provider_fake::FakePool;
 use js_testkit::dir::TestDir;
-use js_types::{HostId, ProviderId, Resources, Shape};
 use serde_json::Value;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 
 /// The wall time every test clock starts at.
 pub const T0: u64 = 1_000_000;
 
 /// The bearer token of the test servers.
 pub const TOKEN: &str = "cli-test-token-0123456789abcdefghijklmn";
-
-/// The flags that ask for one whole host of the shipped pool.
-pub const HOST: [&str; 10] = [
-    "--class",
-    "gpu-host",
-    "--gpus",
-    "1",
-    "--gpu-class",
-    "nvidia-a100",
-    "--cpu-millis",
-    "1000",
-    "--memory-bytes",
-    "1024",
-];
 
 /// A directory under the target directory that holds one test's files and is removed
 /// when the test ends.
@@ -118,11 +98,6 @@ pub struct Js {
 }
 
 impl Js {
-    /// Services over `waiter` and no signals.
-    pub fn services(&self, waiter: Arc<dyn Waiter>) -> Services {
-        Services::new(waiter, Box::new(|_| Ok(())))
-    }
-
     /// The arguments of a command against this server, program name first.
     pub fn args(&self, extra: &[&str]) -> Vec<OsString> {
         let mut args: Vec<OsString> =
@@ -144,17 +119,12 @@ impl Js {
         args.extend(extra.iter().map(OsString::from));
         args.extend(["--server".into(), self.server.clone().into()]);
         args.extend(["--token-file".into(), self.token_file.clone().into()]);
-        run(args, self.services(Arc::new(Never)))
+        run(args, services())
     }
 
-    /// Runs `extra` with a waiter that must not be asked to wait.
+    /// Runs `extra` with services that report no signals.
     pub fn go(&self, extra: &[&str]) -> Outcome {
-        self.with(extra, self.services(Arc::new(Never)))
-    }
-
-    /// Runs `extra` with this waiter.
-    pub fn waiting(&self, extra: &[&str], waiter: Arc<dyn Waiter>) -> Outcome {
-        self.with(extra, self.services(waiter))
+        self.with(extra, services())
     }
 }
 
@@ -168,111 +138,92 @@ pub fn run(args: Vec<OsString>, services: Services) -> Outcome {
     Outcome { code, out, err }
 }
 
-/// Services over `waiter` and a signal source that reports nothing.
-pub fn services(waiter: Arc<dyn Waiter>) -> Services {
-    Services::new(waiter, Box::new(|_| Ok(())))
+/// Services over a signal source that reports nothing.
+pub fn services() -> Services {
+    Services::new(Box::new(|_| Ok(())))
 }
 
-/// A waiter that fails the test when it is asked to wait.
-pub struct Never;
+/// The words of a revoke for `lambdalabs:i-1`: the cheapest authenticated call, answered 204
+/// whether or not the instance has a token.
+pub const REVOKE: [&str; 6] = [
+    "join-token",
+    "revoke",
+    "--provider",
+    "lambdalabs",
+    "--instance-id",
+    "i-1",
+];
 
-impl Waiter for Never {
-    fn wait(&self, interval: Duration) {
-        panic!("waited {interval:?} when nothing should wait");
-    }
-}
+/// A pool that asks nothing of a host but an `arch` (the scheduler describes a host by
+/// it), for the server's `--agent-pool-config`. No host says hello here.
+const POOL: &str = r#"
+name = "macs"
+class = "mac"
+max_machines = 4
 
-/// A waiter that does `act` instead of waiting, and counts the intervals asked of it.
-pub struct Driven {
-    act: Box<dyn Fn() + Send + Sync>,
-    asked: Mutex<Vec<Duration>>,
-}
+[shape]
+cpu_millis = 1
+memory_bytes = 1
 
-impl Driven {
-    pub fn new(act: impl Fn() + Send + Sync + 'static) -> Arc<Self> {
-        Arc::new(Self {
-            act: Box::new(act),
-            asked: Mutex::new(Vec::new()),
-        })
-    }
+[capabilities]
+arch = "x86_64"
+"#;
 
-    /// The intervals asked of the waiter so far.
-    pub fn asked(&self) -> Vec<Duration> {
-        self.asked.lock().unwrap().clone()
-    }
-}
-
-impl Waiter for Driven {
-    fn wait(&self, interval: Duration) {
-        self.asked.lock().unwrap().push(interval);
-        (self.act)();
-    }
-}
-
-/// A capacity source of two fake hosts whose first calls are scripted to get no answer.
-/// These tests never restart a server, so it is never given bookings to put back.
-pub struct Scripted(pub Vec<(Call, bool)>);
-
-impl CapacitySource for Scripted {
-    fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
-        let resources = Resources::new(64_000, 1 << 30, 8, Some("nvidia-a100".into())).unwrap();
-        let caps = BTreeMap::from([("isa".to_string(), "x86-64-v3".to_string())]);
-        let shape = Shape::new(resources, caps);
-        let hosts = ["h1", "h2"].map(|name| (HostId::new(name).unwrap(), shape.clone()));
-        let mut fake = FakePool::new(ProviderId::new("fake").unwrap(), hosts.to_vec());
-        for (call, landed) in &self.0 {
-            fake.script_unknown(*call, *landed);
-        }
-        Ok(Seated::all(Box::new(fake)))
-    }
-}
-
-/// A lease server in this process, on a runtime of its own so the CLI can block the
-/// test's thread, with a clock and a ticker the test moves.
+/// A server in this process, on a runtime of its own so the CLI can block the test's
+/// thread.
 pub struct Harness {
-    pub rt: Runtime,
+    /// The runtime the server runs on.
+    _rt: Runtime,
     /// The server, kept running until the harness is dropped.
     _running: Running,
-    pub clock: ManualClock,
-    pub ticks: TickHandle,
+    /// The server's ticker handle, kept so the ticker stays open.
+    _ticks: TickHandle,
     pub scratch: Scratch,
     pub js: Js,
 }
 
 impl Harness {
-    /// A plain-http server over the shipped two-host pool.
+    /// A plain-http server over the shipped two-host pool. It admits no agents, so it has
+    /// no join-token route.
     pub fn new(name: &str) -> Self {
-        Self::build(name, &[], None)
+        Self::build_in(Scratch::new(name), &[])
     }
 
-    /// A server over two scripted fake hosts.
-    pub fn scripted(name: &str, script: Vec<(Call, bool)>) -> Self {
-        Self::build(name, &[], Some(Box::new(Scripted(script))))
+    /// A plain-http server whose agents register hosts, so the join-token route exists.
+    pub fn agents(name: &str) -> Self {
+        let scratch = Scratch::new(name);
+        let pool = Self::agent_pool(&scratch);
+        Self::build_in(scratch, &["--agent-pool-config", &pool])
     }
 
-    /// A server with these extra server flags (and, when given, this capacity source).
-    pub fn build(name: &str, extra: &[&str], source: Option<Box<dyn CapacitySource>>) -> Self {
-        Self::build_in(Scratch::new(name), extra, source)
-    }
-
-    /// A server over TLS with a certificate made for the test; the certificate is in
-    /// the file `cert.pem` of the scratch directory, for `--ca-cert`.
+    /// A server over TLS with a certificate made for the test, admitting agents; the
+    /// certificate is in the file `cert.pem` of the scratch directory, for `--ca-cert`.
     pub fn tls(name: &str) -> Self {
         let scratch = Scratch::new(name);
         let made = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
         let cert = scratch.write("cert.pem", &made.cert.pem(), 0o644);
         let key = scratch.write("key.pem", &made.signing_key.serialize_pem(), 0o600);
         let (cert, key) = (cert.to_str().unwrap(), key.to_str().unwrap());
-        Self::build_in(scratch, &["--tls-cert", cert, "--tls-key", key], None)
+        let pool = Self::agent_pool(&scratch);
+        let extra = [
+            "--tls-cert",
+            cert,
+            "--tls-key",
+            key,
+            "--agent-pool-config",
+            &pool,
+        ];
+        Self::build_in(scratch, &extra)
     }
 
-    /// A server in `scratch` with these extra server flags (and, when given, this
-    /// capacity source).
-    pub fn build_in(
-        scratch: Scratch,
-        extra: &[&str],
-        source: Option<Box<dyn CapacitySource>>,
-    ) -> Self {
+    /// The path of an agent pool config written into `scratch`.
+    fn agent_pool(scratch: &Scratch) -> String {
+        let pool = scratch.write("agent-pool.toml", POOL, 0o644);
+        pool.to_str().unwrap().to_owned()
+    }
+
+    /// A server in `scratch` with these extra server flags.
+    fn build_in(scratch: Scratch, extra: &[&str]) -> Self {
         let pool = scratch.write("pool.toml", EXAMPLE_CONFIG, 0o644);
         let token_file = scratch.write("token", TOKEN, 0o600);
         let state = scratch.path("leases.toml");
@@ -290,14 +241,11 @@ impl Harness {
             token_file.clone().into(),
         ];
         args.extend(extra.iter().map(OsString::from));
-        let mut config = Config::from_cli(ServerCli::try_parse_from(args).unwrap()).unwrap();
-        if let Some(source) = source {
-            config = config.with_capacity_source(source);
-        }
+        let config = Config::from_cli(ServerCli::try_parse_from(args).unwrap()).unwrap();
         let rt = Runtime::new().unwrap();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();
-        let shared = SharedClock::new(clock.clone());
+        let shared = SharedClock::new(clock);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let config = config.with_listener(listener);
         let running = rt.block_on(start(config, shared, ticker)).unwrap();
@@ -308,47 +256,13 @@ impl Harness {
         };
         let server = format!("{scheme}://{}", running.addr());
         Self {
-            rt,
+            _rt: rt,
             _running: running,
-            clock,
-            ticks,
+            _ticks: ticks,
             scratch,
             js: Js { server, token_file },
         }
     }
-
-    /// One tick of the server.
-    pub fn tick(&self) {
-        self.rt.block_on(self.ticks.step());
-    }
-
-    /// Moves the server's clock forward by `by`.
-    pub fn advance(&self, by: Duration) {
-        self.clock.advance(by);
-    }
-
-    /// A waiter that ticks this server instead of waiting.
-    pub fn ticking(&self) -> Arc<Driven> {
-        let (handle, ticks) = (self.rt.handle().clone(), self.ticks.clone());
-        Driven::new(move || tick_on(&handle, &ticks))
-    }
-
-    /// The ids of the leases the server lists, read by the CLI.
-    pub fn listed(&self) -> Vec<String> {
-        let listed = self.js.go(&["--json", "lease", "list"]);
-        assert_eq!(listed.code, 0, "{}", listed.err);
-        let body = listed.json();
-        let leases = body["leases"].as_array().unwrap();
-        leases
-            .iter()
-            .map(|lease| lease["id"].as_str().unwrap().to_owned())
-            .collect()
-    }
-}
-
-/// One tick of a server, from a thread that is not on its runtime.
-pub fn tick_on(handle: &Handle, ticks: &TickHandle) {
-    handle.block_on(ticks.step());
 }
 
 /// A server that answers every request with `reply`, verbatim, and closes: for answers
@@ -420,28 +334,6 @@ pub fn http(status: &str, body: &str) -> String {
     format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n{body}")
 }
 
-/// A server that answers its requests one after the other with `replies` (the last one
-/// for any request beyond them), each on a connection of its own. Returns its URL and
-/// the request lines it has read, in order; a line is logged before its reply is sent.
-pub fn sequence(replies: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::clone(&log);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for (n, stream) in listener.incoming().enumerate() {
-            let mut stream = stream.unwrap();
-            let head = read_request(&mut stream);
-            log.lock()
-                .unwrap()
-                .push(head.lines().next().unwrap().to_owned());
-            let reply = replies.get(n).or(replies.last()).unwrap();
-            let _ = stream.write_all(reply.as_bytes());
-        }
-    });
-    (format!("http://{addr}"), seen)
-}
-
 /// Reads a request up to the end of its body (the head, as text).
 fn read_request(stream: &mut impl Read) -> String {
     let mut head = Vec::new();
@@ -472,18 +364,45 @@ pub fn against(server: &str, scratch: &Scratch) -> Js {
     }
 }
 
-/// The flags that ask for one whole host, less those `extra` gives its own value.
-fn host_flags<'a>(extra: &[&'a str]) -> Vec<&'a str> {
-    let kept = HOST.chunks(2).filter(|pair| !extra.contains(&pair[0]));
-    kept.flatten().copied().collect()
+/// What the recording server read: the request line and the parsed body of each request.
+pub type Seen = Arc<Mutex<Vec<(String, Value)>>>;
+
+/// A server that answers every request with `reply` and records what it read.
+pub fn recording(reply: String) -> (String, Seen) {
+    let seen: Seen = Arc::default();
+    let log = Arc::clone(&seen);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let (line, body) = read(&mut stream);
+            log.lock().unwrap().push((line, body));
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    (format!("http://{addr}"), seen)
 }
 
-/// The words of `lease acquire` for one whole host of the shipped pool, plus `extra`
-/// (a flag in `extra` replaces the host's own).
-pub fn acquire_words<'a>(extra: &[&'a str]) -> Vec<&'a str> {
-    let mut words = vec!["lease", "acquire"];
-    words.extend(host_flags(extra));
-    words.extend(["--max-wall", "2h"]);
-    words.extend(extra);
-    words
+/// Reads one request: its first line and its body as JSON.
+fn read(stream: &mut impl Read) -> (String, Value) {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    let length = head
+        .lines()
+        .filter_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(str::to_owned)
+        })
+        .find_map(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    let _ = stream.read_exact(&mut body);
+    let line = head.lines().next().unwrap().to_owned();
+    (line, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }

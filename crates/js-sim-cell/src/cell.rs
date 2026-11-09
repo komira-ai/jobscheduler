@@ -54,14 +54,15 @@ use js_lease_server::StartupError;
 use js_sim::{Chance, Faults, NodeId, Partition, Sim, SimRng, Trace, TraceHash};
 use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
-use js_types::{HostId, IdError, LeaseId, Resources};
+use js_types::{HostId, IdError, Resources};
 
-use crate::agent::{AgentKind, AgentNode, AgentSpec, Prepare};
+use crate::agent::{AgentKind, AgentNode, AgentSpec};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::{Counter, Counters};
 use crate::elastic::Cloud;
-use crate::front::{Answer, ClientPort, Front, LeaseFront};
+use crate::front::{Answer, ClientPort, Front};
 use crate::invariant::{Checker, Invariant, Touched, Violation};
+use crate::jobs::JobFront;
 use crate::jobs::read::Reader;
 use crate::ledger::Ledger;
 use crate::node::{Applied, CellNode};
@@ -184,14 +185,14 @@ pub struct Cell {
     /// The cell's directory, where each real agent makes its own.
     dir: PathBuf,
     agents: usize,
+    /// The worker lag of the agents added from now on.
+    worker_lag: Duration,
     script: BTreeMap<(FarmTime, u64), Action>,
     scripted: u64,
     client: Client,
     hook: Option<Hook>,
     checks: u64,
     listed_at: Option<FarmTime>,
-    /// The first host each lease was seen booked on, at a read of the listing.
-    first_booked: BTreeMap<LeaseId, HostId>,
     faulted: Faulted,
     violation: Option<Violation>,
     /// The first restart the server refused, until it is taken.
@@ -211,7 +212,7 @@ pub struct Cell {
 impl Cell {
     /// A cell of `setup`'s seed: the server `spec` describes, its files in `dir` (and the
     /// directories of any real agent), with `faults` on the bus, no agent yet, and a
-    /// [`LeaseFront`] as its client.
+    /// [`JobFront`] as its client.
     ///
     /// # Errors
     ///
@@ -238,7 +239,7 @@ impl Cell {
         }
         sim.add_node(SERVER, CellNode::Server(Box::new(server)));
         let client = Client {
-            front: Box::new(LeaseFront::new(&spec)),
+            front: Box::new(JobFront::new()),
             next_item: 0,
             after: FarmTime::default(),
         };
@@ -253,13 +254,13 @@ impl Cell {
             spec,
             dir: path,
             agents: 0,
+            worker_lag: Duration::ZERO,
             script: BTreeMap::new(),
             scripted: 0,
             client,
             hook: None,
             checks: 0,
             listed_at: None,
-            first_booked: BTreeMap::new(),
             faulted: Faulted::default(),
             violation: None,
             refused: None,
@@ -272,6 +273,12 @@ impl Cell {
         };
         cell.set_faults(faults);
         Ok(cell)
+    }
+
+    /// Makes the agents added from now on take `lag` to act on a reply they read
+    /// ([`crate::AgentSpec::worker_lag`]).
+    pub fn set_worker_lag(&mut self, lag: Duration) {
+        self.worker_lag = lag;
     }
 
     /// Adds the next agent, `h000` first, with a correct agent process.
@@ -316,10 +323,7 @@ impl Cell {
         let name = agent_name(self.agents);
         let host = HostId::new(name.as_str())?;
         let mut capabilities = self.spec.shape().capabilities.clone();
-        // A real agent's node does not speak the per-job messages, so it does not say so.
-        if self.spec.serves_jobs() & matches!(kind, AgentKind::Fake(_)) {
-            capabilities.insert(PER_JOB_CAPABILITY.to_owned(), "true".to_owned());
-        }
+        capabilities.insert(PER_JOB_CAPABILITY.to_owned(), "true".to_owned());
         let spec = AgentSpec {
             host: host.clone(),
             pool: self.spec.pool().to_owned(),
@@ -328,6 +332,7 @@ impl Cell {
             capabilities,
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
+            worker_lag: self.worker_lag,
             kind,
             instance,
         };
@@ -513,14 +518,6 @@ impl Cell {
         }
     }
 
-    /// Makes agent `index` answer a prepare as `prepare` says, from its next heartbeat on
-    /// ([`AgentNode::set_prepare`]).
-    pub fn set_prepare(&mut self, index: usize, prepare: Prepare) {
-        if let Some(agent) = self.agent_mut(index) {
-            agent.set_prepare(prepare);
-        }
-    }
-
     /// Kills the process of agent `index` for good, as [`Cell::kill`] does, with its host
     /// gone rather than faulted: it is never replaced, so the quiet the end check waits
     /// for starts now, as if the host had been taken out of the cell.
@@ -659,14 +656,6 @@ impl Cell {
         self.client.front.answers()
     }
 
-    /// The first host the server's listing showed `lease` booked on, at any read of it
-    /// so far; `None` for a lease never seen booked. The listing is read at every client
-    /// call and poll and at least every [`LISTING_EVERY`].
-    #[must_use]
-    pub fn first_booked(&self, lease: &LeaseId) -> Option<&HostId> {
-        self.first_booked.get(lease)
-    }
-
     /// What the cell observes now.
     #[must_use]
     pub fn observations(&self) -> &Observations {
@@ -766,9 +755,8 @@ impl Cell {
         self.sim.node(&node).and_then(CellNode::as_agent)
     }
 
-    /// Reads the server's listing into the observations, with the bookings it starts and
-    /// ends, and its job tables when the job service is on (always when `force`, else when a
-    /// read of them is due), writing each host, job and allocation whose entry changed into
+    /// Reads the server's listing into the observations, and its job tables (always when
+    /// `force`, else when a read of them is due), writing each host, job and allocation whose entry changed into
     /// the trace.
     fn reread(&mut self, force: bool) {
         let now = self.sim.now();
@@ -796,13 +784,7 @@ impl Cell {
         for line in lines {
             self.record(line);
         }
-        for (host, listed) in &view.hosts {
-            for lease in &listed.leases {
-                let first = self.first_booked.entry(*lease);
-                first.or_insert_with(|| host.clone());
-            }
-        }
-        self.observations.read_listing(view, now);
+        self.observations.server = view;
         self.listed_at = Some(now);
         let server = self.sim.node(&NodeId::new(SERVER));
         let server = server.and_then(CellNode::as_server);

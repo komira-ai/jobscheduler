@@ -5,14 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use js_lease::Clock;
-use js_registry::Registry;
 
 use crate::adapt::SharedClock;
 use crate::error::StartupError;
 use crate::file::UsageKeys;
-use crate::usage::{HostLimits, KeySource, UsageSink};
+use crate::usage::{HostLimits, KeySource, NoKeys, UsageSink};
 use crate::usage_hub::Usage;
-use crate::usage_js::{self, NameMap, RegistryKeys, StoreSetup, no_names};
+use crate::usage_js::{self, StoreSetup, no_names};
 
 /// What `--usage-db`, `--usage-off`, `--profile-store-bytes` and
 /// `--history-retention-days` decided, and the seams a caller may fill: the sink that
@@ -24,11 +23,8 @@ pub(crate) struct UsageSetup {
     pub(crate) history_retention_days: u64,
     /// The sink to use in place of the one that opens `db`.
     pub(crate) sink: Option<Arc<dyn UsageSink>>,
-    /// The key source a caller supplied; `None` leaves the server to read the profile names
-    /// clients gave the runs it queued.
+    /// The key source a caller supplied; `None` leaves every run without a key.
     pub(crate) keys: Option<Arc<dyn KeySource>>,
-    /// How admission finds the profile name of a work key; `None` leaves every key flat.
-    pub(crate) names: Option<NameMap>,
 }
 
 /// The default of `--profile-store-bytes`.
@@ -50,18 +46,16 @@ impl UsageSetup {
             history_retention_days,
             sink: None,
             keys: None,
-            names: None,
         }
     }
 
     /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
-    /// A usage file that will not open is a refused start naming `--usage-db`. A run's key
-    /// is read from `registry` unless the caller supplied a key source.
+    /// A usage file that will not open is a refused start naming `--usage-db`. No run has a
+    /// key unless the caller supplied a key source.
     pub(crate) fn build(
         self,
         clock: &SharedClock,
         limits: HostLimits,
-        registry: &Registry,
     ) -> Result<Option<Arc<Usage>>, StartupError> {
         let Some(db) = self.db else {
             return Ok(None);
@@ -73,14 +67,12 @@ impl UsageSetup {
                     db,
                     profile_store_bytes: self.profile_store_bytes,
                     history_retention_days: self.history_retention_days,
-                    names: self.names.unwrap_or_else(no_names),
+                    names: no_names(),
                 };
                 usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
             }
         };
-        let keys = self
-            .keys
-            .unwrap_or_else(|| Arc::new(RegistryKeys(registry.clone())));
+        let keys = self.keys.unwrap_or_else(|| Arc::new(NoKeys));
         let usage = Usage::new(sink, keys, clock.clone(), limits);
         Ok(Some(Arc::new(usage)))
     }

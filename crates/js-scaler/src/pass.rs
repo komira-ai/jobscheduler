@@ -695,10 +695,10 @@ impl<'a> Pass<'a> {
     /// A registered or draining machine whose host the registry shows but does not hear
     /// from. It is held and counted, and `silent` says since when, until the host books
     /// nothing and has been silent for `unknown_hold`; only then does the machine cost
-    /// money for nothing. A host that holds a lease, a run or a stream, or is set aside
+    /// money for nothing. A host that holds an allocation, a run or a stream, or is set aside
     /// for work (`Held`, `Reserved`, or a waiting request's reservation), is never
-    /// released, whatever else the snapshot says; except that once the registry has given up
-    /// the host's leases ([`HostFacts::lease_given_up`]) the runs and streams it lists are
+    /// released, whatever else the snapshot says; except that once no allocation is on the
+    /// host ([`HostFacts::lease_given_up`]) the runs and streams it lists are
     /// stale and do not count, and only a mark or a reservation keeps it. Otherwise:
     ///
     /// * a registered host that has not been heard from since its hello
@@ -709,10 +709,10 @@ impl<'a> Pass<'a> {
     ///   A host that was heard from once booted, so a re-hello after an agent restart (the
     ///   registry starts its heartbeat count over) does not make it a failed boot. The rule
     ///   reads `busy`, the mark and the waiting requests, and not
-    ///   [`HostFacts::lease_given_up`]: it relies on `busy` reflecting the lease the
-    ///   registry booked on the host. For a silent host `lease_given_up` is true when the
-    ///   host holds no lease, which is what `!busy` already says, so reading it as well would
-    ///   add no case and would make the rule wait for the lease grace it is meant to skip;
+    ///   [`HostFacts::lease_given_up`]: it relies on `busy` reflecting the allocation
+    ///   booked on the host. For a silent host `lease_given_up` is true when the host holds
+    ///   no allocation, which is what `!busy` already says, so reading it as well would add
+    ///   no case and would make the rule wait for a give-up it is meant to skip;
     ///   the unknown-hold rules below are what read it. A draining host is not caught by this
     ///   rule: it falls back to those rules, which wait for `unknown_hold`, the safe
     ///   direction;
@@ -730,9 +730,9 @@ impl<'a> Pass<'a> {
             .silent
             .get(&name)
             .is_some_and(|since| self.now.since(*since) >= hold);
-        // A run a silent host lists is no work once the registry has given up its lease:
-        // the job can no longer report, and the registry keeps the listing until the host
-        // is forgotten. Only the booked lease, or a mark, keeps the host.
+        // A run a silent host lists is no work when no allocation is on the host: the job
+        // can no longer report, and the registry keeps the listing until the host is
+        // forgotten. Only a live allocation, or a mark, keeps the host.
         let requested = self
             .input
             .waiting

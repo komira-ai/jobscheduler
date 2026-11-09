@@ -1,5 +1,5 @@
 //! The job client, `js_client::jobs::JobClient`, against the in-memory job server of
-//! `fake_jobs`: the rules it keeps from the lease client (each against `JobClient::connect`,
+//! `fake_jobs`: the rules it keeps from the HTTP client (each against `JobClient::connect`,
 //! with the whole message), the bearer on every call, how a failure is classified by
 //! whether the request was written, and a retried request on the wire.
 
@@ -126,7 +126,7 @@ async fn a_retried_submit_resends_identical_bytes() {
 }
 
 /// Asserts that plain http to a host off the loopback is refused before anything is
-/// dialled, with the lease client's whole message.
+/// dialled, with the HTTP client's whole message.
 #[tokio::test]
 async fn job_client_refuses_http_off_loopback() {
     let dir = Scratch::new("jobs_http");

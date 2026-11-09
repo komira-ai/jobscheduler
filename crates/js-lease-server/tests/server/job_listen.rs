@@ -13,16 +13,8 @@ use js_lease_server::{Cli, Config, SharedClock, StartupError, channel_ticker, st
 
 use crate::agents_support::{agent_args, join, start_agents};
 use crate::config_support::{PoolText, file, load, refusal, server};
+use crate::jobs_support::job_args;
 use crate::support::{Harness, Scratch, args_with, config};
-
-/// The base flags with agent registration on (the static pool kept) and the job service on
-/// `listen`.
-pub fn job_args(scratch: &Scratch, listen: &str) -> Vec<OsString> {
-    let mut args = agent_args(scratch, true);
-    args.push("--job-listen".into());
-    args.push(listen.into());
-    args
-}
 
 /// A `[server]` table whose listeners let a pool that registers agents start, with `extra`
 /// lines after them.

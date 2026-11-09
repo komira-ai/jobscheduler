@@ -32,84 +32,83 @@ fn addr(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
-/// Catches the commands drifting from what the page shows: the default recording's six command lines, word
-/// for word (the server start has its `&` and no `--listen`, the release names the id).
+/// Catches the commands drifting from what the page shows: the default recording's four command lines, word
+/// for word (the server start has its `&`, the job service's address and no `--listen`).
 #[test]
-fn the_default_recording_runs_these_six_commands() {
-    let base = "js --server http://127.0.0.1:7300 --token-file client-token lease";
+fn the_default_recording_runs_these_four_commands() {
+    let base = "js --server http://127.0.0.1:7301 --token-file client-token job";
+    let image = "registry.example/train@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     assert_eq!(
-        commands(DEFAULT_PORT, "1-1"),
+        commands(DEFAULT_PORT, DEFAULT_JOB_PORT),
         [
             "printf 'a-local-token-of-at-least-32-bytes\\n' > client-token && chmod 600 client-token".to_owned(),
-            "js-lease-server --state-file leases.toml --boot initialise --token-file client-token --pool-config hosts.toml &".to_owned(),
-            format!("{base} acquire --class gpu-host --gpus 1 --gpu-class nvidia-a100 --max-wall 1h"),
-            format!("{base} list"),
-            format!("{base} release 1-1"),
+            "js-lease-server --state-file state --boot initialise --token-file client-token --agent-pool-config pool.toml --job-listen 127.0.0.1:7301 &".to_owned(),
+            format!("{base} submit --id demo-1 --spec.image {image} --spec.needs.gpus 1 --spec.needs.gpu-class nvidia-a100 --spec.wall-limit-seconds 1h"),
             format!("{base} list"),
         ]
     );
 }
 
 /// Catches a port that reaches the client and not the server (or the reverse), and the default port given a
-/// `--listen` the recording does not show; port 0 is asked of the server as 0.
+/// `--listen` the recording does not show; port 0 is asked of the server as 0, for either service, and the
+/// client talks to the job service's port, not the health port.
 #[test]
 fn another_port_reaches_the_server_and_every_client_command() {
-    assert!(!server_args(DEFAULT_PORT).contains(&"--listen".to_owned()));
-    let server = server_args(7411);
+    assert!(!server_args(DEFAULT_PORT, DEFAULT_JOB_PORT).contains(&"--listen".to_owned()));
+    let server = server_args(7411, 7412);
     assert_eq!(server[server.len() - 2..], ["--listen", "127.0.0.1:7411"]);
-    let any = server_args(0);
+    let at = server
+        .iter()
+        .position(|a| a == "--job-listen")
+        .expect("flag");
+    assert_eq!(server[at + 1], "127.0.0.1:7412");
+    let any = server_args(0, 0);
     assert_eq!(any[any.len() - 2..], ["--listen", "127.0.0.1:0"]);
-    for args in [
-        acquire_args(7411),
-        list_args(7411),
-        release_args(7411, "2-3"),
-    ] {
-        assert_eq!(args[..2], ["--server", "http://127.0.0.1:7411"]);
+    let at = any.iter().position(|a| a == "--job-listen").expect("flag");
+    assert_eq!(any[at + 1], "127.0.0.1:0");
+    for args in [submit_args(7412), list_args(7412)] {
+        assert_eq!(args[..2], ["--server", "http://127.0.0.1:7412"]);
         assert_eq!(args[2..4], ["--token-file", TOKEN_FILE]);
     }
 }
 
-/// Catches the host file changing without the recording: the file is one host of eight GPUs and the token is
-/// at least the 32 bytes the server asks for.
+/// Catches the pool file changing without the recording: the file is one pool whose hosts have eight GPUs
+/// of the class the job asks for, and the token is at least the 32 bytes the server asks for.
 #[test]
-fn the_host_file_is_one_host_and_the_token_is_long_enough() {
-    let parsed: toml::Table = toml::from_str(HOSTS_TOML).expect("valid toml");
-    let hosts = parsed["host"].as_array().expect("hosts");
-    assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0]["id"].as_str(), Some("gpu-01"));
-    assert_eq!(hosts[0]["resources"]["gpus"].as_integer(), Some(8));
+fn the_pool_file_is_one_gpu_pool_and_the_token_is_long_enough() {
+    let parsed: toml::Table = toml::from_str(POOL_TOML).expect("valid toml");
+    assert_eq!(parsed["name"].as_str(), Some("gpu"));
+    assert_eq!(parsed["shape"]["gpus"].as_integer(), Some(8));
+    assert_eq!(parsed["shape"]["gpu_class"].as_str(), Some("nvidia-a100"));
     assert!(TOKEN.len() >= 32);
 }
 
-/// Catches an id read from the wrong line or the wrong word: the id of `lease <id> host ...`, none from
-/// output that is not an acquire (a `lease` word elsewhere, a listing, a lease line without a host).
+/// Catches an address read from the wrong line: the address after `listening for the job service addr=`
+/// in a log line of the server, the first such line; none from lines that only look like it.
 #[test]
-fn the_lease_id_is_the_word_after_lease_on_the_acquire_line() {
+fn the_job_service_address_is_the_one_the_server_logged() {
     assert_eq!(
-        lease_id("lease 4-2 host gpu-01 ends 17\n").as_deref(),
-        Some("4-2")
+        job_listening_addr(
+            "INFO x: listening addr=127.0.0.1:7300\nINFO x: listening for the job service addr=127.0.0.1:41931 tls=false\nINFO x: listening for the job service addr=127.0.0.1:9 tls=false\n"
+        ),
+        Some(addr(41931))
     );
-    assert_eq!(
-        lease_id("noise\nlease 5-1 host h ends 1\n").as_deref(),
-        Some("5-1")
-    );
-    for text in [
+    for log in [
         "",
-        "4-2 held host gpu-01 ends 17\n",
-        "lease 4-2 freed\n",
-        "lease\n",
-        "lease 4-2\n",
-        "the lease 4-2 host h\n",
+        "listening on 127.0.0.1:7300\n",
+        "listening for the job service addr=\n",
+        "listening for the job service addr=not-an-address tls=false\n",
+        "listening for the job service\n",
     ] {
-        assert_eq!(lease_id(text), None, "{text:?}");
+        assert_eq!(job_listening_addr(log), None, "{log:?}");
     }
 }
 
-/// Catches a transcript in another format: the comment, the host file, `$ ` lines, the output as printed, a
+/// Catches a transcript in another format: the comment, the pool file, `$ ` lines, the output as printed, a
 /// missing final line end added, and no output adding nothing.
 #[test]
-fn the_recorder_writes_the_host_file_then_each_command_with_its_output() {
-    let mut rec = Recorder::with_host_file();
+fn the_recorder_writes_the_pool_file_then_each_command_with_its_output() {
+    let mut rec = Recorder::with_pool_file();
     rec.command("one");
     rec.output("a\nb");
     rec.command("two");
@@ -117,11 +116,11 @@ fn the_recorder_writes_the_host_file_then_each_command_with_its_output() {
     rec.command("three");
     rec.output("c\n");
     let text = rec.finish();
-    assert!(text.starts_with(
-        "# hosts.toml: one host, listed by hand; there is no agent\n[[host]]\nid = \"gpu-01\"\n"
-    ));
     assert!(
-        text.ends_with("driver = \"550\"\n$ one\na\nb\n$ two\n$ three\nc\n"),
+        text.starts_with("# pool.toml: the pool agents would join; no agent has\nname = \"gpu\"\n")
+    );
+    assert!(
+        text.ends_with("gpu_class = \"nvidia-a100\"\n$ one\na\nb\n$ two\n$ three\nc\n"),
         "{text}"
     );
 }
@@ -255,7 +254,7 @@ fn a_probe_answer_is_ready_not_yet_or_a_failure() {
     }
 }
 
-/// Catches scratch files made wrong: the host file, an owner-only token file and an empty log are made, and
+/// Catches scratch files made wrong: the pool file, an owner-only token file and an empty log are made, and
 /// a directory that is not there is a failure, not a panic.
 #[test]
 fn the_scratch_files_are_made_and_a_missing_directory_fails() {
@@ -263,8 +262,8 @@ fn the_scratch_files_are_made_and_a_missing_directory_fails() {
     let dir = TestDir::under(std::env::temp_dir(), "site-demo-prepare");
     prepare(&dir).expect("prepare");
     assert_eq!(
-        std::fs::read_to_string(dir.join("hosts.toml")).expect("hosts"),
-        HOSTS_TOML
+        std::fs::read_to_string(dir.join(POOL_FILE)).expect("pool"),
+        POOL_TOML
     );
     assert_eq!(
         std::fs::read_to_string(dir.join(TOKEN_FILE)).expect("token"),
@@ -343,17 +342,24 @@ fn each_error_says_what_failed_and_with_what() {
         ),
         (
             Error::Client {
-                command: "js lease list".to_owned(),
+                command: "js job list".to_owned(),
                 status: failed,
                 output: "refused".to_owned(),
             },
-            "`js lease list` ended with exit status: 1: refused",
+            "`js job list` ended with exit status: 1: refused",
         ),
         (
-            Error::NoLeaseId {
-                output: "nothing".to_owned(),
+            Error::NotRefused {
+                command: "js job submit".to_owned(),
+                output: "job.id: demo-1".to_owned(),
             },
-            "`js lease acquire` printed no lease id: nothing",
+            "`js job submit` was not refused, and the recording shows the refusal: job.id: demo-1",
+        ),
+        (
+            Error::NoJobAddress {
+                log: "starting".to_owned(),
+            },
+            "js-lease-server did not say where the job service listens: starting",
         ),
         (
             Error::CreateDir {
@@ -397,11 +403,9 @@ fn an_io_error_stays_the_source_of_its_variant() {
     let source = error.source().expect("a source");
     assert_eq!(source.to_string(), "entity not found");
     assert!(
-        Error::NoLeaseId {
-            output: String::new()
-        }
-        .source()
-        .is_none()
+        Error::NoJobAddress { log: String::new() }
+            .source()
+            .is_none()
     );
 }
 
@@ -501,32 +505,40 @@ fn committed() -> String {
 }
 
 /// Catches the recording on the landing page and the verb that makes it drifting apart (this is the check
-/// that cannot be forgotten: it reads the committed file, so it fails whichever was edited alone): the host
-/// block opens the file, and every `$ ` line is exactly the command the verb runs on the default port for
-/// the lease the recording acquired.
+/// that cannot be forgotten: it reads the committed file, so it fails whichever was edited alone): the pool
+/// file block opens the file, every `$ ` line is exactly the command the verb runs on the default ports,
+/// the submit is followed by the server's refusal, and the list by nothing.
 #[test]
 fn committed_transcript_shows_the_commands_this_verb_runs() {
     let text = committed();
     assert!(
-        text.starts_with(&Recorder::with_host_file().finish()),
-        "the host file block"
+        text.starts_with(&Recorder::with_pool_file().finish()),
+        "the pool file block"
     );
-    let id = text
-        .lines()
-        .find_map(|l| l.strip_prefix("lease ")?.split(' ').next())
-        .expect("an acquired lease");
     let shown: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("$ ")).collect();
-    assert_eq!(shown, commands(7300, id));
+    assert_eq!(shown, commands(DEFAULT_PORT, DEFAULT_JOB_PORT));
+    let lines: Vec<&str> = text.lines().collect();
+    let submitted = lines
+        .iter()
+        .position(|l| l.starts_with("$ js ") && l.contains(" job submit "))
+        .expect("the submit");
+    assert!(
+        lines[submitted + 1].starts_with("js: refused: no-capable-host"),
+        "{}",
+        lines[submitted + 1]
+    );
+    assert!(lines[submitted + 2].ends_with(" job list"));
+    assert_eq!(lines.len(), submitted + 3, "the list printed nothing");
 }
 
 /// Catches a check that passes for any file (the check can fail): the same comparison on a transcript with
 /// one flag changed does not hold.
 #[test]
 fn a_transcript_with_a_changed_command_does_not_match_the_verb() {
-    let edited = committed().replace("--gpus 1", "--gpus 2");
+    let edited = committed().replace("--spec.needs.gpus 1", "--spec.needs.gpus 2");
     let shown: Vec<&str> = edited
         .lines()
         .filter_map(|l| l.strip_prefix("$ "))
         .collect();
-    assert_ne!(shown, commands(7300, "1-1"));
+    assert_ne!(shown, commands(DEFAULT_PORT, DEFAULT_JOB_PORT));
 }

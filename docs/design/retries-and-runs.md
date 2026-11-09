@@ -28,7 +28,7 @@ error, apart, with the runtime's `logs` call, before it removes the container, a
 truncated}` (`truncated`: the job printed more than is kept). The container's log on the host is bounded at creation (1 MiB, Podman `k8s-file`,
 Docker `json-file` with two files), so a tail read soon after a rotation can be short. A log that cannot be read (the call is held to 30 s) leaves the result without a tail
 and notes a `logs-failed` finding; it never changes the outcome. The server keeps the tail with the run's result (in memory, so bounded) and
-`GET /v1/leases/{id}/runs/{run_id}` returns it; the list of runs leaves it out. Runs with host isolation have no tail: the agent does not
+`GET /v1/leases/{id}/runs/{run_id}` returned it (a route since removed with the lease API); the list of runs left it out. Runs with host isolation have no tail: the agent does not
 collect their output.
 
 **The tail is the job's own text, returned as written to whoever can read the run. A task must not print secrets.** It is also untrusted bytes (it may hold ANSI escapes, U+202E or NUL): a consumer that prints it to a terminal must strip control characters.

@@ -10,7 +10,7 @@ use js_elastic::{
     AcquireId, Acquired, Demand, EventStream, Held, HostRef, Offer, ProviderError, Released, Secret,
 };
 use js_jobs::{AllocationRecord, JobId, JobRecord, JobStoreError};
-use js_registry::{Busy, HostView, Waiting};
+use js_registry::{Busy, HostView};
 use js_scaler::{AcquirePlan, Health, Records};
 use js_sched::queue_status::Outcome;
 
@@ -49,10 +49,10 @@ pub enum Call {
 /// and the disk. Every method blocks and none holds a lock another part of the server
 /// waits on across a provider call.
 pub trait Effects: Send + Sync {
-    /// The hosts the registry holds and the whole-node lease requests that found no host, as
-    /// of one moment (one lock of the registry). Read beside the job tables
-    /// ([`Effects::jobs`]): demand is both, and a host is busy with either's work.
-    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>);
+    /// The hosts the registry holds, as of one moment (one lock of the registry). Read
+    /// beside the job tables ([`Effects::jobs`]): demand is the queued jobs, and a host is
+    /// busy with a live allocation.
+    fn hosts(&self) -> Vec<HostView>;
 
     /// The queued jobs and then the live allocations of the job tables; both empty for a
     /// server that holds no job tables.
@@ -67,8 +67,7 @@ pub trait Effects: Send + Sync {
     fn whole_host(&self) -> Demand;
 
     /// Whether the host `host` holds work its machine must not be released under, read at
-    /// the moment of the release: a lease the registry books on it, or a live job
-    /// allocation. A read of the job tables that fails counts as work.
+    /// the moment of the release: a live job allocation. A read of the job tables that fails counts as work.
     fn holds_work(&self, host: &str) -> bool;
 
     /// What the pool's checks say, and the offers they read: the scaler launches only while

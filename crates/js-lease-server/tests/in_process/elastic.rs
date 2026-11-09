@@ -1,6 +1,5 @@
 //! The order of one in-process tick over an elastic pool on the elastic fake cloud: the
-//! pool's checks, then the lease table, then the scaler, read from one log the cloud and the
-//! static pool both write to.
+//! pool's checks, then the scaler, read from one log the cloud and the static pool both write to.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -27,7 +26,7 @@ use js_types::{
     accelerator_of,
 };
 
-use crate::support::{Scratch, Stepping, TOKEN, clock, lease_body_with_wall, routed};
+use crate::support::{Scratch, Stepping, TOKEN, clock};
 
 /// What the cloud's provider and the static pool were asked, in order.
 type Log = Arc<Mutex<Vec<String>>>;
@@ -206,7 +205,7 @@ pub(crate) fn offer() -> Offer {
 }
 
 /// The configuration file of a server with one live pool `burst` of the `logged-cloud` kind,
-/// leases of 60 s wall time, the agent routes on a port of their own (which an elastic pool needs,
+/// the agent routes on a port of their own (which an elastic pool needs,
 /// and which the seam does not bind), and the job service on, so the server holds the job
 /// tables beside the state file (the seam binds no job listener either).
 pub(crate) fn file_text(scratch: &Scratch) -> String {
@@ -290,15 +289,13 @@ fn first(calls: &[String], call: &str) -> usize {
 /// Asserts the order of a tick over an elastic pool with a job queued from the start. The
 /// first tick runs the pool's first pass of checks (so the pool is available) and then the
 /// scaler, which launches for the job: the log shows the checks before the first `acquire`.
-/// Then a lease on the static pool passes its wall end and the checks fall due again (60 s); in
-/// the tick that follows, the table's stop of the ended lease comes before the scaler's
-/// first call (its `list`), and the job, still on its way to its machine, launches nothing
-/// more. It catches a tick that runs the scaler before the checks (the scaler would read the
-/// pool as still being checked and launch nothing), one that skips the checks (no `checks`,
-/// and no launch: the scaler launches only while they pass), and one that runs the scaler
-/// before the table.
+/// Then the checks fall due again (60 s); in the tick that follows they run before the
+/// scaler's first call (its `list`), and the job, still on its way to its machine, launches
+/// nothing more. It catches a tick that runs the scaler before the checks (the scaler would
+/// read the pool as still being checked and launch nothing), and one that skips the checks
+/// (no `checks`, and no launch: the scaler launches only while they pass).
 #[tokio::test]
-async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
+async fn one_tick_runs_the_checks_then_the_scaler() {
     let scratch = Scratch::new("order");
     let fake_clock = FakeClock::new(1_000_000_000_000);
     let cloud = ElasticFake::new(fake_clock.clone(), Billing::Lambda, vec![offer()]);
@@ -314,16 +311,6 @@ async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
         .with_capacity_source(Box::new(LoggedStatic(log.clone())))
         .with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
     let server = InProcess::start(config, shared).unwrap();
-    let client = server.client_router();
-    let granted = routed(
-        &client,
-        "POST",
-        "/v1/leases",
-        Some(TOKEN),
-        Some(&lease_body_with_wall(60)),
-    )
-    .await;
-    assert_eq!(granted.status, 201, "{:?}", granted.body);
 
     let before = log.lock().unwrap().len();
     server.tick().await;
@@ -339,10 +326,7 @@ async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
     let before = log.lock().unwrap().len();
     server.tick().await;
     let calls = log.lock().unwrap()[before..].to_vec();
-    assert!(
-        first(&calls, "stop 1-1") < first(&calls, "list"),
-        "{calls:?}"
-    );
+    assert!(first(&calls, "checks") < first(&calls, "list"), "{calls:?}");
     assert!(!calls.iter().any(|call| call == "acquire"), "{calls:?}");
     let scaler = server.scaler().unwrap();
     assert_eq!(scaler.state().records.instances.len(), 1);

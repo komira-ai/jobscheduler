@@ -1,14 +1,14 @@
 //! Runs a plan: for each slot of the schedule, puts the arm's setting in place, drives
 //! the workload and hands the measured run to the caller to write.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io;
 use std::process::{Command, Stdio};
 
 use crate::clock::Clock;
 use crate::driver::drive;
 use crate::farm::Farm;
-use crate::measure::{HostReading, Identity, MINUTE_MS, Prediction, RunOutput, assemble};
+use crate::measure::{HostReading, Identity, MINUTE_MS, RunOutput, assemble};
 use crate::metric::WARMUP;
 use crate::plan::{Arm, Plan, PlanError};
 use crate::workload::Job;
@@ -102,27 +102,20 @@ pub struct Experiment<'a> {
 }
 
 impl Experiment<'_> {
-    /// One run of the workload under `who`, its jobs asking for `class` when the arm names
-    /// one and for the class the workload names otherwise.
-    fn once(&self, who: &Identity, class: Option<&str>) -> RunOutput {
+    /// One run of the workload under `who`, its jobs needing a whole host or not as the arm
+    /// says (`whole_host`) and as the workload says otherwise.
+    fn once(&self, who: &Identity, whole_host: Option<bool>) -> RunOutput {
         let jobs: Vec<Job> = self
             .jobs
             .iter()
             .cloned()
             .map(|mut job| {
-                if let Some(class) = class {
-                    class.clone_into(&mut job.lease.class);
+                if let Some(whole_host) = whole_host {
+                    job.ask.whole_host = whole_host;
                 }
                 job
             })
             .collect();
-        let mut predictions = BTreeMap::new();
-        for profile in self.jobs.iter().filter_map(|job| job.run.profile.as_ref()) {
-            let curve = self.farm.curve(profile).ok().flatten();
-            if let Some(prediction) = curve.as_ref().and_then(Prediction::of) {
-                predictions.insert(profile.clone(), prediction);
-            }
-        }
         let obs = drive(self.farm, self.clock, &jobs, self.poll_ms, self.deadline_ms);
         let used: BTreeSet<&String> = obs
             .jobs
@@ -142,7 +135,7 @@ impl Experiment<'_> {
                 (host.clone(), reading)
             })
             .collect();
-        assemble(who, &obs, &jobs, &predictions, &hosts)
+        assemble(who, &obs, &jobs, &hosts)
     }
 }
 
@@ -175,7 +168,7 @@ pub fn run_plan(
                 String::new()
             },
         };
-        emit(&exp.once(&who, arm.lease_class.as_deref()))?;
+        emit(&exp.once(&who, arm.whole_host))?;
     }
     Ok(slots.len())
 }

@@ -1,6 +1,6 @@
-//! The real lease server with real agents in the cell: registration through the real
-//! hello and its limiter, loss and forgetting by the real registry, a lease and a run
-//! made through the client router, started, ended and acknowledged on the real wire, and
+//! The real server with fake agents in the cell: registration through the real
+//! hello and its limiter, loss and forgetting by the real registry, a job made through the
+//! job service's router, started, ended and acknowledged on the real wire, and
 //! the store the server keeps its state in (`--store`): the file the cell hands it, a host
 //! joined with a minted token, a read of the store while the server is down, and a second
 //! server on the same store.
@@ -25,15 +25,14 @@ use js_sim_cell::bus::{agent_name, trace_msg};
 use js_sim_cell::server::{CLIENT_TOKEN, SQLITE_FILE, STORE_LINE_FILE};
 use js_sim_cell::{
     AgentNode, AgentSpec, CallId, Cell, CellNode, Checker, Counter, EPOCH_MS, Invariant, Ledger,
-    Msg, Route, RunId, SecondServer, ServerNode, ServerSpec, Setup, Shape, Store, StoreRead,
-    Verdict,
+    Msg, Route, SecondServer, ServerNode, ServerSpec, Setup, Shape, Store, StoreRead, Verdict,
 };
 #[cfg(feature = "postgres")]
 use js_testkit::database::{server_url, with_database};
 use js_types::sched::{FarmTime, StateMachine};
-use serde_json::json;
+use serde_json::Value;
 
-use crate::support::{call, lease, ms, scratch, start_run};
+use crate::support::{call, job, ms, scratch};
 
 /// Registration: as many hosts as one join token's default burst would refuse some of,
 /// heard within this horizon.
@@ -50,7 +49,7 @@ const LOST_RETENTION: Duration = Duration::from_secs(120);
 const FORGET_CUT_MS: (u64, u64) = (10_000, 160_000);
 const FORGET_HORIZON_MS: u64 = 175_000;
 
-/// The lease and its run: one host, a run of three seconds.
+/// The job: one host, a run of three seconds.
 const RUN_HOSTS: usize = 1;
 const RUN_MS: u64 = 3_000;
 const RUN_HORIZON_MS: u64 = 60_000;
@@ -61,7 +60,7 @@ const RUN_HORIZON_MS: u64 = 60_000;
 const RESEND_HOSTS: usize = 1;
 const RESEND_INTERVAL: Duration = Duration::from_secs(1);
 const RESEND_GRACE: Duration = Duration::from_secs(3);
-const RESEND_DELAY: Duration = Duration::from_millis(1_500);
+const RESEND_WORKER_LAG: Duration = Duration::from_millis(1_500);
 const RESEND_RUN_MS: u64 = 200;
 const RESEND_HORIZON_MS: u64 = 40_000;
 
@@ -191,43 +190,44 @@ fn a_host_the_server_has_forgotten_is_answered_unknown_host_and_says_hello_again
     assert_eq!(listed(&cell)[0], ("h000".to_owned(), HostState::Live));
 }
 
-/// Asserts that a lease and a run made through the client router reach the agent as one
-/// start, that the run is launched once, ends on its own timer and its result is
+/// Asserts that a job made through the job service's router reaches the agent as one
+/// start, that the job is launched once, ends on its own timer and its result is
 /// acknowledged `Accepted`; that the ledger shows one launch and one completion; and that
-/// after the lease is released every step invariant held and the end check finds nothing.
-/// Catches a start lost between the real server and the agent, a result the server does
-/// not acknowledge, and a booking left behind.
+/// after the job's result is read every step invariant held and the end check finds
+/// nothing. Catches a start lost between the real server and the agent, a result the
+/// server does not acknowledge, and a booking left behind.
 #[test]
-fn a_lease_and_a_run_made_through_the_client_router_are_started_once_and_their_result_is_acknowledged()
- {
+fn a_job_made_through_the_job_router_is_started_once_and_its_result_is_acknowledged() {
     let mut cell = cell("run", pool(RUN_HOSTS), RUN_HOSTS, Faults::default());
     // Scripted past the horizon, so the loop meets an action later than its end and
     // leaves it unrun: the last assertion shows the agent was never killed.
     cell.at(ms(10 * RUN_HORIZON_MS), |cell| cell.kill(0));
     run_to(&mut cell, 10_000);
-    let lease = lease(&mut cell).expect("a lease is granted");
-    let run = start_run(&mut cell, &lease, RUN_MS).expect("a run is queued");
+    let id = job(&mut cell, "sim-job-run", RUN_MS).expect("a job is accepted");
     run_to(&mut cell, 30_000);
     let launches = cell.ledger().launches();
     assert_eq!(launches.len(), 1);
-    assert_eq!(launches[0].run, RunId::new(run.clone()));
-    let completions = cell.ledger().completions();
-    assert_eq!(completions.len(), 1);
-    assert!(completions[0].at.as_millis() - launches[0].at.as_millis() >= RUN_MS);
-    let truth = cell.agent(0).and_then(AgentNode::truth).expect("a process");
-    assert_eq!(
-        truth.acknowledged.get(&RunId::new(run)),
-        Some(&Verdict::Accepted)
-    );
+    let launched = launches[0].run.as_str().to_owned();
+    assert!(launched.starts_with(&format!("{id}/")), "{launched}");
+    let made = &cell.observations().results_made;
+    assert_eq!(made.len(), 1);
+    assert!(made[0].at.as_millis() - launches[0].at.as_millis() >= RUN_MS);
+    let replies = &cell.observations().job_replies;
+    let acks: Vec<(String, Verdict)> = replies
+        .iter()
+        .flat_map(|reply| &reply.acks)
+        .map(|(job, verdict)| (job.to_string(), *verdict))
+        .collect();
+    assert_eq!(acks, [(id.clone(), Verdict::Accepted)]);
     let counters = cell.counters(0).expect("an agent");
     assert_eq!(counters.get(Counter::StartRepeated), 0);
-    let (status, _) = call(
+    let (status, result) = call(
         &mut cell,
-        "DELETE",
-        &format!("/v1/leases/{lease}"),
-        &json!({}),
+        "GET",
+        &format!("/v1/jobs/{id}/result"),
+        &Value::Null,
     );
-    assert!((200..300).contains(&status), "release answered {status}");
+    assert_eq!(status, 200, "{result}");
     run_to(&mut cell, RUN_HORIZON_MS);
     let settled = Checker::end(cell.observations(), Duration::from_secs(20));
     assert_eq!(settled, Ok(Vec::new()));
@@ -237,9 +237,9 @@ fn a_lease_and_a_run_made_through_the_client_router_are_started_once_and_their_r
     );
 }
 
-/// Asserts that a run shorter than the heartbeat interval, on a bus slower than the
+/// Asserts that a job shorter than the heartbeat interval, on a bus slower than the
 /// interval, is started again by the real server (design section 8, row 31: the heartbeat
-/// that leaves before the start arrives does not list the run), that a correct agent
+/// that leaves before the worker acted on the start does not list the run), that a correct agent
 /// counts the repeated start and launches the run once, and that an agent that runs a
 /// repeated start fails `AtMostOneLaunch`. The first half is the witness that the second
 /// can fail. Catches a correct agent that launches a repeated start, and a cell that does
@@ -249,20 +249,16 @@ fn the_server_sends_a_start_again_to_a_host_that_already_ran_it_and_a_correct_ag
  {
     let outcome = |defect: Option<Defect>| {
         let spec = pool(RESEND_HOSTS).heartbeat(RESEND_INTERVAL, RESEND_GRACE);
-        let faults = Faults {
-            min_delay: RESEND_DELAY,
-            max_delay: RESEND_DELAY,
-            ..Faults::default()
-        };
+        let faults = Faults::default();
         let mut cell = Cell::new(Setup::new(11), spec, scratch("resend"), faults).expect("starts");
+        cell.set_worker_lag(RESEND_WORKER_LAG);
         let added = match defect {
             Some(defect) => cell.add_broken_agent(defect),
             None => cell.add_agent(),
         };
         added.expect("an agent name is a host id");
         cell.run_until(ms(15_000)).expect("no run yet");
-        let lease = lease(&mut cell).expect("a lease is granted");
-        start_run(&mut cell, &lease, RESEND_RUN_MS).expect("a run is queued");
+        job(&mut cell, "sim-job-resend", RESEND_RUN_MS).expect("a job is accepted");
         let ended = cell.run_until(ms(RESEND_HORIZON_MS));
         (cell, ended)
     };
@@ -271,7 +267,7 @@ fn the_server_sends_a_start_again_to_a_host_that_already_ran_it_and_a_correct_ag
     let counters = correct.counters(0).expect("an agent");
     assert!(counters.get(Counter::StartRepeated) >= 1, "{counters:?}");
     assert_eq!(correct.ledger().launches().len(), 1);
-    assert_eq!(correct.ledger().completions().len(), 1);
+    assert_eq!(correct.observations().results_made.len(), 1);
     let (broken, ended) = outcome(Some(Defect::StartRunsTwice));
     let violation = ended.expect_err("a second launch");
     assert_eq!(violation.invariant, Invariant::AtMostOneLaunch);
@@ -403,6 +399,7 @@ fn the_server_node_ticks_on_its_period_and_answers_only_calls() {
         hello_interval: INTERVAL,
         kind: js_sim_cell::AgentKind::Fake(None),
         instance: None,
+        worker_lag: std::time::Duration::ZERO,
     };
     let mut agent = CellNode::Agent(Box::new(AgentNode::new(agent, Ledger::new())));
     assert!(agent.as_server().is_none() && agent.as_server_mut().is_none());

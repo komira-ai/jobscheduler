@@ -1,7 +1,8 @@
 //! The own-host routes: a host cordons itself, lifts its own cordon and reads its own
 //! state with the credential it was admitted with (`POST /v1/hosts/{id}:cordon`,
-//! `POST /v1/hosts/{id}:uncordon`, `GET /v1/hosts/{id}`). A cordon is a lease that the
-//! requester sets and renews, that the server caps and lets lapse, and that a restart keeps.
+//! `POST /v1/hosts/{id}:uncordon`, `GET /v1/hosts/{id}`). A cordon is a hold that the
+//! requester sets and renews, that the server caps and lets lapse, and that a restart keeps;
+//! a cordoned host is handed no new job.
 
 use std::fs;
 use std::path::PathBuf;
@@ -11,11 +12,14 @@ use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, POOL, Session, agent_args, entry, hello_body, hosts, post, restarted, session,
-    start_agents, start_agents_in,
+    JOIN, Session, entry, hosts, job_hello, job_host_args, post, restarted_job_hosts, session,
+    start_job_hosts_in,
 };
-use crate::joins::{beat_with, code, hello, minted};
-use crate::support::{Harness, Kept, Reply, Scratch, T0, kept_bindings, lease_body, request};
+use crate::jobs_support::{JobBody, commands, exited, job_state, one_start, running, submit_body};
+use crate::joins::{beat_with, code, minted};
+use crate::support::{
+    Harness, Kept, Reply, Scratch, T0, kept_bindings, lease_file, replace, request,
+};
 
 /// The default length of a cordon asked for with no length, and the longest one a request
 /// can ask for, in seconds.
@@ -30,7 +34,7 @@ struct Host {
 
 /// The hello of `host` on `instance` that asks for a host credential and reports a runtime.
 fn asking(host: &str, instance: &str) -> Value {
-    let mut body = hello_body(host);
+    let mut body = job_hello(host);
     body["instance"] = json!({ "provider": "lambdalabs", "instance_id": instance });
     body["accepts_host_credential"] = json!(true);
     body["capabilities"]["runtime"] = json!("container");
@@ -114,25 +118,41 @@ async fn live_for(h: &Harness, me: &Host, secs: u64) {
     }
 }
 
-/// Asks for a lease; the answer is the reply.
-async fn lease(h: &Harness) -> Reply {
-    h.call("POST", "/v1/leases", Some(&lease_body())).await
+/// Submits the job `id`, which needs 6 of a host's 8 cores so that no host runs two, and
+/// ticks so that the next heartbeat of a host that may take it is handed it.
+async fn ask(h: &Harness, id: &str) {
+    let made = submit_body(h, &JobBody::new(id).needs(6000, 1 << 30).json()).await;
+    assert_eq!(made.status, 201, "{}", made.body);
+    h.ticks.step().await;
 }
 
-fn no_capacity(reply: &Reply) -> bool {
-    reply.json() == json!({ "error": "no-capacity" })
+/// A heartbeat of `me` that lists `jobs`, answered 200; returns the reply.
+async fn beat_listing(h: &Harness, me: &Host, jobs: &[Value]) -> Value {
+    let mut body = me.session.beat();
+    body["jobs"] = json!(jobs);
+    let reply = post(h, "/v1/agent/heartbeat", Some(&me.credential), &body).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    reply.json()
+}
+
+/// The jobs the reply to a heartbeat of `me` tells it to start.
+async fn starts(h: &Harness, me: &Host) -> Vec<String> {
+    let reply = beat_with(h, &me.credential, &me.session).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let (starts, _stops) = commands(&reply.json());
+    starts.into_iter().map(|(job, _allocation)| job).collect()
 }
 
 /// Asserts that the routes serve the host of the credential and no other: the credential
 /// of one host is refused 403 `join-token-not-admitted` on another host's read, cordon and
 /// uncordon, a pool join token is refused 403 `host-credential-required` on its own host's
 /// (it names no host), the client token and no token are 401, and the host that was reached
-/// for is neither cordoned nor kept from a lease. It catches a route that trusts the host
+/// for is neither cordoned nor kept from a job. It catches a route that trusts the host
 /// id in the path, one that lets the shared pool token act for any host, and one that opens
 /// to the client token.
 #[tokio::test]
 async fn a_host_credential_serves_its_own_host_only() {
-    let h = start_agents("cordon_foreign", false).await;
+    let h = start_job_hosts_in("cordon_foreign", Kept::Files).await;
     let one = enrolled(&h, "burst-1", "i-1").await;
     let two = enrolled(&h, "burst-2", "i-2").await;
     for (method, verb) in [
@@ -155,21 +175,19 @@ async fn a_host_credential_serves_its_own_host_only() {
     assert_eq!(unnamed.status, 403, "{}", unnamed.body);
 
     assert!(show(&h, "burst-2", &two).await.get("cordon").is_none());
-    let hosts: Vec<_> = [lease(&h).await, lease(&h).await]
-        .iter()
-        .map(|reply| reply.json()["host"].as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(hosts.len(), 2);
-    assert!(hosts.contains(&"burst-1".to_string()) && hosts.contains(&"burst-2".to_string()));
+    ask(&h, "job-1").await;
+    ask(&h, "job-2").await;
+    assert_eq!(starts(&h, &one).await.len(), 1);
+    assert_eq!(starts(&h, &two).await.len(), 1);
 }
 
-/// Asserts what a cordon does to placement: a cordoned host is offered no new lease (the
-/// request is `no-capacity`), the answer says the host was not cordoned before, and after
-/// an uncordon the same request is granted on that host. It catches a cordon that is
-/// recorded and not consulted when a lease is placed.
+/// Asserts what a cordon does to placement: a cordoned host is handed no new job (the job
+/// stays queued), the answer says the host was not cordoned before, and after an uncordon a
+/// tick places the job and the host's next heartbeat starts it. It catches a cordon that is
+/// recorded and not consulted when a job is placed.
 #[tokio::test]
-async fn a_cordoned_host_takes_no_new_lease_until_it_is_uncordoned() {
-    let h = start_agents("cordon_placement", false).await;
+async fn a_cordoned_host_takes_no_new_job_until_it_is_uncordoned() {
+    let h = start_job_hosts_in("cordon_placement", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     let placed = cordon(&h, "burst-1", &me, 60).await;
     assert_eq!(placed.status, 200, "{}", placed.body);
@@ -177,41 +195,46 @@ async fn a_cordoned_host_takes_no_new_lease_until_it_is_uncordoned() {
     assert_eq!(body["already_cordoned"], false);
     assert_eq!(body["cordon"]["expires_at_ms"], T0 + 60_000);
     assert_eq!(body["cordon"]["expires_in_ms"], 60_000);
-    assert!(no_capacity(&lease(&h).await));
+    ask(&h, "job-1").await;
+    assert!(starts(&h, &me).await.is_empty());
+    assert_eq!(job_state(&h, "job-1").await, "JOB_STATE_QUEUED");
 
     let lifted = uncordon(&h, "burst-1", &me).await;
     assert_eq!(lifted.status, 200, "{}", lifted.body);
     assert_eq!(lifted.json()["lifted"], true);
-    assert_eq!(lease(&h).await.json()["host"], "burst-1");
+    h.ticks.step().await;
+    assert_eq!(starts(&h, &me).await, ["job-1"]);
 }
 
-/// Asserts that a cordon cuts nothing: a lease held when the host is cordoned stays held,
-/// the host's read counts it until it is released, and after the
-/// release the host still takes no new lease. It catches a cordon that gives up the lease
-/// it finds, and one that lets the freed host be placed again.
+/// Asserts that a cordon cuts nothing: a job running when the host is cordoned runs on (the
+/// host is told nothing, and is not told to stop it), its end is acknowledged, and after it
+/// the host still takes no new job. It catches a cordon that gives up the job it finds, and
+/// one that lets the freed host be placed again.
 #[tokio::test]
-async fn a_lease_held_before_the_cordon_runs_on_and_its_end_leaves_the_host_cordoned() {
-    let h = start_agents("cordon_held", false).await;
+async fn a_job_running_before_the_cordon_runs_on_and_its_end_leaves_the_host_cordoned() {
+    let h = start_job_hosts_in("cordon_held", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
-    assert_eq!(lease(&h).await.json()["id"], "1-1");
+    ask(&h, "job-1").await;
+    let started = beat_listing(&h, &me, &[]).await;
+    let (job, allocation) = one_start(&started);
+    assert_eq!(job, "job-1");
     assert_eq!(cordon(&h, "burst-1", &me, 600).await.status, 200);
-    let busy = show(&h, "burst-1", &me).await;
-    assert_eq!(
-        (busy["leases"].clone(), busy["lease"].clone()),
-        (json!(1), json!("1-1"))
-    );
-    assert_eq!(
-        crate::support::ids(&h.call("GET", "/v1/leases", None).await),
-        ["1-1"]
-    );
+    let busy = beat_listing(&h, &me, &[running("job-1")]).await;
+    assert_eq!(commands(&busy), (vec![], vec![]), "{busy}");
+    let shown = show(&h, "burst-1", &me).await;
+    assert_eq!(shown["cordon"]["expires_in_ms"], 600_000);
 
-    assert_eq!(h.call("DELETE", "/v1/leases/1-1", None).await.status, 200);
+    let ended = beat_listing(&h, &me, &[exited("job-1", &allocation)]).await;
+    assert_eq!(
+        ended["job_acks"],
+        json!([{ "job_id": "job-1", "ack": "ACCEPTED" }])
+    );
+    assert_eq!(job_state(&h, "job-1").await, "JOB_STATE_SUCCEEDED");
+    beat_listing(&h, &me, &[]).await;
     live_for(&h, &me, 10).await;
-    let idle = show(&h, "burst-1", &me).await;
-    assert_eq!(idle["leases"], 0);
-    assert!(idle.get("lease").is_none(), "{idle}");
-    assert_eq!(idle["releasing"], false);
-    assert!(no_capacity(&lease(&h).await));
+    ask(&h, "job-2").await;
+    assert!(starts(&h, &me).await.is_empty());
+    assert_eq!(job_state(&h, "job-2").await, "JOB_STATE_QUEUED");
 }
 
 /// Asserts the lease of a cordon: a request with no length gets the default; a repeat
@@ -222,7 +245,7 @@ async fn a_lease_held_before_the_cordon_runs_on_and_its_end_leaves_the_host_cord
 /// shortens, a cap that is not applied, and a body that is half read.
 #[tokio::test]
 async fn a_renew_extends_the_cordon_and_the_server_caps_it() {
-    let h = start_agents("cordon_renew", false).await;
+    let h = start_job_hosts_in("cordon_renew", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     let first = own(&h, "POST", "burst-1", Some("cordon"), &me.credential, None).await;
     assert_eq!(first.status, 200, "{}", first.body);
@@ -277,22 +300,24 @@ async fn a_renew_extends_the_cordon_and_the_server_caps_it() {
 }
 
 /// Asserts that a cordon nobody renews lifts by itself: just before its expiry the host
-/// takes no lease, at it the host does, and the read no longer shows a cordon. The host
+/// is handed no job, at it the host is, and the read no longer shows a cordon. The host
 /// heartbeats throughout, so it is live. It catches an expiry that is never read, and one
 /// that lifts early.
 #[tokio::test]
 async fn a_cordon_that_is_not_renewed_lifts_by_itself() {
-    let h = start_agents("cordon_expiry", false).await;
+    let h = start_job_hosts_in("cordon_expiry", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     assert_eq!(cordon(&h, "burst-1", &me, 60).await.status, 200);
     live_for(&h, &me, 55).await;
-    assert!(no_capacity(&lease(&h).await));
+    ask(&h, "job-1").await;
+    assert!(starts(&h, &me).await.is_empty());
     assert!(show(&h, "burst-1", &me).await.get("cordon").is_some());
 
     live_for(&h, &me, 10).await;
     let shown = show(&h, "burst-1", &me).await;
     assert!(shown.get("cordon").is_none(), "{shown}");
-    assert_eq!(lease(&h).await.json()["host"], "burst-1");
+    h.ticks.step().await;
+    assert_eq!(starts(&h, &me).await, ["job-1"]);
 }
 
 /// Asserts that an uncordon changes nothing it should not: on a host that is not cordoned
@@ -301,7 +326,7 @@ async fn a_cordon_that_is_not_renewed_lifts_by_itself() {
 /// which a hook that retries cannot use.
 #[tokio::test]
 async fn an_uncordon_is_idempotent() {
-    let h = start_agents("cordon_uncordon", false).await;
+    let h = start_job_hosts_in("cordon_uncordon", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     let none = uncordon(&h, "burst-1", &me).await;
     assert_eq!(
@@ -324,11 +349,10 @@ async fn an_uncordon_is_idempotent() {
 
 /// Asserts what the read of a host says: its id, session state, the agent version and the
 /// runtime its hello reported, no lease, no cordon and no taint for a clean host; then,
-/// after a lease and a cordon and a taint report, the lease count and id, the cordon and
-/// the taint. It catches a field the update hook waits on that is missing or wrong.
+/// after a cordon and a taint report, the cordon and the taint. It catches a field the update hook waits on that is missing or wrong.
 #[tokio::test]
 async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
-    let h = start_agents("cordon_read", false).await;
+    let h = start_job_hosts_in("cordon_read", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     let clean = show(&h, "burst-1", &me).await;
     assert_eq!(
@@ -345,7 +369,6 @@ async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
         })
     );
 
-    assert_eq!(lease(&h).await.json()["id"], "1-1");
     assert_eq!(cordon(&h, "burst-1", &me, 120).await.status, 200);
     let mut beat = me.session.beat();
     beat["taint"] = json!({ "reason": "residue", "run_id": "run-1-1", "check": "tmp" });
@@ -359,8 +382,7 @@ async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
             "state": "live",
             "epoch": 1,
             "session_started_ms": T0,
-            "leases": 1,
-            "lease": "1-1",
+            "leases": 0,
             "releasing": false,
             "cordon": { "expires_at_ms": T0 + 120_000, "expires_in_ms": 120_000 },
             "taint": { "reason": "residue", "run_id": "run-1-1", "check": "tmp" },
@@ -375,7 +397,7 @@ async fn the_read_of_a_host_has_what_the_update_hook_waits_on() {
 /// nothing. It catches a verb that falls through to the read or to the cordon.
 #[tokio::test]
 async fn a_path_that_names_no_action_is_not_found() {
-    let h = start_agents("cordon_paths", false).await;
+    let h = start_job_hosts_in("cordon_paths", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     let calls = [
         ("POST", Some("drain")),
@@ -392,8 +414,8 @@ async fn a_path_that_names_no_action_is_not_found() {
 }
 
 /// Asserts that a cordon is kept with the host bindings and survives a restart: after it
-/// the host (which holds no lease) is read with the same expiry, still awaiting its agent,
-/// takes no lease once the agent says hello again, and is lifted at the expiry as before.
+/// the host (which holds no job) is read with the same expiry, still awaiting its agent,
+/// is handed no job once the agent says hello again, and is lifted at the expiry as before.
 /// It runs with the bindings in the agent state file and in the state store. It catches a
 /// cordon held in memory only, and one a hello forgets; in the store it also catches a
 /// cordon not written to the host's binding key, and a server that still writes the file.
@@ -405,7 +427,7 @@ async fn a_cordon_survives_a_restart() {
 }
 
 async fn a_cordon_survives_a_restart_in(kept: Kept) {
-    let first = start_agents_in("cordon_restart", false, kept).await;
+    let first = start_job_hosts_in("cordon_restart", kept).await;
     let me = enrolled(&first, "burst-1", "i-1").await;
     assert_eq!(cordon(&first, "burst-1", &me, 120).await.status, 200);
     let text = kept_bindings(&first);
@@ -418,7 +440,7 @@ async fn a_cordon_survives_a_restart_in(kept: Kept) {
         }
     }
 
-    let h = restarted(first, false).await;
+    let h = restarted_job_hosts(first).await;
     let read = show(&h, "burst-1", &me).await;
     assert_eq!(read["state"], "awaiting");
     assert_eq!(read["cordon"]["expires_at_ms"], T0 + 120_000);
@@ -434,14 +456,40 @@ async fn a_cordon_survives_a_restart_in(kept: Kept) {
         ..me
     };
     assert_eq!(show(&h, "burst-1", &me).await["state"], "live");
-    assert!(no_capacity(&lease(&h).await));
+    ask(&h, "job-1").await;
+    assert!(starts(&h, &me).await.is_empty());
 
     live_for(&h, &me, 125).await;
     assert!(show(&h, "burst-1", &me).await.get("cordon").is_none());
-    assert_eq!(lease(&h).await.json()["host"], "burst-1");
+    h.ticks.step().await;
+    assert_eq!(starts(&h, &me).await, ["job-1"]);
     if kept == Kept::Store {
         assert!(!agents_file(&h).exists());
     }
+}
+
+/// Asserts that a host's own read names the lease a restart restored on it: the server
+/// restarts over a lease file that holds lease 1 on the host, and the host, still awaiting
+/// its agent, reads `lease` `1-1` and one lease; before the restart it read none. It
+/// catches a read that leaves out the lease the lease file gave the host.
+#[tokio::test]
+async fn a_host_reads_the_lease_a_restart_restored_on_it() {
+    let first = start_job_hosts_in("cordon_restored_lease", Kept::Files).await;
+    let me = enrolled(&first, "burst-1", "i-1").await;
+    let before = show(&first, "burst-1", &me).await;
+    assert!(before.get("lease").is_none(), "{before}");
+    let Harness {
+        running, scratch, ..
+    } = first;
+    running.shutdown().await.unwrap();
+    fs::write(scratch.state(), lease_file(&[(1, "held", Some("burst-1"))])).unwrap();
+    let args = Kept::Files.args(&scratch, job_host_args(&scratch));
+    let args = replace(args, "--boot", "resume");
+    let h = Harness::with(scratch, args, None).await;
+    let read = show(&h, "burst-1", &me).await;
+    assert_eq!(read["state"], "awaiting");
+    assert_eq!(read["lease"], "1-1");
+    assert_eq!(read["leases"], 1);
 }
 
 /// Asserts that a lifted cordon is not brought back by a restart, and that a host the
@@ -458,7 +506,7 @@ async fn a_lifted_cordon_stays_lifted_and_an_unknown_host_is_not_found() {
 }
 
 async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
-    let first = start_agents_in("cordon_lifted_restart", false, kept).await;
+    let first = start_job_hosts_in("cordon_lifted_restart", kept).await;
     let me = enrolled(&first, "burst-1", "i-1").await;
     assert_eq!(cordon(&first, "burst-1", &me, 120).await.status, 200);
     assert_eq!(uncordon(&first, "burst-1", &me).await.status, 200);
@@ -467,7 +515,7 @@ async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
     if kept == Kept::Store {
         assert!(!agents_file(&first).exists());
     }
-    let h = restarted(first, false).await;
+    let h = restarted_job_hosts(first).await;
     for reply in [
         own(&h, "GET", "burst-1", None, &me.credential, None).await,
         cordon(&h, "burst-1", &me, 60).await,
@@ -480,13 +528,13 @@ async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
 
 /// Asserts that a cordon that cannot be written down is not acknowledged: with the state
 /// file blocked the cordon answers 503 `cordon-unsaved` (and holds on this server, so the
-/// host takes no lease), the failure is counted, and the same call after the file can be
+/// host is handed no job), the failure is counted, and the same call after the file can be
 /// written is 200 and in the file; an uncordon that cannot be written is 503 too and is
 /// repeated with the same result. It catches an acknowledgement for a cordon a restart
 /// would lose, and an uncordon that says it is done when the file still has the cordon.
 #[tokio::test]
 async fn a_cordon_that_cannot_be_written_is_not_acknowledged() {
-    let h = start_agents("cordon_unsaved", false).await;
+    let h = start_job_hosts_in("cordon_unsaved", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     let blocker = h.scratch.path("leases.toml.agents.tmp");
     fs::create_dir(&blocker).unwrap();
@@ -496,7 +544,8 @@ async fn a_cordon_that_cannot_be_written_is_not_acknowledged() {
     assert_eq!(refused.status, 503, "{}", refused.body);
     assert_eq!(code(&refused), "cordon-unsaved");
     assert_eq!(h.running.agent_errors(), errors + 1);
-    assert!(no_capacity(&lease(&h).await));
+    ask(&h, "job-1").await;
+    assert!(starts(&h, &me).await.is_empty());
 
     fs::remove_dir(&blocker).unwrap();
     assert_eq!(cordon(&h, "burst-1", &me, 60).await.status, 200);
@@ -525,7 +574,7 @@ async fn a_cordon_that_cannot_be_written_is_not_acknowledged() {
 /// catches a route that reads its body without the limit of the others.
 #[tokio::test]
 async fn an_oversized_body_is_refused_and_cordons_nothing() {
-    let h = start_agents("cordon_oversized", false).await;
+    let h = start_job_hosts_in("cordon_oversized", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     let big = vec![b' '; BODY_LIMIT + 1];
     let over = request(
@@ -547,7 +596,7 @@ async fn an_oversized_body_is_refused_and_cordons_nothing() {
 /// refuses a lost host, and a loss that lifts the cordon.
 #[tokio::test]
 async fn a_lost_host_keeps_its_cordon_and_reads_lost() {
-    let h = start_agents("cordon_lost", false).await;
+    let h = start_job_hosts_in("cordon_lost", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     assert_eq!(cordon(&h, "burst-1", &me, 600).await.status, 200);
     h.clock.advance(Duration::from_secs(30));
@@ -566,7 +615,12 @@ async fn a_lost_host_keeps_its_cordon_and_reads_lost() {
     let shown = show(&h, "burst-1", &me).await;
     assert_eq!(shown["state"], "live");
     assert_eq!(shown["cordon"]["expires_in_ms"], 570_000);
-    assert!(no_capacity(&lease(&h).await));
+    let me = Host {
+        session: session(&back, "burst-1"),
+        ..me
+    };
+    ask(&h, "job-1").await;
+    assert!(starts(&h, &me).await.is_empty());
 }
 
 /// Asserts that a reading tells a stopped agent from a new one: the session marker of a
@@ -576,7 +630,7 @@ async fn a_lost_host_keeps_its_cordon_and_reads_lost() {
 /// for the new agent, and a start time that follows the heartbeats.
 #[tokio::test]
 async fn a_new_hello_moves_the_session_marker_and_a_silent_agent_does_not() {
-    let h = start_agents("cordon_session", false).await;
+    let h = start_job_hosts_in("cordon_session", Kept::Files).await;
     let me = enrolled(&h, "burst-1", "i-1").await;
     live_for(&h, &me, 10).await;
     let before = show(&h, "burst-1", &me).await;
@@ -644,7 +698,7 @@ fn code_of(reply: &Reply) -> String {
 /// encoding, one that is looked up before it is checked, and a verb matched loosely.
 #[tokio::test]
 async fn the_auth_matrix_of_the_paths() {
-    let h = start_agents("cordon_matrix", false).await;
+    let h = start_job_hosts_in("cordon_matrix", Kept::Files).await;
     let one = enrolled(&h, "burst-1", "i-1").await;
     let _two = enrolled(&h, "burst-2", "i-2").await;
     // (path with `{S}` for the verb of the form, the form's answer for a read and for a post)
@@ -687,9 +741,11 @@ async fn the_auth_matrix_of_the_paths() {
 /// It catches a token that serves before it has a host, and one that outlives its swap.
 #[tokio::test]
 async fn a_one_time_token_serves_its_host_while_it_is_the_credential() {
-    let h = start_agents("cordon_tokens", false).await;
+    let h = start_job_hosts_in("cordon_tokens", Kept::Files).await;
     let registered = minted(&h, "i-1").await;
-    let welcome = hello(&h, &registered, "burst-1", "i-1").await;
+    let mut said = job_hello("burst-1");
+    said["instance"] = json!({ "provider": "lambdalabs", "instance_id": "i-1" });
+    let welcome = post(&h, "/v1/agent/hello", Some(&registered), &said).await;
     assert_eq!(welcome.status, 200, "{}", welcome.body);
     let unregistered = minted(&h, "i-2").await;
     let swapped = minted(&h, "i-3").await;
@@ -731,7 +787,7 @@ async fn a_one_time_token_serves_its_host_while_it_is_the_credential() {
 /// whole reading.
 #[tokio::test]
 async fn the_listing_shows_a_cordon_and_only_the_cordon() {
-    let h = start_agents("cordon_listing", false).await;
+    let h = start_job_hosts_in("cordon_listing", Kept::Files).await;
     let one = enrolled(&h, "burst-1", "i-1").await;
     let _two = enrolled(&h, "burst-2", "i-2").await;
     assert!(entry(&hosts(&h).await, "burst-1").get("cordon").is_none());
@@ -749,49 +805,31 @@ async fn the_listing_shows_a_cordon_and_only_the_cordon() {
     assert!(entry(&hosts(&h).await, "burst-1").get("cordon").is_none());
 }
 
-/// A server with agent registration on whose pool serves the `whole-node` class.
-async fn start_whole(name: &str) -> Harness {
-    let scratch = Scratch::new(name);
-    let args = agent_args(&scratch, false);
-    let pool = POOL.replace("gpu-host", "whole-node");
-    scratch.write("agent-pool.toml", &pool, 0o644);
-    Harness::with(scratch, args, None).await
-}
-
 /// Asserts the `mark` of the host's own reading: a host that is not set aside reads without
-/// the key, as it does in the listing; a host a whole-node lease is committed on reads with
-/// the mark, pending and held, and it is the very value `GET /v1/hosts` lists for it. It
-/// catches a reading that leaves the mark out, which would make a host that is set aside look
-/// idle to a caller that reads only its own host, and a mark that names a state differently
-/// from the listing.
+/// the key, as it does in the listing; a host a restored reservation names reads with the
+/// mark, and it is the very value `GET /v1/hosts` lists for it. It catches a reading that
+/// leaves the mark out, which would make a host that is set aside look idle to a caller that
+/// reads only its own host, and a mark that names a state differently from the listing.
 #[tokio::test]
 async fn a_host_that_is_set_aside_reads_the_mark_the_listing_shows() {
-    let h = start_whole("cordon_mark").await;
-    let me = enrolled(&h, "burst-1", "i-1").await;
-    let plain = show(&h, "burst-1", &me).await;
-    assert!(plain.get("mark").is_none(), "{plain}");
-    assert!(entry(&hosts(&h).await, "burst-1").get("mark").is_none());
-
-    let mut body = lease_body();
-    body["class"] = json!("whole-node");
-    let asked = h.call("POST", "/v1/leases", Some(&body)).await;
-    assert_eq!(asked.status, 202, "{}", asked.body);
-    let waiting = show(&h, "burst-1", &me).await;
-    assert_eq!(
-        waiting.get("mark"),
-        entry(&hosts(&h).await, "burst-1").get("mark"),
-        "{waiting}"
+    let scratch = Scratch::new("cordon_mark");
+    let args = replace(job_host_args(&scratch), "--boot", "resume");
+    let text = format!(
+        "version = 1\nterm = 3\nnext_sequence = 1\nlease_count = 0\nreservation_count = 1\n\n\
+         [[reservation]]\nrequest_id = \"r9\"\nhost = \"burst-1\"\nreserved_at_ms = {T0}\n\
+         deadline_ms = {}\nqueue_place = 0\nqueued_since_ms = {T0}\n",
+        T0 + 30_000
     );
+    std::fs::write(scratch.state(), text).unwrap();
+    let h = Harness::with(scratch, args, None).await;
+    let other = enrolled(&h, "burst-2", "i-2").await;
+    let plain = show(&h, "burst-2", &other).await;
+    assert!(plain.get("mark").is_none(), "{plain}");
+    assert!(entry(&hosts(&h).await, "burst-2").get("mark").is_none());
 
-    let beat = beat_with(&h, &me.credential, &me.session).await;
-    let lease = beat.json()["exclusive"].as_str().unwrap().to_string();
-    let mut ready = me.session.beat();
-    ready["exclusive_ready"] = json!(lease);
-    let sent = post(&h, "/v1/agent/heartbeat", Some(&me.credential), &ready).await;
-    assert_eq!(sent.status, 200, "{}", sent.body);
-    h.ticks.step().await;
+    let me = enrolled(&h, "burst-1", "i-1").await;
     let held = show(&h, "burst-1", &me).await;
     let listed = entry(&hosts(&h).await, "burst-1");
-    assert!(held["mark"].is_string(), "{held}");
+    assert_eq!(held["mark"], "reserved", "{held}");
     assert_eq!(held.get("mark"), listed.get("mark"), "{held} {listed}");
 }

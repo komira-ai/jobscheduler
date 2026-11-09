@@ -32,7 +32,6 @@ use std::sync::{Arc, PoisonError};
 
 use js_elastic::{Demand, Instant, OfferKey};
 use js_lease::{Clock, Timestamp};
-use js_registry::Registry;
 use js_scaler::{
     Brake, Cooldown, HelloDimension, LaunchMode, Millis, Phase, Record, Records,
     State as ScalerState,
@@ -53,7 +52,6 @@ use crate::store_health::{self, StoreHealth, StoreView};
 /// What the status routes read.
 pub(crate) struct Status {
     pool: Option<Pool>,
-    registry: Option<Registry>,
     scaler: Option<Scaler>,
     warnings: Vec<String>,
     clock: SharedClock,
@@ -236,22 +234,8 @@ pub(crate) struct Instances {
     pub(crate) max_spend_cents_per_hour: u64,
 }
 
-/// What the next launch is for: the first request on the wait list, else a request for
-/// the pool floor.
-pub(crate) fn wanted(registry: Option<&Registry>, floor: &Demand) -> Wanted {
-    let Some(registry) = registry else {
-        return floor_wanted(floor);
-    };
-    match registry.waiting().into_iter().next() {
-        Some(waiting) => Wanted {
-            request: waiting.id.to_string(),
-            demand: waiting.demand,
-        },
-        None => floor_wanted(floor),
-    }
-}
-
-fn floor_wanted(floor: &Demand) -> Wanted {
+/// What the next launch is for: a request for the pool floor.
+pub(crate) fn wanted(floor: &Demand) -> Wanted {
     Wanted {
         request: "floor".to_owned(),
         demand: floor.clone(),
@@ -342,14 +326,12 @@ fn check_view(verdict: Option<Verdict>) -> Option<CheckView> {
 impl Status {
     pub(crate) fn new(
         pool: Option<Pool>,
-        registry: Option<Registry>,
         scaler: Option<Scaler>,
         warnings: Vec<String>,
         clock: SharedClock,
     ) -> Self {
         Self {
             pool,
-            registry,
             scaler,
             warnings,
             clock,
@@ -401,7 +383,7 @@ impl Status {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let state = health.state();
-        let wanted = wanted(self.registry.as_ref(), &pool.floor_demand);
+        let wanted = wanted(&pool.floor_demand);
         let (next_launch, no_offer) = match state {
             State::Checking => (None, None),
             _ => match pool.next_launch(&wanted, &health.offers) {

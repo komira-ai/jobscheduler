@@ -7,7 +7,7 @@
 //! over the calls (`loops.rs`): [`wait_for_terminal`], [`follow_logs`] and
 //! [`submit_retrying`], over [`JobCalls`] and a [`Waiter`].
 //!
-//! The connection keeps the rules of the lease client ([`crate::Client`]): the same
+//! The connection keeps the rules of the HTTP client ([`crate::Client`]): the same
 //! `--server` check ([`crate::ServerUrl::parse`]: `https://`, or `http://` for a loopback
 //! host only, no user, path or query), the same owner-only token file
 //! ([`crate::bearer`]), and for `https://` the certificates of `--ca-cert` only or, without

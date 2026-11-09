@@ -24,6 +24,8 @@ enum Answer {
     Place,
     /// Take it off the list and refuse it `NoCapableHost`.
     Refuse,
+    /// Leave it unanswered, not on the list: the provider cannot say whether it landed.
+    Unsure,
 }
 
 /// A provider that queues, over the fake: a start is answered as `answer` says, and every
@@ -72,6 +74,7 @@ impl Pool for Queueing {
             }
             Answer::Place => self.fake.start(spec),
             Answer::Refuse => StartAck::Refused(RefusalCode::NoCapableHost),
+            Answer::Unsure => StartAck::Unknown,
         }
     }
 
@@ -179,6 +182,22 @@ fn a_waiting_lease_is_presented_again_each_tick_until_placed() {
     let booked = table.provider().capacity();
     assert_eq!(booked[0].leased_to, Some(lease));
     assert_eq!(table.provider().id(), ProviderId::new("fake").unwrap());
+}
+
+/// Asserts that a pending lease whose request does not wait on the provider is observed at
+/// the tick, not presented again: the provider, which could not say whether the start
+/// landed, is started once, and finds it absent, so the lease is dropped. It catches a
+/// pending lease presented again as if it waited.
+#[test]
+fn a_pending_lease_that_does_not_wait_is_observed_not_presented() {
+    let scratch = Scratch::new("request_unsure");
+    let clock = clock();
+    let mut table = queued(&scratch, &clock, Boot::Initialise);
+    table.provider_mut().answer = Answer::Unsure;
+    let lease = waiting_lease(&mut table, asked());
+    let report = table.tick();
+    assert_eq!(report.dropped, vec![lease]);
+    assert_eq!(table.provider_mut().starts.len(), 1);
 }
 
 /// Asserts that a presentation the provider refuses ends the waiting lease: the tick drops

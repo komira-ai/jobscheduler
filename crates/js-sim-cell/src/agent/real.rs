@@ -19,9 +19,11 @@
 //! It is for small host counts: each process writes its held list into its state root at
 //! every step. The fake is the agent a cell runs by the hundred.
 //!
-//! The lifecycle books GPU devices by index, and the lease front names the indices
-//! `0..gpus` for every run, so on a host of more than one GPU a second run that asks for
-//! one is refused `no-capacity` where the fake runs it. The cell's hosts have one GPU.
+//! The lifecycle books GPU devices by index, and a run that asks for GPUs names the indices
+//! `0..gpus`, so on a host of more than one GPU a second run that asks for one is refused
+//! `no-capacity` where the fake runs it. The cell's hosts have one GPU. The lifecycle
+//! speaks the per-job messages as well, as the per-run ones (`real_jobs.rs`): what the
+//! cell writes down of them is the fake's.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -32,7 +34,7 @@ use std::time::Duration;
 use js_agent::lifecycle::{
     Capacity, Config, Lifecycle, MountRoots, NoChecks, ScratchRoot, StateRoot,
 };
-use js_agent_wire::{HeartbeatReply, HeldRun, RunResult};
+use js_agent_wire::{HeartbeatReply, HeldJob, HeldRun, RunResult};
 use js_conformance::agent::memory::{Memory, Time};
 use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
@@ -123,6 +125,18 @@ impl RealAgent {
     /// The results not yet acknowledged, for a heartbeat.
     pub(crate) fn results(&self) -> Vec<RunResult> {
         self.life.results()
+    }
+
+    /// The jobs the lifecycle holds, for a heartbeat's `jobs`, each with its result once it
+    /// has ended.
+    pub(crate) fn held_jobs(&self) -> Vec<HeldJob> {
+        self.life.held_jobs()
+    }
+
+    /// The ids of the stops of jobs the lifecycle did not hold, not yet acknowledged, for a
+    /// heartbeat's `retired_jobs`.
+    pub(crate) fn retired_jobs(&self) -> Vec<String> {
+        self.life.retired_jobs()
     }
 
     /// The run ids of the results not yet acknowledged.

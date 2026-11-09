@@ -1,7 +1,7 @@
 # The simulation cell: writing, running and reading a scenario
 
-`js-sim-cell` tests the scheduler's behaviour without hosts: the real lease server runs
-under a deterministic kernel beside many fake agents and a client driver, and a set of
+`js-sim-cell` tests the scheduler's behaviour without hosts: the real server, with its job
+service, runs under a deterministic kernel beside many fake agents and a client driver, and a set of
 invariants is checked after every step. A scenario is a short builder chain that reads top
 to bottom. This page is for someone who has not seen the cell: what it is, how to run a
 scenario, how to sweep it over many seeds, what keeps a seed replayable, how to write one,
@@ -18,12 +18,12 @@ example below no longer matches the code.
 One run of the cell is one seed of one scenario. The pieces, and how they talk:
 
 ```text
-  client driver (LeaseFront or JobFront)
+  client driver (JobFront)
       |  calls at exact virtual times, never dropped
       v
   server node                  bus                    agent nodes
-  (the real lease   <-- drop, delay, partition -->    h000, h001, ...
-   server)                                            (FakeAgent behind the real wire)
+  (the real server  <-- drop, delay, partition -->    h000, h001, ...
+   and its job service)                               (FakeAgent behind the real wire)
 
   kernel (js_sim::Sim): the virtual clock, the event queue and the bus, all from the seed
   checker: the step invariants after every step; the end invariants once the run is quiet
@@ -33,8 +33,8 @@ The kernel (`js_sim`) owns the only clock and the only random source, both from 
 Each event it takes (a message delivered, a timer, a partition) goes to one node. The
 server node and the agent nodes exchange one HTTP call as a request and its answer
 (`js_sim_cell::Msg`). The client driver is not a node: the cell's run loop polls it at the
-virtual times it asks for, and its calls go straight to the server's client router (or, for
-a path under `/v1/jobs`, to its job service's router). After
+virtual times it asks for, and its calls go straight to the server's job service router (a
+path under `/v1/jobs`). After
 every kernel step, every poll and every action, the cell gathers what changed into its
 observations and the checker tests the step invariants over them; at the end of the
 scenario it tests the end invariants.
@@ -46,7 +46,8 @@ What is real, the production code as it runs in the server:
   command-line parser from a `ServerSpec`;
 - the registry (`js-registry`): registration through the real hello and its limiter, loss
   after the grace, forgetting after the lost retention;
-- the lease table (`js-lease`), which times its saves on the cell's clock;
+- the lease table (`js-lease`) and its file, which the server still keeps and times its
+  saves on the cell's clock; no client of the cell reaches it;
 - the store the server keeps its host bindings, join tokens and scaler's records in
   (`--store`, `server.store` for an elastic pool's server): by default a SQLite file in
   the server's directory, with `--allow-sqlite-store`, or a Postgres database of its own
@@ -62,10 +63,11 @@ What is real, the production code as it runs in the server:
 - the wire's types and their checks (`js-agent-wire`): each agent builds the hello and
   heartbeat bodies a real agent builds and checks every answer with the wire's own
   `validate()`;
-- with `ServerSpec::jobs` (which `Scenario::over_jobs` sets): the job service's HTTP/JSON
-  gateway (`--job-listen`, reached in process, never bound), its job and allocation
-  tables (`js-jobs`, the SQLite store beside the lease file), the per-job heartbeat and
-  the job pass of the tick, placing as `js-sched`. The tables stamp their rows with the
+- the job service: its HTTP/JSON gateway (`--job-listen`, reached in process, never
+  bound), its job and allocation tables (`js-jobs`, the SQLite store beside the lease
+  file), the per-job heartbeat and the job pass of the tick, placing as `js-sched`
+  (the server's only placement, which takes a host by its `arch`; no `--placement` flag is
+  passed). The tables stamp their rows with the
   cell's clock and mint their allocation ids from js-jobs's scripted source over ids drawn
   from the seed, both given through the server's in-process seam, so a job run replays
   from its seed too.
@@ -85,20 +87,19 @@ What is simulated:
   every step, and the agreement family holds the fake to it.
 - time: virtual. The server reads a manual clock that the node sets to the kernel's time
   before every input. Usage recording, whose store reads the system's clock, is off.
-- the clients: `LeaseFront` turns each unit of `Work` into the calls `js run` makes today
-  and reports what it hears as client events; `JobFront` submits each unit of `Work` as a
-  job (`SubmitJob` under an id of its own, `sim-job-<n>`, then `GetJob` until it is
-  terminal, `GetResult`, and `CancelJob` for a cancel or a give-up) and reports the same
-  events. Their calls are never dropped, delayed or reordered. A `JobFront` made with a
-  `LostAnswer` switch (`JobFront::losing_answers`) loses the answer to its next submit
-  once the action `lose_submit_answer` throws the switch, and submits again under the
-  same job id: a lost answer is the client's own fault, not the bus's.
-- the per-job agents: with `ServerSpec::jobs`, each fake agent reports the per-job
-  capability in its hello and speaks the per-job messages with a second `FakeAgent`, keyed
+- the client: `JobFront` submits each unit of `Work` as a job (`SubmitJob` under an id of
+  its own, `sim-job-<n>`, then `GetJob` until it is terminal, `GetResult`, and `CancelJob`
+  for a cancel or a give-up) and reports what it hears as client events. Its calls are
+  never dropped, delayed or reordered. A `JobFront` made with a `LostAnswer` switch
+  (`JobFront::losing_answers`) loses the answer to its next submit once the action
+  `lose_submit_answer` throws the switch, and submits again under the same job id: a lost
+  answer is the client's own fault, not the bus's.
+- the per-job agents: each fake agent reports the per-job capability in its hello and speaks the per-job messages with a second `FakeAgent`, keyed
   by job id, as their engine: a start of a job it holds is a repeat, a stop of a job it
   does not hold retires the id, each result rides in every heartbeat until an answer
   acknowledges it, and each retired id until an answer acknowledges it. A real agent's
-  node does not speak them.
+  node speaks them too, with the lifecycle of `js-agent` as the engine (`held_jobs`,
+  `retired_jobs`, `JobStart`, `JobStop`), and writes the same ledger entries and counters.
 - an elastic pool's cloud: the elastic fake (`js-elastic-fake`), its clock advanced to the
   virtual time of every input of the server, behind a recording wrapper the scaler is
   handed, which forwards every call and writes down each acquire, release and list with
@@ -146,27 +147,25 @@ with `#[path = ...]`; they are not binaries of their own.
 
 | binary | file | what it holds |
 |---|---|---|
-| `smoke` | `tests/smoke.rs` | The smoke family: a hundred hosts settling four hundred runs, a lossy agent wire, and a partition of ten agents that heals. The scenarios are in `tests/cell/burst.rs`, `tests/cell/lossy_wire.rs` and `tests/cell/partition.rs`. |
+| `smoke` | `tests/smoke.rs` | The smoke family: a hundred hosts settling four hundred runs, a lossy agent wire, and a partition of ten agents that heals; and the two negative cases of the per-job agents: agents that drop an unacknowledged result fail `result-kept-until-acknowledged`, and agents that relaunch a repeated job start fail `at-most-one-launch`, each with its correct twin. The scenarios are in `tests/cell/burst.rs`, `tests/cell/lossy_wire.rs` and `tests/cell/partition.rs`. |
 | `sweep` | `tests/sweep.rs` | The smoke family over the seeds its flags name, one shard of a sweep; it has no harness, and a plain `cargo test` runs it with no flag, so it runs no seed ([Sweep many seeds](#sweep-many-seeds)). |
 | `seed_range` | `tests/seed_range.rs` | `Scenario::run_seed_range` and the sweep, each shown to fail when it should: the seeds a range runs, a failing seed and its report in the panic, the shards of a sweep, flags that do not fit together, a run that is not a sweep, and each kind of failure printed with the command that replays it. |
-| `smoke_jobs` | `tests/smoke_jobs.rs` | The core's smoke scenarios (`smoke.rs` runs them over the lease front) over the job front (`Scenario::over_jobs`), and the two negative cases of the per-job agents: agents that drop an unacknowledged result fail `result-kept-until-acknowledged`, and agents that relaunch a repeated job start fail `at-most-one-launch`, each with its correct twin. |
-| `job_front` | `tests/job_front.rs` | The job front, driven through a scripted client port: each answer of the job service mapped to its event, the submit's body, and what a cancel and a give-up do at each stage. |
-| `jobs` | `tests/jobs.rs` | The job scenario family, each over sixteen seeds over the job front: a submit whose answer the client lost, sent again under the same job id (row 1); a host silent before it lists a job's start, which the start timeout ends (rows 35 and 43); a job cancelled before its host lists the start, with a late start after the stop (row 38); the headline over jobs (twenty hosts, forty jobs, four agents cut off and two killed mid-job and replaced: the two-hundred-host headline at a tenth of its size, since every pull request runs it); and a restart of the server with jobs in flight (rows 3 and 36). The headline is in `tests/cell/jobs_headline.rs`. |
+| `job_front` | `tests/job_front.rs` | The job front, driven through a scripted client port: each answer of the job service mapped to its event, the submit's body (a whole host, or the work's own cpu and memory and wall limit), and what a cancel and a give-up do at each stage. |
+| `jobs` | `tests/jobs.rs` | The job scenario family, each over sixteen seeds over the job front: a submit whose answer the client lost, sent again under the same job id (row 1); a host silent before it lists a job's start, which the start timeout ends (rows 35 and 43); a job cancelled before its host lists the start (row 38); the headline over jobs (twenty hosts, forty jobs, four agents cut off and two killed mid-job and replaced: the two-hundred-host headline at a tenth of its size, since every pull request runs it); and a restart of the server with jobs in flight (rows 3 and 36). The headline is in `tests/cell/jobs_headline.rs`. |
 | `job_actions` | `tests/job_actions.rs` | The machinery the job scenario family added, on the real server: the job front's lost-answer switch and the action that throws it, and the action that kills agents running listed jobs and replaces them. |
 | `broken_agent` | `tests/broken_agent.rs` | The negative cases of the harness: agents that lack a behaviour the server relies on must fail a named invariant, and correct agents must pass with the witness held. |
-| `faults` | `tests/faults.rs` | The fault family: agents that die and return, agents killed for good, a 30 s partition that heals, a lossy wire, a silent host holding a run it never listed, a start after its stop, a restart of the server, and a forgotten host seated again, each over sixteen seeds; three negative cases with defective agents. |
+| `faults` | `tests/faults.rs` | The fault family: agents that die and return, agents killed for good, a 30 s partition that heals, a lossy wire, a silent host holding a job it never listed, a start after its stop, a restart of the server, and a forgotten host seated again, each over sixteen seeds; three negative cases with defective agents. |
 | `fault_actions` | `tests/fault_actions.rs` | The machinery the fault family added: a restart of the server (refused, down, and up again), an agent killed for good, the count of a cut agent's unlisted run, and `Expect::launched_on`. |
-| `builder` | `tests/builder.rs` | The scenario builder and the lease front, each shown to fail when it should. |
-| `server` | `tests/server.rs` | The real server with real agents in the cell, driven through the `Cell` API directly: registration, loss and forgetting, a lease and a run on the real wire; and the store: the `--store` file the cell writes and the server takes, a host joined with a minted token, a read of the store while the server is down, a second server refused on the store of a running one, and, with the `postgres` feature, a run's database dropped when the run ends. |
+| `builder` | `tests/builder.rs` | The scenario builder, shown to fail when it should: a witness no seed satisfies, an expectation not met, a violation and its report, an action at its virtual time, the seeds in order, a fault that never ends, hosts of an unknown pool, and a client call the bus's faults never reach. |
+| `server` | `tests/server.rs` | The real server with fake agents in the cell, driven through the `Cell` API directly: registration, loss and forgetting, a job made through the job service's router on the real wire; and the store: the `--store` file the cell writes and the server takes, a host joined with a minted token, a read of the store while the server is down, a second server refused on the store of a running one, and, with the `postgres` feature, a run's database dropped when the run ends. |
 | `agent` | `tests/agent.rs` | The agent node against a scripted stand-in for the server, its side of the whole-host handshake included. |
 | `real_agent` | `tests/real_agent.rs` | The real agent node (the lifecycle of `js-agent` over the in-memory runtime) against the same scripted stand-in. |
 | `agreement` | `tests/agreement.rs` | The agreement family: each scenario run with every agent fake and again with every agent real, and the client's outcome of every item compared seed by seed. |
 | `invariants` | `tests/invariants.rs` | Each invariant over hand-built observations, with negative cases it must flag and correct siblings it must not. |
-| `whole_host` | `tests/whole_host.rs` | The whole-host family: fifty whole-node requests over twenty hosts, and two negative cases on the real server's history (an agent that reports ready for another lease, a server view that drains by cancelling). The scenario is in `tests/cell/whole_host.rs`. |
-| `whole_host_faults` | `tests/whole_host_faults.rs` | The whole-host fault family: hosts silent on a prepare, a refused prepare for each refusal reason, a drain behind busy hosts, a ready report racing the prepare deadline (a scenario per second of the sweep), an agent that restarts while its host is committed, a cancelled request (queued and marked), and a held lease whose agent restarts, each over sixteen seeds. The scenarios are in `tests/cell/whole_host_faults.rs` and `tests/cell/whole_host_cancel.rs`. |
-| `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: the lease front's whole-host path (under its own request id, a given one or none) and the answers it keeps, the actions that set how agents answer a prepare, request whole hosts and cancel a marked request, the whole-host expectations (on a raw answer, on the server as it stands when judged, at the end or at a virtual time, and over a request's tries), the list of refusal reasons, and the server spec's class, whole-node keys and architecture. |
-| `migrated_whole_host` | `tests/migrated_whole_host.rs` | The whole-host placement and failover tests of the lease server's HTTP suite, moved onto the cell: one scenario per moved test, named by it, each assertion an `Expect` at the same virtual time, run in the old test's world and at fifty hosts over sixteen seeds; and a negative case per scenario, its old world with agents that answer the prepare the wrong way. |
-| `elastic` | `tests/elastic.rs` | The elastic family: a hundred whole-host runs scale an empty pool of at most forty machines up and back to none, billed as EC2 bills and as Lambda bills, each over eight seeds; and cells driven by hand: a machine that boots with the token of its launch payload, the recording wrapper's times, a pool that does not join, machines the cloud drops or preempts, a foreign machine, the operator's brake reset, and an acquire armed to crash the server (down from the tick of that acquire until a restart, after which no second acquire is made). The scenarios are in `tests/cell/elastic.rs`. |
+| `whole_host` | `tests/whole_host.rs` | The whole-host family: fifty whole-host jobs over twenty hosts. The scenario is in `tests/cell/whole_host.rs`. |
+| `whole_host_faults` | `tests/whole_host_faults.rs` | The whole-host fault family: a drain behind busy hosts, a cancelled whole-host job (queued), and a placed job whose agent restarts, each over sixteen seeds. The scenarios are in `tests/cell/whole_host_faults.rs` and `tests/cell/whole_host_cancel.rs`. |
+| `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: whole-host jobs placed in turn on one host, the record of a client cancel, the whole-host expectations (at the end and at a virtual time), and the server spec's class, job service address and architecture, and that no placement flag is passed. |
+| `elastic` | `tests/elastic.rs` | The elastic family: the demand of a hundred queued whole-host jobs scales an empty pool of at most forty machines up and back to none, billed as EC2 bills and as Lambda bills, each over two seeds; and cells driven by hand: a machine that boots with the token of its launch payload, the recording wrapper's times, a pool that does not join, machines the cloud drops or preempts, a foreign machine, the operator's brake reset, and an acquire armed to crash the server (down from the tick of that acquire until a restart, after which no second acquire is made). The scenarios are in `tests/cell/elastic.rs`. |
 | `elastic_faults` | `tests/elastic_faults.rs` | The elastic fault family: the cloud loses the first acquire's answer (the call landed, or did not), denies launches, refuses them for capacity, answers 429 for five minutes, holds two machines that are not the scheduler's under a quota, preempts a machine mid-run, lags 60 s in its list, and boots machines that never join until three boot failures trip the brake and the operator resets it through the server's route, each over sixteen seeds; and two negative cases, a cloud that refuses every release (`launched-machines-settle` names the machine) and a hand-built record of a pool that ignores its brake (`no-acquire-while-plan-only`). The scenarios are in `tests/cell/elastic_faults.rs`. |
 | `elastic_fault_actions` | `tests/elastic_fault_actions.rs` | The machinery the elastic fault family added: each action that scripts the cloud, sets its knobs, preempts, drops or adds a machine, switches whether machines join or resets the brake by the route, shown to change what it says; `Expect::pool_tripped` and `Expect::machines_launched`; and the cloud's counts in the cell's total. |
 | `store` | `tests/store.rs` | The store family: a restart over the store, a stop of the server in a burst of hellos that consume join tokens, a second server on the store of a running one, and a crash of the server at the scaler's acquire, each over sixteen seeds over SQLite and, with the `postgres` feature, over eight seeds over Postgres; and with the feature, the same seeds' trace hashes compared between the two stores. The scenarios are in `tests/cell/store.rs`. |
@@ -335,19 +334,15 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `.hosts(pool, count)` for correct agents, `.broken_hosts(pool, count, defect)` for
   agents that lack a behaviour (a `js_conformance::agent::Defect`), `.real_hosts(pool,
   count)` for hosts running the real agent lifecycle, `.bus(faults)` for the
-  bus's faults at the start, `.front(factory)` for a client other than `LeaseFront`, and
+  bus's faults at the start, and
   `.scratch(env!("CARGO_TARGET_TMPDIR"))` for the server's files. For whole hosts,
-  `ServerSpec::whole_node_pool(pool, shape, count)`, with `.prepare_timeout(d)`,
-  `.reserve_backoff(d)` and `.max_replace(n)` for the pool's whole-node keys (a
-  registered pool's shape is given `arch = x86_64` when it names none, since the
-  server's one placement, `js-sched`, takes a host by its `arch`); `.over_store(store)` after `.server(...)` to keep
+  `ServerSpec::whole_node_pool(pool, shape, count)` with `Shape::cpu_host()`, the host with no
+  GPU (a whole-host job is started only on a host with none); `.over_store(store)` after `.server(...)` to keep
   the server's state in `Store::Sqlite` (the default) or, with the `postgres` feature,
   `Store::Postgres` (the scenario's name gains the store);
 - the work: `.work(count, Work::run_for(d))`, with `.give_up_after(d)` and `.needs(r)`;
-  a whole host with `Work::whole_host(d)`, asked for under a request id of the item's own,
-  under a given one with `.with_request_id(id)`, or under none with
-  `.without_request_id()`; a whole-node pool with `ServerSpec::whole_node_pool`, and its
-  keys with `.prepare_timeout(d)`, `.reserve_backoff(d)` and `.max_replace(n)`;
+  a whole host with `Work::whole_host(d)`, submitted as a job whose needs are
+  `wholeHost`;
 - the actions, at a virtual time after the start, with `.at(after, action)`:
   `submit_work`, `cancel_work(items(range))`, `kill_agents`, `replace_agents`,
   `kill_agents_for_good` (a host gone, not a fault), `partition_agents(agents, lasting)`,
@@ -366,40 +361,27 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `add_foreign_machine(name)` (a machine of the account the scheduler did not launch),
   `machines_never_join(pool, never)` (machines that boot from then on say no hello, or
   say it again) and `reset_brake(pool)` (the operator's reset through
-  `POST /v1/pools/{pool}/brake/reset`); for
-  whole hosts, `request_whole_host`,
-  `agent_prepare_delay`, `agent_refuses_prepare`, `agent_silent_on_prepare` and
-  `cancel_when_set_aside(item, within)` (the item cancelled at the first read of the
-  listing that shows a host set aside for it). Agents are named by
+  `POST /v1/pools/{pool}/brake/reset`).
+  Agents are named by
   the index they were added at (`agents(0..10)`), or drawn from the seed when the action
   runs (`drawn_agents(10)`);
 - what is expected beyond the invariants: `Expect::all_items_terminal()`,
   `Expect::terminal_count(n, how)`, `Expect::host_state(index, state)` and
   `Expect::launched_on(&agents, after)` (each of those hosts launched a run at or after
-  `after`, by the launch ledger), and for whole hosts `Expect::held_and_released(n)`,
-  `Expect::every_host_serving()`, `Expect::serving_but(&agents)`,
-  `Expect::tries(item, n)` (the item's request made exactly `n` tries: leases it was
-  answered pending under), `Expect::held_after_a_failed_try(n)` (at least `n` items held
-  after a try of theirs failed), `Expect::kept_off_a_failed_host(backoff)` (no try
-  booked on a host where an earlier try of the same item failed sooner than `backoff`
-  after, read from the server's listing to within one read) and
-  `Expect::held_after_the_runs_on_its_host(item)`, judged once per
+  `after`, by the launch ledger), `Expect::held_and_released(n)` (n items were placed on a
+  host and heard done with the job's result), and for whole hosts
+  `Expect::every_host_serving()`, `Expect::serving_but(&agents)` and
+  `Expect::held_after_the_runs_on_its_host(item)` (the item was placed only after every job
+  launched on its host had made its result), and for an elastic pool
+  `Expect::pool_tripped(pool, tripped)` (the scaler's brake, when judged) and
+  `Expect::machines_launched(pool, n)` (the machines the fake launched for the
+  scheduler, foreign ones left out), judged once per
   seed after the end check with `.expect(e)`, or at a virtual time with
   `.expect_at(after, e)` (after the kernel's events and the actions of that time, before
-  the client's calls of it). A test of the server moved onto the cell also has the
-  facts that test read: `Expect::answer(call, status, body)`, the raw answer the client
-  kept for one of its calls (`Call::acquire(item, n)`), and the server as it stands when
-  the statement is judged: `Expect::listed(call, Listed::...)` and
-  `Expect::no_leases_listed()` (the lease list as a client reads it),
-  `Expect::booked(call, Booked::...)` (where the agent registry books the lease),
-  `Expect::request_record(key, RecordFact::...)`, `Expect::waiting(id, place)`,
-  `Expect::no_reservations()` and `Expect::set_aside(index, request)`; and for an elastic
-  pool `Expect::pool_tripped(pool, tripped)` (the scaler's brake, when judged) and
-  `Expect::machines_launched(pool, n)` (the machines the fake launched for the
-  scheduler, foreign ones left out);
+  the client's calls of it);
 - witnesses: `.witness(name, |counters| ...)`, a predicate over the agents' counters
-  (`start_repeated`, `start_after_stop`, `start_dropped_late`, `result_resent`,
-  `reply_invalid`, `cut_with_unlisted_run`, `unknown_host`) and the elastic pool's
+  (`start_repeated`, `start_after_stop`, `stop_before_start` (the first stop of a job no answer handed the agent a start of), `start_dropped_late`, `result_resent`,
+  `reply_invalid`, `cut_with_unlisted_run` (an agent that was cut off ran a job that none of its heartbeats had listed), `unknown_host`) and the elastic pool's
   cloud's (`acquire_lost`, `acquire_throttled`, `acquire_refused`, `machine_preempted`)
   added over one seed, which at least one seed must satisfy. A witness
   shows that the situation the scenario is about happened, so a scenario that passes
@@ -440,6 +422,13 @@ submission order; a job is its id (`sim-job-<n>` for item `n` of the job front),
 allocation its 32 hex digits (`<a>` below). The capacity check of `no-double-booking`
 counts the jobs an agent runs beside its runs.
 
+The job front hears no lease, and no whole-node lease is asked for: the lease table the
+server still keeps is empty in every scenario of the cell. The checks over leases, runs and
+ready reports (the rows from `no-lease-on-a-lost-host` through `marked-hosts-serve-no-ordinary-start`,
+and the lease parts of the others) therefore find nothing to flag in a scenario, and
+`tests/invariants.rs` runs them over hand-built observations. A whole-host item holds its host
+from its `placed` to its `released`, as the job front hears them.
+
 | invariant | the property | what a violation says | checked |
 |---|---|---|---|
 | `no-double-booking` | By the agents' own truth, no agent runs more than its capacity, no run is run by two agents at once, and no host runs a run of another lease while a whole-host item holds a lease on it. By the server's listing, a lease is booked on one host only, the host it was first booked on (across a restart too), and no host is listed twice. | `host h003 runs [run "a"; run "b"] needing res(cpu=2000 mem=2048 gpus=2) beyond its capacity res(cpu=8000 mem=17179869184 gpus=1) (over on gpus)`, or `run "a" runs on host h001 and on host h004`, or `host h002 runs run "a" of lease 1.7 while whole-host item3 holds lease 1.5 there`, or `lease 1.7 is booked on host h004, and was booked on host h001 first`, or `host h001 is listed twice` | every step |
@@ -451,8 +440,8 @@ counts the jobs an agent runs beside its runs.
 | `no-result-lost` | From the cell's own ledger of completions and the verdicts the agents read, never the server's record: no run's result is accepted twice; every run an agent completed ends `succeeded` for its client, unless the client had its answer before the completion or the agent was killed between the completion and the first verdict on it; and no client hears `succeeded` for a run no agent completed. | `run "a" was accepted twice: on host h001 at 64010 and on host h001 at 69010`, `run "a" completed on host h001 at 64010 and item3 ended lost`, or `item3 succeeded and no agent completed its run "a"` | at the end |
 | `whole-host-is-exclusive` | While a whole-host item holds its host (as the client asked for it, from its grant to its release), no other whole-host item holds the same host, and the server's listing books no other lease there. That the host runs only that lease's runs is `no-double-booking`. | `host h002 is held by whole-host item3 with lease 1.5 and by whole-host item4 with lease 1.6` or `host h002 books lease 1.7 while whole-host item3 holds lease 1.5 there` | every step |
 | `held-means-ready` | A whole-host item is granted its lease on a host only after that host's agent sent a ready report naming exactly that lease (what the agent sent, not what the server took). | `whole-host item3 was granted lease 1.5 on host h002 at 41000 before the host's agent reported ready for that lease` | every step |
-| `drain-kills-nothing` | No run on a host the server sets aside for a whole-host request is sent a stop or a cancel unless its own client asked first (it cancelled the item or sent its release), or the run's own wall limit had run out. | `host h002, set aside for request sim-item-7, was sent a cancel of run "a" of lease 1.4 at 52000 that its client did not ask for` | every step |
-| `marked-hosts-serve-no-ordinary-start` | A host the server sets aside for a whole-host request is sent no start of a lease of an item that did not ask for a whole host, unless it is backfill that ends inside the host's tail. | `host h002, set aside for request sim-item-7 with its tail ending at 90000, was sent a start of run "a" of ordinary lease 1.4 at 52000 that may run until 120000` | every step |
+| `drain-kills-nothing` | No run on a host the server sets aside for a whole-host request is sent a stop or a cancel unless its own client asked first (it cancelled the item or sent its release), or the run's own wall limit had run out. The job front makes no reservation, so the cell's server lists none and this check is exercised over a view built by hand. | `host h002, set aside for request sim-item-7, was sent a cancel of run "a" of lease 1.4 at 52000 that its client did not ask for` | every step |
+| `marked-hosts-serve-no-ordinary-start` | A host the server sets aside for a whole-host request is sent no start of a lease of an item that did not ask for a whole host, unless it is backfill that ends inside the host's tail. The job front makes no reservation, so the cell's server lists none and this check is exercised over a view built by hand. | `host h002, set aside for request sim-item-7 with its tail ending at 90000, was sent a start of run "a" of ordinary lease 1.4 at 52000 that may run until 120000` | every step |
 | `one-allocation-per-job` | By the server's allocation table, a job has at most one allocation booked at a time, and an allocation id names one placement: never read for a second job or host, never read live again once read freed. By the agents' own truth, no job runs on two hosts at once. | `job sim-job-3 has allocations <a> and <b> booked at once`, or `allocation <a> of job sim-job-3 on host h001 was read at 64000 for job sim-job-4 on host h001`, or `allocation <a> of job sim-job-3 was read booked at 64000 after it was read freed`, or `job sim-job-3 runs on host h001 and on host h004` | every step |
 | `lost-is-terminal` | A job the server's table read lost is never read in another state after, and an answer to a per-job heartbeat that listed it running, sent after it read lost, carries a stop of it. | `job sim-job-3 read running at 70000 after it read lost at 65000`, or `host h002 listed job sim-job-3 at 70000, after it read lost at 65000, and the answer carried no stop of it` | every step |
 | `freed-only-when-confirmed` | An allocation is freed only on the host's word (a heartbeat whose listing left the job out, or named it retired, sent after the allocation was committed, after the host read the job's start (unless it refused it, as a start after its stop) and after it read the verdict on its result), when the server no longer lists the host, or for a whole-host prepare that failed before any launch: never on silence, never on an unknown. | `allocation <a> of job sim-job-3 on host h002 was read freed at 70000 with no listing of the host since 12000 that left the job out, while the server lists the host` | every step |
@@ -530,7 +519,7 @@ The cell writes its own lines, `<t> cell ...`, for what the kernel does not see:
 
 | line | means |
 |---|---|
-| `<t> cell client item<n> <event>` | the client heard `submitted`, `pending` (a whole-host try answered pending), `queued`, `placed <host>`, `started`, `terminal <how>`, `release-sent` or `released` for an item |
+| `<t> cell client item<n> <event>` | the client heard `submitted`, `placed <host>`, `started`, `terminal <how>` or `released` for an item (the checker's events also include `pending`, `queued` and `release-sent`, which the job front never reports) |
 | `<t> cell client item<n> cancel` | the scenario asked the client to cancel an item |
 | `<t> cell client <METHOD> <status>` | a client call to the server and its status |
 | `<t> cell kill <host>`, `<t> cell replace <host>` | an agent's process was killed, or a new one started |
@@ -576,10 +565,10 @@ family `smoke` the first four seeds of the lossy agent wire, family `real_agent`
 first two seeds of the agreement family's world without faults, run with real agents,
 family `faults` the first four seeds of the restart of the server with runs in flight
 (`tests/cell/server_restart.rs`), family `whole_host` the first two seeds of the fifty
-whole-host requests, and family `whole_host_faults` the
-first two seeds of the cancelled whole-host request (`tests/cell/whole_host_cancel.rs`),
-family `jobs` the first seed of jobs over
-the job front on a lossy agent wire (`tests/cell/jobs.rs`, eight hosts), family
+whole-host jobs, and family `whole_host_faults` the
+first two seeds of the cancelled whole-host job (`tests/cell/whole_host_cancel.rs`),
+family `jobs` the first seed of jobs on a lossy agent wire (`tests/cell/jobs.rs`, eight
+hosts), family
 `jobs_scenarios` the first seed of the headline over jobs (`tests/cell/jobs_headline.rs`,
 twenty hosts), family
 `elastic` the first seed of the EC2-like elastic pool scaled up to forty machines and back
@@ -598,7 +587,7 @@ own, `crates/js-sim/tests/golden/trace-hashes.txt`.)
 `the_smoke_scenario_matches_the_golden_file`,
 `the_real_agent_scenario_matches_the_golden_file`,
 `the_whole_host_scenario_matches_the_golden_file`,
-`the_whole_host_fault_scenario_matches_the_golden_file`,
+`the_cancelled_whole_host_scenario_matches_the_golden_file`,
 `the_job_scenario_matches_the_golden_file`,
 `the_headline_over_jobs_matches_the_golden_file`,
 `the_elastic_scenario_matches_the_golden_file`,
@@ -623,20 +612,38 @@ model:
 - **Duplicated or reordered HTTP messages.** HTTP carries a request and its answer once
   each, in order, on one connection, so the default bus (`Faults::default()`) never
   duplicates or reorders. A scenario that models a request retried over a second
-  connection turns `reorder` or `duplicate` on for itself, with `.bus(...)` or
-  `set_bus_faults`. Today three scenarios do: `an_agent_that_never_retires_a_stopped_run`
-  in `tests/broken_agent.rs`, `a_stale_start_after_a_stop_does_not_run` in
-  `tests/faults.rs` and
+  connection could turn `reorder` or `duplicate` on for itself, with `.bus(...)` or
+  `set_bus_faults`. Today one scenario does:
   `a_cancel_before_the_host_lists_the_start_ends_cancelled_and_frees_the_allocation` in
-  `tests/jobs.rs` turn `reorder` on for every message from 2 s to 30 s. None
-  turns `duplicate` on. A result or a stop sent again is covered by the server's HTTP
-  tests (`crates/js-lease-server/tests/server/runs.rs`).
+  `tests/jobs.rs` turns `reorder` on for every message from 2 s to 30 s. None turns
+  `duplicate` on. A result or a stop sent again is covered by the server's HTTP tests
+  (`crates/js-lease-server/tests/server/runs.rs`).
+- **Heartbeats in flight together, and answers read after their request timed out.** The
+  real agent has one call in flight at a time: it sends its next heartbeat an interval after
+  it read the answer to the last, gives a call `REQUEST_LIMIT` (10 s), and drops the answer
+  to a call it gave up. The cell's agent does the same (`agent/process.rs`): after a call
+  with no answer in 10 s it waits the shortest backoff (1 s) and sends the next, and an
+  answer that comes later is ignored. A heartbeat is therefore never sent before the reply
+  to the last was read. What the cell leaves out is a heartbeat request that the server
+  processes after a newer one, which needs a request delayed past the limit; the server's
+  step 3 of the per-job heartbeat would take such a stale omission as the host's word (an
+  open issue, not asserted).
+- **A start that arrives after the stop of its job.** With one call in flight and the reply
+  to a timed-out call dropped, the replies an agent reads reach it in the order the server
+  built them, and the server sends a start only for a placed job with no cancel intent. No
+  path delivers a start after a stop (`stops_for` and `starts_for` in
+  `crates/js-lease-server/src/per_job.rs`), so no scenario produces one; the agent's
+  retired-id fence is covered by the lifecycle's tests (`crates/js-agent`), the stand-in
+  tests of `tests/agent.rs` and the unit tests of `agent/real_jobs.rs` and `agent/per_job.rs`.
+  A start sent again to a host that already holds the job is reachable: the worker of the
+  real agent acts on a reply through a queue, and a worker held in a runtime call has not yet
+  acted on a start when the next heartbeat leaves. `AgentSpec::worker_lag` models it, and the
+  scenarios that need a repeated start set it.
 - **Lost client answers on the wire.** The client's calls are never dropped, delayed or
   reordered; only the agent wire is faulty. The job front loses an answer itself when a
-  scenario throws its `LostAnswer` switch (row 1 over jobs,
-  `a_resubmitted_job_id_after_a_lost_answer_is_one_job`); the lease front has no such
-  switch, and a repeated acquire is covered by the server's HTTP tests
-  (`crates/js-lease-server/tests/server/whole_request_id.rs`).
+  scenario throws its `LostAnswer` switch (row 1,
+  `a_resubmitted_job_id_after_a_lost_answer_is_one_job`); a submit sent again is the
+  same job (the job front's id is its own).
 - **A host the provider reads absent while it still runs.** A registered pool's host is
   never read absent while it holds an allocation (it is not forgotten for silence), and a
   machine an elastic pool's cloud drops has its agent killed in the same step. So no
@@ -677,14 +684,16 @@ model:
   takes from no seam. It writes no key with a time to live, so no decision reads that
   clock; the cell's own read of the store, while the server is down, uses the cell's
   clock.
-- **Jobs that book GPUs, and whole-host jobs.** The server sends no start for a job that
-  books GPUs (it records no device indices), so the job front asks for a work's cpu and
-  memory only and submits no whole-host job; a whole-host item is asked for as a lease. An
-  elastic pool's server is configured from a file that names no job service, and its pool
-  books whole hosts, so no job runs on an elastic pool: row 42 of section 8 (a cancel, then
-  the provider reads the host absent) has no scenario. The job
+- **Jobs that book GPUs, and whole-host jobs on a host with GPUs.** The server sends no
+  start for a job that books GPUs (it records no device indices), so the job front asks for a
+  work's cpu and memory only, and a whole-host job (which books the whole host) is started
+  only on a host with no GPU: the whole-host scenarios use `Shape::cpu_host()`. The job
   service's gRPC transport is covered where it lives (`crates/js-lease-server`); the cell
   reaches the HTTP/JSON gateway.
+- **The whole-host handshake of a lease.** A whole-host job is prepared by its host's agent
+  as a whole-node lease is (the agent goes `preparing` and reports ready), but the cell no
+  longer scripts a slow, silent or refusing prepare, or a request id, a wait list or a
+  mark: those belong to the lease routes.
 
 ## Which section 8 rows have a scenario
 
@@ -697,25 +706,22 @@ rendered again after a change here.
 | row | scenario | family file | what the scenario shows |
 |---|---|---|---|
 | 1 | `a_resubmitted_job_id_after_a_lost_answer_is_one_job` | `tests/jobs.rs` | The client loses the answer to its first submit of a job (the job front's `LostAnswer` switch) and submits again under the same job id: both submits are answered 201, the server's table holds one job with one allocation, launched once, and it succeeds. |
-| 3 | `a_server_restart_with_jobs_in_flight_loses_no_job` | `tests/jobs.rs` | Over jobs: the server is stopped for 30 s with 32 jobs running on four hosts and four queued, and started again over its own directory and store; the hosts say hello again and list their jobs. Thirty seconds after the restart every job is still in the table and none has ended; at the end every job succeeded, for the client and in the table, none was launched twice under any allocation, and no allocation is left booked or releasing. |
-| 3 | `a_restart_of_the_server_with_runs_in_flight_double_books_nothing` | `tests/cell/server_restart.rs` | The server is stopped and started again over its lease file (`--boot resume`) with runs in flight; nothing is launched twice, no lease moves host, no host takes a new lease while it runs a run of before the restart, and everything settles. What becomes of the runs in flight (the row's subject) is not asserted: as built they are forgotten. |
-| 4 | `ten_of_two_hundred_agents_die_mid_run` | `tests/faults.rs` | Ten of two hundred agents die with their state and new processes say hello holding nothing; every item is terminal, nothing runs twice, and the replaced hosts take work again (`launched_on`). That the runs become lost with no result is not asserted. |
-| 25 | `a_whole_host_lease_whose_agent_restarts_after_it_is_held` | `tests/cell/whole_host_faults.rs` | A held whole-host lease's agent is started again with empty state and says hello once its host reads lost; the hello ends the lease's run, the client releases the lease, and a waiting request is then held on the host. The row's hazard (the registry ending a held booking the lease table keeps) needs a client that keeps the lease past the hello's prepare deadline, which the lease front does not: the scenario shows no double booking along this path and does not assert the table's state or a run call. |
-| 31 | `a_lossy_wire_launches_every_run_once` | `tests/faults.rs` | A fifth of the agent wire's messages lost and the rest delayed up to 3 s each way, with runs shorter than the heartbeat interval; the server sends starts again (witness `start_repeated`) and every run is launched once. Agents that run a repeated start fail `at-most-one-launch`. |
-| 31 | `an_agent_that_relaunches_a_repeated_start` | `tests/broken_agent.rs` | The server sends a start again (runs shorter than the heartbeat interval on a bus slower than it); agents that run the repeated start fail `at-most-one-launch`, correct agents pass with the witness `start_repeated` held. The other half of the row, an agent restart that empties the retired list, has no scenario. |
+| 3 | `a_server_restart_with_jobs_in_flight_loses_no_job` | `tests/jobs.rs` | The server is stopped for 30 s with 32 jobs running on four hosts and four queued, and started again over its own directory and store; the hosts say hello again and list their jobs. Thirty seconds after the restart every job is still in the table and none has ended; at the end every job succeeded, for the client and in the table, none was launched twice under any allocation, and no allocation is left booked or releasing. |
+| 3 | `a_restart_of_the_server_with_runs_in_flight_double_books_nothing` | `tests/cell/server_restart.rs` | The server is stopped and started again over its files (`--boot resume`) with jobs in flight; nothing is launched twice, no job moves host, no host takes a new job while it runs a job of before the restart, and everything settles. What becomes of the jobs in flight (the row's subject) is not asserted. |
+| 4 | `ten_of_two_hundred_agents_die_mid_run` | `tests/faults.rs` | Ten of two hundred agents die with their state, after the heartbeat that first listed their jobs, and new processes say hello holding nothing; every item is terminal, nothing runs twice, and the replaced hosts take work again (`launched_on`). That the jobs become lost with no result is not asserted. |
+| 25 | `a_whole_host_job_whose_agent_restarts_after_it_is_placed` | `tests/cell/whole_host_faults.rs` | A placed whole-host job's agent is started again with empty state and says hello once its host reads lost; the hello ends the job's run, and a waiting job is then placed on the host and launches its run there. The scenario shows no double booking along this path and does not assert the job's end state. |
+| 31 | `a_lossy_wire_launches_every_run_once` | `tests/faults.rs` | A fifth of the agent wire's messages lost and the rest delayed up to 3 s each way, with workers that take 7 s to act on a reply and runs shorter than the heartbeat interval; the server sends starts again (witness `start_repeated`) and every run is launched once. Agents that run a repeated start fail `at-most-one-launch`. |
+| 31 | `an_agent_that_relaunches_a_repeated_start` | `tests/broken_agent.rs` | The server sends a start again (runs shorter than the heartbeat interval, workers slower than it); agents that run the repeated start fail `at-most-one-launch`, correct agents pass with the witness `start_repeated` held. The other half of the row, an agent restart that empties the retired list, has no scenario. |
 | 33 | `a_hello_that_consumes_a_join_token_commits_the_binding_with_it` | `tests/cell/store.rs` | Twelve hosts with join tokens of their own say hello at once and the server is stopped between two of their hellos; the store, read while the server is down, holds a binding for every used token and a used token for every binding to one, and after the restart every host is seated and serving, over SQLite and Postgres. The row's failed bindings save is not run: the cell cannot fail a commit, and the hosts take no host credential. |
 | 34 | `the_scaler_records_survive_a_restart_and_launch_nothing_twice` | `tests/cell/store.rs` | The server crashes at the scaler's first acquire, after the call reached the cloud and before its answer was read; the restarted scaler finds the machine its stored record names, makes no second acquire, and the machine's agent joins with the token minted before the launch, over SQLite and Postgres. That a retried launch's token is the one the machine booted with is not asserted: the scaler retries nothing here. |
 | 34 | `an_acquire_whose_answer_is_lost_and_did_not_land_is_retried_once` | `tests/cell/elastic_faults.rs` | The first acquire's answer is lost and the call did not land; the scaler holds the unresolved record for the unknown hold (30 minutes), then gives it up and launches once more: two acquires, one machine, which joins and runs the waiting run. As built the lost acquire is never sent again under its own id, so the row's retry (the same instance, a fresh token) does not happen here and which token the second launch uses is not asserted. |
-| 35 | `a_silent_host_is_never_given_a_second_copy_of_its_run` | `tests/faults.rs` | Agents are cut off longer than the grace while they run a run no heartbeat of theirs had listed (witness `cut_with_unlisted_run`); the run is never run on another host. The lease routes have no start timeout; the scenario below asserts it over jobs. |
+| 35 | `a_silent_host_is_never_given_a_second_copy_of_its_run` | `tests/faults.rs` | Agents are cut off longer than the grace while they run a job no heartbeat of theirs had listed (witness `cut_with_unlisted_run`); the job is never run on another host. The start timeout is asserted by the next scenario. |
 | 35 | `a_silent_host_never_requeues_a_placed_job_and_start_timeout_ends_it` | `tests/jobs.rs` | A host is cut off after a job's start reached it and before any heartbeat listed the job (witness `cut_with_unlisted_run`), for longer than the start timeout: while it is still cut off the job reads failed to start, `start-timeout`, and its allocation releasing; once the host returns, still running the job, it is told to stop, and the allocation is freed. The job has one allocation and one launch. What a cancel of such a job does is not run. |
 | 36 | `a_server_restart_with_jobs_in_flight_loses_no_job` | `tests/jobs.rs` | The restart of row 3 over jobs, with four jobs queued: no running job ends and the queued ones wait and then run. The outage is 30 s, not longer than `max_queue_wait` or the retention window, so the raised deadlines are not asserted (the cell cannot set either, and an outage of an hour is past its budget). |
-| 38 | `a_cancel_before_the_host_lists_the_start_ends_cancelled_and_frees_the_allocation` | `tests/jobs.rs` | Over jobs, on the stale start's settings: every job is cancelled while its start is on a bus that delays past the heartbeat interval and reorders, and a start arrives after its stop in some seed (witness `start_after_stop`); every job ends cancelled, for the client and in the table, no job is launched twice, and no allocation is left booked or releasing. That the allocation is freed in the same commit as the end is not asserted: a job whose start was listed before the cancel ends the same way, its allocation freed a heartbeat later. |
-| 38 | `a_stale_start_after_a_stop_does_not_run` | `tests/faults.rs` | The stale-start situation of the row below (the same settings), over sixteen seeds with every invariant of the fault family on. |
-| 38 | `an_agent_that_never_retires_a_stopped_run` | `tests/broken_agent.rs` | Every item is cancelled while its start is still on the bus, and a start arrives after the stop that follows it; agents that do not retire the stopped run fail `at-most-one-launch`, correct agents pass with the witness `start_after_stop` held. That the allocation is freed in the same commit is not asserted. |
-| 39 | `a_cancelled_whole_host_request_drops_its_mark_and_the_host_serves_again` | `tests/cell/whole_host_cancel.rs` | Queued and marked: one whole-host request cancelled while queued behind a held host, and one cancelled at the first read of the listing that shows the host set aside for it; both end cancelled, no mark is left, and a later whole-host request is held on the host and launches its run. In a whole-node pool there is no ordinary start, so a whole-host lease shows the host serving again. A cancel while preparing is not run. |
-| 41 | `agents_killed_for_good_leave_no_booking_once_clients_release` | `tests/faults.rs` | Five of fifty agents die for good; their hosts read lost and take no new lease, and once the clients give up and release, nothing stays booked on them. |
+| 38 | `a_cancel_before_the_host_lists_the_start_ends_cancelled_and_frees_the_allocation` | `tests/jobs.rs` | Every job is cancelled while its start is on a bus that delays past the heartbeat interval and reorders, so the cancel races the start, and in some seed an agent is sent the stop of a job that no answer it read carried the start of: on this bus, which delays an answer by less than the agent's 10 s limit and drops none, the server committed the cancel before it sent the start (witness `stop_before_start`). Every job ends cancelled, for the client and in the table, no job is launched twice, and no allocation is left booked or releasing. A late start after the stop is not reachable: the agent keeps one heartbeat in flight and the server sends no start for a job with cancel intent (see "What the cell does not model" in `docs/simulation.md`); the agent's own fence against one is covered by `agent/per_job_tests.rs` and `agent/real_jobs_tests.rs`. That the allocation is freed in the same commit as the end is not asserted: a job whose start was listed before the cancel ends the same way, its allocation freed a heartbeat later. |
+| 39 | `a_cancelled_whole_host_request_drops_its_place_and_the_host_serves_again` | `tests/cell/whole_host_cancel.rs` | Queued: one whole-host job cancelled while queued behind a held host ends cancelled, and a later whole-host job is placed on the host and launches its run. A cancel while the server has set a host aside for the job, and one while preparing, are not run. |
+| 41 | `agents_killed_for_good_leave_no_booking_once_clients_release` | `tests/faults.rs` | Five of fifty agents die for good; their hosts read lost and take no new job, and once the clients give up and cancel, nothing stays booked on them. |
 | 43 | `a_silent_host_never_requeues_a_placed_job_and_start_timeout_ends_it` | `tests/jobs.rs` | The start never completes because the host is silent, not because an image fetch sticks: after the start timeout the job fails to start, `start-timeout`; its allocation is kept, releasing, while the host is silent, and freed once the host confirms the container gone. |
-
 The job scenario family (`tests/jobs.rs`) runs every invariant of `Invariant::ALL`, the
 five job invariants among them, and states the rest with the job `Expect`s
 (`Expect::jobs_read` and the seven after it), which read the server's job and allocation
@@ -724,9 +730,10 @@ and 43 above it runs the headline over jobs (`the_headline_over_jobs`, no row: t
 hosts, forty jobs, four agents cut off for 30 s and two killed mid-job and replaced, a
 tenth of a two-hundred-host headline so that every pull request can run it; every job reaches one terminal state, none is launched twice, nothing is
 double-booked and no allocation is left booked or releasing). Two rows the job design
-closes have no scenario, because the cell cannot bring about what each starts from: row
-37 needs a host the provider read absent that comes back still running its job, and row
-42 a job on an elastic pool (see [What the cell does not model](#what-the-cell-does-not-model)).
+closes have no scenario: row 37 needs a host the provider read absent that comes back
+still running its job, which the cell cannot bring about (see [What the cell does not
+model](#what-the-cell-does-not-model)), and row 42 (a cancel, then the provider reads the
+host absent) is not run.
 
 The partition scenario of `tests/cell/partition.rs` cuts agents off while they run, but asserts only
 what the server as built and the design both promise (the invariants and every item
@@ -739,17 +746,20 @@ checks every invariant of `Invariant::ALL` on both sides of each comparison, and
 them that each item's terminal is the same with fake and with real agents. It runs five
 situations over eight seeds: no fault, a lossy wire (15% of messages dropped for 300 s,
 witness `result_resent`), two of six agents cut off for 30 s, two agents killed and
-replaced mid-run, and the stale start of `tests/broken_agent.rs` (witness
-`start_after_stop`). It covers no row by itself: it shows that the fake answers as the
+replaced mid-run, and a start sent again to a slow worker (witness `start_repeated`). It covers no row by itself: it shows that the fake answers as the
 real agent does in the situations of section 7 ("Result lost", "Duplicate start", "Stop
 of an unknown job"), and its replacement is that of rows 4 and 31 (a host whose
 containers and retired list died with the agent), so a scenario that pins either row
 with fake agents is held to the real one there.
 
+The real side runs the job front: the cell's real agent node (`js_sim_cell::agent::real`)
+reports the per-job capability and speaks the per-job messages of the lifecycle of
+`js-agent` (`agent/real_jobs.rs`).
+
 The store family (`tests/store.rs`, its scenarios in `tests/cell/store.rs`) runs every
 invariant of `Invariant::ALL` over SQLite and, with the `postgres` feature, over
 Postgres. Beside rows 33 and 34 above it covers section 6.7's restart recovery over the
-store (`a_restart_over_the_store_keeps_every_host_binding_and_lease`: every host seated
+store (`a_restart_over_the_store_keeps_every_host_binding`: every host seated
 once again under its id, a token used before the restart refused as used after it, an
 unused one still admitting its host, nothing launched twice) and its first step, the
 writer lock
@@ -785,23 +795,17 @@ skipped while the last is busy) needs a provider call that takes time, which the
 calls never do, so it has no scenario. Its witnesses read the cloud's counts:
 `acquire_lost`, `acquire_throttled`, `acquire_refused` and `machine_preempted`.
 
-The whole-host family covers no row yet. Its fifty requests wait on the server's wait list
-and are presented again at every tick, but it pins neither the order the list serves
-(row 11, advisory as built) nor what happens when a request is not presented within
-`regain_grace` (row 12); it has no failed prepare and no hello under a held lease, so it
-does not reach row 25 or 26. It holds the placement to the four whole-host invariants
-above.
+The whole-host family covers no row yet. Its fifty whole-host jobs wait in the queue and
+are placed as hosts become quiet, but it pins neither the order the queue serves (row 11,
+advisory as built) nor what happens when a request is not presented within `regain_grace`
+(row 12); it has no failed prepare and no hello under a placed job, so it does not reach row
+25 or 26. It holds the placement to the whole-host invariants above.
 
 The whole-host fault family (`tests/whole_host_faults.rs`) runs every invariant of
-`Invariant::ALL`. Beside rows 25 and 39 above it covers
-section 7's "Whole-host ready report races the prepare deadline" (a scenario per second
-from five before the deadline to five after: held on that host or retried elsewhere,
-never both), "Flapping agent during whole-host commit" (invariants only: when the
-deadline falls after a hello is row 26 and is not pinned), section 5.4's failed prepare
-(silent hosts and each refusal reason: the request held on a host that reported ready,
-the failed host kept off for `reserve_backoff`, and a request refused after
-`max_replace` tries) and section 6.4's "drain never cuts work" (a request behind busy
-hosts held only after the runs on its host ended, every run succeeding). As built a held
-host is never set aside for another request, so `drain-kills-nothing` watches the host
-from the mark the server makes once it restores. It pins neither the order the wait list
-serves (row 11) nor which request takes which host.
+`Invariant::ALL`. Beside rows 25 and 39 above it covers section 6.4's "drain never cuts
+work" (a job behind busy hosts placed only after the jobs on its host ended, every run
+succeeding). It pins neither the order the queue serves (row 11) nor which job takes which
+host. The cell no longer scripts a failed prepare (silent hosts, a refusal, a ready report
+racing the deadline, an agent that restarts while its host is committed): those scenarios
+drove the whole-node lease's handshake through a request id and a wait list, which a job does
+not have.

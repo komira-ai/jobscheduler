@@ -53,8 +53,7 @@ second rule:
 ## 6.7 A probe pinned to one host
 
 An operator who installs or updates js-agent on a host proves it with one job on that host while the host stays cordoned for ordinary
-work. That job is a **probe**: a request that names one host (`probe_host` on `POST /v1/leases`, `js lease acquire --probe-host HOST`;
-`Request::pin` in `js-sched`). It runs on that host and nowhere else, and it is the only new work a cordoned host takes.
+work. That job is a **probe**: a request that names one host (`Request::pin` in `js-sched`; no client route can request one now, since the lease routes and `js lease` that did are removed). It runs on that host and nowhere else, and it is the only new work a cordoned host takes.
 
 **The rule** is one function, `js_sched::admit_probe`, and both placement engines call it: the scheduler's round for every queued probe,
 over the workers it holds, and the lease server's placer for every probe lease, over the facts its registry keeps
@@ -84,7 +83,7 @@ ends, and ordinary work stays off the host the whole time. A probe is never join
 prove nothing about the host. Ordinary placement is unchanged when no probe is submitted. A request with no pin takes exactly the path it
 took before.
 
-**Where a probe can be placed.**
+**Where a probe can be placed.** No client route requests a probe now; the rules below describe the placement engines, not an API.
 
 - The lease server places probes. Its cordon is the host's own (`POST /v1/hosts/{id}:cordon`, which the update
   hook takes), so a cordoned host is one whose cordon has not lapsed. The registry has no drain of that cordon, so the lease server never

@@ -81,13 +81,7 @@ pub(crate) fn from_server(
     let pools: Arc<dyn Pools> = match state.pools() {
         Some(pools) => Arc::clone(pools) as Arc<dyn Pools>,
         // A state given no status of its pools has no elastic pool: the status of none.
-        None => Arc::new(Status::new(
-            None,
-            state.registry(),
-            None,
-            Vec::new(),
-            agents.clock.clone(),
-        )),
+        None => Arc::new(Status::new(None, None, Vec::new(), agents.clock.clone())),
     };
     let history = state
         .usage()

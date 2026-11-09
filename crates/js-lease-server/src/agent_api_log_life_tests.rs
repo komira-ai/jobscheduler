@@ -527,8 +527,7 @@ async fn no_secret_reaches_a_log_a_status_page_or_an_error() {
         rig.beat(&FakeAgent::uploading(host)).await.unwrap();
     }
 
-    let registry = Some(rig.agents.registry.clone());
-    let status = Status::new(None, registry, None, Vec::new(), status_clock(&rig))
+    let status = Status::new(None, None, Vec::new(), status_clock(&rig))
         .with_logs(Some(Arc::clone(&logs.grants)));
     let view = status.view();
     let json = serde_json::to_string(&view).unwrap();
@@ -536,7 +535,7 @@ async fn no_secret_reaches_a_log_a_status_page_or_an_error() {
     let counted = r#""logs":{"minted":1,"failed":2,"hosts_with_credential":1,"hosts_failing":2}"#;
     assert!(json.contains(counted), "{json}");
     assert!(shown.contains("<h2>Live logs</h2>"), "{shown}");
-    let without = Status::new(None, None, None, Vec::new(), status_clock(&rig)).view();
+    let without = Status::new(None, None, Vec::new(), status_clock(&rig)).view();
     assert!(!serde_json::to_string(&without).unwrap().contains("logs"));
 
     let said = [

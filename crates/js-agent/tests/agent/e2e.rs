@@ -1,5 +1,5 @@
-//! The agent against a real lease server in the test process: registration, leasing,
-//! refusals, a server restart, the stop request, and the rate limit.
+//! The agent against a real server in the test process: registration, refusals, a server
+//! restart, the stop request, and the rate limit.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,20 +22,20 @@ fn mac_without_gpu() -> Host {
     host
 }
 
-/// Asserts the whole path of a host with no GPU: before the agent runs a lease request for
-/// `os=macos` is refused `no-capable-host` (no host could serve it yet); once the agent has said hello (admitted because its
-/// detected `os` is the pool's `macos`) the host is live, serving and listed with its
-/// label; `POST /v1/leases` by capability leases it; a second request finds none; and the
-/// host is leasable again after the lease is released. It proves a machine with no GPU
-/// becomes leasable through the ordinary API with no new selector, and catches an agent
-/// whose hello the server does not accept, or whose host the lease path cannot see.
+/// Asserts the whole path of a host with no GPU: before the agent runs the server lists no
+/// host; once the agent has said hello (admitted because its detected `os` is the pool's
+/// `macos`) the host is live, serving and listed with its source, its detected capabilities
+/// and its label; and after the agent is stopped the host stays listed. It proves a machine
+/// with no GPU registers through the ordinary hello with no new selector, and catches an
+/// agent whose hello the server does not accept.
 #[test]
-fn agent_registers_and_host_is_leasable() {
-    let server = Server::start("e2e_leasable", &[]);
-    let before = server.lease();
-    assert_eq!(
-        (before.status, before.body),
-        (409, json!({ "error": "no-capable-host" }))
+fn agent_registers_and_the_host_is_listed() {
+    let server = Server::start("e2e_listed", &[]);
+    assert!(
+        server.get("/v1/hosts")["hosts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
 
     let flags = ["--host-id", "mac-1", "--label", "rack=r1"];
@@ -60,28 +60,18 @@ fn agent_registers_and_host_is_leasable() {
     );
     assert_eq!(host["labels"], json!({ "rack": "r1" }));
 
-    let granted = server.lease();
-    assert_eq!(granted.status, 201, "{}", granted.body);
-    assert_eq!(granted.body["host"], "mac-1");
-    let id = granted.body["id"].as_str().unwrap().to_owned();
-    assert_eq!(server.host("mac-1")["lease"], id.as_str());
-    let full = server.lease();
-    assert_eq!(full.body, json!({ "error": "no-capacity" }));
-
     agent.elapse();
     assert_eq!(agent.next_wait(), secs(5));
-    let released = server.delete(&format!("/v1/leases/{id}"));
-    assert_eq!(released.body, json!({ "state": "freed" }));
-    assert_eq!(server.lease().status, 201);
     let ran = agent.stop();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(server.host("mac-1")["source"], "registered");
 }
 
 /// Asserts that a Mac with an Apple GPU, whose hello says one GPU of class `apple-m`, is
-/// admitted by the same pool and leased by the same request: the GPU facts the Mac probe
-/// found are accepted by the server's wire checks.
+/// admitted by the same pool and listed live with its GPU: the GPU facts the Mac probe found
+/// are accepted by the server's wire checks and reach the host listing.
 #[test]
-fn an_apple_gpu_host_is_admitted_and_leasable() {
+fn an_apple_gpu_host_is_admitted_and_listed() {
     let server = Server::start("e2e_apple", &[]);
     let agent = crate::server::Agent::spawn(
         server.url(),
@@ -91,8 +81,12 @@ fn an_apple_gpu_host_is_admitted_and_leasable() {
         Dialer,
     );
     agent.next_wait();
-    assert_eq!(server.host("mac-gpu")["state"], "live");
-    assert_eq!(server.lease().body["host"], "mac-gpu");
+    let host = server.host("mac-gpu");
+    assert_eq!(host["state"], "live");
+    assert_eq!(
+        host["capabilities"],
+        json!({ "arch": "arm64", "os": "macos" })
+    );
     agent.stop();
 }
 
@@ -188,11 +182,12 @@ fn refused_hello_is_fatal_per_code() {
 
 /// Asserts that after the server restarts (a new process over the same files) the agent's
 /// next heartbeat is refused as an unknown host, it says hello again at once and is
-/// admitted, and the lease it held before the restart is still on the host and listed
-/// held, with the host live again. It catches an agent that heartbeats a dead session for ever,
-/// and a restart that loses the lease.
+/// admitted, and the host is live again. The restarted server holds no host until the agent
+/// says hello (nothing booked on it is kept). It catches an agent that heartbeats a dead
+/// session for ever. That a running job outlives the restart is asserted with a container
+/// agent in `jobs/e2e.rs`.
 #[test]
-fn server_restart_agent_reregisters_and_lease_resumes() {
+fn server_restart_agent_reregisters() {
     let server = Server::start("e2e_restart", &[]);
     let address = Arc::new(Mutex::new(server.url()));
     let agent = crate::server::Agent::spawn(
@@ -205,32 +200,17 @@ fn server_restart_agent_reregisters_and_lease_resumes() {
     agent.next_wait();
     agent.elapse();
     agent.next_wait();
-    let granted = server.lease();
-    assert_eq!(granted.status, 201, "{}", granted.body);
-    let id = granted.body["id"].as_str().unwrap().to_owned();
 
     let server = server.restart();
     *address.lock().unwrap() = server.url();
-    assert_eq!(server.host("mac-1")["state"], "awaiting");
+    let hosts = server.get("/v1/hosts");
+    assert!(hosts["hosts"].as_array().unwrap().is_empty(), "{hosts}");
     agent.elapse();
     assert_eq!(agent.next_wait(), Duration::ZERO);
     agent.elapse();
     assert_eq!(agent.next_wait(), secs(5));
 
-    let host = server.host("mac-1");
-    assert_eq!(host["state"], "live");
-    assert_eq!(host["lease"], id.as_str());
-    let leases = server.get("/v1/leases");
-    let held = leases["leases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|l| l["id"] == id.as_str());
-    assert_eq!(
-        held.map(|l| l["state"].clone()),
-        Some(json!("held")),
-        "{leases}"
-    );
+    assert_eq!(server.host("mac-1")["state"], "live");
     agent.elapse();
     assert_eq!(agent.next_wait(), secs(5));
     let ran = agent.stop();
@@ -243,12 +223,12 @@ fn server_restart_agent_reregisters_and_lease_resumes() {
     );
 }
 
-/// Asserts that a stop request makes the agent send the phase `draining` and exit 0, that
-/// the server then lists the host as draining, and that a lease request finds no capacity
-/// on it: a draining host takes no new lease. It catches an agent that exits without
-/// telling the server (the host then looks live until its grace runs out).
+/// Asserts that a stop request makes the agent send the phase `draining` and exit 0, and
+/// that the server then lists the host as draining. It catches an agent that exits without
+/// telling the server (the host then looks live until its grace runs out). That a draining
+/// host is placed nothing is asserted with a container agent in `jobs/e2e.rs`.
 #[test]
-fn sigterm_draining_then_no_new_lease() {
+fn sigterm_marks_the_host_draining() {
     let server = Server::start("e2e_drain", &[]);
     let agent = crate::server::Agent::spawn(
         server.url(),
@@ -271,11 +251,6 @@ fn sigterm_draining_then_no_new_lease() {
     assert_eq!(
         (host["phase"].clone(), host["state"].clone()),
         (json!("draining"), json!("live"))
-    );
-    let none = server.lease();
-    assert_eq!(
-        (none.status, none.body),
-        (409, json!({ "error": "no-capacity" }))
     );
 }
 

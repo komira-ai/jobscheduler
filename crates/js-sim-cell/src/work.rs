@@ -1,5 +1,5 @@
 //! One unit of client work: a run of [`crate::SIM_RUN_IMAGE`] that lasts a fixed time,
-//! the resources it asks for, whether it wants a whole host and under which request id,
+//! the resources it asks for, whether it wants a whole host,
 //! and how long the client waits for it before it gives up.
 //!
 //! A [`Work`] says nothing of how it reaches the server: a [`crate::front::Front`] turns
@@ -18,24 +18,13 @@ use crate::observe::Ask;
 /// hour.
 pub const DEFAULT_GIVE_UP: Duration = Duration::from_secs(3600);
 
-/// What an item needs unless [`Work::needs`] says otherwise: the share the server's own
-/// tests lease (`lease_body`): one core, 1 KiB of memory and one `nvidia-a100` GPU.
+/// What an item needs unless [`Work::needs`] says otherwise: one core, 1 KiB of memory and
+/// one `nvidia-a100` GPU (the job front asks for the cpu and memory only).
 #[must_use]
 pub fn default_needs() -> Resources {
     // One GPU with its class: `Resources::new` refuses only a count without a class or a
     // class without a count, so the default is never taken.
     Resources::new(1_000, 1_024, 1, Some("nvidia-a100".to_owned())).unwrap_or_default()
-}
-
-/// Under which request id a whole-host item is asked for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Naming {
-    /// A request id of the item's own: [`crate::REQUEST_PREFIX`] and its number.
-    OwnItem,
-    /// No request id.
-    Absent,
-    /// This request id.
-    Given(String),
 }
 
 /// One unit of client work: a run that lasts a fixed time.
@@ -45,7 +34,6 @@ pub struct Work {
     give_up_after: Duration,
     needs: Resources,
     whole_host: bool,
-    naming: Naming,
 }
 
 impl Work {
@@ -58,14 +46,12 @@ impl Work {
             give_up_after: DEFAULT_GIVE_UP,
             needs: default_needs(),
             whole_host: false,
-            naming: Naming::OwnItem,
         }
     }
 
     /// A run that ends by itself `duration` after its launch on a host it holds whole:
-    /// the client asks for a whole-node lease under a request id, waits until the lease
-    /// is held (after the host's agent reported ready for it), runs, and releases.
-    /// Otherwise as [`Work::run_for`].
+    /// the client submits a job that asks for a whole host. Otherwise as
+    /// [`Work::run_for`].
     #[must_use]
     pub fn whole_host(duration: Duration) -> Self {
         Self {
@@ -74,26 +60,8 @@ impl Work {
         }
     }
 
-    /// This work, a whole host asked for under no request id: the server keys the
-    /// request by its content (two items of equal work are one request to it), waits
-    /// for no host on its behalf, and refuses it `no-capacity` while no host is free, as
-    /// a client that sends no id is answered.
-    #[must_use]
-    pub fn without_request_id(mut self) -> Self {
-        self.naming = Naming::Absent;
-        self
-    }
-
-    /// This work, a whole host asked for under the request id `id` in place of the
-    /// item's own: two items given one id are one request to the server, in turn.
-    #[must_use]
-    pub fn with_request_id(mut self, id: &str) -> Self {
-        self.naming = Naming::Given(id.to_owned());
-        self
-    }
-
-    /// This work, given up `bound` after it is submitted: the client releases what it
-    /// holds and reports [`crate::HowEnded::GaveUp`] unless the item ended before.
+    /// This work, given up `bound` after it is submitted: the client reports
+    /// [`crate::HowEnded::GaveUp`] unless the item ended before.
     #[must_use]
     pub fn give_up_after(mut self, bound: Duration) -> Self {
         self.give_up_after = bound;
@@ -129,11 +97,6 @@ impl Work {
     #[must_use]
     pub fn wants_whole_host(&self) -> bool {
         self.whole_host
-    }
-
-    /// Under which request id a whole host is asked for.
-    pub(crate) fn naming(&self) -> &Naming {
-        &self.naming
     }
 
     /// What an item of this work submitted at `now` asks for.

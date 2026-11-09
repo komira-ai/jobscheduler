@@ -1,10 +1,10 @@
 //! The expectation on one raw answer the client was given, [`super::Expect::answer`], and
 //! which of the client's calls an answer is ([`Call`]).
 //!
-//! It is how a scenario carries what a test of the server's HTTP surface asserted about a
-//! status or an error body (a `409` and its `no-capacity`, say): it compares the answer the
-//! front kept ([`crate::Answer`]) with the one wanted. Nothing else outside the front names
-//! a status, and no invariant reads one.
+//! It is how a scenario states what the job service answered a call with, a status and
+//! when wanted a body (a submit sent again under the same job id answered `201`, say): it
+//! compares the answer the front kept ([`crate::Answer`]) with the one wanted. Nothing
+//! else outside the front names a status, and no invariant reads one.
 
 use serde_json::Value;
 
@@ -28,18 +28,6 @@ impl Call {
         Self { item, kind, nth }
     }
 
-    /// The `nth` acquire (from 1) made for `item`.
-    #[must_use]
-    pub fn acquire(item: ItemId, nth: usize) -> Self {
-        Self::new(item, CallKind::Acquire, nth)
-    }
-
-    /// The `nth` release (from 1) made for `item`.
-    #[must_use]
-    pub fn release(item: ItemId, nth: usize) -> Self {
-        Self::new(item, CallKind::Release, nth)
-    }
-
     /// The call as a statement names it: `item<n> <kind> <nth>`.
     pub(crate) fn name(&self) -> String {
         format!(
@@ -57,13 +45,6 @@ impl Call {
             .filter(|answer| (answer.item == self.item) & (answer.kind == self.kind));
         mine.nth(self.nth.saturating_sub(1))
     }
-}
-
-/// The lease the answer to `call` named, its body's `id`: what a 201 and a 202 to an
-/// acquire name. `None` before the call is made, and for an answer that names none.
-pub(crate) fn lease_of(call: &Call, answers: &[Answer]) -> Option<String> {
-    let body = call.find(answers).map(|answer| json(&answer.body));
-    body.and_then(|body| body["id"].as_str().map(str::to_owned))
 }
 
 /// The statement, what it wanted and what it got, of [`super::Expect::answer`]`(call,
@@ -97,4 +78,57 @@ fn shown(status: u16, body: Option<&Value>) -> String {
 /// `body` as JSON, `null` when it is not JSON.
 fn json(body: &str) -> Value {
     serde_json::from_str(body).unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use js_types::sched::FarmTime;
+
+    fn answer(item: u32, kind: CallKind, status: u16, body: &str) -> Answer {
+        Answer {
+            item: ItemId(item),
+            kind,
+            at: FarmTime::from_millis(0),
+            status,
+            body: body.to_owned(),
+        }
+    }
+
+    /// Asserts that a call is found among the answers by its item, kind and place among
+    /// them; that a status alone is compared without the body; that a wanted body is
+    /// compared as JSON whatever the order of its keys; that a body that is not JSON reads
+    /// as `null`; that a call not made reads `no-answer`; and that the call names itself.
+    /// Catches: a call matched to another item's or another kind's answer, a body compared
+    /// as text, and a missing call read as an answer.
+    #[test]
+    fn an_answer_is_judged_by_status_and_body() {
+        let answers = [
+            answer(0, CallKind::Queue, 201, r#"{"a":1,"b":2}"#),
+            answer(1, CallKind::Queue, 409, "not json"),
+            answer(0, CallKind::Queue, 200, "{}"),
+            answer(0, CallKind::Read, 200, "{}"),
+        ];
+        let first = Call::new(ItemId(0), CallKind::Queue, 1);
+        let second = Call::new(ItemId(0), CallKind::Queue, 2);
+        let other = Call::new(ItemId(1), CallKind::Queue, 1);
+        let third = Call::new(ItemId(0), CallKind::Queue, 3);
+        let status = |call: &Call, status| judged(call, status, None, &answers);
+        assert_eq!(
+            status(&first, 201),
+            ["answer(item0 queue 1)", "201", "201"].map(str::to_owned)
+        );
+        assert_eq!(status(&second, 201)[2], "200");
+        assert_eq!(status(&other, 409)[2], "409");
+        let body = serde_json::json!({"b": 2, "a": 1});
+        let same = judged(&first, 201, Some(&body), &answers);
+        assert_eq!(same[1], same[2]);
+        let plain = judged(&other, 409, Some(&Value::Null), &answers);
+        assert_eq!(plain[1], plain[2]);
+        assert_eq!(
+            status(&third, 200),
+            ["answer(item0 queue 3)", "200", "no-answer"].map(str::to_owned)
+        );
+    }
 }

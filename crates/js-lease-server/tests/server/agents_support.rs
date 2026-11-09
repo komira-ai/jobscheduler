@@ -15,9 +15,7 @@ pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 /// A second join token, added to the file for a rotation or a second tenant of the pool.
 pub const JOIN_B: &str = "join-token-B-0123456789-abcdefghijklmnop";
 
-/// The pool registering hosts join: room for two machines, and a floor that the shipped
-/// two-host static pool's requests (`lease_body`) fit, so one request can be served by
-/// either source.
+/// The pool registering hosts join: room for two machines, with one GPU each.
 pub const POOL: &str = r#"
 name = "burst"
 class = "gpu-host"
@@ -32,6 +30,21 @@ gpu_class = "nvidia-a100"
 [capabilities]
 arch = "x86_64"
 isa = "x86-64-v3"
+"#;
+
+/// A pool of up to two machines of 8 cores and 16 GiB with no GPU, whose capabilities name an
+/// `arch`, as `js-sched` needs to place a job.
+pub const JOB_POOL: &str = r#"
+name = "burst"
+class = "burst-host"
+max_machines = 2
+
+[shape]
+cpu_millis = 8000
+memory_bytes = 17179869184
+
+[capabilities]
+arch = "x86_64"
 "#;
 
 /// The base flags plus the agent flags: the join token file holds [`JOIN`] and
@@ -53,6 +66,34 @@ pub fn agent_args(scratch: &Scratch, keep_static: bool) -> Vec<OsString> {
         args.push(value);
     }
     args
+}
+
+/// The agent flags over [`JOB_POOL`] without the static pool, the job service on a loopback
+/// port, so that a host which says hello with [`job_hello`] runs jobs.
+pub fn job_host_args(scratch: &Scratch) -> Vec<OsString> {
+    let mut args = agent_args(scratch, false);
+    scratch.write("agent-pool.toml", JOB_POOL, 0o644);
+    args.extend(["--job-listen", "127.0.0.1:0"].map(Into::into));
+    args
+}
+
+/// A server on [`job_host_args`], keeping the bindings and the join tokens as `kept` says.
+pub async fn start_job_hosts_in(name: &str, kept: Kept) -> Harness {
+    let scratch = Scratch::new(&kept.named(name));
+    let args = kept.args(&scratch, job_host_args(&scratch));
+    Harness::with(scratch, args, None).await
+}
+
+/// [`restarted`] for a server started with [`start_job_hosts_in`].
+pub async fn restarted_job_hosts(first: Harness) -> Harness {
+    let kept = Kept::of(&first);
+    let Harness {
+        running, scratch, ..
+    } = first;
+    running.shutdown().await.unwrap();
+    let args = kept.args(&scratch, job_host_args(&scratch));
+    let args = replace(args, "--boot", "resume");
+    Harness::with(scratch, args, None).await
 }
 
 /// A server with agent registration on, over a fresh scratch directory.
@@ -97,6 +138,15 @@ pub fn hello_body(host: &str) -> Value {
         "labels": { "rack": "r1" },
         "phase": "serving",
     })
+}
+
+/// The hello of a host of [`JOB_POOL`] that speaks the per-job messages: the shape of the
+/// pool, no GPU, and the arch `x86_64`.
+pub fn job_hello(host: &str) -> Value {
+    let mut hello = hello_body(host);
+    hello["shape"] = json!({ "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 });
+    hello["capabilities"] = json!({ "per-job": "true", "arch": "x86_64" });
+    hello
 }
 
 /// The session an agent holds after its hello.
@@ -149,22 +199,6 @@ pub fn session(reply: &Reply, host: &str) -> Session {
 /// The heartbeat of `session` with [`JOIN`].
 pub async fn beat(h: &Harness, session: &Session) -> Reply {
     post(h, "/v1/agent/heartbeat", Some(JOIN), &session.beat()).await
-}
-
-/// One round of a test agent that does what a real one does about an exclusive lease: it
-/// sends a heartbeat, and when the reply names a lease in `exclusive` it sends a second
-/// one reporting that lease `exclusive_ready`. Returns the first reply, so a test can
-/// read what the server told the agent. A host with no exclusive lease gets one
-/// heartbeat and no report.
-pub async fn beat_preparing(h: &Harness, session: &Session) -> Reply {
-    let reply = beat(h, session).await;
-    if let Some(lease) = reply.json()["exclusive"].as_str() {
-        let mut ready = session.beat();
-        ready["exclusive_ready"] = json!(lease);
-        let sent = post(h, "/v1/agent/heartbeat", Some(JOIN), &ready).await;
-        assert_eq!(sent.status, 200, "{}", sent.body);
-    }
-    reply
 }
 
 /// `GET /v1/hosts` with the client token.

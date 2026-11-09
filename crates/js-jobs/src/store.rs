@@ -3,8 +3,11 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use js_state::{Commit, Cond, ResumeToken, ScanRange, Store, Txn, Version, Versioned};
+use js_state::{
+    Commit, Cond, Conflict, ResumeToken, ScanRange, Store, StoreError, Txn, Version, Versioned,
+};
 use js_types::HostId;
 
 use crate::codec::{Carried, DecodeError, decode_allocation, decode_job};
@@ -82,14 +85,36 @@ pub struct JobPage {
 /// record it returns is what it committed. Nothing is cached: each operation reads the rows
 /// it needs, decides, and commits with the versions it read as preconditions, so a row that
 /// changed in between makes the operation [`JobStoreError::Stale`].
+///
+/// Every write it makes is counted ([`JobStore::written`]), so a caller that read the tables
+/// can tell that they have not changed since without reading them again.
 pub struct JobStore<S, I = RandomIds> {
     store: Arc<S>,
     ids: I,
     schema: u32,
+    /// The number of this job store among those this process made ([`Written`]).
+    instance: u64,
+    /// How many writes this job store has sent to the store since it was made, whatever each
+    /// answered ([`JobStore::written`]).
+    writes: AtomicU64,
     /// How long an ended job is kept: applied when a job ends.
     retention: Retention,
     /// How long a freed allocation's row is kept after its free: applied by the tick.
     allocation_retention: Retention,
+}
+
+/// The number the next job store this process makes gets ([`Written`]).
+static INSTANCES: AtomicU64 = AtomicU64::new(0);
+
+/// Where the writes of one job store stood when it was asked ([`JobStore::written`]): two
+/// that are equal were taken from the same job store with no write of it in between, so its
+/// tables held the same rows at both. Taken from two job stores, they are never equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Written {
+    /// The job store's number among those this process made.
+    instance: u64,
+    /// How many writes it had sent to its store.
+    writes: u64,
 }
 
 /// `Err(error)` unless `ok`.
@@ -180,6 +205,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             store,
             ids,
             schema,
+            instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
+            writes: AtomicU64::new(0),
             retention: Retention::DEFAULT,
             allocation_retention: Retention::ALLOCATION_DEFAULT,
         };
@@ -310,7 +337,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
         let record = self.queued_record(id, spec, priority, client);
         let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
-        match self.store.txn(txn)? {
+        match self.write(txn)? {
             Ok(_) => Ok(Inserted {
                 record,
                 created: true,
@@ -334,7 +361,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             let id = JobId::minted(self.ids.mint()?);
             let record = self.queued_record(id, spec.clone(), priority, client.cloned());
             let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
-            if self.store.txn(txn)?.is_ok() {
+            if self.write(txn)?.is_ok() {
                 return Ok(Inserted {
                     record,
                     created: true,
@@ -708,11 +735,32 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             .ok_or(JobStoreError::NoAllocation { id: id.clone() })
     }
 
+    /// Where this job store's writes stand: each transaction it sends counts once, after the
+    /// store answered it, whether it committed, conflicted or failed (a failed commit may
+    /// still have landed). The tables change only through such a write, so when two readings
+    /// are equal the tables held the same rows at both, unless another writer shares the
+    /// store, which the server's lock on its store rules out. The count is kept in memory and
+    /// starts again with each job store; the store is never asked.
+    #[must_use]
+    pub fn written(&self) -> Written {
+        Written {
+            instance: self.instance,
+            writes: self.writes.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Sends `txn` to the store and counts it ([`JobStore::written`]): the one way this job
+    /// store writes once it is made.
+    fn write(&self, txn: Txn) -> Result<Result<Commit, Conflict>, StoreError> {
+        let answer = self.store.txn(txn);
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        answer
+    }
+
     /// Commits `txn`, whose preconditions are the versions of the job `id`'s rows the caller
     /// read: a conflict is [`JobStoreError::Stale`].
     fn commit(&self, id: &JobId, txn: Txn) -> Result<Commit, JobStoreError> {
-        self.store
-            .txn(txn)?
+        self.write(txn)?
             .map_err(|_| JobStoreError::Stale { id: id.clone() })
     }
 }

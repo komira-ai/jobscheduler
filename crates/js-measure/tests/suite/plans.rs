@@ -11,10 +11,9 @@ use std::io;
 use std::path::PathBuf;
 
 use js_analysis::{Options, analyze, parse_jsonl, to_markdown};
-use js_measure::farm::{RunStanding, Standing};
 use js_measure::{
-    Acquired, Curve, Experiment, FakeClock, FakeFarm, Farm, FarmError, HostShape, LeaseAsk,
-    NoSetter, Plan, RunAsk, RunOutput, UsageRow, Workload, run_plan,
+    Experiment, FakeClock, FakeFarm, Farm, FarmError, HostShape, JobAsk, JobStanding, NoSetter,
+    Plan, RunOutput, UsageRow, Workload, run_plan,
 };
 
 use crate::support::{GIB, T0};
@@ -38,8 +37,8 @@ const SHIPPED: [Shipped; 3] = [
         name: "job-launch",
         baseline: Some("shared"),
         metrics: &[
-            "request_to_token_ms_mean",
-            "request_to_token_ms_max",
+            "submit_to_placed_ms_mean",
+            "submit_to_placed_ms_max",
             "queue_wait_ms_mean",
             "queue_wait_ms_max",
         ],
@@ -232,21 +231,21 @@ fn every_report_plan_validates_and_schedules_each_cell_fully() {
 /// the baseline the page names is an arm of the plan (the analysis refuses an unknown one).
 #[test]
 fn the_report_plans_have_the_arms_the_results_page_gives() {
-    let arms = |name: &str| -> Vec<(String, bool, Option<String>)> {
+    let arms = |name: &str| -> Vec<(String, bool, Option<bool>)> {
         plan(name)
             .arms
             .into_iter()
-            .map(|a| (a.label, a.control, a.lease_class))
+            .map(|a| (a.label, a.control, a.whole_host))
             .collect()
     };
-    let arm = |label: &str, control: bool, class: Option<&str>| {
-        (label.to_owned(), control, class.map(str::to_owned))
+    let arm = |label: &str, control: bool, whole_host: Option<bool>| {
+        (label.to_owned(), control, whole_host)
     };
     assert_eq!(
         arms("job-launch"),
         vec![
             arm("shared", true, None),
-            arm("whole-host", false, Some("whole-node"))
+            arm("whole-host", false, Some(true))
         ]
     );
     assert_eq!(
@@ -256,7 +255,7 @@ fn the_report_plans_have_the_arms_the_results_page_gives() {
     assert_eq!(
         arms("whole-host-vs-backfill"),
         vec![
-            arm("backfill", true, Some("action")),
+            arm("backfill", true, Some(false)),
             arm("whole-host", false, None)
         ]
     );
@@ -285,32 +284,35 @@ fn the_report_plans_have_the_arms_the_results_page_gives() {
 fn the_report_workloads_are_the_job_mixes_the_results_page_describes() {
     for shipped in &SHIPPED {
         for job in workload(shipped.name).expand().unwrap() {
-            let image = &job.run.image;
+            let image = &job.ask.image;
             assert!(
                 image.starts_with("REPLACE-WITH-") && image.contains("@sha256:REPLACE-WITH-"),
                 "{} {}: {image}",
                 shipped.name,
                 job.name
             );
-            assert_eq!(job.run.args.first().map(String::as_str), Some("sleep"));
-            assert_eq!(
-                (job.run.cpu_millis, job.run.memory_bytes),
-                (job.lease.cpu_millis, job.lease.memory_bytes)
-            );
+            assert_eq!(job.ask.args.first().map(String::as_str), Some("sleep"));
         }
     }
 
     let launch = workload("job-launch").expand().unwrap();
     assert_eq!(launch.len(), 1);
     assert_eq!(
-        (launch[0].lease.class.as_str(), launch[0].submit_at_ms),
-        ("action", 0)
+        (
+            launch[0].ask.whole_host,
+            (launch[0].ask.cpu_millis, launch[0].ask.memory_bytes),
+            launch[0].submit_at_ms
+        ),
+        (false, (1_000, GIB), 0)
     );
 
     let load = workload("queue-wait-under-load").expand().unwrap();
     assert_eq!(load.len(), 1000);
-    assert!(load.iter().all(|j| j.lease.class == "action"
-        && (j.lease.cpu_millis, j.lease.memory_bytes) == (2_000, 4 * GIB)));
+    assert!(
+        load.iter().all(
+            |j| !j.ask.whole_host && (j.ask.cpu_millis, j.ask.memory_bytes) == (2_000, 4 * GIB)
+        )
+    );
     let submits: Vec<u64> = load.iter().map(|j| j.submit_at_ms).collect();
     assert_eq!(submits, (0..1000).map(|i| i * 100).collect::<Vec<u64>>());
 
@@ -319,13 +321,17 @@ fn the_report_workloads_are_the_job_mixes_the_results_page_describes() {
     assert_eq!((large.len(), small.len()), (1, 300));
     let large = large[0];
     assert_eq!(large.name, "large-0");
-    assert_eq!(large.lease.class, "whole-node");
+    assert!(large.ask.whole_host);
     assert_eq!(
-        (large.lease.cpu_millis, large.lease.memory_bytes),
+        (large.ask.cpu_millis, large.ask.memory_bytes),
         (SHAPE.cpu_millis, SHAPE.memory_bytes)
     );
-    assert!(small.iter().all(|j| j.lease.class == "action"
-        && (j.lease.cpu_millis, j.lease.memory_bytes) == (4_000, 16 * GIB)));
+    assert!(
+        small
+            .iter()
+            .all(|j| !j.ask.whole_host
+                && (j.ask.cpu_millis, j.ask.memory_bytes) == (4_000, 16 * GIB))
+    );
     let last_small = small.iter().map(|j| j.submit_at_ms).max().unwrap();
     assert_eq!(last_small, 299 * 2_000);
     // The large job comes after the stream has begun and well before it ends.
@@ -333,31 +339,25 @@ fn the_report_workloads_are_the_job_mixes_the_results_page_describes() {
     assert!(large.submit_at_ms < last_small);
 }
 
-/// A farm that records the class and CPU of every lease asked of it, then asks the
+/// A farm that records the whole-host flag and CPU of every job asked of it, then asks the
 /// simulated farm.
 struct Asks<'a> {
     inner: FakeFarm<'a>,
-    seen: RefCell<Vec<(String, u64)>>,
+    seen: RefCell<Vec<(bool, u64)>>,
 }
 
 impl Farm for Asks<'_> {
-    fn acquire(&self, ask: &LeaseAsk) -> Result<Acquired, FarmError> {
+    fn submit(&self, ask: &JobAsk) -> Result<String, FarmError> {
         self.seen
             .borrow_mut()
-            .push((ask.class.clone(), ask.cpu_millis));
-        self.inner.acquire(ask)
+            .push((ask.whole_host, ask.cpu_millis));
+        self.inner.submit(ask)
     }
-    fn lease(&self, id: &str) -> Result<Standing, FarmError> {
-        self.inner.lease(id)
+    fn job(&self, id: &str) -> Result<JobStanding, FarmError> {
+        self.inner.job(id)
     }
-    fn start_run(&self, lease: &str, ask: &RunAsk) -> Result<String, FarmError> {
-        self.inner.start_run(lease, ask)
-    }
-    fn run(&self, lease: &str, run: &str) -> Result<RunStanding, FarmError> {
-        self.inner.run(lease, run)
-    }
-    fn release(&self, lease: &str) -> Result<(), FarmError> {
-        self.inner.release(lease)
+    fn cancel(&self, id: &str) -> Result<(), FarmError> {
+        self.inner.cancel(id)
     }
     fn host(&self, id: &str) -> Result<HostShape, FarmError> {
         self.inner.host(id)
@@ -365,18 +365,15 @@ impl Farm for Asks<'_> {
     fn usage_rows(&self, host: &str, from: u64, to: u64) -> Result<Vec<UsageRow>, FarmError> {
         self.inner.usage_rows(host, from, to)
     }
-    fn curve(&self, profile: &str) -> Result<Option<Curve>, FarmError> {
-        self.inner.curve(profile)
-    }
 }
 
-/// Asserts the leases the two arms of `whole-host-vs-backfill` ask the farm for, as the
+/// Asserts the jobs the two arms of `whole-host-vs-backfill` submit to the farm, as the
 /// harness sends them in a run of the shipped plan (cut to 3 runs per arm after 1
-/// warm-up): under `backfill` every job, the large one (64 cores) included, asks for
-/// `action`; under `whole-host` the large job asks for `whole-node` and the 300 small ones
-/// for `action`. Catches an arm, or a change of how the harness applies an arm's class,
-/// that turns the small stream whole-host too, which would leave nothing to fill in
-/// around the large job, or that leaves the large job a share in both arms.
+/// warm-up): under `backfill` no job, the large one (64 cores) included, asks for a whole
+/// host; under `whole-host` the large job does and the 300 small ones do not. Catches an
+/// arm, or a change of how the harness applies an arm's `whole_host`, that turns the small
+/// stream whole-host too, which would leave nothing to fill in around the large job, or
+/// that leaves the large job a share in both arms.
 #[test]
 fn only_the_large_job_differs_between_whole_host_and_backfill() {
     let shipped = &SHIPPED[2];
@@ -391,18 +388,14 @@ fn only_the_large_job_differs_between_whole_host_and_backfill() {
     assert_eq!(seen.len(), outputs.len() * 301);
     for (output, run) in outputs.iter().zip(seen.chunks(301)) {
         let arm = output.record.arm.as_str();
-        let large = if arm == "whole-host" {
-            "whole-node"
-        } else {
-            "action"
-        };
-        let classes: BTreeSet<(bool, &str)> = run
+        let large_whole_host = arm == "whole-host";
+        let asks: BTreeSet<(bool, bool)> = run
             .iter()
-            .map(|(class, cpu)| (*cpu == SHAPE.cpu_millis, class.as_str()))
+            .map(|(whole_host, cpu)| (*cpu == SHAPE.cpu_millis, *whole_host))
             .collect();
         assert_eq!(
-            classes,
-            [(false, "action"), (true, large)].into(),
+            asks,
+            [(false, false), (true, large_whole_host)].into(),
             "arm {arm}"
         );
         assert_eq!(
@@ -456,8 +449,8 @@ fn the_results_page_names_every_column_the_harness_writes() {
     let (job, job_metrics) = columns(&serde_json::to_value(&first.jobs[0]).unwrap());
     let minute = serde_json::to_value(&first.minutes[0]).unwrap();
     let minute: Vec<String> = minute.as_object().unwrap().keys().cloned().collect();
-    assert_eq!(record_metrics.len(), 18);
-    assert_eq!(job_metrics.len(), 11);
+    assert_eq!(record_metrics.len(), 16);
+    assert_eq!(job_metrics.len(), 7);
     let all = record
         .iter()
         .chain(&record_metrics)
@@ -495,10 +488,11 @@ fn a_column_the_page_does_not_name_is_reported() {
 /// after 1 warm-up, on the farm sizes of [`SHIPPED`]) is the golden in `tests/golden`:
 /// every run recorded with its label, every metric summarised, and the comparisons with
 /// the baseline the results page names. The simulated farm gives every run of a cell the
-/// same numbers, so every spread is zero, and it places every lease alike whatever its
-/// class, so the two arms of a plan give the same numbers and every comparison is 0%: the
-/// goldens hold the path from plan to report and its layout, not a difference of arms. Catches a change of the plans, the harness's
-/// numbers or the analysis that the goldens do not show. A failure writes what the run
+/// same numbers, so every spread is zero, and it places every job alike whatever it
+/// asks for, so the two arms of a plan give the same numbers and every comparison is 0%:
+/// the goldens hold the path from plan to report and its layout, not a difference of arms.
+/// Catches a change of the plans, the harness's numbers or the analysis that the goldens
+/// do not show. A failure writes what the run
 /// gave beside the target directory's other test files, to compare with the golden.
 #[test]
 fn the_analysis_of_each_simulated_plan_run_is_its_golden() {

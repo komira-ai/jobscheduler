@@ -10,8 +10,7 @@ use crate::budget::Budgets;
 use crate::settings::{Health, Settings};
 
 /// One request waiting for a host, in queue order: the server's shell gives one for each
-/// whole-node lease request on the registry's wait list and for each queued job that holds
-/// no allocation. No rule of the step reads how long a request has
+/// queued job that holds no allocation. No rule of the step reads how long a request has
 /// waited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waiting {
@@ -31,7 +30,7 @@ pub struct Waiting {
 pub enum Mark {
     /// Set aside for a waiting request.
     Reserved,
-    /// A whole-node lease is committed on it.
+    /// Committed to work: kept like a busy host.
     Held,
     /// Marked by the scaler: it takes no start of any kind.
     Draining,
@@ -81,20 +80,21 @@ pub struct HostFacts {
     /// How the host is set aside, if it is.
     pub mark: Option<Mark>,
     /// Whether the host holds work: the server's shell sets it when a live (booked or
-    /// releasing) job allocation is on the host, a whole-host one included, a lease the
-    /// registry books is on it, or the registry still has runs of it to finish.
+    /// releasing) job allocation is on the host, a whole-host one included, or the
+    /// registry still has runs of it to finish. A lease the registry books on the host does
+    /// not set it.
     ///
     /// The shell never sets it from the runs a silent host last listed; those listings are
     /// stale once the host stops talking and the registry keeps them until it forgets the
     /// host. So for a silent host `busy` and [`lease_given_up`](Self::lease_given_up) are
-    /// never both `true`: the first says an allocation or a lease is on it, the second says
-    /// neither is.
+    /// never both `true`: the first says an allocation is on it, the second says
+    /// none is.
     /// Silence frees no allocation, so a silent host with one stays busy. A `Held` or
     /// `Reserved` mark keeps a silent host as well.
     pub busy: bool,
     /// Whether nothing is booked on a silent host: no live job allocation is on it and the
-    /// registry books no lease on it (its lease grace gave the lease up, or it never held
-    /// one). It is `false` for a host that still holds either. It never
+    /// host is not heard from, so a silent host that never held one has it set as well. It
+    /// is `false` for a host that still holds an allocation. It never
     /// holds together with [`busy`](Self::busy) on a silent host. A silent host marked
     /// `Releasing` needs no flag: the registry booked nothing on it when it set the mark. The
     /// scaler also reads `mark` and never releases a host that shows work, whatever this
@@ -165,8 +165,8 @@ pub struct Input {
     pub scheduler: SchedulerId,
     /// The elastic pools, in the order requests fall through them.
     pub pools: Vec<PoolInput>,
-    /// The requests waiting for a host (the registry's whole-node lease requests, then the
-    /// queued jobs without an allocation), in queue order.
+    /// The requests waiting for a host (the queued jobs without an allocation), in queue
+    /// order.
     pub waiting: Vec<Waiting>,
     /// The hosts the registry knows.
     pub hosts: Vec<HostFacts>,
@@ -174,7 +174,7 @@ pub struct Input {
     /// after it finished loading its state. The shell sets it `false` for a view it cannot
     /// vouch for (the registry has just started, a read failed or was partial). Settled
     /// means more than loaded: the registry keeps no host in memory across a restart except
-    /// those with a booked lease, so an idle or booting host is absent until its agent says
+    /// those with a live allocation, so an idle or booting host is absent until its agent says
     /// hello again, which can take the agent's longest retry wait (two minutes) and longer
     /// when many agents share a hello limit. The step does not rely on the view being
     /// settled alone: a machine missing from `hosts` is released only on complete views

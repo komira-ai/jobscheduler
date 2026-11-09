@@ -92,8 +92,6 @@ pub(crate) struct Agents {
     pub(crate) limiter: HelloLimiter,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
-    /// How many run ids this boot has minted.
-    runs_minted: AtomicU64,
     store: BindingStore,
     /// The gate every change of the bindings and of the join tokens' uses goes through, held
     /// from the change's commit until the registry has taken it (or its undo is committed): a
@@ -284,7 +282,7 @@ fn placed_in(
             let (pool, memory) = split(pool);
             let placer = placer(max_lease_wall, cpu_slack, memory, clock);
             let registry = Registry::new(pool, clock.clone(), placer.clone());
-            let usage = usage.build(clock, limits, &registry)?;
+            let usage = usage.build(clock, limits)?;
             // Each lease booking that ends leaves its record in the usage store's history.
             usage
                 .iter()
@@ -325,7 +323,6 @@ fn placed_in(
                 mint_provider,
                 limiter: HelloLimiter::new(hello_limit, clock.clone()),
                 clock: clock.clone(),
-                runs_minted: AtomicU64::new(0),
                 store,
                 host_writes: tokio::sync::Mutex::new(()),
                 errors: AtomicU64::new(0),
@@ -377,7 +374,6 @@ impl Agents {
             mint_provider: None,
             limiter: HelloLimiter::new(limit, clock.clone()),
             clock: clock.clone(),
-            runs_minted: AtomicU64::new(0),
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             host_writes: tokio::sync::Mutex::new(()),
             errors: AtomicU64::new(0),
@@ -737,27 +733,6 @@ impl Agents {
         }
     }
 
-    /// A run id no earlier run has had, in this boot or any before it: the lease table's
-    /// term of this boot and a count that only grows. The term is persisted with the lease
-    /// file and rises at every boot, so ids stay unique across a restart although the run
-    /// records themselves are forgotten.
-    pub(crate) fn mint_run_id(&self, term: u64) -> String {
-        let count = self.runs_minted.fetch_add(1, Ordering::SeqCst);
-        format!("run-{term}-{}", count.saturating_add(1))
-    }
-
-    /// Whether `run_id` was minted in a boot before the one whose term is `term`: such a
-    /// run was held in memory by a server that has since restarted, so it is forgotten
-    /// whatever became of its work. An id that is not of the form [`Agents::mint_run_id`]
-    /// makes is not forgotten, only unknown.
-    pub(crate) fn is_forgotten(run_id: &str, term: u64) -> bool {
-        let minted = run_id
-            .strip_prefix("run-")
-            .and_then(|rest| rest.split_once('-'))
-            .and_then(|(minted, _)| minted.parse::<u64>().ok());
-        minted.is_some_and(|minted| minted < term)
-    }
-
     /// How many times the agent side could not read or write one of its files since the
     /// server started: the join token file that could not be read again, the file of
     /// bindings (or the store) that could not be written, and the credential times the tick
@@ -854,24 +829,3 @@ mod mint_tests;
 #[cfg(test)]
 #[path = "agents_estimate_tests.rs"]
 mod estimate_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Only an id this server makes, of a term below the current one, is forgotten; an id of
-    /// this term or a later one, and any other text, is not. It catches a run id of the
-    /// current boot answered `run-forgotten`, and text that is no run id answered so.
-    #[test]
-    fn only_an_id_of_an_earlier_term_is_forgotten() {
-        assert!(Agents::is_forgotten("run-1-1", 2));
-        assert!(Agents::is_forgotten("run-3-77", 4));
-        assert!(!Agents::is_forgotten("run-2-1", 2));
-        assert!(!Agents::is_forgotten("run-3-1", 2));
-        for odd in [
-            "", "ghost", "run-", "run-1", "run-x-1", "run--1", "xrun-1-1",
-        ] {
-            assert!(!Agents::is_forgotten(odd, 9), "{odd}");
-        }
-    }
-}

@@ -1,9 +1,9 @@
 {
-  "parameter": "lease_class",
+  "parameter": "job_request",
   "settings": ["idle-host"],
   "arms": [
     { "label": "shared", "control": true },
-    { "label": "whole-host", "lease_class": "whole-node" }
+    { "label": "whole-host", "whole_host": true }
   ],
   "runs_per_arm": 30,
   "warmups_per_arm": 2,

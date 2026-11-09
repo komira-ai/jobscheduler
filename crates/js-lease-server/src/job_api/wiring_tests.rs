@@ -159,7 +159,7 @@ async fn the_fleet_group_is_served_over_the_servers_own_handles() {
     let dir = scratch("fleet_handles");
     let (_, jobs) = tables();
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(NOW_MS)));
-    let pools = Arc::new(Status::new(None, None, None, Vec::new(), clock));
+    let pools = Arc::new(Status::new(None, None, Vec::new(), clock));
     let given = bare_state(&dir, true, Some(Arc::new(jobs))).with_pools(Arc::clone(&pools));
     let served = Arc::new(given);
     let api =

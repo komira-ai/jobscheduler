@@ -1,8 +1,8 @@
 //! The job scenario family: the rows of design section 8 that the job design closes and
-//! the lease routes could not, each over the job front ([`Scenario::over_jobs`]): a submit
+//! earlier scenarios did not reach, each over the job front: a submit
 //! whose answer the client lost, sent again under the same job id (row 1); a host silent
 //! before it lists a job's start, which the start timeout ends (rows 35 and 43); a job
-//! cancelled before its host lists the start, with a late start after the stop (row 38);
+//! cancelled before its host lists the start (row 38);
 //! the headline over jobs (no row); and a restart of the server with jobs in flight (rows
 //! 3 and 36). Each runs over sixteen seeds under every invariant of `Invariant::ALL` (the
 //! five job invariants among them) and states the rest with [`Expect`]s only.
@@ -68,11 +68,10 @@ const SILENT_CUT_FOR: Duration = Duration::from_secs(1_155);
 const SILENT_CHECK_AT: Duration = Duration::from_secs(1_100);
 const SILENT_SETTLE: Duration = Duration::from_secs(300);
 
-/// The cancel before the start is listed, on the settings of the lease routes' stale
-/// start (`tests/faults.rs`): hosts beat every second; every job is cancelled while its
-/// start is on the way, on a bus that delays a message by more than the interval and lets
-/// a later one overtake it, so a start can arrive after the stop that follows it. The
-/// grace of 6 s keeps a delayed host from being held lost.
+/// The cancel before the start is listed: hosts beat every second; every job is cancelled
+/// while its start is on the way, on a bus that delays a message by more than the interval
+/// and lets a later one overtake it, so the cancel races the start. The grace of 6 s keeps
+/// a delayed host from being held lost.
 const EARLY_HOSTS: usize = 8;
 const EARLY_INTERVAL: Duration = Duration::from_secs(1);
 const EARLY_GRACE: Duration = Duration::from_secs(6);
@@ -127,7 +126,6 @@ fn a_resubmitted_job_id_after_a_lost_answer_is_one_job() {
             RESUBMIT_HOSTS,
         ))
         .hosts("burst", RESUBMIT_HOSTS)
-        .over_jobs()
         .front(JobFront::losing_answers(&lost))
         .at(RESUBMIT_AT, lose_submit_answer(&lost))
         .at(RESUBMIT_AT, submit_work(1, Work::run_for(RESUBMIT_RUN)))
@@ -185,19 +183,23 @@ fn a_silent_host_never_requeues_a_placed_job_and_start_timeout_ends_it() {
             c.get(Counter::CutWithUnlistedRun) >= 1
         })
         .settle_within(SILENT_SETTLE)
-        .over_jobs()
         .run_seeds(SEEDS);
 }
 
 /// Covers section 8, row 38 (cancel of a placed job whose start the host never listed:
 /// the start is no longer sent, the agent retires the id on the stop, the job ends
-/// cancelled and its allocation is freed; a late start does not run). Every job is
-/// cancelled while its start is still on the way, on a bus that delays a message past
-/// the 1 s heartbeat interval and lets a later message overtake an earlier one (a
-/// request retried over a second connection), so a start can reach its agent after the
-/// stop that follows it. States that every job ends cancelled, for the client and in the
-/// server's table, that no allocation is left booked or releasing, and that no job is
-/// launched twice. The witness shows a start arrived after its stop in some seed. Red
+/// cancelled and its allocation is freed). Every job is cancelled while its start is
+/// still on the way, on a bus that delays a message past the 1 s heartbeat interval and
+/// lets a later message overtake an earlier one (a request retried over a second
+/// connection), so the cancel races the start. States that every job ends cancelled, for
+/// the client and in the server's table, that no allocation is left booked or releasing,
+/// and that no job is launched twice. The witness shows the race happened: in some seed
+/// an agent is sent the stop of a job that no answer it read carried the start of, and
+/// on this bus, which delays an answer by less than the agent's 10 s limit and drops
+/// none, that means the server committed the cancel before it sent the start. A start after its stop is not reachable here: the
+/// agent keeps one heartbeat in flight, so answers reach it in the order the server built
+/// them, and the server sends no start for a job with a cancel committed; the agent's own
+/// fence against one is covered by `per_job_tests.rs` and `real_jobs_tests.rs`. Red
 /// for a server that keeps sending a start after the cancel is committed, or leaves the
 /// allocation booked (`no-allocation-live`), and for one that ends such a job otherwise
 /// than cancelled (`jobs-in`, the count of cancels). That the allocation is freed in the
@@ -234,9 +236,10 @@ fn a_cancel_before_the_host_lists_the_start_ends_cancelled_and_frees_the_allocat
         .expect(Expect::jobs_in_state(jobs, JobState::Cancelled))
         .expect(Expect::no_allocation_live())
         .expect(Expect::each_job_launched_once())
-        .witness("start_after_stop", |c| c.get(Counter::StartAfterStop) >= 1)
+        .witness("stop_before_start", |c| {
+            c.get(Counter::StopBeforeStart) >= 1
+        })
         .settle_within(EARLY_SETTLE)
-        .over_jobs()
         .run_seeds(SEEDS);
 }
 
@@ -310,6 +313,5 @@ fn a_server_restart_with_jobs_in_flight_loses_no_job() {
         .expect(Expect::no_allocation_live())
         .witness("unknown_host", |c| c.get(Counter::UnknownHost) >= 1)
         .settle_within(RESTART_SETTLE)
-        .over_jobs()
         .run_seeds(SEEDS);
 }

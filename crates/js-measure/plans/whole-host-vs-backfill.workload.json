@@ -8,7 +8,6 @@
       "cpu_millis": 4000,
       "memory_bytes": 17179869184,
       "wall_ms": 180000,
-      "class": "action",
       "stagger_ms": 2000
     },
     {
@@ -19,7 +18,7 @@
       "cpu_millis": 64000,
       "memory_bytes": 274877906944,
       "wall_ms": 660000,
-      "class": "whole-node",
+      "whole_host": true,
       "submit_at_ms": 60000
     }
   ]

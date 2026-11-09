@@ -1,5 +1,5 @@
 //! The elastic scenarios, shared by the elastic family (`tests/elastic.rs`) and the golden
-//! hashes (`tests/replay.rs`): demand scales a pool of an elastic fake cloud up to its
+//! hashes (`tests/replay.rs`): the demand of queued jobs scales a pool of an elastic fake cloud up to its
 //! instance limit and, once the work is done, back to no machine at all.
 //!
 //! Sizes, in agent requests a seed: at most [`MAX_INSTANCES`] machines beat every 5 s (the
@@ -21,7 +21,7 @@ use js_sim_cell::{
 pub const POOL: &str = "burst";
 /// The most machines of the pool that may run at once.
 pub const MAX_INSTANCES: u64 = 40;
-/// How many whole-host runs the client asks for at once, at the start.
+/// How many whole-host jobs the client submits at once, at the start.
 pub const RUNS: u32 = 100;
 /// How long each run lasts.
 pub const RUN: Duration = Duration::from_secs(300);
@@ -32,12 +32,12 @@ pub const SETTLE: Duration = Duration::from_secs(2_400);
 /// The price of the cloud's one offer, in cents an hour.
 pub const PRICE: u64 = 120;
 
-/// What each machine is: the server's GPU host, with no capability beyond its resources,
+/// What each machine is: the server's host with no GPU, with no capability beyond its resources,
 /// since the pool's floor has none and the client asks for the shape's capabilities.
 pub fn shape() -> Shape {
     Shape {
         capabilities: BTreeMap::new(),
-        ..Shape::gpu_host()
+        ..Shape::cpu_host()
     }
 }
 
@@ -46,8 +46,8 @@ pub fn offers() -> Vec<OfferSpec> {
     vec![OfferSpec::new("sim_1x_a100", "zone-a", PRICE)]
 }
 
-/// [`RUNS`] whole-host runs of [`RUN`] against `pool`, which is empty at the start: every
-/// run succeeds, held and released once, no more than the pool's instance limit runs at
+/// [`RUNS`] whole-host jobs of [`RUN`] against `pool`, which is empty at the start: every
+/// job succeeds, placed and released once, no more than the pool's instance limit runs at
 /// any step (`instances-within-limits`), every machine is released once idle
 /// (`launched-machines-settle`), the cloud runs none of them at the end, every machine the
 /// cloud launched was the answer to an acquire id of its own ([`one_machine_per_acquire`]),

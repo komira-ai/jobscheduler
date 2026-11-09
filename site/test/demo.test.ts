@@ -45,37 +45,45 @@ interface Shape {
   positionals: number;
   required: Set<string>;
   flags: Set<string>;
+  /** The shape ends in "...": the flags it lists are some of the command's, and `js <command> --help` has the rest. */
+  open: boolean;
 }
 
-/** The command shapes of the ```text block of the js-cli module documentation (a shape continues on indented lines). */
+/**
+ * The command shapes of the ```text blocks of the js-cli module documentation (a shape continues on indented lines, and
+ * a line may hold two shapes, set apart by more than one space).
+ */
 function documentedShapes(docs: string): Shape[] {
-  const block = /\/\/! ```text\n([\s\S]*?)\/\/! ```/.exec(docs);
-  if (!block) throw new Error('crates/js-cli/src/lib.rs has no ```text block');
+  const blocks = [...docs.matchAll(/\/\/! ```text\n([\s\S]*?)\/\/! ```/g)];
+  if (blocks.length === 0) throw new Error('crates/js-cli/src/lib.rs has no ```text block');
   const entries: string[] = [];
-  for (const raw of block[1].split('\n')) {
-    const line = raw.replace(/^\/\/! ?/, '');
-    if (line.startsWith('js ')) entries.push(line);
-    else if (line.trim() !== '' && entries.length > 0) entries[entries.length - 1] += ' ' + line.trim();
+  for (const block of blocks) {
+    for (const raw of block[1].split('\n')) {
+      const line = raw.replace(/^\/\/! ?/, '');
+      if (line.startsWith('js ')) entries.push(...line.split(/\s{2,}(?=js )/));
+      else if (line.trim() !== '' && entries.length > 0) entries[entries.length - 1] += ' ' + line.trim();
+    }
   }
   const shapes = entries.map((entry) => {
-    const head = entry.split(' -- ')[0].replace('<the flags of acquire>', ' ');
+    const head = entry.split(' -- ')[0].replace('<the flags of job submit>', ' ');
     // Optional parts are in [brackets]; what is left is required.
     const optional = head.match(/\[[^\]]*\]/g) ?? [];
     const requiredText = optional.reduce((text, o) => text.replace(o, ' '), head);
-    const flagsOf = (text: string): string[] => text.match(/--[a-z][a-z-]*/g) ?? [];
+    const flagsOf = (text: string): string[] => text.match(/--[a-z][a-z0-9.-]*/g) ?? [];
     // A word that follows a flag is that flag's value, not a command word.
     const commandWords: string[] = [];
     const tokens = requiredText.split(/\s+/).filter((w) => w !== '');
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i].startsWith('--')) {
         if (tokens[i + 1] !== undefined && !tokens[i + 1].startsWith('--')) i++;
-      } else if (!tokens[i].startsWith('<')) commandWords.push(tokens[i]);
+      } else if (!tokens[i].startsWith('<') && tokens[i] !== '...') commandWords.push(tokens[i]);
     }
     return {
       words: commandWords,
       positionals: tokens.filter((t, i) => t.startsWith('<') && !(i > 0 && tokens[i - 1].startsWith('--'))).length,
       required: new Set(flagsOf(requiredText)),
       flags: new Set(flagsOf(head)),
+      open: tokens[tokens.length - 1] === '...',
     };
   });
   return shapes;
@@ -112,7 +120,7 @@ function clientProblems(command: string, docs: string): string[] {
   const shape = shapes.find((s) => s.words.join(' ') === words.join(' '));
   if (!shape) return [...problems, `${command}: no documented command "${words.join(' ')}"`];
   for (const f of used) {
-    if (!globals.has(f) && !shape.flags.has(f)) problems.push(`${command}: ${f} is not a documented flag of "${words.join(' ')}"`);
+    if (!globals.has(f) && !shape.open && !shape.flags.has(f)) problems.push(`${command}: ${f} is not a documented flag of "${words.join(' ')}"`);
   }
   for (const f of shape.required) if (!used.has(f)) problems.push(`${command}: "${words.join(' ')}" requires ${f}`);
   if (positionals !== shape.positionals) problems.push(`${command}: "${words.join(' ')}" takes ${shape.positionals} argument(s), given ${positionals}`);
@@ -136,7 +144,7 @@ test('the demo block of the landing page is the committed recording, word for wo
 });
 
 test('a demo block that differs from the recording by one character is found (the check can fail)', () => {
-  const edited = indexHtml.replace(/(<section class="band" id="demo">[\s\S]*?lease )(1-1)/, '$1' + '9-9');
+  const edited = indexHtml.replace(/(<section class="band" id="demo">[\s\S]*?--spec\.needs\.gpus )(1)/, '$1' + '2');
   assert.notEqual(edited, indexHtml, 'the damage landed');
   assert.notEqual(demoText(edited) + '\n', transcript);
 });
@@ -155,37 +163,39 @@ test('the demo comes after the install block of the hero and before "What it doe
   assert.match(section, /<a href="install\.html">/);
 });
 
-test('the recording shows the server start, the host file, a lease acquired, listed, released and the list again', () => {
+test('the recording shows the pool file, the server start, a job submitted and refused, and the list of jobs', () => {
   assert.equal(serverCommands.length, 1);
-  assert.match(transcript, /^# hosts\.toml/m);
+  assert.match(transcript, /^# pool\.toml/m);
+  assert.match(serverCommands[0], / --agent-pool-config pool\.toml --job-listen 127\.0\.0\.1:7301 &$/);
   assert.deepEqual(
-    clientCommands.map((c) => c.replace(/^js --server \S+ --token-file \S+ lease /, '').replace(/ .*/, '')),
-    ['acquire', 'list', 'release', 'list'],
+    clientCommands.map((c) => c.replace(/^js --server \S+ --token-file \S+ job /, '').replace(/ .*/, '')),
+    ['submit', 'list'],
   );
-  const acquired = /^lease (\S+) host (\S+) ends (\d+)$/m.exec(transcript);
-  assert.ok(acquired, 'acquire printed lease <id> host <host> ends <ms>');
-  assert.match(transcript, new RegExp(`^${acquired[1]} held host ${acquired[2]} ends ${acquired[3]}$`, 'm'));
-  assert.match(transcript, new RegExp(`^lease ${acquired[1]} freed$`, 'm'));
-  assert.ok(clientCommands.some((c) => c.endsWith(`lease release ${acquired[1]}`)));
+  // No agent joins the pool: the job is refused for want of a host, and the list that follows is empty.
+  const lines = transcript.split('\n');
+  const submitted = lines.findIndex((l) => l.startsWith('$ js ') && l.includes(' job submit '));
+  assert.equal(lines[submitted + 1], 'js: refused: no-capable-host: no host and no catalog could ever serve the job');
+  assert.match(lines[submitted + 2], / job list$/);
+  assert.deepEqual(lines.slice(submitted + 3), ['']);
 });
 
 test('every client command in the recording is a js command shape that crates/js-cli/src/lib.rs documents', () => {
-  assert.ok(clientCommands.length >= 4);
+  assert.ok(clientCommands.length >= 2);
   for (const c of clientCommands) assert.deepEqual(clientProblems(c, cliDocs), [], c);
 });
 
 test('a client command with an unknown verb, an unknown flag, a missing required flag, a missing id or a missing server is refused (the check can fail)', () => {
-  const base = 'js --server http://127.0.0.1:7300 --token-file client-token';
-  assert.match(clientProblems(`${base} lease grab --class gpu-host`, cliDocs).join('\n'), /no documented command "js lease grab"/);
-  assert.match(clientProblems(`${base} lease acquire --class gpu-host --max-wall 1h --colour red`, cliDocs).join('\n'), /--colour is not a documented flag/);
-  assert.match(clientProblems(`${base} lease acquire --class gpu-host`, cliDocs).join('\n'), /requires --max-wall/);
-  assert.match(clientProblems(`${base} lease release`, cliDocs).join('\n'), /takes 1 argument\(s\), given 0/);
-  assert.match(clientProblems(`${base} lease list extra`, cliDocs).join('\n'), /takes 0 argument\(s\), given 1/);
-  assert.match(clientProblems('js --token-file client-token lease list', cliDocs).join('\n'), /--server is required/);
-  assert.match(clientProblems('js --server http://127.0.0.1:7300 lease list', cliDocs).join('\n'), /--token-file is required/);
-  assert.match(clientProblems(`${base} lease run --class gpu-host --max-wall 1h`, cliDocs).join('\n'), /no documented command "js lease run"/);
-  assert.match(clientProblems(`${base} lease renew 1-1`, cliDocs).join('\n'), /no documented command "js lease renew"/);
-  assert.deepEqual(clientProblems(`${base} lease release 1-1`, cliDocs), []);
+  const base = 'js --server http://127.0.0.1:7301 --token-file client-token';
+  assert.match(clientProblems(`${base} job grab --job-id x`, cliDocs).join('\n'), /no documented command "js job grab"/);
+  assert.match(clientProblems(`${base} job get --job-id x --colour red`, cliDocs).join('\n'), /--colour is not a documented flag/);
+  assert.match(clientProblems(`${base} job submit --id x`, cliDocs).join('\n'), /requires --spec\.image/);
+  assert.match(clientProblems(`${base} job get`, cliDocs).join('\n'), /requires --job-id/);
+  assert.match(clientProblems(`${base} job list extra`, cliDocs).join('\n'), /takes 0 argument\(s\), given 1/);
+  assert.match(clientProblems('js --token-file client-token job list', cliDocs).join('\n'), /--server is required/);
+  assert.match(clientProblems('js --server http://127.0.0.1:7301 job list', cliDocs).join('\n'), /--token-file is required/);
+  assert.match(clientProblems(`${base} lease list`, cliDocs).join('\n'), /no documented command "js lease list"/);
+  assert.deepEqual(clientProblems(`${base} job cancel --job-id x`, cliDocs), []);
+  assert.deepEqual(clientProblems(`${base} job submit --spec.image x --spec.needs.gpus 1`, cliDocs), []);
 });
 
 test('the server start in the recording names only flags that crates/js-lease-server/src/lib.rs documents', () => {
@@ -208,9 +218,9 @@ function wordsMissingFromSource(command: string, source: string): string[] {
   const missing: string[] = [];
   for (const word of command.split(/\s+/).slice(1).filter((w) => w !== '' && w !== '&')) {
     if (source.includes(`"${word}"`)) continue;
-    // The address is the default port; a lease id is what the client printed.
-    if (word === 'http://127.0.0.1:7300' && /DEFAULT_PORT: u16 = 7300/.test(source)) continue;
-    if (/^\d+-\d+$/.test(word)) continue;
+    // The addresses are the default job port, which the source names once.
+    const jobPort = /DEFAULT_JOB_PORT: u16 = 7301/.test(source);
+    if ((word === 'http://127.0.0.1:7301' || word === '127.0.0.1:7301') && jobPort) continue;
     missing.push(word);
   }
   return missing;
@@ -218,10 +228,11 @@ function wordsMissingFromSource(command: string, source: string): string[] {
 
 test('crates/xtask/src/site_demo.rs spells out every word of every command in the recording', () => {
   const programs = commandsOf(transcript).filter((c) => /^js(-lease-server)? /.test(c));
-  assert.equal(programs.length, 5);
+  assert.equal(programs.length, 3);
   for (const c of programs) assert.deepEqual(wordsMissingFromSource(c, demoSource), [], c);
   for (const program of ['js-lease-server', 'js']) assert.match(demoSource, new RegExp(`"${program}"`), program);
   assert.match(demoSource, /DEFAULT_PORT: u16 = 7300/);
+  assert.match(demoSource, /DEFAULT_JOB_PORT: u16 = 7301/);
   // The command that writes the token file is built from the token and the file name the source holds.
   const token = commandsOf(transcript).find((c) => c.startsWith('printf '))!;
   assert.match(token, /a-local-token-of-at-least-32-bytes/);
@@ -229,16 +240,16 @@ test('crates/xtask/src/site_demo.rs spells out every word of every command in th
 });
 
 test('a recorded command with a word the Rust source does not have is found (the check can fail)', () => {
-  assert.deepEqual(wordsMissingFromSource('js lease acquire --class gpu-host --gpus 1 --turbo', demoSource), ['--turbo']);
-  assert.deepEqual(wordsMissingFromSource('js lease list', 'no such source'), ['lease', 'list']);
+  assert.deepEqual(wordsMissingFromSource('js job submit --id demo-1 --turbo', demoSource), ['--turbo']);
+  assert.deepEqual(wordsMissingFromSource('js job list', 'no such source'), ['job', 'list']);
 });
 
 test('the command the page names is a verb of xtask, and the Rust test that holds the commands to this recording is there', () => {
-  assert.match(prose(demoSource), /It builds the lease server and the client, leases a host from a static host file/);
+  assert.match(prose(demoSource), /It builds the server and the client, starts the server on this machine with the job service on, asks the job service for a GPU job and lists the jobs/);
   assert.match(prose(xtaskDocs), /`site-demo \[--out <path>\]/);
   assert.match(demoRustTest, /fn committed_transcript_shows_the_commands_this_verb_runs\(\)/);
   assert.match(demoRustTest, /site\/test\/demo\.transcript/);
-  assert.match(demoRustTest, /assert_eq!\(shown, commands\(7300, id\)\)/);
+  assert.match(demoRustTest, /assert_eq!\(shown, commands\(DEFAULT_PORT, DEFAULT_JOB_PORT\)\)/);
   const section = /<section class="band" id="demo">([\s\S]*?)<\/section>/.exec(indexHtml)![1];
   assert.match(section, /<code>cargo xtask site-demo<\/code>/);
   assert.doesNotMatch(section, /demo\.sh/);

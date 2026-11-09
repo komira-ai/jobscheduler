@@ -68,11 +68,6 @@ impl Fake {
         self.state.lock().unwrap()
     }
 
-    /// The records of ended allocations written, in order.
-    pub fn history(&self) -> Vec<EndedRow> {
-        self.state().history.clone()
-    }
-
     pub fn seen(&self) -> Vec<Seen> {
         self.state().seen.clone()
     }
@@ -83,10 +78,6 @@ impl Fake {
 
     pub fn prunes(&self) -> Vec<u64> {
         self.state().prunes.clone()
-    }
-
-    pub fn ended(&self) -> Vec<RunEnd> {
-        self.state().ended.clone()
     }
 
     /// Makes every later reading a dropped one, for `reason`.

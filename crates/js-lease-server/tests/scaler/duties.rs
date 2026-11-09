@@ -13,7 +13,6 @@ use js_elastic::{Claim, Released};
 use js_lease_server::REGISTRY_QUIET;
 use js_registry::{HostState, SessionSource};
 use js_scaler::{Blocked, Millis, Phase, Record, Records};
-use js_types::LeaseId;
 
 use crate::complete::run_for;
 use crate::fakes::{
@@ -35,6 +34,14 @@ fn registered(name: &str, cloud: &str) -> Record {
 /// How many times `needle` is in everything logged.
 fn times(needle: &str) -> usize {
     logged().matches(needle).count()
+}
+
+/// How many logged lines hold both `needle` and `host`: a count no other test of this
+/// binary, which logs into the same capture, can add to.
+fn times_on(host: &str, needle: &str) -> usize {
+    let lines = logged();
+    let own = lines.lines().filter(|line| line.contains(host));
+    own.filter(|line| line.contains(needle)).count()
 }
 
 /// Asserts that a failed save carries out no later action, whatever the action is: a
@@ -353,42 +360,6 @@ async fn a_host_the_registry_will_not_remove_is_removed_again_and_said_once() {
     assert!(rig.scaler.alerts().is_empty());
 }
 
-/// Asserts that a machine is not released while the registry books a lease on its host,
-/// whatever the step decided from an older read: a machine past its boot timeout is marked
-/// ending and its token revoked, and a hello with a booked lease appears in the registry
-/// after the records were written. No release is sent that tick, the refusal is logged,
-/// and the release goes out at the first tick after the lease is over. It catches the
-/// window between the read of the registry and the release, in which a host says hello
-/// and is booked.
-#[tokio::test]
-async fn a_machine_is_not_released_while_its_host_holds_a_lease() {
-    let rig = rig(
-        records(vec![record("js-leased-late", Phase::Booting)]),
-        live(),
-    );
-    rig.advance(mins(16));
-    rig.scaler.tick().await;
-    rig.advance(mins(5));
-    let said = times("the host holds a lease or a job allocation");
-    let mut booked = view("js-leased-late");
-    booked.lease = Some(LeaseId::new(1, 4));
-    rig.world().after_save = Some(vec![booked]);
-    rig.scaler.tick().await;
-    let released = |rig: &crate::fakes::Rig| {
-        let log = rig.log();
-        log.iter()
-            .filter(|each| each.starts_with("release:"))
-            .count()
-    };
-    assert_eq!(released(&rig), 0, "{:?}", rig.log());
-    assert!(times("the host holds a lease or a job allocation") > said);
-
-    rig.world().hosts[0].lease = None;
-    rig.advance(Duration::from_secs(5));
-    rig.scaler.tick().await;
-    assert_eq!(released(&rig), 1, "{:?}", rig.log());
-}
-
 /// Asserts that a machine is not released while a job allocation is on its host, read just
 /// before the release, though the tick read the job tables without it: the host of a
 /// machine whose release is under way is placed a job after the records were written. No
@@ -401,7 +372,7 @@ async fn a_machine_is_not_released_while_a_job_allocation_is_on_its_host() {
     rig.advance(mins(16));
     rig.scaler.tick().await;
     rig.advance(mins(5));
-    let said = times("the host holds a lease or a job allocation");
+    let said = times("the host holds a job allocation");
     rig.world().after_save_live = Some(vec![allocation("j-late", "js-job-late")]);
     rig.scaler.tick().await;
     let released = |rig: &crate::fakes::Rig| {
@@ -411,7 +382,7 @@ async fn a_machine_is_not_released_while_a_job_allocation_is_on_its_host() {
             .count()
     };
     assert_eq!(released(&rig), 0, "{:?}", rig.log());
-    assert!(times("the host holds a lease or a job allocation") > said);
+    assert!(times("the host holds a job allocation") > said);
 
     rig.world().live.clear();
     rig.advance(Duration::from_secs(5));
@@ -426,14 +397,18 @@ async fn a_machine_is_not_released_while_a_job_allocation_is_on_its_host() {
 /// nothing an operator can see.
 #[tokio::test]
 async fn a_release_the_provider_does_not_confirm_is_said() {
+    let host = "js-stuck-release";
     let stuck = Record {
         since: Millis::new(crate::fakes::START),
-        ..record("js-stuck-release", Phase::Releasing)
+        ..record(host, Phase::Releasing)
     };
     let rig = rig(records(vec![stuck]), live());
     rig.world().release_answer = Some(Released::Refused(Claim::Foreign));
     rig.scaler.tick().await;
-    assert_eq!(times("the provider refused to release the machine"), 1);
+    assert_eq!(
+        times_on(host, "the provider refused to release the machine"),
+        1
+    );
     assert!(rig.scaler.alerts().is_empty());
 
     rig.world().release_answer = Some(Released::Unknown);
@@ -441,9 +416,9 @@ async fn a_release_the_provider_does_not_confirm_is_said() {
     for _ in 0..2 {
         rig.scaler.tick().await;
     }
-    assert!(times("the provider gave no answer to a release") >= 2);
+    assert!(times_on(host, "the provider gave no answer to a release") >= 2);
     let alert = "a machine whose release the provider does not confirm";
-    assert_eq!(times(alert), 1);
+    assert_eq!(times_on(host, alert), 1);
     assert_eq!(rig.scaler.alerts().len(), 1);
 }
 

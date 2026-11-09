@@ -1,6 +1,6 @@
 //! What the cell's server is: the pool file, the token files, the store file and the flags
-//! of a lease server whose hosts register themselves, read by the server's own [`Cli`] and
-//! [`Config`].
+//! of a server whose hosts register themselves and which serves the job service, read by
+//! the server's own [`Cli`] and [`Config`].
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -25,11 +25,10 @@ pub const CLIENT_TOKEN: &str = "sim-cell-client-token-0123456789-abcdef";
 /// The join token every agent of a cell says hello with.
 pub const JOIN_TOKEN: &str = "sim-cell-join-token-0123456789-abcdefgh";
 
-/// The class of the cell's one pool: what a lease asks for by name.
+/// The class of the cell's one pool.
 pub const POOL_CLASS: &str = "gpu-host";
 
-/// The class of a pool whose hosts are leased whole, each after its agent reports it
-/// ready ([`ServerSpec::whole_node_pool`]): what a whole-host item asks for by name.
+/// The class of a pool whose hosts are given whole ([`ServerSpec::whole_node_pool`]).
 pub const WHOLE_CLASS: &str = "whole-node";
 
 /// The capability key a host's architecture is given under.
@@ -38,9 +37,8 @@ pub const ARCH_KEY: &str = "arch";
 /// The architecture a registered pool's shape is given when it names none.
 pub const ARCH: &str = "x86_64";
 
-/// The address `--job-listen` names for a server of [`ServerSpec::jobs`]: on the
-/// loopback, as the server demands of an address served without TLS, and never bound,
-/// since the cell's server runs in process.
+/// The address `--job-listen` names: on the loopback, as the server demands of an address
+/// served without TLS, and never bound, since the cell's server runs in process.
 pub const JOB_LISTEN: &str = "127.0.0.1:0";
 
 /// What the pool books for every host, and what each of the cell's agents offers.
@@ -72,6 +70,18 @@ impl Shape {
         }
     }
 
+    /// The host of [`Shape::gpu_host`] with no GPU: the shape a whole-host job can be
+    /// started on, since a start names each GPU of the host it books by its index and the
+    /// server sends none for a job that books GPUs.
+    #[must_use]
+    pub fn cpu_host() -> Self {
+        Self {
+            gpus: 0,
+            gpu_class: None,
+            ..Self::gpu_host()
+        }
+    }
+
     /// The shape as the scheduler's resources.
     ///
     /// # Errors
@@ -83,7 +93,8 @@ impl Shape {
     }
 }
 
-/// A lease server with one pool of hosts that register themselves, as the cell runs it.
+/// A server with one pool of hosts that register themselves and the job service, placing as
+/// `js-sched`, as the cell runs it.
 ///
 /// The pool admits as many machines as the scenario registers (`max_machines`), and one
 /// join token is allowed as many hellos in a burst (`--agent-hello-burst`): every agent of
@@ -95,17 +106,18 @@ impl Shape {
 /// The heartbeat interval and grace are the server's defaults (5 s and 15 s) unless
 /// [`ServerSpec::heartbeat`] says otherwise, and hosts are forgotten after the
 /// registry's default `lost_retention` unless [`ServerSpec::lost_retention`] says
-/// otherwise. A whole-node pool sets the whole-node keys only that
-/// [`ServerSpec::prepare_timeout`], [`ServerSpec::reserve_backoff`] and
-/// [`ServerSpec::max_replace`] set; each other takes the server's default. Usage recording
-/// is off (`--usage-off`): its store reads the system's clock
+/// otherwise. Usage recording is off (`--usage-off`): its store reads the system's clock
 /// and commits on a thread of its own, so a run would depend on both. The pool's class is
 /// [`POOL_CLASS`] ([`WHOLE_CLASS`] for [`ServerSpec::whole_node_pool`]). The server places
-/// with `js-sched`, its only placement, which takes a host by its `arch`: the shape of a
-/// registered pool is given the capability [`ARCH_KEY`] = [`ARCH`] when it names no
-/// architecture, and the agents announce, and the client's leases ask for, the shape's
-/// capabilities, this one too. The server keeps its state in a SQLite store in its
-/// directory unless [`ServerSpec::store`] says otherwise (module `store`).
+/// with `js-sched`, its only placement, which takes a host by its `arch`, and the job
+/// service is on (`--job-listen`, an address that is never bound: the cell reaches the
+/// service in process). The shape is given the capability [`ARCH_KEY`] = [`ARCH`] when it
+/// names no architecture: `js-sched` refuses an agent or joined pool without one, and
+/// places an elastic pool's machines by the one their agents report. The agents announce,
+/// and the client's jobs ask for, the shape's capabilities, this one too. The cell's agents
+/// speak the per-job messages (they report [`js_agent_wire::PER_JOB_CAPABILITY`] in their
+/// hello). The server keeps its state in a SQLite store in its directory unless
+/// [`ServerSpec::store`] says otherwise (module `store`).
 #[derive(Clone, Debug)]
 pub struct ServerSpec {
     pool: String,
@@ -116,13 +128,9 @@ pub struct ServerSpec {
     interval: Duration,
     grace: Duration,
     lost_retention: Duration,
-    /// The whole-node keys the pool file sets, by name, each as the file spells its value.
-    whole_keys: BTreeMap<&'static str, String>,
     /// Whether the server boots over the lease file a server before it left
     /// (`--boot resume`), rather than a first boot (`--boot initialise`).
     resume: bool,
-    /// Whether the job service is on ([`ServerSpec::jobs`]).
-    jobs: bool,
     /// The elastic pool, for a server of [`ServerSpec::elastic_pool`].
     elastic: Option<ElasticPool>,
     /// Which store the server keeps its state in (`--store`).
@@ -147,9 +155,7 @@ impl ServerSpec {
             interval: Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS),
             grace: Duration::from_millis(DEFAULT_GRACE_MS),
             lost_retention: Duration::from_millis(DEFAULT_LOST_RETENTION_MS),
-            whole_keys: BTreeMap::new(),
             resume: false,
-            jobs: false,
             elastic: None,
             store: Store::default(),
         }
@@ -159,13 +165,13 @@ impl ServerSpec {
     /// machines are launched by the server's scaler on the pool's cloud, which the server
     /// node makes and owns ([`crate::Cloud`]), and each is a host of `shape`. The node
     /// reads the server's configuration from a file ([`crate::elastic`]), not from the
-    /// command line; no job service is what that file says of the server. A host of an
-    /// elastic pool beats at the registry's defaults (5 s, with a grace of 15 s), which an
-    /// elastic pool does not set: [`ServerSpec::heartbeat`] and the whole-node keys do not
-    /// apply to it. The client asks for `shape`'s capabilities, and the pool's floor has
-    /// none, so a scenario gives a shape without any. The pool's floor names no
-    /// architecture either: `shape` is given [`ARCH`], which the cell's agents report at
-    /// hello, and each machine is placed by it.
+    /// command line; the file also turns the job service on. A host of an elastic pool beats at the
+    /// registry's defaults (5 s, with a
+    /// grace of 15 s), which an elastic pool does not set: [`ServerSpec::heartbeat`] and
+    /// the pool file's keys do not apply to it. The client asks for `shape`'s capabilities,
+    /// and the pool's floor has none, so a scenario gives a shape without any. The pool's
+    /// floor names no architecture either: each machine is placed by the `arch` its agent
+    /// reports at hello, which the shape is given.
     #[must_use]
     pub fn elastic_pool(pool: ElasticPool, shape: Shape) -> Self {
         let name = pool.name().to_owned();
@@ -182,33 +188,14 @@ impl ServerSpec {
     }
 
     /// A server whose one pool, `pool_name`, of class [`WHOLE_CLASS`], books `shape` for
-    /// each of `hosts` hosts that register with [`JOIN_TOKEN`]: every lease of it holds a
-    /// host whole, and is held only once the host's agent reported it ready. The pool
-    /// sets no whole-node key, so each takes the server's default, until
-    /// [`ServerSpec::prepare_timeout`], [`ServerSpec::reserve_backoff`] or
-    /// [`ServerSpec::max_replace`] sets one.
+    /// each of `hosts` hosts that register with [`JOIN_TOKEN`]: a job that asks for a
+    /// whole host is given one of its hosts whole.
     #[must_use]
     pub fn whole_node_pool(pool_name: &str, shape: Shape, hosts: usize) -> Self {
         Self {
             class: WHOLE_CLASS,
             ..Self::registered_pool(pool_name, shape, hosts)
         }
-    }
-
-    /// This server, serving the job service too (`--job-listen`, an address on the loopback
-    /// that is never bound: the cell reaches the service in process). The cell's agents then speak the per-job messages (they
-    /// report [`js_agent_wire::PER_JOB_CAPABILITY`] in their hello), and a
-    /// [`crate::JobFront`] submits jobs to it; the lease routes are served beside it.
-    #[must_use]
-    pub fn jobs(mut self) -> Self {
-        self.jobs = true;
-        self
-    }
-
-    /// Whether the server serves the job service ([`ServerSpec::jobs`]).
-    #[must_use]
-    pub fn serves_jobs(&self) -> bool {
-        self.jobs
     }
 
     /// This server, telling its hosts to beat every `interval` and holding a host lost
@@ -226,33 +213,6 @@ impl ServerSpec {
     #[must_use]
     pub fn lost_retention(mut self, retention: Duration) -> Self {
         self.lost_retention = retention;
-        self
-    }
-
-    /// This server, failing a whole-node lease whose host's agent has not reported ready
-    /// `timeout` after the commit (the pool key `prepare_timeout`; the server refuses
-    /// zero).
-    #[must_use]
-    pub fn prepare_timeout(self, timeout: Duration) -> Self {
-        self.whole_key("prepare_timeout", millis(timeout))
-    }
-
-    /// This server, leaving the host of a failed prepare out of the request's next
-    /// placements for `backoff` (the pool key `reserve_backoff`; the server refuses zero).
-    #[must_use]
-    pub fn reserve_backoff(self, backoff: Duration) -> Self {
-        self.whole_key("reserve_backoff", millis(backoff))
-    }
-
-    /// This server, refusing a whole-node request for good once `tries` of its prepares
-    /// have failed (the pool key `max_replace`; the server refuses zero).
-    #[must_use]
-    pub fn max_replace(self, tries: u32) -> Self {
-        self.whole_key("max_replace", tries.to_string())
-    }
-
-    fn whole_key(mut self, key: &'static str, value: String) -> Self {
-        self.whole_keys.insert(key, value);
         self
     }
 
@@ -324,13 +284,9 @@ impl ServerSpec {
             .capabilities
             .iter()
             .map(|(k, v)| format!("{} = {}\n", quoted(k), quoted(v)));
-        let whole = self
-            .whole_keys
-            .iter()
-            .map(|(key, value)| format!("{key} = {value}\n"));
         format!(
             "name = {}\nclass = {}\nmax_machines = {}\nheartbeat_interval = \"{}ms\"\n\
-             grace = \"{}ms\"\nlost_retention = \"{}ms\"\n{}\n[shape]\ncpu_millis = {}\n\
+             grace = \"{}ms\"\nlost_retention = \"{}ms\"\n\n[shape]\ncpu_millis = {}\n\
              memory_bytes = {}\ngpus = {}\n{}\n[capabilities]\n{}",
             quoted(&self.pool),
             quoted(self.class),
@@ -338,7 +294,6 @@ impl ServerSpec {
             self.interval.as_millis(),
             self.grace.as_millis(),
             self.lost_retention.as_millis(),
-            whole.collect::<String>(),
             shape.cpu_millis,
             shape.memory_bytes,
             shape.gpus,
@@ -350,7 +305,7 @@ impl ServerSpec {
     /// Writes the pool file, the two token files and the store file into `dir` and returns
     /// the server's command line: the lease file in `dir`, a first boot (or a resumed one,
     /// for a server started again), registration into the pool with [`JOIN_TOKEN`], the
-    /// hello burst, the job service's address when it is on, the store
+    /// hello burst, the job service's address, the store
     /// (`--store`, a SQLite file in `dir` with `--allow-sqlite-store`), and usage off.
     ///
     /// # Errors
@@ -381,7 +336,7 @@ impl ServerSpec {
             "--agent-token-file",
         )?;
         let store = write_store(dir, at, "--store")?;
-        let mut flags: Vec<(&str, OsString)> = vec![
+        let flags: Vec<(&str, OsString)> = vec![
             ("--state-file", dir.join("leases.toml").into_os_string()),
             ("--boot", boot(self.resume).into()),
             ("--token-file", token),
@@ -389,11 +344,8 @@ impl ServerSpec {
             ("--agent-pool-config", pool),
             ("--agent-hello-burst", self.hello_burst.to_string().into()),
             ("--store", store),
+            ("--job-listen", JOB_LISTEN.into()),
         ];
-        let job = self
-            .jobs
-            .then(|| ("--job-listen", OsString::from(JOB_LISTEN)));
-        flags.extend(job);
         let pairs = flags
             .into_iter()
             .flat_map(|(flag, value)| [flag.into(), value]);
@@ -455,8 +407,8 @@ impl ServerSpec {
 }
 
 impl ServerSpec {
-    /// The configuration of the server of `cloud`'s elastic pool, over the store
-    /// `at`: the client token file, the store file and the
+    /// The configuration of the server of `cloud`'s elastic pool, serving the job service,
+    /// over the store `at`: the client token file, the store file and the
     /// configuration file written into `dir` ([`elastic::config::text`]), read by the
     /// server with the cell's `sim-cloud` kind over `cloud`, on `clock`, the lease table
     /// timing its saves on `clock`, and the scaler drawing its acquire ids from `entropy`.
@@ -496,11 +448,6 @@ fn boot(resume: bool) -> &'static str {
     if resume { "resume" } else { "initialise" }
 }
 
-/// `duration` as the pool file spells a duration: whole milliseconds, quoted.
-fn millis(duration: Duration) -> String {
-    quoted(&format!("{}ms", duration.as_millis()))
-}
-
 /// `text` as a TOML basic string, which the JSON string grammar is a part of.
 fn quoted(text: &str) -> String {
     serde_json::Value::from(text).to_string()
@@ -528,5 +475,22 @@ struct Virtual(ManualClock);
 impl Monotonic for Virtual {
     fn reading(&self) -> Duration {
         Duration::from_millis(self.0.now().millis())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use js_types::Timestamp;
+
+    /// Asserts that the lease table's monotonic clock reads the cell's clock in
+    /// milliseconds, and moves when the cell's clock does.
+    #[test]
+    fn the_monotonic_clock_reads_the_cells_clock() {
+        let clock = ManualClock::new(Timestamp::from_millis(5_250));
+        let monotonic = Virtual(clock.clone());
+        assert_eq!(monotonic.reading(), Duration::from_millis(5_250));
+        clock.advance(Duration::from_secs(2));
+        assert_eq!(monotonic.reading(), Duration::from_millis(7_250));
     }
 }

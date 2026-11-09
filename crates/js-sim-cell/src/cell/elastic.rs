@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_agent_wire::InstanceIdentity;
+use js_agent_wire::{InstanceIdentity, PER_JOB_CAPABILITY};
 use js_elastic::HostRef;
 use js_sim::NodeId;
 use js_types::HostId;
@@ -203,6 +203,7 @@ impl Cell {
         // (`--container-bin`) with the GPU toolkit (`--gpu-toolkit-hook`).
         capabilities.insert("runtime".to_owned(), "container".to_owned());
         capabilities.insert("gpu-toolkit".to_owned(), "true".to_owned());
+        capabilities.insert(PER_JOB_CAPABILITY.to_owned(), "true".to_owned());
         let pool = self.spec.pool().to_owned();
         let instance = InstanceIdentity {
             provider: pool.clone(),
@@ -216,6 +217,7 @@ impl Cell {
             capabilities,
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
+            worker_lag: std::time::Duration::ZERO,
             kind: AgentKind::Fake(None),
             instance: Some(instance),
         };

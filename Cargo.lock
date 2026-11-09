@@ -1269,10 +1269,7 @@ dependencies = [
  "js-lease-server",
  "js-pool-static",
  "js-proto",
- "js-provider",
- "js-provider-fake",
  "js-testkit",
- "js-types",
  "prost",
  "prost-reflect",
  "rcgen",
@@ -1298,9 +1295,7 @@ dependencies = [
  "rcgen",
  "rustix",
  "rustls",
- "serde",
  "serde_json",
- "serde_path_to_error",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -1464,7 +1459,6 @@ dependencies = [
  "js-agent-wire",
  "js-alert",
  "js-api-gateway",
- "js-caps",
  "js-cli",
  "js-conformance",
  "js-contain",
@@ -1633,6 +1627,7 @@ dependencies = [
 name = "js-measure"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "clap",
  "js-analysis",
  "js-client",

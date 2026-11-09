@@ -44,9 +44,10 @@
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
 //!   payload and scripts, laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
-//! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--ready-timeout <s>]` ([`site_demo`]): records the demonstration on
-//!   the landing page of jobscheduler.dev, `site/test/demo.transcript`: builds the lease server and the
-//!   client, leases a host from a static host file, lists the lease and releases it.
+//! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--job-port <n>] [--ready-timeout <s>]` ([`site_demo`]):
+//!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:
+//!   builds the server and the client, starts the server with the job service on and a pool no agent
+//!   joins, submits a GPU job (refused, since no host could serve it) and lists the jobs.
 //! - `site-changed --event <name> --base <ref> --paths <file> --github-output <file>`
 //!   ([`site_changed`]): whether the site steps of the `lint` job run, from the event and the
 //!   files a pull request changes against the entries of `site/ci-paths`.
@@ -239,8 +240,8 @@ enum Verb {
         #[arg(last = true)]
         command: Vec<std::ffi::OsString>,
     },
-    /// Record the demonstration on the landing page of jobscheduler.dev (a build of the lease
-    /// server and the client, a server on 127.0.0.1, a lease acquired, listed and released).
+    /// Record the demonstration on the landing page of jobscheduler.dev (a build of the server and
+    /// the client, a server on 127.0.0.1 with the job service on, a job submitted and the jobs listed).
     SiteDemo {
         /// The repository root, where cargo builds.
         #[arg(long, default_value = ".")]
@@ -254,6 +255,9 @@ enum Verb {
         /// The server's port on 127.0.0.1; the recording shows the default, 7300.
         #[arg(long, default_value_t = site_demo::DEFAULT_PORT)]
         port: u16,
+        /// The job service's port on 127.0.0.1; the recording shows the default, 7301.
+        #[arg(long, default_value_t = site_demo::DEFAULT_JOB_PORT)]
+        job_port: u16,
         /// How many seconds to wait for the server to answer.
         #[arg(long, default_value_t = site_demo::READY_TIMEOUT.as_secs())]
         ready_timeout: u64,
@@ -375,6 +379,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             out,
             bin_dir,
             port,
+            job_port,
             ready_timeout,
             scratch,
         } => {
@@ -388,6 +393,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 out: &out,
                 scratch: &scratch,
                 port,
+                job_port,
                 ready_timeout: std::time::Duration::from_secs(ready_timeout),
             })?)
         }

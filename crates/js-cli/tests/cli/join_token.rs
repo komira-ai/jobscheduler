@@ -1,4 +1,4 @@
-//! `join-token mint` and `join-token revoke`: against a real lease server that admits
+//! `join-token mint` and `join-token revoke`: against a real server that admits
 //! agents (the route exists only then), and against a server that records what it reads
 //! and answers a canned reply, for the bytes sent and the answers the real server never
 //! gives.
@@ -8,31 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use serde_json::json;
 
-use crate::native::recording;
-use crate::support::{Harness, Js, Scratch, T0, against, http};
-
-/// A pool that asks nothing of a host but an `arch` (the scheduler describes a host by
-/// it), for the server's `--agent-pool-config`. No host says hello here.
-const POOL: &str = r#"
-name = "macs"
-class = "mac"
-max_machines = 4
-
-[shape]
-cpu_millis = 1
-memory_bytes = 1
-
-[capabilities]
-arch = "x86_64"
-"#;
-
-/// A real server whose agents register hosts, so the join-token route exists.
-fn agent_server(name: &str) -> Harness {
-    let scratch = Scratch::new(name);
-    let pool = scratch.write("agent-pool.toml", POOL, 0o644);
-    let pool = pool.to_str().unwrap().to_owned();
-    Harness::build_in(scratch, &["--agent-pool-config", &pool], None)
-}
+use crate::support::{Harness, Js, REVOKE, Scratch, T0, against, http, recording};
 
 /// The words of a mint for `lambdalabs:i-1`, plus `extra`.
 fn mint<'a>(extra: &[&'a str]) -> Vec<&'a str> {
@@ -48,16 +24,6 @@ fn mint<'a>(extra: &[&'a str]) -> Vec<&'a str> {
     words
 }
 
-/// The words of a revoke for `lambdalabs:i-1`.
-const REVOKE: [&str; 6] = [
-    "join-token",
-    "revoke",
-    "--provider",
-    "lambdalabs",
-    "--instance-id",
-    "i-1",
-];
-
 fn is_token(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -69,7 +35,7 @@ fn is_token(text: &str) -> bool {
 /// dropped or sent as a different unit, and a text and JSON form that disagree.
 #[test]
 fn a_mint_prints_the_token_alone_or_as_json() {
-    let server = agent_server("join_mint_stdout");
+    let server = Harness::agents("join_mint_stdout");
     let got = server.js.go(&mint(&[]));
     assert_eq!(got.code, 0, "{}", got.err);
     assert!(is_token(got.out.strip_suffix('\n').unwrap()), "{}", got.out);
@@ -93,7 +59,7 @@ fn a_mint_prints_the_token_alone_or_as_json() {
 /// beside the path.
 #[test]
 fn a_mint_with_out_writes_a_private_file_and_prints_no_token() {
-    let server = agent_server("join_mint_out");
+    let server = Harness::agents("join_mint_out");
     let path = server.scratch.path("minted");
     let shown = path.to_str().unwrap();
     let got = server.js.go(&mint(&["--out", shown]));
@@ -226,7 +192,7 @@ fn the_ttl_is_sent_only_when_given() {
 /// with its reason. It catches a ttl that wraps or is clamped silently.
 #[test]
 fn the_ttl_is_parsed_and_the_servers_limit_is_reported() {
-    let server = agent_server("join_ttl_limits");
+    let server = Harness::agents("join_ttl_limits");
     for bad in ["0", "2d", "1.5h", "soon"] {
         let got = server.js.go(&mint(&["--ttl", bad]));
         assert_eq!(got.code, 2, "{bad}: {}", got.err);
@@ -247,7 +213,7 @@ fn the_ttl_is_parsed_and_the_servers_limit_is_reported() {
 /// commands, and nothing is written. It catches a request error told as a server failure.
 #[test]
 fn an_invalid_instance_is_the_contract_exit() {
-    let server = agent_server("join_invalid_instance");
+    let server = Harness::agents("join_invalid_instance");
     let path = server.scratch.path("minted");
     let bad = [
         "join-token",
@@ -278,7 +244,7 @@ fn an_invalid_instance_is_the_contract_exit() {
 /// It catches a 401 told as success or as a contract error.
 #[test]
 fn a_bad_client_token_is_refused() {
-    let server = agent_server("join_bad_bearer");
+    let server = Harness::agents("join_bad_bearer");
     let wrong = server.scratch.write(
         "wrong-token",
         "not-the-clients-token-0123456789abcdef",
@@ -386,7 +352,7 @@ fn a_revoke_sends_its_body_and_a_204_is_success() {
 /// a token, so a terminate that is retried needs no care.
 #[test]
 fn a_revoke_is_idempotent_on_a_real_server() {
-    let server = agent_server("join_revoke_real");
+    let server = Harness::agents("join_revoke_real");
     assert_eq!(server.js.go(&mint(&[])).code, 0);
     for _ in 0..2 {
         let got = server.js.go(&REVOKE);

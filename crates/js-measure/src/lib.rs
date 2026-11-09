@@ -1,5 +1,5 @@
 //! `js-measure`: the measurement harness of the jobscheduler paper. It varies one setting
-//! across arms, runs a synthetic workload against the lease server in a randomised
+//! across arms, runs a synthetic workload against the job server in a randomised
 //! order, and records one line per run for the analysis to read.
 //!
 //! # The pieces
@@ -8,7 +8,7 @@
 //!   may be the control), runs per cell, warm-ups and
 //!   a seed. [`Plan::schedule`] draws the order from the seed alone.
 //! - [`Workload`]: a job mix as data.
-//! - [`Farm`]: the calls made to the lease server; [`HttpFarm`] is the live one,
+//! - [`Farm`]: the calls made to the job server; [`HttpFarm`] is the live one,
 //!   [`FakeFarm`] a simulated one with a [`FakeClock`] for tests and dry runs.
 //! - [`drive`]: submits the jobs and watches them to the end ([`Observation`]).
 //! - [`assemble`]: the numbers of a run, from the observation and the server's readings.
@@ -23,8 +23,8 @@
 //! - `records.jsonl`: one [`Record`] per run: `setting`, `arm`, `run_index`, `seed`,
 //!   `commit`, `label` (`"warmup"` on a warm-up) and `metrics`, a map from the names in
 //!   [`metric::name`] to a number or `null` (not available).
-//! - `jobs.jsonl`: one row per job of each run with the job's own facts (the k of
-//!   `runtime_actual_over_predicted` per job, for the histogram).
+//! - `jobs.jsonl`: one row per job of each run with the job's own facts (its queue wait,
+//!   run time, booked and used CPU and peak memory).
 //! - `minutes.jsonl`: one row per host-minute of the run window with the CPU and RAM
 //!   share of the host.
 //!
@@ -34,18 +34,18 @@
 //! # Numbers a job reports
 //!
 //! A job may print `js-measure-result {"steady_ms":12.3}` to its standard output. After the
-//! run is over the harness reads the end of the run's output from the lease server and
+//! run is over the harness reads the end of the job's output from the job server (its result's tails) and
 //! records the numbers as `reported_<key>` in the run's record (the rules, and what a
-//! missing or malformed line records, are in [`reported`]). The job runs as a container on
-//! a lease like any other, so what it reports is measured through the lease server.
+//! missing or malformed line records, are in [`reported`]). The job is submitted like any
+//! other, so what it reports is measured through the job server.
 //!
 //! # Whole-host noise
 //!
 //! `plans/whole-host-noise.plan.json` and `plans/whole-host-noise.workload.json` compare
 //! the same benchmark cell (TPC-H q6 at scale sf1, run by `komira_bench_runner_main`) on a
-//! shared node (the `shared` arm, the `action` class the workload names) with the same cell
-//! on a whole host (the `whole-host` arm, which asks for the `whole-node` lease class), 20
-//! runs each. The runner takes every value as a flag; with `--js-measure-result` its last
+//! shared node (the `shared` arm, the share of a host the workload asks for) with the same
+//! cell on a whole host (the `whole-host` arm, which sets `whole_host` so every job needs a
+//! whole host), 20 runs each. The runner takes every value as a flag; with `--js-measure-result` its last
 //! standard-output line is `js-measure-result {"steady_ms":..,"first_run_ms":..,
 //! "duckdb_steady_ms":..,"verdict":"PASS|..."}`. The numbers are recorded as
 //! `reported_steady_ms`, `reported_first_run_ms` and `reported_duckdb_steady_ms`; `verdict`
@@ -60,9 +60,9 @@
 //! to be built, with the runner, a pinned duckdb and a verified dataset cache, and pushed before a live run. The flags whose values depend on
 //! that image's layout (the duckdb path, the cache dir, the sql file) and on the host (the
 //! host class, cpu model, os, core count, memory bytes, version) are `REPLACE-WITH-...`
-//! placeholders; the workload format has no lease environment to take the host facts from.
-//! Replace them all before running. A class or image the server refuses is recorded as that
-//! job's `failure` (for example `the server answered 422 unknown-class`) in `jobs.jsonl`,
+//! placeholders; the workload format has no job environment to take the host facts from.
+//! Replace them all before running. An image the server refuses is recorded as that
+//! job's `failure` (for example `the server answered 400 invalid-argument`) in `jobs.jsonl`,
 //! and the run has no reported number. The records go to the analysis:
 //!
 //! ```text
@@ -83,7 +83,7 @@
 //!
 //! # Live mode
 //!
-//! `--live --server URL --token-file F [--ca-cert F]` runs against a lease server; without
+//! `--live --server URL --job-server URL --token-file F [--ca-cert F]` runs against a server; without
 //! `--live` the run is against a [`FakeFarm`] of `--fake-hosts` hosts on a fake clock, which
 //! shows a plan end to end and writes no real measurement. `--apply-command PROG` runs
 //! `PROG <parameter> <setting> <arm> control|treatment` before each run to put the arm's setting in
@@ -109,7 +109,7 @@ pub use clock::{Clock, SystemClock};
 pub use driver::{JobTiming, Observation, drive};
 pub use exec::{CommandSetter, Experiment, ExperimentError, NoSetter, SetError, Setter, run_plan};
 pub use fake::{FakeClock, FakeFarm};
-pub use farm::{Acquired, Curve, Farm, FarmError, HostShape, LeaseAsk, RunAsk, UsageRow};
+pub use farm::{Farm, FarmError, HostShape, JobAsk, JobStanding, LogTail, UsageRow};
 pub use http::HttpFarm;
 pub use measure::{RunOutput, assemble};
 pub use metric::{Record, finite};

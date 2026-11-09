@@ -113,7 +113,6 @@ rustls-native-certs = "0.8.4"
 security-framework = { version = "3.7.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
-serde_path_to_error = "0.1.20"
 sha2 = "0.11.0"
 subtle = "2.6.1"
 # The spawn-site check (xtask): the agent's and the helper's source, parsed.
@@ -195,6 +194,42 @@ opt-level = 2
 opt-level = 2
 
 [profile.test.package.js-types]
+opt-level = 2
+
+# The cell's server runs the job front: every heartbeat of every host runs a placement
+# pass that reads the job tables from SQLite and places the queued jobs, so the crates on
+# that path, and the SQLite they read through, are optimised too. Built at opt-level 0
+# they took the sim cell's fault scenarios past the CI test job's limit. js-lease-server
+# is at opt-level 1: a package's override also applies to its own test targets, and at 2
+# the crate's unit tests and its three test targets took 157 s to build, against 89 s
+# at 1 (measured on 4 cores).
+[profile.test.package.js-api-gateway]
+opt-level = 2
+
+[profile.test.package.js-caps]
+opt-level = 2
+
+[profile.test.package.js-jobs]
+opt-level = 2
+
+[profile.test.package.js-lease-server]
+opt-level = 1
+
+[profile.test.package.js-registry]
+opt-level = 2
+
+[profile.test.package.js-sched-placer]
+opt-level = 2
+
+[profile.test.package.js-state]
+opt-level = 2
+
+# Dependencies, not workspace members: crates/xtask/tests/profile_overrides.rs checks
+# these names against Cargo.lock.
+[profile.test.package.libsqlite3-sys]
+opt-level = 2
+
+[profile.test.package.rusqlite]
 opt-level = 2
 
 # The coverage job builds with this profile (`cargo llvm-cov nextest --cargo-profile

@@ -1,10 +1,6 @@
 //! The job tables in the scaler's words: what waits for a host, which hosts are in use, and
 //! the queued jobs set aside for the machines launched for them.
 //!
-//! The registry's lease side is read beside this, until the lease API is deleted: its wait
-//! list of whole-node lease requests is demand too (before the jobs), and a lease it books
-//! keeps a host busy (`view::host_facts`).
-//!
 //! - **Demand** ([`demand`]). Each queued job that holds no live allocation is one waiting
 //!   request, in queue order. A job that books a share of a host asks for its resources,
 //!   disk, accelerators, platform, ISA level, execution mode, network level and host ports,
@@ -14,7 +10,7 @@
 //!   mode, network level and ports, so one machine of the pool's shape is launched for it, and a host that holds
 //!   any allocation does not cover it.
 //! - **Busy** ([`in_use`]). A host is in use when a live (booked or releasing) allocation is
-//!   on it (a lease the registry books on it keeps it busy too, as before).
+//!   on it.
 //! - **Reservation** ([`Reservations`]). When a step launches a machine for a queued job
 //!   ([`js_scaler::State::launched`]), the job is set aside for that machine: from the next
 //!   step on its request names the machine ([`js_scaler::Waiting::reserved`]), so the step
@@ -211,7 +207,7 @@ impl Reservations {
 /// What the step that left `next` reached for the jobs of `jobs` (each waiting request's job,
 /// by request id), in the order it came: each refused acquire made for a job's request, then
 /// each machine launched for one. A refusal recorded with no request, and a request that
-/// names no job (a lease request's), are left out.
+/// names no waiting job, are left out.
 pub(super) fn pass_two(next: &State, jobs: &BTreeMap<RequestId, JobId>) -> Vec<(JobId, Outcome)> {
     let job_of = |request: &RequestId| jobs.get(request).cloned();
     let refused = next.refusals.iter().filter_map(|refused| {

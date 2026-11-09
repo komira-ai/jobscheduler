@@ -148,7 +148,7 @@ fn what_cannot_be_read_is_refused_by_name() {
 }
 
 /// Asserts the refusals of commands that cannot be: a name without a noun, a command on the
-/// hand-written `lease` words, two calls on one command, a field whose flag is one of `js`'s
+/// words `js` keeps for itself (`join-token`, `lease`), two calls on one command, a field whose flag is one of `js`'s
 /// own, and two fields with one flag.
 #[test]
 fn a_command_that_cannot_be_is_refused_by_name() {
@@ -158,7 +158,11 @@ fn a_command_that_cannot_be_is_refused_by_name() {
     );
     assert_eq!(
         one("ListLeases", Vec::new()),
-        "ListLeases: `js lease list` is a command js writes by hand"
+        "ListLeases: `js lease list` starts with a word js keeps for itself"
+    );
+    assert_eq!(
+        one("ListJoinTokens", Vec::new()),
+        "ListJoinTokens: `js join-token list` starts with a word js keeps for itself"
     );
     let two = set(
         "p",

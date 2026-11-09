@@ -1,18 +1,18 @@
 //! The agent started with `--runtime crun`, over a node made of directories and a stand-in
 //! `crun`: the start check passes on stand-in files, the runtime opened is `CrunRuntime`, and
-//! a job a real lease server queues is created, started, polled and reported through it. The
+//! a job submitted to a real server is created, started, polled and reported through it. The
 //! stand-in is a shell script that holds the container until the test creates a file and then
 //! exits 0, so nothing waits for a clock: the stand-in writes a file when the container is up,
 //! and the test looks for it between heartbeats (a bounded number of them, so a stand-in
 //! that died fails the test at once) and creates the file that lets it end. Whether a real `crun` honours the bundle is the
 //! `crun_runtime` target's.
 //!
-//! The jobs here are queued through the lease API (`/v1/leases`). The path these cases walk
-//! with `--runtime crun` (a job through `crun run`, the default runtime, the host-id and
-//! scratch-root claims while a job runs) is also walked over the v1 job API, with the server's
-//! own binary, in js-lease-server's `v1_acceptance` target, which submits through `js` and
-//! `/v1/jobs`. The rest (the stop grace, the store and quota layouts, the cgroups) is the
-//! agent's own and needs a vehicle of its own once the lease API is gone.
+//! The jobs here are submitted through the v1 job API (`POST /v1/jobs` on `--job-listen`) and
+//! placed by `js-sched`. The path these cases walk with `--runtime crun` (a job through
+//! `crun run`, the default runtime, the host-id and scratch-root claims while a job runs) is
+//! also walked with the server's own binary, in js-lease-server's `v1_acceptance` target,
+//! which submits through `js` and `/v1/jobs`. The rest (the stop grace, the store and quota
+//! layouts, the cgroups) is the agent's own.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -407,12 +407,11 @@ fn the_system_opens_the_crun_runtime_for_crun_settings() {
     assert!(range.contains(SUB) && range.contains(SUB + 65_535) && !range.contains(SUB + 65_536));
 }
 
-/// A server, an agent started with `--runtime crun` over the node, and a lease on its host.
+/// A server and an agent started with `--runtime crun` over the node.
 pub(super) struct Rig {
     server: Server,
     pub(super) agent: Agent,
     worker: Handle,
-    lease: String,
     pub(super) machine: Arc<CrunMachine>,
     flags: Vec<String>,
     address: Arc<Mutex<String>>,
@@ -459,8 +458,7 @@ fn end_leftovers(scratch: &Path) {
 }
 
 impl Rig {
-    /// Starts the server and the agent, waits until the agent has said hello, and takes a
-    /// lease on its host.
+    /// Starts the server and the agent, and waits until the agent has said hello.
     pub(super) fn new(name: &str, extra: &[&str]) -> Self {
         Self::on_pool(name, extra, POOL_RUNS_TOML)
     }
@@ -495,20 +493,10 @@ impl Rig {
             ),
         };
         assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
-        let body = json!({
-            "class": "mac",
-            "resources": { "cpu_millis": 1000, "memory_bytes": 1024 },
-            "capabilities": { "os": "linux" },
-            "max_wall_seconds": 3600,
-        });
-        let granted = server.post_body("/v1/leases", &body);
-        assert_eq!(granted.status, 201, "{}", granted.body);
-        let lease = granted.body["id"].as_str().unwrap().to_owned();
         Self {
             server,
             agent,
             worker,
-            lease,
             machine,
             flags,
             address,
@@ -544,30 +532,27 @@ impl Rig {
         assert!(self.worker.settle());
     }
 
-    /// Queues a run of the node's image; returns its id.
+    /// Submits a job of the node's image; returns its id.
     fn queued(&self) -> String {
-        let queued = self.server.post_body(
-            &format!("/v1/leases/{}/runs", self.lease),
-            &json!({
+        let body = json!({
+            "spec": {
                 "image": format!("registry.example/job:1@{}", digest()),
                 "args": ["true"],
-                "limits": { "cpu_millis": 4000, "memory_bytes": 1048576 },
-            }),
-        );
-        assert_eq!(queued.status, 202, "{}", queued.body);
-        queued.body["run_id"].as_str().unwrap().to_owned()
+                "needs": { "cpuMillis": "4000", "memoryBytes": "1048576" },
+                "wallLimitSeconds": "3600",
+            }
+        });
+        let made = self.server.job_post("/v1/jobs", &body);
+        assert_eq!(made.status, 201, "{}", made.body);
+        made.body["job"]["id"].as_str().unwrap().to_owned()
     }
 
-    /// What the listing says of `run`: its state, and its outcome when it has one.
-    fn view(&self, run: &str) -> (String, Option<String>) {
-        let listing = self.server.get(&format!("/v1/leases/{}/runs", self.lease));
-        let runs = listing["runs"].as_array().unwrap().clone();
-        let entry = runs.iter().find(|entry| entry["run_id"] == run);
-        let entry = entry.unwrap_or_else(|| panic!("{run} is not listed: {runs:?}"));
-        (
-            entry["state"].as_str().unwrap().to_owned(),
-            entry["outcome"].as_str().map(str::to_owned),
-        )
+    /// What the server says of `job`: its state, and its result's reason when it has one.
+    fn view(&self, job: &str) -> (String, Option<String>) {
+        let state = self.server.job_state(job);
+        let result = self.server.job_result(job);
+        let reason = result.body["result"]["reason"].as_str().map(str::to_owned);
+        (state, reason)
     }
 
     /// Beats until `done` holds of what the listing says of `run`. The heartbeats are the
@@ -584,13 +569,13 @@ impl Rig {
         panic!("{run} never got there: {seen:?}");
     }
 
-    /// Beats until the stand-in has said it is up, and the run is listed running.
+    /// Beats until the stand-in has said it is up, and the job reads running.
     fn until_up(&self, run: &str) {
         let ready = node().dir.path().join("ready");
         for _ in 0..100 {
             let said = fs::read_to_string(&ready).unwrap_or_default();
             if said.trim() == "up" {
-                return self.until(run, |seen| seen.0 == "running");
+                return self.until(run, |seen| seen.0 == "JOB_STATE_RUNNING");
             }
             self.beat();
         }
@@ -631,7 +616,10 @@ fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
     rig.until(&run, |seen| seen.1.is_some());
     assert_eq!(
         rig.view(&run),
-        ("exited".to_owned(), Some("succeeded".to_owned()))
+        (
+            "JOB_STATE_SUCCEEDED".to_owned(),
+            Some("RESULT_REASON_EXIT".to_owned())
+        )
     );
 
     let same_id = rig.second(&rig.flags);
@@ -693,7 +681,10 @@ fn the_default_runtime_is_crun() {
     rig.until(&run, |seen| seen.1.is_some());
     assert_eq!(
         rig.view(&run),
-        ("exited".to_owned(), Some("succeeded".to_owned()))
+        (
+            "JOB_STATE_SUCCEEDED".to_owned(),
+            Some("RESULT_REASON_EXIT".to_owned())
+        )
     );
     let ran = rig.agent.stop();
     assert_eq!(ran.status(), code(0), "{}", ran.err);

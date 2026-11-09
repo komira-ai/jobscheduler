@@ -1,5 +1,5 @@
 //! The job service's port (`--job-listen`) over real sockets on 127.0.0.1, port 0: gRPC and
-//! the HTTP/JSON gateway on the one port, the bearer token in front of both, the lease
+//! the HTTP/JSON gateway on the one port, the bearer token in front of both, the client
 //! routes kept apart from it, TLS, and the stop. `GetJob` is served from the server's job
 //! store, and most of these tests ask it for a job that does not exist, which the store
 //! answers `unknown-job`. The fleet calls are served over the server's registry, pool
@@ -35,9 +35,12 @@ use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
 
-use crate::agents_support::{JOIN, hello_body, session, start_agents};
+use crate::agents_support::{JOIN, POOL, hello_body, session, start_agents};
 use crate::config_support::{PoolText, clock, file, kinds, quote, quoted, server};
-use crate::job_listen::job_args;
+use crate::jobs_support::{
+    JobBody, beat_with, cancel, commands, exited, job_agent, job_args, job_server, job_state,
+    one_start, per_job_hello, running, submit_body,
+};
 use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request, unanswered};
 use crate::tls::{connector, test_identity, tls_request};
 
@@ -49,13 +52,6 @@ const WRONG_TOKEN: &str = "wrong-token-0123456789-abcdefghijklmnop";
 
 /// A gateway route of the job service: `GetJob` of `job-1`, which no test submits.
 const GET_JOB: &str = "/v1/jobs/job-1";
-
-/// A server with agent registration on and the job service on a loopback port.
-async fn job_server(name: &str) -> Harness {
-    let scratch = Scratch::new(name);
-    let args = job_args(&scratch, "127.0.0.1:0");
-    Harness::with(scratch, args, None).await
-}
 
 /// A gRPC client of the job service at `addr`, over plain HTTP/2.
 async fn client(addr: SocketAddr) -> JobServiceClient<Channel> {
@@ -130,8 +126,8 @@ async fn get_job(client: &mut JobServiceClient<Channel>, token: Option<&str>) ->
 
 /// Asserts that one address serves both transports: a tonic client's `GetJob` (HTTP/2)
 /// reaches the gRPC service and an HTTP/1.1 `GET /v1/jobs/{id}` reaches the gateway, both
-/// answering `unknown-job` from the server's job store; that the job port is not the lease port and
-/// serves no lease route (`/v1/leases` and `/healthz` are 404 there); and that the lease
+/// answering `unknown-job` from the server's job store; that the job port is not the client port and
+/// serves none of the client port's routes (`/v1/leases` and `/healthz` are 404 there); and that the client
 /// port serves no job route and still serves its own. It catches a listener that routes
 /// one of the two protocols nowhere, or that mixes the two route tables.
 #[tokio::test]
@@ -152,10 +148,10 @@ async fn the_listener_serves_grpc_and_json_on_one_port() {
         let reply = request(job, "GET", path, Some(TOKEN), None).await;
         assert_eq!(reply.status, 404, "{path}");
     }
-    let lease_port = h.call("GET", GET_JOB, None).await;
-    assert_eq!(lease_port.status, 404);
-    assert_ne!(lease_port.body, UNKNOWN_JOB_BODY);
-    assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
+    let client_port = h.call("GET", GET_JOB, None).await;
+    assert_eq!(client_port.status, 404);
+    assert_ne!(client_port.body, UNKNOWN_JOB_BODY);
+    assert_eq!(h.call("GET", "/v1/hosts", None).await.status, 200);
 }
 
 /// Asserts that the token is checked on both protocols through the real listener: with no
@@ -191,8 +187,8 @@ async fn the_listener_enforces_the_token_on_both_protocols() {
 }
 
 /// Asserts that without `--job-listen` the server is as it was: it serves no job port (no
-/// second address is bound), and no job route is on the lease port (404 with the token),
-/// whose own routes answer as before. The lease goldens (`gpu_path_pin`) are this
+/// second address is bound), and no job route is on the client port (404 with the token),
+/// whose own routes answer as before. The route goldens (`gpu_path_pin`) are this
 /// server's byte for byte. It catches the job service mounted, or a port bound, by a
 /// server that was not asked for it.
 #[tokio::test]
@@ -203,7 +199,7 @@ async fn job_listen_off_by_default_leaves_the_server_as_it_was() {
         assert_eq!(h.call("GET", path, None).await.status, 404, "{path}");
     }
     assert_eq!(h.call("POST", "/v1/jobs", None).await.status, 404);
-    assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
+    assert_eq!(h.call("GET", "/v1/hosts", None).await.status, 200);
 }
 
 /// Asserts that the server's stop ends the job port with the others: a keep-alive
@@ -239,12 +235,82 @@ async fn the_listener_stops_with_the_server() {
     assert_eq!(String::from_utf8_lossy(&rest), "");
 }
 
-/// Asserts that with `--tls-cert` and `--tls-key` the job port speaks TLS as the lease
+/// Asserts that a job holds its host until its agent reports it ended: with one host of
+/// 8 cores registered, a job of 6 cores is queued (201) and, after a tick, the agent's
+/// next heartbeat reply carries its one `job_start`; the agent lists it running and the
+/// job reads `JOB_STATE_RUNNING`; a second job of 6 cores is queued and, while the first
+/// runs, a heartbeat carries no command and the second still reads `JOB_STATE_QUEUED`;
+/// once the agent reports the first exited the result is accepted, and after a heartbeat
+/// that no longer lists it and a tick the next heartbeat reply carries the second job's start, while the first reads
+/// `JOB_STATE_SUCCEEDED`. A job that wants a GPU is refused 422 `no-capable-host`, and a whole-host job cancelled
+/// while queued reads `JOB_STATE_CANCELLED`.
+/// It catches a host given to a second job while the first still runs, and one that stays
+/// held after the first job ended.
+#[tokio::test]
+async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
+    let scratch = Scratch::new("job_port_holds_host");
+    let args = job_args(&scratch, "127.0.0.1:0");
+    // A pool of CPU hosts: the scheduler starts no job on a host with GPUs.
+    let pool = POOL.replace("gpus = 1\ngpu_class = \"nvidia-a100\"\n", "");
+    scratch.write("agent-pool.toml", &pool, 0o644);
+    let h = Harness::with(scratch, args, None).await;
+    let mut hello = per_job_hello("host-1");
+    hello["shape"] = json!({ "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 });
+    let agent = job_agent(&h, &hello).await;
+    let wide = |id: &str| JobBody::new(id).needs(6000, 1 << 30).wall(900);
+
+    let first = submit_body(&h, &wide("held-1").json()).await;
+    assert_eq!(first.status, 201, "{}", first.body);
+    assert_eq!(first.json()["job"]["state"], "JOB_STATE_QUEUED");
+    h.ticks.step().await;
+    let (started, allocation) = one_start(&beat_with(&h, &agent, &[]).await);
+    assert_eq!(started, "held-1");
+    let held = beat_with(&h, &agent, &[running("held-1")]).await;
+    assert_eq!(commands(&held), (vec![], vec![]), "{held}");
+    assert_eq!(job_state(&h, "held-1").await, "JOB_STATE_RUNNING");
+
+    let second = submit_body(&h, &wide("held-2").json()).await;
+    assert_eq!(second.status, 201, "{}", second.body);
+    h.ticks.step().await;
+    let busy = beat_with(&h, &agent, &[running("held-1")]).await;
+    assert_eq!(commands(&busy), (vec![], vec![]), "{busy}");
+    assert_eq!(job_state(&h, "held-2").await, "JOB_STATE_QUEUED");
+
+    let ended = beat_with(&h, &agent, &[exited("held-1", &allocation)]).await;
+    assert_eq!(
+        ended["job_acks"],
+        json!([{ "job_id": "held-1", "ack": "ACCEPTED" }]),
+        "{ended}"
+    );
+    // The host is free once a heartbeat no longer lists the first job.
+    let freed = beat_with(&h, &agent, &[]).await;
+    assert_eq!(commands(&freed), (vec![], vec![]), "{freed}");
+    h.ticks.step().await;
+    let (started, _) = one_start(&beat_with(&h, &agent, &[]).await);
+    assert_eq!(started, "held-2");
+    assert_eq!(job_state(&h, "held-1").await, "JOB_STATE_SUCCEEDED");
+
+    let gpu = JobBody::new("held-gpu")
+        .disk(1 << 30)
+        .gpus(1, "nvidia-a100")
+        .constraints(json!({ "isaLevel": "x86-64-v3" }));
+    let refused = submit_body(&h, &gpu.json()).await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert_eq!(refused.json(), json!({ "error": "no-capable-host" }));
+
+    let third = submit_body(&h, &JobBody::new("held-3").whole_host().json()).await;
+    assert_eq!(third.status, 201, "{}", third.body);
+    let cancelled = cancel(&h, "held-3").await;
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+    assert_eq!(job_state(&h, "held-3").await, "JOB_STATE_CANCELLED");
+}
+
+/// Asserts that with `--tls-cert` and `--tls-key` the job port speaks TLS as the client
 /// port does, over the same pair: a client that offers HTTP/2 and HTTP/1.1 settles on
-/// HTTP/2 there (and on HTTP/1.1 on the lease port, which speaks nothing else), gRPC over
+/// HTTP/2 there (and on HTTP/1.1 on the client port, which speaks nothing else), gRPC over
 /// TLS and HTTP/1.1 over TLS both reach the service, a plain request gets no answer, and
 /// after a reload a client that trusts only the renewed certificate is served there too.
-/// It catches a job port served in clear beside a TLS lease port, one that cannot carry
+/// It catches a job port served in clear beside a TLS client port, one that cannot carry
 /// gRPC over TLS, and one that keeps the old pair after a reload.
 #[tokio::test]
 async fn the_job_port_speaks_tls_over_the_reloaded_pair() {

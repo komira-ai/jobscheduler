@@ -1,7 +1,7 @@
 //! The cache of the launching providers' catalogs (`js_lease_server::Catalogs`): when it
 //! fetches, what it keeps when a fetch fails, how a refusal for capacity or quota makes it
 //! fetch again, how an offer cools down, that it never calls the provider with its lock
-//! held, and, through `POST /v1/leases`, that admission reads it and never the provider.
+//! held, and, through `POST /v1/jobs`, that admission reads it and never the provider.
 //! Time is an explicit `Instant` or the harness's manual clock; nothing sleeps.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +27,7 @@ use tokio::sync::Notify;
 
 use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
+use crate::jobs_support::{JobBody, submit_body};
 use crate::support::{Harness, LogCapture, Reply, Scratch};
 
 /// One hour, the default of both `catalog_refresh` and `offer_cooldown`.
@@ -475,7 +476,7 @@ async fn started(name: &str) -> (Harness, Arc<Counting>) {
         .set("join_token_file", &quoted(&joins));
     let head = server(
         &scratch,
-        "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"",
+        "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\njob_listen = \"127.0.0.1:0\"",
     );
     let path = scratch.write("js.toml", &file(&head, &[&pool]), 0o644);
     let kinds = kinds().with("cache-cloud", cache_cloud);
@@ -484,35 +485,38 @@ async fn started(name: &str) -> (Harness, Arc<Counting>) {
     (Harness::over(scratch, config).await, cloud)
 }
 
-/// A request for one `nvidia-a100` of the class `gpu-host`, which only a catalog could
-/// serve.
-fn one_gpu() -> Value {
-    json!({
-        "class": "gpu-host",
-        "resources": { "cpu_millis": 1000, "memory_bytes": 1024, "gpus": 1, "gpu_class": "nvidia-a100" },
-        "max_wall_seconds": 600,
-    })
+/// A job `id` for one `nvidia-a100`, which only a catalog could serve.
+fn one_gpu(id: &str) -> Value {
+    JobBody::new(id)
+        .needs(1000, 1024)
+        .gpus(1, "nvidia-a100")
+        .json()
 }
 
-async fn post(h: &Harness) -> Reply {
-    h.call("POST", "/v1/leases", Some(&one_gpu())).await
+async fn post(h: &Harness, id: &str) -> Reply {
+    submit_body(h, &one_gpu(id)).await
 }
 
-/// Asserts that `reply` is a 409 with the error `code`.
-fn refused(reply: &Reply, code: &str) {
-    assert_eq!(reply.status, 409, "{}", reply.body);
-    assert_eq!(reply.json(), json!({ "error": code }));
+/// Asserts that `reply` queued a job: the catalog may offer a host for it.
+fn admitted(reply: &Reply) {
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(reply.json()["job"]["state"], "JOB_STATE_QUEUED");
+}
+
+/// Asserts that `reply` is a 422 `no-capable-host`.
+fn refused(reply: &Reply) {
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    assert_eq!(reply.json(), json!({ "error": "no-capable-host" }));
 }
 
 /// Asserts, at the level of the cache and then through the route, that a catalog never
 /// fetched, and one whose first fetch failed, read as unread ("may offer"), while one that
-/// was fetched and is empty reads as an empty list. Through `POST /v1/leases`: before any
-/// tick a request only a catalog could serve is admitted (the start answers `no-capacity`)
-/// and the provider is not called; after a tick whose fetch failed it still is, and the
-/// fetch is tried again at the next tick; a tick that fetches an empty list makes the same
-/// request `no-capable-host`; that list is kept until the clock moves past
-/// `catalog_refresh`, after which a tick fetches the new one and the request is admitted
-/// again. Catches an unfetched or failed catalog read as an empty one, which would refuse
+/// was fetched and is empty reads as an empty list. Through `POST /v1/jobs`: before any
+/// tick a job only a catalog could serve is admitted (queued) and the provider is not
+/// called; after a tick whose fetch failed it still is, and the fetch is tried again at the
+/// next tick; a tick that fetches an empty list makes the same job `no-capable-host`; that
+/// list is kept until the clock moves past `catalog_refresh`, after which a tick fetches
+/// the new one and the job is admitted again. Catches an unfetched or failed catalog read as an empty one, which would refuse
 /// work a cloud could serve.
 #[tokio::test]
 async fn a_never_fetched_catalog_is_may_offer() {
@@ -534,23 +538,23 @@ async fn a_never_fetched_catalog_is_may_offer() {
 
     let (h, cloud) = started("cache_never_fetched").await;
     cloud.set(Err("the cloud's API did not answer"));
-    refused(&post(&h).await, "no-capacity");
+    admitted(&post(&h, "never-fetched").await);
     assert_eq!(cloud.calls(), 0);
     h.ticks.step().await;
     assert_eq!(cloud.calls(), 1);
-    refused(&post(&h).await, "no-capacity");
+    admitted(&post(&h, "failed-fetch").await);
     cloud.set(Ok(Vec::new()));
     h.ticks.step().await;
     assert_eq!(cloud.calls(), 2);
-    refused(&post(&h).await, "no-capable-host");
+    refused(&post(&h, "empty-list").await);
     cloud.set(Ok(vec![offer("gpu_1x_a100", Some("zone-a"))]));
     h.ticks.step().await;
     assert_eq!(cloud.calls(), 2);
-    refused(&post(&h).await, "no-capable-host");
+    refused(&post(&h, "kept-list").await);
     h.clock.advance(Duration::from_secs(2 * 3600));
     h.ticks.step().await;
     assert_eq!(cloud.calls(), 3);
-    refused(&post(&h).await, "no-capacity");
+    admitted(&post(&h, "refreshed-list").await);
     assert_eq!(cloud.calls(), 3);
 }
 
@@ -824,8 +828,8 @@ async fn a_second_provider_with_the_same_id_replaces_the_first() {
 }
 
 /// Asserts, through the route, that admission reads the cache: after one tick has fetched
-/// the catalog once, a hundred requests only the catalog could serve are each admitted (the
-/// start answers `no-capacity`) and the provider's call count stays at one. Catches an
+/// the catalog once, a hundred jobs only the catalog could serve are each admitted and the
+/// provider's call count stays at one. Catches an
 /// admission that calls the provider for each request.
 #[tokio::test]
 async fn admission_reads_the_cache_and_never_calls_the_provider() {
@@ -834,8 +838,8 @@ async fn admission_reads_the_cache_and_never_calls_the_provider() {
     assert_eq!(cloud.calls(), 0);
     h.ticks.step().await;
     assert_eq!(cloud.calls(), 1);
-    for _ in 0..100 {
-        refused(&post(&h).await, "no-capacity");
+    for n in 0..100 {
+        admitted(&post(&h, &format!("job-{n}")).await);
     }
     assert_eq!(cloud.calls(), 1);
 }
@@ -844,7 +848,7 @@ async fn admission_reads_the_cache_and_never_calls_the_provider() {
 /// inside the provider's catalog call, a read of the same catalog answers at once (unread,
 /// nothing has come), and once the call is let go the refresh records the catalog and the
 /// view shows it. Catches a refresh that holds the lock across the call, which would stall
-/// admission (under the lease table's lock) for as long as a cloud takes to answer.
+/// admission for as long as a cloud takes to answer.
 #[tokio::test]
 async fn the_provider_is_not_called_while_the_cache_lock_is_held() {
     let gate = Arc::new(Gate {

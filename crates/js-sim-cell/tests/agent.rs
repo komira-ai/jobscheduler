@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use js_agent_wire::{HeldState, RETRY_AFTER_CAP};
 use js_conformance::agent::Defect;
-use js_sim::Sim;
-use js_sim_cell::bus::agent_name;
+use js_sim::{Event, Node, NodeId, NodeInput, Sim};
+use js_sim_cell::bus::{SERVER, agent_name};
 use js_sim_cell::{
-    AgentKind, AgentSpec, Checker, Counter, Invariant, Ledger, Observations, RunId, SIM_RUN_IMAGE,
-    Touched, Verdict,
+    AgentKind, AgentNode, AgentSpec, CallId, Checker, Counter, Invariant, Ledger, Msg,
+    Observations, Route, RunId, SIM_RUN_IMAGE, Touched, Verdict,
 };
-use js_types::sched::FarmTime;
+use js_types::sched::{FarmTime, StateMachine};
 use js_types::{HostId, LeaseId, Resources};
 use serde_json::{Value, json};
 
@@ -69,6 +69,7 @@ fn spec() -> AgentSpec {
         hello_interval: INTERVAL,
         kind: AgentKind::Fake(None),
         instance: None,
+        worker_lag: std::time::Duration::ZERO,
     }
 }
 
@@ -163,7 +164,7 @@ fn a_hello_is_resent_until_welcomed_and_heartbeats_follow_on_the_interval() {
     let (sim, _) = run(spec(), script, 6_500);
     let server = stand_in(&sim);
     assert_eq!(server.hello_times(), [5, 1_005, 2_005]);
-    assert_eq!(server.beat_times(), [3_015, 4_015, 5_015, 6_015]);
+    assert_eq!(server.beat_times(), [3_015, 4_025, 5_035, 6_045]);
     for received in &server.received {
         assert_eq!(received.bearer, JOIN);
     }
@@ -203,7 +204,7 @@ fn a_refused_hello_is_retried_after_the_wait_it_names() {
     let third = second + 10 + cap;
     let server = stand_in(&sim);
     assert_eq!(server.hello_times(), [5, second + 5, third + 5]);
-    assert_eq!(server.beat_times(), [third + 1_015, third + 2_015]);
+    assert_eq!(server.beat_times(), [third + 1_015, third + 2_025]);
 }
 
 /// A refusal other than 429 (here 403 `pool-full`), and a 429 that names no wait, are
@@ -257,7 +258,7 @@ fn an_answer_to_no_open_call_is_ignored() {
     let (sim, _) = run(spec(), script, 2_500);
     let server = stand_in(&sim);
     assert_eq!(server.hello_times(), [5]);
-    assert_eq!(server.beat_times(), [1_015, 2_015]);
+    assert_eq!(server.beat_times(), [1_015, 2_025]);
 }
 
 /// The stand-in answers the second heartbeat 409 `unknown-host`; the first was answered
@@ -272,8 +273,8 @@ fn an_unknown_host_answer_to_a_heartbeat_is_followed_by_a_hello() {
     };
     let (sim, _) = run(spec(), Script::plain().beat(2, refuse), 4_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 2_025]);
-    assert_eq!(server.beat_times(), [1_015, 2_015, 3_035, 4_035]);
+    assert_eq!(server.hello_times(), [5, 2_035]);
+    assert_eq!(server.beat_times(), [1_015, 2_025, 3_045, 4_055]);
     let sessions: Vec<(u64, String)> = server
         .beats()
         .iter()
@@ -327,12 +328,12 @@ fn a_session_mismatch_answer_is_followed_by_a_hello_and_other_refusals_are_not()
         );
     let (sim, _) = run(spec(), script, 5_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 4_025]);
-    assert_eq!(server.beat_times(), [1_015, 2_015, 3_015, 4_015, 5_035]);
+    assert_eq!(server.hello_times(), [5, 4_055]);
+    assert_eq!(server.beat_times(), [1_015, 2_025, 3_035, 4_045, 5_065]);
 }
 
 /// The first reply starts `r1`, which runs 1.5 s and ends at 2 520. Its result is in the
-/// heartbeats of 3 010, 4 010 and 5 010 (the run held as exited and unacknowledged), the
+/// heartbeats of 3 030, 4 040 and 5 050 (the run held as exited and unacknowledged), the
 /// answer to the third acknowledges it `ACCEPTED`, and no later heartbeat carries it. The
 /// ledger shows one launch and one completion, and the ground truth the verdict. Catches a
 /// result dropped before it is acknowledged, or resent after.
@@ -404,12 +405,40 @@ fn a_repeated_start_is_not_launched_twice_by_a_correct_agent_and_is_by_a_defecti
     assert!(ledger_violations(&ledger, 3_500).is_empty());
 
     let (sim, ledger) = run(broken(Defect::StartRunsTwice), script, 3_500);
-    let twice = [("r1".to_owned(), 1_020), ("r1".to_owned(), 2_020)];
+    let twice = [("r1".to_owned(), 1_020), ("r1".to_owned(), 2_030)];
     assert_eq!(launches(&ledger), twice);
     assert_eq!(count(&sim, Counter::StartRepeated), 1);
     assert_eq!(
         ledger_violations(&ledger, 3_500),
         [Invariant::AtMostOneLaunch]
+    );
+}
+
+/// The worker takes 1.5 s to act on a reply. The reply to heartbeat 1 (read at 1 020) starts
+/// `r1` at 2 520; heartbeat 2 left at 2 020 without it, so its reply starts `r1` again, and
+/// the worker, busy until 2 520, acts on that one at 4 020: a repeat, counted and not
+/// launched. Catches a node that acts on a reply the moment it reads it, one that lets the
+/// next reply overtake the one before it, and one that counts the repeat at the wrong time.
+#[test]
+fn a_worker_with_a_lag_acts_on_replies_in_order_after_the_lag() {
+    let mut slow = spec();
+    slow.worker_lag = Duration::from_millis(1_500);
+    let script = Script::plain()
+        .commands(1, json!([start("r1", LONG_RUN_MS, 1, 0)]))
+        .commands(2, json!([start("r1", LONG_RUN_MS, 1, 0)]));
+    let (mut sim, ledger) = cell(slow, script, INTERVAL);
+    sim.run_until(ms(2_400));
+    assert!(launches(&ledger).is_empty());
+    sim.run_until(ms(3_900));
+    assert_eq!(launches(&ledger), [("r1".to_owned(), 2_520)]);
+    assert_eq!(count(&sim, Counter::StartRepeated), 0);
+    sim.run_until(ms(4_100));
+    assert_eq!(launches(&ledger), [("r1".to_owned(), 2_520)]);
+    assert_eq!(count(&sim, Counter::StartRepeated), 1);
+    let beats = stand_in(&sim).beats();
+    assert!(
+        beats[1].1.held.is_empty(),
+        "heartbeat 2 left before the worker acted"
     );
 }
 
@@ -427,12 +456,12 @@ fn a_start_for_a_stopped_run_is_not_launched_by_a_correct_agent_and_is_by_a_defe
     assert_eq!(count(&sim, Counter::StartRepeated), 0);
 
     let (sim, ledger) = run(broken(Defect::ForgetsRetiredIds), script, 3_500);
-    assert_eq!(launches(&ledger), [("r1".to_owned(), 2_020)]);
+    assert_eq!(launches(&ledger), [("r1".to_owned(), 2_030)]);
     assert_eq!(count(&sim, Counter::StartAfterStop), 1);
 }
 
-/// The answer to heartbeat 3 (sent at 3 010) carries two starts valid for 1.5 s: `late`
-/// names heartbeat 1 (sent at 1 010, so it waited 2 010 ms) and `fresh` names heartbeat 3
+/// The answer to heartbeat 3 (sent at 3 030) carries two starts valid for 1.5 s: `late`
+/// names heartbeat 1 (sent at 1 010, so it waited 2 030 ms) and `fresh` names heartbeat 3
 /// (it waited 10 ms). A correct agent drops `late` and counts it; one that runs late
 /// starts launches both. Catches `waited` counted from the heartbeat the reply answers
 /// (then `late` runs) or from the hello (then `fresh` is dropped too).
@@ -446,17 +475,17 @@ fn a_start_that_waited_past_its_validity_is_dropped() {
         ]),
     );
     let (sim, ledger) = run(spec(), script.clone(), 3_500);
-    assert_eq!(launches(&ledger), [("fresh".to_owned(), 3_020)]);
+    assert_eq!(launches(&ledger), [("fresh".to_owned(), 3_040)]);
     assert_eq!(count(&sim, Counter::StartDroppedLate), 1);
 
     let (sim, ledger) = run(broken(Defect::RunsLateStart), script, 3_500);
-    let both = [("late".to_owned(), 3_020), ("fresh".to_owned(), 3_020)];
+    let both = [("late".to_owned(), 3_040), ("fresh".to_owned(), 3_040)];
     assert_eq!(launches(&ledger), both);
     assert_eq!(count(&sim, Counter::StartDroppedLate), 0);
 }
 
 /// A start that names a heartbeat the agent never sent counts its wait from the hello
-/// that opened the session: at 3 020 it waited 3 020 ms, past its 1.5 s. Catches a wait
+/// that opened the session: at 3 040 it waited 3 040 ms, past its 1.5 s. Catches a wait
 /// read as zero for a number the agent cannot place, which would run a stale start.
 #[test]
 fn a_start_naming_a_heartbeat_never_sent_counts_from_the_hello() {
@@ -466,25 +495,27 @@ fn a_start_naming_a_heartbeat_never_sent_counts_from_the_hello() {
     assert_eq!(count(&sim, Counter::StartDroppedLate), 1);
 }
 
-/// `r1` ends at 2 520 while the answers to heartbeats 2 and 3 are cut. When heartbeat 3
-/// is due, heartbeat 2 has had no answer, so the agent is told its connection dropped:
-/// a correct agent still carries the result in heartbeat 3, and one that forgets its
+/// `r1` ends at 2 520 while the answer to heartbeat 2 (sent at 2 020) is cut. The agent has
+/// one call in flight, so it sends nothing until the request limit (10 s) has passed, at
+/// 12 020, and is then told its connection dropped; heartbeat 3 leaves a backoff (1 s)
+/// later. A correct agent still carries the result in heartbeat 3, and one that forgets its
 /// unacknowledged results on a drop does not. Catches a node that never calls
-/// `disconnect`.
+/// `disconnect`, one that sends before the limit, and one that sends after the limit
+/// with no wait.
 #[test]
 fn a_heartbeat_with_no_reply_disconnects_the_agent_and_a_defective_one_forgets_its_result() {
     let script = Script::plain()
         .commands(1, json!([start("r1", SHORT_RUN_MS, 1, 0)]))
-        .beat(2, BeatAnswer::Silent)
-        .beat(3, BeatAnswer::Silent);
-    let (sim, _) = run(spec(), script.clone(), 4_500);
+        .beat(2, BeatAnswer::Silent);
+    let (sim, _) = run(spec(), script.clone(), 13_500);
     let none = runs(&[]);
     let r1 = runs(&["r1"]);
-    let carried = [&none, &none, &r1, &r1].map(Clone::clone);
+    let carried = [&none, &none, &r1].map(Clone::clone);
     assert_eq!(stand_in(&sim).results(), carried);
+    assert_eq!(stand_in(&sim).beat_times(), [1_015, 2_025, 13_025]);
 
-    let (sim, _) = run(broken(Defect::ForgetsUnackedResult), script, 4_500);
-    let carried = [&none, &none, &none, &none].map(Clone::clone);
+    let (sim, _) = run(broken(Defect::ForgetsUnackedResult), script, 13_500);
+    let carried = [&none, &none, &none].map(Clone::clone);
     assert_eq!(stand_in(&sim).results(), carried);
 }
 
@@ -531,22 +562,38 @@ fn answers_that_fail_to_decode_or_carry_bad_parts_are_counted() {
         .commands(4, json!([odd_lease]))
         .commands(5, json!([gpu]));
     let (sim, ledger) = run(no_gpu, script, 5_500);
-    assert_eq!(launches(&ledger), [("r2".to_owned(), 2_020)]);
+    assert_eq!(launches(&ledger), [("r2".to_owned(), 2_030)]);
     assert_eq!(count(&sim, Counter::ReplyInvalid), 4);
 }
 
-/// The answer to heartbeat 2 is held back 2.5 s. Heartbeats 3 and 4 are sent on time
-/// regardless, and the start in the late answer is acted on when it arrives, at 4 520.
-/// Catches an agent that waits for an answer before its next heartbeat, or drops a late
-/// one.
+/// The answer to heartbeat 2 (sent at 2 020) is held back 2.5 s. The agent has one call in
+/// flight: heartbeat 3 leaves an interval after the late answer is read, at 5 530, not
+/// at 3 020, and the start in the answer is acted on when it is read, at 4 530. Catches an
+/// agent that sends a heartbeat while the last has no answer, or drops a late one that
+/// is inside the request limit.
 #[test]
-fn an_agent_beats_on_the_interval_even_when_the_previous_reply_is_late() {
+fn an_agent_sends_no_heartbeat_while_the_last_has_no_answer() {
     let late = json!({ "commands": [start("r1", LONG_RUN_MS, 2, 0)] });
     let script = Script::plain().beat(2, BeatAnswer::Late(HELD_BACK, late));
-    let (sim, ledger) = run(spec(), script, 5_500);
+    let (sim, ledger) = run(spec(), script, 6_000);
     let server = stand_in(&sim);
-    assert_eq!(server.beat_times(), [1_015, 2_015, 3_015, 4_015, 5_015]);
-    assert_eq!(launches(&ledger), [("r1".to_owned(), 4_520)]);
+    assert_eq!(server.beat_times(), [1_015, 2_025, 5_535]);
+    assert_eq!(launches(&ledger), [("r1".to_owned(), 4_530)]);
+}
+
+/// The answer to heartbeat 2 is held back 11 s, past the request limit (10 s): the agent
+/// gave the call up at 12 020, and the answer, which arrives at 13 030, is dropped unread,
+/// so its start launches nothing. Heartbeat 3 leaves at 13 020, a second after the limit,
+/// and heartbeat 4 an interval after its answer. Catches an agent that acts on an answer to a
+/// call it gave up.
+#[test]
+fn an_answer_that_comes_after_the_request_limit_is_dropped() {
+    let late = json!({ "commands": [start("r1", LONG_RUN_MS, 2, 0)] });
+    let script = Script::plain().beat(2, BeatAnswer::Late(Duration::from_secs(11), late));
+    let (sim, ledger) = run(spec(), script, 14_500);
+    let server = stand_in(&sim);
+    assert_eq!(server.beat_times(), [1_015, 2_025, 13_025, 14_035]);
+    assert!(launches(&ledger).is_empty());
 }
 
 /// `a` runs 3 s and `b` runs 1 s, each with its start's resources, in its lease. A
@@ -606,7 +653,7 @@ fn a_stopped_or_cancelled_run_ends_without_a_result() {
 
 /// Two runs launch at 1 020. The process is killed at 2 012 (the answer to heartbeat 2
 /// arrives at 2 020 and is dropped, as is `a`'s end at 3 020), and replaced at 4 500. The
-/// replacement holds nothing, says hello again at the node's next tick (5 010) with
+/// replacement holds nothing, says hello again at the node's next tick (5 020) with
 /// nothing held, is welcomed into a new session and beats with nothing to report, and
 /// `b`'s end timer, armed by the dead process, does nothing. The cell's ledger still
 /// shows both launches. Catches a ledger kept in the agent process, and a replacement
@@ -628,12 +675,12 @@ fn a_killed_agent_loses_its_state_and_a_replacement_registers_empty_and_the_ledg
     sim.run_until(ms(12_000));
 
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 5_015]);
+    assert_eq!(server.hello_times(), [5, 5_025]);
     assert!(server.hellos()[1].held.is_empty());
     let after: Vec<&js_agent_wire::Heartbeat> = server
         .beats()
         .into_iter()
-        .filter(|(at, _)| *at > 5_015)
+        .filter(|(at, _)| *at > 5_025)
         .map(|(_, beat)| beat)
         .collect();
     assert_eq!(after.len(), 6);
@@ -648,6 +695,46 @@ fn a_killed_agent_loses_its_state_and_a_replacement_registers_empty_and_the_ledg
     let both = [("a".to_owned(), 1_020), ("b".to_owned(), 1_020)];
     assert_eq!(launches(&ledger), both);
     assert!(completions(&ledger).is_empty());
+}
+
+/// A call addressed to the agent (only the server takes calls) reaches a live process: the
+/// node ignores it, sending nothing and counting nothing. Catches a node that takes a call
+/// for an answer.
+#[test]
+fn a_call_addressed_to_the_agent_is_ignored() {
+    let mut node = AgentNode::new(spec(), Ledger::new());
+    let call = Msg::Request {
+        id: CallId(0),
+        route: Route::Hello,
+        bearer: JOIN.to_owned(),
+        body: String::new(),
+    };
+    let from = NodeId::new(SERVER);
+    let event = Event::Message { from, msg: call };
+    let input = NodeInput {
+        now: ms(10),
+        entropy: 0,
+        event,
+    };
+    assert!(node.apply(input).is_empty());
+    assert!(node.take_outputs().is_empty());
+    assert_eq!(node.counters().get(Counter::ReplyInvalid), 0);
+}
+
+/// The answer to heartbeat 1 starts `r1`, which the next hello or heartbeat has not yet
+/// listed: from the start until heartbeat 2 leaves (at 2 010) the agent runs a run the
+/// server cannot have seen listed, and after it, which names `r1` held, it does not.
+/// Catches an agent that counts a run listed before it was, or one never listed.
+#[test]
+fn a_started_run_is_unlisted_until_a_heartbeat_lists_it() {
+    let script = Script::plain().commands(1, json!([start("r1", LONG_RUN_MS, 1, 0)]));
+    let (mut sim, _) = cell(spec(), script, INTERVAL);
+    sim.run_until(ms(500));
+    assert!(!agent(&sim).runs_unlisted());
+    sim.run_until(ms(1_500));
+    assert!(agent(&sim).runs_unlisted());
+    sim.run_until(ms(2_500));
+    assert!(!agent(&sim).runs_unlisted());
 }
 
 /// The same script twice gives the same trace hash; the trace names every call and

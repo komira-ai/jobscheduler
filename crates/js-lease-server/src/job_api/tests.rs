@@ -461,7 +461,7 @@ async fn every_unserved_call_answers_unimplemented() {
     assert_eq!(methods, routed());
     let dir = scratch("every_call");
     for jobs in [over_fake(), over_sqlite(&dir)] {
-        let pools = PoolStatus::new(None, None, None, Vec::new(), clock());
+        let pools = PoolStatus::new(None, None, Vec::new(), clock());
         let fleet = fleet::Ctx::served(Arc::new(NoHosts), Arc::new(pools), None);
         let api = Arc::new(JobApi::new(jobs, clock()).with_fleet(fleet));
         let channel = connect(grpc(api.clone(), token())).await;

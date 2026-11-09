@@ -17,22 +17,19 @@ use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, Launch, OwnerOnlyFiles,
     channel_ticker, start_with_checks,
 };
-use js_provider::StartSpec;
 use js_provider_lambdalabs::{
     Architecture, ElasticConfig, FakeLambda, InstanceTypeOffer, LambdaProvider, ManualClock,
     OptionTable, Region,
 };
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Cond, Store, SystemClock, Txn};
-use js_types::{
-    Capabilities, ClassId, ExecMode, LeaseId, Model, Request, RequestId, ResourceClass, Resources,
-};
+use js_types::{ExecMode, Model};
 use serde_json::{Value, json};
 
 use crate::agents_support::{Session, hello_body, session};
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
 use crate::store_support::sqlite_db;
-use crate::support::{Harness, Kept, Reply, Scratch, request};
+use crate::support::{Harness, Kept, Reply, Scratch, TOKEN, request};
 
 /// The key of the scaler's records in the state store.
 pub const RECORDS_KEY: &str = "acquires/scaler/records";
@@ -502,6 +499,7 @@ pub fn text_with(scratch: &Scratch, launch: &str, boot: &str, more: &[(&str, &st
         };
     }
     let extra = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\n\
+                 job_listen = \"127.0.0.1:0\"\n\
                  advertise_url = \"https://sched.example.org:7301\"";
     let head = server(scratch, extra).replace("\"initialise\"", &quote(boot));
     file(&head, &[&pool])
@@ -537,23 +535,28 @@ pub async fn start_refused(scratch: &Scratch, text: &str) -> String {
     refused.err().unwrap().to_string()
 }
 
-/// The start of a whole-node request `id` for one a100, under the lease `lease`.
-pub fn spec(lease: u64, id: &str) -> StartSpec {
-    let request = Request {
-        class: ClassId::new("whole-node").unwrap(),
-        resources: Resources::new(1000, 1024, 1, Some("nvidia-a100".to_owned())).unwrap(),
-        capabilities: Capabilities::new(),
-        max_wall: Duration::from_secs(7200),
-        labels: BTreeMap::new(),
-        validation_run: None,
-        probe_host: None,
-    };
-    let spec = StartSpec::new(
-        LeaseId::new(1, lease),
-        request,
-        &[ResourceClass::whole_node()],
-    );
-    spec.unwrap().with_request_id(RequestId::new(id).unwrap())
+/// `SubmitJob` of the job `id` through the job port of `h`: one core and 1 GiB for ten
+/// minutes. A job no host serves waits queued, and a pool that can launch for it does.
+pub async fn submit(h: &Harness, id: &str) -> Reply {
+    let body = json!({
+        "spec": {
+            "jobId": id,
+            "image": format!("team/app@sha256:{}", "a".repeat(64)),
+            "command": "run",
+            "needs": { "cpuMillis": "1000", "memoryBytes": "1073741824" },
+            "wallLimitSeconds": "600",
+        }
+    });
+    let job = h.running.job_addr().unwrap();
+    let body = body.to_string().into_bytes();
+    request(job, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await
+}
+
+/// `CancelJob` of the job `id` through the job port of `h`.
+pub async fn cancel(h: &Harness, id: &str) -> Reply {
+    let job = h.running.job_addr().unwrap();
+    let path = format!("/v1/jobs/{id}:cancel");
+    request(job, "POST", &path, Some(TOKEN), Some(b"{}")).await
 }
 
 /// The join token the user data of a launch writes for the agent.
@@ -590,6 +593,12 @@ pub fn hello_body_of(name: &str) -> Value {
     // The class the agent of a `gpu_1x_a100` machine reads from `nvidia-smi`: the 40 GB
     // PCIe variant the provider's catalog table offers for that type.
     body["shape"]["gpu_class"] = json!("nvidia-a100-pcie-40gb");
+    // These tests are about the machine's life, and the job queued for it is the demand that
+    // launched it: a host that names no `arch` is one the scheduler places no job on, so the
+    // job stays queued and the host's only holder is the test's own doing.
+    if let Some(capabilities) = body["capabilities"].as_object_mut() {
+        capabilities.remove("arch");
+    }
     body
 }
 

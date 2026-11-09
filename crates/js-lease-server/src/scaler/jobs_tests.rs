@@ -463,9 +463,9 @@ fn a_reservation_is_let_go_when_its_machine_cannot_take_the_job() {
 
 /// Asserts what a step hands the placement pass ([`pass_two`]): each refusal for a request
 /// that names a job, then each launch for one, charged to that job; a refusal recorded with
-/// no request, and a refusal or launch for a request that names no job (a lease request's),
-/// are left out. It catches an outcome charged to the wrong job, one handed for a lease
-/// request, and launches handed before the refusals that came first.
+/// no request, and a refusal or launch for a request that names no waiting job,
+/// are left out. It catches an outcome charged to the wrong job, one handed for a request
+/// that names no waiting job, and launches handed before the refusals that came first.
 #[test]
 fn pass_two_charges_each_refusal_and_launch_to_its_job() {
     use js_sched::failover::Refused;

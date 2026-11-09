@@ -155,10 +155,9 @@
 //! ([`LeaseTable::request_ids`] lists the leases kept with an id, for a caller that binds
 //! them sooner). A row that is not a valid request (an id, class, host or resources the
 //! types refuse, or a request [`js_types::Request::validate`] refuses) is an
-//! [`OpenError::Corrupt`]. [`LeaseTable::release_then`] and [`LeaseTable::tick_then`] write
-//! the leases a release or a tick changed and the reservation ledger the provider's calls
-//! left in one replace, for a caller whose provider keeps its waiting requests in that
-//! ledger. The row is additive: a file without it loads as before, a build
+//! [`OpenError::Corrupt`]. [`LeaseTable::tick_then`] writes
+//! the leases a tick changed and the reservation ledger the provider's calls left in one
+//! replace, for a caller whose provider keeps its waiting requests in that ledger. The row is additive: a file without it loads as before, a build
 //! that predates it keeps it on rewrite and serves the lease as one acquired without an id,
 //! and a file with no lease acquired under an id is written byte for byte as before.
 //!

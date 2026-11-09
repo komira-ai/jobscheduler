@@ -41,6 +41,7 @@ fn spec(kind: AgentKind, per_job: Option<&str>) -> AgentSpec {
         hello_interval: Duration::from_secs(1),
         kind,
         instance: None,
+        worker_lag: std::time::Duration::ZERO,
     }
 }
 
@@ -221,16 +222,19 @@ fn run_out_job(agent: &mut PerJob, io: &mut Io, job: &str) -> bool {
 }
 
 /// Asserts that a stop of a job the agent never held retires its id: listed in
-/// `retired_jobs`, not in `jobs`, and a later start of it is refused, counted as a start
+/// `retired_jobs`, not in `jobs`, and counted once as a stop before the start (a second
+/// stop of it is not counted again), and a later start of it is refused, counted as a start
 /// after a stop, and written into the ledger as refused (a start it took is not). Catches
 /// an agent that ignores a stop of a job it does not hold (the server would never free the
-/// allocation), one that runs a start after the stop, and a refused start taken by the
-/// invariants for one the agent acted on.
+/// allocation), one that runs a start after the stop, a refused start taken by the
+/// invariants for one the agent acted on, and a stop before the start that goes uncounted
+/// or is counted for each repeat.
 #[test]
 fn a_jobstop_for_an_unknown_job_retires_its_id() {
     let mut agent = agent(None);
     let mut io = fresh_io();
     answer(&mut agent, &mut io, vec![stop(JOB)], &[], &[]);
+    assert_eq!(io.counters.get(Counter::StopBeforeStart), 1);
     let (held, retired) = beat(&mut agent, &mut io);
     assert!(held.is_empty());
     assert_eq!(retired, [JOB]);
@@ -243,6 +247,8 @@ fn a_jobstop_for_an_unknown_job_retires_its_id() {
     answer(&mut agent, &mut io, vec![start(OTHER)], &[], &[]);
     let replies = io.ledger.jobs_after([0; 3]).1;
     assert!(!replies[2].starts[0].refused);
+    answer(&mut agent, &mut io, vec![stop(JOB)], &[], &[]);
+    assert_eq!(io.counters.get(Counter::StopBeforeStart), 1);
 }
 
 /// Asserts that a result is listed with every heartbeat, `exited_unacked` and `succeeded`,
@@ -322,8 +328,10 @@ fn a_retired_id_is_listed_until_acked() {
 /// code, made once in the ledger, and that a stop of that job again, while its result is
 /// not yet acknowledged, keeps the result rather than retiring the id; that a job whose
 /// command is not a duration runs until stopped; and that the end timer of a job a stop
-/// ended makes no second result. Catches an agent that drops a stopped job silently (the
-/// server would wait for its result), and one that reports it succeeded.
+/// ended makes no second result; and that no such stop counts as a stop before the start.
+/// Catches an agent that drops a stopped job silently (the server would wait for its
+/// result), one that reports it succeeded, and one that counts a stop of a job it was
+/// handed a start of as a cancel that beat the start.
 #[test]
 fn a_stop_of_a_running_job_ends_it_killed_and_its_result_rides_on() {
     let mut agent = agent(None);
@@ -363,6 +371,7 @@ fn a_stop_of_a_running_job_ends_it_killed_and_its_result_rides_on() {
     let made = io.ledger.jobs_after([0; 3]).2;
     let jobs: Vec<JobId> = made.into_iter().map(|made| made.job).collect();
     assert_eq!(jobs, [job(JOB), job(OTHER)]);
+    assert_eq!(io.counters.get(Counter::StopBeforeStart), 0);
 }
 
 /// Asserts that a start naming no valid job id or no valid allocation id, and a stop

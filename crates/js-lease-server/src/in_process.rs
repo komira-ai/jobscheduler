@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use js_jobs::JobStore;
-use js_lease::{Clock, Timings};
+use js_lease::Clock;
 use js_registry::Registry;
 use js_state::Store;
 use tokio::sync::Mutex;
@@ -104,9 +104,9 @@ impl InProcess {
         })
     }
 
-    /// The client, operator and run routes, behind the bearer token, with `/healthz` and the
-    /// status routes open, as the listen address serves them when the agent routes have a
-    /// port of their own. The agent routes answer 404 here; they are
+    /// The host listing, join, brake and usage routes, behind the bearer token, with
+    /// `/healthz` and the status routes open, as the listen address serves them when the
+    /// agent routes have a port of their own. The agent routes answer 404 here; they are
     /// [`InProcess::agent_router`]'s.
     pub fn client_router(&self) -> Router {
         router(self.shared.clone(), false)
@@ -164,18 +164,6 @@ impl InProcess {
     /// [`crate::Running::scaler`].
     pub fn scaler(&self) -> Option<&Scaler> {
         self.scaler.as_ref()
-    }
-
-    /// How long the lease table's steps took since the server started, on the
-    /// configuration's monotonic clock. As [`crate::Running::timings`].
-    pub fn timings(&self) -> Timings {
-        self.shared.timings()
-    }
-
-    /// How many ticks failed to write the lease file since the server started. As
-    /// [`crate::Running::save_errors`].
-    pub fn save_errors(&self) -> u64 {
-        self.shared.save_errors()
     }
 
     /// How many times the agent side could not read or write one of its files since the

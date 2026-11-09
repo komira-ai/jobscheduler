@@ -101,8 +101,7 @@ Two rules join pass 1 and pass 2:
 - **Pass 2 hands its outcomes to pass 1 and writes nothing.** The scaler runs on its own task. After each step it maps each
   refusal (`Refused::request`, new) and each launch to the job of its request, and hands them to the placer
   (`SchedPlacer::note_outcomes`). The next placement pass takes them in queue order before its own outcome for the job. So no
-  second writer ever races the placement commit for a job's row. A job whose request id also names a lease request has no pass-2
-  outcome, because the scaler does not map such a request to a job.
+  second writer ever races the placement commit for a job's row.
 
 Within one pass the outcomes are decided in order, each against the code the ones before it left
 (`js_sched::queue_status::notes`): what pass 2 told since the last pass, in the order it came, then the pass's own outcome.

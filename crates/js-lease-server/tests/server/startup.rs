@@ -71,7 +71,7 @@ async fn token_file_trailing_newline_is_trimmed() {
     let with_newline = scratch.write("nl", &format!("{TOKEN}\n"), 0o600);
     let args = replace(args, "--token-file", with_newline);
     let h = Harness::with(scratch, args, None).await;
-    let reply = request(h.addr(), "GET", "/v1/leases", Some(TOKEN), None).await;
+    let reply = request(h.addr(), "GET", "/v1/hosts", Some(TOKEN), None).await;
     assert_eq!(reply.status, 200);
 }
 
@@ -145,28 +145,33 @@ fn durations_parse_and_the_tick_flag_takes_them() {
     assert_eq!(config(ok).unwrap().tick_period().as_secs(), 250);
 }
 
-/// Asserts that the removed ttl options are startup errors with a message that says a lease
-/// has no time to live: `--default-ttl 60s` and `--max-ttl 1h` each fail in `config(args)`
-/// naming their own flag (the server would exit non-zero without binding), and the file
-/// keys `server.default_ttl` and `server.max_ttl` are refused, not as unknown keys and not
-/// ignored, with the whole message asserted by equality. It catches a removed flag that
-/// is accepted and ignored (an operator would think a ttl is set), and a removed key told
-/// as merely unknown.
+/// Asserts that `--default-ttl 60s` and `--max-ttl 1h`, the flags of the lease's removed time
+/// to live, are refused as any unknown flag is: the program exits with status 2 (that of
+/// `--no-such-flag`), says on stderr that the flag is an unexpected argument and names it,
+/// prints nothing on stdout, and never starts (the state file is not made). The file keys
+/// `server.default_ttl` and `server.max_ttl` are refused as unknown keys, naming the key,
+/// with a list of known keys that holds neither. Catches a removed flag that is still
+/// accepted, or refused with a message of its own.
 #[test]
-fn the_removed_ttl_flags_are_refused_with_a_message() {
-    let scratch = Scratch::new("removed_ttl_flags");
+fn a_server_given_a_removed_lease_flag_refuses_to_start() {
+    let scratch = Scratch::new("removed_lease_flags");
+    let (unknown, _, said) = run_captured(args_with(&scratch, &["--no-such-flag"]));
+    assert!(unknown == ExitCode::from(2));
+    assert!(
+        said.contains("unexpected argument '--no-such-flag'"),
+        "{said}"
+    );
     for (flag, value) in [("--default-ttl", "60s"), ("--max-ttl", "1h")] {
-        let refused = config(args_with(&scratch, &[flag, value]))
-            .err()
-            .expect("a removed flag should be refused");
-        assert_eq!(refused.flag(), flag);
-        assert_eq!(
-            refused.to_string(),
-            format!(
-                "{flag}: was removed: a lease has no time to live (it ends when released or at \
-                 its maximum wall time); remove the flag"
-            )
+        let scratch = Scratch::new(&format!("removed_flag{flag}"));
+        let (code, out, err) = run_captured(args_with(&scratch, &[flag, value]));
+        assert!(code == unknown, "{flag}");
+        assert!(out.is_empty(), "{flag}: {out}");
+        assert!(
+            err.contains(&format!("unexpected argument '{flag}'")),
+            "{flag}: {err}"
         );
+        assert!(!err.contains("was removed"), "{flag}: {err}");
+        assert!(!scratch.state().exists(), "{flag} started the server");
     }
 
     for key in ["default_ttl", "max_ttl"] {
@@ -174,12 +179,10 @@ fn the_removed_ttl_flags_are_refused_with_a_message() {
         let pool = PoolText::static_pool(&scratch, "hosts");
         let extra = format!("{key} = \"5m\"");
         let text = file(&server(&scratch, &extra), &[&pool]);
-        assert_eq!(
-            refusal(&scratch, &text),
-            format!(
-                "server.{key}: was removed: a lease has no time to live (it ends when released or at its maximum wall time); remove the key"
-            )
-        );
+        let said = refusal(&scratch, &text);
+        let head = format!("server.{key}: unknown field; known: ");
+        assert!(said.starts_with(&head), "{said}");
+        assert!(!said[head.len()..].contains("ttl"), "{said}");
     }
 }
 
@@ -476,7 +479,7 @@ async fn a_server_on_a_listener_the_caller_bound_leaves_the_port_with_the_caller
     let addr = listener.local_addr().unwrap();
     let h = Harness::over(scratch, config.with_listener(listener)).await;
     assert_eq!(h.addr(), addr);
-    assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
+    assert_eq!(h.call("GET", "/v1/hosts", None).await.status, 200);
     // The flag is shared with the clone: with nothing waiting, an accept returns at once.
     assert_eq!(
         kept.accept().unwrap_err().kind(),
