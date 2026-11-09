@@ -1,0 +1,335 @@
+{
+  "flow": [
+    {
+      "agent": {
+        "body": {
+          "accepts_host_credential": true,
+          "agent_version": "0.1.0",
+          "capabilities": {
+            "arch": "x86_64",
+            "egress": "none",
+            "exec": "container",
+            "os": "linux",
+            "per-job": "true",
+            "runtime": "container",
+            "start-fence": "true"
+          },
+          "gpu_devices": [
+            {
+              "index": 0,
+              "memory_bytes": 85899345920,
+              "model": "NVIDIA A100-SXM4-80GB",
+              "uuid": "GPU-3f1c9a52-0b7e-4d0a-9a55-6f1d2c8b7e01"
+            },
+            {
+              "index": 1,
+              "memory_bytes": 85899345920,
+              "model": "NVIDIA A100-SXM4-80GB",
+              "uuid": "GPU-77a0c2d4-5e19-4b3f-8c66-0d9e1f2a3b02"
+            }
+          ],
+          "held": [],
+          "host_id": "h1",
+          "labels": {},
+          "phase": "serving",
+          "pool": "macs",
+          "protocol": {
+            "max": 1,
+            "min": 1
+          },
+          "shape": {
+            "accelerator": {
+              "count": 2,
+              "memory_per_device_bytes": 85899345920,
+              "model": "nvidia-a100",
+              "variant_spelling": "nvidia-a100-sxm4-80gb",
+              "vendor": "nvidia"
+            },
+            "cpu_millis": 8000,
+            "gpu_class": "nvidia-a100-sxm4-80gb",
+            "gpus": 2,
+            "memory_bytes": 34359738368
+          }
+        },
+        "path": "/v1/agent/hello"
+      },
+      "server": {
+        "body": {
+          "epoch": 1,
+          "grace_ms": 15000,
+          "heartbeat_interval_ms": 5000,
+          "pool": "macs",
+          "protocol": 1,
+          "session": "previous-release-session"
+        },
+        "status": 200
+      }
+    },
+    {
+      "submitted": "4898f4729d4e57ba746279b9cee92dd5"
+    },
+    {
+      "agent": {
+        "body": {
+          "epoch": 1,
+          "held": [],
+          "host_id": "h1",
+          "phase": "serving",
+          "results": [],
+          "session": "previous-release-session"
+        },
+        "path": "/v1/agent/heartbeat"
+      },
+      "server": {
+        "body": {
+          "commands": [],
+          "result_acks": [],
+          "taint_ack": false
+        },
+        "status": 200
+      }
+    },
+    {
+      "agent": {
+        "body": {
+          "epoch": 1,
+          "held": [],
+          "host_id": "h1",
+          "phase": "serving",
+          "results": [],
+          "session": "previous-release-session"
+        },
+        "path": "/v1/agent/heartbeat"
+      },
+      "server": {
+        "body": {
+          "commands": [
+            {
+              "allocation_id": "f1e1ec5c5118909fc0a28e6bfaa7ce9d",
+              "booked": {
+                "cpu_millis": 2000,
+                "memory_bytes": 1048576
+              },
+              "command": [
+                "true"
+              ],
+              "image": "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+              "job_id": "4898f4729d4e57ba746279b9cee92dd5",
+              "type": "job_start",
+              "wall_ms": 3600000
+            }
+          ],
+          "result_acks": [],
+          "taint_ack": false
+        },
+        "status": 200
+      }
+    },
+    {
+      "agent": {
+        "body": {
+          "epoch": 1,
+          "held": [],
+          "host_id": "h1",
+          "jobs": [
+            {
+              "job_id": "4898f4729d4e57ba746279b9cee92dd5",
+              "state": "running"
+            }
+          ],
+          "phase": "serving",
+          "results": [],
+          "session": "previous-release-session"
+        },
+        "path": "/v1/agent/heartbeat"
+      },
+      "server": {
+        "body": {
+          "commands": [],
+          "result_acks": [],
+          "taint_ack": false
+        },
+        "status": 200
+      }
+    },
+    {
+      "cancelled": "4898f4729d4e57ba746279b9cee92dd5"
+    },
+    {
+      "agent": {
+        "body": {
+          "epoch": 1,
+          "held": [],
+          "host_id": "h1",
+          "jobs": [
+            {
+              "job_id": "4898f4729d4e57ba746279b9cee92dd5",
+              "state": "running"
+            }
+          ],
+          "phase": "serving",
+          "results": [],
+          "session": "previous-release-session"
+        },
+        "path": "/v1/agent/heartbeat"
+      },
+      "server": {
+        "body": {
+          "commands": [
+            {
+              "job_id": "4898f4729d4e57ba746279b9cee92dd5",
+              "type": "job_stop"
+            }
+          ],
+          "result_acks": [],
+          "taint_ack": false
+        },
+        "status": 200
+      }
+    },
+    {
+      "agent": {
+        "body": {
+          "epoch": 1,
+          "held": [],
+          "host_id": "h1",
+          "jobs": [
+            {
+              "job_id": "4898f4729d4e57ba746279b9cee92dd5",
+              "result": {
+                "allocation_id": "f1e1ec5c5118909fc0a28e6bfaa7ce9d",
+                "job_id": "4898f4729d4e57ba746279b9cee92dd5",
+                "outcome": "killed"
+              },
+              "state": "exited_unacked"
+            }
+          ],
+          "phase": "serving",
+          "results": [],
+          "session": "previous-release-session"
+        },
+        "path": "/v1/agent/heartbeat"
+      },
+      "server": {
+        "body": {
+          "commands": [],
+          "job_acks": [
+            {
+              "ack": "ACCEPTED",
+              "job_id": "4898f4729d4e57ba746279b9cee92dd5"
+            }
+          ],
+          "result_acks": [],
+          "taint_ack": false
+        },
+        "status": 200
+      }
+    },
+    {
+      "agent": {
+        "body": {
+          "epoch": 1,
+          "held": [],
+          "host_id": "h1",
+          "phase": "serving",
+          "results": [],
+          "session": "previous-release-session"
+        },
+        "path": "/v1/agent/heartbeat"
+      },
+      "server": {
+        "body": {
+          "commands": [],
+          "result_acks": [],
+          "taint_ack": false
+        },
+        "status": 200
+      }
+    },
+    {
+      "agent": {
+        "body": {
+          "epoch": 1,
+          "held": [],
+          "host_id": "h1",
+          "phase": "draining",
+          "results": [],
+          "session": "previous-release-session"
+        },
+        "path": "/v1/agent/heartbeat"
+      },
+      "server": {
+        "body": {
+          "commands": [],
+          "result_acks": [],
+          "taint_ack": false
+        },
+        "status": 200
+      }
+    }
+  ],
+  "refusal": {
+    "agent": {
+      "body": {
+        "accepts_host_credential": true,
+        "agent_version": "0.1.0",
+        "capabilities": {
+          "arch": "x86_64",
+          "egress": "none",
+          "exec": "container",
+          "os": "linux",
+          "per-job": "true",
+          "runtime": "container",
+          "start-fence": "true"
+        },
+        "gpu_devices": [
+          {
+            "index": 0,
+            "memory_bytes": 85899345920,
+            "model": "NVIDIA A100-SXM4-80GB",
+            "uuid": "GPU-3f1c9a52-0b7e-4d0a-9a55-6f1d2c8b7e01"
+          },
+          {
+            "index": 1,
+            "memory_bytes": 85899345920,
+            "model": "NVIDIA A100-SXM4-80GB",
+            "uuid": "GPU-77a0c2d4-5e19-4b3f-8c66-0d9e1f2a3b02"
+          }
+        ],
+        "held": [],
+        "host_id": "h1",
+        "labels": {},
+        "phase": "serving",
+        "pool": "macs",
+        "protocol": {
+          "max": 3,
+          "min": 2
+        },
+        "shape": {
+          "accelerator": {
+            "count": 2,
+            "memory_per_device_bytes": 85899345920,
+            "model": "nvidia-a100",
+            "variant_spelling": "nvidia-a100-sxm4-80gb",
+            "vendor": "nvidia"
+          },
+          "cpu_millis": 8000,
+          "gpu_class": "nvidia-a100-sxm4-80gb",
+          "gpus": 2,
+          "memory_bytes": 34359738368
+        }
+      },
+      "path": "/v1/agent/hello"
+    },
+    "server": {
+      "body": {
+        "error": "unsupported-protocol",
+        "supported": {
+          "max": 1,
+          "min": 1
+        }
+      },
+      "status": 400
+    }
+  }
+}
