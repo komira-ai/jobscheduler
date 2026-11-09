@@ -287,16 +287,13 @@ mod tests {
     /// With a line too short to name a uid, which no lookup may stop at.
     const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\n+short:x\nagent:x:990:990::/var/lib/agent:/usr/sbin/nologin\n";
 
-    /// One test's files, beside the test binary.
-    fn files(name: &str, subuid: Option<&str>, subgid: Option<&str>) -> IdFiles {
-        let exe = std::env::current_exe().expect("test binary");
-        let dir = exe
-            .parent()
-            .expect("deps directory")
-            .join("container-driver-unit")
-            .join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
+    /// One test's files, in a scratch directory the returned guard removes when dropped.
+    fn files(
+        name: &str,
+        subuid: Option<&str>,
+        subgid: Option<&str>,
+    ) -> (crate::test_dir::TestDir, IdFiles) {
+        let dir = crate::unit_dir(name);
         let files = IdFiles {
             passwd: dir.join("passwd"),
             subuid: dir.join("subuid"),
@@ -308,7 +305,7 @@ mod tests {
                 std::fs::write(path, text).expect("write");
             }
         }
-        files
+        (dir, files)
     }
 
     /// Catches a user with a full range, by name or by number, or in two halves,
@@ -323,7 +320,7 @@ mod tests {
                 "other:1:5\nagent:100000:32768\n990:200000:32768\n",
             ),
         ] {
-            let files = files(name, Some(text), Some(text));
+            let (_dir, files) = files(name, Some(text), Some(text));
             check_subordinate_ids(&files, 990).expect(name);
         }
     }
@@ -339,7 +336,7 @@ mod tests {
             ("no-subuid", Some(other), Some(full), "subuid"),
             ("no-subgid", Some(full), None, "subgid"),
         ] {
-            let files = files(name, subuid, subgid);
+            let (_dir, files) = files(name, subuid, subgid);
             let error = check_subordinate_ids(&files, 990).expect_err(name);
             let text = error.to_string();
             assert!(
@@ -355,7 +352,7 @@ mod tests {
             assert!(text.contains("map only to subordinate ids"), "{text}");
             assert!(text.contains("usermod --add-subuids"), "{text}");
         }
-        let files = files("unknown-user", Some(full), Some(full));
+        let (_dir, files) = files("unknown-user", Some(full), Some(full));
         let error = check_subordinate_ids(&files, 4242).expect_err("not agent");
         assert!(error.to_string().contains(" uid 4242:"), "{error}");
     }
@@ -373,14 +370,14 @@ mod tests {
                 60000,
             ),
         ] {
-            let files = files(name, Some(text), Some(text));
+            let (_dir, files) = files(name, Some(text), Some(text));
             let error = check_subordinate_ids(&files, 990).expect_err(name);
             // Only `TooFew` says "subordinate ids;", after the count.
             let says = format!("(uid 990) {count} subordinate ids;");
             assert!(error.to_string().contains(&says), "{name}: {error}");
         }
         let huge = format!("agent:1:{max}\n990:0:2\n", max = u64::MAX);
-        let files = files("huge", Some(&huge), Some(&huge));
+        let (_dir, files) = files("huge", Some(&huge), Some(&huge));
         check_subordinate_ids(&files, 990).expect("saturates");
     }
 
@@ -402,7 +399,7 @@ mod tests {
     #[test]
     fn a_short_or_malformed_range_is_refused() {
         let short = "agent:100000:65535\nagent:x:9\nagent:1:2:3\nagent:1:many\nagent\n";
-        let files = files("short", Some(short), Some(short));
+        let (_dir, files) = files("short", Some(short), Some(short));
         let error = check_subordinate_ids(&files, 990).expect_err("short");
         assert!(
             matches!(error, SubidError::TooFew { count: 65535, .. }),
@@ -418,13 +415,13 @@ mod tests {
     /// (or passing): the error names the file.
     #[test]
     fn an_unreadable_file_names_itself() {
-        let mut no_passwd = files("unreadable", Some(""), Some(""));
+        let (_dir, mut no_passwd) = files("unreadable", Some(""), Some(""));
         no_passwd.passwd = no_passwd.passwd.with_file_name("absent");
         let error = check_subordinate_ids(&no_passwd, 990).expect_err("no passwd");
         assert!(matches!(error, SubidError::Read { .. }), "{error}");
         assert!(error.to_string().contains("absent"), "{error}");
 
-        let mut files = files("unreadable-subuid", Some(""), Some(""));
+        let (_dir, mut files) = files("unreadable-subuid", Some(""), Some(""));
         files.subuid = files.subuid.parent().expect("dir").to_owned();
         let error = check_subordinate_ids(&files, 990).expect_err("a directory");
         assert!(matches!(error, SubidError::Read { .. }), "{error}");
@@ -469,7 +466,7 @@ mod tests {
     fn a_users_ids_are_the_first_of_one_big_range_in_each_file() {
         let uid_text = "agent:100000:65536\n";
         let gid_text = "agent:200000:70000\n";
-        let ids_files = files("ids", Some(uid_text), Some(gid_text));
+        let (_dir, ids_files) = files("ids", Some(uid_text), Some(gid_text));
         let ids = user_ids(&ids_files, 990, 991).expect("ids");
         assert_eq!(
             ids,
@@ -481,13 +478,13 @@ mod tests {
             }
         );
         let split = "agent:100000:40000\nagent:200000:40000\n";
-        let split_files = files("split", Some(split), Some(gid_text));
+        let (_dir, split_files) = files("split", Some(split), Some(gid_text));
         let refused = user_ids(&split_files, 990, 991).expect_err("split");
         assert!(refused.to_string().contains("no single range"), "{refused}");
         assert!(refused.to_string().contains("subuid"), "{refused}");
         // A user the passwd file does not know is named by number.
         let numeric = "4242:100000:40000\n4242:200000:40000\n";
-        let numeric_files = files("split-numeric", Some(numeric), Some(numeric));
+        let (_dir, numeric_files) = files("split-numeric", Some(numeric), Some(numeric));
         let refused = user_ids(&numeric_files, 4242, 4242).expect_err("split");
         assert!(refused.to_string().contains("user uid 4242"), "{refused}");
         assert!(daemon_ids(&IdFiles::in_dir(Path::new("/nonexistent-ids"))).is_err());
@@ -500,7 +497,7 @@ mod tests {
     #[test]
     fn root_is_refused_as_the_user_whatever_the_files_hold() {
         let text = "root:100000:65536\n0:100000:65536\nagent:300000:65536\n";
-        let with_root = files("root-range", Some(text), Some(text));
+        let (_dir, with_root) = files("root-range", Some(text), Some(text));
         for (uid, gid) in [(0, 0), (990, 0), (0, 990)] {
             let refused = user_ids(&with_root, uid, gid).expect_err("root refused");
             assert_eq!(

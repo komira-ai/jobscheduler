@@ -9,14 +9,35 @@ use clap::Parser as _;
 use common::{arm_runs, rec};
 use js_analysis::{Cli, Error, run};
 
-/// A path under the test scratch directory.
-fn scratch(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
+/// A scratch directory of one test, `<CARGO_TARGET_TMPDIR>/cli_<test>-<pid>`, removed with
+/// everything in it when dropped, so tests running in other processes never share it.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    /// Makes the directory of the test called `test`.
+    fn new(test: &str) -> Self {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("cli_{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    /// A path in the directory; the empty name is the directory itself.
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Writes a run file of three arms at one setting, with a warm-up and a missing value, and
 /// returns its path.
-fn write_runs(name: &str) -> PathBuf {
+fn write_runs(scratch: &Scratch, name: &str) -> PathBuf {
     let mut records = vec![rec("0.5", "base", 7, "warmup", &[("m", Some(99.0))])];
     records.extend(arm_runs("0.5", "base", &[9.0, 10.0, 11.0]));
     records.extend(arm_runs("0.5", "fast", &[12.0, 13.0, 14.0]));
@@ -25,7 +46,7 @@ fn write_runs(name: &str) -> PathBuf {
         .iter()
         .map(|r| serde_json::to_string(r).unwrap())
         .collect();
-    let path = scratch(name);
+    let path = scratch.path(name);
     std::fs::write(&path, lines.join("\n")).unwrap();
     path
 }
@@ -57,8 +78,9 @@ fn compare_cv_takes_a_pair_and_ladder_excludes_baseline() {
 /// Asserts a run prints the markdown and writes the JSON file, both with every run.
 #[test]
 fn a_run_prints_markdown_and_writes_json() {
-    let input = write_runs("cli_run.jsonl");
-    let json = scratch("cli_run.json");
+    let scratch = Scratch::new("a_run_prints_markdown_and_writes_json");
+    let input = write_runs(&scratch, "cli_run.jsonl");
+    let json = scratch.path("cli_run.json");
     let cli = parse(&[
         input.to_str().unwrap(),
         "--baseline",
@@ -84,7 +106,8 @@ fn a_run_prints_markdown_and_writes_json() {
 /// Asserts a missing input file is reported with its path.
 #[test]
 fn a_missing_input_is_reported() {
-    let path = scratch("cli_no_such.jsonl");
+    let scratch = Scratch::new("a_missing_input_is_reported");
+    let path = scratch.path("cli_no_such.jsonl");
     let cli = parse(&[path.to_str().unwrap()]).unwrap();
     let error = run(&cli, &mut Vec::new()).unwrap_err();
     assert!(matches!(error, Error::Read { .. }));
@@ -95,7 +118,8 @@ fn a_missing_input_is_reported() {
 /// that cannot be written and standard output that cannot be written are each an error.
 #[test]
 fn failures_are_errors() {
-    let bad = scratch("cli_bad.jsonl");
+    let scratch = Scratch::new("failures_are_errors");
+    let bad = scratch.path("cli_bad.jsonl");
     std::fs::write(&bad, "oops\n").unwrap();
     let cli = parse(&[bad.to_str().unwrap()]).unwrap();
     assert!(matches!(
@@ -103,13 +127,13 @@ fn failures_are_errors() {
         Err(Error::Line { .. })
     ));
 
-    let input = write_runs("cli_fail.jsonl");
+    let input = write_runs(&scratch, "cli_fail.jsonl");
     let cli = parse(&[input.to_str().unwrap(), "--baseline", "zzz"]).unwrap();
     let error = run(&cli, &mut Vec::new()).unwrap_err();
     assert!(matches!(error, Error::UnknownArm(_)));
     assert_eq!(error.to_string(), "no run of arm \"zzz\"");
 
-    let directory = scratch("");
+    let directory = scratch.path("");
     let cli = parse(&[
         input.to_str().unwrap(),
         "--json",
@@ -139,7 +163,8 @@ fn failures_are_errors() {
 #[cfg(target_os = "linux")]
 #[test]
 fn json_output_that_refuses_writes_is_a_json_error() {
-    let input = write_runs("cli_full.jsonl");
+    let scratch = Scratch::new("json_output_that_refuses_writes_is_a_json_error");
+    let input = write_runs(&scratch, "cli_full.jsonl");
     let cli = parse(&[input.to_str().unwrap(), "--json", "/dev/full"]).unwrap();
     assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Json(_))));
 }
@@ -162,7 +187,8 @@ fn the_program_answers_version() {
 /// Asserts the program prints the report of a file and exits 0.
 #[test]
 fn the_program_prints_a_report() {
-    let input = write_runs("cli_program.jsonl");
+    let scratch = Scratch::new("the_program_prints_a_report");
+    let input = write_runs(&scratch, "cli_program.jsonl");
     let output = Command::new(env!("CARGO_BIN_EXE_js-analysis"))
         .arg(&input)
         .output()
@@ -178,8 +204,9 @@ fn the_program_prints_a_report() {
 /// Asserts the program exits nonzero and names itself on standard error for a missing file.
 #[test]
 fn the_program_fails_on_a_missing_file() {
+    let scratch = Scratch::new("the_program_fails_on_a_missing_file");
     let output = Command::new(env!("CARGO_BIN_EXE_js-analysis"))
-        .arg(scratch("cli_program_missing.jsonl"))
+        .arg(scratch.path("cli_program_missing.jsonl"))
         .output()
         .unwrap();
     assert!(!output.status.success());

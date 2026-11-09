@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use xtask::release::plan::PlanArgs;
@@ -14,6 +14,8 @@ use xtask::release::plan::PlanArgs;
 pub struct Repo {
     /// Its working tree.
     pub dir: PathBuf,
+    /// Removes the directory when the repository is dropped.
+    _scratch: js_testkit::dir::TestDir,
 }
 
 const MANIFEST: &str = "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2021\"\n";
@@ -21,14 +23,15 @@ const MANIFEST: &str = "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\
 impl Repo {
     /// A fresh repository named `name` with the workspace written and committed.
     pub fn new(name: &str) -> Repo {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("xtask-release")
-            .join(name);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).expect("clear scratch");
-        }
-        std::fs::create_dir_all(&dir).expect("scratch");
-        let repo = Repo { dir };
+        let scratch = js_testkit::dir::TestDir::under(
+            env!("CARGO_TARGET_TMPDIR"),
+            &format!("xtask-release-{name}"),
+        );
+        let dir = scratch.path().to_path_buf();
+        let repo = Repo {
+            dir,
+            _scratch: scratch,
+        };
         repo.git(&["init", "--quiet", "-b", "main"]);
         repo.write("Cargo.toml", MANIFEST);
         repo.write("Cargo.lock", "version = 4\n");

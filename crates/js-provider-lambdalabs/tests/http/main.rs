@@ -8,6 +8,7 @@ mod inputs;
 mod launch;
 mod proxy;
 mod reads;
+mod scratch;
 mod setup;
 mod support;
 mod tls;
