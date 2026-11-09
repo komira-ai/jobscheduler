@@ -1,6 +1,6 @@
 //! The totals where they are easiest to get wrong: the first launches of a go with
-//! `max_step` above one, the kind of a pool that has left the file, the registry's
-//! `Launchable`, an adopted orphan, and every kind of total driven through real launches
+//! `max_step` above one, the kind of a pool that has left the file, `launchable`,
+//! an adopted orphan, and every kind of total driven through real launches
 //! across restarts. The pool's one offer costs 60 cents an hour, so a launch costs at least
 //! 15 cents against a window.
 
@@ -157,9 +157,9 @@ fn a_launch_notes_the_kind_of_its_pool() {
     assert!(!bare.state.records.encode().unwrap().contains("pool_kinds"));
 }
 
-/// Asserts the registry's `Launchable` under a total: a gone machine of 60 cents and a launch
+/// Asserts `launchable` under a total: a gone machine of 60 cents and a launch
 /// of 15 cents are answered yes at a day total of 75 and no at 74, for the server's total and
-/// for the kind's, and yes with none. It catches a total the registry does not ask, which
+/// for the kind's, and yes with none. It catches a total it does not ask, which
 /// would accept a request the step then refuses for ever.
 #[test]
 fn launchable_answers_for_the_totals() {

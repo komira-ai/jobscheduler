@@ -237,9 +237,7 @@ pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
 /// Whether a request for `demand` could be served by launching a machine now: some pool
 /// is live and available, pass 2 picks an offer of it (the same pick a step stages), and
 /// the caps allow one more machine once the idle hosts that would be released count as
-/// free. This is the registry's
-/// `Launchable`; a request it refuses fails at once instead of waiting on a pool that
-/// cannot launch. A pool cooling off after a failure still answers yes: the request waits.
+/// free. A request it refuses would wait on a pool that cannot launch. A pool cooling off after a failure still answers yes: the request waits.
 #[must_use]
 pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) -> bool {
     input.pools.iter().any(|pool| {
