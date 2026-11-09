@@ -47,7 +47,7 @@ async fn raw_header(addr: std::net::SocketAddr, header: &str) -> u16 {
         format!("GET /v1/hosts HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{header}\r\n\r\n");
     stream.write_all(text.as_bytes()).await.unwrap();
     let mut raw = Vec::new();
-    let _ = stream.read_to_end(&mut raw).await;
+    stream.read_to_end(&mut raw).await.unwrap();
     crate::support::parse_reply(&raw).status
 }
 
