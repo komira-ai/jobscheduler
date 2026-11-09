@@ -101,7 +101,7 @@ runc = { version = "0.3.0", features = ["async"] }
 # The SQLite state store (js-state): the C library is compiled in (`bundled`), so the file
 # format and WAL behaviour do not depend on the host's libsqlite3. No default features: no
 # statement cache (hashlink) and no wasm shim.
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }
 # The pure-Rust zstd codec (js-bundle: layers are zstd-compressed tars; the decoder is
 # the only code that parses an untrusted compressed stream, so it has no C to link).
 ruzstd = "0.9.1"
