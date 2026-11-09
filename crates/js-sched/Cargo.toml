@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# What a test reads of the scheduler beyond its interface: how many platform matches its
+# placement rounds made. The crate's own unit tests have it through `cfg(test)`; a crate
+# whose tests read it turns it on in its own `[dev-dependencies]` entry.
+test-support = []
+
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
