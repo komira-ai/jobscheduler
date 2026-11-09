@@ -12,7 +12,11 @@
 //!
 //! The updater reads two things: the exit status and the last line of standard output, a JSON
 //! object ([`Report`]). Exit 0 is success, 1 failure, 75 deferred (nothing irreversible
-//! happened, try later) and 76 halt (no version can repair this). The verb is answered before
+//! happened, try later) and 76 halt (no version can repair this). hostkeeper's daemon logs only
+//! the reason of that line, and the hook's standard error, which it keeps as the hook's log; so
+//! a step that does not succeed also writes one line there, its step, how it ended, its reason
+//! and its detail (`js-agent update-hook: prepare failed: state_invalid: ...`), and a command
+//! line or params file that is refused writes why. The verb is answered before
 //! the agent's flags are parsed and before any signal handler is installed: a hook is a
 //! short-lived root process of the updater, not an agent.
 //!
@@ -151,8 +155,9 @@ impl Refusal {
     }
 }
 
-/// Reads the command line and the params file and runs the step they name.
-fn step_of(args: &[OsString], host: &Host<'_>) -> Result<Done, Refusal> {
+/// Reads the command line and the params file and runs the step they name: the step, and how it
+/// ended.
+fn step_of(args: &[OsString], host: &Host<'_>) -> Result<(Step, Done), Refusal> {
     let invocation = Invocation::parse(args.iter().skip(1).cloned()).map_err(Refusal::Args)?;
     let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
     // `prepare` is given the staged tree twice, by argument and by the table; they must agree.
@@ -166,7 +171,24 @@ fn step_of(args: &[OsString], host: &Host<'_>) -> Result<Done, Refusal> {
             staged: params.staged_release,
         });
     }
-    Ok((host.step)(&invocation, &params))
+    Ok((invocation.step, (host.step)(&invocation, &params)))
+}
+
+/// Writes to `err` how `step` ended and why, unless it succeeded: the reason and the detail of
+/// its last line, in the same words.
+fn tell(err: &mut dyn Write, step: Step, done: &Done) {
+    let ending = match done.outcome {
+        Outcome::Success => return,
+        Outcome::Failure => "failed",
+        Outcome::Deferred => "deferred",
+        Outcome::Halt => "halted",
+    };
+    let reason = done.report.reason.map_or("", Reason::as_str);
+    let detail = done.report.detail.as_deref().unwrap_or("");
+    let _ = writeln!(
+        err,
+        "js-agent update-hook: {step} {ending}: {reason}: {detail}"
+    );
 }
 
 /// Runs the hook on `args` (the program name first, then the verb or the step): the last line goes to
@@ -177,10 +199,16 @@ pub fn run(
     err: &mut dyn Write,
     host: &Host<'_>,
 ) -> ExitCode {
-    let done = step_of(args, host).unwrap_or_else(|refusal| {
-        let _ = writeln!(err, "js-agent update-hook: {refusal}");
-        refusal.done()
-    });
+    let done = match step_of(args, host) {
+        Ok((step, done)) => {
+            tell(err, step, &done);
+            done
+        }
+        Err(refusal) => {
+            let _ = writeln!(err, "js-agent update-hook: {refusal}");
+            refusal.done()
+        }
+    };
     // A closed standard output cannot be reported anywhere; the status still is.
     let _ = done.report.write_to(out);
     done.outcome.into()

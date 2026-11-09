@@ -6,7 +6,8 @@
 //!
 //! In this order, each before anything is written unless it says so:
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
-//!    is `state_invalid` (1);
+//!    is `state_invalid` (1). The state directory is made, mode 0700, when it is not there:
+//!    hostkeeper makes none, so a first install finds none;
 //! 2. a taint or an `owed-*` record halts (76);
 //! 3. `<staged>/bin/js-agent --version` names the target version (1), and the staged release
 //!    carries the unit the hook manages (`bad_artifact` otherwise);

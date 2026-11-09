@@ -2,14 +2,14 @@
 //! hostkeeper's daemon runs one: its manifest loader (`hostkeeper_config`) reads the manifest, its
 //! step runner (`hostkeeper_steps::StepRunner`) writes the params file and orders the steps, and
 //! its systemd launcher builds each step's `systemd-run` line and keeps what the hook printed. All
-//! of it is hostkeeper's code at the revision the workspace pins (v0.1.194, the release on the
-//! farm). Only `systemd-run` is a stand-in ([`StandIn`]): it runs the command line the launcher
+//! of it is hostkeeper's code at the revision the workspace pins (v0.1.194). Only `systemd-run` is a stand-in ([`StandIn`]): it runs the command line the launcher
 //! gave it, with `js-update-hook-fake` (the hook's own steps over the fake ports,
 //! tests/bin/update_hook_fake.rs) in place of the release's `bin/js-agent`, and the hook's state
 //! directory where the fake keeps it (`--state-dir`).
 //!
-//! Nothing makes the hook's state directory before the first step: hostkeeper treats `state_dir`
-//! as one more value of `[params]`, and neither the package nor the host setup lists it.
+//! Nothing but the hook makes its state directory: hostkeeper treats `state_dir` as one more
+//! value of `[params]`, and neither the package nor the host setup lists it, so the first step
+//! of a first install finds none.
 
 use std::ffi::OsString;
 use std::fs;
@@ -35,10 +35,11 @@ use super::conformance::BIN;
 use super::fakes::World;
 use super::fakes::harness::OWNED_CORDON;
 
-/// The version of the farm's first install.
+/// The version the first install installs.
 const VERSION: &str = "0.1.208";
 
-/// The hostkeeper release on the farm, which the manifest's `min_hostkeeper` is judged against.
+/// The hostkeeper release that runs the update, which the manifest's `min_hostkeeper` is judged
+/// against.
 const HOSTKEEPER: &str = "0.1.194";
 
 /// The `min_hostkeeper` the release fills in (crates/xtask/src/release/hostkeeper_package.rs).
@@ -323,7 +324,7 @@ verify_deadline_secs = 9000
 verify_timeout_secs = 615
 "#;
 
-/// The farm's first install: hostkeeper 0.1.194 orders js-agent on a host where nothing has made
+/// A first install: hostkeeper 0.1.194 orders js-agent on a host where nothing has made
 /// the hook's state directory. The params file it writes is read by the hook as it is, `prepare`
 /// makes the state directory (root's alone, mode 0700) and the update runs to the end:
 /// `prepare`, `cutover`, `verify` and `cleanup`, each in the bare form hostkeeper runs a step
@@ -397,10 +398,9 @@ fn a_first_install_through_hostkeepers_runner_makes_the_state_directory_and_succ
 
 /// A state directory whose parent is not there either cannot be made: the hook makes only the
 /// last directory of the path. `prepare` fails `state_invalid` and so does the `rollback` after
-/// it, and the host halts, as on the farm; each step says why on standard error, which hostkeeper
-/// keeps as the hook's log, in the same words as the detail of its last line. Catches a refusal
-/// that reaches the journal as a bare reason token, and a hook that makes the directories above
-/// its own.
+/// it, and the host halts; each step says why on standard error, which hostkeeper keeps as the
+/// hook's log, in the same words as the detail of its last line. Catches a refusal that reaches
+/// the journal as a bare reason token, and a hook that makes the directories above its own.
 #[test]
 fn a_state_directory_that_cannot_be_made_halts_and_each_step_says_why_on_standard_error() {
     let host = Host::with_state_dir("hk-runner-no-parent", "gone/js-agent-update");

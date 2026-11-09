@@ -13,6 +13,13 @@
 //! its group or by others, or the step refuses ([`Document::STATE_INVALID`]) before it opens
 //! anything in it.
 //!
+//! hostkeeper makes no state directory for a hook: it passes `state_dir` on as one more value
+//! of the manifest's `[params]` and never looks at it. [`Held::open_or_make`] therefore makes it,
+//! mode 0700, when it is not there, and holds it to the same rules: only the directory itself,
+//! never one above it, made in its parent through the descriptor the walk checked (so a link
+//! put in its place is never followed), the parent synced so the new entry survives a crash.
+//! [`Held::open`] makes nothing.
+//!
 //! The directory is opened once, walking down from `/` one component at a time without
 //! following a link, and checked through the descriptor it was opened as. The lock, the
 //! record and the temporary file are opened, renamed and synced relative to that descriptor,
@@ -32,8 +39,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
-    AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fsync, openat, renameat, statat,
-    unlinkat,
+    AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fsync, mkdirat, openat, renameat,
+    statat, unlinkat,
 };
 use rustix::io::Errno;
 use serde::de::DeserializeOwned;
@@ -304,13 +311,26 @@ fn refusal<D: Document>(path: &Path, last: bool, refused: Refused) -> StateError
     }
 }
 
+/// Makes the directory `name` of `parent`, mode 0700, unless something is at that name already
+/// (what it is, the open after this judges), and syncs `parent` so that the new entry survives a
+/// crash.
+fn make_dir_at(parent: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
+    match mkdirat(parent, name, Mode::RWXU) {
+        Ok(()) => fsync(parent).map_err(io::Error::from),
+        Err(Errno::EXIST) => Ok(()),
+        Err(errno) => Err(errno.into()),
+    }
+}
+
 /// Opens `dir` by walking down from `/`, one component at a time and without following a
 /// link, holding each ancestor to [`check_ancestor`] before going into it and the last
 /// directory to [`check_dir`]. Every look is at an open descriptor, never at a path, so what
-/// is checked is what is returned.
+/// is checked is what is returned. With `make`, the last directory is made in its checked
+/// parent first when nothing is at its name ([`make_dir_at`]).
 fn open_checked<D: Document>(
     dir: &Path,
     stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
+    make: bool,
 ) -> Result<OwnedFd, StateError<D>> {
     if !is_plain(dir) {
         return Err(StateError::Dir {
@@ -339,6 +359,9 @@ fn open_checked<D: Document>(
         })?;
         here.push(part);
         let last = parts.clone().next().is_none();
+        if last && make {
+            make_dir_at(fd.as_fd(), part.as_os_str()).map_err(at(&here))?;
+        }
         fd = open_dir_at(fd.as_fd(), part.as_os_str())
             .map_err(|refused| refusal(&here, last, refused))?;
     }
@@ -399,7 +422,31 @@ impl<D: Document> Held<D> {
         dir: &Path,
         stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
     ) -> Result<Held<D>, StateError<D>> {
-        let fd = open_checked(dir, stat)?;
+        Held::open_dir(dir, stat, false)
+    }
+
+    /// [`Held::open`], having first made `dir` (mode 0700, owned by the user the hook runs as)
+    /// when nothing is at its path: the first step of a first install finds no directory, since
+    /// nothing but the hook makes it. Only `dir` itself is made, in the parent the walk checked;
+    /// a directory above it that is not there is still [`StateError::Io`] naming it. What is made
+    /// is held to the same rules as a directory that was there.
+    ///
+    /// # Errors
+    /// As [`Held::open`]; [`StateError::Io`] naming `dir` when it cannot be made.
+    pub fn open_or_make(
+        dir: &Path,
+        stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
+    ) -> Result<Held<D>, StateError<D>> {
+        Held::open_dir(dir, stat, true)
+    }
+
+    /// [`Held::open`], or [`Held::open_or_make`] with `make`.
+    fn open_dir(
+        dir: &Path,
+        stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
+        make: bool,
+    ) -> Result<Held<D>, StateError<D>> {
+        let fd = open_checked(dir, stat, make)?;
         // The directory first: a holder of it (the updater, another step) is refused before
         // anything is made in it.
         flock(&fd, FlockOperation::NonBlockingLockExclusive).map_err(|errno| StateError::Lock {
@@ -566,7 +613,7 @@ pub fn peek<D: Document>(
     dir: &Path,
     stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
 ) -> Result<Option<D>, StateError<D>> {
-    let fd = open_checked(dir, stat)?;
+    let fd = open_checked(dir, stat, false)?;
     load_in(fd.as_fd(), &dir.join(RECORD_FILE))
 }
 
