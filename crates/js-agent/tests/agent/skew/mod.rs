@@ -36,8 +36,12 @@ pub fn previous() -> Value {
 /// Asserts that this release's agent and server, met as [`record`] meets them, say
 /// everything their previous release said, with the fresh values paired as the replay
 /// pairs them; and writes this release's transcript to `skew/transcript.json` under the
-/// directory cargo gives integration tests for scratch files, which is where the next
-/// release's transcript is taken from. It catches a transcript that no longer matches the
+/// directory cargo gives integration tests for scratch files (`CARGO_TARGET_TMPDIR`, under
+/// the build's own target directory; nothing else writes there), which is where the next
+/// release's transcript is taken from: a path that outlives the test, unlike a [`Scratch`]
+/// directory.
+///
+/// [`Scratch`]: crate::support::Scratch It catches a transcript that no longer matches the
 /// conversation [`record`] has (the other tests would then compare against a conversation
 /// that is not the one they run).
 #[test]

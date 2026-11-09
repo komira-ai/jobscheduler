@@ -172,9 +172,16 @@ either side (a release that changed none leaves the transcript as it is):
 
 1. In a checkout of the new release's tag, run
    `cargo test -p js-agent --test agent skew::this_version_still_says_what_the_previous_release_said`.
-   It records that release's conversation, checks that it says everything the transcript it
-   replaces said, and writes it to `target/tmp/skew/transcript.json` (cargo's
-   `CARGO_TARGET_TMPDIR` for the test).
+   A tag from before the module has no `skew/` directory: copy
+   `crates/js-agent/tests/agent/skew/` and the `mod skew;` line of
+   `crates/js-agent/tests/agent/main.rs` from main into the checkout first (where the tag's
+   agent test harness differs from main's, the module is adapted to it there, not on main).
+   The test records that release's conversation, checks that it says everything the
+   transcript it replaces said, and writes it to `target/tmp/skew/transcript.json` (cargo's
+   `CARGO_TARGET_TMPDIR` for the test). Its unknown-major hello asks for majors 2 to 3, and
+   it fails unless the server refuses it; once a server speaks major 2, the majors in
+   `record()` (`crates/js-agent/tests/agent/skew/record.rs`) are moved above the newest one
+   it speaks in the same pull request.
 2. On a branch of main, copy that file to `crates/js-agent/tests/agent/skew/v<new>.json`,
    delete the old transcript, and change the file name in `previous()`
    (`crates/js-agent/tests/agent/skew/mod.rs`) and the release this section and the module's

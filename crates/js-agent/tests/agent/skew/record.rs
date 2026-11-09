@@ -3,10 +3,11 @@
 //! lease server started in the test process with the job service on, every post and its
 //! answer written down in order with the job API calls between them.
 //!
-//! Nothing here depends on a type of either side's wire: a frame is the JSON the transport
-//! carried. The same code runs at any release that has the job service and the agent's
-//! test harness (`v0.1.213` and later), so the transcript of the newest release is recorded
-//! by the test [`super::this_version_still_says_what_the_previous_release_said`], which
+//! No frame is built from a wire type of either side: a frame is the JSON the transport
+//! carried. The code uses only the agent program's test harness and the lease server's job
+//! service, so it can be applied to a release tag that predates it (it was to `v0.1.213`;
+//! a later tag whose harness changed may need it adapted), and the transcript of a release
+//! is recorded by the test [`super::this_version_still_says_what_the_previous_release_said`], which
 //! writes it beside the test binary (see `docs/layering.md`, "The previous release of the
 //! agent wire").
 
@@ -19,7 +20,7 @@ use js_client::{Client, ClientError};
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
 use serde_json::{Value, json};
-use tokio::runtime::Runtime;
+use tokio::runtime::{Builder, Runtime};
 
 use crate::jobs::fake::FakeMachine;
 use crate::jobs::{private, user};
@@ -221,7 +222,14 @@ impl Cell {
         let config = Config::from_cli(Cli::try_parse_from(argv).unwrap()).unwrap();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();
-        let runtime = Runtime::new().unwrap();
+        // Two workers, not one per core: the test binary's address space is capped
+        // (`bounds`), and every worker thread reserves its own malloc arena, so several
+        // cells started at once on a machine of many cores would exceed the cap.
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
         let started = start(config, SharedClock::new(clock.clone()), ticker);
         let running = runtime.block_on(started).unwrap();
         Self {
@@ -346,7 +354,8 @@ pub fn replace_text(value: &mut Value, from: &str, to: &str) {
 }
 
 /// Records the conversation of this build's agent with this build's server, and the
-/// server's answer to a hello that speaks majors 2 to 3 only (built from the agent's own
+/// server's refusal (asserted: status 400, `unsupported-protocol`) of a hello that speaks
+/// majors 2 to 3 only, majors above the one server and agent speak (built from the agent's own
 /// hello). The session secret is replaced by [`SESSION`].
 pub fn record(name: &str) -> Value {
     let cell = Cell::start(name);
@@ -379,6 +388,12 @@ pub fn record(name: &str) -> Value {
         .connect(&cell.url(), &cell.join_file(), None)
         .unwrap();
     let answer = transport.post(js_agent::HELLO_PATH, &future).unwrap();
+    assert_eq!(answer.status, 400, "{}", answer.body);
+    assert_eq!(
+        answer.body["error"], "unsupported-protocol",
+        "{}",
+        answer.body
+    );
     let mut refusal = exchange(js_agent::HELLO_PATH, &future, &answer);
 
     let session = flow[0]["server"]["body"]["session"]

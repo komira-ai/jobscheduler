@@ -186,8 +186,12 @@ fn the_previous_server_refuses_an_unknown_major_and_this_agent_stops() {
     assert_eq!(*server.problems.lock().unwrap(), Vec::<String>::new());
     assert_eq!(server.exchanges.lock().unwrap().len(), 0);
     assert_eq!(ran.status(), code(2), "{}", ran.err);
-    let said = "js-agent: the server refused the hello with status 400 (unsupported-protocol; \
-                it speaks majors 1 to 1); not retrying";
+    let supported = &refusal[0]["server"]["body"]["supported"];
+    let said = format!(
+        "js-agent: the server refused the hello with status 400 (unsupported-protocol; \
+         it speaks majors {} to {}); not retrying",
+        supported["min"], supported["max"]
+    );
     assert!(ran.err.lines().any(|line| line == said), "{}", ran.err);
 }
 

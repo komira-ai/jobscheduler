@@ -92,9 +92,9 @@ fn a_field_this_server_no_longer_sends_is_named() {
 
 /// Asserts that the replay fails when the previous agent's heartbeat carries a field this
 /// server needs under a name it does not read (the session secret of the first heartbeat
-/// under another name, as if this server had renamed the field it reads): the server
-/// refuses that heartbeat with the session mismatch, where the previous server accepted
-/// it. It catches a replay that would pass a server that no longer reads a field the
+/// under another name, as if this server had renamed the field it reads): the first problem
+/// is that heartbeat's status, 403 where the previous server answered 200 (the server
+/// refuses a heartbeat without its session). It catches a replay that would pass a server that no longer reads a field the
 /// previous agent sends.
 #[test]
 fn a_field_this_server_no_longer_reads_is_caught() {
@@ -111,4 +111,22 @@ fn a_field_this_server_no_longer_reads_is_caught() {
     let problems = replay("skew-server-unread", &transcript);
     let wanted = format!("{index} /v1/agent/heartbeat: status was 200, now 403");
     assert_eq!(problems.first(), Some(&wanted), "{problems:?}");
+}
+
+/// Asserts that the replay fails, naming the field, when the previous server's refusal of
+/// an unknown major held a field this server does not send (the transcript's refusal
+/// carries `supported` under another name, as if this server had renamed it). It catches a
+/// replay that would pass a server whose refusal lost the majors the previous agent reads.
+#[test]
+fn a_refusal_field_this_server_no_longer_sends_is_named() {
+    let mut transcript = super::previous();
+    let index = transcript["flow"].as_array().unwrap().len();
+    let fields = transcript["refusal"]["server"]["body"]
+        .as_object_mut()
+        .unwrap();
+    let supported = fields.remove("supported").unwrap();
+    fields.insert("majors".to_owned(), supported);
+    let problems = replay("skew-server-refusal", &transcript);
+    let wanted = format!("{index} /v1/agent/hello $.majors: missing");
+    assert_eq!(problems, [wanted]);
 }
