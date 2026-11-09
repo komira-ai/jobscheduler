@@ -896,7 +896,7 @@ pub const ALLOWED: &[Allowed] = &[
         item: "Writer::run",
         token: Token::InstantNow,
         sites: 2,
-        reason: "the writer's group-commit wait; a cell's calls come one at a time from its one thread and each blocks for its reply, so a group is one call",
+        reason: "the writer's group-commit wait; a cell's calls come one at a time from its one thread and each blocks for its reply, so none is queued behind another and no group waits",
     },
     Allowed {
         file: "crates/js-system-clock/src/lib.rs",
