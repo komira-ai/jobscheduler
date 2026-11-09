@@ -33,7 +33,7 @@ fn unit_dir(name: &str) -> TestDir {
 /// Counts the statements `conn` prepares from now on, other than transaction control.
 /// Installing the authorizer expires the statements `conn` has already prepared, so each
 /// of those is prepared again, and counted, the next time it runs.
-fn count_prepares(conn: &Connection) -> Arc<AtomicUsize> {
+fn count_prepares(conn: &mut Connection) -> Arc<AtomicUsize> {
     let prepares = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&prepares);
     let hook = move |context: AuthContext<'_>| {
@@ -92,7 +92,7 @@ fn the_reader_prepares_each_statement_once() {
     for key in ["a", "b", "c"] {
         put(&store, key);
     }
-    let prepares = count_prepares(&store.reader());
+    let prepares = count_prepares(&mut store.reader());
 
     read_everything(&store);
     assert!(
@@ -153,11 +153,11 @@ fn a_read_that_stops_early_does_not_keep_its_snapshot() {
 /// A writer on the state file in `dir`, one transaction a group, with its prepares
 /// counted from before its first group.
 fn counted_writer(dir: &Path, shared: &Arc<Shared>) -> (Writer, Arc<AtomicUsize>) {
-    let conn = Connection::open(dir.join("state.db")).expect("open the state file");
+    let mut conn = Connection::open(dir.join("state.db")).expect("open the state file");
     schema::init(&conn).expect("schema");
     schema::configure(&conn).expect("configure");
     let head = schema::head(&conn).expect("head");
-    let prepares = count_prepares(&conn);
+    let prepares = count_prepares(&mut conn);
     let options = Options {
         max_group: 1,
         ..Options::default()
