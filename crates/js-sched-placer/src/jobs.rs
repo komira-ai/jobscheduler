@@ -310,6 +310,10 @@ impl Engine {
     /// whole host is not walked, nor is one whose constraints are no platform requirements
     /// (logged): neither closes a host.
     ///
+    /// The scheduler holds its platform matches over the walk's rounds
+    /// ([`js_sched::Scheduler::hold_matches`]): each open host is matched once per platform
+    /// request in the walk, not once per job, with the placements the same.
+    ///
     /// Returns the placements, and each walked job placed nowhere with whether some open host
     /// could run it (it waits for room) or none could, both in queue order.
     pub fn walk_jobs(
@@ -317,6 +321,18 @@ impl Engine {
         queued: &[JobRecord],
         open: &BTreeMap<HostId, OpenHost>,
         now: FarmTime,
+    ) -> (Vec<Decided>, Vec<(JobId, bool)>) {
+        self.walk_holding(queued, open, now, true)
+    }
+
+    /// [`Engine::walk_jobs`], with the scheduler's platform matches held over the walk's
+    /// rounds if `hold` says so, else made again in each round.
+    fn walk_holding(
+        &mut self,
+        queued: &[JobRecord],
+        open: &BTreeMap<HostId, OpenHost>,
+        now: FarmTime,
+        hold: bool,
     ) -> (Vec<Decided>, Vec<(JobId, bool)>) {
         let nodes: BTreeMap<HostId, (super::Node, &OpenHost)> = open
             .iter()
@@ -332,6 +348,11 @@ impl Engine {
                 caps: caps.clone(),
             };
             self.feed(now, heard);
+        }
+        // From here to the walk's end no worker's capabilities are written: what the hosts
+        // match is held over the rounds.
+        if hold {
+            self.sched.hold_matches();
         }
         let walkers: Vec<Walker> = queued.iter().filter_map(walker).collect();
         let usable: Vec<BTreeSet<&HostId>> = walkers
@@ -366,6 +387,7 @@ impl Engine {
                 host
             },
         );
+        self.sched.drop_matches();
         let decided = walkers.into_iter().zip(placed).zip(&usable);
         let mut placements = Vec::new();
         let mut waiting = Vec::new();
@@ -847,5 +869,23 @@ impl SchedPlacer {
 }
 
 #[cfg(test)]
+impl Engine {
+    /// [`Engine::walk_jobs`] as it was before the scheduler held its matches over a walk:
+    /// each round matches every open host again.
+    pub(crate) fn walk_jobs_matching_each_round(
+        &mut self,
+        queued: &[JobRecord],
+        open: &BTreeMap<HostId, OpenHost>,
+        now: FarmTime,
+    ) -> (Vec<Decided>, Vec<(JobId, bool)>) {
+        self.walk_holding(queued, open, now, false)
+    }
+}
+
+#[cfg(test)]
 #[path = "jobs_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "jobs_matches_tests.rs"]
+mod matches_tests;
