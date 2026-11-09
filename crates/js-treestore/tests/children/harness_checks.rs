@@ -1,0 +1,93 @@
+//! The privileged tests' harness helpers, checked where CI can run them.
+
+use std::path::Path;
+use std::process::{Command, Output};
+
+use crate::priv_harness::{inheritable_write_ace, user_command, user_name};
+
+#[test]
+fn the_name_of_root_is_root_and_a_number_nobody_has_has_no_name() {
+    assert_eq!(user_name(0).as_deref(), Some("root"));
+    assert_eq!(user_name(4_000_000_011), None);
+}
+
+#[test]
+fn the_acl_entry_names_the_user_and_never_a_number() {
+    let entry = inheritable_write_ace(0);
+    assert_eq!(
+        entry,
+        "user:root allow write,file_inherit,directory_inherit"
+    );
+    assert!(!entry.contains('#'), "{entry}");
+}
+
+#[test]
+#[should_panic(expected = "no user with uid 4000000011")]
+fn an_acl_entry_for_a_uid_with_no_name_is_refused() {
+    let _ = inheritable_write_ace(4_000_000_011);
+}
+
+#[test]
+fn a_command_run_as_another_user_starts_in_the_root_directory() {
+    let me = rustix::process::geteuid().as_raw();
+    let group = rustix::process::getegid().as_raw();
+    let mut command = user_command("/bin/pwd", &[], me, group);
+    assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+    let out = command.output().unwrap();
+    assert!(out.status.success(), "/bin/pwd failed: {}", ran(&out));
+    assert_eq!(out.stdout, b"/\n", "{}", ran(&out));
+}
+
+#[test]
+fn a_command_passes_its_arguments_and_reads_no_input() {
+    let me = rustix::process::geteuid().as_raw();
+    let group = rustix::process::getegid().as_raw();
+    let mut command = user_command("/bin/echo", &[Path::new("-n"), Path::new("a")], me, group);
+    let out = command.output().unwrap();
+    assert!(out.status.success(), "/bin/echo failed: {}", ran(&out));
+    assert_eq!(out.stdout, b"a", "{}", ran(&out));
+}
+
+/// Catches: `user_command` setting the user or group when they are the caller's own. The
+/// standard library forks the test process to start a command that sets either (it must,
+/// to change them before the exec) and spawns it with `posix_spawn` otherwise; a fork of
+/// this multithreaded binary could abort inside `fork` on macOS. The alternate `Debug` of
+/// a `Command` shows `uid` and `gid` exactly when they are set.
+#[test]
+fn a_command_as_the_callers_own_user_sets_no_user_or_group_and_one_for_another_sets_them() {
+    let me = rustix::process::geteuid().as_raw();
+    let group = rustix::process::getegid().as_raw();
+    let own = settings(&user_command("/bin/pwd", &[], me, group));
+    assert!(!own.contains("uid:"), "{own}");
+    assert!(!own.contains("gid:"), "{own}");
+    assert!(own.contains("cwd:Some("), "{own}");
+
+    let other = me.wrapping_add(1);
+    let theirs = settings(&user_command("/bin/pwd", &[], other, group));
+    assert!(theirs.contains(&format!("uid:Some({other},)")), "{theirs}");
+    assert!(!theirs.contains("gid:"), "{theirs}");
+
+    let other_group = group.wrapping_add(1);
+    let regrouped = settings(&user_command("/bin/pwd", &[], me, other_group));
+    assert!(!regrouped.contains("uid:"), "{regrouped}");
+    assert!(
+        regrouped.contains(&format!("gid:Some({other_group},)")),
+        "{regrouped}"
+    );
+}
+
+/// The command's settings as its alternate `Debug` prints them, without whitespace.
+fn settings(command: &Command) -> String {
+    format!("{command:#?}").replace(char::is_whitespace, "")
+}
+
+/// How a command ended, for a failed assertion: its status (an exit code or the signal
+/// that killed it), what it wrote to stdout and what it wrote to stderr.
+fn ran(out: &Output) -> String {
+    format!(
+        "{}; stdout {:?}; stderr {:?}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}

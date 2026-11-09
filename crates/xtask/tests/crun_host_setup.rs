@@ -162,6 +162,13 @@ fn an_apply_on_a_fresh_root_sets_the_host_up() {
         .rposition(|c| c == &format!("findmnt -n -o OPTIONS --mountpoint {SCRATCH}"))
         .expect("the mount options were read");
     assert!(reload < stop && stop < start && start < check, "{calls:?}");
+    // What systemd loaded is read after the reload and before the unmount.
+    let loaded = index(
+        &calls,
+        &format!("systemctl show -p FragmentPath,DropInPaths -- {MOUNT}"),
+    );
+    let text = index(&calls, &format!("systemctl cat -- {MOUNT}"));
+    assert!(reload < loaded && loaded < text && text < stop, "{calls:?}");
     // The tmpfiles file is applied after the reload and before the verify: the unit's program is
     // reached through the release link that file makes.
     let tmpfiles = index(
@@ -293,6 +300,168 @@ fn a_unit_with_prjquota_and_a_mount_without_it_is_mounted_again() {
     assert!(
         index(&calls, &format!("systemctl stop {MOUNT}"))
             < index(&calls, &format!("systemctl start {MOUNT}"))
+    );
+}
+
+/// For a mounted unit systemd's `show -p Options` gives the live mount's options (the stand-in
+/// does too), which lack prjquota until the remount: the apply checks what systemd loaded instead
+/// (`FragmentPath`, `DropInPaths`, `systemctl cat`), so it unmounts, mounts again and finds
+/// prjquota active.
+#[test]
+fn a_mounted_unit_without_prjquota_is_mounted_again_though_systemd_shows_the_live_options() {
+    let rig = Rig::new("quota-live-options");
+    let mut answers = psmisc_fuser();
+    answers.extend(rig.defaults());
+    std::fs::write(rig.shim.join("answers"), answers.join("\n") + "\n").expect("answers");
+    let shown = std::process::Command::new(rig.shim.join("systemctl"))
+        .args(["show", "-p", "Options", "--value", "--", MOUNT])
+        .env_clear()
+        .env("HOST_SHIM_DIR", &rig.shim)
+        .envs(profile_env())
+        .output()
+        .expect("run");
+    assert_eq!(
+        String::from_utf8_lossy(&shown.stdout),
+        "rw,relatime,attr2,inode64,logbufs=8,logbsize=32k,noquota\n",
+        "the stand-in answers with the live mount, as systemd does"
+    );
+    std::fs::remove_file(rig.shim.join("calls")).expect("clear the calls");
+    let out = rig.apply();
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(!out.text.contains("FAILED"), "{}", out.text);
+    assert!(
+        out.text
+            .lines()
+            .any(|l| l == format!("  findmnt: prjquota is active on {SCRATCH}: ok")),
+        "{}",
+        out.text
+    );
+    let calls = rig.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("systemctl show -p Options ")),
+        "{calls:?}"
+    );
+    let text = index(&calls, &format!("systemctl cat -- {MOUNT}"));
+    let stop = index(&calls, &format!("systemctl stop {MOUNT}"));
+    let start = index(&calls, &format!("systemctl start {MOUNT}"));
+    assert!(text < stop && stop < start, "{calls:?}");
+}
+
+/// A unit that is not mounted now is edited and its loaded text checked, and it is not unmounted
+/// or started: the option applies at its next mount.
+#[test]
+fn a_unit_that_is_not_mounted_is_edited_and_checked_without_a_remount() {
+    let rig = Rig::new("quota-unmounted");
+    rig.write("mount-options", "");
+    let out = rig.apply();
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        out.text.contains(&format!(
+            "{SCRATCH} is not mounted: the option applies at its next mount"
+        )),
+        "{}",
+        out.text
+    );
+    assert_eq!(
+        rig.text(&format!("etc/systemd/system/{MOUNT}")),
+        mount_unit("loop,prjquota")
+    );
+    let calls = rig.calls();
+    let reload = index(&calls, "systemctl daemon-reload");
+    assert!(
+        reload < index(&calls, &format!("systemctl cat -- {MOUNT}")),
+        "{calls:?}"
+    );
+    for call in [
+        format!("systemctl stop {MOUNT}"),
+        format!("systemctl start {MOUNT}"),
+    ] {
+        assert!(!calls.contains(&call), "{call}: {calls:?}");
+    }
+    assert!(!calls.iter().any(|c| c.starts_with("fuser ")), "{calls:?}");
+}
+
+/// A rerun on a host left as the old check left it (the user, the subids and the edit of the unit
+/// done and recorded, then `incomplete 1 step_scratch_quota`; the filesystem still mounted
+/// without prjquota) resumes: no new user, block or edit, then the remount and its findmnt check,
+/// then the rest of the setup; the manifest keeps its lines and gains the new ones.
+#[test]
+fn a_rerun_after_the_scratch_step_stopped_resumes_with_the_remount() {
+    let rig = Rig::new("quota-resume");
+    rig.install_crun();
+    let unit = format!("etc/systemd/system/{MOUNT}");
+    let edited = mount_unit("loop,prjquota");
+    rig.write(&unit, &edited);
+    rig.write(
+        "etc/passwd",
+        "root:x:0:0:root:/root:/bin/bash\njsjob:x:998:998::/nonexistent:/usr/sbin/nologin\n",
+    );
+    rig.write("etc/group", "root:x:0:\njsjob:x:998:\n");
+    rig.write("etc/subuid", "jsjob:200000:65536\n");
+    rig.write("etc/subgid", "jsjob:200000:65536\n");
+    let earlier = format!(
+        "user\tjsjob\t998\nsubuid\tjsjob\t200000\t65536\nsubgid\tjsjob\t200000\t65536\nmount-options\t{}\tloop\t{}\nincomplete\t1\tstep_scratch_quota\n",
+        rig.path(&unit).display(),
+        sha(&edited)
+    );
+    let state = rig.path("var/lib/js-crun-host-setup");
+    std::fs::create_dir_all(&state).expect("directory");
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .expect("mode");
+    rig.write("var/lib/js-crun-host-setup/manifest", &earlier);
+    let out = rig.apply();
+    assert_eq!(out.code, 0, "{}", out.text);
+    assert!(
+        out.text
+            .lines()
+            .any(|l| l == "  Options=loop,prjquota already has prjquota"),
+        "{}",
+        out.text
+    );
+    assert!(!out.text.contains("set Options="), "{}", out.text);
+    assert_eq!(rig.text(&unit), edited);
+    let calls = rig.calls();
+    for absent in ["apt-get ", "useradd ", "usermod "] {
+        assert!(
+            !calls.iter().any(|c| c.starts_with(absent)),
+            "{absent}: {calls:?}"
+        );
+    }
+    let reload = index(&calls, "systemctl daemon-reload");
+    let text = index(&calls, &format!("systemctl cat -- {MOUNT}"));
+    let stop = index(&calls, &format!("systemctl stop {MOUNT}"));
+    let start = index(&calls, &format!("systemctl start {MOUNT}"));
+    let check = calls
+        .iter()
+        .rposition(|c| c == &format!("findmnt -n -o OPTIONS --mountpoint {SCRATCH}"))
+        .expect("the mount options were read");
+    assert!(
+        reload < text && text < stop && stop < start && start < check,
+        "{calls:?}"
+    );
+    assert!(
+        out.text
+            .lines()
+            .any(|l| l == format!("  findmnt: prjquota is active on {SCRATCH}: ok")),
+        "{}",
+        out.text
+    );
+    assert_eq!(mode(&rig, "var/lib/js-agent/scratch/runs"), 0o711);
+    let manifest = rig.text("var/lib/js-crun-host-setup/manifest");
+    let added = manifest
+        .strip_prefix(&earlier)
+        .unwrap_or_else(|| panic!("the earlier lines changed: {manifest}"));
+    assert!(
+        added.lines().any(|l| l.starts_with("dir-created\t")),
+        "{manifest}"
+    );
+    assert!(
+        !added
+            .lines()
+            .any(|l| l.starts_with("mount-options\t") || l.starts_with("incomplete\t")),
+        "{manifest}"
     );
 }
 
