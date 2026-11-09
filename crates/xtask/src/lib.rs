@@ -1,9 +1,10 @@
 //! `cargo xtask <verb>`: the repository's CI logic, in Rust with tests, so each workflow
 //! step is one command (the alias is in `.cargo/config.toml`).
 //!
-//! - `fetch --url <url> --sha256 <hex> --out <path> [--extract tar.gz --member <path>]`
-//!   ([`fetch`]): a pinned tool, downloaded over HTTPS and refused unless its SHA-256
-//!   matches, before anything is unpacked or written.
+//! - `fetch --url <url> --sha256 <hex> --out <path> [--extract tar.gz --member <path>]
+//!   [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over HTTPS (or taken from the
+//!   file the actions cache restored at `--cache`) and refused unless its SHA-256 matches,
+//!   before anything is unpacked or written.
 //!
 //! - `release plan --head <sha>`, `release stamp --to <version>` and `release stage --bin <name>
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
@@ -185,6 +186,10 @@ enum Verb {
         /// The file to take out of a tar (`--extract tar.gz`): its path inside the archive.
         #[arg(long)]
         member: Option<PathBuf>,
+        /// The file the actions cache restores and saves: when it exists it is checked and
+        /// used in place of the download; when it does not, the checked download is kept there.
+        #[arg(long)]
+        cache: Option<PathBuf>,
     },
     /// Set the release's version for services on the update coordinator and wait for them.
     Deploy(deploy::Args),
@@ -327,10 +332,18 @@ fn run(cli: Cli) -> Result<String, Error> {
             out,
             extract,
             member,
+            cache,
         } => {
             let unpack = fetch::Unpack::new(extract, member).map_err(Error::Usage)?;
             let roots = fetch::host_roots();
-            Ok(fetch::fetch(&url, &sha256, &unpack, &out, &roots)?)
+            Ok(fetch::fetch(
+                &url,
+                &sha256,
+                &unpack,
+                &out,
+                cache.as_deref(),
+                &roots,
+            )?)
         }
         Verb::Deploy(args) => Ok(deploy::run(&args)?),
         Verb::Determinism { root } => Ok(determinism::run(&root)?),

@@ -519,7 +519,8 @@ fn run_lines(text: &str) -> Vec<String> {
 
 /// The workflow builds, checks, uploads as a workflow artifact and attests, and does nothing
 /// else with the deb: no write scope on the repository, packages or releases, no action but
-/// four pinned by commit, and only these commands. The list of banned words is a tripwire, not
+/// these six pinned by commit (the actions cache only for nfpm's archive), and only these
+/// commands. The list of banned words is a tripwire, not
 /// the proof: the proof is the absence of a write scope (below) and the list of commands.
 #[test]
 fn the_workflow_publishes_nothing() {
@@ -559,6 +560,8 @@ fn the_workflow_publishes_nothing() {
             assert!(
                 [
                     "actions/checkout",
+                    "actions/cache/restore",
+                    "actions/cache/save",
                     "actions/upload-artifact",
                     "actions/download-artifact",
                     "actions/attest-build-provenance",

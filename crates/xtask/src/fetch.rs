@@ -1,17 +1,26 @@
-//! `fetch --url <https url> --sha256 <hex> --out <path> [--extract tar.gz --member <path>]`:
-//! installs a pinned tool for a CI job.
+//! `fetch --url <https url> --sha256 <hex> --out <path> [--extract tar.gz --member <path>]
+//! [--cache <path>]`: installs a pinned tool for a CI job.
 //!
 //! The order is the point:
 //!
-//! 1. The whole download is read into memory over HTTPS (redirects followed, each one
-//!    HTTPS too; the host's trusted roots; a status other than 2xx is an error).
-//! 2. Its SHA-256 is compared with `--sha256`. A mismatch is refused here, before any
-//!    byte is unpacked or written: nothing is created on disk.
-//! 3. It is unpacked in memory: as is, or one regular file (`--member`, its path inside
-//!    the archive) out of a gzip tar (`--extract tar.gz`).
-//! 4. The file is written to `<out>.part` beside `--out`, made executable (0755) and
+//! 1. The bytes are read into memory. With `--cache` and a file at that path (the actions
+//!    cache restored it), they are that file's, and nothing is downloaded. Otherwise they
+//!    are the whole download, over HTTPS (redirects followed, each one HTTPS too; the
+//!    host's trusted roots; a status other than 2xx is an error). With `--cache`, a failed
+//!    download is reported in one line saying the file was not in the cache either.
+//! 2. Their SHA-256 is compared with `--sha256`, whichever way they came. A mismatch is
+//!    refused here, before any byte is unpacked or written: nothing is created on disk.
+//!    A cached file that does not match is refused too, not replaced by a download.
+//! 3. They are unpacked in memory: as is, or one regular file (`--member`, its path
+//!    inside the archive) out of a gzip tar (`--extract tar.gz`).
+//! 4. With `--cache` and no file there, the download as it came (the archive, not the
+//!    file taken out of it) is written to the `--cache` path, for the actions cache to
+//!    save: only a download that matched the pin and unpacked is kept.
+//! 5. The file is written to `<out>.part` beside `--out`, made executable (0755) and
 //!    renamed over `--out`. When writing or renaming fails, `<out>.part` is removed, so
 //!    `--out` holds either the whole new file or what it held before.
+//!
+//! Steps 4 and 5 write through a `.part` file the same way; the kept download is mode 0644.
 
 use std::fmt;
 use std::io::Read;
@@ -143,6 +152,36 @@ pub enum Error {
         /// The digest of what was downloaded.
         actual: Sha256,
     },
+    /// The file was not in the cache, and the download failed.
+    #[error(
+        "{cache:?} was not in the actions cache, and the download failed: {download}; nothing was installed"
+    )]
+    NotCached {
+        /// The `--cache` path, which held no file.
+        cache: PathBuf,
+        /// The download's error, on one line.
+        download: String,
+    },
+    /// The cached file is not the pinned file.
+    #[error(
+        "the cached {cache:?} has SHA-256 {actual}, not the pinned {expected}; nothing was installed"
+    )]
+    CachedMismatch {
+        /// The `--cache` path.
+        cache: PathBuf,
+        /// The pinned digest.
+        expected: Sha256,
+        /// The digest of the cached file.
+        actual: Sha256,
+    },
+    /// The `--cache` path could not be read or written.
+    #[error("the cache file {cache:?}: {why}")]
+    Cache {
+        /// The `--cache` path.
+        cache: PathBuf,
+        /// The system's reason.
+        why: String,
+    },
     /// The archive could not be decoded.
     #[error("unpack the download: {0}")]
     Unpack(String),
@@ -204,6 +243,12 @@ pub fn download(url: &str, roots: &[CertificateDer<'static>]) -> Result<Vec<u8>,
 
 /// Checks `bytes` against `sha256`, unpacks them and installs the file at `out`.
 pub fn install(bytes: &[u8], sha256: &Sha256, unpack: &Unpack, out: &Path) -> Result<(), Error> {
+    let file = checked(bytes, sha256, unpack)?;
+    place(out, &file)
+}
+
+/// The file `unpack` makes of `bytes`, once their digest is `sha256`.
+fn checked(bytes: &[u8], sha256: &Sha256, unpack: &Unpack) -> Result<Vec<u8>, Error> {
     let actual = Sha256::of(bytes);
     if actual != *sha256 {
         return Err(Error::Mismatch {
@@ -211,27 +256,73 @@ pub fn install(bytes: &[u8], sha256: &Sha256, unpack: &Unpack, out: &Path) -> Re
             actual,
         });
     }
-    let file = unpack.apply(bytes)?;
-    write_executable(out, &file).map_err(|e| Error::Install {
+    unpack.apply(bytes)
+}
+
+/// Writes `file` to `out`, mode 0755.
+fn place(out: &Path, file: &[u8]) -> Result<(), Error> {
+    write_file(out, file, 0o755).map_err(|e| Error::Install {
         path: out.to_owned(),
         why: e.to_string(),
     })
 }
 
-/// [`download`]s `url` and [`install`]s it at `out`: the line to print.
+/// [`download`]s `url` and [`install`]s it at `out`: the line to print. With `cache`, the
+/// file there is checked and installed in place of the download when it exists; when it
+/// does not, the download is checked, kept there, and installed.
 pub fn fetch(
     url: &str,
     sha256: &Sha256,
     unpack: &Unpack,
     out: &Path,
+    cache: Option<&Path>,
     roots: &[CertificateDer<'static>],
 ) -> Result<String, Error> {
-    let bytes = download(url, roots)?;
-    install(&bytes, sha256, unpack, out)?;
-    Ok(format!(
-        "ok: {url} has SHA-256 {sha256}; installed {}",
-        out.display()
-    ))
+    let Some(cache) = cache else {
+        let bytes = download(url, roots)?;
+        install(&bytes, sha256, unpack, out)?;
+        return Ok(format!(
+            "ok: {url} has SHA-256 {sha256}; installed {}",
+            out.display()
+        ));
+    };
+    let cache_error = |e: std::io::Error| Error::Cache {
+        cache: cache.to_owned(),
+        why: e.to_string(),
+    };
+    match std::fs::read(cache) {
+        Ok(bytes) => {
+            let file = checked(&bytes, sha256, unpack).map_err(|e| match e {
+                Error::Mismatch { expected, actual } => Error::CachedMismatch {
+                    cache: cache.to_owned(),
+                    expected,
+                    actual,
+                },
+                other => other,
+            })?;
+            place(out, &file)?;
+            Ok(format!(
+                "ok: the cached {} of {url} has SHA-256 {sha256}; installed {}",
+                cache.display(),
+                out.display()
+            ))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let bytes = download(url, roots).map_err(|e| Error::NotCached {
+                cache: cache.to_owned(),
+                download: e.to_string().replace(['\r', '\n'], " "),
+            })?;
+            let file = checked(&bytes, sha256, unpack)?;
+            write_file(cache, &bytes, 0o644).map_err(cache_error)?;
+            place(out, &file)?;
+            Ok(format!(
+                "ok: {url} has SHA-256 {sha256}; kept it at {} and installed {}",
+                cache.display(),
+                out.display()
+            ))
+        }
+        Err(e) => Err(cache_error(e)),
+    }
 }
 
 /// The file `out` is written as before it is renamed over `out`.
@@ -241,13 +332,13 @@ pub fn part_path(out: &Path) -> PathBuf {
     PathBuf::from(part)
 }
 
-/// Writes `data` to `out` (mode 0755) through [`part_path`], removing the part file
+/// Writes `data` to `out` (mode `mode`) through [`part_path`], removing the part file
 /// when a step fails.
-fn write_executable(out: &Path, data: &[u8]) -> std::io::Result<()> {
+fn write_file(out: &Path, data: &[u8], mode: u32) -> std::io::Result<()> {
     out.parent().map_or(Ok(()), std::fs::create_dir_all)?;
     let part = part_path(out);
     let written = std::fs::write(&part, data)
-        .and_then(|()| std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)))
+        .and_then(|()| std::fs::set_permissions(&part, std::fs::Permissions::from_mode(mode)))
         .and_then(|()| std::fs::rename(&part, out));
     if written.is_err() {
         // A part file that cannot be removed is reported by the write error itself.
