@@ -3,13 +3,33 @@
 //! Cargo only warns when a `[profile.<p>.package.<name>]` table names a package that
 //! does not exist, so a misspelled name keeps CI green and silently drops the
 //! optimisation. These tests turn that warning into a failure, and check that the
-//! packages whose replay simulations need the optimisation have it on both profiles.
+//! packages whose simulations need the optimisation have it on the test profile. A
+//! dependency (not a workspace member) may carry an override only when it is listed in
+//! [`DEPENDENCIES`] and locked in `Cargo.lock`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// The packages whose simulations run in CI test builds.
-const OPTIMISED: [&str; 5] = ["js-sched", "js-sim", "js-sim-cell", "js-sizing", "js-types"];
+/// The workspace packages whose simulations run in CI test builds, and those on the path
+/// of the sim cell's job front (its server's placement pass and job tables).
+const OPTIMISED: [&str; 12] = [
+    "js-api-gateway",
+    "js-caps",
+    "js-jobs",
+    "js-lease-server",
+    "js-registry",
+    "js-sched",
+    "js-sched-placer",
+    "js-sim",
+    "js-sim-cell",
+    "js-sizing",
+    "js-state",
+    "js-types",
+];
+
+/// The dependencies (not workspace members) optimised on the test profile: the SQLite the
+/// job tables are read through.
+const DEPENDENCIES: [&str; 2] = ["libsqlite3-sys", "rusqlite"];
 
 /// The repository root.
 fn repo() -> PathBuf {
@@ -52,6 +72,24 @@ fn overrides(manifest: &toml::Table) -> Vec<(String, String)> {
     found
 }
 
+/// The package names `Cargo.lock` locks.
+fn locked() -> BTreeSet<String> {
+    let text = std::fs::read_to_string(repo().join("Cargo.lock")).expect("Cargo.lock");
+    let lock: toml::Table = text.parse().expect("Cargo.lock parses");
+    let packages = lock["package"].as_array().expect("locked packages");
+    let names = packages.iter().map(|p| p["name"].as_str().expect("name"));
+    names.map(str::to_owned).collect()
+}
+
+/// The names of `listed` that `locked` does not hold.
+fn unlocked<'a>(listed: &[&'a str], locked: &BTreeSet<String>) -> Vec<&'a str> {
+    listed
+        .iter()
+        .copied()
+        .filter(|name| !locked.contains(*name))
+        .collect()
+}
+
 /// The overrides in `manifest` that name no member of `members`.
 fn unmatched(manifest: &toml::Table, members: &BTreeSet<String>) -> Vec<(String, String)> {
     overrides(manifest)
@@ -84,8 +122,31 @@ fn manifest_with(pairs: &[(&str, &str)]) -> toml::Table {
 }
 
 #[test]
-fn every_override_names_a_workspace_package() {
-    assert_eq!(unmatched(&root(), &members()), Vec::new());
+fn every_override_names_a_workspace_package_or_a_listed_dependency() {
+    let mut allowed = members();
+    allowed.extend(DEPENDENCIES.map(str::to_owned));
+    assert_eq!(unmatched(&root(), &allowed), Vec::new());
+}
+
+#[test]
+fn every_listed_dependency_is_locked_and_optimised_on_the_test_profile() {
+    assert_eq!(unlocked(&DEPENDENCIES, &locked()), Vec::<&str>::new());
+    let manifest = root();
+    for package in DEPENDENCIES {
+        assert!(
+            optimised(&manifest, "test", package),
+            "profile.test.package.{package} lacks opt-level = 2"
+        );
+    }
+}
+
+#[test]
+fn a_misspelled_dependency_name_is_reported() {
+    let locked = locked();
+    assert_eq!(
+        unlocked(&["rusqlite", "libsqlite3-syss"], &locked),
+        ["libsqlite3-syss"]
+    );
 }
 
 #[test]

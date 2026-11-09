@@ -69,6 +69,9 @@ const DIE_SETTLE: Duration = Duration::from_secs(1_300);
 /// The 200-host scenario is the family's largest by far, and over the job service a seed
 /// of it costs about four CPU minutes, so it runs [`DIE_SEEDS`] seeds, on this many threads,
 /// a quarter each.
+// TODO(js-placement-pass-cost): restore 16 seeds, the family's [`SEEDS`], once the
+// placement pass stops re-reading every active job and re-placing every queued job on
+// every heartbeat; that follow-up measures the cost of the 16 seeds before it lands.
 const DIE_SEEDS: u64 = 4;
 const DIE_THREADS: u64 = 4;
 
