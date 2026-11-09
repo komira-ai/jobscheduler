@@ -29,14 +29,30 @@ fn fixture() -> Export {
     read_dir(&fixture_dir()).expect("the committed fixture parses")
 }
 
-/// A scratch directory of its own, emptied of the files these tests write.
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("sim_x2_{name}"));
-    std::fs::create_dir_all(&dir).expect("scratch directory");
-    for file in [KEY_PROFILE_FILE, NODE_MINUTE_FILE] {
-        let _ = std::fs::remove_file(dir.join(file));
+/// A scratch directory of its own, `sim_x2_<name>-<pid>` under the target tmp directory,
+/// removed with its files when dropped so tests in other processes never share it.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
     }
-    dir
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("sim_x2_{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    Scratch(dir)
 }
 
 /// The lease (index in start order) of the `nth` run of `digest`, also in start order.

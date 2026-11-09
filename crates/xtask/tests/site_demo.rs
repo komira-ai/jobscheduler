@@ -553,7 +553,8 @@ fn the_fake_server_can_answer_503_or_leave_its_address_unannounced() {
 #[ignore = "builds the release binaries of js-lease-server and js and uses the default port 7300"]
 fn a_new_recording_differs_from_the_committed_one_only_in_ids_and_times() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("demo.recorded");
+    let scratch = js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "demo-recorded");
+    let out = scratch.join("demo.recorded");
     let status = Command::new(XTASK)
         .args(["site-demo", "--root"])
         .arg(&root)

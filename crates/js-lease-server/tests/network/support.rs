@@ -3,7 +3,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Artifact, BootPlan, BootStep, HostName, SchedulerId, Secret};
@@ -12,6 +11,7 @@ use js_lease_server::SharedClock;
 use js_lease_server::network::{
     API_TIMEOUT, LaunchCtx, OAuthClient, TailscaleApi, TailscaleMode, TailscaleSettings,
 };
+use js_testkit::dir::TestDir;
 
 use crate::fake::{CLIENT_SECRET, Fake};
 
@@ -92,21 +92,18 @@ pub fn plan(host: &HostName) -> BootPlan {
     }
 }
 
-/// A directory of files for one test.
+/// A directory of files for one test, unique to this process and removed on drop.
 pub struct Scratch {
-    dir: PathBuf,
+    dir: TestDir,
 }
 
 impl Scratch {
-    /// An empty directory named `name`.
+    /// An empty directory for the test `name`.
     pub fn new(name: &str) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("js-lease-server-network")
-            .join(format!("{name}-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-lease-server-network");
+        Self {
+            dir: TestDir::under(root, name),
+        }
     }
 
     /// Writes `bytes` to the file `name` with `mode` and returns its path.
@@ -115,12 +112,6 @@ impl Scratch {
         fs::write(&path, bytes).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
         path
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -15,15 +15,12 @@ const XTASK: &str = env!("CARGO_BIN_EXE_xtask");
 const TOOL: &[u8] = b"a pinned tool";
 
 /// An empty directory of its own for one test.
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("xtask-fetch-https")
-        .join(name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("clear scratch");
-    }
-    std::fs::create_dir_all(&dir).expect("scratch");
-    dir
+/// Removed when the returned value is dropped.
+fn scratch(name: &str) -> js_testkit::dir::TestDir {
+    js_testkit::dir::TestDir::under(
+        env!("CARGO_TARGET_TMPDIR"),
+        &format!("xtask-fetch-https-{name}"),
+    )
 }
 
 /// A canned HTTP/1.1 response.
@@ -166,7 +163,8 @@ fn a_certificate_the_roots_do_not_trust_is_refused() {
 #[test]
 fn fetch_installs_a_matching_download_and_refuses_a_mismatch() {
     let (base, ca) = serve(true, |_, _| response("200 OK", &[], TOOL));
-    let out = scratch("fetch").join("bin").join("tool");
+    let dir = scratch("fetch");
+    let out = dir.join("bin").join("tool");
     let url = format!("{base}/tool");
     let line = fetch::fetch(
         &url,
@@ -185,7 +183,8 @@ fn fetch_installs_a_matching_download_and_refuses_a_mismatch() {
         )
     );
     assert_eq!(std::fs::read(&out).expect("read"), TOOL);
-    let other = scratch("fetch-mismatch").join("tool");
+    let dir = scratch("fetch-mismatch");
+    let other = dir.join("tool");
     let pinned = Sha256::of(b"another tool");
     let result = fetch::fetch(&url, &pinned, &Unpack::Raw, &other, &[ca]);
     assert!(
@@ -213,7 +212,8 @@ const PIN: &str = "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8
 /// Asserts that the verb refuses plain HTTP, exits 1 and writes nothing.
 #[test]
 fn the_verb_refuses_plain_http_with_exit_1_and_writes_nothing() {
-    let out = scratch("cli-http").join("tool");
+    let dir = scratch("cli-http");
+    let out = dir.join("tool");
     let url = "http://127.0.0.1:9/tool";
     let (code, err) = xtask_fetch(&[
         "--url",
@@ -235,7 +235,8 @@ fn the_verb_refuses_plain_http_with_exit_1_and_writes_nothing() {
 /// all exit 2 (the usage status) before any download.
 #[test]
 fn flags_that_do_not_fit_together_exit_2() {
-    let out = scratch("cli-usage").join("tool");
+    let dir = scratch("cli-usage");
+    let out = dir.join("tool");
     let out = out.to_str().expect("utf-8");
     let url = "https://127.0.0.1:9/tool";
     for (extra, says) in [

@@ -421,7 +421,9 @@ fn the_checkout_must_be_the_head() {
 #[test]
 fn the_lines_are_appended_to_the_output_file() {
     let repo = Repo::new("output");
-    let out = repo.dir.join("../output.txt");
+    let outside =
+        js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "xtask-release-output");
+    let out = outside.join("output.txt");
     std::fs::write(&out, "earlier=1\n").expect("earlier");
     let mut args = repo.plan();
     args.output = Some(out.clone());

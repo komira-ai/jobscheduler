@@ -6,26 +6,20 @@ use std::path::{Path, PathBuf};
 
 use super::{replace, replace_with, sibling};
 
-/// A directory next to the test binary, emptied when the test ends.
-struct Dir(PathBuf);
+/// A directory unique to the test, next to the test binary, removed when the test ends.
+struct Dir(js_testkit::dir::TestDir);
 
 impl Dir {
     fn new(name: &str) -> Self {
         let exe = std::env::current_exe().unwrap();
-        let dir = exe.parent().unwrap().join(format!("js-lease-store-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        Self(js_testkit::dir::TestDir::under(
+            exe.parent().unwrap(),
+            &format!("js-lease-store-{name}"),
+        ))
     }
 
     fn file(&self) -> PathBuf {
-        self.0.join("leases.toml")
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        self.0.path().join("leases.toml")
     }
 }
 

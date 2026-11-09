@@ -44,15 +44,47 @@ fn table(text: &str) -> Table {
     text.parse().unwrap()
 }
 
-/// A directory for one test, empty, under the test target's scratch directory.
-fn scratch(name: &str) -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("ec2-live-cloud")
-        .join(format!("{name}-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+/// A directory for one test, empty, named `<name>-<pid>-<n>` under the test target's scratch
+/// directory so no other test process shares it, and removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("ec2-live-cloud")
+            .join(format!(
+                "{name}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
+    Scratch::new(name)
 }
 
 fn names_in(dir: &Path) -> Vec<String> {
@@ -243,7 +275,8 @@ fn a_capture_directory_that_cannot_be_made_is_refused_naming_it() {
 
 #[test]
 fn a_capture_directory_is_made_when_it_is_missing() {
-    let dir = scratch("made").join("a").join("b");
+    let root = scratch("made");
+    let dir = root.join("a").join("b");
     cloud_of(&[
         "--region",
         "us-east-1",

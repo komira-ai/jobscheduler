@@ -6,14 +6,15 @@ use std::path::Path;
 
 use js_provider_lambdalabs::{ApiKey, KeyError};
 
-/// A directory of files for one test, removed when dropped.
+/// A directory of files for one test, named `<name>-<pid>` so no other test process shares
+/// it, and removed when dropped.
 struct Dir(std::path::PathBuf);
 
 impl Dir {
     fn new(name: &str) -> Self {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("lambdalabs-key")
-            .join(name);
+            .join(format!("{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Self(dir)
@@ -77,7 +78,8 @@ fn the_refusal_names_the_file_and_leaves_the_key_out() {
     let err = load("named", b"TOPSECRETKEY\n", 0o644).unwrap_err();
     let shown = format!("{err} | {err:?}");
     assert!(
-        shown.contains("named/key") && !shown.contains("TOPSECRET"),
+        shown.contains(&format!("named-{}/key", std::process::id()))
+            && !shown.contains("TOPSECRET"),
         "{shown}"
     );
 }
