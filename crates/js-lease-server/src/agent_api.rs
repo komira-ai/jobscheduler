@@ -167,7 +167,9 @@ async fn authenticate(
 }
 
 /// Holds a credential to its hello limit before the body is read: a 429 with the code
-/// `rate-limited` and a `Retry-After` in whole seconds.
+/// `rate-limited` and a `Retry-After` in whole seconds. The listener reads the body it
+/// leaves and drops it before the 429 goes (`listener.rs`), so the connection does not
+/// close on bytes it never read.
 async fn limit_hello(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,

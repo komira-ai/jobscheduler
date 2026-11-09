@@ -11,20 +11,22 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// The workspace packages whose simulations run in CI test builds, and those on the path
-/// of the sim cell's job front (its server's placement pass and job tables).
-const OPTIMISED: [&str; 12] = [
-    "js-api-gateway",
-    "js-caps",
-    "js-jobs",
-    "js-lease-server",
-    "js-registry",
-    "js-sched",
-    "js-sched-placer",
-    "js-sim",
-    "js-sim-cell",
-    "js-sizing",
-    "js-state",
-    "js-types",
+/// of the sim cell's job front (its server's placement pass and job tables), each with
+/// the opt-level the test profile builds it at. js-lease-server is at 1, not 2: its
+/// override also applies to its own test targets, which take longer to build at 2.
+const OPTIMISED: [(&str, i64); 12] = [
+    ("js-api-gateway", 2),
+    ("js-caps", 2),
+    ("js-jobs", 2),
+    ("js-lease-server", 1),
+    ("js-registry", 2),
+    ("js-sched", 2),
+    ("js-sched-placer", 2),
+    ("js-sim", 2),
+    ("js-sim-cell", 2),
+    ("js-sizing", 2),
+    ("js-state", 2),
+    ("js-types", 2),
 ];
 
 /// The dependencies (not workspace members) optimised on the test profile: the SQLite the
@@ -98,8 +100,8 @@ fn unmatched(manifest: &toml::Table, members: &BTreeSet<String>) -> Vec<(String,
         .collect()
 }
 
-/// Whether `profile` sets `opt-level = 2` for `package` in `manifest`.
-fn optimised(manifest: &toml::Table, profile: &str, package: &str) -> bool {
+/// Whether `profile` sets `opt-level = level` for `package` in `manifest`.
+fn optimised(manifest: &toml::Table, profile: &str, package: &str, level: i64) -> bool {
     manifest
         .get("profile")
         .and_then(|p| p.get(profile))
@@ -107,7 +109,7 @@ fn optimised(manifest: &toml::Table, profile: &str, package: &str) -> bool {
         .and_then(|p| p.get(package))
         .and_then(|p| p.get("opt-level"))
         .and_then(|v| v.as_integer())
-        == Some(2)
+        == Some(level)
 }
 
 /// A manifest with one override table per `(profile, package)` pair given.
@@ -134,7 +136,7 @@ fn every_listed_dependency_is_locked_and_optimised_on_the_test_profile() {
     let manifest = root();
     for package in DEPENDENCIES {
         assert!(
-            optimised(&manifest, "test", package),
+            optimised(&manifest, "test", package, 2),
             "profile.test.package.{package} lacks opt-level = 2"
         );
     }
@@ -152,10 +154,10 @@ fn a_misspelled_dependency_name_is_reported() {
 #[test]
 fn the_simulation_packages_are_optimised_on_the_test_profile_only() {
     let manifest = root();
-    for package in OPTIMISED {
+    for (package, level) in OPTIMISED {
         assert!(
-            optimised(&manifest, "test", package),
-            "profile.test.package.{package} lacks opt-level = 2"
+            optimised(&manifest, "test", package, level),
+            "profile.test.package.{package} lacks opt-level = {level}"
         );
     }
     let others: Vec<_> = overrides(&manifest)
@@ -195,11 +197,12 @@ fn a_misspelled_package_name_is_reported() {
 #[test]
 fn a_missing_or_weaker_override_is_reported() {
     let manifest = manifest_with(&[("dev", "js-sched")]);
-    assert!(optimised(&manifest, "dev", "js-sched"));
-    assert!(!optimised(&manifest, "test", "js-sched"));
-    assert!(!optimised(&manifest, "dev", "js-sim"));
+    assert!(optimised(&manifest, "dev", "js-sched", 2));
+    assert!(!optimised(&manifest, "test", "js-sched", 2));
+    assert!(!optimised(&manifest, "dev", "js-sim", 2));
     let weaker: toml::Table = "[profile.dev.package.js-sched]\nopt-level = 1\n"
         .parse()
         .expect("parses");
-    assert!(!optimised(&weaker, "dev", "js-sched"));
+    assert!(!optimised(&weaker, "dev", "js-sched", 2));
+    assert!(optimised(&weaker, "dev", "js-sched", 1));
 }

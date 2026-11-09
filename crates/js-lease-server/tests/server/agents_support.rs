@@ -232,11 +232,11 @@ pub struct Raw {
     pub body: String,
 }
 
-/// Half-closes the write side after the body, and hyper's http1 without half_close can then drop
-/// the connection before a slow handler answers (status 0): use it only for fast refusals.
 /// POSTs `body` and returns the whole answer. `declared` is the Content-Length to claim
 /// (the body's own length when `None`). The sending side is shut after the body, so a
-/// declared length longer than the body ends the request mid-body.
+/// declared length longer than the body ends the request mid-body. A failed write, shut or
+/// read, and a connection that ends with no answer, fail the test with what happened, so a
+/// lost answer is not taken for a status of 0.
 pub async fn post_raw(
     h: &Harness,
     path: &str,
@@ -251,10 +251,22 @@ pub async fn post_raw(
     );
     let mut message = head.into_bytes();
     message.extend_from_slice(body);
-    let _ = stream.write_all(&message).await;
-    let _ = stream.shutdown().await;
+    let sent = stream.write_all(&message).await;
+    sent.unwrap_or_else(|error| panic!("POST {path}: the request was not sent: {error}"));
+    let shut = stream.shutdown().await;
+    shut.unwrap_or_else(|error| panic!("POST {path}: the sending side did not shut: {error}"));
     let mut raw = Vec::new();
-    let _ = stream.read_to_end(&mut raw).await;
+    let read = stream.read_to_end(&mut raw).await;
+    read.unwrap_or_else(|error| {
+        panic!(
+            "POST {path}: the answer was lost after {} bytes: {error}",
+            raw.len()
+        )
+    });
+    assert!(
+        !raw.is_empty(),
+        "POST {path}: the connection ended with no answer"
+    );
     let text = String::from_utf8_lossy(&raw).into_owned();
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
     let status = head

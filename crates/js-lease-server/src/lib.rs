@@ -535,7 +535,12 @@
 //! unauthenticated client cannot make it buffer more before the token is checked (a
 //! larger head is a 431). A client that sends its head and then stalls on the
 //! body does so with a valid token, since the token is checked on the head; it is cut
-//! by `--read-timeout`. Those two timeouts limit stalls, not total time. A failed accept (descriptors used
+//! by `--read-timeout`. Those two timeouts limit stalls, not total time. A request
+//! answered before its route read the body (a refused token, a hello over its rate
+//! limit) has the rest of its body read and dropped before the answer goes, so the
+//! connection does not close on bytes it never read; that read takes at most 64 KiB and
+//! at most `--header-timeout`, so a client without a token holds a connection no longer
+//! than its handshake and twice `--header-timeout`. A failed accept (descriptors used
 //! up, say) is logged and retried after 100 ms.
 //!
 //! # Restart

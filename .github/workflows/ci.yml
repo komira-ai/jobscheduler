@@ -134,7 +134,10 @@ jobs:
   # fails the job when it has not passed after 30 tries.
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 55, not 45, until js-placement-pass-cost: the sim cell's server re-reads every active
+    # job and re-places every queued job on every heartbeat, which takes its fault
+    # scenarios past 45 minutes with the test build. That task brings the limit back to 45.
+    timeout-minutes: 55
     permissions:
       contents: read
     services:
@@ -710,7 +713,11 @@ jobs:
   # the same either way.
   coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 80, not 60, until js-placement-pass-cost: the sim cell's server re-reads every active
+    # job and re-places every queued job on every heartbeat, and unoptimised and
+    # instrumented the 200-host fault scenario alone runs over half an hour. That task
+    # brings the limit back to 60.
+    timeout-minutes: 80
     permissions:
       contents: read
     services:

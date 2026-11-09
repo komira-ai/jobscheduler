@@ -195,7 +195,10 @@ opt-level = 2
 # The cell's server runs the job front: every heartbeat of every host runs a placement
 # pass that reads the job tables from SQLite and places the queued jobs, so the crates on
 # that path, and the SQLite they read through, are optimised too. Built at opt-level 0
-# they took the sim cell's fault scenarios past the CI test job's limit.
+# they took the sim cell's fault scenarios past the CI test job's limit. js-lease-server
+# is at opt-level 1: a package's override also applies to its own test targets, and at 2
+# the crate's unit tests and its three test targets took 157 s to build, against 89 s
+# at 1 (measured on 4 cores).
 [profile.test.package.js-api-gateway]
 opt-level = 2
 
@@ -206,7 +209,7 @@ opt-level = 2
 opt-level = 2
 
 [profile.test.package.js-lease-server]
-opt-level = 2
+opt-level = 1
 
 [profile.test.package.js-registry]
 opt-level = 2

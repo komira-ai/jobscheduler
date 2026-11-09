@@ -175,7 +175,7 @@ async fn the_mint_answer_is_not_stored() {
     let mut stream = TcpStream::connect(h.addr()).await.unwrap();
     stream.write_all(head.as_bytes()).await.unwrap();
     let mut bytes = Vec::new();
-    let _ = stream.read_to_end(&mut bytes).await;
+    stream.read_to_end(&mut bytes).await.unwrap();
     let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
     let (head, reply) = text.split_once("\r\n\r\n").unwrap();
     assert!(head.starts_with("http/1.1 201"), "{head}");
