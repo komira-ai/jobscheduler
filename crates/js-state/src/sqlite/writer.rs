@@ -1,9 +1,10 @@
-//! The writer thread: the only connection that writes. It gathers the requests that
-//! arrive inside the commit window into one group, applies the group in one SQLite
+//! The writer thread: the only connection that writes. It takes a request and, when no
+//! other is queued behind it, commits it at once; when another is, it gathers the requests
+//! that arrive inside the commit window into one group. It applies the group in one SQLite
 //! transaction, syncs once, and only then answers every request in it.
 
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -50,6 +51,23 @@ pub(super) struct Shared {
     pub(super) commits: AtomicU64,
     /// The commit latency figures.
     pub(super) metrics: Mutex<CommitMetrics>,
+    /// Requests a caller has queued (or is queuing) that the writer has not yet taken.
+    pub(super) waiting: AtomicUsize,
+    /// Groups that waited the commit window for more requests to join them.
+    pub(super) window_waits: AtomicU64,
+}
+
+impl Shared {
+    /// Queues `request` for the writer, counted in [`Shared::waiting`] before it is sent,
+    /// so a writer that takes another request first sees this one coming.
+    pub(super) fn queue(&self, requests: &SyncSender<Request>, request: Request) {
+        self.waiting.fetch_add(1, Ordering::AcqRel);
+        // A writer that has stopped would not take the request, which is then dropped here
+        // with its reply sender, or drops it unanswered: either way the caller's receive
+        // fails and it is told the writer has stopped. The count is left raised, since no
+        // writer is left to read it.
+        let _ = requests.send(request);
+    }
 }
 
 pub(super) struct Writer {
@@ -96,24 +114,41 @@ impl Writer {
     }
 
     /// Serves requests until every sender is gone.
+    ///
+    /// A group whose first request has no other queued behind it when the writer takes it
+    /// is committed at once: waiting would only delay a caller no one else is batching
+    /// with. When another is queued, the group waits the window ([`Options::window`]) for
+    /// more to join it, until it holds [`Options::max_group`] transactions: under load that
+    /// is what bounds the syncs. A request queued after a lone request was taken joins the
+    /// next group.
     pub(super) fn run(mut self, requests: &Receiver<Request>) {
         while let Ok(first) = requests.recv() {
+            self.taken();
             let started = first.queued;
+            let mut size = first.txns.len().max(1);
             let mut group = vec![first];
-            let mut size = group[0].txns.len().max(1);
-            let deadline = Instant::now() + self.options.window;
-            while size < self.options.max_group {
-                let left = deadline.saturating_duration_since(Instant::now());
-                match requests.recv_timeout(left) {
-                    Ok(next) => {
-                        size += next.txns.len().max(1);
-                        group.push(next);
+            if size < self.options.max_group && self.shared.waiting.load(Ordering::Acquire) > 0 {
+                self.shared.window_waits.fetch_add(1, Ordering::AcqRel);
+                let deadline = Instant::now() + self.options.window;
+                while size < self.options.max_group {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    match requests.recv_timeout(left) {
+                        Ok(next) => {
+                            self.taken();
+                            size += next.txns.len().max(1);
+                            group.push(next);
+                        }
+                        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
                     }
-                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
                 }
             }
             self.commit_group(group, started, size);
         }
+    }
+
+    /// Counts a request the writer took off the queue out of [`Shared::waiting`].
+    fn taken(&self) {
+        self.shared.waiting.fetch_sub(1, Ordering::AcqRel);
     }
 
     fn commit_group(&mut self, group: Vec<Request>, started: Instant, size: usize) {

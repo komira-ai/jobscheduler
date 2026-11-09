@@ -1,10 +1,12 @@
 //! The SQLite backend: the state store for `all-in-one` and for a single frontend.
 //!
-//! - **One writer.** A thread owns the only connection that writes. Calls queue to it;
-//!   it gathers the requests that arrive inside the commit window ([`Options::window`],
-//!   5 ms by default, [`crate::GROUP_COMMIT_WINDOW`]) into one `BEGIN IMMEDIATE`
-//!   transaction, commits it with one sync (WAL mode, `synchronous=FULL`), and only then
-//!   answers every request in the group. Compare-and-set, transactions and counters run
+//! - **One writer.** A thread owns the only connection that writes. Calls queue to it. A
+//!   call with no other queued behind it when the writer takes it is a group of its own,
+//!   committed at once; when another is queued, the writer gathers the requests that
+//!   arrive inside the commit window ([`Options::window`], 5 ms by default,
+//!   [`crate::GROUP_COMMIT_WINDOW`]) into the group. A group is one `BEGIN IMMEDIATE`
+//!   transaction, committed with one sync (WAL mode, `synchronous=FULL`), and only then
+//!   does the writer answer every request in it. Compare-and-set, transactions and counters run
 //!   inside that thread, so they are linearizable by construction.
 //! - **Reads** use a connection of their own: in WAL mode they never wait for the writer
 //!   and see only committed groups, so the change feed needs no horizon beyond the head.
@@ -66,6 +68,8 @@ use writer::{Reply, Request, Shared, Writer};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
     /// How long the writer waits, after the first request of a group, for more to join it.
+    /// It waits only when another request is already queued as it takes the first: a lone
+    /// request is committed at once.
     pub window: Duration,
     /// The group is committed as soon as it holds this many transactions, window or not.
     pub max_group: usize,
@@ -85,7 +89,8 @@ impl Default for Options {
 }
 
 /// Commit latency figures, for the operator's metrics. Latency runs from a call queuing
-/// its write to the group it is in being on disk, so it includes the window.
+/// its write to the group it is in being on disk, so it includes the window, when the
+/// group waited it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CommitMetrics {
     /// Groups committed.
@@ -258,10 +263,7 @@ impl SqliteStore {
             queued: Instant::now(),
             reply,
         };
-        // A writer that has stopped would not take the request, which is then dropped here
-        // with its reply sender, or drops it unanswered: either way the receive fails and
-        // the caller is told the writer has stopped.
-        let _ = self.requests.send(request);
+        self.shared.queue(&self.requests, request);
         answer.recv().ok().ok_or_else(gone)?
     }
 
@@ -355,5 +357,7 @@ impl Store for SqliteStore {
     }
 }
 
+#[cfg(test)]
+mod group_tests;
 #[cfg(test)]
 mod tests;
