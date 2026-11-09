@@ -264,10 +264,19 @@ Before the unmount it also refuses when
 - `<unit>.d` exists (a drop-in can override `Options=`), or the `Options=` line is continued with a
   backslash.
 
-After the edit and the reload it checks `systemctl show -p Options` for prjquota before it
-unmounts anything. If the mount does not start again after it was stopped, the run stops there,
-leaves the host drained and prints `systemctl start <mount unit>`; no later step runs, so nothing is
-made on the root filesystem under the mount point.
+After the edit and the reload, before it unmounts anything, it checks that systemd will mount
+with the edited options: `systemctl show -p FragmentPath,DropInPaths` must name the edited file
+and no drop-in, and the `Options=` of the text systemd loaded (`systemctl cat`) must have
+prjquota; otherwise the run fails (exit 1). It does not read `systemctl show -p Options`: for a
+mounted unit that gives the live mount's options, which lack prjquota until the remount. The
+`findmnt` check after the mount is what proves the option took.
+
+A rerun after a run that stopped at this check, with the unit already edited, does not edit it
+again: it reloads, checks, and goes on to the remount.
+
+If the mount does not start again after it was stopped, the run stops there, leaves the host
+drained and prints `systemctl start <mount unit>`; no later step runs, so nothing is made on the
+root filesystem under the mount point.
 
 Where the scratch filesystem is not mounted at the moment, only the unit is edited and the option
 applies at its next mount.

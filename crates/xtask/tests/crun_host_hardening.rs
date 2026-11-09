@@ -265,27 +265,134 @@ fn a_mount_unit_the_edit_cannot_be_trusted_with_is_refused() {
     rig.expect_refused("Type=ext4");
 }
 
-/// The options systemd will use once it has read the edited unit are checked, not assumed: where
-/// the effective `Options=` still lacks prjquota (a file the edit missed), the run stops before
-/// the filesystem is unmounted.
+/// What systemd loaded for the mount unit after the reload is checked before the filesystem is
+/// unmounted: the run stops (exit 1, the step named in the manifest, nothing unmounted, no later
+/// step) when the files systemd names cannot be read, when it loaded the unit from another file
+/// or with a drop-in, and when the `Options=` of the loaded text (`systemctl cat`, read as
+/// systemd does: the last line wins, the `# <path>` line is a comment) lacks prjquota.
 #[test]
-fn an_effective_options_line_without_prjquota_stops_the_run_before_the_unmount() {
-    let mut rig = Rig::new("effective");
-    rig.rule(rule(
-        "systemctl",
-        &format!("show -p Options --value -- {MOUNT}"),
-        0,
-        "loop\\n",
-        &[],
-    ));
+fn a_loaded_unit_that_would_not_mount_with_prjquota_stops_the_run_before_the_unmount() {
+    let file = format!("/etc/systemd/system/{MOUNT}");
+    let show = format!("show -p FragmentPath,DropInPaths -- {MOUNT}");
+    let cat = format!("cat -- {MOUNT}");
+    let shown = |text: &str| rule("systemctl", &show, 0, &esc(text), &[]);
+    let loaded =
+        |frag: &str, drop: &str| shown(&format!("FragmentPath={frag}\nDropInPaths={drop}\n"));
+    let catted = |text: &str| {
+        rule(
+            "systemctl",
+            &cat,
+            0,
+            &esc(&format!("# {file}\n{text}")),
+            &[],
+        )
+    };
+    let unread = format!(
+        "  FAILED: cannot read the files systemd loaded for {MOUNT} (systemctl show -p FragmentPath,DropInPaths): nothing was unmounted"
+    );
+    let from = |frag: &str| {
+        format!(
+            "  FAILED: systemd loaded {MOUNT} from '{frag}', not from the edited {file}: nothing was unmounted"
+        )
+    };
+    let without = |options: &str| {
+        format!(
+            "  FAILED: the Options= systemd loaded for {MOUNT} (systemctl cat) is '{options}', without prjquota: nothing was unmounted"
+        )
+    };
+    let elsewhere = format!("/run/systemd/system/{MOUNT}");
+    let dropin =
+        format!("/run/systemd/system/{MOUNT}.d/override.conf /etc/systemd/system/mount.d/x.conf");
+    let cases = [
+        (
+            "show-fails",
+            rule("systemctl", &show, 1, "", &[]),
+            unread.clone(),
+        ),
+        (
+            "show-no-drop-ins",
+            shown(&format!("FragmentPath={file}\n")),
+            unread.clone(),
+        ),
+        ("show-no-fragment", shown("DropInPaths=\n"), unread),
+        (
+            "fragment-elsewhere",
+            loaded(&elsewhere, ""),
+            from(&elsewhere),
+        ),
+        ("fragment-none", loaded("", ""), from("")),
+        (
+            "fragment-longer-path",
+            loaded(&format!("/x{file}"), ""),
+            from(&format!("/x{file}")),
+        ),
+        (
+            "drop-ins",
+            loaded(&file, &dropin),
+            format!(
+                "  FAILED: systemd loaded drop-ins for {MOUNT} ({dropin}), which can override Options=: nothing was unmounted"
+            ),
+        ),
+        (
+            "cat-fails",
+            rule("systemctl", &cat, 1, "", &[]),
+            without(""),
+        ),
+        ("cat-without", catted(&mount_unit("loop")), without("loop")),
+        (
+            "cat-later-line",
+            catted(&mount_unit("loop,prjquota").replace(
+                "Options=loop,prjquota\n",
+                "Options=loop,prjquota\nOptions=loop\n",
+            )),
+            without("loop"),
+        ),
+        (
+            "cat-other-section",
+            catted(&mount_unit("loop").replace("[Install]\n", "[Install]\nOptions=prjquota\n")),
+            without("loop"),
+        ),
+    ];
+    for (name, answer, want) in cases {
+        let mut rig = Rig::new(&format!("loaded-{name}"));
+        rig.rule(answer);
+        let out = rig.apply();
+        assert_eq!(out.code, 1, "{name}: {}", out.text);
+        assert!(
+            out.text.lines().any(|l| l == want),
+            "{name}: {want}\n{}",
+            out.text
+        );
+        let calls = rig.calls();
+        assert!(
+            index(&calls, "systemctl daemon-reload") < index(&calls, &format!("systemctl {show}")),
+            "{name}: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&format!("systemctl stop {MOUNT}")),
+            "{name}: {calls:?}"
+        );
+        assert!(
+            !rig.path("var/lib/js-agent").exists(),
+            "{name}: the steps after it ran"
+        );
+        let manifest = rig.text("var/lib/js-crun-host-setup/manifest");
+        assert_eq!(
+            manifest.lines().last(),
+            Some("incomplete\t1\tstep_scratch_quota"),
+            "{name}: {manifest}"
+        );
+    }
+    // The check runs for a unit that is not mounted too: its edit alone is checked.
+    let mut rig = Rig::new("loaded-unmounted");
+    rig.write("mount-options", "");
+    rig.rule(loaded(&file, &dropin));
     let out = rig.apply();
     assert_eq!(out.code, 1, "{}", out.text);
-    assert!(out.text.contains("effective"), "{}", out.text);
-    let calls = rig.calls();
-    assert!(
-        !calls.contains(&format!("systemctl stop {MOUNT}")),
-        "{calls:?}"
+    let want = format!(
+        "  FAILED: systemd loaded drop-ins for {MOUNT} ({dropin}), which can override Options=: nothing was unmounted"
     );
+    assert!(out.text.lines().any(|l| l == want), "{}", out.text);
     assert!(
         !rig.path("var/lib/js-agent").exists(),
         "the steps after it ran"
@@ -533,7 +640,7 @@ fn a_failed_tmpfiles_run_stops_the_reload_step_before_the_verify() {
     assert!(last.starts_with("incomplete\t1\t"), "{manifest}");
 }
 
-/// A state directory or a manifest that is a link, an existing user with uid 0 and an effective
+/// A state directory or a manifest that is a link, an existing user with uid 0 and a loaded
 /// `Options=` that only looks like it has the option are each refused or stopped.
 #[test]
 fn links_a_root_account_and_a_lookalike_option_are_not_trusted() {
@@ -568,12 +675,15 @@ fn links_a_root_account_and_a_lookalike_option_are_not_trusted() {
     let mut rig = Rig::new("noprjquota");
     rig.rule(rule(
         "systemctl",
-        &format!("show -p Options --value -- {MOUNT}"),
+        &format!("cat -- {MOUNT}"),
         0,
-        "loop,noprjquota\\n",
+        &esc(&mount_unit("loop,noprjquota")),
         &[],
     ));
     let out = rig.apply();
     assert_eq!(out.code, 1, "{}", out.text);
-    assert!(out.text.contains("effective"), "{}", out.text);
+    let want = format!(
+        "  FAILED: the Options= systemd loaded for {MOUNT} (systemctl cat) is 'loop,noprjquota', without prjquota: nothing was unmounted"
+    );
+    assert!(out.text.lines().any(|l| l == want), "{}", out.text);
 }

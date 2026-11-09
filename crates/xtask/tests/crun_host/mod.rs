@@ -265,10 +265,25 @@ impl Rig {
                 &format!("list-dependencies --reverse --plain --no-pager {MOUNT}"),
                 &format!("{MOUNT}\n  local-fs.target\n"),
             ),
-            ok(
+            // systemd's answer for a mounted unit: the options of the live mount (from mountinfo),
+            // not the unit file's `Options=`, so a check that read it could not pass before the
+            // remount. The script does not ask it; a test holds the stand-in to this.
+            file(
                 "systemctl",
                 &format!("show -p Options --value -- {MOUNT}"),
-                "loop,prjquota\n",
+                "mount-options",
+            ),
+            // What systemd loaded for the mount unit: the file in /etc alone, and that file's text
+            // as it is now (`systemctl cat` prints a `# <path>` line first; tests that need it say so).
+            ok(
+                "systemctl",
+                &format!("show -p FragmentPath,DropInPaths -- {MOUNT}"),
+                &format!("FragmentPath=/etc/systemd/system/{MOUNT}\nDropInPaths=\n"),
+            ),
+            file(
+                "systemctl",
+                &format!("cat -- {MOUNT}"),
+                &format!("etc/systemd/system/{MOUNT}"),
             ),
             ok(
                 "findmnt",
@@ -504,7 +519,7 @@ pub fn mutating(call: &str) -> bool {
         | "systemd-tmpfiles" => true,
         "systemctl" => !matches!(
             words.next(),
-            Some("--version" | "show" | "list-dependencies")
+            Some("--version" | "show" | "cat" | "list-dependencies")
         ),
         _ => false,
     }
