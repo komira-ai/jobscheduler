@@ -273,3 +273,47 @@ fn child_removed_dir() {
     let dir = TestDir::under(root, "child");
     std::fs::remove_dir_all(dir.path()).expect("remove");
 }
+
+/// Catches two processes of one test binary, running at once, making `TestDir`s of one
+/// name under one root at the same path (nextest runs every test in its own process, so
+/// a name and a per-process counter alone would collide): each child prints its path
+/// after a marker and the two differ.
+#[test]
+fn dirs_of_one_name_in_concurrent_processes_are_distinct() {
+    let holder = TestDir::under(ROOT, "dir-procs");
+    let spawn = || {
+        Command::new(std::env::current_exe().expect("exe"))
+            .args([
+                "--exact",
+                "child_prints_its_dir",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("KBF_DIR_ROOT", holder.path())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start child")
+    };
+    let (a, b) = (spawn(), spawn());
+    let paths: Vec<String> = [a, b]
+        .into_iter()
+        .map(|child| {
+            let out = child.wait_with_output().expect("wait child");
+            assert!(out.status.success(), "{out:?}");
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            stdout
+                .lines()
+                .find_map(|line| line.split_once("TESTDIR-PATH:").map(|(_, p)| p.to_owned()))
+                .unwrap_or_else(|| panic!("no marker in {stdout:?}"))
+        })
+        .collect();
+    assert_ne!(paths[0], paths[1]);
+}
+
+#[test]
+#[ignore = "run by the case above, in a child process"]
+fn child_prints_its_dir() {
+    let root = std::env::var("KBF_DIR_ROOT").expect("root");
+    let dir = TestDir::under(root, "same");
+    println!("TESTDIR-PATH:{}", dir.path().display());
+}

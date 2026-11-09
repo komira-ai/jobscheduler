@@ -463,6 +463,7 @@ fn run(
     if real {
         return real_run(
             stream,
+            &shared.homes,
             (lease, argv, env, limits),
             [stdin, stdout, stderr, cwd],
         );
@@ -568,7 +569,12 @@ fn wait_for_end(shared: &Shared, lease: &str) -> End {
 }
 
 #[cfg(target_os = "macos")]
-fn real_run(stream: &UnixStream, ask: RunAsk, [stdin, stdout, stderr, cwd]: [OwnedFd; 4]) {
+fn real_run(
+    stream: &UnixStream,
+    homes: &Path,
+    ask: RunAsk,
+    [stdin, stdout, stderr, cwd]: [OwnedFd; 4],
+) {
     use std::os::unix::process::ExitStatusExt as _;
 
     use js_mac_session::proto::Session;
@@ -579,7 +585,7 @@ fn real_run(stream: &UnixStream, ask: RunAsk, [stdin, stdout, stderr, cwd]: [Own
     let child = spawn::spawn(Spawn {
         uid: rustix::process::getuid().as_raw(),
         gid: rustix::process::getgid().as_raw(),
-        home: std::env::temp_dir().join(&name),
+        home: homes.join(&name),
         user: name,
         argv,
         env,
@@ -601,7 +607,7 @@ fn real_run(stream: &UnixStream, ask: RunAsk, [stdin, stdout, stderr, cwd]: [Own
 }
 
 #[cfg(not(target_os = "macos"))]
-fn real_run(_: &UnixStream, _: RunAsk, _: [OwnedFd; 4]) {
+fn real_run(_: &UnixStream, _: &Path, _: RunAsk, _: [OwnedFd; 4]) {
     panic!("real runs are for a Mac");
 }
 

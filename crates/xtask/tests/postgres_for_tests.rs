@@ -11,6 +11,8 @@ use std::process::Command;
 /// A scratch directory of its own for each test, holding the stand-ins in `bin/`.
 struct Rig {
     dir: PathBuf,
+    /// Removes the directory when the rig is dropped.
+    _scratch: js_testkit::dir::TestDir,
 }
 
 /// What one run did.
@@ -24,8 +26,11 @@ struct Ran {
 impl Rig {
     /// Stand-ins that end with the statuses given for `initdb`, `pg_ctl` and `pg_isready`.
     fn new(name: &str, statuses: [i32; 3]) -> Rig {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("postgres-for-tests-{name}"));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = js_testkit::dir::TestDir::under(
+            env!("CARGO_TARGET_TMPDIR"),
+            &format!("postgres-for-tests-{name}"),
+        );
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("bin")).unwrap();
         for (program, status) in ["initdb", "pg_ctl", "pg_isready"].iter().zip(statuses) {
             let path = dir.join("bin").join(program);
@@ -39,7 +44,10 @@ impl Rig {
             .unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        Rig { dir }
+        Rig {
+            dir,
+            _scratch: scratch,
+        }
     }
 
     fn data(&self) -> PathBuf {
