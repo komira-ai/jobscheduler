@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use js_agent_wire::{Ack, Heartbeat, NodeLoad, Outcome, ResultAck};
-use js_lease::Clock;
+use js_types::Clock;
 use js_types::{HostId, LeaseId};
 pub use js_usage::UsageCounters;
 use js_usage::{

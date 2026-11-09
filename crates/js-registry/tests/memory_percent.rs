@@ -3,10 +3,10 @@
 mod support;
 
 use js_agent_wire::{JobSpec, refusal};
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, Refusal, Registry, RunRefusal, SequentialSessions, WholeNodeConfig};
 use js_types::{ExecMode, MemoryPercent, ProviderId, Request, RequestId, ResourceClass, Resources};
+use js_types::{ManualClock, Timestamp};
 use support::world::{HOUR_S, World};
 use support::*;
 

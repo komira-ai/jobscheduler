@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{CapacityProvider, CheckResult, Offer};
-use js_lease::{Clock, Timestamp};
 use js_types::normalise_arch;
+use js_types::{Clock, Timestamp};
 use serde::Serialize;
 use tokio::runtime::Handle;
 use tokio::task::spawn_blocking;

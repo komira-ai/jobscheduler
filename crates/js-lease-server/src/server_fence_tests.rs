@@ -8,9 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_jobs::{JobId, JobState, JobStoreError, NewJob, StartFailure};
-use js_lease::{Boot, LeaseTable, ManualClock, Settings};
+use js_lease::{Boot, LeaseTable, Settings};
 use js_state::{Store, StoreError};
 use js_testkit::dir::TestDir;
+use js_types::ManualClock;
 use tokio::task::JoinHandle;
 
 use super::{FENCED, Running, start, stop_or_fence, tick_loop, until_fenced};

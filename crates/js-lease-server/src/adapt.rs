@@ -3,8 +3,8 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use js_lease::{Clock, Timestamp};
 use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
+use js_types::{Clock, Timestamp};
 use js_types::{LeaseId, ProviderId, ResourceClass};
 
 /// The pool the lease table runs on, behind a lock that the host listing shares.
@@ -81,7 +81,7 @@ impl PoolHosts {
 /// A clock the server and its caller can both hold: clones read the same source.
 ///
 /// The server reads time through this and nowhere else, so a test gives it a
-/// [`js_lease::ManualClock`] and the server's notion of time moves only when the test
+/// [`js_types::ManualClock`] and the server's notion of time moves only when the test
 /// says so.
 #[derive(Clone)]
 pub struct SharedClock(Arc<dyn Clock + Send + Sync>);
@@ -103,8 +103,8 @@ impl Clock for SharedClock {
 mod tests {
     use std::collections::BTreeMap;
 
-    use js_lease::ManualClock;
     use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
+    use js_types::ManualClock;
 
     use super::*;
 

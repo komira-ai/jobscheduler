@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use js_lease::Timestamp;
 use js_provider::{Held, HostBook};
+use js_types::Timestamp;
 use js_types::{HostId, Shape};
 
 use super::record::Record;

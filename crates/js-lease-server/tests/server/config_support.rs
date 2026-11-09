@@ -8,13 +8,13 @@ use js_elastic::{
     AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Held, HostRef, Offer,
     ProviderError, Released,
 };
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SharedClock,
     StartupError,
 };
 use js_pool_static::EXAMPLE_CONFIG;
 use js_types::{ExecMode, Model};
+use js_types::{ManualClock, Timestamp};
 
 use crate::support::{Scratch, T0, TOKEN};
 

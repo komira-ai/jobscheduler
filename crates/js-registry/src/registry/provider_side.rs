@@ -11,7 +11,7 @@ use js_provider::{HostCapacity, Observed};
 use js_types::sched::usage::NodeLoad;
 use js_types::{Admission, HostId, LeaseId, RequestId, Resources, Shape};
 
-use js_lease::Timestamp;
+use js_types::Timestamp;
 
 use super::record::{Bound, Queue};
 use super::{HostState, Record, Registry, State};

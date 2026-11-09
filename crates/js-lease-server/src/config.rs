@@ -8,7 +8,9 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use js_alert::AlertSink;
 use js_jobs::Retention;
-use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
+use js_lease::{Boot, Settings};
+use js_system_clock::{SystemClock, SystemMonotonic};
+use js_types::Monotonic;
 
 use js_registry::{OsSessions, SessionSource};
 

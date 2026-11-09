@@ -4,7 +4,7 @@
 use std::fs;
 use std::time::Duration;
 
-use js_lease::Clock;
+use js_types::Clock;
 use serde_json::{Value, json};
 
 use js_lease_server::{SharedClock, channel_ticker};
@@ -428,7 +428,7 @@ async fn a_second_server_over_the_same_state_is_refused() {
     let mut args = replace(agent_args(&h.scratch, false), "--boot", "resume");
     args.push("--usage-off".into());
     let (_, ticker) = channel_ticker();
-    let clock = SharedClock::new(js_lease::ManualClock::default());
+    let clock = SharedClock::new(js_types::ManualClock::default());
     let started = start(config(args).unwrap(), clock, ticker).await;
     let refusal = started.err().expect("the second start should be refused");
     assert_eq!(refusal.flag(), "--state-file");

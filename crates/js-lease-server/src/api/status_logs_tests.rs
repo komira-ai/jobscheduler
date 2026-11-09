@@ -8,11 +8,11 @@ use std::sync::Arc;
 use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use js_lease::{ManualClock, Timestamp};
 use js_logmint::fake::FakeMinter;
 use js_logmint::{MintError, Minter};
 use js_logstore::fake::FakeStore;
 use js_logstore::{Endpoint, Unavailable};
+use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 

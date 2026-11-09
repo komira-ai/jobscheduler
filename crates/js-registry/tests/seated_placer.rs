@@ -7,12 +7,12 @@ mod support;
 
 use std::sync::{Arc, Mutex};
 
-use js_lease::Timestamp;
 use js_provider::{Candidate, Held, SeatError, StartSpec};
 use js_registry::{
     LeaseTimes, MarkedTails, Placer, PoolConfig, Registry, SeatedLease, SequentialSessions,
     WholeNodeConfig,
 };
+use js_types::Timestamp;
 use js_types::{ProviderId, ResourceClass};
 use support::world::*;
 use support::*;

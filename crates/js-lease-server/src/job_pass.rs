@@ -43,9 +43,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_jobs::{JobId, JobStoreError, StartFailure};
-use js_lease::Clock;
 use js_registry::{Registry, WholeNodeConfig};
 use js_state::StoreTime;
+use js_types::Clock;
 use js_types::HostId;
 use tracing::{info, warn};
 

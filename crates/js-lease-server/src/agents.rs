@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, InstanceIdentity};
 use js_elastic::HostName;
-use js_lease::Clock;
 use js_registry::{Binding, Cordoned, Credential, OsSessions, ProfileLives, Registry, Uncordoned};
+use js_types::Clock;
 use js_types::{HostId, ProviderId};
 use js_usage::{ProfileCurves, ProfileKey, TailSink};
 use tracing::{error, info, warn};

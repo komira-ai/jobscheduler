@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use js_elastic::{Acquired, Refusal, RefusalCode};
 use js_jobs::StartFailure;
-use js_lease::Monotonic;
+use js_types::Monotonic;
 
 pub(crate) use scrape::router;
 

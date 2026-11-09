@@ -6,10 +6,10 @@
 
 use js_agent_wire::NodeLoad as Wire;
 use js_agent_wire::limits::MAX_MEMORY_BYTES;
-use js_lease::Timestamp;
 use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::HostState;
 use js_sched::LoadConfig;
+use js_types::Timestamp;
 use js_types::{LeaseId, Resources};
 
 use super::engine_rig::*;

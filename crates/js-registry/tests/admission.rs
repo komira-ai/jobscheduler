@@ -270,7 +270,7 @@ fn timing_is_validated_and_sent_in_the_welcome() {
     assert!(config(1).with_timing(1_000, 2_000).is_err());
     assert!(config(1).with_timing(0, 10_000).is_err());
     let timed = config(4).with_timing(1_000, 5_000).unwrap();
-    let clock = js_lease::ManualClock::default();
+    let clock = js_types::ManualClock::default();
     let placer = sched_placer(100, &clock);
     let registry = js_registry::Registry::new(timed, clock, placer);
     let welcome = registry.hello(&hello("a"), &cred("t")).unwrap();

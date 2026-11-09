@@ -31,8 +31,8 @@
 use std::collections::BTreeMap;
 
 use js_agent_wire::RefusalReason;
-use js_lease::Timestamp;
 use js_provider::StartSpec;
+use js_types::Timestamp;
 use js_types::{HostId, LeaseId, Request, RequestId};
 use js_usage::ProfileKey;
 

@@ -484,8 +484,8 @@ mod tests {
     fn the_hosts_body_is_pinned_byte_for_byte() {
         let mut reserved = view(Some(HostMark::Reserved));
         reserved.reserved_for = Some(js_types::RequestId::new("req-1").unwrap());
-        reserved.drain_deadline = Some(js_lease::Timestamp::from_millis(7000));
-        reserved.cordon_until = Some(js_lease::Timestamp::from_millis(9000));
+        reserved.drain_deadline = Some(js_types::Timestamp::from_millis(7000));
+        reserved.cordon_until = Some(js_types::Timestamp::from_millis(9000));
         let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
         let leased = HostCapacity {
             host: HostId::new("s").unwrap(),
@@ -571,10 +571,11 @@ mod tests {
         use std::future::Future as _;
         use std::task::{Context, Poll, Waker};
 
-        use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
+        use js_lease::{Boot, LeaseTable, Settings};
         use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
         use js_testkit::dir::TestDir;
         use js_types::{ClassId, ProviderId, Request};
+        use js_types::{ManualClock, Timestamp};
 
         use crate::adapt::{BoxedPool, SharedClock};
         use crate::config::parse_token;

@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_conformance::{Check, Subject, Verdict, run};
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Call, Pool};
 use js_registry::{Credential, PoolConfig, RegisteredProvider, Registry};
 use js_sched_placer::engine::Settings;
 use js_sched_placer::place::SchedPlacer;
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Shape};
+use js_types::{ManualClock, Timestamp};
 
 mod common;
 use common::hello;

@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::Hello;
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Pool, StartAck, StartSpec};
 use js_registry::{Credential, ERROR_EDGES_MS, TailCounters};
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Cond, Store, SystemClock, Txn};
 use js_testkit::dir::TestDir;
 use js_types::{Admission, ClassId, LeaseId, Request, ResourceClass, Resources};
+use js_types::{ManualClock, Timestamp};
 use js_usage::{StoreTailSink, TailSink, TailSinkCounters};
 use serde_json::json;
 

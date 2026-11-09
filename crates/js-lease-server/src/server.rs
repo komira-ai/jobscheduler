@@ -8,8 +8,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_lease::{Booking, Boot, LeaseTable, Monotonic, Settings, read_bookings};
+use js_lease::{Booking, Boot, LeaseTable, Settings, read_bookings};
 use js_provider::Pool as _;
+use js_types::Monotonic;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;

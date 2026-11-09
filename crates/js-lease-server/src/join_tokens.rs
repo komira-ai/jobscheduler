@@ -125,9 +125,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_agent_wire::{HostCredential, InstanceIdentity};
-use js_lease::Clock;
 use js_registry::{Credential, SessionSource};
 use js_state::Store;
+use js_types::Clock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tracing::error;

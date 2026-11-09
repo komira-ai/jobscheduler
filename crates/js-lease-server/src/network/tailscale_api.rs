@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use hyper::Uri;
 use js_elastic::Secret;
-use js_lease::{Clock, Timestamp};
+use js_types::{Clock, Timestamp};
 use rustls::crypto::ring::default_provider;
 use serde::Deserialize;
 use serde_json::json;

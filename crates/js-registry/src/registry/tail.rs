@@ -58,12 +58,12 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
-    use js_lease::{ManualClock, Timestamp};
     use js_provider::{Pool, StartSpec};
     use js_types::{
         Admission, Capabilities, ClassId, LeaseId, ProviderId, Request, RequestId, ResourceClass,
         Resources, Shape,
     };
+    use js_types::{ManualClock, Timestamp};
     use js_usage::{TailDelta, TailTotals};
 
     use super::*;

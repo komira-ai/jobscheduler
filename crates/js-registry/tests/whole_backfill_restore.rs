@@ -8,9 +8,10 @@ mod support;
 
 use std::time::Duration;
 
-use js_lease::{Held, ReservationRecord, Timestamp};
+use js_lease::{Held, ReservationRecord};
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, Restored};
+use js_types::Timestamp;
 use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources};
 use support::world::*;
 use support::*;

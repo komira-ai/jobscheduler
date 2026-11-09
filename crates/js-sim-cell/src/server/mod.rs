@@ -72,13 +72,13 @@ use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{Method, Request, Response, StatusCode};
 use js_jobs::ScriptedIds;
-use js_lease::{Clock as _, ManualClock, Timestamp};
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{Config, SharedClock, StartupError};
 use js_registry::{HostMark, HostState, HostView, Registry, SessionSource};
 use js_sim::{Event, NodeId, NodeInput, Output};
 use js_testkit::dir::TestDir;
 use js_types::sched::{Effect, FarmTime, StateMachine};
+use js_types::{Clock as _, ManualClock, Timestamp};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
 

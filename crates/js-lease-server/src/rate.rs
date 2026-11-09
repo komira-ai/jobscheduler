@@ -5,8 +5,8 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_HELLO_BURST, DEFAULT_HELLO_INTERVAL};
-use js_lease::Clock;
 use js_registry::Credential;
+use js_types::Clock;
 
 use crate::adapt::SharedClock;
 
@@ -148,7 +148,7 @@ impl HelloLimiter {
 
 #[cfg(test)]
 mod tests {
-    use js_lease::{ManualClock, Timestamp};
+    use js_types::{ManualClock, Timestamp};
 
     use super::*;
 

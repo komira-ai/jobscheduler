@@ -10,10 +10,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_lease::{Clock, ManualClock, Timestamp};
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, Placer};
 use js_testkit::dir::TestDir;
+use js_types::{Clock, ManualClock, Timestamp};
 use js_types::{HostId, LeaseId, ResourceClass, Resources};
 
 use super::wiring_tests::{JOIN, config_of, hello, host_of, scratch, sharing, sharing_spec, write};

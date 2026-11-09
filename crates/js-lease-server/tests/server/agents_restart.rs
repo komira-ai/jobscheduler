@@ -300,7 +300,7 @@ async fn a_failed_binding_write_is_counted_and_retried_at_the_next_tick() {
 /// Starts a server over `args` and returns the refusal.
 async fn refused(args: Vec<std::ffi::OsString>) -> StartupError {
     let (_, ticker) = channel_ticker();
-    let clock = SharedClock::new(js_lease::ManualClock::default());
+    let clock = SharedClock::new(js_types::ManualClock::default());
     let started = start(config(args).unwrap(), clock, ticker).await;
     started.err().expect("the start should be refused")
 }

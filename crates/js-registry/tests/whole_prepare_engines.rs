@@ -11,9 +11,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::RefusalReason;
-use js_lease::Timestamp;
 use js_provider::{Observed, Pool, RefusalCode, StartAck};
 use js_registry::{Exclusion, WholeNodeConfig};
+use js_types::Timestamp;
 use support::world::*;
 use support::*;
 

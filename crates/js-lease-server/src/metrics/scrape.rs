@@ -11,8 +11,8 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
-use js_lease::Clock;
 use js_state::StoreTime;
+use js_types::Clock;
 use tracing::warn;
 
 use super::Recorder;

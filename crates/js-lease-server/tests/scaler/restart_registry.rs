@@ -13,7 +13,6 @@ use js_elastic::{
     AcquireId, Acquired, Demand, Held, HostRef, Offer, ProviderError, Released, SchedulerId, Secret,
 };
 use js_jobs::JobStoreError;
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, JobTables, Scaler, SharedClock, UnremovedFile};
 use js_provider::{Pool, StartAck, StartSpec};
 use js_registry::{Busy, Credential, HostView, PoolConfig, Registry, SequentialSessions};
@@ -23,6 +22,7 @@ use js_types::{
     Capabilities, ExecMode, HostId, LeaseId, ProviderId, RefusalCode, Request, ResourceClass,
     Resources, Shape,
 };
+use js_types::{ManualClock, Timestamp};
 
 use crate::fakes::{Handle, START, live, new_world, record, records};
 

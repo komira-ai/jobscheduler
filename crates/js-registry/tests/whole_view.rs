@@ -6,11 +6,11 @@ mod support;
 
 use std::time::Duration;
 
-use js_lease::Clock;
 use js_provider::{Pool, StartAck, StartSpec};
 use js_registry::{
     HostMark, HostView, PoolConfig, RegisteredProvider, Registry, WholeCounts, WholeNodeConfig,
 };
+use js_types::Clock;
 use js_types::{Admission, ClassId, ProviderId, Request, RequestId, ResourceClass};
 use support::*;
 

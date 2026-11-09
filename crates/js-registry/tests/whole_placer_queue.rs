@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, Taint};
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Candidate, Pool, StartAck, StartSpec};
 use js_registry::{
     DEFAULT_PREPARE_TIMEOUT_MS, MarkedTails, Placer, PoolConfig, Presented, ProfileLives,
@@ -20,6 +19,7 @@ use js_registry::{
     WholeNodeConfig, WholeRound,
 };
 use js_types::{Clock, LeaseId, ProviderId, Request, RequestId};
+use js_types::{ManualClock, Timestamp};
 use js_usage::ProfileKey;
 use support::world::*;
 use support::*;

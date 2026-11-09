@@ -172,8 +172,8 @@ mod tests {
     use super::*;
     use crate::adapt::SharedClock;
     use crate::rate::{HelloLimit, HelloLimiter};
-    use js_lease::{Clock, ManualClock, Timestamp};
     use js_registry::Credential;
+    use js_types::{Clock, ManualClock, Timestamp};
 
     /// Only the second assert is an inequality that can fail: the floor is below the quiet
     /// period. The first holds whatever the constants are, because `REGISTRY_FLOOR` is

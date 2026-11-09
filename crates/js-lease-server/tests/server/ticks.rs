@@ -133,7 +133,7 @@ async fn health_fails_when_the_tick_loop_has_stopped() {
         gone: Some(gone),
     };
     crate::support::quiet_logs();
-    let clock = SharedClock::new(js_lease::ManualClock::default());
+    let clock = SharedClock::new(js_types::ManualClock::default());
     let running = start(config, clock, ticker).await.unwrap();
     stopped.await.unwrap();
 

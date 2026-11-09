@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use js_elastic::Demand;
-use js_lease::Timestamp;
 use js_provider::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
+use js_types::Timestamp;
 use js_types::{
     Admission, Capabilities, HostId, LeaseId, RequestId, ResourceClass, Resources, Shape,
 };

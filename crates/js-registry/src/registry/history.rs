@@ -28,8 +28,8 @@
 
 use std::sync::{Arc, MutexGuard};
 
-use js_lease::Timestamp;
 use js_provider::Observed;
+use js_types::Timestamp;
 use js_types::{Admission, HostId, LeaseId};
 use js_usage::{
     AllocationId, AllocationLog, Booked, DrainOutcome, EndedReason, EndedRow, ProfileKey,

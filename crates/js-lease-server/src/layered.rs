@@ -565,10 +565,10 @@ mod tests {
         );
         let name = ProviderId::new("builders").unwrap();
         let config = js_registry::PoolConfig::new(name, sharing(), floor, 2);
-        let now = js_lease::Timestamp::from_millis(1);
+        let now = js_types::Timestamp::from_millis(1);
         let registry = Registry::new(
             config,
-            js_lease::ManualClock::new(now),
+            js_types::ManualClock::new(now),
             std::sync::Arc::new(js_sched_placer::place::SchedPlacer::default()),
         );
         let source = LayeredSource::new(None, registry, BTreeMap::new());

@@ -11,13 +11,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Hello, Isolation, JobSpec, Limits};
-use js_lease::{Booking, LeaseState, LeaseTable, ManualClock, Timestamp, read_bookings};
+use js_lease::{Booking, LeaseState, LeaseTable, read_bookings};
 use js_provider::{Pool, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_state::SystemClock;
 use js_state::sqlite::{Options, SqliteStore};
 use js_testkit::dir::TestDir;
 use js_types::{Admission, ClassId, HostId, LeaseId, Request, RequestId, ResourceClass, Resources};
+use js_types::{ManualClock, Timestamp};
 use js_usage::{NoUsage, ProfileCurves, ProfileKey, ProfileStore, RunMinute, RunSeries, UsageSink};
 use serde_json::json;
 

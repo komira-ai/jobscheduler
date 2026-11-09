@@ -74,12 +74,12 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use js_jobs::{ClientName, JobId, JobPage, JobRecord, JobState, MAX_PAGE, keys};
-use js_lease::Clock;
 use js_proto::v1::{
     self, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
     GetResultResponse, ListJobsRequest, ListJobsResponse,
 };
 use js_state::{ResumeToken, StoreTime};
+use js_types::Clock;
 use js_types::HostId;
 use tonic::{Request, Response, Status};
 

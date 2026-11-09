@@ -9,8 +9,9 @@
 
 use std::fs;
 
-use js_lease::{ExclusionEnd, ReservationRecord, Timestamp};
+use js_lease::{ExclusionEnd, ReservationRecord};
 use js_types::RequestId;
+use js_types::Timestamp;
 
 use super::whole_view_tests::{GOLDEN, Rig, T0};
 use crate::reservations::RESERVATION_BOOT_GRACE;

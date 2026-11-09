@@ -11,7 +11,6 @@ use js_elastic::{
     AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture, Held, HostRef,
     Observed, Offer, ProviderCaps, ProviderError, Released,
 };
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Catalogs, DefaultPlatform, SharedClock};
 use js_platform::{ContainerPlatform, PlatformId};
 use js_provider::{Pool, StartAck, StartSpec};
@@ -24,6 +23,7 @@ use js_types::{
     AcceleratorNeed, Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, JobNetwork, LeaseId,
     Model, Os, ProviderId, Request, Requirements, ResourceClass, Resources, Shape,
 };
+use js_types::{ManualClock, Timestamp};
 
 /// A [`DefaultPlatform`] over `providers` and `hosts` whose catalog cache has fetched
 /// nothing: every launching provider's catalog reads as unread (it may offer), the answer

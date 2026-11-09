@@ -4,9 +4,9 @@
 //! tick hands the registry's ledger to the lease table, which writes it with the leases.
 //! Nothing here sleeps and no test asserts how long anything takes on a wall clock.
 
-use js_lease::Timestamp;
 use js_registry::WholeCounts;
 use js_types::RequestId;
+use js_types::Timestamp;
 
 use super::whole_view_tests::{Rig, T0};
 use crate::reservations::RESERVATION_BOOT_GRACE;

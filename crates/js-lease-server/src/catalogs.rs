@@ -42,8 +42,8 @@ use js_elastic::{
     Acquired, CapacityProvider, Catalog, CatalogCache, Cooldowns, Instant, Offer, OfferKey,
     ProviderError, Recorded, Refusal, RefusalCode,
 };
-use js_lease::Clock;
 use js_sched::admission_ever::CatalogView;
+use js_types::Clock;
 use js_types::ProviderId;
 use tracing::warn;
 

@@ -14,12 +14,12 @@ use std::time::Duration;
 use js_agent_wire::{
     Command, ExclusiveRefusal, HeldRun, HeldState, Isolation, JobSpec, Limits, RefusalReason,
 };
-use js_lease::{Clock, Timestamp};
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_RESERVE_BACKOFF_MS, Exclusion, NotReady, PoolConfig,
     RunState, WholeNodeConfig,
 };
+use js_types::{Clock, Timestamp};
 use js_types::{ProviderId, Request, RequestId, ResourceClass};
 use support::*;
 

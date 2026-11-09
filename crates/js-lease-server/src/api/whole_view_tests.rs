@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
-use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp, read_bookings};
+use js_lease::{Boot, LeaseTable, Settings, read_bookings};
 use js_provider::{Pool, StartSpec};
 use js_registry::{
     Credential, PoolConfig, Registry, SequentialSessions, WholeCounts, WholeNodeConfig,
@@ -23,6 +23,7 @@ use js_types::{
     Admission, Capabilities, ClassId, ProviderId, Request, RequestId, ResourceClass, Resources,
     Shape,
 };
+use js_types::{ManualClock, Timestamp};
 use tracing_subscriber::fmt::MakeWriter;
 
 use super::*;

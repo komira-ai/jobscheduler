@@ -167,8 +167,8 @@ async fn a_refusal_before_the_body_reaches_a_client_that_half_closed() {
 /// The agent routes over a pool of four hosts, with their files under `dir`: the pool's
 /// join token is forty `j`s, and a credential may say five hellos in a burst.
 fn agent_routes(dir: &std::path::Path) -> Router {
-    use js_lease::{ManualClock, Timestamp};
     use js_registry::{PoolConfig, Registry, SequentialSessions};
+    use js_types::{ManualClock, Timestamp};
     use js_types::{ProviderId, ResourceClass, Resources, Shape};
 
     let clock = ManualClock::new(Timestamp::from_millis(5_000_000));

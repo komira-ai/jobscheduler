@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS};
-use js_lease::{Clock, ManualClock, Monotonic};
 use js_lease_server::{Cli, Config, SharedClock, StartupError};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, SessionSource};
 use js_types::Resources;
+use js_types::{Clock, ManualClock, Monotonic};
 
 use super::store::{STORE_LINE_FILE, Store, StoreAt};
 use crate::elastic::{self, Cloud, ElasticPool};

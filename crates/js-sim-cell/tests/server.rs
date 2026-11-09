@@ -18,7 +18,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_conformance::agent::Defect;
-use js_lease::{ManualClock, Timestamp};
 use js_registry::HostState;
 use js_sim::{Event, Faults, Node, NodeInput};
 use js_sim_cell::bus::{agent_name, trace_msg};
@@ -30,6 +29,7 @@ use js_sim_cell::{
 #[cfg(feature = "postgres")]
 use js_testkit::database::{server_url, with_database};
 use js_types::sched::{FarmTime, StateMachine};
+use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
 
 use crate::support::{call, job, ms, scratch};

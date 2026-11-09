@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::{Command, Heartbeat, HeldRun, HeldState, Hello};
-use js_lease::{ManualClock, Timestamp};
 use js_provider::Candidate;
 use js_provider::{Pool as _, RefusalCode, StartAck, StartSpec};
 use js_registry::{MarkedTails, Placer, PoolConfig, Registry, RunRefusal};
 use js_types::{Admission, ClassId, Dims, Request, ResourceClass, Resources};
+use js_types::{ManualClock, Timestamp};
 use support::world::*;
 use support::*;
 

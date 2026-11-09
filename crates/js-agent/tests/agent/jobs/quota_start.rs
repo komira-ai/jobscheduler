@@ -9,12 +9,12 @@ use std::time::Duration;
 use js_agent::lifecycle::Capacity;
 use js_agent::quota::FakeQuota;
 use js_agent_wire::Hello;
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Pool, StartAck, StartSpec};
 use js_registry::{Credential, PoolConfig, Registry, SequentialSessions};
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape,
 };
+use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 
 use super::drain::container_flags;

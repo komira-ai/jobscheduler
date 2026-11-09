@@ -12,9 +12,9 @@ use js_jobs::{
     AllocationRecord, AllocationStep, Booked, EndReason, JobId, JobSpec, JobState, Needs, NewJob,
     StartFailure,
 };
-use js_lease::Clock;
 use js_registry::WholeNodeConfig;
 use js_state::StoreTime;
+use js_types::Clock;
 
 use super::job_rig::{FakeAgent, Rig, spec, starts, stops, whole_rig};
 use crate::job_pass::store_time;

@@ -81,8 +81,8 @@ use axum::routing::{get, post};
 use js_agent_wire::{
     Heartbeat, HeartbeatReply, Hello, HostCredential, ProtocolRange, Welcome, refusal,
 };
-use js_lease::Clock;
 use js_registry::{Credential, Refusal};
+use js_types::Clock;
 use js_types::{HostId, Resources, Shape};
 use serde::Serialize;
 use serde::de::DeserializeOwned;

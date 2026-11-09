@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use js_agent_wire::{HeldState, Outcome, RefusalReason};
 use js_jobs::{JobId, JobState, NewJob, StartFailure};
-use js_lease::Monotonic;
 use js_registry::WholeNodeConfig;
 use js_types::HostId;
+use js_types::Monotonic;
 
 use super::*;
 use crate::agent_api::job_rig::{FakeAgent, Rig, clocked_rig, spec, whole_rig};

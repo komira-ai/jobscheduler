@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{Artifact, CapacityProvider, Demand, SchedulerId};
-use js_lease::Clock;
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_scaler::{Budgets, Millis};
 use js_sched::admission_ever::PoolLimits;
+use js_types::Clock;
 use js_types::{
     Admission, ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, ProviderId,
     ResourceClass, Resources, Shape,

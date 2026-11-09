@@ -111,7 +111,7 @@ fn needing(cpu_millis: u64) -> JobSpec {
 
 /// The milliseconds of the rig's clock now.
 fn now_ms(rig: &Rig) -> u64 {
-    js_lease::Clock::now(&rig.shared).millis()
+    js_types::Clock::now(&rig.shared).millis()
 }
 
 /// A provider whose reading of each host the test sets: present unless set.

@@ -8,12 +8,11 @@
 mod support;
 
 use js_agent_wire::{ExclusiveRefusal, RefusalReason};
-use js_lease::Clock as _;
-use js_lease::{
-    Exclusion as LeaseExclusion, ExclusionEnd, Held, Queued, ReservationRecord, Timestamp,
-};
+use js_lease::{Exclusion as LeaseExclusion, ExclusionEnd, Held, Queued, ReservationRecord};
 use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Exclusion, PoolConfig, Restored, WholeNodeConfig};
+use js_types::Clock as _;
+use js_types::Timestamp;
 use js_types::{ProviderId, RequestId};
 use support::world::*;
 use support::*;

@@ -6,12 +6,12 @@ use std::time::Duration;
 
 use super::*;
 use js_agent_wire::{Command, ExclusiveRefusal, Isolation, JobSpec, Limits, RefusalReason, Taint};
-use js_lease::{Clock, Timestamp};
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, RegisteredProvider, Reservation, WholeNodeConfig};
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, RequestId, ResourceClass,
 };
+use js_types::{Clock, Timestamp};
 
 pub const POLL_MS: u64 = 5_000;
 pub const HOUR_S: u64 = 3_600;

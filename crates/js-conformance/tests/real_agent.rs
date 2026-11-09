@@ -19,7 +19,6 @@ use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, Isolation, JobSpec, Limits, Outcome, Phase,
 };
 use js_conformance::agent::memory::{Memory as Fake, Time};
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, PoolConfig, Registry, RunState};
 use js_sched_placer::engine::Settings;
@@ -29,6 +28,7 @@ use js_types::{
     Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
     Resources, Shape,
 };
+use js_types::{ManualClock, Timestamp};
 
 mod common;
 use common::hello;

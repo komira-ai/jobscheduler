@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, Hello, Phase, ProtocolRange, Welcome, WireShape};
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{StartAck, StartSpec};
 use js_registry::{
     Credential, PoolConfig, Refusal, RegisteredProvider, Registry, SequentialSessions,
@@ -20,6 +19,7 @@ use js_types::{
     Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
     Resources, Shape,
 };
+use js_types::{ManualClock, Timestamp};
 
 pub fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs

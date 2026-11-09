@@ -14,10 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{CapacityProvider, SchedulerId};
-use js_lease::Clock as LeaseClock;
 use js_provider_ec2 as ec2;
 use js_provider_gce as gce;
 use js_provider_lambdalabs as lambda;
+use js_types::Clock as LeaseClock;
 use js_types::{AcceleratorNeed, ExecMode, MemoryPercent, Model, ResourceClass};
 
 use crate::adapt::SharedClock;
@@ -374,7 +374,7 @@ fn gce_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError>
 
 #[cfg(test)]
 mod tests {
-    use js_lease::{ManualClock, Timestamp};
+    use js_types::{ManualClock, Timestamp};
 
     use super::*;
 

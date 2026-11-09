@@ -16,8 +16,8 @@
 
 use std::time::Duration;
 
-use js_lease::Timestamp;
 use js_types::HostId;
+use js_types::Timestamp;
 
 use super::{HostView, Record, Registry, State};
 

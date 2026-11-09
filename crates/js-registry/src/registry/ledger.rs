@@ -45,7 +45,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_lease::{Exclusion as Barred, ExclusionEnd, Held, Queued, ReservationRecord, Timestamp};
+use js_lease::{Exclusion as Barred, ExclusionEnd, Held, Queued, ReservationRecord};
+use js_types::Timestamp;
 use js_types::{HostId, RequestId};
 
 use super::{Registry, State};

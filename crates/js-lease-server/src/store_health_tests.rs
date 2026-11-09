@@ -15,7 +15,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use js_alert::FakeSink;
 use js_jobs::{JobId, JobStore, JobStoreError};
-use js_lease::{Boot, LeaseTable, ManualClock, Settings};
+use js_lease::{Boot, LeaseTable, Settings};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
 use js_state::fake::{Fake, Flaw};
 use js_state::{
@@ -23,6 +23,7 @@ use js_state::{
     ScanRange, Store, StoreError, StoreTime, Txn, Versioned,
 };
 use js_testkit::dir::TestDir;
+use js_types::ManualClock;
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use serde_json::{Value, json};
 use tower::ServiceExt;

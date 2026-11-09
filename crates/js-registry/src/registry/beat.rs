@@ -8,8 +8,8 @@ use std::sync::PoisonError;
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, Outcome, Taint};
-use js_lease::Timestamp;
 use js_provider::HostBook;
+use js_types::Timestamp;
 use js_types::{HostId, LeaseId};
 
 use crate::config::PoolConfig;
@@ -212,7 +212,7 @@ mod tests {
     use std::time::Duration;
 
     use js_agent_wire::{DEFAULT_GRACE_MS, Hello, Phase, ProtocolRange, WireShape};
-    use js_lease::ManualClock;
+    use js_types::ManualClock;
     use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
 
     use super::*;

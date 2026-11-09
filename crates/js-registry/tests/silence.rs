@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use js_agent_wire::DEFAULT_GRACE_MS;
-use js_lease::{Clock, Timestamp};
 use js_provider::{Candidate, StartSpec};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, MarkedTails, Placer, Registry, SequentialSessions};
 use js_types::HostId;
+use js_types::{Clock, Timestamp};
 use support::*;
 
 /// Catches a silence read from the wrong instant (the last beat, the read itself), one that

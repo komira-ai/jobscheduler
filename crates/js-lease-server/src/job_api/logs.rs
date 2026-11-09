@@ -59,10 +59,10 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use js_jobs::{JobRecord, JobState};
-use js_lease::Clock as _;
 use js_logmint::{LogPrefix, host_prefix};
 use js_logstore::{Credential, JobPrefix, Store, StoreError, Stream, Transport, UreqTransport};
 use js_proto::v1::{self, GetLogsRequest, GetLogsResponse, LogGap};
+use js_types::Clock as _;
 use tokio::sync::Semaphore;
 use tonic::Status;
 

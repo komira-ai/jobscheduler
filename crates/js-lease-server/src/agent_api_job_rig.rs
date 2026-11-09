@@ -22,7 +22,6 @@ use js_jobs::{
     AllocationRecord, AllocationStep, Booked, Constraints, JobId, JobRecord, JobSpec, JobState,
     JobStore, Needs, NetworkPolicy, NewJob, Retention,
 };
-use js_lease::{ManualClock, Timestamp};
 use js_logmint::fake::FakeMinter;
 use js_logmint::{Bucket, LogPrefix};
 use js_logstore::fake::FakeStore;
@@ -33,6 +32,7 @@ use js_state::fake::{Fake, Flaw};
 use js_state::{ManualClock as StoreClock, Store};
 use js_testkit::dir::TestDir;
 use js_types::{ImageDigestRef, Labels, ProviderId, ResourceClass, Resources, Shape};
+use js_types::{ManualClock, Timestamp};
 use serde_json::json;
 
 use super::*;
@@ -94,7 +94,7 @@ pub(crate) const START_MS: u64 = 5_000_000;
 /// rig made by [`clocked_rig`] has one time for the registry, the server and the store.
 pub(crate) struct OneClock(pub(crate) Arc<StoreClock>);
 
-impl js_lease::Clock for OneClock {
+impl js_types::Clock for OneClock {
     fn now(&self) -> Timestamp {
         let since = js_state::Clock::now(&*self.0).as_duration();
         Timestamp::from_millis(u64::try_from(since.as_millis()).unwrap())

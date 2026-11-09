@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use js_elastic::Demand;
-use js_lease::Timestamp;
+use js_types::Timestamp;
 use js_types::{HostId, Request, RequestId};
 
 use super::{Registry, State};

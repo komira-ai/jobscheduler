@@ -9,10 +9,10 @@ mod support;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Candidate, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{MarkedTails, Placer, PoolConfig, RegisteredProvider, Registry};
 use js_types::{HostId, ProviderId, Request, Resources, Shape};
+use js_types::{ManualClock, Timestamp};
 use support::*;
 
 /// The floor of a pool whose hosts are launched from offers: 4 cores and 8 GiB, no

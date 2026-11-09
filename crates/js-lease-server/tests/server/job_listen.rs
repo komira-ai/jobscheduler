@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 
-use js_lease::ManualClock;
 use js_lease_server::{Cli, Config, SharedClock, StartupError, channel_ticker, start};
+use js_types::ManualClock;
 
 use crate::agents_support::{agent_args, join, start_agents};
 use crate::config_support::{PoolText, file, load, refusal, server};

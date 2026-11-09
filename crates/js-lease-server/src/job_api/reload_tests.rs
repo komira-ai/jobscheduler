@@ -60,7 +60,7 @@ impl Reloading {
         ];
         let config = rig.config_of_flags(&extra).expect("the flags start");
         let clients: LiveClients = config.clients.clone();
-        let clock = SharedClock::new(js_lease::ManualClock::default());
+        let clock = SharedClock::new(js_types::ManualClock::default());
         let server = InProcess::start(config, clock).expect("the server starts");
         let store_clock = Arc::new(ManualClock::default());
         store_clock.advance(Duration::from_millis(START_MS));

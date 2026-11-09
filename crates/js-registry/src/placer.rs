@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::Phase;
-use js_lease::Timestamp;
 use js_provider::{Candidate, Held};
 use js_provider::{RefusalCode, StartSpec};
+use js_types::Timestamp;
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, LeaseId, Request, RequestId, Shape};
 

@@ -9,13 +9,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Phase, Taint};
-use js_lease::{ManualClock, Timestamp};
 use js_provider::Candidate;
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{
     MarkedTails, Placer, PoolConfig, ProbeHost, RegisteredProvider, Registry, SequentialSessions,
 };
 use js_types::{HostId, Request, ResourceClass};
+use js_types::{ManualClock, Timestamp};
 use support::*;
 
 /// A placer that answers every probe with `answer`, records what it was told of the

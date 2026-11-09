@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 use std::sync::Barrier;
 
 use js_agent_wire::Hello;
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Pool, StartSpec};
 use js_registry::{Credential, HostState};
 use js_types::{LeaseId, Resources};
+use js_types::{ManualClock, Timestamp};
 use serde_json::json;
 
 use super::engine_rig::*;

@@ -258,8 +258,8 @@ async fn resume_needs_the_state_file() {
     assert!(scratch.state().exists());
 }
 
-fn clock() -> js_lease::ManualClock {
-    js_lease::ManualClock::default()
+fn clock() -> js_types::ManualClock {
+    js_types::ManualClock::default()
 }
 
 /// Asserts that a second server over one lease file, a lease file that is not a lease

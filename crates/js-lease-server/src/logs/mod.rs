@@ -62,10 +62,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
 use js_agent_wire::{HeartbeatReply, LOG_UPLOAD_CAPABILITY, LogGrant, LogGrantState, LogSink};
-use js_lease::Clock as _;
 use js_logmint::{Bucket, LogPrefix, MintError, MintRequest, Minter, Refusal};
 use js_logstore::Credential;
 use js_registry::{HostState, Registry};
+use js_types::Clock as _;
 use serde::Serialize;
 use tracing::{info, warn};
 

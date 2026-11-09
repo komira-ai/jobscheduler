@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use js_agent_wire::{RefusalReason, Taint};
-use js_lease::Timestamp;
 use js_provider::HostBook;
+use js_types::Timestamp;
 use js_types::{HostId, LeaseId};
 
 use crate::runs::Runs;

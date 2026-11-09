@@ -8,11 +8,12 @@ use std::path::Path as FilePath;
 
 use js_agent_wire::InstanceIdentity;
 use js_jobs::interfere::{INJECTED, Interfere};
-use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
+use js_lease::{Boot, LeaseTable, Settings};
 use js_registry::{Binding, PoolConfig, Registry, SequentialSessions};
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, Store, Txn};
 use js_testkit::dir::TestDir;
+use js_types::{ManualClock, Timestamp};
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use serde_json::{Value, json};
 

@@ -165,7 +165,7 @@ async fn bad_tls_files_are_refused() {
             ],
         );
         let (_, ticker) = channel_ticker();
-        let clock = SharedClock::new(js_lease::ManualClock::default());
+        let clock = SharedClock::new(js_types::ManualClock::default());
         let err = start(config(args).unwrap(), clock, ticker)
             .await
             .err()
@@ -228,7 +228,7 @@ async fn a_loose_key_file_is_refused() {
             ],
         );
         let (_, ticker) = channel_ticker();
-        let clock = SharedClock::new(js_lease::ManualClock::default());
+        let clock = SharedClock::new(js_types::ManualClock::default());
         let err = start(config(args).unwrap(), clock, ticker)
             .await
             .err()
@@ -247,6 +247,6 @@ async fn a_loose_key_file_is_refused() {
         ],
     );
     let (_, ticker) = channel_ticker();
-    let clock = SharedClock::new(js_lease::ManualClock::default());
+    let clock = SharedClock::new(js_types::ManualClock::default());
     assert!(start(config(args).unwrap(), clock, ticker).await.is_ok());
 }

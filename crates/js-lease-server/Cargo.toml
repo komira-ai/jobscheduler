@@ -30,6 +30,7 @@ js-sched-placer = { path = "../js-sched-placer" }
 # The store the server's state is kept in (`--store`): the Postgres backend, and SQLite for
 # tests and single-node development (src/store.rs).
 js-state = { path = "../js-state", features = ["postgres"] }
+js-system-clock = { path = "../js-system-clock" }
 js-types = { path = "../js-types" }
 # The host updater's hook contract (`js-lease-server update-hook`, src/update_hook): the exit
 # status and last line, the state directory and its record, the unit manager, the release link.

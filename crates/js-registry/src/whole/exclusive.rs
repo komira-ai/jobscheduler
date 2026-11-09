@@ -48,8 +48,8 @@
 //! committed from its whole-node queue
 //! ([`crate::Placer::prepare_overdue`]); the states here stay the registry's.
 
-use js_lease::Timestamp;
 use js_types::LeaseId;
+use js_types::Timestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exclusive {

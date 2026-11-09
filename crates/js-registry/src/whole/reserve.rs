@@ -9,7 +9,7 @@
 //! marked host for its request alone: a marked host takes no other request's start, except
 //! as backfill, for work that ends by the end of its tail ([`crate::Placer::pick`]).
 
-use js_lease::Timestamp;
+use js_types::Timestamp;
 use js_types::{HostId, RequestId};
 
 use super::caps::Capability;

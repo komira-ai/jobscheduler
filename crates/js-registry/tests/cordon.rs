@@ -6,9 +6,9 @@ mod support;
 
 use std::time::Duration;
 
-use js_lease::Timestamp;
 use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Binding, MIN_LOST_RETENTION_MS, NotHeld};
+use js_types::Timestamp;
 use support::*;
 
 fn secs(n: u64) -> Duration {

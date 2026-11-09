@@ -3,11 +3,11 @@
 //! default, or the file's), and a pool in `plan` mode starts without the pins a live pool
 //! needs. No test calls the Tailscale API: a mode makes no call until a launch asks it to.
 
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{
     Config, OwnerOnlyFiles, Running, SharedClock, StartupError, TickHandle, channel_ticker,
     start_with_checks,
 };
+use js_types::{ManualClock, Timestamp};
 
 use crate::config_support::{clock, oauth_file};
 use crate::scaler_support::{account, cloud_kinds, text_with};

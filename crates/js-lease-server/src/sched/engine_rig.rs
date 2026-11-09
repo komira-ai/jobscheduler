@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, LoadDrops, NodeLoad as Wire, Phase};
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Pool, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_testkit::dir::TestDir;
 use js_types::{LeaseId, Request, Resources};
+use js_types::{ManualClock, Timestamp};
 use serde_json::json;
 
 use super::place::{Fallbacks, SchedPlacer};

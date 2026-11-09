@@ -108,13 +108,14 @@ use std::time::Duration;
 use js_alert::{AlertSink, Notifier};
 use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
 use js_jobs::JobId;
-use js_lease::{Booking, Clock};
+use js_lease::Booking;
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
     AcquireResult, Action, Budgets, HostFacts, Input, Millis, OfferCooldown, Phase, PoolInput,
     Records, ReleaseResult, Settings, State, launchable, step,
 };
 use js_sched::failover::Refused;
+use js_types::Clock;
 use js_types::{ExecMode, HostId, RequestId};
 use tracing::{debug, info, warn};
 

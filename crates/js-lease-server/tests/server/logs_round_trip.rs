@@ -191,7 +191,7 @@ impl Cell {
         );
         let text = format!("{}\n{logs}", file(&server(&scratch, listeners), &[&pool]));
         let path = scratch.write("js.toml", &text, 0o644);
-        let clock = SharedClock::new(js_lease::SystemClock);
+        let clock = SharedClock::new(js_system_clock::SystemClock);
         let config =
             Config::from_config_file(&path, &Kinds::standard(), &OwnerOnlyFiles, clock.clone())
                 .expect("the file loads");

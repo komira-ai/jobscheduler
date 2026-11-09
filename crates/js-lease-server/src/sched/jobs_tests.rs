@@ -13,7 +13,6 @@ use js_jobs::{
     AllocationStep, Booked, Constraints, Isolation, JobEnd, JobId, JobSpec, JobState, Needs,
     NewJob, Output,
 };
-use js_lease::{ManualClock, Timestamp};
 use js_provider::{Candidate, Pool};
 use js_registry::{Credential, Placer};
 use js_sched::Event;
@@ -25,6 +24,7 @@ use js_state::Store;
 use js_state::fake::Fake;
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources, Shape};
+use js_types::{ManualClock, Timestamp};
 
 use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{placed, spec, tables};

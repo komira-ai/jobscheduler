@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use js_lease::{Booking, ManualClock, Timestamp};
+use js_lease::Booking;
 use js_lease_server::{
     CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
     Ticker, channel_ticker, start_with_checks,
@@ -17,6 +17,7 @@ use js_provider::Pool;
 use js_state::Store;
 use js_testkit::dir::TestDir;
 use js_types::ProviderId;
+use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -539,7 +540,7 @@ impl Stepping {
     }
 }
 
-impl js_lease::Monotonic for Stepping {
+impl js_types::Monotonic for Stepping {
     fn reading(&self) -> std::time::Duration {
         let step = u64::try_from(self.step.as_micros()).unwrap();
         let before = self

@@ -10,7 +10,7 @@
 use std::sync::{MutexGuard, PoisonError};
 use std::time::Duration;
 
-use js_lease::Timestamp;
+use js_types::Timestamp;
 use js_types::{HostId, RequestId};
 
 use super::{Registry, State, WholeCounts};

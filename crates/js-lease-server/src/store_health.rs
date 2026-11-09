@@ -31,8 +31,8 @@ use std::time::Duration;
 
 use js_alert::{AlertSink, Notifier};
 use js_jobs::JobStoreError;
-use js_lease::{Clock, Timestamp};
 use js_state::StoreError;
+use js_types::{Clock, Timestamp};
 use serde::Serialize;
 use tracing::{info, warn};
 

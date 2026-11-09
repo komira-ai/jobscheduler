@@ -13,8 +13,8 @@
 use std::time::Duration;
 
 use js_jobs::ScriptedIds;
-use js_lease::{Clock as _, ManualClock};
 use js_state::StoreTime;
+use js_types::{Clock as _, ManualClock};
 
 /// How many ids the script holds before it starts over.
 pub const SCRIPT_LEN: usize = 4_096;
@@ -60,8 +60,8 @@ impl js_state::Clock for StoreClock {
 #[cfg(test)]
 mod tests {
     use js_jobs::IdSource;
-    use js_lease::Timestamp;
     use js_state::Clock as _;
+    use js_types::Timestamp;
 
     use super::*;
 

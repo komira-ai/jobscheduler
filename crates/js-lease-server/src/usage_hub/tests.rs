@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use js_agent_wire::{LeaseMinute, LoadDrops, Phase, RunResult};
-use js_lease::{ManualClock, Timestamp};
+use js_types::{ManualClock, Timestamp};
 use js_usage::{AllocationId, DrainOutcome, EndedReason, EndedRow, GRACE_BEATS};
 
 use super::*;

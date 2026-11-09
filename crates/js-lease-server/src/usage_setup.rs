@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use js_lease::Clock;
+use js_types::Clock;
 
 use crate::adapt::SharedClock;
 use crate::error::StartupError;

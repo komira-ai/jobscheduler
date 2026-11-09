@@ -11,12 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, SchedulerId, Secret};
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::SharedClock;
 use js_lease_server::network::{
     API_TIMEOUT, LaunchCtx, NetworkMode, OAuthClient, TailscaleApi, TailscaleMode,
     TailscaleSettings,
 };
+use js_types::{ManualClock, Timestamp};
 use tracing_subscriber::fmt::MakeWriter;
 
 use fake::{AUTH_KEY, CLIENT_SECRET, Fake, Reply, TOKEN};

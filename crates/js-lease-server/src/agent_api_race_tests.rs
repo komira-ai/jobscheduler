@@ -11,9 +11,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use js_agent_wire::InstanceIdentity;
-use js_lease::{ManualClock, Timestamp};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
 use js_testkit::dir::TestDir;
+use js_types::{ManualClock, Timestamp};
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use serde_json::json;
 

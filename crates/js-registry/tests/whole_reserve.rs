@@ -10,9 +10,9 @@ mod support;
 use std::time::Duration;
 
 use js_agent_wire::Command;
-use js_lease::Timestamp;
 use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{PoolConfig, RunState, WholeNodeConfig};
+use js_types::Timestamp;
 use js_types::{LeaseId, ProviderId};
 use support::world::*;
 use support::*;

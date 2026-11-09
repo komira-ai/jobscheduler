@@ -4,8 +4,8 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-use js_lease::{ManualClock, Timestamp};
 use js_registry::SequentialSessions;
+use js_types::{ManualClock, Timestamp};
 
 use js_testkit::dir::TestDir;
 

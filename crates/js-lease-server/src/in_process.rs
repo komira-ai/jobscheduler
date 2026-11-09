@@ -33,9 +33,9 @@ use std::sync::Arc;
 
 use axum::Router;
 use js_jobs::JobStore;
-use js_lease::Clock;
 use js_registry::Registry;
 use js_state::Store;
+use js_types::Clock;
 use tokio::sync::Mutex;
 
 use crate::adapt::SharedClock;
