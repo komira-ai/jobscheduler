@@ -242,7 +242,9 @@ impl Runtime for VmRuntime {
         };
         run.cancel.store(true, Ordering::SeqCst);
         self.driver.kill(&run.name);
-        run.take_reports();
+        // The end is waited for whether or not it has already come: the thread reports the
+        // end before anything else, so the first report waiting is it, and one already sent
+        // is received at once.
         if run.ended.is_none() {
             match run.reports.recv_timeout(grace) {
                 Ok(report) => run.note(report),

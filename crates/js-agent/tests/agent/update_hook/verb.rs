@@ -79,16 +79,23 @@ fn last_line(out: &str) -> serde_json::Value {
     serde_json::from_str(out.trim_end()).unwrap()
 }
 
+/// Each outcome exits with its status and prints the step's report as the last line; a step that
+/// does not succeed also says on standard error how it ended, with the reason and the detail of
+/// that line, which is what hostkeeper's journal keeps of a hook. Catches a refusal that the
+/// journal shows as a bare reason token.
 #[test]
 fn each_outcome_exits_with_its_status_and_prints_the_report_the_step_gave() {
     let (_dir, params) = params_file("hook-verb-outcomes", PARAMS);
+    let said = |ending: &str| {
+        format!("js-agent update-hook: verify {ending}: not_implemented: the step's own words\n")
+    };
     let cases = [
-        (Outcome::Success, 0),
-        (Outcome::Failure, 1),
-        (Outcome::Deferred, 75),
-        (Outcome::Halt, 76),
+        (Outcome::Success, 0, String::new()),
+        (Outcome::Failure, 1, said("failed")),
+        (Outcome::Deferred, 75, said("deferred")),
+        (Outcome::Halt, 76, said("halted")),
     ];
-    for (outcome, code) in cases {
+    for (outcome, code, err) in cases {
         let report = Report {
             class: Class::Environment,
             retry_after_secs: Some(300),
@@ -109,7 +116,7 @@ fn each_outcome_exits_with_its_status_and_prints_the_report_the_step_gave() {
             assert_eq!(ran.status, status(code), "{outcome:?}");
             assert_eq!(outcome.code(), code);
             assert_eq!(ran.out, format!("{}\n", report.to_line()));
-            assert_eq!(ran.err, "");
+            assert_eq!(ran.err, err, "{outcome:?}");
         }
     }
 }
@@ -304,8 +311,13 @@ fn the_binary_prints_one_valid_last_line_and_exits_1() {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(1));
-        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+        let detail = "/nowhere: No such file or directory (os error 2)";
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("js-agent update-hook: prepare failed: state_invalid: {detail}\n")
+        );
         let line = last_line(&String::from_utf8(output.stdout).unwrap());
+        assert_eq!(line["detail"], detail);
         assert_eq!(line["class"], "release");
         assert_eq!(line["reason"], "state_invalid");
         assert_eq!(line["reversible"], true);
