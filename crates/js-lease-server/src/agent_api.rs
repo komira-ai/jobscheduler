@@ -561,8 +561,9 @@ async fn serve_jobs(
         }
         // What the listing ended or freed, and the load the beat brought, can make room
         // for a queued job: a pass places it, and its start rides on the host's next reply.
-        // A host job the pass placed has tainted its host: the taint is kept below.
-        let placed_taints = placing.place_jobs();
+        // A beat that changed nothing the pass depends on runs none. A host job the pass
+        // placed has tainted its host: the taint is kept below.
+        let placed_taints = placing.place_jobs_after_beat();
         (host, served, placed_taints)
     })
     .await;

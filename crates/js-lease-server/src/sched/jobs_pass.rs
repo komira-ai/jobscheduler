@@ -1,4 +1,6 @@
-//! The server's pass over the queued jobs ([`Agents::place_jobs`]): it reads the hosts the
+//! The server's pass over the queued jobs ([`Agents::place_jobs`], which the tick runs, and
+//! [`Agents::place_jobs_after_beat`], which a heartbeat runs and which is skipped when nothing
+//! the pass depends on changed since the last one): it reads the hosts the
 //! registry would let take a job now and whose last job listing was clean, each with the
 //! network ceiling its hello advertises and whether it reported that it runs host jobs, the
 //! hosts that said hello to this server, and the pool's whole-node settings, and hands them to
@@ -28,7 +30,7 @@ use js_sched::ceiling::ceiling_of;
 use js_types::HostId;
 use tracing::warn;
 
-use super::engine::jobs::{JobHosts, JobStarts, OpenHost, open_to_jobs};
+use super::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics, open_to_jobs};
 use crate::admit::reports_host_jobs;
 use crate::agents::Agents;
 use crate::metrics::PassSink;
@@ -59,6 +61,14 @@ impl JobStarts for Tainted<'_> {
     }
 }
 
+/// Whether a pass over the queued jobs runs whatever changed (the tick's) or only when
+/// something it depends on changed (a heartbeat's).
+#[derive(Debug, Clone, Copy)]
+enum Pass {
+    Always,
+    IfChanged,
+}
+
 impl Agents {
     /// The whole-node rules a whole-host job's prepare runs under: the pool's settings, or,
     /// for a pool that has none, the defaults of a dedicated pool of one host, as a lease's
@@ -85,7 +95,25 @@ impl Agents {
     /// returned: the caller writes the bindings of the hosts returned
     /// ([`Agents::keep_taints`]). A host the registry no longer holds, or that was tainted
     /// before, is not returned.
+    ///
+    /// The tick runs this pass whatever changed; a heartbeat runs
+    /// [`Agents::place_jobs_after_beat`].
     pub(crate) fn place_jobs(&self) -> Vec<HostId> {
+        self.pass_over_queue(Pass::Always)
+    }
+
+    /// The pass a heartbeat runs: [`Agents::place_jobs`], skipped when nothing it depends on
+    /// changed since the last pass that ran
+    /// ([`SchedPlacer::place_jobs_if_changed`](super::place::SchedPlacer::place_jobs_if_changed)):
+    /// the job tables, the engine's picture of the hosts, the hosts offered with what each
+    /// offers, the hosts that said hello and what pass 2 told. The hosts are read from the
+    /// registry first either way.
+    pub(crate) fn place_jobs_after_beat(&self) -> Vec<HostId> {
+        self.pass_over_queue(Pass::IfChanged)
+    }
+
+    /// [`Agents::place_jobs`], or [`Agents::place_jobs_after_beat`] as `pass` says.
+    fn pass_over_queue(&self, pass: Pass) -> Vec<HostId> {
         let (Some(jobs), Some(placer)) = (&self.jobs, &self.placer) else {
             return Vec::new();
         };
@@ -124,7 +152,12 @@ impl Agents {
             hosts: Mutex::default(),
         };
         let sink = PassSink(self.meter().sink());
-        if let Err(error) = placer.place_jobs_with(jobs, &hosts, (&starts, &sink)) {
+        let sinks = (&starts as &dyn JobStarts, &sink as &dyn PassMetrics);
+        let placed = match pass {
+            Pass::Always => placer.place_jobs_with(jobs, &hosts, sinks).map(drop),
+            Pass::IfChanged => placer.place_jobs_if_changed(jobs, &hosts, sinks).map(drop),
+        };
+        if let Err(error) = placed {
             self.fence.note(&error);
             warn!(%error, "the queued jobs could not be read; the next pass places them");
         }
@@ -144,3 +177,7 @@ mod ports_tests;
 #[cfg(test)]
 #[path = "jobs_taint_tests.rs"]
 mod taint_tests;
+
+#[cfg(test)]
+#[path = "jobs_cost_tests.rs"]
+mod cost_tests;
