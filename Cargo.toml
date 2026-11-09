@@ -99,9 +99,10 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem
 ring = "0.17.14"
 runc = { version = "0.3.0", features = ["async"] }
 # The SQLite state store (js-state): the C library is compiled in (`bundled`), so the file
-# format and WAL behaviour do not depend on the host's libsqlite3. No default features: no
-# statement cache (hashlink) and no wasm shim.
-rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }
+# format and WAL behaviour do not depend on the host's libsqlite3. The statement cache
+# (`cache`, which brings hashlink): the store prepares each statement once per connection.
+# No other default features: no wasm shim.
+rusqlite = { version = "0.41.0", default-features = false, features = ["bundled", "cache"] }
 # The pure-Rust zstd codec (js-bundle: layers are zstd-compressed tars; the decoder is
 # the only code that parses an untrusted compressed stream, so it has no C to link).
 ruzstd = "0.9.1"

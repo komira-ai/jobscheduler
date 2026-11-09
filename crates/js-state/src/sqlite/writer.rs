@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OptionalExtension, Row, Statement, TransactionBehavior, params};
+use rusqlite::{CachedStatement, Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use super::schema::{KIND_DELETE, KIND_EXPIRE, KIND_PUT};
 use super::{CommitMetrics, Options};
@@ -70,6 +70,11 @@ impl Shared {
     }
 }
 
+/// How many statements the writer's cache holds: one for each the writer runs, so none is
+/// evicted and prepared again. They are the eight an [`Applier`] holds and the head read
+/// when the store opens.
+pub(super) const STATEMENTS: usize = 9;
+
 pub(super) struct Writer {
     pub(super) conn: Connection,
     pub(super) clock: Arc<dyn Clock>,
@@ -122,6 +127,7 @@ impl Writer {
     /// is what bounds the syncs. A request queued after a lone request was taken joins the
     /// next group.
     pub(super) fn run(mut self, requests: &Receiver<Request>) {
+        self.conn.set_prepared_statement_cache_capacity(STATEMENTS);
         while let Ok(first) = requests.recv() {
             self.taken();
             let started = first.queued;
@@ -234,16 +240,18 @@ impl Writer {
     }
 }
 
-/// The statements of one group, and the revisions it hands out.
+/// The statements of one group, and the revisions it hands out. The statements come from
+/// the connection's cache and go back to it when the group is done, so each is prepared
+/// once per connection and not once per group.
 struct Applier<'c> {
-    get: Statement<'c>,
-    put: Statement<'c>,
-    delete: Statement<'c>,
-    feed: Statement<'c>,
-    counter: Statement<'c>,
-    expire: Statement<'c>,
-    set_head: Statement<'c>,
-    trim: Statement<'c>,
+    get: CachedStatement<'c>,
+    put: CachedStatement<'c>,
+    delete: CachedStatement<'c>,
+    feed: CachedStatement<'c>,
+    counter: CachedStatement<'c>,
+    expire: CachedStatement<'c>,
+    set_head: CachedStatement<'c>,
+    trim: CachedStatement<'c>,
     now: StoreTime,
     head: u64,
     wrote: bool,
@@ -252,23 +260,23 @@ struct Applier<'c> {
 impl<'c> Applier<'c> {
     fn new(conn: &'c Connection, head: u64, now: StoreTime) -> rusqlite::Result<Applier<'c>> {
         Ok(Applier {
-            get: conn.prepare("SELECT version, expires_at FROM kv WHERE key = ?1")?,
-            put: conn.prepare(
+            get: conn.prepare_cached("SELECT version, expires_at FROM kv WHERE key = ?1")?,
+            put: conn.prepare_cached(
                 "INSERT OR REPLACE INTO kv (key, value, version, expires_at) VALUES (?1, ?2, ?3, ?4)",
             )?,
-            delete: conn.prepare("DELETE FROM kv WHERE key = ?1")?,
-            feed: conn.prepare(
+            delete: conn.prepare_cached("DELETE FROM kv WHERE key = ?1")?,
+            feed: conn.prepare_cached(
                 "INSERT INTO feed (revision, key, kind, value) VALUES (?1, ?2, ?3, ?4)",
             )?,
-            counter: conn.prepare(
+            counter: conn.prepare_cached(
                 "INSERT INTO counter (name, value) VALUES (?1, 1) \
                  ON CONFLICT (name) DO UPDATE SET value = value + 1 RETURNING value",
             )?,
-            expire: conn.prepare(
+            expire: conn.prepare_cached(
                 "DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?1 RETURNING key",
             )?,
-            set_head: conn.prepare("UPDATE meta SET value = ?1 WHERE name = 'head'")?,
-            trim: conn.prepare("DELETE FROM feed WHERE revision <= ?1")?,
+            set_head: conn.prepare_cached("UPDATE meta SET value = ?1 WHERE name = 'head'")?,
+            trim: conn.prepare_cached("DELETE FROM feed WHERE revision <= ?1")?,
             now,
             head,
             wrote: false,

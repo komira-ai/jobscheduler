@@ -53,6 +53,9 @@ tokio-rustls.workspace = true
 # A child held between fork and exec, for the tests of what releases the file lock, and the
 # test server's URL (`database::server_url`) for the Postgres tests.
 js-testkit = { path = "../js-testkit", features = ["postgres"] }
+# The authorizer hook (`hooks`), which SQLite calls only while it prepares a statement: the
+# unit tests of the statement cache count prepares with it (src/sqlite/cache_tests.rs).
+rusqlite = { workspace = true, features = ["hooks"] }
 # The digest of the first migration's file (tests/migration_identity.rs).
 sha2.workspace = true
 

@@ -57,9 +57,11 @@ pub(super) fn first_string(row: &Row<'_>) -> rusqlite::Result<String> {
     row.get(0)
 }
 
-/// The head revision the file records.
+/// The head revision the file records. The statement is cached on `conn`: the reader runs
+/// it on every page of the change feed.
 pub(super) fn head(conn: &Connection) -> rusqlite::Result<i64> {
-    conn.query_row("SELECT value FROM meta WHERE name = 'head'", [], first_i64)
+    conn.prepare_cached("SELECT value FROM meta WHERE name = 'head'")?
+        .query_row([], first_i64)
 }
 
 /// Puts a connection in WAL mode with a sync on every commit (a commit is acknowledged
