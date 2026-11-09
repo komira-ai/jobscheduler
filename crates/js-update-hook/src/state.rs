@@ -426,8 +426,8 @@ impl<D: Document> Held<D> {
     }
 
     /// [`Held::open`], having first made `dir` (mode 0700, owned by the user the hook runs as)
-    /// when nothing is at its path: the first step of a first install finds no directory, since
-    /// nothing but the hook makes it. Only `dir` itself is made, in the parent the walk checked;
+    /// when nothing is at its path: the first step of a first install under hostkeeper finds no
+    /// directory, since hostkeeper makes none. Only `dir` itself is made, in the parent the walk checked;
     /// a directory above it that is not there is still [`StateError::Io`] naming it. What is made
     /// is held to the same rules as a directory that was there.
     ///
