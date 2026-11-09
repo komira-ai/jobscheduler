@@ -67,8 +67,9 @@
 //! [`Counter::UnknownHost`].
 //!
 //! Every call carries the join token of [`AgentSpec::join_token`] as its bearer. The hello
-//! does not ask for a host credential (`accepts_host_credential` is false), so the agent
-//! keeps none and a credential in a welcome is ignored.
+//! does not ask for a host credential (`accepts_host_credential` is false) unless the node's
+//! [`AgentProfile`] is the previous release's, which does; the agent keeps none either way
+//! and a credential in a welcome is ignored.
 //!
 //! A start names the heartbeat the server had taken when it queued it
 //! ([`js_agent_wire::JobSpec::heartbeat_seq`]); the agent numbers its heartbeats of a
@@ -162,11 +163,13 @@ use js_conformance::agent::{AgentHarness, FakeAgent};
 mod exclusive;
 mod per_job;
 mod process;
+mod profile;
 mod real;
 mod real_jobs;
 
 pub use exclusive::Prepare;
 use process::{Answer, Process};
+pub use profile::AgentProfile;
 
 /// The image of a run that ends by itself: its first argument is how long it runs, in
 /// milliseconds. Pinned by a fixed digest, as a start must be.
@@ -244,6 +247,7 @@ impl AgentNode {
             counters: Counters::default(),
             ledger,
             prepare: Prepare::default(),
+            profile: AgentProfile::default(),
         };
         Self {
             process: Process::new(&spec),
@@ -300,6 +304,18 @@ impl AgentNode {
     /// in this process and any that replaces it.
     pub fn set_prepare(&mut self, prepare: Prepare) {
         self.io.prepare = prepare;
+    }
+
+    /// Makes the agent say hello as `profile` says, from its next hello on, in this
+    /// process and any that replaces it.
+    pub fn set_profile(&mut self, profile: AgentProfile) {
+        self.io.profile = profile;
+    }
+
+    /// The release whose hello the agent sends.
+    #[must_use]
+    pub fn profile(&self) -> AgentProfile {
+        self.io.profile
     }
 
     /// How the agent answers a prepare.
@@ -394,7 +410,7 @@ impl Node for AgentNode {
 
 /// What a process uses of its node and leaves behind when it dies: the clock of the input
 /// being applied, the outputs, the numbering of calls and timers, the counters, the
-/// ledger and the prepare switch.
+/// ledger, the prepare switch and the profile.
 struct Io {
     now: FarmTime,
     host: HostId,
@@ -407,6 +423,7 @@ struct Io {
     counters: Counters,
     ledger: Ledger,
     prepare: Prepare,
+    profile: AgentProfile,
 }
 
 impl Io {

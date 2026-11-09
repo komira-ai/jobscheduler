@@ -41,6 +41,7 @@ mod start_second_server;
 mod stop_server;
 mod submit_work;
 mod uncordon_host;
+mod upgrade_agents;
 
 pub use add_foreign_machine::{AddForeignMachine, add_foreign_machine};
 pub use agent_prepare_delay::{AgentPrepareDelay, agent_prepare_delay};
@@ -72,6 +73,7 @@ pub use start_second_server::{StartSecondServer, start_second_server};
 pub use stop_server::{StopServer, stop_server};
 pub use submit_work::{SubmitWork, submit_work};
 pub use uncordon_host::{UncordonHost, uncordon_host};
+pub use upgrade_agents::{UpgradeAgents, upgrade_agents};
 
 /// A change a scenario makes to the cell at a virtual time. The builder runs it once in
 /// each seed's cell, at the time it was scripted for.

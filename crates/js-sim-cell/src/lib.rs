@@ -151,7 +151,7 @@ pub mod usage;
 pub mod work;
 
 pub use actions::Action;
-pub use agent::{AgentKind, AgentNode, AgentSpec, Prepare, SIM_RUN_IMAGE};
+pub use agent::{AgentKind, AgentNode, AgentProfile, AgentSpec, Prepare, SIM_RUN_IMAGE};
 pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differences};
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, SecondServer, Setup, StoreRead};

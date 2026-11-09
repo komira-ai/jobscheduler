@@ -56,7 +56,7 @@ use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 use js_types::{HostId, IdError, Resources};
 
-use crate::agent::{AgentKind, AgentNode, AgentSpec, Prepare};
+use crate::agent::{AgentKind, AgentNode, AgentProfile, AgentSpec, Prepare};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::{Counter, Counters};
 use crate::elastic::Cloud;
@@ -293,6 +293,20 @@ impl Cell {
     /// Never for fewer than a thousand million agents: the name is a host id.
     pub fn add_agent(&mut self) -> Result<HostId, IdError> {
         self.add(AgentKind::Fake(None))
+    }
+
+    /// Adds the next agent, a correct fake that says hello as `profile` says.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cell::add_agent`].
+    pub fn add_agent_as(&mut self, profile: AgentProfile) -> Result<HostId, IdError> {
+        let host = self.add(AgentKind::Fake(None))?;
+        let last = self.agents - 1;
+        self.agent_mut(last)
+            .into_iter()
+            .for_each(|agent| agent.set_profile(profile));
+        Ok(host)
     }
 
     /// Adds the next agent, whose agent lacks `defect`.
@@ -543,6 +557,16 @@ impl Cell {
         if let Some(agent) = self.agent_mut(index) {
             agent.set_prepare(prepare);
         }
+    }
+
+    /// Makes agent `index` an agent of the current release and starts a new process on its
+    /// host, as [`Cell::replace`] does: the upgrade of a host, which loses what its
+    /// process held.
+    pub fn upgrade(&mut self, index: usize) {
+        self.agent_mut(index)
+            .into_iter()
+            .for_each(|agent| agent.set_profile(AgentProfile::Current));
+        self.replace(index);
     }
 
     /// Starts a new process on agent `index`'s host, with empty state.
