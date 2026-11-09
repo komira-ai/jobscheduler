@@ -51,7 +51,7 @@
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
 //! | `--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement. The flag is accepted with the warning `--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)`; `--placement registry`, the removed first-free placement, is refused at start, `the registry placement mode was removed; js-sched is the only placement (drop the flag)`. The server keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets; it places the jobs on the hosts that registered themselves, and the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings, and the start is counted. The pool's `memory_schedulable_percent` is the scheduler's rule: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; `GET /v1/hosts` shows the cut memory as `shape.memory_bytes`, beside the percent. A host a whole-node request has set aside takes work of the pool's `share_class` only as backfill, by the end of the host's tail as the mark took it; a wall time above `server.max_lease_wall` never does. An agent pool (`--agent-pool-config`, or a joined pool of the file) whose capabilities name no `arch` is refused at start, naming the pool; an elastic pool is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. Needs `--agent-pool-config` |
-//! | `--estimate-feed` | off by default. Costs a restored lease at its estimated end, cut to its max-wall bound, when a whole-node request has to pick a host to drain: the lease's start plus the largest P90 wall time, among the profiles the usage file has learned, of the runs queued on it with a profile name. No route queues a run any more, so a lease has no such run and is costed at its bound, as every lease is without the flag. Needs `--agent-pool-config`; not with `--usage-off` |
+//! | `--estimate-feed` | deprecated, and does nothing: no lease is costed by an estimate any more. The flag is accepted with the warning `--estimate-feed is deprecated and does nothing: no lease is costed by an estimate any more (drop the flag)`, and is still refused beside `--usage-off` and without `--agent-pool-config` |
 //! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of `GET /v1/hosts` and the join, brake and usage routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--tick` | how often the job pass runs and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
@@ -111,8 +111,8 @@
 //! # placement: deprecated, as the flag; "js-sched" warns, "registry" is refused; refused unless a pool registers agents
 //! # cpu_slack (1.1, a number): the flag's name, default and range; refused unless a pool
 //! # registers agents
-//! # estimate_feed (false): the flag's name and default; refused unless a pool registers
-//! # agents, and refused as true beside usage_off = true
+//! # estimate_feed (false): deprecated, as the flag; true warns and does nothing; refused unless a
+//! # pool registers agents, and refused as true beside usage_off = true
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456),
 //! # history_retention_days (90): the flags' names, defaults and rules; usage_db is refused
 //! # beside usage_off = true
@@ -578,27 +578,18 @@
 //! is bad costs nothing but its own data: the beat's results, held list and taint are
 //! handled as ever and the reply is unchanged (the load is counted in
 //! [`Running::usage_counters`]). A beat the registry refuses (unknown host, stale epoch,
-//! wrong session) records nothing. Runs that ended cleanly (an `ACCEPTED` result with the
-//! outcome `succeeded` or `failed`) are handed to the sink with their series once the
-//! host has sent two more beats, so the lease's last partial minute is not lost, if a
-//! [`KeySource`] names the work they did; without one no run has a key, so none is learned
-//! from and `runs_without_key` counts each. The seam types and
-//! [`NoUsage`] are public so that a test or an embedding program can supply its own
-//! ([`Config::with_usage_sink`], [`Config::with_key_source`]). Without a sink of its own
-//! the server records into the SQLite file `--usage-db` names (beside the state file by
-//! default): node minutes are written by the flush, and the profiles learned from clean
-//! runs are kept under `--profile-store-bytes`; a file that cannot be opened refuses the
-//! start. `--usage-off` leaves the usage side out altogether.
+//! wrong session) records nothing. The seam types and [`NoUsage`] are public so that a
+//! test or an embedding program can supply its own sink ([`Config::with_usage_sink`]).
+//! Without a sink of its own the server records into the SQLite file `--usage-db` names
+//! (beside the state file by default): node minutes are written by the flush, and the
+//! profiles an earlier release learned are kept under `--profile-store-bytes` and read by
+//! `GET /v1/usage/keys/{key}`; a file that cannot be opened refuses the start.
+//! `--usage-off` leaves the usage side out altogether. No lease is held, so a result a
+//! heartbeat carries teaches the usage side nothing, and no profile is learned from a run.
 //!
-//! The same file keeps the record of every ended allocation (`docs/usage-store.md`): when a
-//! lease's booking ends (a stop, or a whole-node prepare that failed), the registry hands the
-//! usage side one record (the lease, its host,
-//! what it booked and was measured to use, its queue wait and run time, why it ended, its
-//! drain and give-up outcome, its estimated against its actual end), with the registry's lock
-//! released; the record is queued in memory and written by the next tick, and kept for
-//! `--history-retention-days`. A record whose write fails stays queued for the next tick (at
-//! most 4096 wait; past that the oldest is dropped), the failure is counted in
-//! [`Running::usage_counters`], and a run of failures is logged once.
+//! The same file keeps the record of every ended allocation (`docs/usage-store.md`), kept
+//! for `--history-retention-days`; the daily prune removes the older ones. The records an
+//! earlier release wrote are read as they were written.
 //!
 //! Every tick acts by the wall clock of the server: the sink is flushed every five
 //! minutes and once more at shutdown, and pruned at the first tick and once a day. A
@@ -730,9 +721,9 @@ pub use static_pool::StaticPoolSource;
 pub use store::LockLost;
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{
-    BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, MAX_KEY_LEN,
-    MinuteIn, NoKeys, NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd,
-    RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
+    BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, LoadIn, MAX_KEY_LEN, MinuteIn,
+    NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd, RunMinute,
+    RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 pub use usage_hub::UsageCounters;
 

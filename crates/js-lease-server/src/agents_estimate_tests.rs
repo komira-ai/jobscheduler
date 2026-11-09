@@ -1,5 +1,5 @@
-//! `--estimate-feed` wired into the server, in process: the configuration read from the
-//! flags and the agent side assembled from it as the server assembles it. No listener is
+//! `--estimate-feed` beside files that will not open, in process: the configuration read
+//! from the flags and the agent side assembled from it as the server assembles it. No listener is
 //! bound and no connection is made.
 
 use std::ffi::OsString;
@@ -89,8 +89,8 @@ fn refused(name: &str, extra: &[&str], spoil: impl Fn(&Path)) -> String {
 
 /// Asserts that with the flag a start whose usage file will not open (a directory in its
 /// place) is refused naming `--usage-db`, and one whose file of join tokens cannot be read
-/// (a directory in its place) is refused, before any source of lives is set. It catches a
-/// feed that turns a broken usage file into a start with no estimates.
+/// (a directory in its place) is refused. The flag, which does nothing, does not turn a
+/// broken usage file into a start.
 #[test]
 fn with_the_flag_a_start_over_files_that_will_not_open_is_refused() {
     let usage = refused("refused_usage", &["--estimate-feed"], |dir| {

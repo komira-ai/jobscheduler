@@ -9,13 +9,13 @@ use js_types::Clock;
 use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::UsageKeys;
-use crate::usage::{HostLimits, KeySource, NoKeys, UsageSink};
+use crate::usage::{HostLimits, UsageSink};
 use crate::usage_hub::Usage;
 use crate::usage_js::{self, StoreSetup, no_names};
 
 /// What `--usage-db`, `--usage-off`, `--profile-store-bytes` and
-/// `--history-retention-days` decided, and the seams a caller may fill: the sink that
-/// measures, and the source of the key of a run.
+/// `--history-retention-days` decided, and the seam a caller may fill: the sink that
+/// measures.
 pub(crate) struct UsageSetup {
     /// The usage file; `None` when usage is off.
     pub(crate) db: Option<PathBuf>,
@@ -23,8 +23,6 @@ pub(crate) struct UsageSetup {
     pub(crate) history_retention_days: u64,
     /// The sink to use in place of the one that opens `db`.
     pub(crate) sink: Option<Arc<dyn UsageSink>>,
-    /// The key source a caller supplied; `None` leaves every run without a key.
-    pub(crate) keys: Option<Arc<dyn KeySource>>,
 }
 
 /// The default of `--profile-store-bytes`.
@@ -45,13 +43,11 @@ impl UsageSetup {
             profile_store_bytes,
             history_retention_days,
             sink: None,
-            keys: None,
         }
     }
 
     /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
-    /// A usage file that will not open is a refused start naming `--usage-db`. No run has a
-    /// key unless the caller supplied a key source.
+    /// A usage file that will not open is a refused start naming `--usage-db`.
     pub(crate) fn build(
         self,
         clock: &SharedClock,
@@ -72,8 +68,7 @@ impl UsageSetup {
                 usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
             }
         };
-        let keys = self.keys.unwrap_or_else(|| Arc::new(NoKeys));
-        let usage = Usage::new(sink, keys, clock.clone(), limits);
+        let usage = Usage::new(sink, clock.clone(), limits);
         Ok(Some(Arc::new(usage)))
     }
 }

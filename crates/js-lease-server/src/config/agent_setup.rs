@@ -22,8 +22,6 @@ pub(crate) struct AgentSetup {
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
-    /// `--estimate-feed`.
-    pub(crate) estimate_feed: bool,
     /// `--cpu-slack`, or the engine's default.
     pub(crate) cpu_slack: CpuSlack,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time

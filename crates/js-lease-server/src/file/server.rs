@@ -175,8 +175,7 @@ impl AgentKeys {
         self.placement
     }
 
-    /// Whether each lease's estimated end is fed to the drain cost; off unless the file
-    /// says so.
+    /// Whether the deprecated `estimate_feed` key is on; off unless the file says so.
     pub(crate) fn estimate_feed(&self) -> bool {
         self.estimate_feed.unwrap_or(false)
     }
@@ -258,7 +257,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         job_listen: s.address("job_listen")?,
     };
     let usage = read_usage(&mut s)?;
-    // The rule of `--estimate-feed`: with usage off there is nothing to estimate from.
+    // The rule of `--estimate-feed`, kept with the deprecated key: not beside usage off.
     if agents.estimate_feed() & usage.off {
         return Err(s.fail("estimate_feed", "not allowed with server.usage_off"));
     }

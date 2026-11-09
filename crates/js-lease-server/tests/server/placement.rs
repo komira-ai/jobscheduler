@@ -97,7 +97,7 @@ fn placement_defaults_to_js_sched() {
 
 /// Asserts that `--placement js-sched` and `server.placement = "js-sched"` are accepted
 /// and change nothing but one warning, given in full, naming the flag or the key to drop:
-/// the CPU slack and the estimate feed are those of the same server without them, and a
+/// the CPU slack is that of the same server without them, and a
 /// `--cpu-slack` (once refused unless `js-sched` was named) is read with or without it.
 #[test]
 fn placement_js_sched_is_accepted_and_does_nothing_more() {
@@ -106,7 +106,6 @@ fn placement_js_sched_is_accepted_and_does_nothing_more() {
     let named = config(args(&scratch, &["--placement", "js-sched"])).unwrap();
     assert_eq!(named.warnings(), [FLAG_WARNING]);
     assert_eq!(named.cpu_slack(), plain.cpu_slack());
-    assert_eq!(named.estimate_feed(), plain.estimate_feed());
     let slack = config(args(&scratch, &["--cpu-slack", "1.5"])).unwrap();
     let both = ["--placement", "js-sched", "--cpu-slack", "1.5"];
     let slack_named = config(args(&scratch, &both)).unwrap();
@@ -121,7 +120,6 @@ fn placement_js_sched_is_accepted_and_does_nothing_more() {
     let keyed = load(&scratch, &text).unwrap();
     assert_eq!(keyed.warnings(), [KEY_WARNING]);
     assert_eq!(keyed.cpu_slack(), keyless.cpu_slack());
-    assert_eq!(keyed.estimate_feed(), keyless.estimate_feed());
 }
 
 /// Asserts that `registry` is refused, by the flag and by the key, with the whole message

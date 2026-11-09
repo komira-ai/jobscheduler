@@ -31,7 +31,7 @@ async fn get(h: &Harness, path: &str) -> crate::support::Reply {
 async fn start_jobs(name: &str, fake: &Arc<Fake>) -> Harness {
     let scratch = Scratch::new(name);
     let args = placing_args(&scratch, Kept::Files);
-    start_over(scratch, args, fake, &[]).await
+    start_over(scratch, args, fake).await
 }
 
 /// Submits the job `id`, has a tick place it, and returns the allocation id the start the
@@ -79,7 +79,7 @@ async fn a_beat_with_a_bad_load_still_delivers_its_results() {
 #[tokio::test]
 async fn a_load_that_is_not_a_load_is_no_load() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_no_load", &fake, &[]).await;
+    let h = start_usage("usage_no_load", &fake).await;
     let me = join(&h, "burst-1").await;
     let reply = beat_load(&h, &me, json!({ "mono_usec": "x" })).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -95,7 +95,7 @@ async fn a_load_that_is_not_a_load_is_no_load() {
 #[tokio::test]
 async fn a_beat_the_registry_refuses_records_nothing() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_refused", &fake, &[]).await;
+    let h = start_usage("usage_refused", &fake).await;
     let me = join(&h, "burst-1").await;
     let mut stale = me.clone();
     stale.epoch += 1;
@@ -127,7 +127,7 @@ async fn a_beat_the_registry_refuses_records_nothing() {
 #[tokio::test]
 async fn flush_is_every_five_minutes_and_at_shutdown_and_prune_is_daily() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_schedule", &fake, &[]).await;
+    let h = start_usage("usage_schedule", &fake).await;
     h.ticks.step().await;
     assert_eq!((fake.flushes(), fake.prunes()), (vec![], vec![16]));
     h.clock.advance(4 * MINUTE);
@@ -159,7 +159,7 @@ async fn flush_is_every_five_minutes_and_at_shutdown_and_prune_is_daily() {
 #[tokio::test]
 async fn each_closed_node_minute_is_logged_once_and_not_for_each_beat() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_log", &fake, &[]).await;
+    let h = start_usage("usage_log", &fake).await;
     let (a, b) = (join(&h, "logged-1").await, join(&h, "logged-2").await);
     for seq in 1..=3u64 {
         for twice in [0, 10] {
@@ -202,7 +202,7 @@ async fn dropped_readings_are_warned_once_for_a_host_and_minute() {
     let log = LogCapture::start();
     let fake = Arc::new(Fake::default());
     fake.drop_readings(DropReason::NoBaseline);
-    let h = start_usage("usage_drops", &fake, &[]).await;
+    let h = start_usage("usage_drops", &fake).await;
     let me = join(&h, "burst-1").await;
     for seq in 1..=3 {
         beat_load(&h, &me, load(seq, 1000, &[])).await;
@@ -270,7 +270,7 @@ async fn with_usage_off_there_are_no_routes_and_nothing_is_recorded() {
     let scratch = Scratch::new("usage_off");
     let mut args = agent_args(&scratch, false);
     args.push("--usage-off".into());
-    let h = start_over(scratch, args, &fake, &[]).await;
+    let h = start_over(scratch, args, &fake).await;
     let me = join(&h, "burst-1").await;
     let reply = beat_load(&h, &me, load(1, 1000, &[0])).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -290,7 +290,7 @@ async fn with_usage_off_there_are_no_routes_and_nothing_is_recorded() {
 #[tokio::test]
 async fn the_minutes_of_beats_are_written_as_rows_by_a_flush() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_rows", &fake, &[]).await;
+    let h = start_usage("usage_rows", &fake).await;
     let me = join(&h, "burst-1").await;
     beat_load(&h, &me, load(1, 5_000_000, &[])).await;
     h.clock.advance(MINUTE);
@@ -316,7 +316,7 @@ async fn the_minutes_of_beats_are_written_as_rows_by_a_flush() {
 #[tokio::test]
 async fn a_failing_sink_is_counted_and_the_ticks_go_on() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_faults", &fake, &[]).await;
+    let h = start_usage("usage_faults", &fake).await;
     fake.fail();
     h.ticks.step().await;
     h.clock.advance(5 * MINUTE);
@@ -333,7 +333,7 @@ async fn a_failing_sink_is_counted_and_the_ticks_go_on() {
 #[tokio::test]
 async fn the_minutes_of_beats_are_rows_after_a_flush() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_api_rows", &fake, &[]).await;
+    let h = start_usage("usage_api_rows", &fake).await;
     let me = join(&h, "burst-1").await;
     beat_load(&h, &me, load(1, 5_000_000, &[])).await;
     h.clock.advance(MINUTE);
@@ -363,7 +363,7 @@ async fn the_minutes_of_beats_are_rows_after_a_flush() {
 async fn rows_come_in_pages_and_the_default_is_the_last_hour() {
     let fake = Arc::new(Fake::default());
     fake.seed_rows("burst-1", 0..1500);
-    let h = start_usage("usage_paging", &fake, &[]).await;
+    let h = start_usage("usage_paging", &fake).await;
     let first = get(&h, "/v1/usage/nodes/burst-1?from=0&to=2000")
         .await
         .json();
@@ -408,7 +408,7 @@ async fn rows_come_in_pages_and_the_default_is_the_last_hour() {
 #[tokio::test]
 async fn the_read_routes_are_for_the_client_token_only() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_auth", &fake, &[]).await;
+    let h = start_usage("usage_auth", &fake).await;
     let paths = ["/v1/usage/nodes/burst-1", "/v1/usage/keys/act.build"];
     for path in paths {
         for token in [None, Some(JOIN), Some(JOIN_B), Some("nope")] {
@@ -446,7 +446,7 @@ async fn the_read_routes_are_for_the_client_token_only() {
 async fn ids_keys_and_queries_are_read_strictly_and_never_echoed() {
     let log = LogCapture::start();
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_strict", &fake, &[]).await;
+    let h = start_usage("usage_strict", &fake).await;
     let (long_id, long_key) = ("a".repeat(64), "k".repeat(129));
     let bad_ids = [
         "..",
@@ -520,7 +520,7 @@ async fn without_agents_the_usage_routes_do_not_exist() {
 #[tokio::test]
 async fn a_failing_store_is_a_503_and_is_counted() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_store_faults", &fake, &[]).await;
+    let h = start_usage("usage_store_faults", &fake).await;
     fake.fail();
     for path in ["/v1/usage/nodes/burst-1", "/v1/usage/keys/act.build"] {
         let reply = get(&h, path).await;
@@ -540,7 +540,7 @@ async fn a_failing_store_is_a_503_and_is_counted() {
 #[tokio::test]
 async fn a_reading_held_in_the_sink_does_not_stop_other_requests() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_parked", &fake, &[]).await;
+    let h = start_usage("usage_parked", &fake).await;
     let (slow, quick) = (join(&h, "burst-1").await, join(&h, "burst-2").await);
     let (mut arrived, release) = fake.park_next_reading();
     let mut parked = Box::pin(beat_load(&h, &slow, load(1, 1000, &[])));
@@ -602,7 +602,7 @@ async fn the_started_server_keeps_a_usage_file_and_offers_curves() {
     assert!(db.exists());
     assert!(h.running.usage_curves().is_some());
     let fake = Arc::new(Fake::default());
-    let other = start_usage("usage_no_curves", &fake, &[]).await;
+    let other = start_usage("usage_no_curves", &fake).await;
     assert!(other.running.usage_curves().is_none());
 }
 

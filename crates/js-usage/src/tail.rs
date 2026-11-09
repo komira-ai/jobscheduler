@@ -399,8 +399,9 @@ struct State {
 }
 
 impl StoreTailSink {
-    /// The counters kept in `store`, bucketed by `edges` (the registry's
-    /// `ERROR_EDGES_MS`).
+    /// The counters kept in `store`, bucketed by `edges` (the edges the rows
+    /// of an earlier release were bucketed by are `[-300_000, -60_000, -10_000, 0, 10_000,
+    /// 60_000, 300_000]`).
     #[must_use]
     pub fn new(store: Arc<dyn Store>, edges: [i64; TAIL_BUCKETS - 1]) -> Self {
         Self {

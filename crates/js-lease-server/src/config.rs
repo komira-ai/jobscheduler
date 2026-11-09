@@ -27,11 +27,12 @@ use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
 use crate::static_pool::StaticPoolSource;
 use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
-use crate::usage::{KeySource, UsageSink};
+use crate::usage::UsageSink;
 use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
 mod cpu_slack;
+mod estimate_feed;
 mod feed_retention;
 mod job_wall;
 mod listen;
@@ -166,12 +167,9 @@ pub struct Cli {
     /// the flag the engine's own default is used, which is 1.1.
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
-    /// Feeds each lease's estimated end to the drain cost of a whole-node request: the
-    /// lease's start plus the largest P90 wall time, among the profiles the usage file has
-    /// learned, of the runs queued on it with a profile name. A lease with no such run is
-    /// costed at its max-wall bound, as every lease is without the flag. Off by
-    /// default. Needs `--agent-pool-config`; not allowed with `--usage-off`, which leaves
-    /// nothing to estimate from.
+    /// Deprecated, and does nothing: no lease is costed by an estimate any more. The flag
+    /// is accepted with a warning. Needs `--agent-pool-config`; not allowed with
+    /// `--usage-off`.
     #[arg(long, conflicts_with = "usage_off")]
     pub estimate_feed: bool,
     /// How often the table is ticked (expiries, retries, pending starts).
@@ -497,6 +495,10 @@ impl Config {
         // The deprecated `--placement` first: a removed `registry` is refused before the
         // pool is read, naming the flag to drop.
         let mut warnings = Vec::from_iter(Placement::given(cli.placement, "--placement")?);
+        warnings.extend(estimate_feed::deprecated(
+            cli.estimate_feed,
+            "--estimate-feed",
+        ));
         let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
@@ -595,6 +597,10 @@ impl Config {
                 } = *registering;
                 let placed = Placement::given(server.agents.placement(), "server.placement")?;
                 warnings.extend(placed);
+                warnings.extend(estimate_feed::deprecated(
+                    server.agents.estimate_feed(),
+                    "server.estimate_feed",
+                ));
                 let cpu_slack = server.agents.cpu_slack().unwrap_or_default();
                 let agents = Box::new(AgentSetup {
                     tokens,
@@ -602,7 +608,6 @@ impl Config {
                     mint_provider,
                     hello_limit: server.agents.hello_limit(),
                     require_host_credential: server.agents.require_host_credential(),
-                    estimate_feed: server.agents.estimate_feed(),
                     cpu_slack,
                     max_lease_wall: server.max_lease_wall,
                     job_limits,
@@ -789,15 +794,6 @@ impl Config {
         self.usage.db.as_deref()
     }
 
-    /// Whether each lease's estimated end is fed to the drain cost (`--estimate-feed`, or
-    /// `server.estimate_feed`): off for a server with no agent registration.
-    pub fn estimate_feed(&self) -> bool {
-        match &self.hosts {
-            Hosts::Layered { agents, .. } => agents.estimate_feed,
-            Hosts::Static(_) => false,
-        }
-    }
-
     /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
     /// value given, or the engine's default, 1.1x, which is also the answer for a server
     /// with no agent registration.
@@ -845,13 +841,6 @@ impl Config {
         self.usage.sink = Some(sink);
         self
     }
-
-    /// The same configuration naming the key of a run with `keys`; without it no run has a
-    /// key, and none is learned from.
-    pub fn with_key_source(mut self, keys: Arc<dyn KeySource>) -> Self {
-        self.usage.keys = Some(keys);
-        self
-    }
 }
 
 /// `value`, or the refusal of the flag that was left out: `clap` requires the flag unless
@@ -890,7 +879,6 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
                         interval: cli.agent_hello_interval,
                     },
                     require_host_credential: cli.require_host_credential,
-                    estimate_feed: cli.estimate_feed,
                     cpu_slack,
                     max_lease_wall: None,
                     job_limits: JobLimits::default(),

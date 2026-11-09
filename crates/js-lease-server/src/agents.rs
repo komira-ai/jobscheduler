@@ -236,7 +236,6 @@ fn placed_in(
                 mint_provider,
                 hello_limit,
                 require_host_credential,
-                estimate_feed: _,
                 cpu_slack,
                 max_lease_wall,
                 job_limits,
