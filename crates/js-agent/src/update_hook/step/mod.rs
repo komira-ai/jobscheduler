@@ -2,10 +2,11 @@
 //! (host-updates design, 4.2).
 //!
 //! A step is a function of an [`Env`] and the params table, and ends as a [`Done`]: the status
-//! and the last line. It takes the state directory's lock first, loads and validates the
-//! record, and only then looks at the machine. Every change to the record or through a port
-//! passes a kill point first ([`Ports::point`](super::Ports::point)), so that a test, and later
-//! the conformance harness, can end the step at any of them and run it again.
+//! and the last line. It takes the state directory's lock first (making the directory when it
+//! is not there), loads and validates the record, and only then looks at the machine. Every
+//! change to the record or through a port passes a kill point first
+//! ([`Ports::point`](super::Ports::point)), so that a test, and later the conformance harness,
+//! can end the step at any of them and run it again.
 
 mod cleanup;
 mod cutover;
@@ -97,9 +98,11 @@ fn lease_failure(error: LeaseError) -> Done {
     done
 }
 
-/// Takes the lock, loads the record and holds it to the rules; `None` if there is none.
+/// Takes the lock, loads the record and holds it to the rules; `None` if there is none. The
+/// state directory is made (mode 0700) when it is not there: hostkeeper makes none, so the first
+/// step of a first install finds none (see [`Held::open_or_make`]).
 fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), Done> {
-    let held = Held::open(&params.settings.state_dir, env.stat).map_err(state_failure)?;
+    let held = Held::open_or_make(&params.settings.state_dir, env.stat).map_err(state_failure)?;
     let record = held.load().map_err(state_failure)?;
     if let Some(record) = &record {
         check(params, record)?;

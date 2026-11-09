@@ -13,6 +13,7 @@ mod fake_bin;
 mod fakes;
 mod fakes_tests;
 mod harness_tests;
+mod hostkeeper_runner;
 mod launchd;
 mod lease_port;
 mod lease_port_transport;
