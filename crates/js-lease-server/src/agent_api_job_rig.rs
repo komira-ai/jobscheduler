@@ -36,7 +36,7 @@ use js_types::{ManualClock, Timestamp};
 use serde_json::json;
 
 use super::*;
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::job_expiry::JobLimits;
 use crate::logs::{Scope, SinkTemplate, StoreClock as LogClock};
 

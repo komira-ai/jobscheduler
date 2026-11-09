@@ -26,16 +26,16 @@ use js_types::{
     ResourceClass, Resources, Shape,
 };
 
-use crate::adapt::SharedClock;
 use crate::agent_pool::shipped_class;
 use crate::agent_tokens::AgentTokens;
-use crate::capacity::CapacitySource;
+use crate::clock::SharedClock;
 use crate::config::{LiveClients, Token, checked};
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
 use crate::job_expiry::JobLimits;
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::OAuthClient;
+use crate::static_pool::StaticPoolSource;
 
 mod brake;
 mod budget;
@@ -317,10 +317,10 @@ impl Registering {
 /// The pools of the file, as the sources of hosts they make.
 pub(crate) enum LoadedHosts {
     /// Static pools only.
-    Static(Box<dyn CapacitySource>),
+    Static(StaticPoolSource),
     /// An elastic pool that agents register into, beside a static pool when there is one.
     Registering {
-        static_pool: Option<Box<dyn CapacitySource>>,
+        static_pool: Option<StaticPoolSource>,
         registering: Box<Registering>,
     },
 }
@@ -458,7 +458,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
 }
 
 /// Why the server cannot run the registering pools `registering` (each with its message
-/// head, `pool "<name>"`): this version runs one, through the fixed order of `layered.rs`.
+/// head, `pool "<name>"`): this version runs one, since the server keeps one registry.
 /// The refusal names the second pool.
 fn unrunnable(registering: &[(String, Box<Registering>)]) -> Option<StartupError> {
     let (second, _) = registering.get(1)?;
@@ -485,7 +485,7 @@ struct Read {
 }
 
 enum Pool {
-    Static(Box<dyn CapacitySource>),
+    Static(StaticPoolSource),
     Elastic(Box<Registering>),
     /// A pool that names only hostless platforms: in [`Resolved`], and nothing to run.
     Hostless,

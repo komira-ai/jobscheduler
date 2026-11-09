@@ -240,50 +240,15 @@ fn run_captured(args: Vec<OsString>) -> (ExitCode, String, String) {
     )
 }
 
-/// Asserts that a server whose first boot is not asked for refuses a missing lease file
-/// naming `--boot`, and that a first boot creates the file.
-#[tokio::test]
-async fn resume_needs_the_state_file() {
-    let scratch = Scratch::new("resume_missing");
-    let args = replace(base_args(&scratch), "--boot", "resume");
-    let (_, ticker) = channel_ticker();
-    let started = start(config(args).unwrap(), SharedClock::new(clock()), ticker).await;
-    assert_eq!(flag_of(started), "--boot");
-    assert!(!scratch.state().exists());
-
-    let args = base_args(&scratch);
-    let (_, ticker) = channel_ticker();
-    let started = start(config(args).unwrap(), SharedClock::new(clock()), ticker).await;
-    assert!(started.is_ok());
-    assert!(scratch.state().exists());
-}
-
 fn clock() -> js_types::ManualClock {
     js_types::ManualClock::default()
 }
 
-/// Asserts that a second server over one lease file, a lease file that is not a lease
-/// file, a pool file that is missing or wrong, and a listen address already in use are
+/// Asserts that a pool file that is missing or wrong and a listen address already in use are
 /// each refused naming their flag.
 #[tokio::test]
 async fn other_start_refusals_name_their_flag() {
-    let first = Harness::new("refusals").await;
-    let args = base_args(&first.scratch);
-    let (_, ticker) = channel_ticker();
-    let second = start(
-        config(args.clone()).unwrap(),
-        SharedClock::new(clock()),
-        ticker,
-    )
-    .await;
-    assert_eq!(flag_of(second), "--state-file");
-
     let scratch = Scratch::new("refusals_files");
-    let garbage = scratch.write("garbage.toml", "this is not a lease file", 0o600);
-    let args = replace(base_args(&scratch), "--state-file", garbage);
-    let (_, ticker) = channel_ticker();
-    let started = start(config(args).unwrap(), SharedClock::new(clock()), ticker).await;
-    assert_eq!(flag_of(started), "--state-file");
 
     for (name, text) in [("typo.toml", "[[host]]\nidd = 1\n"), ("missing.toml", "")] {
         let pool = scratch.write(name, text, 0o644);
@@ -390,10 +355,11 @@ fn connection_limits_are_flags() {
     assert_eq!(cli.drain_timeout.as_secs(), 3600);
 }
 
-/// Asserts that a lease file whose term is the last one (the next boot cannot take a new
-/// term) refuses the start naming `--state-file`, and the file is left as it was.
+/// Asserts that a lease file of the previous release whose term is the last one (a file the
+/// previous release could not boot from) does not refuse the start, and is left as it was.
+/// It catches a server that reads the term of the file.
 #[tokio::test]
-async fn a_lease_file_at_its_last_term_is_refused() {
+async fn a_lease_file_at_its_last_term_does_not_refuse_a_start() {
     let scratch = Scratch::new("term_exhausted");
     let head = format!(
         "version = 1\nterm = {}\nnext_sequence = 1\nlease_count = 0\n",
@@ -403,7 +369,7 @@ async fn a_lease_file_at_its_last_term_is_refused() {
     let args = replace(base_args(&scratch), "--boot", "resume");
     let (_, ticker) = channel_ticker();
     let started = start(config(args).unwrap(), SharedClock::new(clock()), ticker).await;
-    assert_eq!(flag_of(started), "--state-file");
+    started.unwrap().shutdown().await.unwrap();
     assert_eq!(std::fs::read_to_string(scratch.state()).unwrap(), head);
 }
 

@@ -1,13 +1,11 @@
 //! How the server's store paths fared, tick by tick: what `/healthz`, the status routes and
 //! the `store:unreachable` alert read.
 //!
-//! Each tick is one reading ([`TickStore`]) of the two store paths a tick takes: the write
-//! of the lease file, when the tick changed something to write, and the job pass over the job
-//! tables, when the server holds them ([`crate::agents::Agents::job_pass`]). A tick in which
-//! either failed is a failure of the kind of the one that failed (the job pass's when both
-//! did); any other tick is a success. A job pass that failed for a reason that is not the
-//! store's (a job the pass expected and did not find, say) is no reading of the store: the
-//! store answered.
+//! Each tick is one reading ([`TickStore`]) of the store path a tick takes: the job pass over
+//! the job tables, when the server holds them ([`crate::agents::Agents::job_pass`]). A tick
+//! in which it failed is a failure of the kind that failed it; any other tick is a success. A
+//! job pass that failed for a reason that is not the store's (a job the pass expected and did
+//! not find, say) is no reading of the store: the store answered.
 //!
 //! - A failure adds one to the consecutive failures, names its [`FailureKind`], and starts
 //!   the streak's clock at its tick when it is the first.
@@ -36,7 +34,7 @@ use js_types::{Clock, Timestamp};
 use serde::Serialize;
 use tracing::{info, warn};
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 
 /// The key of the alert that holds while the store is unreachable.
 pub(crate) const UNREACHABLE: &str = "store:unreachable";
@@ -64,8 +62,6 @@ pub(crate) enum FailureKind {
     Fenced,
     /// A read of the store's change feed began past its trim ([`StoreError::StaleCursor`]).
     StaleCursor,
-    /// The lease file could not be written.
-    LeaseFile,
 }
 
 impl FailureKind {
@@ -88,7 +84,6 @@ impl FailureKind {
             FailureKind::Failed => "failed",
             FailureKind::Fenced => "fenced",
             FailureKind::StaleCursor => "stale_cursor",
-            FailureKind::LeaseFile => "lease_file",
         }
     }
 }
@@ -105,21 +100,17 @@ pub(crate) enum Pass {
 /// What one tick's store paths did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TickStore {
-    /// The tick's write of the lease file failed.
-    pub(crate) lease_file_failed: bool,
     /// The job pass, when the server holds the job tables and the pass read the store.
     pub(crate) pass: Option<Pass>,
 }
 
 impl TickStore {
-    /// The kind of the tick's failure: the job pass's, else the lease file's; `None` when
-    /// nothing failed.
+    /// The kind of the tick's failure, the job pass's; `None` when nothing failed.
     fn failure(self) -> Option<FailureKind> {
-        let pass = match self.pass {
+        match self.pass {
             Some(Pass::Failed(kind)) => Some(kind),
             _ => None,
-        };
-        pass.or(self.lease_file_failed.then_some(FailureKind::LeaseFile))
+        }
     }
 }
 

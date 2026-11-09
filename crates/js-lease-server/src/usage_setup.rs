@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use js_types::Clock;
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::UsageKeys;
 use crate::usage::{HostLimits, KeySource, NoKeys, UsageSink};
@@ -79,13 +79,13 @@ impl UsageSetup {
 }
 
 /// The usage file `--usage-db`, `--usage-off` or the file's keys name: none when usage is
-/// off, else `db` or `usage.db` in the directory of the lease file.
+/// off, else `db` or `usage.db` in the directory of the state file.
 fn usage_db(off: bool, db: Option<PathBuf>, state_file: &Path) -> Option<PathBuf> {
     let beside = || state_file.with_file_name("usage.db");
     (!off).then(|| db.unwrap_or_else(beside))
 }
 
-/// What the usage settings decide, for the lease file at `state_file`.
+/// What the usage settings decide, for the state file `state_file`.
 pub(crate) fn usage_setup(keys: UsageKeys, state_file: &Path) -> UsageSetup {
     let db = usage_db(keys.off, keys.db, state_file);
     UsageSetup::new(db, keys.profile_store_bytes, keys.history_retention_days)

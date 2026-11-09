@@ -1,8 +1,8 @@
 //! The routes, the authentication in front of them, and the state they share.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::Extension;
 use axum::Router;
@@ -11,20 +11,16 @@ use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use js_lease::{LeaseTable, TickReport, Timings};
-use js_registry::{Registry, WholeCounts};
+use js_registry::Registry;
+use js_types::HostCapacity;
 use serde::Serialize;
-use tokio::sync::Mutex;
-use tracing::{error, info};
 
-use crate::adapt::{BoxedPool, PoolHosts, SharedClock};
 use crate::admit::Admit;
 use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::{Token, is_private_address};
 use crate::hosts::listing;
 use crate::join_api;
-use crate::reservations::{self, Handed};
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
 use crate::store::{LockLost, ServerStore};
@@ -37,19 +33,13 @@ use crate::wire::ApiError;
 /// The largest request body served.
 pub const BODY_LIMIT: usize = 64 * 1024;
 
-/// The lease table over the server's provider and clock.
-pub(crate) type Table = LeaseTable<BoxedPool, SharedClock>;
-
-/// What every request handler and the tick loop share: the lease table behind its one lock
-/// (the restored leases the tick still ends), the token, the count of lease-file writes that
-/// failed, the health of the store paths, and the agent side when agents register hosts.
+/// What every request handler and the tick loop share: the token, the hosts of the static
+/// pool, the health of the store paths, and the agent side when agents register hosts.
 pub(crate) struct Shared {
-    table: Mutex<Table>,
-    /// The hosts of the table's pool, which the host listing reads without the table's lock.
-    hosts: PoolHosts,
-    /// How long the table's saves took.
-    timings: Timings,
     token: Token,
+    /// The hosts the operator lists in the static pool's file (`--pool-config`), read once at
+    /// start: the host listing shows them beside the registered hosts.
+    static_hosts: Vec<HostCapacity>,
     agents: Option<Arc<Agents>>,
     /// The elastic pool's scaler, for the operator's reset of its failure brake.
     scaler: Option<Scaler>,
@@ -61,15 +51,10 @@ pub(crate) struct Shared {
     /// whatever the listen address: the job port takes a client's token. `None` when the
     /// server was given none.
     pools: Option<Arc<Status>>,
-    save_errors: AtomicU64,
     ticking: AtomicBool,
     /// How the tick's store paths fared ([`crate::store_health`]); `None` only in a test
     /// that builds the state without it, where nothing records or reads it.
     store_health: Option<Arc<StoreHealth>>,
-    /// The whole-node counts the last tick logged.
-    counted: std::sync::Mutex<WholeCounts>,
-    /// The reservation ledger the last tick handed the table.
-    handed: Handed,
     /// The pool's launching machine providers, which a submitted job is admitted over.
     admit: Admit,
     /// The store, under the writer lock the server holds for its life (`--store`).
@@ -77,28 +62,26 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn new(table: Table, token: Token, agents: Option<Arc<Agents>>) -> Self {
-        if let Some(agents) = &agents {
-            reservations::restore(&agents.registry, &table);
-        }
-        let handed = Handed::opened_with(&table);
+    pub(crate) fn new(token: Token, agents: Option<Arc<Agents>>) -> Self {
         Self {
-            timings: table.timings(),
-            hosts: table.provider().hosts(),
-            table: Mutex::new(table),
             token,
+            static_hosts: Vec::new(),
             agents,
             scaler: None,
             status: None,
             pools: None,
-            save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
             store_health: None,
-            counted: std::sync::Mutex::new(WholeCounts::default()),
-            handed,
             admit: Admit::default(),
             store: None,
         }
+    }
+
+    /// The same state listing `hosts`, the static pool's, beside the registered hosts.
+    #[must_use]
+    pub(crate) fn with_static_hosts(mut self, hosts: Vec<HostCapacity>) -> Self {
+        self.static_hosts = hosts;
+        self
     }
 
     /// The same state admitting jobs over `admit`'s launching providers as well as the
@@ -173,22 +156,9 @@ impl Shared {
         self.pools.as_ref()
     }
 
-    /// The lease table behind its lock. A caller that also needs the registry takes this
-    /// first and the registry's lock second.
-    #[cfg(test)]
-    pub(crate) fn table(&self) -> &Mutex<Table> {
-        &self.table
-    }
-
-    /// The hosts of the table's pool, read without the table's lock: what the host listing
-    /// reads ([`crate::hosts::listing`]).
-    pub(crate) fn hosts(&self) -> &PoolHosts {
-        &self.hosts
-    }
-
-    /// The record of the table's saves and of the lock waits.
-    pub(crate) fn timings(&self) -> Timings {
-        self.timings.clone()
+    /// The hosts of the static pool, as the file listed them at start.
+    pub(crate) fn static_hosts(&self) -> &[HostCapacity] {
+        &self.static_hosts
     }
 
     /// The agent side; `None` without agent flags.
@@ -250,57 +220,30 @@ impl Shared {
         }
     }
 
-    /// How many ticks failed to write the lease file.
-    pub(crate) fn save_errors(&self) -> u64 {
-        self.save_errors.load(Ordering::SeqCst)
-    }
-
-    /// Ticks the table, which writes the leases the tick changed and, when it changed, the
-    /// registry's reservation ledger as the tick's stops and presentations left it, in one replace;
-    /// then runs the job pass, which ends the jobs that ran out of time, deletes those past their
-    /// retention and settles the allocations of hosts read absent ([`Agents::job_pass`]); then
-    /// advances the agent registry (when the server has one) so its reservations and prepare
-    /// deadlines act on this tick, logs what changed and counts a failed write; then runs a pass
-    /// over the queued jobs ([`Agents::place_jobs`]), after which the binding of each host a
-    /// host job tainted is written ([`Agents::keep_taints`]): the order of design section 6.1. The
-    /// table's lock is held for the tick alone. How the lease file's write and the job pass
+    /// One tick: runs the job pass, which ends the jobs that ran out of time, deletes those
+    /// past their retention and settles the allocations of hosts read absent
+    /// ([`Agents::job_pass`]); then advances the agent registry (when the server has one) so
+    /// its marks and prepare deadlines act on this tick; then runs a pass over the queued jobs
+    /// ([`Agents::place_jobs`]), after which the binding of each host a host job tainted is
+    /// written ([`Agents::keep_taints`]): the order of design section 6.1. How the job pass
     /// went is recorded as one reading of the store's health ([`StoreHealth::record`]).
-    pub(crate) async fn tick(&self) -> TickReport {
-        let report = {
-            let mut table = self.table.lock().await;
-            // The registry's reservations, as the tick's stops and presentations leave
-            // them, are written in the same replace as the leases of this tick.
-            let handed = &self.handed;
-            let agents = self.agents.as_ref();
-            table.tick_then(|| agents.and_then(|agents| handed.changed(&agents.registry)))
-        };
+    pub(crate) async fn tick(&self) {
         let pass = match &self.agents {
             // The job pass reads and writes the job tables, so it runs on the pool for
-            // blocking calls; it holds no lock of the table or the registry while it does.
+            // blocking calls; it holds no lock of the registry while it does.
             Some(agents) => {
                 let passing = Arc::clone(agents);
                 crate::util::blocking(move || passing.job_pass()).await
             }
             None => None,
         };
-        let store = TickStore {
-            lease_file_failed: report.save_error.is_some(),
-            pass,
-        };
         self.store_health
             .iter()
-            .for_each(|health| health.record(store));
-        let counts = match &self.agents {
-            Some(agents) => {
-                // The marks are brought up to this tick, so the counts and the next
-                // answer read what the tick left.
-                agents.registry.advance();
-                agents.registry.whole_counts()
-            }
-            None => WholeCounts::default(),
-        };
-        self.record(&report, counts);
+            .for_each(|health| health.record(TickStore { pass }));
         if let Some(agents) = &self.agents {
+            // The marks are brought up to this tick, so the next answer reads what the tick
+            // left.
+            agents.registry.advance();
             agents.refresh().await;
             // The tick is a pass over the queued jobs too, whatever else freed room; it reads
             // and writes the job tables, so it runs on the pool for blocking calls.
@@ -308,32 +251,6 @@ impl Shared {
             let tainted = crate::util::blocking(move || placing.place_jobs()).await;
             // A host job the pass placed has tainted its host; the binding is written now.
             agents.keep_taints(tainted).await;
-        }
-        report
-    }
-
-    fn record(&self, report: &TickReport, counts: WholeCounts) {
-        let moved = std::mem::replace(
-            &mut *self.counted.lock().unwrap_or_else(PoisonError::into_inner),
-            counts,
-        ) != counts;
-        if report.changed() || moved {
-            info!(
-                expired = report.expired.len(),
-                freed = report.freed.len(),
-                confirmed = report.confirmed.len(),
-                dropped = report.dropped.len(),
-                pending = report.pending,
-                releasing = report.releasing,
-                reserved = counts.reserved,
-                held = counts.held,
-                queued = counts.queued,
-                "tick changed leases"
-            );
-        }
-        if let Some(err) = &report.save_error {
-            self.save_errors.fetch_add(1, Ordering::SeqCst);
-            error!(error = %err, "cannot write the lease file");
         }
     }
 }
@@ -487,23 +404,18 @@ fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
-/// Every host the server leases: the static pool's, and the registered ones with the
-/// state of their session. The table's lock is not taken: the pool's is taken first and
-/// dropped, then the registry's; the order of the two never reverses.
+/// Every host the server lists: the static pool's, and the registered ones with the state
+/// of their session.
 async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
-    json(StatusCode::OK, &listing(&shared).await.0)
+    json(StatusCode::OK, &listing(&shared))
 }
 
+#[cfg(test)]
+pub(crate) mod rig;
 #[cfg(test)]
 mod status_gate_tests;
 #[cfg(test)]
 mod status_logs_tests;
-#[cfg(test)]
-mod whole_restart_tests;
-#[cfg(test)]
-mod whole_sched_tests;
-#[cfg(test)]
-pub(crate) mod whole_view_tests;
 
 #[cfg(test)]
 mod tests {
@@ -532,7 +444,7 @@ mod tests {
         use axum::body::Body;
         use tower::ServiceExt;
 
-        let rig = whole_view_tests::Rig::new("guarded_token").await;
+        let rig = rig::Rig::new("guarded_token").await;
         let client = "c".repeat(40);
         let other = "d".repeat(40);
         let ask = |authorization: Option<String>| {

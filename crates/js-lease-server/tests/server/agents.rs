@@ -3,7 +3,8 @@
 
 use std::time::Duration;
 
-use js_lease_server::BODY_LIMIT;
+use js_lease_server::{BODY_LIMIT, StaticPoolSource};
+use js_pool_static::EXAMPLE_CONFIG;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
@@ -416,7 +417,7 @@ async fn heartbeats_hammered_during_job_calls_complete() {
             }
         }),
     ));
-    guard_tasks(tasks, &h.running.timings()).await;
+    guard_tasks(tasks).await;
 }
 
 /// Asserts the hello rate limit at the transport, per credential, on the injected clock:
@@ -507,7 +508,7 @@ async fn a_supplied_source_replaces_the_pool_file_of_a_static_server() {
     let scratch = crate::support::Scratch::new("agents_supplied_alone");
     let args = crate::support::base_args(&scratch);
     let one = "[[host]]\nid = \"supplied-1\"\n[host.resources]\ncpu_millis = 8000\nmemory_bytes = 17179869184\ngpus = 0\n";
-    let supplied = Box::new(crate::support::SharedPool::of(one));
+    let supplied = StaticPoolSource::new(scratch.write("supplied.toml", one, 0o644));
     let h = Harness::with(scratch, args, Some(supplied)).await;
     let listing = hosts(&h).await;
     assert_eq!(listed(&listing), ["supplied-1"]);
@@ -522,7 +523,7 @@ async fn a_supplied_source_replaces_the_pool_file_of_a_static_server() {
 async fn a_supplied_static_source_refuses_its_ids_to_registering_hosts() {
     let scratch = crate::support::Scratch::new("agents_supplied");
     let args = crate::agents_support::agent_args(&scratch, false);
-    let supplied = Box::new(crate::support::SharedPool::new());
+    let supplied = StaticPoolSource::new(scratch.write("supplied.toml", EXAMPLE_CONFIG, 0o644));
     let h = Harness::with(scratch, args, Some(supplied)).await;
     join(&h, "burst-1").await;
     let clash = hello_with(&h, JOIN, "gpu-02").await;

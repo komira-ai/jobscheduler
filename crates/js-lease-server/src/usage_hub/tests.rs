@@ -660,7 +660,7 @@ impl Captured {
     fn start() -> Self {
         let text = Arc::new(Mutex::new(Vec::new()));
         let sink = text.clone();
-        crate::api::whole_view_tests::process_sink();
+        crate::api::rig::process_sink();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .with_writer(move || Buffer(sink.clone()))

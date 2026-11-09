@@ -468,10 +468,10 @@ bytes after the last reply: 0
 == state-files ==
 without agent flags
   before start: pool.toml state/ token
-  after start: pool.toml state/ state/leases.toml state/leases.toml.lock token
-  after shutdown: pool.toml state/ state/leases.toml state/leases.toml.lock token
+  after start: pool.toml state/ token
+  after shutdown: pool.toml state/ token
 with agent flags
   before start: agent-pool.toml agent-tokens pool.toml state/ token
-  after start: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
-  after an agent joins: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
-  after shutdown: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock state/usage.db state/usage.db.lock token
+  after start: agent-pool.toml agent-tokens pool.toml state/ state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
+  after an agent joins: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml.agents state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
+  after shutdown: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml.agents state/usage.db state/usage.db.lock token

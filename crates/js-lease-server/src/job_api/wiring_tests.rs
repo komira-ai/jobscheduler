@@ -1,13 +1,12 @@
 //! The job service built from the server's state, and the router of its port, with no
-//! socket: a server state over a lease table and an agent side in a directory of the test's
-//! own, and requests sent to the router as a `tower::Service`.
+//! socket: a server state over an agent side in a directory of the test's own, and requests
+//! sent to the router as a `tower::Service`.
 
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use js_jobs::{JobId, NewJob};
-use js_lease::{Boot, LeaseTable, Settings};
 use js_proto::v1::ListPoolsRequest;
 use js_registry::{PoolConfig, Registry, SequentialSessions};
 use js_testkit::dir::TestDir;
@@ -19,10 +18,10 @@ use tower::ServiceExt;
 use super::super::tests::{call, connect, methods, send_all, value};
 use super::super::{gateway, grpc};
 use super::{SERVED_CALLS, from_server, logs, port};
-use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_api::job_rig::{spec, tables};
 use crate::agents::Agents;
 use crate::api::Shared;
+use crate::clock::SharedClock;
 use crate::config::{Token, parse_token};
 use crate::job_api::fleet;
 use crate::status::Status;
@@ -70,22 +69,13 @@ fn bare_state(
         SequentialSessions::new(),
         Arc::new(js_sched_placer::place::SchedPlacer::default()),
     );
-    let settings = Settings::new();
-    let table = LeaseTable::open(
-        BoxedPool::new(Box::new(registry.provider())),
-        clock.clone(),
-        settings,
-        dir.path().join("leases.toml"),
-        Boot::Initialise,
-    )
-    .unwrap();
     let side = Agents::over(registry, &clock, dir.path());
     let side = match jobs {
         Some(jobs) => side.with_jobs(jobs),
         None => side,
     };
     let side = agents.then(|| Arc::new(side));
-    Shared::new(table, token(), side)
+    Shared::new(token(), side)
 }
 
 /// The ceiling the service is built with: one hour, so that it differs from the default.

@@ -15,8 +15,8 @@
 //! agentless `static` kind is not resolved: it is built as before, and goes away with that
 //! kind.
 //!
-//! Everything downstream reads [`Resolved`]. This version still runs the fixed order of
-//! `layered.rs` (registered hosts, then the elastic provider), so a platform whose
+//! Everything downstream reads [`Resolved`]. This version still runs a fixed order
+//! (registered hosts, then the elastic provider), so a platform whose
 //! machine providers put a launching one before `static` is refused, and a pool reaches
 //! exactly one launching machine provider.
 

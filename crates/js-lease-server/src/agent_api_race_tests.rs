@@ -18,7 +18,7 @@ use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use serde_json::json;
 
 use super::*;
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 
 fn instance() -> InstanceIdentity {
     InstanceIdentity {

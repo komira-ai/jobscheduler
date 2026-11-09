@@ -77,6 +77,13 @@ impl StaticPool {
         self
     }
 
+    /// Every host the file lists, in id order, with its shape (the memory cut to the
+    /// schedulable percent) and the memory it was listed with. The server shows these
+    /// beside the hosts that register themselves.
+    pub fn hosts(&self) -> Vec<HostCapacity> {
+        self.book.hosts()
+    }
+
     /// The hosts that are booked and the lease holding each, read from the pool's own
     /// table.
     pub fn booked(&self) -> BTreeMap<HostId, LeaseId> {
@@ -121,6 +128,6 @@ impl Pool for StaticPool {
     }
 
     fn capacity(&self) -> Vec<HostCapacity> {
-        self.book.hosts()
+        self.hosts()
     }
 }

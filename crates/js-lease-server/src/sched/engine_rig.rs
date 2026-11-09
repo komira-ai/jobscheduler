@@ -1,22 +1,23 @@
 //! The rig of the placement engine's tests: the agent side of a server assembled from the
-//! flags as the server assembles it, on a manual clock, with the hosts it registers and
-//! the provider and lease table it leases through. No listener is bound.
+//! flags as the server assembles it, on a manual clock, with the hosts it registers and the
+//! job tables it places queued jobs on. No listener is bound.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, LoadDrops, NodeLoad as Wire, Phase};
-use js_provider::{Pool, StartSpec};
-use js_registry::{Credential, RegisteredProvider};
+use js_jobs::{JobId, JobSpec, Needs, NewJob};
+use js_registry::Credential;
 use js_testkit::dir::TestDir;
-use js_types::{LeaseId, Request, Resources};
+use js_types::Resources;
 use js_types::{ManualClock, Timestamp};
 use serde_json::json;
 
-use super::place::{Fallbacks, SchedPlacer};
-use super::wiring_tests::{JOIN, config_of, host_of, scratch, sharing, sharing_spec};
-use crate::adapt::SharedClock;
+use super::place::SchedPlacer;
+use super::wiring_tests::{JOIN, config_of, scratch};
+use crate::agent_api::job_rig::{spec, tables};
 use crate::agents::{Agents, assemble_placed};
+use crate::clock::SharedClock;
 
 /// The time the clock starts at.
 pub(super) const T0: u64 = 1_000_000;
@@ -57,17 +58,12 @@ pub(super) fn hello_of(host: &str, cpu_millis: u64, memory_bytes: u64) -> Hello 
     serde_json::from_value(body).unwrap()
 }
 
-/// The agent side of a server, the provider of its registry serving the class `share`,
-/// its clock and each registered host's session.
+/// The agent side of a server holding job tables, its clock and each registered host's
+/// session.
 pub(super) struct Rig {
     pub(super) agents: Arc<Agents>,
-    pub(super) placer: Option<Arc<SchedPlacer>>,
-    /// What the server builds its lease table from: the capacity source, its settings,
-    /// its file and how it boots.
-    source: Box<dyn crate::CapacitySource>,
-    table_of: (js_lease::Settings, std::path::PathBuf, js_lease::Boot),
-    pub(super) provider: RegisteredProvider,
     pub(super) clock: ManualClock,
+    placer: Option<Arc<SchedPlacer>>,
     sessions: Vec<(String, u64, String)>,
     _dir: TestDir,
 }
@@ -88,8 +84,7 @@ pub(super) fn rig(name: &str, pool: &str, hosts: &[&str], extra: &[&str]) -> Rig
 /// [`Rig`] over `config`, in `dir`, on `clock`, with no host registered.
 pub(super) fn rig_of(config: crate::config::Config, dir: TestDir, clock: ManualClock) -> Rig {
     let shared = SharedClock::new(clock.clone());
-    let table_of = (config.settings, config.state_file.clone(), config.boot);
-    let ((source, agents), placer) = assemble_placed(
+    let ((_, agents), placer) = assemble_placed(
         config.hosts,
         config.usage,
         &shared,
@@ -97,15 +92,13 @@ pub(super) fn rig_of(config: crate::config::Config, dir: TestDir, clock: ManualC
         None,
     )
     .unwrap();
-    let agents = agents.unwrap();
-    let provider = agents.registry.provider().with_classes(vec![sharing()]);
+    let agents = Arc::try_unwrap(agents.unwrap()).ok().unwrap();
+    let (_store, jobs) = tables();
+    let agents = Arc::new(agents.with_jobs(Arc::new(jobs)));
     Rig {
         agents,
-        placer,
-        source,
-        table_of,
-        provider,
         clock,
+        placer,
         sessions: Vec::new(),
         _dir: dir,
     }
@@ -124,45 +117,6 @@ impl Rig {
         let entry = (hello.host_id.clone(), welcome.epoch, welcome.session);
         self.sessions.retain(|(host, ..)| *host != entry.0);
         self.sessions.push(entry);
-    }
-
-    /// The lease table the server runs over this agent side, on the same clock, opened as
-    /// the server opens it: on a resume the provider is given the bookings the lease file
-    /// names first, which the registry puts back before any host says hello.
-    pub(super) fn table(&self) -> js_lease::LeaseTable<crate::adapt::BoxedPool, SharedClock> {
-        let (settings, file, boot) = self.table_of.clone();
-        let bookings = match boot {
-            js_lease::Boot::Resume => js_lease::read_bookings(&file).unwrap(),
-            js_lease::Boot::Initialise => Vec::new(),
-        };
-        let seated = self.source.provider(&bookings).unwrap();
-        let provider = crate::adapt::BoxedPool::new(seated.provider);
-        let clock = SharedClock::new(self.clock.clone());
-        js_lease::LeaseTable::open(provider, clock, settings, &file, boot).unwrap()
-    }
-
-    /// This server stopped, and another started over its files with `config` (which boots
-    /// as `resume`), on the same clock: a new registry and a new engine, nothing carried
-    /// over but the files. No host has said hello to it yet.
-    pub(super) fn restarted(self, config: crate::config::Config) -> Self {
-        let Self {
-            agents,
-            placer,
-            source,
-            provider,
-            clock,
-            _dir,
-            ..
-        } = self;
-        // The old server lets go of its files (the usage file's lock) before the new one
-        // opens them.
-        drop((agents, placer, source, provider));
-        rig_of(config, _dir, clock)
-    }
-
-    /// The directory of the server's files.
-    pub(super) fn dir(&self) -> &std::path::Path {
-        self._dir.path()
     }
 
     /// A heartbeat of `host` with `load`, which the registry accepts.
@@ -198,43 +152,35 @@ impl Rig {
         self.clock.advance(Duration::from_millis(ms));
     }
 
-    /// Starts `spec`; the host it is booked on.
-    pub(super) fn start(&mut self, spec: StartSpec) -> Option<String> {
-        host_of(&self.provider.start(spec)).map(str::to_owned)
+    /// Queues job `id` asking for `cpu_millis` and `memory_bytes`, runs a pass over the
+    /// queue, and returns the host the job was placed on; `None` when no host took it, in
+    /// which case the job is cancelled, so that it holds back none of the jobs after it.
+    pub(super) fn place(&self, id: &str, cpu_millis: u64, memory_bytes: u64) -> Option<String> {
+        let jobs = self.agents.jobs.as_ref().unwrap();
+        let spec = JobSpec {
+            needs: Needs::Shape(Resources::new(cpu_millis, memory_bytes, 0, None).unwrap()),
+            ..spec()
+        };
+        let new = NewJob {
+            id: Some(JobId::parse(id).unwrap()),
+            spec,
+            priority: 0,
+            client: None,
+        };
+        let queued = jobs.insert_queued(new).unwrap().record.id;
+        self.agents.place_jobs();
+        let allocation = jobs.get_allocation(&queued).unwrap();
+        if allocation.is_none() {
+            jobs.request_cancel(&queued).unwrap();
+        }
+        allocation.map(|allocation| allocation.host.to_string())
     }
-
-    /// The counters of the placer, as one value: fallbacks, resyncs and engines built.
-    pub(super) fn counted(&self) -> (Fallbacks, u64, u64) {
-        let placer = self.placer();
-        (placer.fallbacks(), placer.resynced(), placer.built())
-    }
-}
-
-/// No fallback.
-pub(super) const NONE: Fallbacks = Fallbacks {
-    unmappable: 0,
-    declined: 0,
-};
-
-/// A lease of class `share` numbered `sequence`, booking `cpu_millis` and `memory_bytes`.
-pub(super) fn share_of(sequence: u64, cpu_millis: u64, memory_bytes: u64) -> StartSpec {
-    let spec = sharing_spec(sequence);
-    let request = Request {
-        resources: Resources::new(cpu_millis, memory_bytes, 0, None).unwrap(),
-        ..spec.request().clone()
-    };
-    StartSpec::new(LeaseId::new(1, sequence), request, &[sharing()]).unwrap()
-}
-
-/// The hosts `h01` to `h<count>`.
-pub(super) fn names(count: usize) -> Vec<String> {
-    (1..=count).map(|n| format!("h{n:02}")).collect()
 }
 
 /// A load reading numbered `seq`, `seq` windows of 5 s into the agent's clock, with the
-/// host's leases busy at `cores` thousandths of a core on average since the start, a
-/// working set of `working_set` bytes, and `covered` the leases it covers.
-pub(super) fn reading(seq: u64, cores: u64, working_set: u64, covered: &[&str]) -> Wire {
+/// host busy at `cores` thousandths of a core on average since the start and a working set
+/// of `working_set` bytes.
+pub(super) fn reading(seq: u64, cores: u64, working_set: u64) -> Wire {
     Wire {
         seq,
         mono_usec: seq * 5_000_000,
@@ -242,7 +188,7 @@ pub(super) fn reading(seq: u64, cores: u64, working_set: u64, covered: &[&str]) 
         working_set_bytes: working_set,
         active_file_bytes: 0,
         actions_cpu_limited: false,
-        covered: covered.iter().map(|lease| (*lease).to_owned()).collect(),
+        covered: Vec::new(),
         clocks: Vec::new(),
         minutes: Vec::new(),
         dropped: LoadDrops::default(),

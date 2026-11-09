@@ -25,7 +25,7 @@ use super::{Passed, run, store_time};
 use crate::agent_api::job_rig::{
     FakeAgent, Rig, clocked_rig, clocked_rig_keeping, spec, starts, stops,
 };
-use crate::api::whole_view_tests::{Lines, process_sink};
+use crate::api::rig::{Lines, process_sink};
 use crate::config::FeedRetention;
 use crate::job_api::JobApi;
 use crate::job_api::read::{Ctx, Silence};

@@ -69,7 +69,7 @@ use tonic::Status;
 use super::JobApi;
 use super::read::{self, view};
 use super::roles::Caller;
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::file::{LogsConfig, ObjectStoreLogs};
 use crate::logs::StoreClock;
 use crate::util::blocking;

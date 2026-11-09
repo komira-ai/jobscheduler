@@ -9,7 +9,7 @@ use super::{
     API_BASE, API_TIMEOUT, Contribution, FORGET_ATTEMPTS, LaunchCtx, NetworkError, NetworkMode,
     OAuthClient, TailscaleApi,
 };
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 
 /// The slot the auth key fills.
 pub const AUTH_KEY_SLOT: &str = "network.tailscale.authkey";

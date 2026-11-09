@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use js_testkit::dir::TestDir;
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::config::{Cli, Config};
 use crate::error::StartupError;
 use crate::kinds::{Kinds, OwnerOnlyFiles};

@@ -21,9 +21,9 @@ use js_elastic::{
 use js_types::{ExecMode, MemoryHeadroom, ProviderId, normalise_arch};
 use serde::Serialize;
 
-use crate::adapt::SharedClock;
 use crate::bootstrap::{Fill, JOIN_TOKEN_SLOT, render};
 use crate::checks::{AgentPins, Checker, Health};
+use crate::clock::SharedClock;
 use crate::config::TlsFiles;
 use crate::file::{ElasticPlan, NetworkPlan};
 use crate::kinds::Floor;

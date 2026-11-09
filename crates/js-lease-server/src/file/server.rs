@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use js_elastic::SchedulerId;
 use js_jobs::Retention;
-use js_lease::Settings;
 
 use super::{Load, Section};
 use crate::config::{
@@ -79,7 +78,6 @@ pub(crate) struct Server {
     pub(crate) client_token_file: PathBuf,
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) tick: Duration,
-    pub(crate) settings: Settings,
     /// `max_lease_wall`: the ceiling on a lease's `max_wall`, when the file sets one.
     pub(crate) max_lease_wall: Option<Duration>,
     pub(crate) limits: Limits,
@@ -272,12 +270,10 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let max_job_wall = read_max_job_wall(&mut s)?;
     let (store, allow_sqlite_store) = read_store(&mut s)?;
     let store_unreachable_after = s.duration_or("store_unreachable_after", UNREACHABLE_AFTER)?;
-    let settings = Settings::new();
     let max_lease_wall = s.duration("max_lease_wall")?;
-    let settings = match max_lease_wall {
-        Some(wall) => with_ceiling(&s, settings, wall)?,
-        None => settings,
-    };
+    if let Some(wall) = max_lease_wall {
+        check_ceiling(&s, wall)?;
+    }
     Ok(Server {
         listen,
         agent_listen,
@@ -289,7 +285,6 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         client_token_file,
         tls,
         tick,
-        settings,
         max_lease_wall,
         limits,
         agents,
@@ -414,16 +409,12 @@ fn read_alerts(s: &mut Section) -> Result<Option<AlertKeys>, StartupError> {
     }))
 }
 
-/// `settings` with `wall` as the ceiling on a lease's wall time: at most 30 days, and
-/// positive (the settings refuse a zero, which `duration` has already refused, and the
-/// refusal is passed on if that ever changes).
-fn with_ceiling(s: &Section, settings: Settings, wall: Duration) -> Result<Settings, StartupError> {
-    if wall > super::lifetime::LONGEST {
-        return Err(s.fail("max_lease_wall", "must not be longer than 30 days"));
+/// Refuses a ceiling `wall` on a work's wall time that is longer than 30 days.
+fn check_ceiling(s: &Section, wall: Duration) -> Result<(), StartupError> {
+    match wall > super::lifetime::LONGEST {
+        true => Err(s.fail("max_lease_wall", "must not be longer than 30 days")),
+        false => Ok(()),
     }
-    settings
-        .with_max_wall(wall)
-        .map_err(|err| s.fail("max_lease_wall", &err.to_string()))
 }
 
 /// `placement`, the deprecated key of `--placement`: `js-sched`, or the removed `registry`,
@@ -501,24 +492,20 @@ pub(super) fn read_client_token(server: &Server, ld: &Load<'_>) -> Result<Token,
 mod tests {
     use super::*;
 
-    /// Asserts that a ceiling the settings refuse (a zero) is an error naming the key and
-    /// not a ceiling silently dropped, and that 30 days is the longest accepted. A zero
-    /// cannot come from the file, whose durations are positive, so this is the only way to
-    /// reach the refusal.
+    /// Asserts that a ceiling of 30 days is accepted and one a second longer is refused,
+    /// naming the key. It catches a ceiling above the longest wall time that passes as valid.
     #[test]
-    fn a_ceiling_is_never_dropped_silently() {
+    fn a_ceiling_above_thirty_days_is_refused_naming_the_key() {
         let s = Section::open(toml::Table::new(), "server.".to_owned());
-        let base = Settings::new();
-        let said = with_ceiling(&s, base, Duration::ZERO)
+        let longest = super::super::lifetime::LONGEST;
+        assert!(check_ceiling(&s, longest).is_ok());
+        let said = check_ceiling(&s, longest + Duration::from_secs(1))
             .unwrap_err()
             .to_string();
         assert_eq!(
             said,
-            "server.max_lease_wall: the ceiling on the maximum wall time must be positive"
+            "server.max_lease_wall: must not be longer than 30 days"
         );
-        let longest = super::super::lifetime::LONGEST;
-        assert!(with_ceiling(&s, base, longest).is_ok());
-        assert!(with_ceiling(&s, base, longest + Duration::from_secs(1)).is_err());
     }
 
     /// The text of the refusal of the `[server]` table `text`.

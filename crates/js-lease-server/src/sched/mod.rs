@@ -16,9 +16,7 @@ pub(crate) use js_sched_placer::{engine, map, place};
 mod jobs_pass;
 
 #[cfg(test)]
-mod backfill_tests;
-#[cfg(test)]
-mod engine_cases_tests;
+mod engine_hosts_tests;
 #[cfg(test)]
 mod engine_rig;
 #[cfg(test)]

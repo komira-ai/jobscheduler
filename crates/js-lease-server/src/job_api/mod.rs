@@ -57,11 +57,10 @@
 //! that one context. A new group (a file of its own, such as one for the logs) adds its file,
 //! its `mod` line, its field and its default here, and its builder in its file.
 //!
-//! The job service holds no handle on the lease table or the registry: the server takes the
-//! table before the registry, and a call that held either while reading the store would add
-//! a third lock to that order. The fleet group reaches them only through the narrow traits
-//! of its context (`fleet::Hosts`), whose calls take and drop each lock in that order and
-//! return before the group reads the job tables. The submit group reads the registry's hosts
+//! The job service holds no handle on the registry: a call that held it while reading the store
+//! would add a second lock to the server's order. The fleet group reaches it only through
+//! the narrow traits of its context (`fleet::Hosts`), whose calls take and drop the lock
+//! and return before the group reads the job tables. The submit group reads the registry's hosts
 //! and the providers' cached catalogs only through its admission trait (`submit::Admission`),
 //! whose call takes the registry's lock alone, calls no provider, and returns before the
 //! group writes the job tables.
@@ -85,7 +84,7 @@ use js_proto::v1::{
 use tonic::{Code, Request, Response, Status};
 use tower::Layer;
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::config::LiveClients;
 use crate::fence::Fence;
 use crate::job_store::ServerJobs;

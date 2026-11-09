@@ -1,5 +1,5 @@
 //! The order of one in-process tick over an elastic pool on the elastic fake cloud: the
-//! pool's checks, then the scaler, read from one log the cloud and the static pool both write to.
+//! pool's checks, then the scaler, read from the log the cloud writes to.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -11,24 +11,17 @@ use js_elastic::{
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};
 use js_jobs::{Constraints, JobId, JobSpec, JobStore, Needs, NetworkPolicy, NewJob, RandomIds};
-use js_lease::Booking;
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{
-    BuildCtx, Built, CapacitySource, Config, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles,
-    Seated, StartupError,
+    BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles,
 };
-use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
-use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_registry::{SequentialSessions, SessionSource};
 use js_state::sqlite::{Options, SqliteStore};
-use js_types::{
-    ExecMode, ImageDigestRef, Labels, LeaseId, Model, ProviderId, ResourceClass, Resources,
-    accelerator_of,
-};
+use js_types::{ExecMode, ImageDigestRef, Labels, Model, ProviderId, Resources, accelerator_of};
 
 use crate::support::{Scratch, Stepping, TOKEN, clock};
 
-/// What the cloud's provider and the static pool were asked, in order.
+/// What the cloud's provider was asked, in order.
 type Log = Arc<Mutex<Vec<String>>>;
 
 /// The clouds and their logs, by the path of the key file that names them: a kind is a
@@ -132,50 +125,6 @@ fn logged_cloud(table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindE
         },
         exec: vec![ExecMode::Container],
     }))
-}
-
-/// The shipped two-host static pool, writing the table's stops (`stop <lease>`) to the log.
-struct LoggedStatic(Log);
-
-struct LoggedPool {
-    pool: StaticPool,
-    log: Log,
-}
-
-impl CapacitySource for LoggedStatic {
-    fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
-        let id = ProviderId::new("static").unwrap();
-        let pool = StaticPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
-        let log = self.0.clone();
-        Ok(Seated::all(Box::new(LoggedPool { pool, log })))
-    }
-}
-
-impl Pool for LoggedPool {
-    fn id(&self) -> ProviderId {
-        self.pool.id()
-    }
-
-    fn classes(&self) -> Vec<ResourceClass> {
-        self.pool.classes()
-    }
-
-    fn start(&mut self, spec: StartSpec) -> StartAck {
-        self.pool.start(spec)
-    }
-
-    fn stop(&mut self, lease: &LeaseId) -> StopAck {
-        self.log.lock().unwrap().push(format!("stop {lease}"));
-        self.pool.stop(lease)
-    }
-
-    fn observe(&mut self, lease: &LeaseId) -> Observed {
-        self.pool.observe(lease)
-    }
-
-    fn capacity(&self) -> Vec<HostCapacity> {
-        self.pool.capacity()
-    }
 }
 
 /// The one offer of the cloud: one a100 on 8 cores and 64 GiB.
@@ -307,9 +256,7 @@ async fn one_tick_runs_the_checks_then_the_scaler() {
     let (clock, shared) = clock();
     let kinds = Kinds::standard().with("logged-cloud", logged_cloud);
     let config = Config::from_config_file(&path, &kinds, &OwnerOnlyFiles, shared.clone()).unwrap();
-    let config = config
-        .with_capacity_source(Box::new(LoggedStatic(log.clone())))
-        .with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
+    let config = config.with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
     let server = InProcess::start(config, shared).unwrap();
 
     let before = log.lock().unwrap().len();
@@ -349,9 +296,7 @@ async fn launches(name: &str, entropy: Option<Arc<dyn SessionSource>>) -> Vec<(S
     let (_clock, shared) = clock();
     let kinds = Kinds::standard().with("logged-cloud", logged_cloud);
     let config = Config::from_config_file(&path, &kinds, &OwnerOnlyFiles, shared.clone()).unwrap();
-    let config = config
-        .with_capacity_source(Box::new(LoggedStatic(log)))
-        .with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
+    let config = config.with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
     let config = match entropy {
         Some(entropy) => config.with_entropy(entropy),
         None => config,

@@ -19,8 +19,8 @@ use tracing::Level;
 
 use super::access_tests::{Events, info};
 use super::writes_rig::{Fixed, Writes, wire};
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{OneClock, START_MS, tables_on};
+use crate::clock::SharedClock;
 use crate::config::LiveClients;
 use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN, JOIN};
 use crate::in_process::InProcess;

@@ -1,11 +1,11 @@
-//! The host bindings, kept in a file beside the lease file or, with a store setting, in the
+//! The host bindings, kept in a file beside the state file or, with a store setting, in the
 //! state store.
 //!
-//! A lease on a registered host survives a restart because the lease file names the
-//! host; what it cannot hold is which credential and instance the host id was bound to
-//! when the host was admitted. Without that, the first hello for the id after a restart
-//! would take the lease from anyone holding a join token. The server keeps the bindings
-//! itself and hands them back to the registry when it seats the lease file's bookings.
+//! A binding holds which credential and instance a host id was bound to when the host was
+//! admitted. Without it, the first hello for the id after a restart would take the id from
+//! anyone holding a join token. The server keeps the bindings itself and hands them back to
+//! the registry at start (a host that reported a taint, or is cordoned, is put back as an
+//! awaiting host, bound as it was).
 //!
 //! A taint is kept so that a restart does not make a host that reported one clean: nothing
 //! in the server clears a taint, and a tainted host's binding is kept until an operator
@@ -17,7 +17,7 @@
 //! # Without a store setting: the file
 //!
 //! The bindings are kept in a file of their own, `<state file>.agents`. The format is
-//! TOML, written whole through a temporary file and renamed, like the lease file, and
+//! TOML, written whole through a temporary file and renamed, and
 //! readers ignore keys they do not know:
 //!
 //! ```toml
@@ -69,7 +69,7 @@ use crate::config::read_private;
 use crate::error::StartupError;
 use crate::host_keys::{self, BINDINGS, Extra, Writes};
 
-/// The flag the refusals name: the file lives beside the lease file.
+/// The flag the refusals name: the file lives beside the state file.
 const FLAG: &str = "--state-file";
 
 /// The version this build writes.
@@ -258,7 +258,7 @@ fn parse(text: &str) -> Result<BTreeMap<HostId, Binding>, String> {
     Ok(bindings)
 }
 
-/// Where the bindings are kept: the file beside the lease file, or the state store.
+/// Where the bindings are kept: the file beside the state file, or the state store.
 enum Keeper {
     File(PathBuf),
     Store(Arc<dyn Store>),

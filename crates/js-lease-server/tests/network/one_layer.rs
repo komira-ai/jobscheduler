@@ -313,7 +313,7 @@ fn the_path_check_finds_a_stray_file() {
         ("network/mod.rs".to_owned(), named),
         (
             "rate.rs".to_owned(),
-            "use crate::adapt::SharedClock;".to_owned(),
+            "use crate::clock::SharedClock;".to_owned(),
         ),
         ("util.rs".to_owned(), "use crate::NETWORK::Mode;".to_owned()),
     ];

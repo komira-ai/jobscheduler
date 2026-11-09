@@ -18,7 +18,7 @@ use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 use ureq::{Agent, Error as TransportError};
 
 use super::{ApiFailure, NetworkError, OAuthClient};
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 
 /// The address of Tailscale's API.
 pub const API_BASE: &str = "https://api.tailscale.com";

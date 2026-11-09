@@ -14,25 +14,20 @@ use js_lease_server::Limits;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
-use crate::agents_support::agent_args;
-use crate::support::{
-    Harness, Scratch, TOKEN, config, guard, lease_file, parse_reply, replace, request, until,
-};
+use crate::agents_support::{agent_args, job_host_args};
+use crate::jobs_support::{job_agent, per_job_hello, submit};
+use crate::support::{Harness, Scratch, TOKEN, config, guard, parse_reply, request, until};
 
 /// A route behind the client token that reads a request body, so a body that stalls holds
 /// its handler.
 const BODY_ROUTE: &str = "/v1/agent/join-tokens";
 
-/// A server with agent registration on (which serves [`BODY_ROUTE`]) under these limits,
-/// resumed over the lease file text `seed` when given.
-async fn limited_with_agents(name: &str, limits: Limits, seed: Option<String>) -> Harness {
+/// A server with agent registration on (which serves [`BODY_ROUTE`]) under these limits.
+async fn limited_with_agents(name: &str, limits: Limits) -> Harness {
     let scratch = Scratch::new(name);
-    let mut args = agent_args(&scratch, true);
-    if let Some(text) = seed {
-        std::fs::write(scratch.state(), text).unwrap();
-        args = replace(args, "--boot", "resume");
-    }
-    let config = config(args).unwrap().with_limits(limits);
+    let config = config(agent_args(&scratch, true))
+        .unwrap()
+        .with_limits(limits);
     Harness::over(scratch, config).await
 }
 
@@ -112,7 +107,7 @@ async fn a_client_that_stops_in_the_body_is_cut_and_its_slot_returned() {
         read_timeout: Duration::from_millis(20),
         ..Limits::default()
     };
-    let h = limited_with_agents("limit_read", limits, None).await;
+    let h = limited_with_agents("limit_read", limits).await;
     let mut stalled = TcpStream::connect(h.addr()).await.unwrap();
     let head = format!(
         "POST {BODY_ROUTE} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 100\r\n\r\n0123456789"
@@ -251,8 +246,9 @@ async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
 
 /// Asserts that a stop is bounded by the drain timeout (the read timeout is long, so it
 /// is not what ends the stall): a request stalled in its body
-/// is cut, the stop still returns and the last tick still runs (a restored lease that fell
-/// due is gone from the file), and the client sees the connection end with no answer.
+/// is cut, the stop still returns and the last tick still runs (a queued job that no tick
+/// has placed is placed on the registered host by it), and the client sees the connection
+/// end with no answer.
 #[tokio::test]
 async fn a_stalled_request_cannot_hold_up_a_stop() {
     let limits = Limits {
@@ -260,19 +256,22 @@ async fn a_stalled_request_cannot_hold_up_a_stop() {
         read_timeout: Duration::from_secs(3600),
         ..Limits::default()
     };
-    let leases = lease_file(&[(1, "held", Some("gpu-01"))]);
-    let h = limited_with_agents("limit_drain", limits, Some(leases)).await;
-    h.clock.advance(Duration::from_secs(7201));
+    let scratch = Scratch::new("limit_drain");
+    let config = config(job_host_args(&scratch)).unwrap().with_limits(limits);
+    let h = Harness::over(scratch, config).await;
+    job_agent(&h, &per_job_hello("host-1")).await;
+    assert_eq!(submit(&h, "job-q").await.status, 201);
     let mut stalled = stall_in_body(h.addr()).await;
-    let state = h.scratch.state();
+    let jobs = h.scratch.path("leases.toml.jobs");
+    assert_eq!(
+        crate::jobs_support::job_state(&h, "job-q").await,
+        "JOB_STATE_QUEUED"
+    );
 
     h.running.shutdown().await.unwrap();
     let mut seen = Vec::new();
     guard(stalled.read_to_end(&mut seen)).await.unwrap();
     assert!(seen.is_empty());
-    assert!(
-        std::fs::read_to_string(state)
-            .unwrap()
-            .contains("lease_count = 0")
-    );
+    let placed = crate::restart::stored(&jobs);
+    assert!(placed[0].starts_with("job-q Placed "), "{placed:?}");
 }

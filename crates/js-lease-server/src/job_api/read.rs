@@ -3,7 +3,7 @@
 //!
 //! Every call reads the tables through [`Reads`], which offers the two reads they need (one
 //! job, one page of jobs) and no write, so no read call changes any state. None takes a lock:
-//! the service holds no handle on the lease table or the registry. Time is read from the
+//! the service holds no handle on the registry. Time is read from the
 //! service's clock, and only to tell an ended job whose retention end has passed.
 //!
 //! # Answers

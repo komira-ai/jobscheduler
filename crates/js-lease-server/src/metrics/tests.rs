@@ -1,5 +1,5 @@
 //! The text a scrape answers, over a server whose state the test sets: jobs in every state,
-//! hosts with leases, job allocations and a whole-host mark, and events fed to the recorder.
+//! hosts with job allocations and a whole-host mark, and events fed to the recorder.
 //! The registry, the server and the store read one manual clock, and every duration the
 //! recorder is told is given by the test, so nothing here sleeps or reads the wall clock.
 
@@ -14,15 +14,12 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request as HttpRequest, StatusCode};
 use js_elastic::{Acquired, Reason, Refusal, RefusalCode};
 use js_jobs::{Booked, JobEnd, JobId, JobState, NewJob, Output, StartFailure};
-use js_lease::{Boot, LeaseTable, Settings};
-use js_testkit::dir::TestDir;
-use js_types::{HostId, Request, ResourceClass, Resources};
+use js_types::HostId;
 use tower::ServiceExt;
 
 use super::render::{label, render};
 use super::scrape::{TEXT_FORMAT, snapshot};
 use super::*;
-use crate::adapt::BoxedPool;
 use crate::agent_api::job_rig::{BOOKED, Rig, clocked_rig, placed, spec};
 use crate::api::Shared;
 use crate::config::parse_token;
@@ -31,21 +28,10 @@ use crate::job_expiry::JobLimits;
 /// The client token of the fixture's server.
 const TOKEN: [u8; 40] = [b'q'; 40];
 
-/// A server over the job rig `rig`'s agent side, its lease table on the registry's hosts.
-pub(super) fn shared_over(rig: &Rig, dir: &TestDir) -> Arc<Shared> {
-    let provider = rig.agents.registry.provider();
-    let settings = Settings::new();
-    let file = dir.path().join("leases.toml");
-    let table = LeaseTable::open(
-        BoxedPool::new(Box::new(provider)),
-        rig.shared.clone(),
-        settings,
-        file,
-        Boot::Initialise,
-    )
-    .unwrap();
+/// A server over the job rig `rig`'s agent side.
+pub(super) fn shared_over(rig: &Rig) -> Arc<Shared> {
     let token = parse_token(&TOKEN).unwrap();
-    Arc::new(Shared::new(table, token, Some(Arc::clone(&rig.agents))))
+    Arc::new(Shared::new(token, Some(Arc::clone(&rig.agents))))
 }
 
 /// What the fixture is made of, by the ids a leak would show.
@@ -53,9 +39,8 @@ struct Fixture {
     rig: Rig,
     shared: Arc<Shared>,
     recorder: Arc<Recorder>,
-    /// Every job id and the lease id.
+    /// Every job id.
     ids: Vec<String>,
-    _dir: TestDir,
 }
 
 fn job_id(text: &str) -> JobId {
@@ -80,9 +65,8 @@ fn exited(code: i32) -> JobEnd {
     }
 }
 
-/// The server of the golden: four hosts of 8 cores and 16 GiB; a lease of the `gpu-host`
-/// class, which books its host (`host-a`) whole; one job in each state, the six that hold an
-/// allocation (live or releasing) booking 1.5 cores and 1 GiB each on `host-a`, so it is booked
+/// The server of the golden: four hosts of 8 cores and 16 GiB; one job in each state, the six
+/// that hold an allocation (live or releasing) booking 1.5 cores and 1 GiB each on `host-a`, so it is booked
 /// past its shape; a placed job booking the whole of `host-c`; two queued jobs, the older
 /// submitted 90 s before the scrape and 64 ms more of the store's own clock (2 ms for each of
 /// the 32 commits after it), the younger 5 s before it; `host-d` draining; and the recorder told of two placements, a start failure of
@@ -94,22 +78,7 @@ async fn fixture(name: &str) -> Fixture {
     for host in ["host-a", "host-b", "host-c", "host-d"] {
         rig.register(host, true);
     }
-    let dir = TestDir::under(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/metrics_unit"),
-        name,
-    );
-    let shared = shared_over(&rig, &dir);
-    let class = ResourceClass::gpu_host();
-    let lease = Request {
-        class: class.id().clone(),
-        resources: Resources::new(1000, 1 << 20, 1, Some("nvidia-a100".to_owned())).unwrap(),
-        capabilities: BTreeMap::new(),
-        max_wall: Duration::from_secs(600),
-        labels: BTreeMap::new(),
-        validation_run: None,
-        probe_host: None,
-    };
-    let lease = shared.table().lock().await.acquire(lease).unwrap();
+    let shared = shared_over(&rig);
     let jobs = &rig.jobs;
     let queued = queue(&rig, "alpha-queued");
     let placed_job = placed(jobs, "bravo-placed", "host-a", spec(), BOOKED).0.id;
@@ -168,7 +137,7 @@ async fn fixture(name: &str) -> Fixture {
     recorder.acquire_answered("gpu", &capacity);
     recorder.acquire_answered("gpu", &Acquired::Unknown);
     recorder.acquire_answered("gpu", &Acquired::Unknown);
-    let mut ids = vec![lease.id.to_string()];
+    let mut ids = Vec::new();
     let named = [
         queued, placed_job, starting, cancelled, refused, whole, young,
     ];
@@ -178,7 +147,6 @@ async fn fixture(name: &str) -> Fixture {
         shared,
         recorder,
         ids,
-        _dir: dir,
     }
 }
 
@@ -193,8 +161,8 @@ async fn scraped(fixture: &Fixture) -> String {
 /// Asserts the whole text of a scrape of a known state: the jobs by state (the job that
 /// failed to start counted under `failed-to-start`), the older queued job's wait (not the
 /// younger's, which is listed after it), each host's
-/// CPU and memory booked and free (`host-a` with its whole lease and six allocations, so none
-/// free; `host-c` booked whole by a job; `host-b` and `host-d` free), `host-d`'s `draining`
+/// CPU and memory booked and free (`host-a` with its six allocations, booked past its shape for
+/// CPU, so none free; `host-c` booked whole by a job; `host-b` and `host-d` free), `host-d`'s `draining`
 /// mark, and
 /// every event the recorder was told, histograms cumulative. It catches a family that is
 /// missing, renamed or out of order, a count read from the wrong place, a booking left out,
@@ -206,10 +174,10 @@ async fn the_text_of_a_known_state_is_the_golden() {
     assert_eq!(text, include_str!("golden.prom"), "the scrape now:\n{text}");
 }
 
-/// Asserts that the text names none of the fixture's job ids, its lease id, the client token
-/// or the agents' join token: a scrape shows states, codes, hosts, pools and marks only.
+/// Asserts that the text names none of the fixture's job ids, the client token or the agents'
+/// join token: a scrape shows states, codes, hosts, pools and marks only.
 #[tokio::test]
-async fn the_text_holds_no_job_id_lease_id_or_token() {
+async fn the_text_holds_no_job_id_or_token() {
     let fixture = fixture("no_secrets").await;
     let text = scraped(&fixture).await;
     let tokens = [String::from_utf8(TOKEN.to_vec()).unwrap(), "j".repeat(40)];
@@ -241,11 +209,7 @@ async fn without_the_job_tables_no_job_family_is_written() {
 async fn a_scrape_without_the_job_tables_reads_the_hosts_alone() {
     let mut rig = crate::agent_api::job_rig::rig("metrics_no_tables", false);
     rig.register("host-a", true);
-    let dir = TestDir::under(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/metrics_unit"),
-        "no_tables",
-    );
-    let shared = shared_over(&rig, &dir);
+    let shared = shared_over(&rig);
     let seen = snapshot(&shared, NonZeroUsize::MIN).await.unwrap();
     let free = |total| super::render::Split::of(total, 0);
     let host = super::render::HostSeen {
@@ -427,7 +391,7 @@ async fn a_failed_read_of_the_job_tables_answers_503() {
     let fixture = fixture("read_fails").await;
     let logged = Logged::default();
     let writer = logged.clone();
-    crate::api::whole_view_tests::process_sink();
+    crate::api::rig::process_sink();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(move || writer.clone())
         .with_ansi(false)

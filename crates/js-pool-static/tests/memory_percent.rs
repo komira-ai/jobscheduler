@@ -126,3 +126,21 @@ fn capacity_shows_what_is_listed_and_what_is_bookable() {
     assert_eq!(plain[0].memory.percent(), MemoryPercent::FULL);
     assert_eq!(plain[0].shape.resources().memory_bytes(), LISTED);
 }
+
+/// Asserts that the inherent host listing shows what the file lists, in id order, with the
+/// shape cut to the schedulable percent and no lease on any host. It catches a listing that
+/// leaves out a host or lists the unreduced memory as bookable.
+#[test]
+fn the_host_listing_shows_every_listed_host_with_its_bookable_memory() {
+    let text = format!(
+        "memory_schedulable_percent = 90\n{}",
+        hosts("").replace("\"big\"", "\"zed\"")
+            + "[[host]]\nid = \"alpha\"\ngpu_class = \"nvidia-a100\"\n[host.resources]\ncpu_millis = 1000\nmemory_bytes = 1000\ngpus = 1\n"
+    );
+    let listed = pool(&text).hosts();
+    let ids: Vec<&str> = listed.iter().map(|host| host.host.as_str()).collect();
+    assert_eq!(ids, ["alpha", "zed"]);
+    assert_eq!(listed[1].memory.configured_bytes(), LISTED);
+    assert_eq!(listed[1].shape.resources().memory_bytes(), NINETY);
+    assert!(listed.iter().all(|host| host.leases.is_empty()));
+}

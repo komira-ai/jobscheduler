@@ -45,7 +45,7 @@ use tower::ServiceExt;
 
 use super::tests::{SERVICE, TOKEN, connect, scratch, token};
 use super::{JobApi, gateway, grpc, read};
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::job_store::ServerJobs;
 
 /// The time the clocks start at, in milliseconds since the Unix epoch.

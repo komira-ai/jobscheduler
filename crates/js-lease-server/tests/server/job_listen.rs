@@ -209,8 +209,8 @@ async fn job_listen_off_opens_no_job_store_and_creates_no_file() {
     );
 }
 
-/// Asserts the job store's file beside the lease file: made by the start, owned by the
-/// lease file's owner and owner-only (mode 0600), as is every file of the store beside it
+/// Asserts the job store's file beside the state file's path: made by the start, owned by the
+/// owner of the directory and owner-only (mode 0600), as is every file of the store beside it
 /// (its lock and SQLite's own); and a file already there with a looser mode is kept and
 /// made owner-only. It catches a store file that others on the host can read, which would
 /// show them the jobs' specs.
@@ -223,7 +223,7 @@ async fn job_listen_creates_the_store_file_with_the_neighbouring_mode() {
         }
         let args = job_args(&scratch, "127.0.0.1:0");
         let h = Harness::with(scratch, args, None).await;
-        let owner = fs::metadata(h.scratch.state()).unwrap().uid();
+        let owner = fs::metadata(&h.scratch.dir).unwrap().uid();
         let files = named(&h.scratch.dir, "leases.toml.jobs");
         assert!(
             files.contains(&h.scratch.path("leases.toml.jobs")),

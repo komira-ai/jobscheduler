@@ -35,7 +35,7 @@ use js_usage::{
 };
 use tracing::{error, info, warn};
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::usage::{
     HostLimits, KeyProfile, KeySource, NodeRow, ProfileCurves, ProfileKey, UsageFault, UsageSink,
 };

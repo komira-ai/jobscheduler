@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::job_rig::{
     FakeAgent, LOG_BUCKET, LOG_ENDPOINT, LOG_REGION, Rig, logging_rig, rig, starts,
 };
-use crate::api::whole_view_tests::{Lines, process_sink};
+use crate::api::rig::{Lines, process_sink};
 
 /// A grace no test outlives, so that a host is never lost while a test moves the clock.
 pub(crate) const LONG_GRACE: u64 = js_agent_wire::limits::MAX_GRACE_MS;

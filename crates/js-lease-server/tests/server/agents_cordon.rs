@@ -12,14 +12,12 @@ use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, Session, entry, hosts, job_hello, job_host_args, post, restarted_job_hosts, session,
+    JOIN, Session, entry, hosts, job_hello, listed, post, restarted_job_hosts, session,
     start_job_hosts_in,
 };
 use crate::jobs_support::{JobBody, commands, exited, job_state, one_start, running, submit_body};
 use crate::joins::{beat_with, code, minted};
-use crate::support::{
-    Harness, Kept, Reply, Scratch, T0, kept_bindings, lease_file, replace, request,
-};
+use crate::support::{Harness, Kept, Reply, T0, kept_bindings, request};
 
 /// The default length of a cordon asked for with no length, and the longest one a request
 /// can ask for, in seconds.
@@ -468,28 +466,42 @@ async fn a_cordon_survives_a_restart_in(kept: Kept) {
     }
 }
 
-/// Asserts that a host's own read names the lease a restart restored on it: the server
-/// restarts over a lease file that holds lease 1 on the host, and the host, still awaiting
-/// its agent, reads `lease` `1-1` and one lease; before the restart it read none. It
-/// catches a read that leaves out the lease the lease file gave the host.
+/// Asserts that a cordoned host whose agent never returns after a restart is put back as an
+/// awaiting host, and is forgotten once its cordon has lapsed and a grace period and the
+/// retention have passed since the restart: it leaves the listing, its binding leaves the
+/// agent file at the tick, and its place in the pool is free for new hosts. Before that it is
+/// still listed, bound and counted. It runs with the bindings in files and in the state
+/// store (where the binding row is deleted at the tick and no agent file is ever written).
+/// It catches an awaiting host that keeps its record, binding and `max_machines` slot until
+/// the next restart, and in the store a binding row that outlives its host.
 #[tokio::test]
-async fn a_host_reads_the_lease_a_restart_restored_on_it() {
-    let first = start_job_hosts_in("cordon_restored_lease", Kept::Files).await;
+async fn a_cordoned_host_that_never_returns_is_forgotten_with_its_binding() {
+    for kept in Kept::BOTH {
+        a_cordoned_host_that_never_returns_is_forgotten_with_its_binding_in(kept).await;
+    }
+}
+
+async fn a_cordoned_host_that_never_returns_is_forgotten_with_its_binding_in(kept: Kept) {
+    let first = start_job_hosts_in("cordon_awaiting_forgotten", kept).await;
     let me = enrolled(&first, "burst-1", "i-1").await;
-    let before = show(&first, "burst-1", &me).await;
-    assert!(before.get("lease").is_none(), "{before}");
-    let Harness {
-        running, scratch, ..
-    } = first;
-    running.shutdown().await.unwrap();
-    fs::write(scratch.state(), lease_file(&[(1, "held", Some("burst-1"))])).unwrap();
-    let args = Kept::Files.args(&scratch, job_host_args(&scratch));
-    let args = replace(args, "--boot", "resume");
-    let h = Harness::with(scratch, args, None).await;
-    let read = show(&h, "burst-1", &me).await;
-    assert_eq!(read["state"], "awaiting");
-    assert_eq!(read["lease"], "1-1");
-    assert_eq!(read["leases"], 1);
+    assert_eq!(cordon(&first, "burst-1", &me, MAX_SECS).await.status, 200);
+    let h = restarted_job_hosts(first).await;
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "awaiting");
+    assert!(kept_bindings(&h).contains("burst-1"));
+
+    h.clock.advance(Duration::from_secs(MAX_SECS + 1));
+    h.ticks.step().await;
+    assert_eq!(listed(&hosts(&h).await), ["burst-1"]);
+    h.clock.advance(Duration::from_secs(86_400));
+    h.ticks.step().await;
+    assert!(listed(&hosts(&h).await).is_empty());
+    let text = kept_bindings(&h);
+    assert!(!text.contains("burst-1"), "{text}");
+    if kept == Kept::Store {
+        assert!(!agents_file(&h).exists());
+    }
+    enrolled(&h, "burst-2", "i-2").await;
+    enrolled(&h, "burst-3", "i-3").await;
 }
 
 /// Asserts that a lifted cordon is not brought back by a restart, and that a host the
@@ -806,30 +818,25 @@ async fn the_listing_shows_a_cordon_and_only_the_cordon() {
 }
 
 /// Asserts the `mark` of the host's own reading: a host that is not set aside reads without
-/// the key, as it does in the listing; a host a restored reservation names reads with the
+/// the key, as it does in the listing; a host the registry has marked to drain reads with the
 /// mark, and it is the very value `GET /v1/hosts` lists for it. It catches a reading that
 /// leaves the mark out, which would make a host that is set aside look idle to a caller that
 /// reads only its own host, and a mark that names a state differently from the listing.
 #[tokio::test]
 async fn a_host_that_is_set_aside_reads_the_mark_the_listing_shows() {
-    let scratch = Scratch::new("cordon_mark");
-    let args = replace(job_host_args(&scratch), "--boot", "resume");
-    let text = format!(
-        "version = 1\nterm = 3\nnext_sequence = 1\nlease_count = 0\nreservation_count = 1\n\n\
-         [[reservation]]\nrequest_id = \"r9\"\nhost = \"burst-1\"\nreserved_at_ms = {T0}\n\
-         deadline_ms = {}\nqueue_place = 0\nqueued_since_ms = {T0}\n",
-        T0 + 30_000
-    );
-    std::fs::write(scratch.state(), text).unwrap();
-    let h = Harness::with(scratch, args, None).await;
+    let h = start_job_hosts_in("cordon_mark", Kept::Files).await;
     let other = enrolled(&h, "burst-2", "i-2").await;
     let plain = show(&h, "burst-2", &other).await;
     assert!(plain.get("mark").is_none(), "{plain}");
     assert!(entry(&hosts(&h).await, "burst-2").get("mark").is_none());
 
     let me = enrolled(&h, "burst-1", "i-1").await;
+    let registry = h.running.registry().unwrap();
+    registry
+        .drain(&js_types::HostId::new("burst-1").unwrap())
+        .unwrap();
     let held = show(&h, "burst-1", &me).await;
     let listed = entry(&hosts(&h).await, "burst-1");
-    assert_eq!(held["mark"], "reserved", "{held}");
+    assert_eq!(held["mark"], "draining", "{held}");
     assert_eq!(held.get("mark"), listed.get("mark"), "{held} {listed}");
 }

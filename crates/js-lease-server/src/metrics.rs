@@ -16,8 +16,8 @@
 //! - **Snapshots**, read at each scrape from the state `GET /v1/hosts` and the job service
 //!   read ([`scrape`]): the jobs by state, the age of the oldest queued job, and for each host
 //!   the CPU and memory booked and free and its whole-host mark. A scrape holds no lock of the
-//!   server's while it renders: the lease table's and the registry's are taken and dropped
-//!   as `GET /v1/hosts` takes them, and the job tables are read on the pool for blocking
+//!   server's while it renders: the registry's is taken and dropped as `GET /v1/hosts`
+//!   takes it, and the job tables are read on the pool for blocking
 //!   calls. The parts are read one after another, not in one transaction: a job placed between
 //!   two reads can show as queued while its booking already counts.
 //!

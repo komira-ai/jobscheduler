@@ -172,7 +172,7 @@ fn agent_routes(dir: &std::path::Path) -> Router {
     use js_types::{ProviderId, ResourceClass, Resources, Shape};
 
     let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
-    let shared = crate::adapt::SharedClock::new(clock.clone());
+    let shared = crate::clock::SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_owned())).unwrap();
     let arch = ("arch".to_owned(), "x86_64".to_owned());
     let shape = Shape::new(resources, [arch].into_iter().collect());

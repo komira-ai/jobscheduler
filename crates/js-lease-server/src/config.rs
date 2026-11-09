@@ -8,17 +8,15 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use js_alert::AlertSink;
 use js_jobs::Retention;
-use js_lease::{Boot, Settings};
 use js_system_clock::{SystemClock, SystemMonotonic};
 use js_types::Monotonic;
 
 use js_registry::{OsSessions, SessionSource};
 
-use crate::adapt::SharedClock;
 use crate::agent_pool;
 use crate::agent_tokens::AgentTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
-use crate::capacity::{CapacitySource, StaticPoolSource};
+use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
 use crate::flags;
@@ -27,6 +25,7 @@ use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
+use crate::static_pool::StaticPoolSource;
 use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
 use crate::usage::{KeySource, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
@@ -43,7 +42,6 @@ mod retention;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
-use agent_setup::with_pool_settings;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use feed_retention::FeedRetention;
 pub(crate) use feed_retention::{
@@ -69,7 +67,7 @@ pub(crate) use tokens::{Clients, Entry, LiveClients, Role, Taken, parse_token, t
 #[command(
     name = "js-lease-server",
     version,
-    about = "Serves a lease table over an authenticated HTTP JSON API"
+    about = "Serves the job scheduler over an authenticated HTTP JSON API"
 )]
 pub struct Cli {
     /// The configuration file: a `[server]` table and `[[pool]]` tables (see the crate
@@ -97,12 +95,15 @@ pub struct Cli {
     /// refused.
     #[arg(long)]
     pub metrics_listen: Option<SocketAddr>,
-    /// The lease file.
+    /// The base path of the server's state files (`.agents`, `.joins`, `.scaler`, `.jobs`,
+    /// and `usage.db` beside it). A lease file of an earlier release at this path is left
+    /// as it is.
     #[arg(long, required_unless_present = "config")]
     pub state_file: Option<PathBuf>,
-    /// `initialise` creates the lease file when it is missing (the first boot);
-    /// `resume` requires it. There is no default, so a lost state file is never
-    /// silently started empty.
+    /// `initialise` is the first start: a live elastic pool may have no records yet.
+    /// `resume` is a later one: a live elastic pool's records must exist. There is no
+    /// default, so a lost state is never silently started empty. The value says nothing
+    /// about a lease file, which the server does not read.
     #[arg(long, value_enum, required_unless_present = "config")]
     pub boot: Option<BootMode>,
     /// The TOML file listing the hosts to lease. Optional when agents register hosts
@@ -168,8 +169,7 @@ pub struct Cli {
     /// Feeds each lease's estimated end to the drain cost of a whole-node request: the
     /// lease's start plus the largest P90 wall time, among the profiles the usage file has
     /// learned, of the runs queued on it with a profile name. A lease with no such run is
-    /// costed at its max-wall bound, as every lease is without the flag. A lease put back
-    /// after a restart keeps the start and the bound the lease file records. Off by
+    /// costed at its max-wall bound, as every lease is without the flag. Off by
     /// default. Needs `--agent-pool-config`; not allowed with `--usage-off`, which leaves
     /// nothing to estimate from.
     #[arg(long, conflicts_with = "usage_off")]
@@ -271,7 +271,7 @@ pub struct Cli {
     /// Postgres store it has no effect. Needs --store.
     #[arg(long)]
     pub allow_sqlite_store: bool,
-    /// How long the store paths of the tick (the lease file's write, the job pass) may fail
+    /// How long the store paths of the tick (the job pass over the job tables) may fail
     /// tick after tick before `/healthz` answers 503 `store unreachable` and the alert
     /// `store:unreachable` holds. The first tick that succeeds clears both.
     #[arg(long, default_value = DEFAULT_UNREACHABLE_AFTER, value_parser = parse_duration)]
@@ -328,22 +328,15 @@ impl From<&Cli> for Limits {
     }
 }
 
-/// What a missing lease file means (`--boot`).
+/// Whether this is a first start (`--boot`). The server reads no lease file at either
+/// value; the mode decides whether a live elastic pool's records may be missing
+/// (`Initialise`) or must exist (`Resume`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum BootMode {
-    /// A missing file starts an empty table.
+    /// The first start: a live elastic pool has no records yet.
     Initialise,
-    /// A missing file is an error.
+    /// A later start: a live elastic pool's records are needed.
     Resume,
-}
-
-impl From<BootMode> for Boot {
-    fn from(mode: BootMode) -> Self {
-        match mode {
-            BootMode::Initialise => Boot::Initialise,
-            BootMode::Resume => Boot::Resume,
-        }
-    }
 }
 
 /// A duration: a whole count with an optional unit, `90`, `90s`, `250ms`, `15m` or `2h`.
@@ -436,8 +429,7 @@ pub struct Config {
     pub(crate) launch_inputs: LaunchInputs,
     pub(crate) elastic: Option<ElasticPlan>,
     pub(crate) state_file: PathBuf,
-    pub(crate) boot: Boot,
-    pub(crate) settings: Settings,
+    pub(crate) boot: BootMode,
     pub(crate) tick: Duration,
     pub(crate) token: Token,
     /// The clients of the job service, the token of `--token-file` among them, behind the
@@ -478,11 +470,11 @@ pub struct Config {
 /// beside the hosts agents register.
 pub(crate) enum Hosts {
     /// `--pool-config` alone: the server builds exactly what it always has.
-    Static(Box<dyn CapacitySource>),
+    Static(StaticPoolSource),
     /// Agent registration is on.
     Layered {
         /// The static pool, when `--pool-config` was given; it is tried first.
-        static_pool: Option<Box<dyn CapacitySource>>,
+        static_pool: Option<StaticPoolSource>,
         /// The registering side.
         agents: Box<AgentSetup>,
     },
@@ -505,14 +497,12 @@ impl Config {
         // The deprecated `--placement` first: a removed `registry` is refused before the
         // pool is read, naming the flag to drop.
         let mut warnings = Vec::from_iter(Placement::given(cli.placement, "--placement")?);
-        let settings = Settings::new();
         let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
         let clients = LiveClients::new(tokens::from_flags(&token, &cli)?);
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &clients)?;
-        let settings = with_pool_settings(settings, &hosts)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
         let keys = UsageKeys {
             db: cli.usage_db.clone(),
@@ -536,8 +526,7 @@ impl Config {
             launch_inputs: LaunchInputs::default(),
             elastic: None,
             state_file,
-            boot: required(cli.boot, "--boot")?.into(),
-            settings,
+            boot: required(cli.boot, "--boot")?,
             tick: cli.tick,
             token,
             clients,
@@ -637,7 +626,6 @@ impl Config {
             .map_or(DEFAULT_ALERT_REPEAT, |keys| keys.repeat_after);
         let state_file = server.state_file;
         let usage = usage_setup(server.usage, &state_file);
-        let settings = with_pool_settings(server.settings, &hosts)?;
         let status = status_policy("server.listen", server.listen, &mut warnings);
         Ok(Self {
             listen: server.listen,
@@ -652,8 +640,7 @@ impl Config {
             launch_inputs: LaunchInputs::default(),
             elastic,
             state_file,
-            boot: server.boot.into(),
-            settings,
+            boot: server.boot,
             tick: server.tick,
             token: client_token,
             clients,
@@ -756,7 +743,7 @@ impl Config {
 
     /// The same configuration taking its static hosts from `capacity` instead of the
     /// file `--pool-config` names.
-    pub fn with_capacity_source(mut self, capacity: Box<dyn CapacitySource>) -> Self {
+    pub fn with_static_pool(mut self, capacity: StaticPoolSource) -> Self {
         self.hosts = match self.hosts {
             Hosts::Static(_) => Hosts::Static(capacity),
             Hosts::Layered { agents, .. } => Hosts::Layered {
@@ -773,7 +760,7 @@ impl Config {
         self
     }
 
-    /// The same configuration timing the lease table's steps on `clock`.
+    /// The same configuration timing the metrics on `clock`.
     pub fn with_monotonic(mut self, clock: Arc<dyn Monotonic>) -> Self {
         self.monotonic = clock;
         self
@@ -796,7 +783,7 @@ impl Config {
         self.tick
     }
 
-    /// The usage file (`--usage-db`, or `usage.db` beside the lease file), or `None`
+    /// The usage file (`--usage-db`, or `usage.db` beside the state file), or `None`
     /// when `--usage-off` turned usage off.
     pub fn usage_db(&self) -> Option<&Path> {
         self.usage.db.as_deref()
@@ -876,10 +863,7 @@ fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> 
 /// The sources of hosts the flags name. At least one is required; the shared join token
 /// file needs the agent pool file, which alone turns registration on.
 fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
-    let static_pool = cli
-        .pool_config
-        .as_ref()
-        .map(|path| Box::new(StaticPoolSource::new(path)) as Box<dyn CapacitySource>);
+    let static_pool = cli.pool_config.as_ref().map(StaticPoolSource::new);
     match (&cli.agent_token_file, &cli.agent_pool_config) {
         (None, None) => static_pool.map(Hosts::Static).ok_or_else(|| {
             StartupError::new(

@@ -18,7 +18,7 @@ use crate::support::Scratch;
 /// A provider kind that builds a pool of listed hosts, as the agentless `static` kind
 /// does, under another name.
 fn listed_kind(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
-    Ok(Built::Static(Box::new(StaticPoolSource::new("hosts.toml"))))
+    Ok(Built::Static(StaticPoolSource::new("hosts.toml")))
 }
 
 /// The kinds of the tests, a hostless platform kind and a listed-hosts provider kind

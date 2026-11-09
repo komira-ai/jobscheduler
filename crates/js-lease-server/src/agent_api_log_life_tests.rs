@@ -22,8 +22,8 @@ use super::job_rig::{
     logging_rig, placed, result, spec, starts,
 };
 use super::log_tests::{LONG_GRACE, capture, sink_of, start_of, tick};
-use crate::adapt::SharedClock;
-use crate::api::whole_view_tests::Lines;
+use crate::api::rig::Lines;
+use crate::clock::SharedClock;
 use crate::job_store::ServerJobs;
 use crate::metrics::NoMetrics;
 use crate::per_job::{self, BeatContext};

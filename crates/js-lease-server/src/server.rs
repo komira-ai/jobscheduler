@@ -3,29 +3,29 @@
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_lease::{Booking, Boot, LeaseTable, Settings, read_bookings};
-use js_provider::Pool as _;
-use js_types::Monotonic;
+use js_types::HostCapacity;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::adapt::{BoxedPool, SharedClock};
 use crate::admit::{Admit, Launching};
 use crate::agents::{Agents, assemble_in};
-use crate::api::{Shared, Table, agent_router, router};
-use crate::capacity::Seated;
+use crate::api::{Shared, agent_router, router};
 use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
-use crate::config::{Config, JobListen, Limits, LiveClients, MetricsListen, TlsFiles, Token};
+use crate::clock::SharedClock;
+use crate::config::{
+    BootMode, Config, JobListen, Limits, LiveClients, MetricsListen, TlsFiles, Token,
+};
 use crate::error::StartupError;
 use crate::file::Launch;
+use crate::hosts::listing;
 use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
 use crate::metrics::{self, Meter, Recorder};
@@ -47,7 +47,6 @@ pub struct Running {
     agent: Option<Port>,
     job: Option<Port>,
     metrics: Option<Port>,
-    state_file: PathBuf,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
     slots: Arc<Slots>,
@@ -95,8 +94,8 @@ async fn bind(
     bound.map_err(|err| StartupError::new(flag, err))
 }
 
-/// Starts a server: builds the provider from the capacity source, opens the lease table
-/// over the state file, binds the listener and begins serving and ticking. The checks of
+/// Starts a server: reads the static pool's hosts, puts the agent side together, binds the
+/// listener and begins serving and ticking. The checks of
 /// an elastic pool run on a timer of `--tick`; see [`start_with_checks`].
 ///
 /// Time comes from `clock` and ticks from `ticker`, so a test decides both. Each
@@ -113,7 +112,7 @@ pub async fn start<T: Ticker>(
 /// [`start`] with the ticker of the pool checks given too. At each tick of `checks` the
 /// check loop of the elastic pool (if the configuration has one) asks the injected clock
 /// whether a pass is due, runs it if so, and finishes the tick when the pass is done, so a
-/// test steps the checks as it steps the table. Without an elastic pool `checks` is
+/// test steps the checks as it steps the server's tick. Without an elastic pool `checks` is
 /// dropped.
 pub async fn start_with_checks<T: Ticker, C: Ticker>(
     config: Config,
@@ -151,17 +150,14 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         scaler,
         checker,
         cached,
-        state_file,
-    } = open(prepared, &clock, |table| {
-        info!(
-            %addr,
-            provider = %table.provider().id(),
-            hosts = table.provider().capacity().len(),
-            tls = served_tls,
-            logs = %logs,
-            "listening"
-        );
-    })?;
+    } = open(prepared, &clock)?;
+    info!(
+        %addr,
+        hosts = listing(&shared).hosts.len(),
+        tls = served_tls,
+        logs = %logs,
+        "listening"
+    );
     let limits = listeners.limits;
     let split = agent_listener.is_some();
     // Every listener stops at its own stop or at the loss of the store's writer lock.
@@ -247,7 +243,6 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         agent,
         job,
         metrics,
-        state_file,
         shared,
         stop,
         slots,
@@ -278,20 +273,15 @@ pub(crate) struct Listeners {
 }
 
 /// What a start has built when its listeners are about to be bound: the agent side, the
-/// elastic pool and its scaler, and the provider seated over the lease file's bookings,
-/// with the parts of the configuration that [`open`] reads.
+/// elastic pool and its scaler, and the hosts of the static pool, with the parts of the
+/// configuration that [`open`] reads.
 pub(crate) struct Prepared {
-    bookings: Vec<Booking>,
     agents: Option<Arc<Agents>>,
     pool: Option<Pool>,
     scaler: Option<Scaler>,
-    seated: Seated,
-    state_file: PathBuf,
-    boot: Boot,
-    settings: Settings,
+    static_hosts: Vec<HostCapacity>,
     tick: Duration,
     token: Token,
-    monotonic: Arc<dyn Monotonic>,
     warnings: Vec<String>,
     status: bool,
     admit: Admit,
@@ -302,22 +292,22 @@ pub(crate) struct Prepared {
     store_health: StoreHealth,
 }
 
-/// What a start has built once the lease table is open: the state the routes and the tick
+/// What a start has built once the shared state is made: the state the routes and the tick
 /// share, the elastic pool's scaler and its check loop, the cache of the launching
-/// providers' catalogs, and the lease file.
+/// providers' catalogs, and the state file's path.
 pub(crate) struct Opened {
     pub(crate) shared: Arc<Shared>,
     pub(crate) scaler: Option<Scaler>,
     pub(crate) checker: Option<Checker>,
     pub(crate) cached: Cached,
-    pub(crate) state_file: PathBuf,
 }
 
 /// The first half of a start, everything before a listener is bound: takes the store's
-/// writer lock and opens the store when the configuration names one, then reads the lease
-/// file's bookings, puts the agent side together, builds the elastic pool and its scaler
-/// (which marks the machines its records show as being released) and seats the provider
-/// over the bookings. Binds nothing and spawns nothing.
+/// writer lock and opens the store when the configuration names one, then puts the agent
+/// side together, reads the static pool's hosts and builds the elastic pool and its scaler
+/// (which marks the machines its records show as being released). Binds nothing and spawns
+/// nothing. No lease file is read: a lease file of an earlier release at the state file's
+/// path is left as it is.
 pub(crate) fn prepare(
     config: Config,
     clock: &SharedClock,
@@ -336,7 +326,6 @@ pub(crate) fn prepare(
         elastic,
         state_file,
         boot,
-        settings,
         tick,
         token,
         clients,
@@ -354,25 +343,23 @@ pub(crate) fn prepare(
         store_unreachable_after,
         ..
     } = config;
-    // The store's writer lock before anything else (design 6.7, step 1): before the store or
-    // the lease file is read, before the lease file is locked and before any listener.
+    // The store's writer lock before anything else (design 6.7, step 1): before the store is
+    // read and before any listener.
     let store = store.map(ServerStore::open).transpose()?;
-    // Then, once, the files a server without the setting kept beside the lease file: before
+    // Then, once, the files a server without the setting kept beside the state file: before
     // the store is read for them. A live pool not at its first start needs its records.
     let live = elastic
         .as_ref()
         .is_some_and(|plan| plan.launch == Launch::Live);
-    let records_needed = [live, boot != Boot::Initialise]
+    let records_needed = [live, boot != BootMode::Initialise]
         .into_iter()
         .all(|holds| holds);
     if let Some(store) = &store {
         store.import(&state_file, records_needed)?;
     }
-    let bookings =
-        read_bookings(&state_file).map_err(|err| StartupError::new("--state-file", err))?;
     let logs = crate::logs::from_config(&logs, clock);
     let kept = (state_file.as_path(), store.as_ref());
-    let (source, agents) = assemble_in(hosts, usage, clock, kept, logs)?;
+    let (static_hosts, agents) = assemble_in(hosts, usage, clock, kept, logs)?;
     let launching = elastic.iter().map(|plan| Launching {
         provider: Arc::clone(&plan.provider),
         share: plan.share,
@@ -405,7 +392,7 @@ pub(crate) fn prepare(
                 state_file: &state_file,
                 store: store.as_ref(),
                 advertise_url: advertise_url.as_deref(),
-                first_start: boot == Boot::Initialise,
+                first_start: boot == BootMode::Initialise,
                 health: pool.health.clone(),
                 mode: pool.mode(),
                 catalogs: Arc::clone(cached.catalogs()),
@@ -440,19 +427,13 @@ pub(crate) fn prepare(
             .iter()
             .for_each(|scaler| scaler.set_meter(meter.clone()));
     }
-    let seated = source.provider(&bookings)?;
     let prepared = Prepared {
-        bookings,
         agents,
         pool: elastic.map(|(pool, _)| pool),
         scaler,
-        seated,
-        state_file,
-        boot,
-        settings,
+        static_hosts,
         tick,
         token,
-        monotonic,
         warnings,
         status,
         admit,
@@ -476,27 +457,16 @@ pub(crate) fn prepare(
 }
 
 /// The second half of a start, once the listeners are bound (or, in process, once there is
-/// nothing to bind): the scaler starts counting the registry's view, the lease table is
-/// opened over the lease file (and locks it), the bookings it could not seat are logged,
-/// `announce` is given the table to say where it is served, and the state the routes and the
-/// tick share is built over it. Spawns nothing.
-pub(crate) fn open(
-    prepared: Prepared,
-    clock: &SharedClock,
-    announce: impl FnOnce(&Table),
-) -> Result<Opened, StartupError> {
+/// nothing to bind): the scaler starts counting the registry's view, and the state the
+/// routes and the tick share is built. Spawns nothing.
+pub(crate) fn open(prepared: Prepared, clock: &SharedClock) -> Result<Opened, StartupError> {
     let Prepared {
-        bookings,
         agents,
         pool,
         scaler,
-        seated: Seated { provider, unseated },
-        state_file,
-        boot,
-        settings,
+        static_hosts,
         tick,
         token,
-        monotonic,
         warnings,
         status: serves_status,
         admit,
@@ -506,30 +476,8 @@ pub(crate) fn open(
     } = prepared;
     let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
     if let Some(scaler) = &scaler {
-        scaler.listening(Some(2 * tick), &bookings);
+        scaler.listening(Some(2 * tick));
     }
-    let mut table = LeaseTable::open(
-        BoxedPool::new(provider),
-        clock.clone(),
-        settings,
-        &state_file,
-        boot,
-    )
-    .map_err(|err| match err {
-        js_lease::OpenError::Missing { .. } => StartupError::new("--boot", err),
-        _ => StartupError::new("--state-file", err),
-    })?;
-    table.watch_saves(monotonic);
-    for lost in &unseated {
-        warn!(
-            lease = %lost.booking.lease,
-            host = %lost.booking.host,
-            state = %lost.booking.state,
-            reason = %lost.reason,
-            "the lease file's booking cannot be restored; the provider does not know the lease, so the table drops it"
-        );
-    }
-    announce(&table);
     for warning in &warnings {
         warn!("{warning}");
     }
@@ -544,7 +492,8 @@ pub(crate) fn open(
     );
     let status = serves_status.then(|| Arc::clone(&pools));
     let shared = Arc::new(
-        Shared::new(table, token, agents)
+        Shared::new(token, agents)
+            .with_static_hosts(static_hosts)
             .with_admit(admit)
             .with_status(status)
             .with_pools(pools)
@@ -557,12 +506,11 @@ pub(crate) fn open(
         scaler,
         checker,
         cached,
-        state_file,
     })
 }
 
 /// The tick task, ended when it is dropped: a server that is dropped must not go on
-/// ticking a table (and holding its lock on the lease file).
+/// ticking.
 struct Ticking(JoinHandle<()>);
 
 impl Drop for Ticking {
@@ -590,16 +538,16 @@ impl Drop for Alive {
     }
 }
 
-/// Ticks the table at every tick of `ticker`, and hands each tick to the scaler of the
+/// Ticks the server at every tick of `ticker`, and hands each tick to the scaler of the
 /// elastic pool when the server has one, with the cache of its provider's catalog, forever;
 /// the caller aborts it, or drops it once the state store says this process is no longer its
 /// writer ([`until_fenced`]). The scaler ticks on a task of its own (a provider's slow call must
-/// not hold back the table's lease expiry): at each tick it first fetches the catalogs that
-/// are due ([`Cached::refresh`]) and then runs its own tick, so a tick is finished when the
-/// table, the fetch and the scaler are done, or at once when the scaler is still busy with
-/// an earlier tick, which skips this one for it.
+/// not hold back the job pass): at each tick it first fetches the catalogs that are due
+/// ([`Cached::refresh`]) and then runs its own tick, so a tick is finished when the server's
+/// tick, the fetch and the scaler are done, or at once when the scaler is still busy with an
+/// earlier tick, which skips this one for it.
 ///
-/// A panic in the scaler ends its task, as one in the table ends this loop: `/healthz` then
+/// A panic in the scaler ends its task, as one in the server's tick ends this loop: `/healthz` then
 /// answers that the server is not ticking, and the supervisor of the process must restart
 /// it. The records are on disk before any call they describe, so a restart launches nothing
 /// twice.
@@ -630,7 +578,7 @@ async fn tick_loop<T: Ticker>(
     }
 }
 
-/// One tick: the table, and then the scaler's turn when there is one. Not generic, so that
+/// One tick: the server's own, and then the scaler's turn when there is one. Not generic, so that
 /// every kind of ticker runs the same code.
 async fn tick_once(shared: &Shared, side: Option<&ScalerLoop>, tick: Tick) {
     shared.tick().await;
@@ -706,18 +654,12 @@ async fn until_fenced(shared: Arc<Shared>, ticking: Pin<Box<dyn Future<Output = 
     tokio::select! { biased; () = shared.fenced() => {}, () = ticking => {} }
 }
 
-/// The tick that ends a shutdown, and the usage side's last flush; an error when the tick
-/// could not write the lease file.
-async fn final_tick(shared: &Shared, state_file: &Path) -> io::Result<()> {
-    let report = shared.tick().await;
+/// The tick that ends a shutdown, and the usage side's last flush.
+async fn final_tick(shared: &Shared) {
+    shared.tick().await;
     if let Some(usage) = shared.usage() {
         usage.finish().await;
     }
-    report.save_error.map_or(Ok(()), |err| {
-        let file = state_file.display();
-        let reason = format!("the final tick could not write the lease file {file}: {err}");
-        Err(io::Error::other(reason))
-    })
 }
 
 impl Running {
@@ -775,11 +717,6 @@ impl Running {
         self.metrics.as_ref().map(|metrics| metrics.addr)
     }
 
-    /// How long the lease table's steps took since the server started.
-    pub fn timings(&self) -> js_lease::Timings {
-        self.shared.timings()
-    }
-
     /// The scaler of the elastic pool of the configuration file; `None` without one. A test
     /// reads what it decided through [`Scaler::state`].
     pub fn scaler(&self) -> Option<&Scaler> {
@@ -798,11 +735,6 @@ impl Running {
     /// `None` without a store setting.
     pub fn store(&self) -> Option<Arc<dyn js_state::Store>> {
         self.shared.server_store().map(ServerStore::store)
-    }
-
-    /// How many ticks failed to write the lease file since the server started.
-    pub fn save_errors(&self) -> u64 {
-        self.shared.save_errors()
     }
 
     /// How many times the agent side could not read or write one of its files since the
@@ -847,19 +779,17 @@ impl Running {
     }
 
     /// Stops the server: no new connections, the requests in flight finish (those still
-    /// open after `--drain-timeout` are cut), the table is ticked once more (so an expiry
-    /// that fell due is stopped before the process ends) and the lease table is released.
+    /// open after `--drain-timeout` are cut), and the server is ticked once more (so a job
+    /// that ran out of time is ended before the process ends).
     ///
-    /// It is an error when the serving task failed, or when that last tick could not
-    /// write the lease file: the file is then behind the table, and an orderly stop
-    /// that says nothing would hide it. The cause is in the error and in the log.
+    /// It is an error when the serving task failed.
     ///
     /// After the store's writer lock was lost ([`Running::lock_lost`]) there is no last tick
     /// (nothing more is written) and the error is the loss.
     ///
     /// When the state store has said this process is no longer its writer, the last tick is
-    /// not run (it would write the job tables and the lease file of a server that no longer
-    /// owns them) and the stop is an error that says so.
+    /// not run (it would write the job tables of a server that no longer owns them) and the
+    /// stop is an error that says so.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
         let ports = [self.agent.take(), self.job.take(), self.metrics.take()];
@@ -873,11 +803,11 @@ impl Running {
         if let Some(lost) = self.lock_watch.lost() {
             return served.and(Err(io::Error::other(lost)));
         }
-        let saved = match self.shared.is_fenced() {
-            true => Err(io::Error::other(FENCED)),
-            false => final_tick(&self.shared, &self.state_file).await,
-        };
-        served.and(saved)
+        if self.shared.is_fenced() {
+            return served.and(Err(io::Error::other(FENCED)));
+        }
+        final_tick(&self.shared).await;
+        served
     }
 }
 

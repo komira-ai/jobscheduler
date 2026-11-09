@@ -62,7 +62,7 @@ js_acquires_total{pool="gpu"} 3
 js_acquire_failovers_total{pool="gpu"} 1
 # HELP js_host_cpu_booked_millicores CPU booked on each host, in thousandths of a core.
 # TYPE js_host_cpu_booked_millicores gauge
-js_host_cpu_booked_millicores{host="host-a"} 17000
+js_host_cpu_booked_millicores{host="host-a"} 9000
 js_host_cpu_booked_millicores{host="host-b"} 0
 js_host_cpu_booked_millicores{host="host-c"} 8000
 js_host_cpu_booked_millicores{host="host-d"} 0
@@ -74,13 +74,13 @@ js_host_cpu_free_millicores{host="host-c"} 0
 js_host_cpu_free_millicores{host="host-d"} 8000
 # HELP js_host_memory_booked_bytes Memory booked on each host.
 # TYPE js_host_memory_booked_bytes gauge
-js_host_memory_booked_bytes{host="host-a"} 23622320128
+js_host_memory_booked_bytes{host="host-a"} 6442450944
 js_host_memory_booked_bytes{host="host-b"} 0
 js_host_memory_booked_bytes{host="host-c"} 17179869184
 js_host_memory_booked_bytes{host="host-d"} 0
 # HELP js_host_memory_free_bytes Memory free on each host, of what it may book.
 # TYPE js_host_memory_free_bytes gauge
-js_host_memory_free_bytes{host="host-a"} 0
+js_host_memory_free_bytes{host="host-a"} 10737418240
 js_host_memory_free_bytes{host="host-b"} 17179869184
 js_host_memory_free_bytes{host="host-c"} 0
 js_host_memory_free_bytes{host="host-d"} 17179869184

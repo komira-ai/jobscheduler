@@ -15,7 +15,6 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use js_alert::FakeSink;
 use js_jobs::{JobId, JobStore, JobStoreError};
-use js_lease::{Boot, LeaseTable, Settings};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
 use js_state::fake::{Fake, Flaw};
 use js_state::{
@@ -29,7 +28,6 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::*;
-use crate::adapt::BoxedPool;
 use crate::agent_api::job_rig::{OneClock, START_MS};
 use crate::agents::Agents;
 use crate::api::{Shared, router};
@@ -174,15 +172,6 @@ fn bed(name: &str, sink: Option<Arc<FakeSink>>) -> Bed {
         Arc::new(js_sched_placer::place::SchedPlacer::default()),
     );
     let agents = Agents::over(registry, &server_clock, dir.path()).with_jobs(Arc::new(jobs));
-    let settings = Settings::new();
-    let table = LeaseTable::open(
-        BoxedPool::new(Box::new(agents.registry.provider())),
-        server_clock.clone(),
-        settings,
-        dir.path().join("leases.toml"),
-        Boot::Initialise,
-    )
-    .unwrap();
     let health = StoreHealth::new(server_clock.clone(), WINDOW);
     let health = Arc::new(match sink {
         Some(sink) => health.with_sink(sink, Duration::from_secs(3600)),
@@ -191,7 +180,7 @@ fn bed(name: &str, sink: Option<Arc<FakeSink>>) -> Bed {
     let status =
         Status::new(None, None, Vec::new(), server_clock).with_store_health(Arc::clone(&health));
     let token = parse_token(&[b'c'; 40]).unwrap();
-    let shared = Shared::new(table, token, Some(Arc::new(agents)))
+    let shared = Shared::new(token, Some(Arc::new(agents)))
         .with_status(Some(Arc::new(status)))
         .with_store_health(Arc::clone(&health));
     Bed {
@@ -396,36 +385,32 @@ fn health_on(clock: &ManualClock) -> StoreHealth {
     StoreHealth::new(SharedClock::new(clock.clone()), WINDOW)
 }
 
-/// Asserts how one tick's two paths make one reading: the lease file alone failing is a
-/// `lease_file` failure; both failing is the job pass's kind; a tick without a job pass is a
-/// success that keeps the latency of the last pass that ran. Catches a lease-file failure
-/// that is not counted, a kind that hides the store's, and a latency lost to a tick that ran
-/// no pass.
+/// Asserts how one tick's job pass makes one reading: a failed pass is a failure of its
+/// kind, and a tick without a job pass is a success that keeps the latency of the last pass
+/// that ran. Catches a failure that is not counted, and a latency lost to a tick that ran no
+/// pass.
 #[test]
-fn a_tick_is_one_reading_of_both_paths() {
+fn a_tick_is_one_reading_of_the_job_pass() {
     let clock = ManualClock::new(Timestamp::from_millis(START_MS));
     let health = health_on(&clock);
     health.record(TickStore {
-        lease_file_failed: false,
         pass: Some(Pass::Ran(Duration::from_millis(40))),
     });
     health.record(TickStore {
-        lease_file_failed: true,
-        pass: None,
-    });
-    let view = health.view();
-    assert_eq!(
-        (view.consecutive_failures, view.last_error),
-        (1, Some(FailureKind::LeaseFile))
-    );
-    health.record(TickStore {
-        lease_file_failed: true,
         pass: Some(Pass::Failed(FailureKind::Failed)),
     });
     let view = health.view();
     assert_eq!(
         (view.consecutive_failures, view.last_error),
-        (2, Some(FailureKind::Failed))
+        (1, Some(FailureKind::Failed))
+    );
+    health.record(TickStore {
+        pass: Some(Pass::Failed(FailureKind::Disconnected)),
+    });
+    let view = health.view();
+    assert_eq!(
+        (view.consecutive_failures, view.last_error),
+        (2, Some(FailureKind::Disconnected))
     );
     clock.set(Timestamp::from_millis(START_MS + 7));
     health.record(TickStore::default());
@@ -466,7 +451,6 @@ fn each_store_error_has_its_kind_and_others_have_none() {
         (FailureKind::Failed, "failed"),
         (FailureKind::Fenced, "fenced"),
         (FailureKind::StaleCursor, "stale_cursor"),
-        (FailureKind::LeaseFile, "lease_file"),
     ] {
         assert_eq!(kind.name(), name);
         assert_eq!(serde_json::to_value(kind).unwrap(), name);
@@ -505,7 +489,6 @@ fn the_page_rows_show_every_field_and_each_lock_state() {
         ]
     );
     health.record(TickStore {
-        lease_file_failed: false,
         pass: Some(Pass::Failed(FailureKind::Fenced)),
     });
     let rows = rows(&health.view());
@@ -580,33 +563,6 @@ fn the_switch_passes_every_call_while_healthy_and_refuses_them_while_failing() {
     assert_eq!(store.reap_expired(), Err(gone));
 }
 
-/// Asserts that the tick reads the lease file's write: with the file behind the table and
-/// its write blocked, a tick whose job pass succeeds is still one `lease_file` failure on the
-/// status route, and the tick after the write is unblocked succeeds. Catches a lease-file
-/// failure left out of the reading, and one that the job pass's success in the same tick
-/// resets.
-#[tokio::test]
-async fn a_failed_lease_file_write_is_a_failure_even_when_the_job_pass_succeeds() {
-    let bed = bed("lease_file", None);
-    bed.shared.tick().await;
-    let before = bed.store_view().await["last_ok_ms"].clone();
-    let blocker = bed._dir.path().join("leases.toml.tmp");
-    std::fs::create_dir(&blocker).unwrap();
-    bed.shared.table().lock().await.set_reservations(Vec::new());
-    bed.clock.advance(Duration::from_secs(5));
-    bed.shared.tick().await;
-    assert_eq!(bed.shared.save_errors(), 1);
-    let store = bed.store_view().await;
-    assert_eq!(store["consecutive_failures"], 1);
-    assert_eq!(store["last_error"], "lease_file");
-    assert_eq!(store["last_ok_ms"], before);
-    std::fs::remove_dir(&blocker).unwrap();
-    bed.shared.tick().await;
-    let store = bed.store_view().await;
-    assert_eq!(store["consecutive_failures"], 0);
-    assert_eq!(store["last_ok_ms"], bed.now_ms());
-}
-
 /// Asserts that a server built from its configuration, with no elastic pool and so no
 /// scaler, gives its store health the window of `--store-unreachable-after` and the alert
 /// sink of the configuration, which receives `store:unreachable`; and that without a store
@@ -624,7 +580,7 @@ async fn a_server_without_a_scaler_sends_the_store_alert_to_its_sink() {
     let clock = ManualClock::new(Timestamp::from_millis(START_MS));
     let server_clock = SharedClock::new(clock.clone());
     let (prepared, _) = prepare(config, &server_clock).unwrap();
-    let Opened { shared, scaler, .. } = open(prepared, &server_clock, |_| {}).unwrap();
+    let Opened { shared, scaler, .. } = open(prepared, &server_clock).unwrap();
     assert!(scaler.is_none());
     let health = Arc::clone(shared.store_health().unwrap());
     let view = health.view();
@@ -633,8 +589,7 @@ async fn a_server_without_a_scaler_sends_the_store_alert_to_its_sink() {
         (LockState::None, 1000)
     );
     let failed = TickStore {
-        lease_file_failed: true,
-        pass: None,
+        pass: Some(Pass::Failed(FailureKind::Failed)),
     };
     health.record(failed);
     clock.set(Timestamp::from_millis(START_MS + 1000));

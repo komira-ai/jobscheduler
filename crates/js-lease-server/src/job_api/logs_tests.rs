@@ -16,7 +16,7 @@ use super::logs::page::LOG_SETTLE;
 use super::logs::{DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES};
 use super::logs_rig::{Failure, Rig, ask, end, end_as, pattern, prefix};
 use super::read_tests::{self, queue, running, spec};
-use crate::api::whole_view_tests::Lines;
+use crate::api::rig::Lines;
 
 /// The request for stdout of `job` from `from`.
 fn out(job: &str, from: u64) -> GetLogsRequest {
@@ -640,7 +640,7 @@ async fn a_store_that_is_down_is_unavailable_and_leaks_nothing() {
     ];
     for (passing, failure, line) in cases {
         let lines = Lines::default();
-        crate::api::whole_view_tests::process_sink();
+        crate::api::rig::process_sink();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(lines.clone())
             .with_ansi(false)

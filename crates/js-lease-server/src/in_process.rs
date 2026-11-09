@@ -11,7 +11,7 @@
 //! [`SharedClock`] it is given. What only a listener reads (the listen addresses, the TLS
 //! acceptor, the connection limits, `--drain-timeout`) is not used.
 //!
-//! The lease table times its saves on the configuration's monotonic clock, which is the
+//! The metrics time what they measure on the configuration's monotonic clock, which is the
 //! system's unless [`Config::with_monotonic`] gives another: a caller that must read no real
 //! clock gives it one of its own.
 //!
@@ -38,10 +38,10 @@ use js_state::Store;
 use js_types::Clock;
 use tokio::sync::Mutex;
 
-use crate::adapt::SharedClock;
 use crate::api::{Shared, agent_router, router};
 use crate::catalogs::Cached;
 use crate::checks::{Checker, Schedule};
+use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::error::StartupError;
 use crate::job_api;
@@ -51,10 +51,9 @@ use crate::server::{Opened, open, prepare};
 
 /// A server built in process, with no listener and no task of its own.
 ///
-/// Dropping it, or [`InProcess::shutdown`], drops what the server holds, the lease table
-/// and with it its lock on the lease file. A router handed out holds the table too: drop
-/// every clone of the routers before the handle when a second server is to open the same
-/// lease file.
+/// Dropping it, or [`InProcess::shutdown`], drops what the server holds. A router handed out
+/// holds the server's state too: drop every clone of the routers before the handle when a
+/// second server is to open the same state files.
 pub struct InProcess {
     shared: Arc<Shared>,
     scaler: Option<Scaler>,
@@ -75,9 +74,8 @@ struct Checks {
 }
 
 impl InProcess {
-    /// Builds the server `config` describes, on `clock`: the lease table over the state file
-    /// (`--boot` as given), the agent side, and the elastic pool with its scaler and checks
-    /// when the configuration has one. Each failure to start names the flag at fault, as
+    /// Builds the server `config` describes, on `clock`: the agent side, and the elastic pool
+    /// with its scaler and checks when the configuration has one. Each failure to start names the flag at fault, as
     /// [`crate::start_with_checks`] does, except that no listen address can fail.
     pub fn start(config: Config, clock: SharedClock) -> Result<Self, StartupError> {
         let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
@@ -88,7 +86,7 @@ impl InProcess {
             checker,
             cached,
             ..
-        } = open(prepared, &clock, |_| {})?;
+        } = open(prepared, &clock)?;
         let checks = checker.map(|checker| Checks {
             checker,
             schedule: Schedule::first(clock.now()),
@@ -136,9 +134,9 @@ impl InProcess {
     }
 
     /// One tick, its parts in this order and each run to its end: the elastic pool's checks
-    /// (a pass when one is due by the clock), then the lease table and the agent registry
-    /// (what the tick loop does at a tick), then the fetch of the catalogs that are due,
-    /// then the scaler. In the server the checks, the table and the fetch-then-scaler run
+    /// (a pass when one is due by the clock), then the job pass and the agent registry (what
+    /// the tick loop does at a tick), then the fetch of the catalogs that are due, then the
+    /// scaler. In the server the checks, the tick and the fetch-then-scaler run
     /// on three tasks, and the scaler's task skips a tick while it is still busy with the
     /// one before; this order is one of the interleavings those tasks allow, and the fetch
     /// and the scaler are never skipped. A second call waits for the first to finish.
@@ -173,10 +171,10 @@ impl InProcess {
         self.shared.agent_errors()
     }
 
-    /// Drops everything the server holds, with no last tick: what the lease file keeps is
+    /// Drops everything the server holds, with no last tick: what the state files keep is
     /// what the last tick or request wrote, as after a process that ends between two ticks.
-    /// Once the routers' clones are dropped too, the lease file is unlocked and a second
-    /// server may open it (`--boot resume`).
+    /// Once the routers' clones are dropped too, a second server may open the same files
+    /// (`--boot resume`).
     pub fn shutdown(self) {
         drop(self);
     }

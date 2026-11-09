@@ -1,5 +1,6 @@
-//! A restart over a lease file written by an earlier server, and over a job store restored
-//! from an older backup; and the job path, which has no lease and no time to live to keep.
+//! A start over the lease file of an earlier release, which is ignored, and a restart over a
+//! job store restored from an older backup; and the job path, which has no lease and no time
+//! to live to keep.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -9,7 +10,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_jobs::{JobStore, ScriptedIds};
-use js_pool_static::EXAMPLE_CONFIG;
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{ManualClock as StoreClock, SystemClock};
 use serde_json::json;
@@ -19,89 +19,81 @@ use crate::jobs_support::{
     beat_with, commands, job_agent as shared_agent, job_of, one_start, running, submit_body,
 };
 use crate::support::{
-    Harness, LogCapture, Scratch, T0, TOKEN, args_with, base_args, config, lease_file, replace,
-    request,
+    Harness, Scratch, T0, TOKEN, base_args, config, lease_file, replace, request,
 };
 
-/// Asserts that a first boot over an existing lease file loads it like a resume: the lease
-/// the file holds on `gpu-01` is on that host in the host list, and `gpu-02` is free.
-#[tokio::test]
-async fn initialise_over_an_existing_file_loads_it() {
-    let scratch = Scratch::new("initialise_existing");
-    std::fs::write(scratch.state(), lease_file(&[(1, "held", Some("gpu-01"))])).unwrap();
-    let args = args_with(&scratch, &[]);
-    let h = Harness::with(scratch, args, None).await;
-    let listing = hosts(&h).await;
-    assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
-    assert!(entry(&listing, "gpu-02").get("lease").is_none());
-}
-
-/// Asserts that a lease file with a held, a releasing and a pending lease without a
-/// host restores both hosts as booked, and that a tick then settles the other two as the
-/// table always does: the releasing lease is stopped and frees its host, the pending lease
-/// is not known to the pool and is dropped, and the file holds the one lease left.
-#[tokio::test]
-async fn every_booking_of_the_file_is_seated_before_the_table_looks() {
-    let scratch = Scratch::new("resume_states");
-    let leases = [
+/// A lease file the previous release could have left: a held lease on `gpu-01`, a releasing
+/// one on `gpu-02` and a pending one with no host.
+fn left_over() -> String {
+    lease_file(&[
         (1, "held", Some("gpu-01")),
         (2, "releasing", Some("gpu-02")),
         (3, "pending", None),
-    ];
-    std::fs::write(scratch.state(), lease_file(&leases)).unwrap();
+    ])
+}
+
+/// Asserts that a lease file the previous release left at the state file's path is ignored
+/// under both values of `--boot`: the server starts, lists `gpu-01` and `gpu-02` with no
+/// lease (the leases the file holds are not seated), and after a tick and an orderly stop
+/// the file is byte for byte what it was (it is not read for its content, locked, rewritten
+/// or removed). A rollback to the previous release reads it as it was left. It catches a
+/// server that restores the file's bookings, that rewrites or deletes it at a tick or a
+/// stop, or that refuses a start over it.
+#[tokio::test]
+async fn a_lease_file_left_by_the_previous_release_is_ignored_and_left_as_it_was() {
+    for boot in ["initialise", "resume"] {
+        let scratch = Scratch::new(&format!("leftover_{boot}"));
+        std::fs::write(scratch.state(), left_over()).unwrap();
+        let args = replace(base_args(&scratch), "--boot", boot);
+        let h = Harness::with(scratch, args, None).await;
+        let listing = hosts(&h).await;
+        assert_eq!(listed(&listing), ["gpu-01", "gpu-02"], "{boot}");
+        for id in ["gpu-01", "gpu-02"] {
+            let host = entry(&listing, id);
+            assert!(host.get("lease").is_none(), "{boot}: {host}");
+            assert!(host.get("leases").is_none(), "{boot}: {host}");
+        }
+        h.clock.advance(Duration::from_secs(7201));
+        h.ticks.step().await;
+        let state = h.scratch.state();
+        h.running.shutdown().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(state).unwrap(),
+            left_over(),
+            "{boot}"
+        );
+    }
+}
+
+/// Asserts that a lease file that is no lease file (bytes no TOML reader takes) at the
+/// state file's path does not refuse a start under `--boot resume`, and is left as it was.
+/// It catches a server that parses the file to start.
+#[tokio::test]
+async fn a_lease_file_that_cannot_be_read_does_not_refuse_a_start() {
+    let scratch = Scratch::new("leftover_garbage");
+    let garbage = b"\xff\xfe not toml at all = = =".as_slice();
+    std::fs::write(scratch.state(), garbage).unwrap();
     let args = replace(base_args(&scratch), "--boot", "resume");
     let h = Harness::with(scratch, args, None).await;
-    let listing = hosts(&h).await;
-    assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
-    assert_eq!(entry(&listing, "gpu-02")["lease"], "1-2");
+    assert_eq!(listed(&hosts(&h).await), ["gpu-01", "gpu-02"]);
+    let state = h.scratch.state();
+    h.running.shutdown().await.unwrap();
+    assert_eq!(std::fs::read(state).unwrap(), garbage);
+}
 
+/// Asserts that `--boot resume` with no lease file at the state file's path starts, lists the
+/// pool file's hosts, and makes no lease file. It catches a server that asks for the file
+/// `--boot resume` used to require, and one that makes it.
+#[tokio::test]
+async fn resume_without_a_lease_file_starts_and_makes_none() {
+    let scratch = Scratch::new("resume_no_file");
+    let args = replace(base_args(&scratch), "--boot", "resume");
+    let h = Harness::with(scratch, args, None).await;
+    assert_eq!(listed(&hosts(&h).await), ["gpu-01", "gpu-02"]);
+    let state = h.scratch.state();
     h.ticks.step().await;
-    let listing = hosts(&h).await;
-    assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
-    assert!(entry(&listing, "gpu-02").get("lease").is_none());
-    let saved = std::fs::read_to_string(h.scratch.state()).unwrap();
-    assert!(saved.contains("lease_count = 1"), "{saved}");
-}
-
-/// Asserts that a lease whose host the pool file no longer lists is dropped at the
-/// restart (the table finds the pool ignorant of it), that the drop is logged with the
-/// lease, the host and the reason, and that the hosts left carry no lease.
-#[tokio::test]
-async fn a_host_the_pool_file_dropped_loses_its_lease_and_says_so() {
-    let scratch = Scratch::new("resume_unlisted");
-    std::fs::write(scratch.state(), lease_file(&[(1, "held", Some("gpu-01"))])).unwrap();
-    let only_gpu_02 = format!(
-        "[[host]]{}",
-        EXAMPLE_CONFIG.rsplit("[[host]]").next().unwrap()
-    );
-    let logs = LogCapture::start();
-    let args = replace(base_args(&scratch), "--boot", "resume");
-    std::fs::write(scratch.path("pool.toml"), &only_gpu_02).unwrap();
-    let h = Harness::with(scratch, args, None).await;
-    let text = logs.text();
-    assert!(text.contains("1-1"), "{text}");
-    assert!(text.contains("gpu-01"), "{text}");
-    assert!(text.contains("not in the pool"), "{text}");
-
-    let listing = hosts(&h).await;
-    assert_eq!(listed(&listing), ["gpu-02"]);
-    assert!(entry(&listing, "gpu-02").get("lease").is_none());
-}
-
-/// Asserts that when a lease file names one host for two leases the lower id keeps it,
-/// the other is dropped, and the drop is logged with the reason.
-#[tokio::test]
-async fn two_leases_on_one_host_leave_the_lower_id_seated() {
-    let scratch = Scratch::new("resume_double");
-    let leases = [(1, "held", Some("gpu-01")), (2, "held", Some("gpu-01"))];
-    std::fs::write(scratch.state(), lease_file(&leases)).unwrap();
-    let logs = LogCapture::start();
-    let args = replace(base_args(&scratch), "--boot", "resume");
-    let h = Harness::with(scratch, args, None).await;
-    let text = logs.text();
-    assert!(text.contains("1-2"), "{text}");
-    assert!(text.contains("held by lease 1-1"), "{text}");
-    assert_eq!(entry(&hosts(&h).await, "gpu-01")["lease"], "1-1");
+    h.running.shutdown().await.unwrap();
+    assert!(!state.exists());
 }
 
 /// The image every job of the restore runs: pinned by digest, as the service demands.
@@ -173,7 +165,7 @@ async fn job_agent(h: &Harness, host: &str) -> Session {
 
 /// Every job of the job store in `file` with its allocation, read after the server stopped,
 /// one line each, sorted: `<job id> <state> [<allocation id> <host> <step>]`.
-fn stored(file: &Path) -> Vec<String> {
+pub(crate) fn stored(file: &Path) -> Vec<String> {
     let clock = Arc::new(SystemClock::default());
     let store = SqliteStore::open(file, clock, Options::default()).unwrap();
     let jobs = JobStore::new(Arc::new(store), ScriptedIds::new([0xee; 16], [])).unwrap();

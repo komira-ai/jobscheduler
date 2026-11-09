@@ -8,7 +8,7 @@ use js_agent_wire::{DEFAULT_HELLO_BURST, DEFAULT_HELLO_INTERVAL};
 use js_registry::Credential;
 use js_types::Clock;
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 
 /// How many hellos one credential may say in a burst, and how often one more is allowed
 /// once the burst is spent (`--agent-hello-burst`, `--agent-hello-interval`).

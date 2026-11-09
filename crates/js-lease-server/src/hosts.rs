@@ -1,15 +1,15 @@
-//! `GET /v1/hosts`: the hosts the server leases, whichever source they come from.
+//! `GET /v1/hosts`: the hosts the server lists, whichever source they come from.
 //!
 //! [`listing`] reads them once for both the JSON route and the job service's `ListHosts`:
-//! the route writes the [`HostList`] as its body, and the job service maps the same entries,
-//! and the leases booked on each host, to its own messages.
+//! the route writes the [`HostList`] as its body, and the job service maps the same entries
+//! to its own messages.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use js_agent_wire::Taint;
 use js_registry::{HostMark, HostState, HostView};
 use js_types::sched::usage::NodeLoad;
-use js_types::{Held, HostCapacity, HostId, LeaseId, MemoryHeadroom, Shape};
+use js_types::{HostCapacity, HostId, MemoryHeadroom, Shape};
 
 use crate::api::Shared;
 use crate::sched::map::lease_text as sched_lease_text;
@@ -20,11 +20,6 @@ use serde::{Serialize, Serializer};
 pub(crate) struct HostList {
     pub(crate) hosts: Vec<HostEntry>,
 }
-
-/// The leases on each host that holds one, in the order they were booked, with what each
-/// books there: as the registry books them on a registered host, and each the whole host on
-/// a static one (the static pool leases whole hosts only).
-pub(crate) type LeasesOn = BTreeMap<HostId, Vec<Held>>;
 
 /// The shape of a host: what a lease on it holds.
 #[derive(Debug, Serialize)]
@@ -93,20 +88,13 @@ pub(crate) struct HostEntry {
     lost: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     phase: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lease: Option<String>,
-    /// Every lease on the host, when it carries more than one (`lease` is the first of
-    /// them); absent for a host with none or one, so those bodies are as they were.
-    #[serde(skip_serializing_if = "at_most_one")]
-    leases: Vec<String>,
     pub(crate) shape: ShapeView,
     pub(crate) memory: MemoryView,
     pub(crate) capabilities: BTreeMap<String, String>,
     pub(crate) labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent_version: Option<String>,
-    /// Set for a registered host: it holds no lease but has runs to finish, so it takes
-    /// no new lease yet.
+    /// Set for a registered host: it has work to finish, so it takes no new work yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     releasing: Option<bool>,
     /// Set for a registered host that reported a taint: `{reason, run_id?, check?}`. It
@@ -114,7 +102,7 @@ pub(crate) struct HostEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) taint: Option<Taint>,
     /// Set for a registered host that is set aside: `reserved` for a waiting whole-node
-    /// request, `held` while a whole-node lease is committed on it, `draining` and
+    /// request, `held` while a whole-node request is committed on it, `draining` and
     /// `releasing` while it is being scaled away.
     #[serde(skip_serializing_if = "Option::is_none", serialize_with = "mark_named")]
     pub(crate) mark: Option<HostMark>,
@@ -231,18 +219,6 @@ fn shape_view(shape: &Shape) -> ShapeView {
     }
 }
 
-fn lease_texts(leases: &[LeaseId]) -> Vec<String> {
-    leases.iter().map(ToString::to_string).collect()
-}
-
-fn at_most_one(leases: &[String]) -> bool {
-    leases.len() <= 1
-}
-
-fn lease_text(lease: Option<LeaseId>) -> Option<String> {
-    lease.map(|lease| lease.to_string())
-}
-
 /// How a session is told in an answer: `awaiting`, `live` or `lost`.
 pub(crate) fn state_text(state: HostState) -> &'static str {
     match state {
@@ -270,8 +246,6 @@ impl HostEntry {
             state: None,
             lost: None,
             phase: None,
-            lease: lease_text(host.leased_to),
-            leases: lease_texts(&host.leases),
             shape: shape_view(&host.shape),
             memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
@@ -294,8 +268,6 @@ impl HostEntry {
             state: Some(host.state),
             lost: Some(host.state == HostState::Lost),
             phase: Some(String::from(host.phase)),
-            lease: lease_text(host.lease),
-            leases: lease_texts(&host.leases),
             shape: shape_view(&host.shape),
             memory: MemoryView::of(host.memory),
             capabilities: host.shape.capabilities().clone(),
@@ -315,21 +287,10 @@ impl HostEntry {
 }
 
 impl HostList {
-    /// Every host of the static pool and every registered host, in id order.
-    ///
-    /// `capacity` is what the provider lists, which holds both kinds; the static hosts
-    /// are those of it that `reserved` names (the ids the registry keeps for the static
-    /// pool), or all of it when there is no registry. The registered hosts come from the
-    /// registry's own view, which knows their session.
-    pub(crate) fn of(
-        capacity: Vec<HostCapacity>,
-        registered: Vec<HostView>,
-        reserved: Option<&BTreeSet<HostId>>,
-    ) -> Self {
-        let statics = capacity
-            .into_iter()
-            .filter(|host| is_static(host, reserved))
-            .map(HostEntry::listed);
+    /// Every host of the static pool and every registered host, in id order. The registered
+    /// hosts come from the registry's own view, which knows their session.
+    pub(crate) fn of(statics: Vec<HostCapacity>, registered: Vec<HostView>) -> Self {
+        let statics = statics.into_iter().map(HostEntry::listed);
         let mut hosts: Vec<HostEntry> = statics
             .chain(registered.into_iter().map(HostEntry::registered))
             .collect();
@@ -338,52 +299,16 @@ impl HostList {
     }
 }
 
-/// Whether `host` of the provider's capacity is a static host: one that `reserved` names
-/// (the ids the registry keeps for the static pool), or any host when there is no registry.
-fn is_static(host: &HostCapacity, reserved: Option<&BTreeSet<HostId>>) -> bool {
-    reserved.is_none_or(|ids| ids.contains(&host.host))
-}
-
-/// The leases on each static host of `capacity` that holds one, each booking the whole
-/// host, since the static pool leases whole hosts only.
-fn static_leases(
-    capacity: &[HostCapacity],
-    reserved: Option<&BTreeSet<HostId>>,
-) -> BTreeMap<HostId, Vec<Held>> {
-    let statics = capacity.iter().filter(|host| is_static(host, reserved));
-    let booked = statics.filter(|host| !host.leases.is_empty());
-    let leases = booked.map(|host| {
-        let whole = |lease: &LeaseId| Held {
-            lease: *lease,
-            resources: host.shape.resources().clone(),
-            whole: true,
-        };
-        (host.host.clone(), host.leases.iter().map(whole).collect())
-    });
-    leases.collect()
-}
-
-/// Every host the server leases, the static pool's and the registered ones, with the leases
-/// booked on each: what `GET /v1/hosts` and the job service's `ListHosts` both read. The
-/// capacity is read from the host table of the table's pool ([`Shared::hosts`]), not
-/// through the lease table, so the listing never takes the table's lock. The pool's lock is
-/// taken first and dropped, then the registry's; the order of the two never reverses. It
-/// books, cordons and counts nothing.
-pub(crate) async fn listing(shared: &Shared) -> (HostList, LeasesOn) {
-    let capacity = shared.hosts().capacity();
-    match shared.agents() {
-        Some(agents) => {
-            let reserved = agents.registry.reserved();
-            let mut leases = static_leases(&capacity, Some(&reserved));
-            leases.extend(agents.registry.held());
-            let registered = agents.registry.hosts();
-            (HostList::of(capacity, registered, Some(&reserved)), leases)
-        }
-        None => {
-            let leases = static_leases(&capacity, None);
-            (HostList::of(capacity, Vec::new(), None), leases)
-        }
-    }
+/// Every host the server lists, the static pool's and the registered ones: what
+/// `GET /v1/hosts` and the job service's `ListHosts` both read. The static pool's hosts are
+/// those read from its file at start; the registered ones come from the registry, so a
+/// registered host shows its session. It books, cordons and counts nothing.
+pub(crate) fn listing(shared: &Shared) -> HostList {
+    let statics = shared.static_hosts().to_vec();
+    let registered = shared
+        .agents()
+        .map_or_else(Vec::new, |agents| agents.registry.hosts());
+    HostList::of(statics, registered)
 }
 
 /// A host id as the body writes it: its text.
@@ -434,52 +359,10 @@ mod tests {
         }
     }
 
-    /// A host that carries several leases lists them all beside `lease` (the first), for a
-    /// registered host and a static one; a host with one or none has no `leases` key, so its
-    /// body is as it was. It catches a listing that shows only the first lease.
-    #[test]
-    fn a_host_with_several_leases_lists_them_all() {
-        let ids = [LeaseId::new(1, 1), LeaseId::new(1, 2)];
-        let mut many = view(None);
-        many.lease = Some(ids[0]);
-        many.leases = ids.to_vec();
-        let mut one = view(None);
-        one.id = HostId::new("b").unwrap();
-        one.lease = Some(ids[0]);
-        one.leases = vec![ids[0]];
-        let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
-        let capacity = |name: &str, leases: Vec<LeaseId>| HostCapacity {
-            host: HostId::new(name).unwrap(),
-            shape: Shape::new(resources.clone(), BTreeMap::new()),
-            memory: MemoryHeadroom::full(1 << 20),
-            leased_to: leases.first().copied(),
-            leases,
-        };
-        let statics = vec![
-            capacity("s2", ids.to_vec()),
-            capacity("s1", ids[..1].to_vec()),
-        ];
-        let list = HostList::of(statics, vec![many, one], None);
-        let body = serde_json::to_value(&list).unwrap();
-        let by_id = |id: &str| {
-            let hosts = body["hosts"].as_array().unwrap();
-            hosts.iter().find(|host| host["id"] == id).unwrap().clone()
-        };
-        for id in ["a", "s2"] {
-            assert_eq!(by_id(id)["lease"], "1-1");
-            assert_eq!(by_id(id)["leases"], serde_json::json!(["1-1", "1-2"]));
-        }
-        for id in ["b", "s1"] {
-            assert_eq!(by_id(id)["lease"], "1-1");
-            assert!(by_id(id).get("leases").is_none());
-        }
-    }
-
-    /// Asserts the whole `GET /v1/hosts` body for a static host with a lease and a
-    /// registered host that is reserved, has a drain deadline and is cordoned, by exact
-    /// string equality: the keys, their order, and the absence of any lease expiry. It
-    /// catches a field added, renamed or reordered in the hosts listing, and a lease time
-    /// that leaks into it.
+    /// Asserts the whole `GET /v1/hosts` body for a static host and a registered host that is
+    /// reserved, has a drain deadline and is cordoned, by exact string equality: the keys,
+    /// their order, and the absence of any lease key. It catches a field added, renamed or
+    /// reordered in the hosts listing, and a lease field that comes back into it.
     #[test]
     fn the_hosts_body_is_pinned_byte_for_byte() {
         let mut reserved = view(Some(HostMark::Reserved));
@@ -487,14 +370,14 @@ mod tests {
         reserved.drain_deadline = Some(js_types::Timestamp::from_millis(7000));
         reserved.cordon_until = Some(js_types::Timestamp::from_millis(9000));
         let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
-        let leased = HostCapacity {
+        let listed = HostCapacity {
             host: HostId::new("s").unwrap(),
             shape: Shape::new(resources, BTreeMap::new()),
             memory: MemoryHeadroom::full(1 << 20),
-            leased_to: Some(LeaseId::new(1, 1)),
-            leases: vec![LeaseId::new(1, 1)],
+            leased_to: None,
+            leases: Vec::new(),
         };
-        let list = HostList::of(vec![leased], vec![reserved], None);
+        let list = HostList::of(vec![listed], vec![reserved]);
         let shape = r#"{"cpu_millis":1000,"memory_bytes":1048576,"gpus":0}"#;
         let memory =
             r#"{"configured_bytes":1048576,"schedulable_percent":100,"bookable_bytes":1048576}"#;
@@ -502,7 +385,7 @@ mod tests {
             r#"{{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","shape":{shape},"memory":{memory},"capabilities":{{}},"labels":{{}},"releasing":false,"mark":"reserved","reserved_for":"req-1","drain_deadline_ms":7000,"cordon":{{"expires_at_ms":9000}}}}"#
         );
         let fixed = format!(
-            r#"{{"id":"s","source":"static","lease":"1-1","shape":{shape},"memory":{memory},"capabilities":{{}},"labels":{{}}}}"#
+            r#"{{"id":"s","source":"static","shape":{shape},"memory":{memory},"capabilities":{{}},"labels":{{}}}}"#
         );
         assert_eq!(
             serde_json::to_string(&list).unwrap(),
@@ -524,7 +407,7 @@ mod tests {
             (Some(HostMark::Releasing), Some("releasing")),
         ];
         for (mark, listed) in cases {
-            let list = HostList::of(Vec::new(), vec![view(mark)], None);
+            let list = HostList::of(Vec::new(), vec![view(mark)]);
             let body = serde_json::to_value(&list).unwrap();
             let host = &body["hosts"][0];
             assert_eq!(host["id"], "a");
@@ -545,7 +428,7 @@ mod tests {
             .unwrap()
             .with_disk_bytes(5 << 30);
         with_disk.shape = Shape::new(resources, BTreeMap::new());
-        let list = HostList::of(Vec::new(), vec![with_disk, view(None)], None);
+        let list = HostList::of(Vec::new(), vec![with_disk, view(None)]);
         let body = serde_json::to_value(&list).unwrap();
         let shapes: Vec<_> = body["hosts"]
             .as_array()
@@ -562,80 +445,57 @@ mod tests {
         assert_eq!(disk.and_then(|disk| disk.as_u64()), Some(5 << 30));
     }
 
-    /// The listing reads the hosts of the table's pool, with the lease the table booked on
-    /// one of them, and answers while another caller holds the table's lock: it is polled
-    /// once, with nothing to wake it, and is ready. Catches a listing that reads the hosts
-    /// through the lease table, which would wait for that lock.
-    #[tokio::test]
-    async fn the_listing_reads_the_pool_without_the_table_lock() {
-        use std::future::Future as _;
-        use std::task::{Context, Poll, Waker};
-
-        use js_lease::{Boot, LeaseTable, Settings};
+    /// The listing of a server with a static pool and a registry shows the static pool's hosts
+    /// as `static` and the registered hosts as `registered`, all in id order, and none of them
+    /// carries a lease. A server without agents shows the static hosts alone. It catches a
+    /// listing that leaves out either source or lists them in the order of their sources.
+    #[test]
+    fn the_listing_shows_the_static_hosts_and_the_registered_ones_in_id_order() {
         use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
-        use js_testkit::dir::TestDir;
-        use js_types::{ClassId, ProviderId, Request};
-        use js_types::{ManualClock, Timestamp};
+        use js_types::{ManualClock, ProviderId, Timestamp};
 
-        use crate::adapt::{BoxedPool, SharedClock};
+        use crate::clock::SharedClock;
         use crate::config::parse_token;
 
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/hosts_unit");
-        let dir = TestDir::under(root, "listing");
         let pool = StaticPool::from_toml(ProviderId::new("static").unwrap(), EXAMPLE_CONFIG);
-        let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(1_000)));
-        let table = LeaseTable::open(
-            BoxedPool::new(Box::new(pool.unwrap())),
-            clock,
-            Settings::new(),
-            dir.path().join("leases.toml"),
-            Boot::Initialise,
-        )
-        .unwrap();
-        let shared = Shared::new(table, parse_token(&[b'q'; 40]).unwrap(), None);
-        let request = Request {
-            class: ClassId::new("gpu-host").unwrap(),
-            resources: Resources::new(1, 1, 1, Some("nvidia-a100".into())).unwrap(),
-            capabilities: BTreeMap::new(),
-            max_wall: std::time::Duration::from_secs(60),
-            labels: BTreeMap::new(),
-            validation_run: None,
-            probe_host: None,
+        let statics = pool.unwrap().hosts();
+        let token = parse_token(&[b'q'; 40]).unwrap();
+        let alone = Shared::new(token, None).with_static_hosts(statics.clone());
+        let rows = |shared: &Shared| -> Vec<(String, Source)> {
+            let list = listing(shared);
+            list.hosts
+                .iter()
+                .map(|host| (host.id.to_string(), host.source))
+                .collect()
         };
-        let lease = shared.table().lock().await.acquire(request).unwrap();
-
-        let held = shared.table().lock().await;
-        let mut listed = std::pin::pin!(listing(&shared));
-        let polled = listed
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()));
-        drop(held);
-
-        // What the listing answered, as plain values: the host ids, the lease each lists, the
-        // source of each, and the leases booked per host. `Pending` means it waited for the
-        // table's lock.
-        let seen = polled.map(|(list, leases)| {
-            let hosts = list.hosts.iter();
-            let rows: Vec<(String, Option<String>, Source)> = hosts
-                .map(|host| (host.id.to_string(), host.lease.clone(), host.source))
-                .collect();
-            (rows, leases)
-        });
-        let shape = Resources::new(64_000, 549_755_813_888, 8, Some("nvidia-a100".into()));
-        let whole = Held {
-            lease: lease.id,
-            resources: shape.unwrap(),
-            whole: true,
-        };
-        let rows = vec![
-            (
-                "gpu-01".to_owned(),
-                Some(lease.id.to_string()),
-                Source::Static,
-            ),
-            ("gpu-02".to_owned(), None, Source::Static),
+        let fixed = vec![
+            ("gpu-01".to_owned(), Source::Static),
+            ("gpu-02".to_owned(), Source::Static),
         ];
-        let booked = BTreeMap::from([(lease.host, vec![whole])]);
-        assert_eq!(seen, Poll::Ready((rows, booked)));
+        assert_eq!(rows(&alone), fixed);
+
+        let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(1_000)));
+        let dir = js_testkit::dir::TestDir::under(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/hosts_unit"),
+            "listing",
+        );
+        let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
+        let pool = js_registry::PoolConfig::new(
+            ProviderId::new("burst").unwrap(),
+            js_types::ResourceClass::gpu_host(),
+            Shape::new(resources, BTreeMap::new()),
+            4,
+        );
+        let registry = js_registry::Registry::with_sessions(
+            pool,
+            clock.clone(),
+            js_registry::SequentialSessions::new(),
+            std::sync::Arc::new(js_sched_placer::place::SchedPlacer::default()),
+        );
+        let agents = crate::agents::Agents::over(registry, &clock, dir.path());
+        let token = parse_token(&[b'q'; 40]).unwrap();
+        let shared =
+            Shared::new(token, Some(std::sync::Arc::new(agents))).with_static_hosts(statics);
+        assert_eq!(rows(&shared), fixed);
     }
 }

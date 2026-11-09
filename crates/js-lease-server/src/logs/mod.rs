@@ -69,7 +69,7 @@ use js_types::Clock as _;
 use serde::Serialize;
 use tracing::{info, warn};
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 
 mod setup;
 mod sink;

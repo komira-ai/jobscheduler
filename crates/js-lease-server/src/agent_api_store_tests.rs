@@ -8,7 +8,6 @@ use std::path::Path as FilePath;
 
 use js_agent_wire::InstanceIdentity;
 use js_jobs::interfere::{INJECTED, Interfere};
-use js_lease::{Boot, LeaseTable, Settings};
 use js_registry::{Binding, PoolConfig, Registry, SequentialSessions};
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, Store, Txn};
@@ -19,11 +18,11 @@ use serde_json::{Value, json};
 
 use super::log_tests::capture;
 use super::*;
-use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_state::BindingStore;
 use crate::agents::CordonFault;
 use crate::api::Shared;
-use crate::api::whole_view_tests::Lines;
+use crate::api::rig::Lines;
+use crate::clock::SharedClock;
 use crate::config::parse_token;
 use crate::join_tokens::JoinTokens;
 
@@ -221,14 +220,8 @@ impl Rig {
 
 /// The server state the host book is read from, over `rig`'s agent side.
 fn shared_over(rig: &Rig) -> Shared {
-    let provider = rig.agents.registry.provider();
-    let settings = Settings::new();
-    let file = rig.dir.path().join("leases.toml");
-    let clock = SharedClock::new(rig.clock.clone());
-    let pool = BoxedPool::new(Box::new(provider));
-    let table = LeaseTable::open(pool, clock, settings, file, Boot::Initialise).unwrap();
     let token = parse_token(&[b'q'; 40]).unwrap();
-    Shared::new(table, token, Some(Arc::clone(&rig.agents)))
+    Shared::new(token, Some(Arc::clone(&rig.agents)))
 }
 
 /// Asserts that the first hello with a join token commits the token's use and the host's
@@ -453,7 +446,7 @@ async fn heartbeat_and_host_book_reads_make_no_store_call() {
     let one_time = (&who, Some(who.clone()));
     let reply = rig.beat(one_time, "host-a", &welcome, Value::Null).await;
     assert!(!reply.expect("a heartbeat").taint_ack);
-    let (book, _) = crate::hosts::listing(&shared).await;
+    let book = crate::hosts::listing(&shared);
     let listed = serde_json::to_value(&book).unwrap();
     assert!(listed.to_string().contains("host-a"), "{listed}");
     let target = axum::extract::Path("host-a".to_owned());

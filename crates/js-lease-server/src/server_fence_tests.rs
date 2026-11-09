@@ -8,17 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_jobs::{JobId, JobState, JobStoreError, NewJob, StartFailure};
-use js_lease::{Boot, LeaseTable, Settings};
 use js_state::{Store, StoreError};
 use js_testkit::dir::TestDir;
 use js_types::ManualClock;
 use tokio::task::JoinHandle;
 
 use super::{FENCED, Running, start, stop_or_fence, tick_loop, until_fenced};
-use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_api::job_rig::{Rig, clocked_rig, spec};
 use crate::agents::Agents;
 use crate::api::Shared;
+use crate::clock::SharedClock;
 use crate::config::{Cli, Config, parse_token};
 use crate::error::Failure;
 use crate::job_expiry::JobLimits;
@@ -35,25 +34,15 @@ fn scratch(name: &str) -> TestDir {
     )
 }
 
-/// A server state over the rig's agent side (its job tables, store and clock) and a lease
-/// table of its own in `dir`.
-fn shared_over(rig: &Rig, dir: &TestDir) -> Arc<Shared> {
-    shared_with(rig, dir, Some(Arc::clone(&rig.agents)))
+/// A server state over the rig's agent side (its job tables, store and clock).
+fn shared_over(rig: &Rig) -> Arc<Shared> {
+    shared_with(Some(Arc::clone(&rig.agents)))
 }
 
 /// [`shared_over`] holding `agents`, which may be none.
-fn shared_with(rig: &Rig, dir: &TestDir, agents: Option<Arc<Agents>>) -> Arc<Shared> {
-    let settings = Settings::new();
-    let table = LeaseTable::open(
-        BoxedPool::new(Box::new(rig.agents.registry.provider())),
-        rig.shared.clone(),
-        settings,
-        dir.path().join("leases.toml"),
-        Boot::Initialise,
-    )
-    .unwrap();
+fn shared_with(agents: Option<Arc<Agents>>) -> Arc<Shared> {
     let token = parse_token(&[b'c'; 40]).unwrap();
-    Arc::new(Shared::new(table, token, agents))
+    Arc::new(Shared::new(token, agents))
 }
 
 /// The tick loop of `shared` as the server runs it, on a task.
@@ -88,8 +77,7 @@ fn queue(rig: &Rig, id: &str) -> JobId {
 #[tokio::test]
 async fn a_tick_that_meets_a_fenced_store_ends_the_loop_and_writes_nothing_after() {
     let rig = clocked_rig("fence_loop", false, JobLimits::DEFAULT);
-    let dir = scratch("fence_loop_table");
-    let shared = shared_over(&rig, &dir);
+    let shared = shared_over(&rig);
     let id = queue(&rig, "job-q");
     let (handle, ticker) = channel_ticker();
     let task = spawn_ticking(&shared, ticker);
@@ -119,8 +107,7 @@ async fn a_tick_that_meets_a_fenced_store_ends_the_loop_and_writes_nothing_after
 #[tokio::test]
 async fn a_loop_waiting_for_a_tick_ends_when_the_fence_trips() {
     let rig = clocked_rig("fence_waiting", false, JobLimits::DEFAULT);
-    let dir = scratch("fence_waiting_table");
-    let shared = shared_over(&rig, &dir);
+    let shared = shared_over(&rig);
     let (handle, ticker) = channel_ticker();
     let task = spawn_ticking(&shared, ticker);
     handle.step().await;
@@ -151,7 +138,7 @@ async fn started(name: &str) -> (Running, Arc<crate::job_store::ServerJobs>, Job
         0o600,
     );
     let pool = write("agent-pool.toml", pool, 0o644);
-    let state = dir.path().join("leases.toml");
+    let state = dir.path().join("state");
     let args = [
         "js-lease-server",
         "--listen",
@@ -262,9 +249,7 @@ async fn a_fenced_server_stops_with_a_failure_exit_status() {
 /// server with no store that stops as if it had lost one.
 #[tokio::test]
 async fn a_server_without_a_state_store_is_never_fenced() {
-    let rig = clocked_rig("fence_none", false, JobLimits::DEFAULT);
-    let dir = scratch("fence_none_table");
-    let shared = shared_with(&rig, &dir, None);
+    let shared = shared_with(None);
     let waited = tokio::select! {
         biased;
         () = shared.fenced() => false,

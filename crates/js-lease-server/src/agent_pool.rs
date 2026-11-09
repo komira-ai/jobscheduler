@@ -2,10 +2,9 @@
 //! register themselves.
 //!
 //! The whole-node keys are parsed, checked and carried on the loaded [`PoolConfig`], which
-//! the agent registry is built from and reads the keys of (see `WholeNodeConfig`). The
-//! lease table is given `prepare_timeout` as well (see `Config::from_cli`), so an
-//! operator's `prepare_timeout = "20m"` is how long a whole-node lease waits, pending, on
-//! both sides. The keys are accepted only for class
+//! the agent registry is built from and reads the keys of (see `WholeNodeConfig`). An
+//! operator's `prepare_timeout = "20m"` is how long a whole-node request waits, pending.
+//! The keys are accepted only for class
 //! `whole-node`; `gpu-host` books a whole host (`BookAll`) and refuses them.
 
 use std::collections::BTreeMap;

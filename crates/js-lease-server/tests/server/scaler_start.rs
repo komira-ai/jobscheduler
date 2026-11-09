@@ -264,8 +264,6 @@ async fn a_host_whose_release_was_under_way_is_marked_when_it_says_hello_again()
     let registry = h.running.registry().unwrap();
     let queued = submit(&h, "j1").await;
     assert_eq!(queued.status, 201, "{}", queued.body);
-    let counts = registry.whole_counts();
-    assert_eq!((counts.reserved, counts.held), (0, 0));
     assert_eq!(beat(&h, &token, &me).await.status, 200);
 
     h.ticks.step().await;

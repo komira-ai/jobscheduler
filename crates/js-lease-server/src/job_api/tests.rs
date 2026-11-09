@@ -47,9 +47,9 @@ use super::{
     Bearer, JobApi, UNIMPLEMENTED, cancel, fleet, gateway, gateway_over, grpc, grpc_over, read,
     submit,
 };
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::config::{Clients, LiveClients, parse_token};
-use crate::hosts::{HostList, LeasesOn};
+use crate::hosts::HostList;
 use crate::job_store::ServerJobs;
 use crate::status::Status as PoolStatus;
 
@@ -425,8 +425,8 @@ struct NoHosts;
 
 #[tonic::async_trait]
 impl fleet::Hosts for NoHosts {
-    async fn hosts(&self) -> (HostList, LeasesOn) {
-        (HostList::of(Vec::new(), Vec::new(), None), LeasesOn::new())
+    async fn hosts(&self) -> HostList {
+        HostList::of(Vec::new(), Vec::new())
     }
 
     async fn cordon(&self, _: &HostId, _: Duration) -> Result<bool, fleet::Refused> {

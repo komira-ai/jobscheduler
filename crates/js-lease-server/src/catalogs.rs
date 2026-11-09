@@ -6,7 +6,7 @@
 //! cool-down of one of its offers lasts, and one [`Cooldowns`] for every offer. Each cache
 //! is behind a lock taken only to read it or to record a fetch, never across a call to the
 //! provider, so a read ([`Catalogs::view`], [`Catalogs::offers_for_pass2`]) answers at once
-//! while a fetch is in flight and is safe under the lease table's lock.
+//! while a fetch is in flight.
 //!
 //! - [`Catalogs::refresh_due`] fetches each catalog whose cache says a refresh is due, at
 //!   the server's tick: the tick spaces the fetches, so a cloud that keeps failing is asked
@@ -47,7 +47,7 @@ use js_types::Clock;
 use js_types::ProviderId;
 use tracing::warn;
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 
 /// One provider's entry.
 struct Entry {

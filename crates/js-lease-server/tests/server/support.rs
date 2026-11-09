@@ -7,16 +7,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use js_lease::Booking;
 use js_lease_server::{
-    CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
-    Ticker, channel_ticker, start_with_checks,
+    Cli, Config, Limits, Running, SharedClock, StartupError, StaticPoolSource, TickHandle, Ticker,
+    channel_ticker, start_with_checks,
 };
-use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
-use js_provider::Pool;
+use js_pool_static::EXAMPLE_CONFIG;
 use js_state::Store;
 use js_testkit::dir::TestDir;
-use js_types::ProviderId;
 use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -194,11 +191,11 @@ impl Harness {
     pub async fn with(
         scratch: Scratch,
         args: Vec<OsString>,
-        source: Option<Box<dyn CapacitySource>>,
+        source: Option<StaticPoolSource>,
     ) -> Self {
         let mut config = config(args).unwrap();
         if let Some(source) = source {
-            config = config.with_capacity_source(source);
+            config = config.with_static_pool(source);
         }
         Self::over(scratch, config).await
     }
@@ -237,68 +234,6 @@ impl Harness {
     pub async fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
         let body = body.map(|body| body.to_string().into_bytes());
         request(self.addr(), method, path, Some(TOKEN), body.as_deref()).await
-    }
-}
-
-/// A capacity source that hands out one provider whose state outlives the servers built
-/// from it, as a provider that is a service of its own would.
-#[derive(Clone)]
-pub struct SharedPool {
-    pool: Arc<std::sync::Mutex<StaticPool>>,
-}
-
-impl SharedPool {
-    pub fn new() -> Self {
-        Self::of(EXAMPLE_CONFIG)
-    }
-
-    /// A source whose hosts are the ones `config`, the text of a pool file, lists.
-    pub fn of(config: &str) -> Self {
-        let id = ProviderId::new("shared").unwrap();
-        let pool = StaticPool::from_toml(id, config).unwrap();
-        Self {
-            pool: Arc::new(std::sync::Mutex::new(pool)),
-        }
-    }
-}
-
-struct SharedProvider(Arc<std::sync::Mutex<StaticPool>>);
-
-impl CapacitySource for SharedPool {
-    fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
-        Ok(Seated::all(Box::new(SharedProvider(self.pool.clone()))))
-    }
-}
-
-impl SharedProvider {
-    fn pool(&self) -> std::sync::MutexGuard<'_, StaticPool> {
-        self.0.lock().unwrap()
-    }
-}
-
-impl Pool for SharedProvider {
-    fn id(&self) -> ProviderId {
-        self.pool().id()
-    }
-
-    fn classes(&self) -> Vec<js_types::ResourceClass> {
-        self.pool().classes()
-    }
-
-    fn start(&mut self, spec: js_provider::StartSpec) -> js_provider::StartAck {
-        self.pool().start(spec)
-    }
-
-    fn stop(&mut self, lease: &js_types::LeaseId) -> js_provider::StopAck {
-        self.pool().stop(lease)
-    }
-
-    fn observe(&mut self, lease: &js_types::LeaseId) -> js_provider::Observed {
-        self.pool().observe(lease)
-    }
-
-    fn capacity(&self) -> Vec<js_provider::HostCapacity> {
-        self.pool().capacity()
     }
 }
 
@@ -463,8 +398,9 @@ impl LogCapture {
     }
 }
 
-/// A lease file at term 1 holding these leases, each `(sequence, state, host)`, all
-/// acquired at `T0` and ending 7200 seconds later.
+/// A lease file as the previous release wrote it, at term 1 holding these leases, each
+/// `(sequence, state, host)`, all acquired at `T0` and ending 7200 seconds later. The server
+/// reads no lease file now: a test writes one to show that it is left as it is.
 pub fn lease_file(leases: &[(u64, &str, Option<&str>)]) -> String {
     let mut text = format!(
         "version = 1\nterm = 1\nnext_sequence = {}\nlease_count = {}\n",
@@ -498,11 +434,8 @@ pub async fn guard<F: std::future::Future>(future: F) -> F::Output {
 }
 
 /// Waits for every labelled task under the same bound as [`guard`]. When the bound is
-/// hit, the panic names the tasks that have not finished and says what `timings` saw.
-pub async fn guard_tasks(
-    mut tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>,
-    timings: &js_lease::Timings,
-) {
+/// hit, the panic names the tasks that have not finished.
+pub async fn guard_tasks(mut tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>) {
     let bound = std::time::Duration::from_secs(30);
     let waited = tokio::time::timeout(bound, async {
         for (_, task) in &mut tasks {
@@ -516,37 +449,7 @@ pub async fn guard_tasks(
             .filter(|(_, task)| !task.is_finished())
             .map(|(name, _)| *name)
             .collect();
-        let steps = timings.report();
-        panic!(
-            "still waiting after {bound:?}: unfinished tasks: {pending:?}; lease steps: {steps}"
-        );
-    }
-}
-
-/// A clock that moves by `step` on every reading, so a step timed with one reading
-/// before and one after lasts exactly `step`.
-#[derive(Debug, Clone)]
-pub struct Stepping {
-    micros: Arc<std::sync::atomic::AtomicU64>,
-    step: std::time::Duration,
-}
-
-impl Stepping {
-    pub fn of(step: std::time::Duration) -> Self {
-        Self {
-            micros: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            step,
-        }
-    }
-}
-
-impl js_types::Monotonic for Stepping {
-    fn reading(&self) -> std::time::Duration {
-        let step = u64::try_from(self.step.as_micros()).unwrap();
-        let before = self
-            .micros
-            .fetch_add(step, std::sync::atomic::Ordering::SeqCst);
-        std::time::Duration::from_micros(before)
+        panic!("still waiting after {bound:?}: unfinished tasks: {pending:?}");
     }
 }
 

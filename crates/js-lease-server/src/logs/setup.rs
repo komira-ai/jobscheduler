@@ -13,7 +13,7 @@ use js_logstore::{Credential, UreqTransport};
 use js_types::Clock as _;
 
 use super::{LogGrants, Scope, SinkTemplate};
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::file::{AccessKey, LogsConfig, Minting, ObjectStoreLogs};
 
 /// The longest one `AssumeRole` call may take, connect to answer. A call that takes longer is

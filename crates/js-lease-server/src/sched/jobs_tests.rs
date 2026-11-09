@@ -13,7 +13,7 @@ use js_jobs::{
     AllocationStep, Booked, Constraints, Isolation, JobEnd, JobId, JobSpec, JobState, Needs,
     NewJob, Output,
 };
-use js_provider::{Candidate, Pool};
+use js_provider::Candidate;
 use js_registry::{Credential, Placer};
 use js_sched::Event;
 use js_sched_placer::engine::Engine;
@@ -23,18 +23,18 @@ use js_sched_placer::place::SchedPlacer;
 use js_state::Store;
 use js_state::fake::Fake;
 use js_types::sched::FarmTime;
-use js_types::{HostId, LeaseId, Resources, Shape};
+use js_types::{HostId, Resources, Shape};
 use js_types::{ManualClock, Timestamp};
 
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{placed, spec, tables};
 use crate::agents::{Agents, assemble_placed};
+use crate::clock::SharedClock;
 use crate::job_alloc::{Freed, free_allocation};
 use crate::job_store::ServerJobs;
 use crate::metrics::NoMetrics;
 use crate::per_job::{BeatContext, serve};
 use crate::sched::engine::Settings;
-use crate::sched::engine_rig::{GIB, T0, hello_of, pool, rig, share_of};
+use crate::sched::engine_rig::{GIB, T0, hello_of, pool};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
 
 /// The host `name`.
@@ -575,41 +575,6 @@ fn a_large_share_job_among_a_steady_small_stream_is_documented_not_starved_by_de
         pass(&placer, &jobs, &["host-a"]),
         ["job-large", "job-small"]
     );
-}
-
-/// Asserts that on one host a lease and a job share the room without overbooking: with a
-/// lease and a job placed, a second job and a second lease that need more than is left both
-/// wait or are refused; stopping the lease frees its room in the engine at once, before any
-/// pass, and the next pass gives exactly that room to the front job. It catches an engine
-/// that counts only job allocations or only lease bookings (section 8, row 25).
-#[test]
-fn lease_and_job_bookings_cannot_overbook_a_host() {
-    let sched = ["--placement", "js-sched"];
-    let mut rig = rig("jobs-beside-leases", &pool(1, 8000, ""), &["h1"], &sched);
-    let (_store, jobs) = tables();
-    let on_h1 = open(&["h1"]);
-    let memory =
-        |rig: &crate::sched::engine_rig::Rig| rig.placer().booked_on("h1").unwrap().memory_bytes;
-    assert_eq!(rig.start(share_of(1, 1000, 6 * GIB)).as_deref(), Some("h1"));
-    queue(&jobs, "job-1", 6, 0);
-    let placed = |rig: &crate::sched::engine_rig::Rig| {
-        let placed = rig
-            .placer()
-            .place_jobs(&jobs, &on_h1, (&NoStarts, &NoMetrics))
-            .unwrap();
-        placed.iter().map(ToString::to_string).collect::<Vec<_>>()
-    };
-    assert_eq!(placed(&rig), ["job-1"]);
-    queue(&jobs, "job-2", 6, 0);
-    assert_eq!(placed(&rig), NONE);
-    assert_eq!(rig.start(share_of(2, 1000, 6 * GIB)), None);
-    assert_eq!(memory(&rig), 12 * GIB);
-    rig.provider.stop(&LeaseId::new(1, 1));
-    assert_eq!(memory(&rig), 6 * GIB);
-    queue(&jobs, "job-3", 5, 0);
-    assert_eq!(placed(&rig), ["job-2"]);
-    assert_eq!(state(&jobs, "job-3"), JobState::Queued);
-    assert_eq!(memory(&rig), 12 * GIB);
 }
 
 /// Asserts that, for a pool with no whole-node settings (`place_jobs` passes none), a job that

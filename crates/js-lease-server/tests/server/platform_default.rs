@@ -13,15 +13,14 @@ use js_elastic::{
 };
 use js_lease_server::{Catalogs, DefaultPlatform, SharedClock};
 use js_platform::{ContainerPlatform, PlatformId};
-use js_provider::{Pool, StartAck, StartSpec};
 use js_registry::{Binding, Credential, PoolConfig, Registry, StaticCapacity};
 use js_sched::admission_ever::{
     Admission as AdmitVerdict, CatalogView, HostState, HostView, PoolLimits, ProviderView,
     can_ever_serve,
 };
 use js_types::{
-    AcceleratorNeed, Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, JobNetwork, LeaseId,
-    Model, Os, ProviderId, Request, Requirements, ResourceClass, Resources, Shape,
+    AcceleratorNeed, Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, JobNetwork, Model, Os,
+    ProviderId, Requirements, ResourceClass, Resources, Shape,
 };
 use js_types::{ManualClock, Timestamp};
 
@@ -259,7 +258,7 @@ fn agrees(platform: &DefaultPlatform, hosts: &[HostView], providers: &[ProviderV
 }
 
 /// Asserts that the `default` platform's `can_ever_serve` is admission's function: for a
-/// host that is busy, then lost (silent past its grace), for one that is tainted, for one
+/// host that is serving, then lost (silent past its grace), for one that is tainted, for one
 /// marked to drain (capable: the mark is undone when a request needs the host) and then
 /// being released (draining out of the pool), and for a launching provider whose catalog
 /// cannot be read, it answers what `js_sched`'s `can_ever_serve` answers over the same
@@ -270,29 +269,15 @@ fn default_platform_can_ever_serve_is_the_admission_function() {
     let id = PlatformId::new("ours");
     let on = |hosts: &Registry| platform(id.clone(), Vec::new(), Some(hosts.clone()));
     let clock = ManualClock::new(Timestamp::from_millis(1));
-    let busy = table_on(&["a"], clock.clone());
-    let request = Request {
-        class: rack().id().clone(),
-        resources: Resources::new(1000, 1 << 30, 0, None).unwrap(),
-        capabilities: BTreeMap::new(),
-        max_wall: Duration::from_secs(600),
-        labels: BTreeMap::new(),
-        validation_run: None,
-        probe_host: None,
-    };
-    let spec = StartSpec::new(LeaseId::new(1, 1), request, &[rack()]).unwrap();
-    assert!(matches!(
-        busy.provider().start(spec),
-        StartAck::Started { .. }
-    ));
+    let serving = table_on(&["a"], clock.clone());
     assert!(agrees(
-        &on(&busy),
-        &[view(HostState::Busy, false, false)],
+        &on(&serving),
+        &[view(HostState::Serving, false, false)],
         &[]
     ));
     clock.advance(Duration::from_secs(3600));
     assert!(agrees(
-        &on(&busy),
+        &on(&serving),
         &[view(HostState::Lost, false, false)],
         &[]
     ));

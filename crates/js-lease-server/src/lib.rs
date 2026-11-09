@@ -1,8 +1,8 @@
 //! The job scheduler's server: the hosts that register with it, the pools that launch
 //! more, the job service that places work on them, and the routes that list the hosts and
 //! pools, answer the agents, mint join tokens, reset a pool's brake and read usage. The
-//! lease file it restores at start (a [`js_lease::LeaseTable`]) is the state of an earlier
-//! release; no route takes or ends a lease, and a later change removes the file.
+//! lease file of an earlier release, at the path `--state-file` names, is never opened,
+//! locked, read, written or deleted: a rollback to that release reads it as it was left.
 //!
 //! The library is the program: [`run`] takes the arguments and the streams to report
 //! to, and `main` calls it. The pieces:
@@ -12,10 +12,9 @@
 //!   without TLS).
 //! - [`Kinds`]: the provider kinds a `[[pool]]` of the configuration file may name,
 //!   compiled in (`static` and `lambdalabs`).
-//! - [`CapacitySource`]: where the hosts come from. [`StaticPoolSource`] reads the
-//!   operator's pool file. With agent registration on (see "Agents" below), the static
-//!   pool and the hosts agents register are two sources of the same trait, layered
-//!   behind one provider.
+//! - [`StaticPoolSource`]: the hosts the operator lists in a pool file (`--pool-config`),
+//!   read once at start. They are listed beside the hosts that register themselves (see
+//!   "Agents" below), and no work is placed on them.
 //! - [`network`]: how a machine the service launches reaches it (the `default` and
 //!   `tailscale` modes), and [`bootstrap`]: the script such a machine boots with, rendered
 //!   from a plan with its secrets masked or filled. A provider receives the rendered
@@ -40,21 +39,21 @@
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
 //! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
-//! | `--state-file <path>` | the base path of the server's state files: the lease file it restores, `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and the default place of `usage.db` |
+//! | `--state-file <path>` | the base path of the server's state files: `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and the default place of `usage.db`; a lease file of an earlier release at the path is left as it is |
 //! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; the server takes the store's writer lock before anything else (see "The store" below). Its content is never printed |
 //! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
-//! | `--store-unreachable-after <duration>` | `60s`: how long the store paths of the tick (the lease file's write, the job pass over the job tables) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both. Zero or an unparsable value is refused at start naming the flag |
-//! | `--boot initialise\|resume` | required: `initialise` may create the state file, `resume` needs it and restores the leases it holds |
+//! | `--store-unreachable-after <duration>` | `60s`: how long the store paths of the tick (the job pass over the job tables) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both. Zero or an unparsable value is refused at start naming the flag |
+//! | `--boot initialise\|resume` | required: `initialise` is the first start (a live elastic pool may have no records yet), `resume` a later one (its records must exist); the server reads no lease file at either, so `resume` without one starts |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
 //! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
 //! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk the pool books for every host and the floor a hello must meet; zero or absent books none; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that books disk and does not name `scratch-quota` refuses every agent that does not report disk, which no current agent does; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project`, whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than `disk_bytes`, with `shape-not-accepted`), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on; `share_class?`: a class that books part of a host, served beside `class` so that its work shares a host with room (it may not name `class`); a joined pool of the file takes the same key |
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
-//! | `--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement. The flag is accepted with the warning `--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)`; `--placement registry`, the removed first-free placement, is refused at start, `the registry placement mode was removed; js-sched is the only placement (drop the flag)`. The server keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets; it places the jobs on the hosts that registered themselves, and the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings, and the start is counted. The pool's `memory_schedulable_percent` is the scheduler's rule: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; `GET /v1/hosts` shows the cut memory as `shape.memory_bytes`, beside the percent. A host a whole-node request has set aside takes work of the pool's `share_class` only as backfill, by the end of the host's tail as the mark took it; a wall time above `server.max_lease_wall` never does. The reservations the scheduler keeps are written into the lease file's reservation ledger, and a restart with `--boot resume` puts them back. An agent pool (`--agent-pool-config`, or a joined pool of the file) whose capabilities name no `arch` is refused at start, naming the pool; an elastic pool is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them. Leases restored from the lease file are seated with the resources it records. Needs `--agent-pool-config` |
+//! | `--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement. The flag is accepted with the warning `--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)`; `--placement registry`, the removed first-free placement, is refused at start, `the registry placement mode was removed; js-sched is the only placement (drop the flag)`. The server keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets; it places the jobs on the hosts that registered themselves, and the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings, and the start is counted. The pool's `memory_schedulable_percent` is the scheduler's rule: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; `GET /v1/hosts` shows the cut memory as `shape.memory_bytes`, beside the percent. A host a whole-node request has set aside takes work of the pool's `share_class` only as backfill, by the end of the host's tail as the mark took it; a wall time above `server.max_lease_wall` never does. An agent pool (`--agent-pool-config`, or a joined pool of the file) whose capabilities name no `arch` is refused at start, naming the pool; an elastic pool is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. Needs `--agent-pool-config` |
 //! | `--estimate-feed` | off by default. Costs a restored lease at its estimated end, cut to its max-wall bound, when a whole-node request has to pick a host to drain: the lease's start plus the largest P90 wall time, among the profiles the usage file has learned, of the runs queued on it with a profile name. No route queues a run any more, so a lease has no such run and is costed at its bound, as every lease is without the flag. Needs `--agent-pool-config`; not with `--usage-off` |
 //! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of `GET /v1/hosts` and the join, brake and usage routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
-//! | `--tick` | how often the lease table is ticked, the job pass runs and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
+//! | `--tick` | how often the job pass runs and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
 //! | `--handshake-timeout` | a TLS client's time to finish its handshake, `10s` |
@@ -365,7 +364,7 @@
 //! The URL's `sslmode` (`disable` to `verify-full`) and `sslrootcert` choose its TLS. A
 //! Postgres store must hold the state schema already: the server creates none.
 //!
-//! The server takes the store's writer lock first, before it reads or locks the lease file
+//! The server takes the store's writer lock first, before it reads anything else
 //! and before it binds a listener, and holds it for its life: on Postgres a session-level
 //! advisory lock (`js_state::postgres::WRITER_LOCK_KEY`) on a connection of its own, on
 //! SQLite the lock file beside the store's file. A second server on the same store does not
@@ -384,7 +383,7 @@
 //! before the call it records); a heartbeat with no new taint, a known host's hello and the
 //! host book use no store. The first start over an empty store imports the four files once,
 //! in one transaction with the marker `meta/server-state-imported`, and never changes them.
-//! The lease file, the job store and the usage file are kept as without the setting.
+//! The job store and the usage file are kept as without the setting.
 //!
 //! # Who may do what
 //!
@@ -395,9 +394,9 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, lease?, leases?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `leases` lists every lease on the host in booking order and is left out when the host has at most one (`lease` is the first); `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when the host a reservation is draining is expected to be drained at the latest; reaching it gives nothing up, and the mark stays) are those of a registered host; so is `cordon {expires_at_ms}`, present while the host is cordoned (see "Cordon" below: a cordon left by a dead hook lapses within its last `lease_secs`, at most 3600 s after its last extension, or the host's own `:uncordon` lifts it) |
+//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` (a host of the pool file, listed with no state) or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (work still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when the host a reservation is draining is expected to be drained at the latest; reaching it gives nothing up, and the mark stays) are those of a registered host; so is `cordon {expires_at_ms}`, present while the host is cordoned (see "Cordon" below: a cordon left by a dead hook lapses within its last `lease_secs`, at most 3600 s after its last extension, or the host's own `:uncordon` lifts it) |
 //! | `GET /healthz` | 200 `ok`, no token; 503 `tick loop stopped` once the tick loop has stopped; else 503 `store unreachable` while the tick's store paths have failed for `--store-unreachable-after` (until a tick's store work succeeds) |
-//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `fenced`, `stale_cursor`, `lease_file`) and never an error's text, `lock` `none`, `held` or `lost`, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `fenced`, `stale_cursor`) and never an error's text, `lock` `none`, `held` or `lost`, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `POST /v1/pools/{pool}/brake/reset` | 202 `{pool, reset: "requested"}`; 401; 404 for another pool |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
@@ -425,12 +424,6 @@
 //! provider refused a launch for capacity or quota. A fetch that fails keeps the last
 //! catalog that came and is tried again at the next tick; until one has come (and after a
 //! restart) the catalog has never been read. A catalog that was read and is empty refuses.
-//!
-//! The lease table sits behind one async mutex, taken for the table call alone and never
-//! held across an await. A table call is synchronous: it writes and syncs the lease file
-//! and calls the provider on a runtime worker thread, with the lock held, so the tick waits
-//! for it. That is cheap for the static pool; a provider that can take long (one that calls
-//! over a network) must bound its own calls, see [`CapacitySource`].
 //!
 //! # Agents
 //!
@@ -466,11 +459,10 @@
 //! committed to the store) before it is acknowledged and survives a restart; an uncordon is written
 //! the same way. The routes are served by the agent routes' listener (`agent_listen`, if any).
 //!
-//! A leasing client asks for a lease as ever and is given a static host first, a
-//! registered one when the static pool has none; it cannot tell which it got except by
-//! `GET /v1/hosts`. A registered host takes a lease only while it is live (heard within
-//! the grace period) and serving. A host that goes silent keeps its lease and reads
-//! `Unknown` until it is heard again or the lease ends by its maximum wall time or a release.
+//! A host of the static pool file is listed (`GET /v1/hosts`, with `source` `static`) and
+//! takes no work; a hello for its id is refused. A registered host takes work only while it
+//! is live (heard within the grace period) and serving. A host that goes silent reads
+//! `Unknown` until it is heard again.
 //!
 //! **Tokens.** The join tokens and the client tokens are different secrets: each is a 401
 //! with an empty body on the other's routes, and a join-token file that holds the token of
@@ -545,76 +537,38 @@
 //!
 //! # Restart
 //!
-//! The lease file is the record of the leases, and for the static pool it is also the
-//! record of the pool's bookings: the pool is built again from `--pool-config` at every
-//! start and holds its bookings in memory only. So before the table looks at a held
-//! lease, the server reads the hosts the file names ([`js_lease::read_bookings`]) and
-//! asks the [`CapacitySource`] to seat each lease on its host again, in lease id order.
-//! A lease the source seats is observed present, stays held on the same host, and the
-//! host is not leased to anyone else; it can be released as before.
+//! The server keeps no record of leases: it never opens, locks, reads, writes or deletes
+//! the lease file of an earlier release, so a start with `--boot resume` and no lease file
+//! at the state file's path starts, and a lease file left there is ignored. A rollback to
+//! that release finds the file as this one left it. `--state-file` is the base path of the
+//! state files beside it (`.agents`, `.joins`, `.scaler`, `.jobs`), and `--boot` decides
+//! only whether a live elastic pool's records may be missing (`initialise`) or must exist
+//! (`resume`).
 //!
-//! A booking the source cannot seat is logged at warn level with the lease, the host,
-//! the state and the reason, and the table then finds the provider ignorant of it and
-//! drops it: a host the pool file no longer lists, or a host the file gives to two
-//! leases (the lower id keeps it). Edit the pool file with that in mind: removing a
-//! host from it ends the leases on it at the next start. A source that keeps its own
-//! state across restarts (a provider that is a service, or hosts that agents report) is
-//! free to ignore the bookings it is given.
+//! The static pool is built again from `--pool-config` at every start and lists the same
+//! hosts. The registry holds nothing else across a restart except the hosts that had
+//! reported a taint or were cordoned: each is put back as an *awaiting* host, bound as it
+//! was and tainted or cordoned as it was, and it counts toward `max_machines`, until its
+//! agent says hello again. An awaiting host whose agent has not returned is forgotten,
+//! binding included, once the grace period and `lost_retention` have passed since the
+//! restart that put it back; the next tick writes the file of bindings (or the store)
+//! without it. An agent whose heartbeat reaches a restarted server is answered 409
+//! `unknown-host` and says hello.
 //!
-//! The registered hosts are a source of that second kind in part. The registry holds
-//! nothing across a restart, so each booking of the lease file that names a host the
-//! static pool does not list is seated on the registry as an *awaiting* host: its lease
-//! is held and observes `Unknown` (never `Absent`, so the table keeps it), the host takes
-//! no new lease, and it counts toward `max_machines`, until its agent says hello again.
-//! That hello is admitted as any other and the lease then observes `Present`. An awaiting
-//! host whose lease has ended and whose agent has not returned is forgotten, binding
-//! included, once the grace period and `lost_retention` have passed since the restart
-//! that seated it; the next tick writes the file of bindings (or the store) without it.
-//! An agent whose heartbeat reaches a restarted server is answered 409 `unknown-host` and
-//! says hello.
-//!
-//! What would otherwise let any join-token holder take such a lease with the first hello
-//! after the restart is the binding of the host id to the credential and instance it was
-//! admitted with. The server keeps the bindings (in the store with a store setting, see
-//! "The store") in a file of its own beside the lease file, `<state file>.agents` (TOML,
-//! mode 0600, replaced whole, keys it does not know ignored), written when a hello admits a
-//! host and again at a tick when it differs, and reads it at start. It holds SHA-256
-//! digests of join tokens, not tokens, and the taint of each host that reported one: such a
-//! host is put back at start as an awaiting host (and counts toward `max_machines`) whether
-//! or not it holds a lease. The file is not part of the lease file, so the lease file's
-//! format and the static-only start are unchanged. A file that is present and unreadable, or not private, is a refused start
-//! naming `--state-file`. A missing file means no bindings: a lease on a registered host
-//! then restores without one, and the first hello binds the id. If the file cannot be
-//! written (the failure is logged and counted) a lease granted meanwhile survives a
-//! restart without its binding until a later tick writes it.
+//! What lets a host keep its id against any join-token holder after a restart is the
+//! binding of the host id to the credential and instance it was admitted with. The server
+//! keeps the bindings (in the store with a store setting, see "The store") in a file of its
+//! own beside the state file, `<state file>.agents` (TOML, mode 0600, replaced whole, keys
+//! it does not know ignored), written when a hello admits a host and again at a tick when it
+//! differs, and reads it at start. It holds SHA-256 digests of join tokens, not tokens, and
+//! the taint of each host that reported one. A file that is present and unreadable, or not
+//! private, is a refused start naming `--state-file`. A missing file means no bindings: the
+//! first hello binds the id. If the file cannot be written (the failure is logged and
+//! counted) a binding made meanwhile does not survive a restart until a later tick writes it.
 //!
 //! The whole-node reservations of the registry (the host set aside for a waiting request,
-//! the wait list's order, the failed-prepare counts, the hosts a request is
-//! kept off and until when) are kept in the lease file, as the table's reservation
-//! ledger: each tick hands the table the registry's ledger when it changed and the table
-//! writes it in the same replace as the leases, so the file is at most one tick behind and
-//! the final tick of a shutdown brings it level. With `--boot resume` the registry is
-//! given the ledger before any agent says hello. A restored mark stands while its host has
-//! not yet said hello, a restored request waits in its place until its consumer presents
-//! the same request id again (the file does not hold what the request asks for), and a
-//! reservation whose deadline had passed, or would pass sooner, gets the boot plus
-//! [`RESERVATION_BOOT_GRACE`] (two minutes) to drain; the deadline is when the host is
-//! expected to be drained at the latest, and reaching it gives nothing up.
-//! What is not presented again, or not heard from again, within the pool's `regain_grace`
-//! is dropped and counted ([`js_registry::Registry::dropped_reservations`]); the count
-//! of failed prepares is kept, so a restart does not reset `max_replace`. The ledger
-//! writes a give-up count of zero and reads an older one and ignores it
-//! (`max_reserve_attempts` is deprecated and ignored). Estimates are not kept. The format is
-//! additive: the rows and their keys are read past by a build that does not know them.
-//! A reservation in the file belongs to a pending lease of an earlier release. The lease
-//! file keeps that lease's request with it, so after a `--boot resume` the first tick
-//! presents the pending lease's request again under its id: that is the presentation that
-//! claims the restored record, so the drain continues on the host set aside with its stored
-//! deadline (floored as above, never reset). The host keeps the mark only as the
-//! registry's pass allows: a pass that finds no capable
-//! host at all (none has said hello yet, and none is put back from the lease file) has a
-//! ceiling of zero hosts whole and drops the restored mark, and the request then waits for
-//! a host as a new one would.
+//! the wait list's order) are in memory only: a restart forgets them, and the requests that
+//! are presented again are reserved anew.
 //!
 //! # Usage
 //!
@@ -631,7 +585,7 @@
 //! from and `runs_without_key` counts each. The seam types and
 //! [`NoUsage`] are public so that a test or an embedding program can supply its own
 //! ([`Config::with_usage_sink`], [`Config::with_key_source`]). Without a sink of its own
-//! the server records into the SQLite file `--usage-db` names (beside the lease file by
+//! the server records into the SQLite file `--usage-db` names (beside the state file by
 //! default): node minutes are written by the flush, and the profiles learned from clean
 //! runs are kept under `--profile-store-bytes`; a file that cannot be opened refuses the
 //! start. `--usage-off` leaves the usage side out altogether.
@@ -661,21 +615,17 @@
 //!
 //! # Ticks
 //!
-//! Only a tick ends a restored lease at its maximum wall time, retries a stop or resolves a pending start. The server
-//! ticks the table (then advances the agent registry, when agent registration is on) at every tick of its [`Ticker`] (a timer of `--tick` in production),
-//! logs what a tick changed, and counts the ticks that could not write the lease file
-//! ([`Running::save_errors`]); `/healthz` answers 503 once the loop has stopped, or while the
-//! store paths have failed for `--store-unreachable-after`. On
-//! SIGTERM or ctrl-c the server stops accepting, gives the requests
-//! in flight `--drain-timeout` to finish (a connection still open then is cut), ticks
-//! once more and exits 0. If that last tick cannot write the lease file the file is
-//! behind the table, so the server logs the cause and exits 1 instead. A second signal
-//! while it drains is not needed: the drain is bounded.
+//! The server ticks (the job pass, then the agent registry, when agent registration is on)
+//! at every tick of its [`Ticker`] (a timer of `--tick` in production); `/healthz` answers
+//! 503 once the loop has stopped, or while the store paths have failed for
+//! `--store-unreachable-after`. On SIGTERM or ctrl-c the server stops accepting, gives the
+//! requests in flight `--drain-timeout` to finish (a connection still open then is cut),
+//! ticks once more and exits 0. A second signal while it drains is not needed: the drain is
+//! bounded.
 //!
 //! SIGHUP reloads the TLS pair (`--tls-cert`, `--tls-key`) without a restart, so a
 //! renewed certificate is served while the whole-host reservations in memory stay.
 
-mod adapt;
 mod admit;
 mod agent_api;
 mod agent_pool;
@@ -686,9 +636,9 @@ mod alerts;
 mod api;
 pub mod bootstrap;
 mod brake_api;
-mod capacity;
 mod catalogs;
 mod checks;
+mod clock;
 mod config;
 mod cordon;
 mod error;
@@ -719,7 +669,6 @@ mod job_whole;
 mod join_api;
 mod join_tokens;
 mod kinds;
-mod layered;
 mod listener;
 mod logs;
 mod metrics;
@@ -729,10 +678,10 @@ mod platform;
 mod pool;
 mod program;
 mod rate;
-mod reservations;
 mod scaler;
 mod sched;
 mod server;
+mod static_pool;
 mod status;
 mod store;
 mod store_health;
@@ -752,10 +701,9 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
-pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
 pub use catalogs::Catalogs;
+pub use clock::SharedClock;
 pub use config::{
     BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES, Placement, TlsFiles,
     Token, is_private_address, parse_duration,
@@ -771,16 +719,14 @@ pub use kinds::{
     BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, PlatformKind,
     SecretFiles,
 };
-#[doc(hidden)]
-pub use layered::LayeredProvider;
 pub use platform::DefaultPlatform;
 pub use pool::LaunchInputs;
-pub use reservations::RESERVATION_BOOT_GRACE;
 pub use scaler::{
     Call, Effects, InFlight, JobTables, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET,
     RETRY_AFTER, RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_with_checks};
+pub use static_pool::StaticPoolSource;
 pub use store::LockLost;
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{

@@ -8,11 +8,11 @@
 //!
 //! The group's state is [`Ctx`]. Until [`Ctx::served`] gives it the server's handles every
 //! call answers `UNIMPLEMENTED`. It reaches the server through three narrow traits, so the
-//! service holds no lease table or registry of its own:
+//! service holds no registry of its own:
 //!
 //! - [`Hosts`], over the server's shared state ([`Shared`]): the listing that
-//!   `GET /v1/hosts` writes ([`hosts::listing`], which reads the pool's hosts without the
-//!   table's lock: the pool's lock taken and dropped before the registry's), and the registry's cordon of a host, saved before it is acknowledged.
+//!   `GET /v1/hosts` writes ([`hosts::listing`]: the static pool's hosts and the registry's),
+//!   and the registry's cordon of a host, saved before it is acknowledged.
 //! - [`Pools`], over the status of the pools ([`PoolStatus`]): what `GET /v1/pools` writes,
 //!   mapped here field by field, so nothing but the fields named below leaves the server.
 //! - [`History`], twice: over the usage sink ([`SinkHistory`]), the ended bookings of leases
@@ -22,9 +22,8 @@
 //!   and answers an empty page when the server holds neither.
 //!
 //! The booked resources of a host are its live (booked or releasing) allocations in the job
-//! tables, in the order they were booked, then the leases still held on it through the lease
-//! routes, each listed under its lease id's text. The job tables are read after both locks
-//! are dropped, on the pool for blocking calls.
+//! tables, in the order they were booked. The job tables are read on the pool for blocking
+//! calls.
 //!
 //! The reads change nothing: they take no write lock, write no row, bump no counter and move
 //! no state on. A cordon follows the rules of the host's own route ([`cordon`]): 300 s when
@@ -46,7 +45,6 @@ use js_proto::v1::{
     ListProvidersResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use js_registry::{HostMark, HostState};
-use js_types::Held;
 use js_types::HostId;
 use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use tonic::{Request, Response, Status};
@@ -57,7 +55,7 @@ use crate::agents::CordonFault;
 use crate::api::Shared;
 use crate::checks::State;
 use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, UNKNOWN_HOST};
-use crate::hosts::{self, HostEntry, HostList, LeasesOn, MemoryView, ShapeView, Source};
+use crate::hosts::{self, HostEntry, HostList, MemoryView, ShapeView, Source};
 use crate::status::Status as PoolStatus;
 use crate::status::{CheckView, MachineView, NamedCheckView, PoolView, PoolsView, ProviderState};
 use crate::usage::{UsageFault, UsageSink};
@@ -93,8 +91,8 @@ const CREDENTIALS: &str = "credentials";
 /// The hosts as the server holds them.
 #[tonic::async_trait]
 pub(crate) trait Hosts: Send + Sync {
-    /// Every host, as `GET /v1/hosts` lists it, and the leases booked on each.
-    async fn hosts(&self) -> (HostList, LeasesOn);
+    /// Every host, as `GET /v1/hosts` lists it.
+    async fn hosts(&self) -> HostList;
 
     /// Cordons `host` for `length` from now, or renews its cordon (never shortening it), and
     /// saves the bindings; whether this placed the cordon (the host was not cordoned).
@@ -235,8 +233,8 @@ pub(super) async fn list_hosts(
     _request: Request<ListHostsRequest>,
 ) -> Result<Response<ListHostsResponse>, Status> {
     let served = served(api)?;
-    let (list, leases) = served.hosts.0.hosts().await;
-    let hosts = described(api, list.hosts, &leases).await?;
+    let list = served.hosts.0.hosts().await;
+    let hosts = described(api, list.hosts).await?;
     Ok(Response::new(ListHostsResponse { hosts }))
 }
 
@@ -370,9 +368,9 @@ fn refusal(refused: Refused) -> Status {
 /// The host `id` as `ListHosts` lists it now, or `NOT_FOUND` `unknown-host` when the listing
 /// no longer holds it.
 async fn one_host(api: &JobApi, served: &Served, id: &HostId) -> Result<wire::Host, Status> {
-    let (list, leases) = served.hosts.0.hosts().await;
+    let list = served.hosts.0.hosts().await;
     let entries = list.hosts.into_iter().filter(|entry| entry.id == *id);
-    let mut hosts = described(api, entries.collect(), &leases).await?;
+    let mut hosts = described(api, entries.collect()).await?;
     hosts.pop().ok_or_else(|| Status::not_found(UNKNOWN_HOST))
 }
 
@@ -380,12 +378,8 @@ async fn one_host(api: &JobApi, served: &Served, id: &HostId) -> Result<wire::Ho
 type Live = Vec<(AllocationRecord, Option<JobRecord>)>;
 
 /// `entries` as the service tells them, each with what is booked on it: its live
-/// allocations, read from the job tables on the pool for blocking calls, then `leases`.
-async fn described(
-    api: &JobApi,
-    entries: Vec<HostEntry>,
-    leases: &LeasesOn,
-) -> Result<Vec<wire::Host>, Status> {
+/// allocations, read from the job tables on the pool for blocking calls.
+async fn described(api: &JobApi, entries: Vec<HostEntry>) -> Result<Vec<wire::Host>, Status> {
     let ids: Vec<HostId> = entries.iter().map(|entry| entry.id.clone()).collect();
     let jobs = Arc::clone(&api.jobs);
     let read = move || ids.iter().map(|id| jobs.live_on(id)).collect();
@@ -394,20 +388,16 @@ async fn described(
         unavailable_if_fenced(api, &error, Status::unavailable(STORE_UNAVAILABLE))
     })?;
     let hosts = entries.into_iter().zip(live);
-    Ok(hosts
-        .map(|(entry, live)| host(entry, live, leases))
-        .collect())
+    Ok(hosts.map(|(entry, live)| host(entry, live)).collect())
 }
 
-/// One host as the service tells it, with `live` and its `leases` booked on it.
-fn host(entry: HostEntry, mut live: Live, leases: &LeasesOn) -> wire::Host {
+/// One host as the service tells it, with the allocations `live` on it.
+fn host(entry: HostEntry, mut live: Live) -> wire::Host {
     let shape = shape(&entry.shape);
     live.sort_by_key(|(allocation, _)| allocation.created_at);
     let jobs = live.iter();
     let jobs = jobs.map(|(allocation, _)| job_booking(allocation, &shape));
-    let mut booked: Vec<wire::HostBooking> = jobs.collect();
-    let held = leases.get(&entry.id).into_iter().flatten();
-    booked.extend(held.map(lease_booking));
+    let booked: Vec<wire::HostBooking> = jobs.collect();
     wire::Host {
         id: entry.id.to_string(),
         source: i32::from(source(entry.source)),
@@ -458,19 +448,6 @@ fn job_booking(allocation: &AllocationRecord, whole: &wire::Shape) -> wire::Host
             .copied()
             .map(u32::from)
             .collect(),
-    }
-}
-
-/// What a lease held through the lease routes books, under the lease id's text.
-fn lease_booking(held: &Held) -> wire::HostBooking {
-    let resources = &held.resources;
-    wire::HostBooking {
-        job_id: held.lease.to_string(),
-        cpu_millis: resources.cpu_millis(),
-        memory_bytes: resources.memory_bytes(),
-        disk_bytes: resources.disk_bytes(),
-        gpus: gpus_of(resources.gpus()),
-        host_ports: Vec::new(),
     }
 }
 
@@ -763,8 +740,8 @@ fn estimated_run(row: &EndedRow) -> Option<u64> {
 
 #[tonic::async_trait]
 impl Hosts for Shared {
-    async fn hosts(&self) -> (HostList, LeasesOn) {
-        hosts::listing(self).await
+    async fn hosts(&self) -> HostList {
+        hosts::listing(self)
     }
 
     async fn cordon(&self, host: &HostId, length: Duration) -> Result<bool, Refused> {

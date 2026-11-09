@@ -862,7 +862,7 @@ version = "0.1.0"
 }
 
 /// The crates that may build against `js-pool-static` outside tests: `js-lease-server`,
-/// whose `kinds.rs`, `adapt.rs` and `capacity.rs` build the pool from the hosts file.
+/// whose `kinds.rs` and `static_pool.rs` build the pool from the hosts file.
 /// The booking table (`HostBook`, `Candidate`, `Held`, `SeatError`) is `js-provider`'s,
 /// so no other crate needs the pool crate to book a host.
 const MAY_DEPEND_ON_POOL_STATIC: &[&str] = &["js-lease-server"];

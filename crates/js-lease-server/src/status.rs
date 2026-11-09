@@ -40,9 +40,9 @@ use js_types::{Clock, Timestamp};
 use js_types::{ExecMode, ProviderId, RequestId};
 use serde::Serialize;
 
-use crate::adapt::SharedClock;
 use crate::catalogs::Catalogs;
 use crate::checks::{Checked, State, Verdict};
+use crate::clock::SharedClock;
 use crate::hosts::MemoryView;
 use crate::logs::{LogCounters, LogGrants};
 use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};

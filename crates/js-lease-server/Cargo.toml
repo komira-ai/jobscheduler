@@ -13,7 +13,6 @@ js-agent-wire = { path = "../js-agent-wire" }
 js-api-gateway = { path = "../js-api-gateway" }
 js-elastic = { path = "../js-elastic" }
 js-jobs = { path = "../js-jobs" }
-js-lease = { path = "../js-lease" }
 js-logmint = { path = "../js-logmint" }
 js-logstore = { path = "../js-logstore" }
 js-platform = { path = "../js-platform" }
@@ -85,7 +84,6 @@ js-conformance = { path = "../js-conformance" }
 js-lease-server = { path = ".", features = ["in-process"] }
 # The elastic fake cloud with its own bill (tests/server/elastic_fake_e2e.rs).
 js-elastic-fake = { path = "../js-elastic-fake" }
-js-provider-fake = { path = "../js-provider-fake" }
 # What the server's tests read of the placer: its fallback counters, the engines it built and
 # its scheduler (src/sched/*_tests.rs).
 js-sched-placer = { path = "../js-sched-placer", features = ["test-support"] }
