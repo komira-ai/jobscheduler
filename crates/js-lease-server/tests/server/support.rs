@@ -348,8 +348,10 @@ pub async fn request(
 }
 
 /// Sends one request over `stream` (plain or TLS) and reads the reply until the
-/// server closes. A reset after the reply started does not lose what was read: a
-/// server that answers without reading a large body closes on unread data.
+/// server closes. A failed write or read after part of the reply was read keeps what
+/// was read (a server that refuses a body over its limit closes without reading the
+/// rest); one that leaves no reply at all fails the test with the error, so a lost
+/// reply is not taken for a status of 0.
 pub async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     method: &str,
@@ -363,12 +365,37 @@ pub async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Like [`exchange`], with the whole `Authorization` header value given.
 pub async fn exchange_authorized<S: AsyncRead + AsyncWrite + Unpin>(
-    mut stream: S,
+    stream: S,
     method: &str,
     path: &str,
     authorization: Option<&str>,
     body: Option<&[u8]>,
 ) -> Reply {
+    let (raw, failed) = exchange_raw(stream, method, path, authorization, body).await;
+    if let (true, Some(error)) = (raw.is_empty(), failed) {
+        panic!("{method} {path}: no reply, the connection failed: {error}");
+    }
+    parse_reply(&raw)
+}
+
+/// Sends one HTTP/1.1 request over a new plain connection to a listener that is to refuse
+/// it below HTTP (plain text sent to a TLS port), and reads what comes back to the end of
+/// the connection, whatever error ends it: the reply, of status 0 when there was none.
+pub async fn unanswered(addr: std::net::SocketAddr, method: &str, path: &str) -> Reply {
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (raw, _) = exchange_raw(stream, method, path, None, None).await;
+    parse_reply(&raw)
+}
+
+/// Sends one request over `stream` and reads until the connection ends: the bytes read,
+/// and the first error of the write, the flush and the read.
+async fn exchange_raw<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    body: Option<&[u8]>,
+) -> (Vec<u8>, Option<std::io::Error>) {
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n");
     if let Some(value) = authorization {
         head.push_str(&format!("Authorization: {value}\r\n"));
@@ -377,11 +404,11 @@ pub async fn exchange_authorized<S: AsyncRead + AsyncWrite + Unpin>(
     head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
     let mut message = head.into_bytes();
     message.extend_from_slice(body);
-    let _ = stream.write_all(&message).await;
-    let _ = stream.flush().await;
+    let sent = stream.write_all(&message).await;
+    let flushed = stream.flush().await;
     let mut raw = Vec::new();
-    let _ = stream.read_to_end(&mut raw).await;
-    parse_reply(&raw)
+    let read = stream.read_to_end(&mut raw).await.map(drop);
+    (raw, sent.and(flushed).and(read).err())
 }
 
 /// Splits a raw reply into status and body.

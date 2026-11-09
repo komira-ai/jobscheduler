@@ -13,8 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 
 use crate::support::{
-    Harness, Scratch, TOKEN, args_with, config, exchange, guard, lease_body, replace, request,
-    start,
+    Harness, Scratch, TOKEN, args_with, config, exchange, guard, lease_body, replace, start,
+    unanswered,
 };
 use js_lease_server::{Limits, SharedClock, channel_ticker};
 
@@ -106,7 +106,7 @@ async fn tls_round_trip() {
     .await;
     assert_eq!(made.status, 201, "{}", made.body);
 
-    let plain = request(addr, "GET", "/healthz", None, None).await;
+    let plain = unanswered(addr, "GET", "/healthz").await;
     assert_eq!(plain.status, 0);
     let mut junk = tokio::net::TcpStream::connect(addr).await.unwrap();
     junk.write_all(&[0x16, 0x03, 0x01, 0xff, 0xff, 0, 0, 0])
