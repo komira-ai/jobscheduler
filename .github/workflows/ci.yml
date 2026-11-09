@@ -734,11 +734,11 @@ jobs:
   # the same either way.
   coverage:
     runs-on: ubuntu-latest
-    # 80, not 60, until js-placement-pass-cost: the sim cell's server re-reads every active
+    # 100, not 60, until js-placement-pass-cost: the sim cell's server re-reads every active
     # job and re-places every queued job on every heartbeat, and unoptimised and
-    # instrumented the 200-host fault scenario alone runs over half an hour. That task
+    # instrumented the 200-host fault scenario alone runs about 40 minutes. That task
     # brings the limit back to 60.
-    timeout-minutes: 80
+    timeout-minutes: 100
     permissions:
       contents: read
     services:
