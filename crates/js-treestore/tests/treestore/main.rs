@@ -1,16 +1,16 @@
 //! The tree store's tests, in one binary so the generic store is compiled once.
+//!
+//! Nothing here starts a child process; those tests are in `tests/children`. A child holds
+//! a copy of every file the test process has open from its spawn until its exec closes
+//! them, among them the lock of a store another test has just dropped, and that test's
+//! next open of the directory is then refused as `Locked`.
 
 mod common;
 mod crash;
 mod ensure;
 mod evict;
 mod flight;
-mod harness_checks;
 mod mac_checks;
-#[cfg(target_os = "macos")]
-mod mac_host;
 mod mac_seal;
-#[path = "../support/priv_harness.rs"]
-mod priv_harness;
 mod restart;
 mod review;
