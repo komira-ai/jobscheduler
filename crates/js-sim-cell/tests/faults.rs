@@ -1,9 +1,10 @@
 //! The fault family: what goes wrong between the server and its hosts. Agents that die
 //! and return, agents that never return, a partition longer than the grace that heals,
 //! a lossy wire, a host that goes silent holding a run the server never saw listed, a
-//! restart of the server, and a host forgotten and seated again. Each runs over sixteen seeds (the 200-host scenario over four) under every invariant of `Invariant::ALL`
-//! (the step invariants after every step, the end invariants once it has settled), and
-//! states in its doc comment the row of the design (sections 7 and 8) it covers.
+//! restart of the server, and a host forgotten and seated again. Each runs over sixteen seeds
+//! under every invariant of `Invariant::ALL` (the step invariants after every step, the end
+//! invariants once it has settled), and states in its doc comment the row of the design
+//! (sections 7 and 8) it covers.
 //!
 //! Each states only what the server does today and the design also promises; none pins
 //! a behaviour that section 8 marks Open. A scenario about a situation shows with a
@@ -66,13 +67,9 @@ const DIE_REPLACE_AT: Duration = Duration::from_secs(95);
 const DIE_SECOND_AT: Duration = Duration::from_secs(135);
 const DIE_SECOND_RUNS: u32 = 100;
 const DIE_SETTLE: Duration = Duration::from_secs(1_300);
-/// The 200-host scenario is the family's largest by far, and over the job service a seed
-/// of it costs about four CPU minutes, so it runs [`DIE_SEEDS`] seeds, on this many threads,
-/// a quarter each.
-// TODO(js-placement-pass-cost): restore 16 seeds, the family's [`SEEDS`], once the
-// placement pass stops re-reading every active job and re-placing every queued job on
-// every heartbeat; that follow-up measures the cost of the 16 seeds before it lands.
-const DIE_SEEDS: u64 = 4;
+/// The 200-host scenario is the family's largest by far, so its seeds, the family's
+/// [`SEEDS`], run on this many threads, a quarter each.
+const DIE_SEEDS: u64 = SEEDS;
 const DIE_THREADS: u64 = 4;
 
 /// Agents killed for good: five of fifty hosts, at the server's default heartbeat.
