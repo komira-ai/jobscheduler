@@ -16,19 +16,19 @@ fn repo() -> PathBuf {
 
 /// A scratch copy of the workspace's manifests, named `name`.
 struct Copy {
-    dir: PathBuf,
+    /// Removed, with the copy in it, when the copy is dropped.
+    dir: js_testkit::dir::TestDir,
 }
 
 impl Copy {
     /// Copies the root files, every crate's manifest and every `.rs` file under its `src/`.
     fn new(name: &str) -> Copy {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("xtask-layering")
-            .join(name);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).expect("clear scratch");
-        }
-        let copy = Copy { dir };
+        let copy = Copy {
+            dir: js_testkit::dir::TestDir::under(
+                env!("CARGO_TARGET_TMPDIR"),
+                &format!("xtask-layering-{name}"),
+            ),
+        };
         for file in ["Cargo.toml", "Cargo.lock", "layers.toml"] {
             copy.put(
                 file,

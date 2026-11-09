@@ -4,15 +4,15 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use js_testkit::dir::TestDir;
 use js_vmm::stage::{Env, Plan, execute, remove_path};
 
 /// Catches a directory made for the volume (and the manifest) whose mode depends on the
 /// umask of the host process: under 077 each must still be 0755 (0644 for the file).
 #[test]
 fn directories_made_on_the_volume_have_their_modes_whatever_the_umask_is() {
-    let volume = Path::new(env!("CARGO_TARGET_TMPDIR")).join("stage-umask");
-    let _ = std::fs::remove_dir_all(&volume);
-    std::fs::create_dir_all(&volume).expect("volume");
+    let volume = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "stage-umask");
+    let volume = volume.path();
     let (free, clone) = (|_: &Path| Ok(u64::MAX), |_: &Path, _: &Path| Ok(()));
     let chown = |_: &Path| Ok(());
     let env = Env {
@@ -23,7 +23,7 @@ fn directories_made_on_the_volume_have_their_modes_whatever_the_umask_is() {
     };
     // SAFETY: umask only sets this process's file creation mask; nothing else runs here.
     let before = unsafe { libc::umask(0o077) };
-    let out = execute(&volume, &Plan::default(), &env);
+    let out = execute(volume, &Plan::default(), &env);
     // SAFETY: as above.
     unsafe { libc::umask(before) };
     out.expect("execute");

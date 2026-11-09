@@ -5,19 +5,16 @@
 //! finished, process, and these tests pin that the result is complete and runnable.)
 
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
+use js_testkit::dir::TestDir;
 use js_testkit::spawn::{install_copy, install_script};
 
-/// A fresh directory for one test, under Cargo's per-target temporary directory.
-fn dir(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("old dir");
-    }
-    std::fs::create_dir_all(&dir).expect("dir");
-    dir
+/// A fresh directory for one test, `<name>-<pid>-<n>` under Cargo's per-target temporary
+/// directory, removed when the returned guard drops (so keep it for the test's length).
+fn dir(name: &str) -> TestDir {
+    TestDir::under(env!("CARGO_TARGET_TMPDIR"), name)
 }
 
 fn mode(path: &Path) -> u32 {
@@ -28,7 +25,8 @@ fn mode(path: &Path) -> u32 {
 /// mode: it runs and prints what it was given, byte for byte (quotes and `%` kept).
 #[test]
 fn an_installed_script_runs_with_the_mode_asked_for() {
-    let path = dir("install-script").join("tool");
+    let scratch = dir("install-script");
+    let path = scratch.join("tool");
     install_script(&path, "#!/bin/sh\necho 'a \"b\" %s'\n", "755");
     assert_eq!(mode(&path), 0o755);
     let out = Command::new(&path).output().expect("runs");
@@ -39,7 +37,8 @@ fn an_installed_script_runs_with_the_mode_asked_for() {
 /// bit included).
 #[test]
 fn an_installed_copy_has_the_source_bytes_and_the_mode_asked_for() {
-    let from = dir("install-copy").join("from");
+    let scratch = dir("install-copy");
+    let from = scratch.join("from");
     std::fs::write(&from, b"#!/bin/sh\n").expect("source");
     let to = from.with_file_name("to");
     install_copy(&from, &to, "4755");
@@ -52,6 +51,7 @@ fn an_installed_copy_has_the_source_bytes_and_the_mode_asked_for() {
 #[test]
 #[should_panic(expected = "installing a program")]
 fn an_install_that_fails_panics() {
-    let path = dir("install-fails").join("no-such-dir/tool");
+    let scratch = dir("install-fails");
+    let path = scratch.join("no-such-dir/tool");
     install_script(&path, "x", "755");
 }

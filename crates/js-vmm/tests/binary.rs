@@ -2,8 +2,10 @@
 //! off macOS, and, on macOS, the commands that need no hypervisor (a missing base bundle,
 //! a refused digest). The hypervisor parts run only on a Mac with virtualization.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
+
+use js_testkit::dir::TestDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_js-vmm");
 
@@ -11,13 +13,10 @@ fn run(args: &[&str]) -> Output {
     Command::new(BIN).args(args).output().expect("run js-vmm")
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("binary")
-        .join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch");
-    dir
+/// A fresh `<name>-<pid>-<n>` directory under the target's `binary` scratch directory,
+/// removed when the returned guard drops.
+fn scratch(name: &str) -> TestDir {
+    TestDir::under(Path::new(env!("CARGO_TARGET_TMPDIR")).join("binary"), name)
 }
 
 /// Catches a binary that does not answer `--version` with its name and version and exit
