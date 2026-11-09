@@ -1,6 +1,7 @@
 # The js-agent deb (packaging/js-agent): built from the musl binary by nfpm (pinned by
-# SHA-256), checked against the list of what it may contain (`cargo xtask pkg check-deb`),
-# and attested. It publishes nothing: no release, no package repository, no registry, no
+# SHA-256, restored from the actions cache under its version and SHA-256 and downloaded only
+# when not cached, as ci.yml's header says), checked against the list of what it may contain
+# (`cargo xtask pkg check-deb`), and attested. It publishes nothing: no release, no package repository, no registry, no
 # bucket. The deb is a workflow artifact for seven days, and its provenance attestation is
 # stored by GitHub; getting it anywhere else is a separate, deliberate step.
 #
@@ -81,8 +82,18 @@ jobs:
         run: cargo xtask release stamp --to "$VERSION"
       - name: Build js-agent
         run: cargo build --locked --release --target "$TARGET" -p js-agent --bin js-agent
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: nfpm-cache
+        with:
+          path: ${{ runner.temp }}/pinned/nfpm.tar.gz
+          key: pinned-nfpm-${{ env.NFPM_VERSION }}-${{ env.NFPM_SHA256_X86_64_LINUX }}
       - name: Fetch nfpm (pinned version, checked by SHA-256)
-        run: cargo xtask fetch --url "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" --sha256 "$NFPM_SHA256_X86_64_LINUX" --out "$RUNNER_TEMP/tools/nfpm" --extract tar.gz --member nfpm
+        run: cargo xtask fetch --url "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" --sha256 "$NFPM_SHA256_X86_64_LINUX" --cache "$RUNNER_TEMP/pinned/nfpm.tar.gz" --out "$RUNNER_TEMP/tools/nfpm" --extract tar.gz --member nfpm
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.nfpm-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/nfpm.tar.gz
+          key: ${{ steps.nfpm-cache.outputs.cache-primary-key }}
       - name: Build the deb
         env:
           SOURCE_DATE_EPOCH: '1790000000'
