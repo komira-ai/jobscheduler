@@ -68,6 +68,8 @@ impl StateMachine for Scheduler {
                 capacity,
                 caps,
             } => {
+                // The worker's capabilities are written: no kept match stands.
+                self.matches.forget();
                 let raw_memory_bytes = capacity.memory_bytes;
                 let capacity = self.memory_percent.of_capacity(capacity);
                 let now = self.now;
@@ -129,6 +131,7 @@ impl StateMachine for Scheduler {
                 capacity,
                 caps,
             } => {
+                self.matches.forget();
                 let raw_memory_bytes = capacity.memory_bytes;
                 let capacity = self.memory_percent.of_capacity(capacity);
                 if let Some(w) = self.workers.get_mut(&worker) {

@@ -11,7 +11,7 @@ publish.workspace = true
 # What a test reads of the placer and its engine (the fallback counters, the engines built,
 # the scheduler and what it books). The crate's own unit tests have it through `cfg(test)`;
 # a crate whose tests read the placer turns it on in its own `[dev-dependencies]` entry.
-test-support = []
+test-support = ["js-sched/test-support"]
 
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
@@ -31,6 +31,8 @@ js-elastic = { path = "../js-elastic" }
 # The whole-host job tests run the job tables on the in-memory fake, behind the wrapper that
 # fails or races a commit.
 js-jobs = { path = "../js-jobs", features = ["test-support"] }
+# The walk tests count the platform matches the scheduler makes.
+js-sched = { path = "../js-sched", features = ["test-support"] }
 js-state = { path = "../js-state", features = ["test-support"] }
 
 [lints]
