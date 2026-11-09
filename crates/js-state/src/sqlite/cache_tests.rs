@@ -112,8 +112,8 @@ fn the_reader_prepares_each_statement_once() {
 
 // Catches a cached statement handed back to the reader's cache still holding the snapshot
 // of a read that stopped before its last row: the reader would go on answering from that
-// snapshot and never see a later commit. Each read below stops early, then a commit is
-// made, and every read sees it.
+// snapshot and never see a later commit. A range scan and a feed page each stop after one
+// row of three; then a commit is made, and `get`, both scans and the feed all see it.
 #[test]
 fn a_read_that_stops_early_does_not_keep_its_snapshot() {
     let dir = unit_dir("snapshot");
