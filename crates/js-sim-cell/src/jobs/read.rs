@@ -25,7 +25,7 @@ use js_jobs::{
     AllocationRecord, AllocationStep, JobId, JobRecord, JobState, JobStore, StartFailure,
 };
 use js_lease_server::in_process::{InProcess, ServerIds};
-use js_state::{ResumeToken, Store};
+use js_state::{ResumeToken, Store, StoreTime};
 use js_types::sched::FarmTime;
 
 use super::{AllocationRead, AllocationRow, JobRead};
@@ -140,14 +140,19 @@ fn all_jobs(tables: &Tables) -> Vec<JobRecord> {
 
 /// An allocation record as the cell observes it, its creation on the virtual clock.
 fn row_of(record: AllocationRecord) -> AllocationRow {
-    let created = record.created_at.as_duration().as_millis();
+    let virtual_at = |at: StoreTime| {
+        let millis = at.as_duration().as_millis();
+        virtual_time(u64::try_from(millis).unwrap_or(u64::MAX))
+    };
     AllocationRow {
         job: record.job,
         allocation: record.allocation_id,
         host: record.host,
         step: record.step,
-        created_at: virtual_time(u64::try_from(created).unwrap_or(u64::MAX)),
+        created_at: virtual_at(record.created_at),
         end_reason: record.end_reason,
+        freed_at: record.freed_at.map(virtual_at),
+        booked: record.booked,
     }
 }
 

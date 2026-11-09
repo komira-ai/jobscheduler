@@ -69,9 +69,11 @@ use crate::node::{Applied, CellNode};
 use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Killed, Observations};
 use crate::server::{JOIN_TOKEN, ServerNode, ServerSpec};
 use crate::text;
+use crate::usage::UsageReadFault;
 use crate::work::Work;
 
 mod cloud_faults;
+mod cordon;
 mod elastic;
 mod store;
 
@@ -207,6 +209,8 @@ pub struct Cell {
     machines: elastic::Machines,
     /// The join tokens the cell minted, and what it saw of the server's store.
     kept: store::Kept,
+    /// The defect the cell applies to the usage rows it reads at the end.
+    usage_fault: UsageReadFault,
 }
 
 impl Cell {
@@ -270,6 +274,7 @@ impl Cell {
             tables: Reader::default(),
             machines: elastic::Machines::default(),
             kept: store::Kept::default(),
+            usage_fault: UsageReadFault::default(),
         };
         cell.set_faults(faults);
         Ok(cell)
@@ -413,6 +418,7 @@ impl Cell {
         let end = self.sim.now().saturating_add(within);
         self.run_until(end)?;
         self.reread(true);
+        self.read_usage();
         self.read_cloud();
         self.observations.at = self.sim.now();
         let at = self.observations.at;

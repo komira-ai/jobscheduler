@@ -168,6 +168,8 @@ mod tests {
             step,
             created_at: at(0),
             end_reason: None,
+            freed_at: None,
+            booked: js_jobs::Booked::WholeHost,
         }
     }
 

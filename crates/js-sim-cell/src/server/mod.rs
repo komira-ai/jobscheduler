@@ -17,7 +17,8 @@
 //! virtual time, through the client router, which the bus never drops.
 //! Every server also serves the job service, in process ([`JOBS_PATH`]): a client
 //! call whose path is under it goes to the job service's router (its HTTP/JSON gateway),
-//! and every other to the client router.
+//! (so are `GET /v1/usage` and the `/v1/hosts/` routes of the operator's cordon), and every
+//! other to the client router.
 //!
 //! # Ids and the job store's clock
 //!
@@ -118,6 +119,10 @@ pub fn virtual_time(millis: u64) -> FarmTime {
 /// service's router.
 pub const JOBS_PATH: &str = "/v1/jobs";
 
+/// The paths the job service's router serves: [`JOBS_PATH`], the usage history
+/// (`GET /v1/usage`) and the hosts' operator routes (`/v1/hosts/{id}:cordon`).
+const JOB_SERVICE_PATHS: [&str; 3] = [JOBS_PATH, "/v1/usage", "/v1/hosts/"];
+
 /// A kind of call the server answered: who called, on which route, and the status.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CallKey {
@@ -172,9 +177,10 @@ impl Up {
     }
 
     /// The router a client call to `path` goes to: the job service's for a path under
-    /// [`JOBS_PATH`] while it is on, else the client router.
+    /// [`JOBS_PATH`], `/v1/usage` or `/v1/hosts/` while it is on, else the client router.
     fn router_for(&self, path: &str) -> Router {
-        let job = self.job.as_ref().filter(|_| path.starts_with(JOBS_PATH));
+        let served = JOB_SERVICE_PATHS.iter().any(|root| path.starts_with(root));
+        let job = self.job.as_ref().filter(|_| served);
         job.unwrap_or(&self.client).clone()
     }
 }

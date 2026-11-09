@@ -1,7 +1,8 @@
 //! What must always be true of the cell: the seven properties of "exactly once, nothing
 //! double-booked, nothing lost", the four of a whole host held, drained and served
 //! (`whole.rs`), the five of a job, its allocations and its result (`jobs.rs`), the five
-//! of an elastic pool's cloud (`elastic.rs`), and the [`Checker`] that tests them.
+//! of an elastic pool's cloud (`elastic.rs`), the two of the usage history (`usage.rs`), the one of
+//! a cordon (`cordon.rs`), and the [`Checker`] that tests them.
 //!
 //! The checker runs a step check ([`Checker::step`]) after every kernel step and every
 //! client call, and an end check ([`Checker::end`]) once, after the scenario has been
@@ -42,9 +43,11 @@ use crate::observe::{
 };
 use crate::text;
 
+mod cordon;
 mod elastic;
 mod jobs;
 mod results;
+mod usage;
 mod whole;
 
 /// One property the cell must keep.
@@ -186,11 +189,27 @@ pub enum Invariant {
     /// agent runs no run and no job) and without a drain (the server's listing shows its
     /// host neither drained nor being released).
     LaunchedMachinesSettle,
+    /// End check. Every allocation the cell last read freed has exactly one row in the usage
+    /// history the server tells at the end (named by the job and the host and ending when
+    /// the allocation was freed), and no row names an allocation that has not ended
+    /// (`invariant/usage.rs`).
+    UsageRowPerEndedAllocation,
+    /// End check. For each job whose usage rows are as many as its ended allocations, the
+    /// rows add up to what the allocations booked: the number, the CPU, the memory and the
+    /// hosts (`invariant/usage.rs`).
+    UsageTotalsMatchTerminalJobs,
+    /// Step check. After the operator cordons a host (`POST /v1/hosts/{id}:cordon`), and
+    /// while the cordon holds, no allocation is created on it, no allocation that was
+    /// running there when it was set ends for a reason other than its job's own (an exit,
+    /// the wall limit, the memory limit, or a cancel the client asked for), and no agent
+    /// of the host reads a stop of such a job that the client did not ask for
+    /// (`invariant/cordon.rs`).
+    CordonNeverKillsRunningJob,
 }
 
 impl Invariant {
     /// Every invariant.
-    pub const ALL: [Invariant; 21] = [
+    pub const ALL: [Invariant; 24] = [
         Invariant::NoDoubleBooking,
         Invariant::AtMostOneLaunch,
         Invariant::OneTerminalAnswer,
@@ -212,6 +231,9 @@ impl Invariant {
         Invariant::NoAcquireWhilePlanOnly,
         Invariant::ThrottleHonoured,
         Invariant::LaunchedMachinesSettle,
+        Invariant::UsageRowPerEndedAllocation,
+        Invariant::UsageTotalsMatchTerminalJobs,
+        Invariant::CordonNeverKillsRunningJob,
     ];
 
     /// A stable kebab-case name, as a failure writes it.
@@ -239,6 +261,9 @@ impl Invariant {
             Invariant::NoAcquireWhilePlanOnly => "no-acquire-while-plan-only",
             Invariant::ThrottleHonoured => "throttle-honoured",
             Invariant::LaunchedMachinesSettle => "launched-machines-settle",
+            Invariant::UsageRowPerEndedAllocation => "usage-row-per-ended-allocation",
+            Invariant::UsageTotalsMatchTerminalJobs => "usage-totals-match-terminal-jobs",
+            Invariant::CordonNeverKillsRunningJob => "cordon-never-kills-running-job",
         }
     }
 
@@ -262,11 +287,14 @@ impl Invariant {
             | Invariant::InstancesWithinLimits
             | Invariant::OnlyOwnMachinesReleased
             | Invariant::NoAcquireWhilePlanOnly
-            | Invariant::ThrottleHonoured => Checked::EveryStep,
+            | Invariant::ThrottleHonoured
+            | Invariant::CordonNeverKillsRunningJob => Checked::EveryStep,
             Invariant::SettlesWhenQuiet
             | Invariant::BookingsMatchAgents
             | Invariant::NoResultLost
-            | Invariant::LaunchedMachinesSettle => Checked::AtEnd,
+            | Invariant::LaunchedMachinesSettle
+            | Invariant::UsageRowPerEndedAllocation
+            | Invariant::UsageTotalsMatchTerminalJobs => Checked::AtEnd,
         }
     }
 }
@@ -474,6 +502,7 @@ impl Checker {
         self.read_stops(observations, &mut found);
         self.jobs.step(observations, touched, &mut found);
         self.cloud.step(observations, &mut found);
+        cordon::check(observations, &mut found);
         found.list
     }
 
@@ -542,6 +571,7 @@ impl Checker {
         }
         results::check(observations, &mut found);
         elastic::settle(observations, &mut found);
+        usage::check(observations, &mut found);
         Ok(found.list)
     }
 

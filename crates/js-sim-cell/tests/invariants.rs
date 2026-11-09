@@ -19,6 +19,9 @@ use js_types::{HostId, LeaseId, Resources};
 // The boundary cases, a module of this test binary (not a test target of its own).
 #[path = "invariants/boundaries.rs"]
 mod boundaries;
+// The cordon invariant's cases, a module of this test binary too, and the usage invariants'.
+#[path = "invariants/cordon.rs"]
+mod cordon;
 // The invariants of an elastic pool's cloud, a module of this test binary too.
 #[path = "invariants/elastic.rs"]
 mod elastic;
@@ -30,6 +33,8 @@ mod faults;
 mod jobs;
 #[path = "invariants/names.rs"]
 mod names;
+#[path = "invariants/usage.rs"]
+mod usage;
 #[path = "invariants/whole_host.rs"]
 mod whole_host;
 
@@ -959,7 +964,9 @@ fn every_invariant_has_a_negative_case_in_the_table() {
     );
     let others = whole_host::NEGATIVE_CASES
         .iter()
-        .chain(elastic::NEGATIVE_CASES);
+        .chain(elastic::NEGATIVE_CASES)
+        .chain(usage::NEGATIVE_CASES)
+        .chain(cordon::NEGATIVE_CASES);
     let table = || jobs::table(NEGATIVE_CASES.iter().chain(others.clone()));
     for invariant in Invariant::ALL {
         let rows = table().filter(|(row, _)| *row == invariant);

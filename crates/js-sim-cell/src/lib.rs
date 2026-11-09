@@ -133,6 +133,7 @@ pub mod agent;
 pub mod agreement;
 pub mod bus;
 pub mod cell;
+pub mod cordon;
 mod counters;
 pub mod elastic;
 pub mod front;
@@ -146,6 +147,7 @@ pub mod scenario;
 pub mod server;
 pub mod sweep;
 mod text;
+pub mod usage;
 pub mod work;
 
 pub use actions::Action;
@@ -153,6 +155,7 @@ pub use agent::{AgentKind, AgentNode, AgentSpec, Prepare, SIM_RUN_IMAGE};
 pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differences};
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, SecondServer, Setup, StoreRead};
+pub use cordon::{Cordon, Uncordon};
 pub use counters::{Counter, Counters};
 pub use elastic::{
     AcquireAnswer, Cloud, CloudCall, CloudEvent, CloudFacts, ElasticPool, Machine, OfferSpec,
@@ -174,4 +177,5 @@ pub use observe::{
 pub use replay::{Failure, FailureReport, drive, run};
 pub use scenario::{Call, Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
 pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, Store, WHOLE_CLASS};
+pub use usage::{UsageReadFault, UsageRow};
 pub use work::Work;
