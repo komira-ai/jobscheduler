@@ -1,8 +1,10 @@
 # Bodies of release v0.1.208
 
-The JSON the agent wire of release `v0.1.208` sends, the last release in which a server
-queued runs and whole-node leases and answered an agent's heartbeat with run-keyed
-commands. Each body was written by that tag's own code and is stored as it came out: the
+The JSON the agent wire of release `v0.1.208` sends, a release in which a server queued
+runs and whole-node leases and answered an agent's heartbeat with run-keyed commands. The
+wire crate is the same in every release from `v0.1.208` to `v0.1.214` (`git diff v0.1.208
+v0.1.214 -- crates/js-agent-wire` is empty), so these are also the bodies of `v0.1.213`,
+the last release whose server queued runs. Each body was written by that tag's own code and is stored as it came out: the
 two hellos by `crates/js-agent/src/contract.rs` of the tag (`report` for the container agent,
 `report_native` for the native one) over a hello of the wire crate, and the heartbeat and
 the reply by the tag's wire types. They are files, not values built from the current types,

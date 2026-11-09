@@ -33,7 +33,7 @@ The design adds, in this order:
    that names pool and field.
 6. A per-pool background check loop, and a status API and page, served only on the private address.
 7. Registry changes: a read of waiting demand, a drain mark, a remove, a `Launchable`
-   hook, and a pool that needs no shared join-token file.
+   hook (since deleted with the lease code), and a pool that needs no shared join-token file.
 8. `js-scaler`: a pure step function with an injected clock, a durable record of every
    acquire written before the call, and a shell in `js-lease-server` on the existing tick.
    Two new crates in all (`js-elastic`, `js-scaler`).

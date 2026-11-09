@@ -45,7 +45,7 @@ The feed reads the raw P90, not the life admission charges a lease (`lives.rs` h
 
 ### The tail counters
 
-`TailCounters` (`crates/js-registry/src/tail_counters.rs`) has these fields:
+`TailCounters` (`crates/js-registry/src/tail_counters.rs`, deleted with the lease code) had these fields:
 
 | field | counts |
 |---|---|

@@ -86,5 +86,5 @@ hello in message metadata, never in a log line.
   tokens the pool's `join_token_file`, and the three server keys are refused when no pool registers agents. They have the flags'
   names and defaults (`--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`; `--placement` and `server.placement` are deprecated and do nothing: `js-sched` places every job, `js-sched` is accepted with a warning and `registry` is refused at start), and the flags work as before when
   `--config` is absent.
-- *Source.* The `DefaultProvider` (providers.md) is served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answers from admitted agents and ignores the bookings it is given: the lease
-  file records leases and agents re-announce them.
+- *Source.* The `DefaultProvider` (providers.md) was served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answered from admitted agents. `CapacitySource` and the lease
+  file are deleted; the server lists the hosts of the registry and of the static pool file.
