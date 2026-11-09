@@ -148,3 +148,48 @@ Rules the crates keep so a git dependency works:
 - A shim has to forward the Cargo features of the crate it re-exports, and `pub use js_x::*`
   does not re-export macros: the other repository checks its dependents with
   `cargo check --workspace --all-targets --all-features`.
+
+## The previous release of the agent wire
+
+The agent is released from main while a deployed server can be a release older, so the agent
+wire is tested against the previous release both ways: this release's agent against the
+previous release's server, and the previous release's agent against this release's server,
+over a hello, heartbeats, a job start and a job stop, and the refusal of a hello whose
+protocol major the server does not speak (`docs/design/rollout.md`, rules 1 to 3). The test is
+`crates/js-agent/tests/agent/skew/`.
+
+The previous release is not a dependency. A git dependency on a tag of this repository would
+bring a second `js-types`, which `single_source` in `layers.toml` refuses, and `deny.toml`
+allows no git source of this repository. It stands instead as a transcript,
+`crates/js-agent/tests/agent/skew/v<release>.json`: every post of that release's agent
+program to that release's lease server and its answer, in order, with the job API calls
+between them, recorded at the release's tag. The session secret in it is replaced by a
+stand-in; the job and allocation ids are the ones that conversation drew, and the tests pair
+them with the ones a new conversation draws.
+
+The pin is moved by a pull request of its own, after a release that changed a frame of
+either side (a release that changed none leaves the transcript as it is):
+
+1. In a checkout of the new release's tag, run
+   `cargo test -p js-agent --test agent skew::this_version_still_says_what_the_previous_release_said`.
+   A tag from before the module has no `skew/` directory: copy
+   `crates/js-agent/tests/agent/skew/` and the `mod skew;` line of
+   `crates/js-agent/tests/agent/main.rs` from main into the checkout first (where the tag's
+   agent test harness differs from main's, the module is adapted to it there, not on main).
+   The test records that release's conversation, checks that it says everything the
+   transcript it replaces said, and writes it to `target/tmp/skew/transcript.json` (cargo's
+   `CARGO_TARGET_TMPDIR` for the test). Its unknown-major hello asks for majors 2 to 3, and
+   it fails unless the server refuses it; once a server speaks major 2, the majors in
+   `record()` (`crates/js-agent/tests/agent/skew/record.rs`) are moved above the newest one
+   it speaks in the same pull request.
+2. On a branch of main, copy that file to `crates/js-agent/tests/agent/skew/v<new>.json`,
+   delete the old transcript, and change the file name in `previous()`
+   (`crates/js-agent/tests/agent/skew/mod.rs`) and the release this section and the module's
+   header name.
+3. Run the skew tests. A failure names the step and the field: a field removed, renamed or
+   given another value since the new pin is a break of the wire, fixed in the code, never by
+   editing the transcript.
+
+The first transcript, `v0.1.213`, was recorded by applying the test module to that tag: it
+uses only the agent program's test harness and the lease server's job service, which that
+release has.
