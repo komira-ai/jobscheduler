@@ -15,7 +15,8 @@ use js_alert::Receiver;
 use js_elastic::{AcquireId, HostName, SchedulerId};
 use js_watch::{Config, ConfigError, run};
 
-/// A directory of files for one test, removed when it is dropped.
+/// A directory of files for one test, named `<name>-<pid>-<n>` so no other test process
+/// shares it, and removed when it is dropped.
 struct Scratch {
     dir: PathBuf,
 }
@@ -25,7 +26,11 @@ impl Scratch {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("js-watch")
-            .join(format!("{name}-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
+            .join(format!(
+                "{name}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Self { dir }

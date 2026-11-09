@@ -8,6 +8,7 @@ use std::time::Duration;
 use js_elastic::{AcquireId, SchedulerId};
 use js_lease::{ManualClock, Timestamp};
 use js_registry::{PoolConfig, SequentialSessions};
+use js_testkit::dir::TestDir;
 use js_types::{ResourceClass, Resources, Shape};
 
 use super::*;
@@ -15,12 +16,10 @@ use crate::join_tokens::{Admission, JoinRefusal};
 
 const T0: u64 = 5_000_000;
 
-fn agents(name: &str) -> (Agents, ManualClock) {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/agents_mint_unit")
-        .join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+/// The agents of the test `name`, over a new directory unique to this process that is
+/// removed when the returned [`TestDir`] drops.
+fn agents(name: &str) -> (Agents, ManualClock, TestDir) {
+    let dir = TestDir::under(std::env::temp_dir(), &format!("agents_mint_unit-{name}"));
     let clock = ManualClock::new(Timestamp::from_millis(T0));
     let shared = SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_string())).unwrap();
@@ -35,7 +34,7 @@ fn agents(name: &str) -> (Agents, ManualClock) {
         SequentialSessions::new(),
         Arc::new(js_sched_placer::place::SchedPlacer::default()),
     );
-    (Agents::over(registry, &shared, &dir), clock)
+    (Agents::over(registry, &shared, &dir), clock, dir)
 }
 
 fn pool_id() -> ProviderId {
@@ -64,7 +63,7 @@ fn identity(name: &HostName) -> InstanceIdentity {
 /// the one asked for.
 #[test]
 fn a_token_minted_for_a_pool_and_name_is_bound_to_that_instance() {
-    let (agents, clock) = agents("bound");
+    let (agents, clock, _dir) = agents("bound");
     let launched = name("acquire-1");
     let minted = agents
         .mint_for(&pool_id(), &launched, Duration::from_secs(600))
@@ -101,7 +100,7 @@ fn a_token_minted_for_a_pool_and_name_is_bound_to_that_instance() {
 /// launch.
 #[test]
 fn a_second_mint_for_a_name_replaces_the_first() {
-    let (agents, _) = agents("replace");
+    let (agents, _, _dir) = agents("replace");
     let (one, two) = (name("acquire-1"), name("acquire-2"));
     let ttl = Duration::from_secs(600);
     let first = agents.mint_for(&pool_id(), &one, ttl).unwrap();
@@ -120,7 +119,7 @@ fn a_second_mint_for_a_name_replaces_the_first() {
 /// heartbeat and say hello with its credential.
 #[test]
 fn revoke_for_drops_the_token_and_the_host_credential() {
-    let (agents, _) = agents("revoke");
+    let (agents, _, dir) = agents("revoke");
     let (gone, kept) = (name("acquire-1"), name("acquire-2"));
     let ttl = Duration::from_secs(600);
     let minted = agents.mint_for(&pool_id(), &gone, ttl).unwrap();
@@ -142,25 +141,22 @@ fn revoke_for_drops_the_token_and_the_host_credential() {
         Err(JoinRefusal::NotAdmitted)
     );
     assert!(agents.joins.identify(&spared.token).is_some());
-    let file = std::fs::read_to_string(agents_file("revoke")).unwrap();
+    let file = std::fs::read_to_string(agents_file(&dir)).unwrap();
     assert_eq!(file.matches("[[join]]").count(), 1);
     assert!(!file.contains(gone.as_str()));
     assert_eq!(agents.revoke_for(&pool_id(), &gone), Ok(0));
 }
 
-/// The join token file of the agents made by `agents(name)`.
-fn agents_file(name: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/agents_mint_unit")
-        .join(name)
-        .join("joins")
+/// The join token file of the agents made by `agents(name)`, whose directory is `dir`.
+fn agents_file(dir: &Path) -> std::path::PathBuf {
+    dir.join("joins")
 }
 
 /// A revoke names the pool as well as the host: the same name under another pool keeps its
 /// token. It catches a revoke keyed by the name alone.
 #[test]
 fn revoke_for_is_scoped_to_the_pool() {
-    let (agents, _) = agents("scoped");
+    let (agents, _, _dir) = agents("scoped");
     let launched = name("acquire-1");
     let ttl = Duration::from_secs(600);
     let minted = agents.mint_for(&pool_id(), &launched, ttl).unwrap();

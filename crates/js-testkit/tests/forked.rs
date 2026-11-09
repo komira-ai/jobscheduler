@@ -5,20 +5,17 @@
 
 use std::fs::{File, TryLockError};
 use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use js_testkit::dir::TestDir;
 use js_testkit::forked::ForkedChild;
 use js_testkit::spawn::retry_busy;
 
-/// A fresh directory for one test, under Cargo's per-target temporary directory.
-fn dir(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("old dir");
-    }
-    std::fs::create_dir_all(&dir).expect("dir");
-    dir
+/// A fresh directory for one test, `<name>-<pid>-<n>` under Cargo's per-target temporary
+/// directory, removed when the returned guard drops (so keep it for the test's length).
+fn dir(name: &str) -> TestDir {
+    TestDir::under(env!("CARGO_TARGET_TMPDIR"), name)
 }
 
 /// A new lock file with its lock held by the returned file.
@@ -42,7 +39,8 @@ fn refused(path: &Path) -> bool {
 /// child of its own meanwhile, so that is not asserted.)
 #[test]
 fn a_lock_released_by_closing_stays_held_while_a_forked_child_has_a_copy() {
-    let path = dir("forked-close").join("lock");
+    let scratch = dir("forked-close");
+    let path = scratch.join("lock");
     let file = locked(&path);
     let child = ForkedChild::before_exec();
     drop(file);
@@ -54,7 +52,8 @@ fn a_lock_released_by_closing_stays_held_while_a_forked_child_has_a_copy() {
 /// other crates pin: a lock unlocked before the close is free whatever copies exist.
 #[test]
 fn an_unlocked_lock_is_free_while_a_forked_child_has_a_copy() {
-    let path = dir("forked-unlock").join("lock");
+    let scratch = dir("forked-unlock");
+    let path = scratch.join("lock");
     let file = locked(&path);
     let child = ForkedChild::before_exec();
     file.unlock().expect("unlock");
@@ -68,7 +67,8 @@ fn an_unlocked_lock_is_free_while_a_forked_child_has_a_copy() {
 /// another test of this binary holds meanwhile goes in its own time.
 #[test]
 fn a_dropped_forked_child_is_let_go() {
-    let path = dir("forked-drop").join("lock");
+    let scratch = dir("forked-drop");
+    let path = scratch.join("lock");
     let file = locked(&path);
     drop(ForkedChild::before_exec());
     drop(file);
@@ -154,7 +154,8 @@ mod busy {
     /// `spawn_retrying` starts the program once the child has gone.
     #[test]
     fn a_copy_written_while_a_child_forked_is_started_once_the_child_has_gone() {
-        let copy = dir("forked-busy").join("act");
+        let scratch = dir("forked-busy");
+        let copy = scratch.join("act");
         let writer = copy_writing(&copy);
         let child = ForkedChild::before_exec();
         drop(writer);
@@ -175,7 +176,8 @@ mod busy {
     /// is returned as it came).
     #[test]
     fn a_start_that_is_not_busy_fails_as_it_is() {
-        let mut missing = Command::new(dir("forked-missing").join("nothing"));
+        let scratch = dir("forked-missing");
+        let mut missing = Command::new(scratch.join("nothing"));
         let error = spawn_retrying(&mut missing).expect_err("there is no such program");
         assert_eq!(error.kind(), ErrorKind::NotFound);
     }

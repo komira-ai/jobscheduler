@@ -258,14 +258,14 @@ fn the_traits_the_watcher_is_built_from_have_exactly_their_methods() {
         set(&["send"])
     );
 
-    let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-watch-methods.rs");
+    let dir = js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "js-watch-methods");
+    let scratch = dir.join("methods.rs");
     fs::write(
         &scratch,
         "pub trait T {\n    async fn a();\n    unsafe fn b();\n    pub const fn c<X>();\n    fn d(\n        x: u8,\n    );\n}\n",
     )
     .unwrap();
     assert_eq!(methods(&scratch, "pub trait T"), set(&["a", "b", "c", "d"]));
-    fs::remove_file(&scratch).unwrap();
 }
 
 /// The files of `files` (path from `crates/`, text) that name `Aborter` where it may not be

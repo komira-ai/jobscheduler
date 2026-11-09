@@ -70,7 +70,10 @@ impl Cell {
     /// `js-helper` binary of this package, which answers the default helper modes.
     pub fn new(name: &str, source: Arc<dyn ImageSource>) -> Self {
         let uid = rustix::process::getuid().as_raw();
-        let scratch = std::env::temp_dir().join(format!("js-contain-crun-{uid}-{name}"));
+        let scratch = std::env::temp_dir().join(format!(
+            "js-contain-crun-{uid}-{}-{name}",
+            std::process::id()
+        ));
         if scratch.exists() {
             // A previous run's files belong to subordinate ids: only a helper removes them.
             let stale = Oci::new(&config(), source.clone(), &scratch, &parent(name));

@@ -21,6 +21,8 @@ fn root() -> PathBuf {
 /// A scratch directory of its own for each test, holding the stand-in `gh` in `bin/`.
 struct Rig {
     dir: PathBuf,
+    /// Removes the directory when the rig is dropped.
+    _scratch: js_testkit::dir::TestDir,
 }
 
 /// What one run of the script did.
@@ -47,8 +49,11 @@ enum Read<'a> {
 
 impl Rig {
     fn new(name: &str) -> Rig {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("required-checks-{name}"));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = js_testkit::dir::TestDir::under(
+            env!("CARGO_TARGET_TMPDIR"),
+            &format!("required-checks-{name}"),
+        );
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("bin")).unwrap();
         let gh = dir.join("bin/gh");
         fs::write(
@@ -68,7 +73,10 @@ impl Rig {
         )
         .unwrap();
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
-        Rig { dir }
+        Rig {
+            dir,
+            _scratch: scratch,
+        }
     }
 
     fn run(&self, args: &[&str], read: Read<'_>, write_status: i32) -> Ran {

@@ -2,13 +2,16 @@
 
 use std::process::Command;
 
+use js_testkit::dir::TestDir;
+
 fn probe() -> Command {
     Command::new(env!("CARGO_BIN_EXE_js-mac-probe"))
 }
 
 #[test]
 fn the_write_child_creates_a_file_and_exits_zero() {
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("binary-write");
+    let scratch = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "binary-write");
+    let path = scratch.join("file");
     let out = probe()
         .arg("child")
         .arg("write")
@@ -17,7 +20,6 @@ fn the_write_child_creates_a_file_and_exits_zero() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     assert_eq!(std::fs::read(&path).unwrap(), b"probe\n");
-    std::fs::remove_file(&path).unwrap();
 }
 
 #[test]
