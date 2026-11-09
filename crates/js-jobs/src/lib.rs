@@ -66,6 +66,7 @@
 //! | `taint/<host>` | the [`HostTaint`] a host-isolation job's placement put on `<host>` (reason [`HOST_JOB_TAINT`]): the job that placed there; written in the placement's transaction, deleted by [`JobStore::drop_taints`] once the caller holds the taint elsewhere and by nothing else (the retention tick does not read it), listed whole by [`JobStore::host_taints`]; a store written before taints has none and opens unchanged |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
+//! | `idx/job/queued/<id>` | empty: the job is queued (it is under `idx/job/active/` too); a store an earlier build wrote has none until a build that names them opens it |
 //! | `idx/job/due/<end>/<id>` | empty: the job has ended, `<end>` its retention end's nanoseconds on the store's clock as twenty digits (zero for an ended row without one) |
 //! | `idx/alloc/host/<host>/<id>` | empty: the job's allocation is live (booked or releasing) on `<host>` |
 //! | `idx/alloc/freed/<at>/<id>` | empty: the job's allocation was freed at `<at>`, as twenty digits |
@@ -127,8 +128,9 @@
 //!
 //! Two reads serve the placement engine: [`JobStore::queued`], every queued job in queue
 //! order ([`queue_order`]: the higher priority first, then the earlier submit, then the job
-//! id), and [`JobStore::live_allocations`], every booked or releasing allocation. Both read
-//! through the `idx/` entries.
+//! id), read through the `idx/job/queued/` entries, so the rows of the jobs placed or running
+//! are not read; and [`JobStore::live_allocations`], every booked or releasing allocation,
+//! read through the `idx/alloc/host/` entries.
 //!
 //! Every operation that writes also moves the `idx/` entries of the rows it writes, in the
 //! same transaction (the table above names only the rows).
@@ -177,5 +179,5 @@ pub use result::{
 };
 pub use store::{
     Backfill, Beside, FailedPrepare, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob,
-    Placement, Row, SCHEMA_VERSION, queue_order,
+    Placement, Row, SCHEMA_VERSION, Written, queue_order,
 };

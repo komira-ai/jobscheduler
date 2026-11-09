@@ -21,7 +21,7 @@ use crate::codec::{DecodeError, encode_allocation, encode_job};
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
-use crate::record::{AllocationRecord, AllocationStep, JobRecord};
+use crate::record::{AllocationRecord, AllocationStep, JobRecord, JobState};
 use crate::result::SWEEP_BATCH;
 
 /// What one backfill changed.
@@ -33,17 +33,18 @@ pub struct Backfill {
     pub removed: usize,
 }
 
-/// The entry the job `job` calls for: active while it has not ended, and due once it has, at
-/// its retention end (only an ended job has one). An ended row with no retention end (one an
-/// earlier build wrote) is due at the origin, so every ended job is under [`keys::DUE`]; the
-/// sweep never deletes such a row, since it has no end to be past.
+/// The entries the job `job` calls for: active while it has not ended, and queued too while it
+/// is queued; due once it has ended, at its retention end (only an ended job has one). An ended
+/// row with no retention end (one an earlier build wrote) is due at the origin, so every ended
+/// job is under [`keys::DUE`]; the sweep never deletes such a row, since it has no end to be
+/// past.
 pub(crate) fn job_entries(job: &JobRecord) -> BTreeSet<String> {
-    let entry = if job.state.is_ended() {
-        keys::due(job.retention_ends.unwrap_or(StoreTime::ZERO), &job.id)
-    } else {
-        keys::active(&job.id)
-    };
-    BTreeSet::from([entry])
+    if job.state.is_ended() {
+        let due = keys::due(job.retention_ends.unwrap_or(StoreTime::ZERO), &job.id);
+        return BTreeSet::from([due]);
+    }
+    let queued = (job.state == JobState::Queued).then(|| keys::queued(&job.id));
+    queued.into_iter().chain([keys::active(&job.id)]).collect()
 }
 
 /// The entry the allocation `allocation` calls for: on its host while it is live (booked or
@@ -261,7 +262,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
 
     /// Commits one batch of a backfill; a lost precondition names the row it was on.
     fn commit_backfill(&self, txn: Txn) -> Result<(), JobStoreError> {
-        match self.store.txn(txn)? {
+        match self.write(txn)? {
             Ok(_) => Ok(()),
             Err(conflict) => Err(match id_of(&conflict.key) {
                 Some(id) => JobStoreError::Stale { id },

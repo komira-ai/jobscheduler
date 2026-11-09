@@ -59,6 +59,11 @@ pub(crate) const INDEX: &str = "idx/";
 /// `idx/job/active/<id>`: a job that has not ended (queued, placed, starting or running).
 pub(crate) const ACTIVE: &str = "idx/job/active/";
 
+/// `idx/job/queued/<id>`: a queued job, also under [`ACTIVE`]: what the placement engine reads
+/// on each pass ([`crate::JobStore::queued`]). A store an earlier build wrote has none of these
+/// entries until a build that names them opens it ([`crate::JobStore::backfill_indexes`]).
+pub(crate) const QUEUED: &str = "idx/job/queued/";
+
 /// `idx/job/due/<end>/<id>`: an ended job, `<end>` the nanoseconds of its retention end on the
 /// store's clock as twenty digits (zero for an ended row an earlier build wrote without one),
 /// so the keys sort by retention end and then by job id.
@@ -93,6 +98,11 @@ pub(crate) fn stamp(time: StoreTime) -> String {
 /// The active entry of the job `id`.
 pub(crate) fn active(id: &JobId) -> String {
     format!("{ACTIVE}{id}")
+}
+
+/// The queued entry of the job `id`.
+pub(crate) fn queued(id: &JobId) -> String {
+    format!("{QUEUED}{id}")
 }
 
 /// The due entry of the job `id`, whose retention ends at `end`.
@@ -149,6 +159,8 @@ pub(crate) fn indexed_row(entry: &str) -> Option<String> {
     };
     let (table, id) = if let Some(id) = entry.strip_prefix(ACTIVE) {
         (JOB, Some(id.to_owned()))
+    } else if let Some(id) = entry.strip_prefix(QUEUED) {
+        (JOB, Some(id.to_owned()))
     } else if let Some(rest) = entry.strip_prefix(DUE) {
         (JOB, stamped(rest))
     } else if let Some(id) = entry.strip_prefix(UNREAD_JOB) {
@@ -192,6 +204,7 @@ mod tests {
         let job = id("j-1");
         for (entry, row) in [
             (active(&job), "job/j-1"),
+            (queued(&job), "job/j-1"),
             (due(at, &job), "job/j-1"),
             (unread("job/j-1").expect("a job key"), "job/j-1"),
             (on_host(&host, &job), "alloc/j-1"),
@@ -201,6 +214,7 @@ mod tests {
             assert_eq!(indexed_row(&entry).as_deref(), Some(row), "{entry}");
         }
         assert_eq!(due(at, &job), "idx/job/due/00000000000000000009/j-1");
+        assert_eq!(queued(&job), "idx/job/queued/j-1");
         assert!(stamp(at) < stamp(StoreTime::from_duration(Duration::from_nanos(10))));
         assert!(due(at, &job) < due_below(at.saturating_add(Duration::from_nanos(1))));
         assert!(due_below(at) < due(at, &job));
@@ -213,6 +227,7 @@ mod tests {
         for other in [
             "idx/later/x",
             "idx/job/active/",
+            "idx/job/queued/",
             "idx/job/due/123/j-1",
             "idx/job/due/0000000000000000000x/j-1",
             "idx/job/due/00000000000000000009j-1",

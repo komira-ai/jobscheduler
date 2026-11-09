@@ -606,9 +606,12 @@ any request. See [design/placement.md](design/placement.md).
 
 ### 6.8 Queued jobs and their allocations
 When the server holds the job and allocation tables (the job service, off by default; no default
-behaviour changes), the lease server's engine also places queued jobs (`crates/js-sched-placer/src/jobs.rs`). On each tick and
-after each heartbeat of a host that speaks the per-job messages it reads the live allocations and the queued jobs (higher priority
-first, then earlier submit, then job id) from the tables as they stand, so no queued job has to be presented again. It walks the
+behaviour changes), the lease server's engine also places queued jobs (`crates/js-sched-placer/src/jobs.rs`). On each tick, and
+after a heartbeat of a host that speaks the per-job messages when something the pass depends on changed since the last pass (the
+job tables, the engine's picture of the hosts, the hosts offered, the hellos or what pass 2 told;
+`crates/js-sched-placer/src/jobs_seen.rs`), it reads the live allocations and the queued jobs (higher priority first, then earlier
+submit, then job id) from the tables as they stand, again only when the job store wrote since the last read, so no queued job has
+to be presented again. It walks the
 queue in that order and the order is binding (`js_sched::walk_in_order`): a job that fits no host now closes to every job behind it
 each host it could use, so when a host frees the front job that fits it gets it. Each placement is one store transaction (the job
 placed, its allocation booked) before the host is told; a failed commit books nothing and the job stays queued. The engine counts

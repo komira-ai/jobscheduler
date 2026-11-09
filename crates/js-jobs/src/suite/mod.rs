@@ -37,6 +37,7 @@ mod paging;
 mod placement;
 mod prepare;
 mod queue;
+mod queued_index;
 mod races;
 mod retention;
 mod rows;
@@ -58,6 +59,7 @@ pub use paging::*;
 pub use placement::*;
 pub use prepare::*;
 pub use queue::*;
+pub use queued_index::*;
 pub use races::*;
 pub use retention::*;
 pub use rows::*;
@@ -149,6 +151,9 @@ where
     an_indexed_read_reads_every_page_of_entries(backend);
     an_ended_row_without_a_retention_end_is_due_and_kept(backend);
     a_backfill_that_loses_its_row_is_stale(backend);
+    a_store_an_earlier_build_wrote_reads_its_whole_queue_after_an_open(backend);
+    a_queued_job_stays_under_the_active_space_an_earlier_build_reads(backend);
+    every_write_moves_the_written_mark_and_no_read_does(backend);
     marks_are_additive_to_an_existing_store(backend);
     a_mark_round_trips_with_its_exclusions_and_made(backend);
     a_mark_keeps_a_later_builds_field_only_on_its_host(backend);
@@ -273,6 +278,9 @@ macro_rules! job_store_tests {
             an_indexed_read_reads_every_page_of_entries,
             an_ended_row_without_a_retention_end_is_due_and_kept,
             a_backfill_that_loses_its_row_is_stale,
+            a_store_an_earlier_build_wrote_reads_its_whole_queue_after_an_open,
+            a_queued_job_stays_under_the_active_space_an_earlier_build_reads,
+            every_write_moves_the_written_mark_and_no_read_does,
             marks_are_additive_to_an_existing_store,
             a_mark_round_trips_with_its_exclusions_and_made,
             a_mark_keeps_a_later_builds_field_only_on_its_host,

@@ -219,10 +219,12 @@ pub fn the_backfill_makes_the_indexes_agree_and_a_second_changes_nothing<B: Back
     let ended = rig.running("bf-ended");
     rig.jobs.end_job(&ended, exited(0)).expect("ends");
     rig.jobs.free(&ended, EndReason::Exited).expect("frees");
+    // The queued job is active and queued, the placed one active with its allocation on its
+    // host, the ended one due with its allocation freed.
     let entries = rig.jobs.index_entries().expect("reads");
     assert_eq!(
         entries.len(),
-        5,
+        6,
         "{name}: the writes did not index: {entries:?}"
     );
 
@@ -257,7 +259,7 @@ pub fn the_backfill_makes_the_indexes_agree_and_a_second_changes_nothing<B: Back
     assert_eq!(
         done,
         Backfill {
-            added: 6,
+            added: 7,
             removed: 2
         },
         "{name}: the backfill did not count what it put and deleted"

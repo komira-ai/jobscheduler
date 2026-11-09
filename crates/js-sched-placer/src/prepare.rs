@@ -426,6 +426,12 @@ impl Engine {
     /// start and no failure for `horizon`, bars for life and all, and the bars a restart put
     /// back for requests not queued within `horizon` of it.
     pub fn whole_sweep(&mut self, horizon: Duration, now: FarmTime) {
+        let _ = self.whole_swept(horizon, now);
+    }
+
+    /// [`Engine::whole_sweep`], answering whether it dropped anything.
+    pub(crate) fn whole_swept(&mut self, horizon: Duration, now: FarmTime) -> bool {
+        let before = self.whole_kept();
         let lapsed = |at: &FarmTime| now.saturating_duration_since(*at) >= horizon;
         let gone: Vec<RequestId> = self
             .restored
@@ -455,6 +461,18 @@ impl Engine {
             let key = RequestKey::Content(request.clone());
             held(&key) | idle(record)
         });
+        self.whole_kept() != before
+    }
+
+    /// How many records of whole-node requests the engine keeps: those a restart put back,
+    /// their carried bars, and the records and content records of the prepares.
+    fn whole_kept(&self) -> [usize; 4] {
+        [
+            self.restored.len(),
+            self.carried.len(),
+            self.prepare.records.len(),
+            self.prepare.content.len(),
+        ]
     }
 }
 
