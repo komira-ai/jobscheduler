@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use js_agent_wire::{LeaseMinute, LoadDrops, Phase, RunResult};
 use js_types::{ManualClock, Timestamp};
-use js_usage::{AllocationId, DrainOutcome, EndedReason, EndedRow, GRACE_BEATS};
+use js_usage::{EndedRow, GRACE_BEATS};
 
 use super::*;
 use crate::usage::{
@@ -750,70 +750,4 @@ fn reads_pass_the_sinks_answer_and_failure_on() {
     assert!(usage.node_rows(&host, 5, 9, NonZeroUsize::MIN).is_err());
     assert!(usage.key_profile(&key).is_err());
     assert_eq!(usage.counters().faults, 2);
-}
-
-/// The record of lease `1-n`, ended at `n` ms.
-fn ended_row(n: u64) -> EndedRow {
-    EndedRow {
-        id: AllocationId::of_lease(&LeaseId::new(1, n)),
-        profile: None,
-        host: Some(HostId::new("h1").unwrap()),
-        booked: None,
-        queued_ms: Some(0),
-        run_ms: Some(1),
-        ended_reason: EndedReason::Released,
-        drain_outcome: DrainOutcome::None,
-        give_up_outcome: None,
-        estimated_end: None,
-        actual_end: n,
-        error_ms: None,
-        used: None,
-    }
-}
-
-/// Asserts that a record handed to the usage side's log reaches the sink at the next tick
-/// and at shutdown, not when it is handed over, and that a run of failed writes is logged
-/// once when it begins and once when a write succeeds after it, the records kept meanwhile.
-/// It catches a log that writes on the thread that ended the allocation (a stop would wait
-/// on the store), a tick or a shutdown that does not write the queue, a failure logged at
-/// every tick, and a record lost to a failure.
-#[tokio::test]
-async fn ended_allocations_are_written_at_the_tick_and_a_failing_run_is_logged_once() {
-    let log = Captured::start();
-    let fake = Arc::new(Fake::default());
-    let (usage, _) = usage(&fake, &[]);
-    let written = |fake: &Fake| fake.history.lock().unwrap().len();
-    usage.log().ended(ended_row(1));
-    assert_eq!(written(&fake), 0);
-    usage.tick().await;
-    assert_eq!(written(&fake), 1);
-    fake.fail.store(true, Ordering::SeqCst);
-    usage.log().ended(ended_row(2));
-    usage.tick().await;
-    usage.tick().await;
-    assert_eq!(log.lines_with("cannot write the allocation history"), 1);
-    assert_eq!(usage.counters().history_failed, 2);
-    fake.fail.store(false, Ordering::SeqCst);
-    usage.finish().await;
-    assert_eq!(log.lines_with("the allocation history is written again"), 1);
-    assert_eq!(written(&fake), 2);
-    usage.finish().await;
-    assert_eq!(log.lines_with("the allocation history is written again"), 1);
-    assert_eq!(usage.counters().history_written, 2);
-}
-
-/// Asserts that the log the registry is given does not keep the usage side alive: once the
-/// usage side is dropped, the hub is gone and a record handed to the log is let go. It
-/// catches a log that holds the hub strongly, which with the hub holding the registry (its
-/// key source) would keep the usage store open, and its lock taken, after the server stops.
-#[test]
-fn the_registrys_log_does_not_keep_the_usage_side_alive() {
-    let fake = Arc::new(Fake::default());
-    let (usage, _) = usage(&fake, &[]);
-    let log = usage.log();
-    let hub = Arc::downgrade(&usage.hub);
-    drop(usage);
-    assert!(hub.upgrade().is_none());
-    log.ended(ended_row(1));
-    assert!(fake.history.lock().unwrap().is_empty());
 }

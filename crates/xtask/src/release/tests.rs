@@ -604,7 +604,6 @@ fn this_repositorys_shipped_crates() {
         "js-bundle",
         "js-bundle-cli",
         "js-client",
-        "js-lease",
         "js-lease-server",
         "js-mdm",
         "js-mdm-core",

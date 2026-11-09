@@ -43,9 +43,7 @@
 //!    only on a host that reported it runs host jobs, and a host such a job is placed on is
 //!    open to no job behind it in the same walk, since the host is tainted from the job's
 //!    commit on. The engine's free capacity on a host is what its
-//!    shape leaves after the job allocations and the registry's lease bookings on it, which
-//!    the engine holds side by side, so a job and a lease can never book the same room (row
-//!    25). A host port is a resource of the allocation too: a host where an allocation the
+//!    shape leaves after the job allocations on it. A host port is a resource of the allocation too: a host where an allocation the
 //!    engine holds already has a port the job declares has no room for it, so one host never
 //!    holds a port twice, and the job waits as for room. Each placement is held in the
 //!    engine at once, with its ports, so a job or a lease placed while the pass commits does
@@ -145,8 +143,6 @@ pub type Decided = (JobId, HostId, Booked, Placement);
 pub struct JobHold {
     /// Its host.
     host: HostId,
-    /// What it books there.
-    booked: Booked,
     /// The host ports it holds there, sorted, each once: the job's declared ports, booked with
     /// the allocation and let go with it.
     host_ports: Vec<u16>,
@@ -201,19 +197,17 @@ impl Engine {
         here.any(|hold| hold.host_ports.iter().any(|port| ports.contains(port)))
     }
 
-    /// Takes up each of `holds`, as an engine built again takes up what the one before it
-    /// held of the job allocations.
-    pub(super) fn take_jobs(&mut self, holds: &BTreeMap<JobId, JobHold>) {
-        for (job, hold) in holds {
-            self.take_job(job, &hold.host, hold.booked, hold.host_ports.clone());
-        }
-    }
-
     /// Takes up the allocation of `job` on `host`, booking `booked` and the host ports
     /// `host_ports`, as a lease recovered after a restart is: held there (on a host that has not
     /// said hello yet, until its first heartbeat lists it or the engine's grace runs out), and
     /// never placed again by the engine alone.
-    fn take_job(&mut self, job: &JobId, host: &HostId, booked: Booked, host_ports: Vec<u16>) {
+    pub(super) fn take_job(
+        &mut self,
+        job: &JobId,
+        host: &HostId,
+        booked: Booked,
+        host_ports: Vec<u16>,
+    ) {
         let placed = Placed {
             lease: SchedLeaseId::new(0, self.taken),
             operation: self.sched.next_operation(),
@@ -223,24 +217,21 @@ impl Engine {
         let _ = self
             .sched
             .take_in(recovered_as(placed, host, key, booking(booked)));
-        self.hold_job(job, host, (booked, host_ports), placed);
+        self.hold_job(job, host, host_ports, placed);
     }
 
-    /// Records that the engine holds the allocation of `job` on `host` as `placed`, booking
-    /// `booked` (what it books of the host and its host ports), and holds its operation to
-    /// no host.
+    /// Records that the engine holds the allocation of `job` on `host` as `placed`, holding
+    /// the host ports `host_ports`, and holds its operation to no host.
     pub(super) fn hold_job(
         &mut self,
         job: &JobId,
         host: &HostId,
-        booked: (Booked, Vec<u16>),
+        host_ports: Vec<u16>,
         placed: Placed,
     ) {
-        let (booked, host_ports) = booked;
         self.sched.place_only_on(placed.operation, BTreeSet::new());
         let hold = JobHold {
             host: host.clone(),
-            booked,
             host_ports,
             placed,
         };
@@ -478,8 +469,7 @@ impl Engine {
         match placed {
             Some((lease, host)) => {
                 let placed = Placed { lease, operation };
-                let booked = (walker.booked, walker.host_ports.clone());
-                self.hold_job(&walker.job, &host, booked, placed);
+                self.hold_job(&walker.job, &host, walker.host_ports.clone(), placed);
                 Some(host)
             }
             None => {

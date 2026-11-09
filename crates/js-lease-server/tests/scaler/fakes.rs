@@ -177,7 +177,7 @@ impl Effects for Handle {
                 world.hosts.retain(|view| view.id.as_str() != host);
                 Ok(())
             }
-            false => Err(Busy::Lease),
+            false => Err(Busy::Runs),
         }
     }
 

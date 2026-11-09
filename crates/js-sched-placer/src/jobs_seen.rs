@@ -9,17 +9,15 @@
 //!   a write of the job store, which counts its writes ([`js_jobs::JobStore::written`]): a job
 //!   submitted, cancelled, started, ended or freed, a host's job lost, a prepare failed, the
 //!   tick's expiry and loss, and the pass's own placements, marks and queue status writes;
-//! - the engine's picture of the hosts and their leases, which the registry changes through
-//!   the [`js_registry::Placer`] calls only. The placer counts each call that changed it
+//! - the engine's picture of the hosts, which the registry changes through the
+//!   [`js_registry::Placer`] calls only. The placer counts each call that changed it
 //!   ([`SchedPlacer::engine_changes`]): a hello, a heartbeat that brought a load reading or
-//!   gave up a lease, a lease placed, put back or ended, a host forgotten, and every step of
-//!   the whole-node queue (each tick's round among them); a heartbeat with no reading that
-//!   gives up nothing, and a sweep or expiry of the whole-node records that drops nothing, are
-//!   not counted;
+//!   gave up an allocation, and a host forgotten; a heartbeat with no reading that gives up
+//!   nothing is not counted;
 //! - the hosts it is offered ([`super::jobs::JobHosts`]): the hosts open to jobs, each with
 //!   its ceiling and whether it runs host jobs, the hosts that said hello, and the pool's
 //!   whole-node settings. They are read from the registry before every pass, skipped or not,
-//!   so a host that went lost, came back, was tainted or cordoned, finished its last lease or
+//!   so a host that went lost, came back, was tainted or cordoned, finished its last run or
 //!   listed a job it holds no allocation for is seen at once;
 //! - what pass 2 told of the queued jobs since the last pass ([`SchedPlacer::note_outcomes`]);
 //! - the clock.

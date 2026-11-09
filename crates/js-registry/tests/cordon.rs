@@ -1,4 +1,4 @@
-//! The cordon of a host: it keeps new leases off a host that is live, renews and lifts,
+//! The cordon of a host: it keeps new jobs off a host that is live, renews and lifts,
 //! lapses by itself, is kept in the bindings a caller persists, and is not forgotten with
 //! a silent host.
 
@@ -6,7 +6,6 @@ mod support;
 
 use std::time::Duration;
 
-use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Binding, MIN_LOST_RETENTION_MS, NotHeld};
 use js_types::Timestamp;
 use support::*;
@@ -28,51 +27,46 @@ fn until(fx: &Fixture, name: &str) -> Option<Timestamp> {
     fx.registry.own_host(&host(name)).unwrap().cordon_until
 }
 
-/// Asserts what a cordon does to placement and how it ends: while it is in force a live
-/// host takes no lease (`NoCapacity`), just before it lapses still none, and at the time it
-/// lapses the host takes one with no further call. It catches a cordon that is not read
-/// when a lease is placed, and one that never ends.
+/// Asserts what a cordon shows and how it ends: while it is in force the host's view carries
+/// the time it lapses (the job engine reads it there), just before it lapses it still does,
+/// and at the time it lapses the view carries none, with no further call. It catches a cordon
+/// that is not read when the hosts are listed, and one that never ends.
 #[test]
-fn a_cordoned_host_takes_no_lease_until_the_cordon_lapses() {
-    let mut fx = fixture(2);
+fn a_cordoned_host_shows_its_cordon_until_it_lapses() {
+    let fx = fixture(2);
     fx.join("a", "t");
     let placed = fx.registry.cordon(&host("a"), secs(60)).unwrap();
     assert!(placed.placed);
-    assert_eq!(
-        placed.host.cordon_until,
-        Some(Timestamp::from_millis(1_060_000))
-    );
-    assert_eq!(
-        fx.provider.start(spec(1)),
-        StartAck::Refused(RefusalCode::NoCapacity)
-    );
+    let lapses = Timestamp::from_millis(1_060_000);
+    assert_eq!(placed.host.cordon_until, Some(lapses));
+    assert_eq!(placed.host.host.cordon_until, Some(lapses));
+    assert_eq!(fx.registry.hosts()[0].cordon_until, Some(lapses));
     live_for(&fx, 55);
-    assert_eq!(
-        fx.provider.start(spec(1)),
-        StartAck::Refused(RefusalCode::NoCapacity)
-    );
+    assert_eq!(fx.registry.hosts()[0].cordon_until, Some(lapses));
     live_for(&fx, 10);
     assert_eq!(until(&fx, "a"), None);
-    assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
+    assert_eq!(fx.registry.hosts()[0].cordon_until, None);
 }
 
-/// Asserts that a cordon cuts nothing and survives the end of the lease: a lease held when
-/// the host is cordoned stays held and is read on the host, and once it is stopped the host
-/// takes no new one. It catches a cordon that gives up a lease it finds.
+/// Asserts that a cordon cuts nothing and survives the end of the work: a run the host lists
+/// as held stays listed (the host is releasing) when the host is cordoned, and once the host
+/// lists none the cordon is still in force. It catches a cordon that touches the held list.
 #[test]
-fn a_cordon_leaves_the_lease_it_finds_and_outlives_it() {
-    let mut fx = fixture(2);
+fn a_cordon_leaves_the_runs_it_finds_and_outlives_them() {
+    let fx = fixture(2);
     fx.join("a", "t");
-    assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
+    let mut listing = fx.heartbeat("a", 1);
+    listing.held = vec![js_agent_wire::HeldRun {
+        run_id: "r1".into(),
+        state: js_agent_wire::HeldState::Running,
+    }];
+    fx.registry.heartbeat(&listing, &cred("t")).unwrap();
     let cordoned = fx.registry.cordon(&host("a"), secs(600)).unwrap();
-    assert_eq!(cordoned.host.host.lease, Some(lease(1)));
-    fx.provider.stop(&lease(1));
+    assert!(cordoned.host.host.releasing);
     fx.beat("a", 1);
-    assert_eq!(fx.registry.own_host(&host("a")).unwrap().host.lease, None);
-    assert_eq!(
-        fx.provider.start(spec(2)),
-        StartAck::Refused(RefusalCode::NoCapacity)
-    );
+    let own = fx.registry.own_host(&host("a")).unwrap();
+    assert!(!own.host.releasing);
+    assert!(own.cordon_until.is_some());
 }
 
 /// Asserts the renewal: a repeat reports that it did not place the cordon, a longer one
@@ -162,8 +156,8 @@ fn a_cordon_survives_what_is_persisted() {
     after.hello(&hello("a"), &cred("t")).unwrap();
     assert_eq!(until(&after, "a"), Some(Timestamp::from_millis(1_100_000)));
     assert_eq!(
-        after.provider.clone().start(spec(1)),
-        StartAck::Refused(RefusalCode::NoCapacity)
+        after.registry.hosts()[0].cordon_until,
+        Some(Timestamp::from_millis(1_100_000))
     );
 }
 

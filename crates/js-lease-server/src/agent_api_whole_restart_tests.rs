@@ -183,8 +183,6 @@ async fn a_queued_whole_host_job_is_an_ordinary_job_row() {
     assert_eq!(row.spec.needs, Needs::WholeHost);
     assert!(rig.jobs.queued().unwrap().iter().any(|job| job.id == whole));
     assert_eq!(rig.jobs.get_allocation(&whole).unwrap(), None);
-    let (_, waiting) = rig.agents.registry.snapshot();
-    assert!(waiting.is_empty());
     assert!(rig.jobs.get_mark(&whole).unwrap().is_some());
 
     pass_time(&rig, &mut agent, 3599).await;

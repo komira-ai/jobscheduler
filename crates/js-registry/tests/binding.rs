@@ -1,17 +1,17 @@
-//! What a host id is bound to, what a restart does to a seated lease's binding, and when
+//! What a host id is bound to, what a restart does to a restored host's binding, and when
 //! a lost host is forgotten.
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{DEFAULT_GRACE_MS, InstanceIdentity, refusal};
-use js_provider::{Observed, Pool, RefusalCode, StartAck};
+use js_agent_wire::{DEFAULT_GRACE_MS, InstanceIdentity, Taint, refusal};
 use js_registry::{
     Binding, ConfigError, DEFAULT_LOST_RETENTION_MS, HostState, MAX_LOST_RETENTION_MS,
     MIN_LOST_RETENTION_MS, Refusal, Registry, SequentialSessions, SessionSource,
 };
-use js_types::ManualClock;
+use js_types::{Clock, ManualClock};
 use support::*;
 
 const RETENTION_MS: u64 = MIN_LOST_RETENTION_MS;
@@ -37,6 +37,17 @@ fn short_retention(max_machines: usize) -> Fixture {
     fixture_of(config)
 }
 
+/// `binding` with a taint, so that a restart puts the host back
+/// ([`Registry::restore_tainted`]).
+fn tainted(binding: Binding) -> Binding {
+    let taint = Taint {
+        reason: "check".into(),
+        run_id: None,
+        check: None,
+    };
+    binding.with_taint(Some(taint))
+}
+
 fn advance(fx: &Fixture, millis: u64) {
     fx.clock.advance(Duration::from_millis(millis));
 }
@@ -48,14 +59,12 @@ fn lost_for_retention(fx: &Fixture) {
 
 /// Asserts that a host id first admitted with an instance identity refuses a hello with
 /// the same token and another instance, or none: a holder of the pool's token cannot take
-/// over a lost host that was bound to its machine, and so cannot inherit its booking. The
-/// same instance gets back in. Without the instance part of the binding the first two
-/// hellos are admitted and the lease reads Present on the intruder.
+/// over the id of a lost host that was bound to its machine. The same instance gets back
+/// in. Without the instance part of the binding the first two hellos are admitted.
 #[test]
 fn instance_bound_host_refuses_another_instance_with_the_same_token() {
-    let mut fx = fixture(4);
+    let fx = fixture(4);
     fx.registry.hello(&on("a", "i-1"), &cred("t")).unwrap();
-    fx.provider.start(spec(1));
     fx.pass_grace();
     let other = fx.registry.hello(&on("a", "i-2"), &cred("t")).unwrap_err();
     assert_eq!(other, Refusal::HostBound);
@@ -66,32 +75,25 @@ fn instance_bound_host_refuses_another_instance_with_the_same_token() {
     other_provider.instance.as_mut().unwrap().provider = "gcp".into();
     let elsewhere = fx.registry.hello(&other_provider, &cred("t")).unwrap_err();
     assert_eq!(elsewhere, Refusal::HostBound);
-    assert_eq!(fx.provider.observe(&lease(1)), Observed::Unknown);
+    assert_eq!(fx.registry.hosts()[0].state, HostState::Lost);
     let welcome = fx.registry.hello(&on("a", "i-1"), &cred("t")).unwrap();
     assert_eq!(welcome.epoch, 2);
-    assert_eq!(
-        fx.provider.observe(&lease(1)),
-        Observed::Present { host: host("a") }
-    );
+    assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
 }
 
 /// Asserts the stated limit of the binding, so a change to it is a decision: a host id
 /// first admitted without an instance identity is bound to the pool credential only, and
-/// a hello for it with the same token takes it over once it is lost, with its booking,
-/// whatever instance it names. The binding is not upgraded by that hello: the first
+/// a hello for it with the same token takes it over once it is lost, whatever instance it
+/// names. The binding is not upgraded by that hello: the first
 /// holder of the token without an instance still gets back in.
 #[test]
 fn host_without_instance_is_bound_to_the_pool_credential_only() {
-    let mut fx = fixture(4);
+    let fx = fixture(4);
     fx.join("a", "t");
-    fx.provider.start(spec(1));
     fx.pass_grace();
     let welcome = fx.registry.hello(&on("a", "i-9"), &cred("t")).unwrap();
     assert_eq!(welcome.epoch, 2);
-    assert_eq!(
-        fx.provider.observe(&lease(1)),
-        Observed::Present { host: host("a") }
-    );
+    assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
     fx.pass_grace();
     assert_eq!(fx.join("a", "t"), 3);
     fx.pass_grace();
@@ -99,18 +101,15 @@ fn host_without_instance_is_bound_to_the_pool_credential_only() {
     assert_eq!(other_token, Refusal::HostBound);
 }
 
-/// Asserts that a lease seated with a binding is held for that binding: the awaiting host
+/// Asserts that a host put back with a binding is held for that binding: the awaiting host
 /// refuses a hello from another credential, and from another instance with the right
-/// credential, and stays awaiting with its lease unobservable; the bound hello takes it
-/// and the lease is Present. Without the binding on the awaiting record any holder of
-/// the pool's token takes the id and the restored lease.
+/// credential, and stays awaiting; the bound hello takes it. Without the binding on the
+/// awaiting record any holder of the pool's token takes the id.
 #[test]
-fn seat_with_a_binding_refuses_a_hello_that_does_not_match() {
-    let mut fx = fixture(4);
-    let binding = Binding::new(cred("t"), Some(instance("i-1")));
-    fx.provider
-        .seat(&host("a"), lease(1), Some(binding))
-        .unwrap();
+fn a_restored_host_refuses_a_hello_that_does_not_match_its_binding() {
+    let fx = fixture(4);
+    let binding = tainted(Binding::new(cred("t"), Some(instance("i-1"))));
+    fx.registry.restore_tainted(&host("a"), binding);
     let token = fx.registry.hello(&on("a", "i-1"), &cred("u")).unwrap_err();
     assert_eq!(token, Refusal::HostBound);
     let machine = fx.registry.hello(&on("a", "i-2"), &cred("t")).unwrap_err();
@@ -118,7 +117,6 @@ fn seat_with_a_binding_refuses_a_hello_that_does_not_match() {
     let bare = fx.registry.hello(&hello("a"), &cred("t")).unwrap_err();
     assert_eq!(bare, Refusal::HostBound);
     assert_eq!(fx.registry.hosts()[0].state, HostState::Awaiting);
-    assert_eq!(fx.provider.observe(&lease(1)), Observed::Unknown);
     assert_eq!(
         fx.registry
             .hello(&on("a", "i-1"), &cred("t"))
@@ -126,42 +124,27 @@ fn seat_with_a_binding_refuses_a_hello_that_does_not_match() {
             .epoch,
         1
     );
-    assert_eq!(
-        fx.provider.observe(&lease(1)),
-        Observed::Present { host: host("a") }
-    );
+    assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
 }
 
-/// Asserts that a binding seated with a credential and no instance holds the credential
-/// only: the right token with any instance is admitted. The restart gap, as documented:
-/// with no binding at all (`None`), the first hello from any token holder takes the id
-/// and the lease, and is the binding from then on, instance included.
+/// Asserts that a binding restored with a credential and no instance holds the credential
+/// only: the right token with any instance is admitted, another token is refused, and the
+/// binding is not upgraded by a hello that names an instance.
 #[test]
-fn seat_without_a_binding_lets_the_first_hello_bind() {
+fn a_restored_binding_with_a_credential_and_no_instance_holds_the_credential_only() {
     let fx = fixture(4);
-    let credential_only = Binding::new(cred("t"), None);
-    fx.provider
-        .seat(&host("a"), lease(1), Some(credential_only))
-        .unwrap();
+    let credential_only = tainted(Binding::new(cred("t"), None));
+    fx.registry.restore_tainted(&host("a"), credential_only);
     assert_eq!(
         fx.registry.hello(&hello("a"), &cred("u")).unwrap_err(),
         Refusal::HostBound
     );
     fx.registry.hello(&on("a", "i-5"), &cred("t")).unwrap();
-    fx.provider.seat(&host("b"), lease(2), None).unwrap();
-    fx.registry.hello(&on("b", "i-1"), &cred("anyone")).unwrap();
     fx.pass_grace();
-    let other_instance = fx.registry.hello(&on("b", "i-2"), &cred("anyone"));
-    assert_eq!(other_instance.unwrap_err(), Refusal::HostBound);
-    let other_token = fx.registry.hello(&on("b", "i-1"), &cred("else"));
+    let other_token = fx.registry.hello(&on("a", "i-5"), &cred("else"));
     assert_eq!(other_token.unwrap_err(), Refusal::HostBound);
-    assert_eq!(
-        fx.registry
-            .hello(&on("b", "i-1"), &cred("anyone"))
-            .unwrap()
-            .epoch,
-        2
-    );
+    let other_instance = fx.registry.hello(&on("a", "i-6"), &cred("t")).unwrap();
+    assert_eq!(other_instance.epoch, 2);
 }
 
 /// Asserts that ids a token holder made up and abandoned stop blocking real hosts once
@@ -183,43 +166,36 @@ fn squatting_ids_stop_blocking_real_hosts_after_the_retention() {
     let listed = fx.registry.hosts();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, host("real"));
-    assert_eq!(fx.provider.capacity().len(), 1);
 }
 
-/// Asserts that a lost host holding a booking is never forgotten, however long it is
-/// silent, while an unbooked one beside it is; that it comes back with its booking; and
-/// that once the lease is stopped the host is forgotten at the next call, since it is
-/// lost and holds nothing. Without the booking exemption a long outage would drop the
-/// lease's host, and the lease with it.
+/// Asserts that a lost host its placer holds work on is never forgotten, however long it
+/// is silent, while one beside it that holds nothing is; that it comes back; and that once
+/// the placer holds nothing on it the host is forgotten at the next call, since it is lost
+/// and holds nothing. Without the exemption a long outage would drop the host a job's
+/// allocation stands on.
 #[test]
-fn a_booked_lost_host_is_kept_until_its_lease_stops() {
-    let mut fx = short_retention(4);
+fn a_lost_host_the_placer_holds_work_on_is_kept_until_it_holds_none() {
+    let holding = Arc::new(Holding::default());
+    let config = config(4).with_lost_retention(RETENTION_MS).unwrap();
+    let fx = with_placer(config, holding.clone());
     fx.join("a", "t");
     fx.join("b", "t");
-    assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
+    holding.hold(&host("a"));
     lost_for_retention(&fx);
     advance(&fx, 1);
     let listed = fx.registry.hosts();
     assert_eq!(listed.len(), 1);
     assert_eq!(
-        (listed[0].id.clone(), listed[0].state, listed[0].lease),
-        (host("a"), HostState::Lost, Some(lease(1)))
+        (listed[0].id.clone(), listed[0].state),
+        (host("a"), HostState::Lost)
     );
     advance(&fx, MIN_LOST_RETENTION_MS * 1000);
-    assert_eq!(fx.provider.observe(&lease(1)), Observed::Unknown);
+    assert_eq!(fx.registry.hosts().len(), 1);
     assert_eq!(fx.registry.hello(&hello("a"), &cred("t")).unwrap().epoch, 2);
     fx.pass_grace();
     advance(&fx, RETENTION_MS);
-    assert!(matches!(
-        fx.provider.stop(&lease(1)),
-        js_provider::StopAck::Stopped { .. }
-    ));
+    holding.release(&host("a"));
     assert!(fx.registry.hosts().is_empty());
-    assert!(fx.provider.capacity().is_empty());
-    assert_eq!(
-        fx.provider.start(spec(2)),
-        StartAck::Refused(RefusalCode::NoCapacity)
-    );
 }
 
 /// Asserts that a host bound to a token that was rotated away is refused while its
@@ -243,31 +219,30 @@ fn a_host_bound_to_a_rotated_token_registers_again_after_eviction() {
     assert_eq!(welcome.epoch, 1);
 }
 
-/// Asserts that an awaiting host that holds a booking is not forgotten however much time
-/// passes: its lease is still the table's, and its agent may yet say hello.
+/// Asserts that an awaiting host that reported a taint is not forgotten however much time
+/// passes: its taint is the table's, and its agent may yet say hello.
 #[test]
-fn a_booked_awaiting_host_is_not_forgotten() {
+fn a_tainted_awaiting_host_is_not_forgotten() {
     let fx = short_retention(4);
-    fx.provider.seat(&host("a"), lease(1), None).unwrap();
+    let binding = tainted(Binding::new(cred("t"), None));
+    fx.registry.restore_tainted(&host("a"), binding);
     advance(&fx, MAX_LOST_RETENTION_MS * 2);
     assert_eq!(fx.registry.hosts()[0].state, HostState::Awaiting);
 }
 
-/// Asserts that an awaiting host whose lease has ended is forgotten, binding included,
-/// once the grace period and the retention have passed since it was seated (not since
-/// the lease ended), and not a moment before; and that its slot is then free for another
-/// host. Without a seat time to count from, an agent that never returns keeps its
-/// record, its binding and its place in `max_machines` until the next restart.
+/// Asserts that an awaiting host whose cordon has lapsed is forgotten, binding included,
+/// once the grace period and the retention have passed since it was put back, and not a
+/// moment before; and that its slot is then free for another host. Without a time to
+/// count from, an agent that never returns keeps its record, its binding and its place in
+/// `max_machines` until the next restart.
 #[test]
-fn an_awaiting_host_with_no_booking_is_forgotten_from_its_seating() {
-    let mut fx = short_retention(1);
-    let binding = Binding::new(cred("t"), None);
-    fx.provider
-        .seat(&host("a"), lease(1), Some(binding))
-        .unwrap();
+fn an_awaiting_host_with_a_lapsed_cordon_is_forgotten_from_its_restoring() {
+    let fx = short_retention(1);
+    let until = fx.clock.now().millis() + 1_000;
+    let binding = Binding::new(cred("t"), None).with_cordon(Some(until));
+    fx.registry.restore_tainted(&host("a"), binding);
     assert_eq!(fx.registry.bindings().len(), 1);
     lost_for_retention(&fx);
-    fx.provider.stop(&lease(1));
     assert_eq!(fx.registry.hosts()[0].state, HostState::Awaiting);
     assert_eq!(fx.registry.hosts()[0].lease, None);
     let full = fx.registry.hello(&hello("b"), &cred("t")).unwrap_err();
@@ -304,13 +279,13 @@ fn lost_retention_is_validated() {
 /// epoch (both guessable), cannot heartbeat for an instance-bound host: with no session
 /// secret, an empty one or a guessed one it is refused as `session-mismatch`, and the
 /// host's state, phase, epoch and last-heard time are exactly as before, so the dead
-/// host stays lost and takes no lease. The session the host was given at its hello still
+/// host stays lost. The session the host was given at its hello still
 /// works and revives it. Without the session check the peer's first heartbeat is
-/// accepted: it keeps a dead host live and bookable, so leases land on a dead machine,
-/// and sets the host's phase.
+/// accepted: it keeps a dead host live, so jobs land on a dead machine, and sets the host's
+/// phase.
 #[test]
 fn heartbeat_from_a_peer_with_the_same_token_but_no_session_is_refused_and_changes_nothing() {
-    let mut fx = fixture(4);
+    let fx = fixture(4);
     let welcome = fx.hello(&on("a", "i-1"), &cred("pool")).unwrap();
     fx.pass_grace();
     let before = fx.registry.hosts();
@@ -325,10 +300,6 @@ fn heartbeat_from_a_peer_with_the_same_token_but_no_session_is_refused_and_chang
         assert_eq!(refused.code(), refusal::SESSION_MISMATCH);
         assert_eq!(fx.registry.hosts(), before);
     }
-    assert_eq!(
-        fx.provider.start(spec(1)),
-        StartAck::Refused(RefusalCode::NoCapacity)
-    );
     let mut real = fx.heartbeat("a", welcome.epoch);
     real.phase = js_agent_wire::Phase::Draining;
     fx.registry.heartbeat(&real, &cred("pool")).unwrap();
@@ -418,9 +389,8 @@ fn the_sequential_source_counts_from_one() {
 }
 
 /// Asserts that `bindings` lists what each known host id is bound to (the credential and
-/// the instance of its first hello), that a seated booking shows the binding it was
-/// seated with, and that a seat without one shows none until the first hello binds the
-/// id. It catches a caller that persists bindings getting a list that is empty, that
+/// the instance of its first hello), and that a restored host shows the binding it was put
+/// back with. It catches a caller that persists bindings getting a list that is empty, that
 /// leaves out an awaiting host's binding (so a second restart would lose it), or that
 /// invents one.
 #[test]
@@ -439,12 +409,12 @@ fn bindings_list_what_each_host_is_bound_to() {
 
     let restarted = fixture(4);
     let kept = Binding::new(cred("t"), Some(instance("i-9")));
+    let restored = tainted(kept.clone());
     restarted
-        .provider
-        .seat(&host("c"), lease(1), Some(kept.clone()))
-        .unwrap();
-    restarted.provider.seat(&host("d"), lease(2), None).unwrap();
+        .registry
+        .restore_tainted(&host("c"), restored.clone());
     let awaiting = restarted.registry.bindings();
     assert_eq!(awaiting.len(), 1);
-    assert_eq!(awaiting[&host("c")], kept);
+    assert_eq!(awaiting[&host("c")], restored);
+    assert_eq!(awaiting[&host("c")].credential(), kept.credential());
 }

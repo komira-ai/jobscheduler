@@ -13,7 +13,6 @@ use js_jobs::{
     AllocationStep, Booked, Constraints, Isolation, JobEnd, JobId, JobSpec, JobState, Needs,
     NewJob, Output,
 };
-use js_provider::Candidate;
 use js_registry::{Credential, Placer};
 use js_sched::Event;
 use js_sched_placer::engine::Engine;
@@ -610,12 +609,10 @@ fn a_whole_host_job_or_one_no_host_could_describe_holds_back_no_one() {
     assert_eq!(state(&jobs, "job-5"), JobState::Queued);
 }
 
-/// Asserts that the engine keeps a job's booking through its own events: an engine built
-/// again (when it disagrees with the registry) carries it, a heartbeat of its host lists
-/// its lease so the scheduler keeps it past a placement round, and a host the registry
-/// forgets is kept as a worker while it holds one. It catches a rebuild that drops the job
-/// allocations, a heartbeat that gives them up, and a forgotten host taking its bookings
-/// with it.
+/// Asserts that the engine keeps a job's booking through its own events: a heartbeat of its
+/// host lists its allocation so the scheduler keeps it past a placement round, and a host the
+/// registry forgets is kept as a worker while it holds one. It catches a heartbeat that gives
+/// the allocations up, and a forgotten host taking its bookings with it.
 #[test]
 fn the_engine_keeps_a_jobs_booking_through_its_own_events() {
     let clock = clock();
@@ -625,27 +622,22 @@ fn the_engine_keeps_a_jobs_booking_through_its_own_events() {
     assert_eq!(pass(&placer, &jobs, &["host-a"]), ["job-a"]);
     let a = host("host-a");
     let worker = map::worker(&a);
-    let every = [Candidate {
-        host: a.clone(),
-        shape: shape(),
-        leases: Vec::new(),
-    }];
     let now = placer.now();
-    let mut rebuilt = placer.engine().rebuild(Settings::default(), &every, now);
+    let mut engine = placer.engine();
     let memory = |engine: &Engine| engine.sched().booked(&worker).unwrap().memory_bytes;
-    assert_eq!(memory(&rebuilt), 10 * GIB);
+    assert_eq!(memory(&engine), 10 * GIB);
     let later = FarmTime::from_millis(now.as_millis() + 5_000);
-    rebuilt.heard(&a, None, later);
-    rebuilt.feed(later, Event::Tick);
-    assert_eq!(rebuilt.job_leases_on(&a).count(), 1);
-    let held = rebuilt.job_leases_on(&a).collect::<Vec<_>>();
-    assert_eq!(rebuilt.sched().leases_on(&worker), held);
-    rebuilt.host_gone(&a);
-    assert_eq!(memory(&rebuilt), 10 * GIB);
-    rebuilt.job_failed(&JobId::parse("job-a").unwrap());
-    assert_eq!(memory(&rebuilt), 0);
-    rebuilt.host_gone(&a);
-    assert!(rebuilt.sched().capacity(&worker).is_none());
+    engine.heard(&a, None, later);
+    engine.feed(later, Event::Tick);
+    assert_eq!(engine.job_leases_on(&a).count(), 1);
+    let held = engine.job_leases_on(&a).collect::<Vec<_>>();
+    assert_eq!(engine.sched().leases_on(&worker), held);
+    engine.host_gone(&a);
+    assert_eq!(memory(&engine), 10 * GIB);
+    engine.job_failed(&JobId::parse("job-a").unwrap());
+    assert_eq!(memory(&engine), 0);
+    engine.host_gone(&a);
+    assert!(engine.sched().capacity(&worker).is_none());
 }
 
 /// Asserts that a pass whose read of either table fails answers the error and places

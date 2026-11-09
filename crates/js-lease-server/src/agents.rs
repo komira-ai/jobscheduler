@@ -24,10 +24,9 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, InstanceIdentity};
 use js_elastic::HostName;
-use js_registry::{Binding, Cordoned, Credential, OsSessions, ProfileLives, Registry, Uncordoned};
+use js_registry::{Binding, Cordoned, Credential, OsSessions, Registry, Uncordoned};
 use js_types::Clock;
 use js_types::{HostCapacity, HostId, ProviderId};
-use js_usage::{ProfileCurves, ProfileKey, TailSink};
 use tracing::{error, info, warn};
 
 use self::taints::restore_job_taints;
@@ -50,32 +49,6 @@ use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
 use crate::usage_setup::UsageSetup;
 use crate::util::blocking;
-
-/// The source of lives the estimate feed reads: the learned curves, or [`NoLives`] for a
-/// sink that keeps none.
-fn lives_of(curves: Option<Arc<ProfileCurves>>) -> Arc<dyn ProfileLives> {
-    match curves {
-        Some(curves) => curves,
-        None => Arc::new(NoLives),
-    }
-}
-
-/// Gives `registry` the sink its tail counters are kept in. Stored counters that cannot be
-/// read (or were bucketed by other edges) are said once; the counters then start at zero.
-fn keep_tail(registry: &Registry, tail: Arc<dyn TailSink>) {
-    if let Err(error) = registry.set_tail_sink(tail) {
-        warn!(%error, "the stored tail counters are not read; they count on from zero");
-    }
-}
-
-/// The source of lives of a usage sink that keeps no curves: no profile has a known life.
-struct NoLives;
-
-impl ProfileLives for NoLives {
-    fn wall_minutes_p90(&self, _: &ProfileKey) -> Option<u32> {
-        None
-    }
-}
 
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
 /// nothing else of the server's.
@@ -263,7 +236,7 @@ fn placed_in(
                 mint_provider,
                 hello_limit,
                 require_host_credential,
-                estimate_feed,
+                estimate_feed: _,
                 cpu_slack,
                 max_lease_wall,
                 job_limits,
@@ -280,20 +253,6 @@ fn placed_in(
             let placer = placer(max_lease_wall, cpu_slack, memory, clock);
             let registry = Registry::new(pool, clock.clone(), placer.clone());
             let usage = usage.build(clock, limits)?;
-            // Each lease booking that ends leaves its record in the usage store's history.
-            usage
-                .iter()
-                .for_each(|usage| registry.set_allocation_log(usage.log()));
-            // The tail counters are kept in the usage store when there is one, and the
-            // registry counts on from what it holds; with none they are in memory only.
-            let tail = usage.iter().find_map(|usage| usage.tail());
-            tail.into_iter().for_each(|tail| keep_tail(&registry, tail));
-            // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
-            // drain order. A sink that keeps no curves gives a source that knows no
-            // profile: every lease is then costed at its bound. Off, no source is set, no
-            // estimate is passed and every lease is costed at its bound.
-            let lives = lives_of(usage.iter().find_map(|usage| usage.curves()));
-            estimate_feed.then(|| registry.set_lives(lives));
             // The one job store of the server, when the job service is on. It is opened
             // before the bindings are put back: a host a host job tainted whose binding lost
             // the taint (a crash between the placement and the binding's write) gets it from

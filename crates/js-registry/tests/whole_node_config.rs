@@ -32,7 +32,7 @@ fn a_dedicated_pool_keeps_its_settings_and_reports_the_surplus() {
 }
 
 /// Asserts that the registry hands out its pool's whole-node settings as the pool has them,
-/// and none for a pool without any: the one source the lease table and the scaler read the
+/// and none for a pool without any: the one source the job engine and the scaler read the
 /// prepare timeout from. Catches a registry that answers defaults in place of the pool's.
 #[test]
 fn the_registry_answers_the_whole_node_settings_of_its_pool() {

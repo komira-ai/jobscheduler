@@ -39,7 +39,7 @@ use js_types::sched::WorkKey;
 use js_usage::{
     EndedHistory, EndedPage, EndedQuery, EndedRow, KeyProfile, NodeBuffer, NodeSeries,
     ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder, RunSeries, StoreTailSink,
-    TailFlush, TailSink,
+    TAIL_BUCKETS, TailFlush, TailSink,
 };
 use tracing::{info, warn};
 
@@ -48,6 +48,14 @@ use crate::usage::{
     HostLimits, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault, UsageSink,
 };
 use crate::usage_setup::DEFAULT_HISTORY_RETENTION_DAYS;
+
+/// The upper edges, in milliseconds, of the estimate-error buckets of the stored tail counters:
+/// bucket `i` counts the errors up to and including `ERROR_EDGES_MS[i]` (and above the edge
+/// before it); the last bucket counts the errors above the last edge. An error is the actual
+/// end minus the estimated end, so a lease that outlives its estimate is positive. The stored
+/// rows are bucketed by these edges, so they are not changed.
+const ERROR_EDGES_MS: [i64; TAIL_BUCKETS - 1] =
+    [-300_000, -60_000, -10_000, 0, 10_000, 60_000, 300_000];
 
 /// How admission finds the profile name of a work key: the caller supplies it, since the
 /// name is the caller's (a key of its own estimator), not something the server derives from
@@ -144,10 +152,7 @@ impl NodeUsage {
         let curves = Arc::new(ProfileCurves::new(Box::new(move |key| names(key))));
         let profiles = ProfileStore::open(store.clone(), curves.clone(), budget_bytes, today)?;
         Ok(Self {
-            tail: Arc::new(StoreTailSink::new(
-                store.clone(),
-                js_registry::ERROR_EDGES_MS,
-            )),
+            tail: Arc::new(StoreTailSink::new(store.clone(), ERROR_EDGES_MS)),
             store,
             curves,
             inner: Mutex::new(Inner {

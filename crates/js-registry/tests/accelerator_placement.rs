@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{GpuDevice, Hello};
-use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::PoolConfig;
 use js_types::{Capabilities, ClassId, ProviderId, Request, Resources, Shape};
 use support::*;
@@ -55,8 +54,7 @@ fn gpu_request(gpu_class: &str, extra: &[(&str, &str)]) -> Request {
 
 /// Whether `request` is placed on the one registered host of `fx`.
 fn placed(fx: &Fixture, request: Request) -> bool {
-    let spec = StartSpec::new(lease(1), request, &[class()]).unwrap();
-    started_on(&fx.provider.clone().start(spec)) == Some("gpu-1")
+    placed_on(fx, "gpu-1", &request)
 }
 
 /// Asserts that a host of an old agent (no `shape.accelerator`) with a class the alias
@@ -138,35 +136,21 @@ fn gpu_host(floor_class: &str, hello: &Hello) -> Fixture {
     fx
 }
 
-/// What a start of `request` on `fx` answers.
-fn start(fx: &Fixture, request: Request) -> StartAck {
-    let spec = StartSpec::new(lease(1), request, &[class()]).unwrap();
-    fx.provider.clone().start(spec)
-}
-
-/// Asserts that a pool whose floor names the family `nvidia-a100`
-/// places a request for `nvidia-a100-sxm4-80gb` on its host of that variant, and refuses
-/// one for `nvidia-a100-sxm4-40gb` `no-capacity`: the floor answers for the family, not
-/// the variant, so a host of the 40 GiB variant could still join. Catches a pool-fit gate
-/// that holds a request to the floor's family alone (the floor fits no variant spelling,
-/// so the placer was never asked and the start was `no-fit`), and a host
+/// Asserts that a pool whose floor names the family `nvidia-a100` places a request for
+/// `nvidia-a100-sxm4-80gb` on its host of that variant, and not one for
+/// `nvidia-a100-sxm4-40gb`: the floor answers for the family, not the variant. Catches a host
 /// placed as the floor's family.
 #[test]
 fn a_variant_request_is_placed_on_its_variant() {
     let hello = old_gpu_hello("nvidia-a100-sxm4-80gb", 80);
     let fx = gpu_host("nvidia-a100", &hello);
-    let ack = start(&fx, gpu_request("nvidia-a100-sxm4-80gb", &[]));
-    assert_eq!(started_on(&ack), Some("gpu-1"));
-    let fx = gpu_host("nvidia-a100", &hello);
-    let ack = start(&fx, gpu_request("nvidia-a100-sxm4-40gb", &[]));
-    assert_eq!(ack, StartAck::Refused(RefusalCode::NoCapacity),);
+    assert!(placed(&fx, gpu_request("nvidia-a100-sxm4-80gb", &[])));
+    assert!(!placed(&fx, gpu_request("nvidia-a100-sxm4-40gb", &[])));
 }
 
-/// Asserts that a host of a model the alias table does not know,
-/// whose devices measure 40 GiB, takes a request for that model with 40 GiB per device,
-/// and that one for 41 GiB is refused `no-capacity` (the floor knows no memory, so a
-/// larger host could join). Catches the measured memory of the host lost before js-sched
-/// places, and a gate that holds the request to the floor, which states no memory.
+/// Asserts that a host of a model the alias table does not know, whose devices measure 40 GiB,
+/// takes a request for that model with 40 GiB per device, and that one for 41 GiB is not
+/// placed on it. Catches the measured memory of the host lost before js-sched places.
 #[test]
 fn a_measured_memory_decides_placement() {
     let hello = old_gpu_hello("nvidia-zz9000", 40);
@@ -178,30 +162,6 @@ fn a_measured_memory_decides_placement() {
         gpu_request("nvidia-zz9000", &caps)
     };
     let fx = gpu_host("nvidia-zz9000", &hello);
-    assert_eq!(started_on(&start(&fx, ask("40"))), Some("gpu-1"),);
-    let fx = gpu_host("nvidia-zz9000", &hello);
-    let over = start(&fx, ask("41"));
-    assert_eq!(over, StartAck::Refused(RefusalCode::NoCapacity),);
-}
-
-/// Asserts that a pool whose floor pins the variant
-/// `nvidia-a100-sxm4-80gb` refuses a request for `nvidia-a100-sxm4-40gb` `no-fit`: every
-/// host is held to the floor's variant, so none ever serves another, and a client must not
-/// be told to retry. A request for 81 GiB per device is refused `no-fit` too, and the
-/// floor's own variant is placed. Catches a gate that leaves a floor's variant to the
-/// hosts, as it leaves a family's.
-#[test]
-fn a_floor_that_pins_a_variant_answers_for_it() {
-    let a100_80 = "nvidia-a100-sxm4-80gb";
-    let hello = old_gpu_hello(a100_80, 80);
-    let fx = gpu_host(a100_80, &hello);
-    let other = start(&fx, gpu_request("nvidia-a100-sxm4-40gb", &[]));
-    assert_eq!(other, StartAck::Refused(RefusalCode::NoFit),);
-    let more = start(
-        &fx,
-        gpu_request(a100_80, &[("accelerator.memory-gib", "81")]),
-    );
-    assert_eq!(more, StartAck::Refused(RefusalCode::NoFit));
-    let own = start(&fx, gpu_request(a100_80, &[]));
-    assert_eq!(started_on(&own), Some("gpu-1"));
+    assert!(placed(&fx, ask("40")));
+    assert!(!placed(&fx, ask("41")));
 }

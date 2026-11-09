@@ -385,11 +385,10 @@ async fn heartbeat(
     if let Some(usage) = &agents.usage {
         let usage = Arc::clone(usage);
         let acks = reply.result_acks.clone();
-        let registry = agents.registry.clone();
         blocking(move || {
-            let holds = |lease: &js_types::LeaseId, host: &js_types::HostId| {
-                registry.host_of(lease).as_ref() == Some(host)
-            };
+            // No lease holds a host: the registry queues no run, so the acks of a previous
+            // release's results (`unknown-lease`) name none that is held.
+            let holds = |_: &js_types::LeaseId, _: &js_types::HostId| false;
             usage.on_beat(&heartbeat, load, &acks, &holds);
         })
         .await;

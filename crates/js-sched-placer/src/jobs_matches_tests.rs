@@ -11,8 +11,8 @@ use js_types::sched::WorkerId;
 use js_types::{Candidate, Held, HostId, JobNetwork, LeaseId, Resources, Shape};
 
 use super::{Decided, OpenHost};
-use crate::engine::rig::{Tables, at, host, spec_of};
-use crate::engine::{Engine, Settings};
+use crate::engine::Engine;
+use crate::engine::rig::{Tables, at, engine_over, host, spec_of};
 
 const GIB: u64 = 1 << 30;
 
@@ -50,7 +50,7 @@ const POLICIES: [NetworkPolicy; 3] = [
 const PORTS: [u16; 3] = [8000, 8001, 9000];
 
 /// A host named `name` of `cores` cores and `gib` GiB that reports `arch` and `os`, carrying
-/// one-core leases of the registry numbered `seqs`.
+/// the one-core allocations of the jobs `held-<seq>` for each of `seqs`.
 fn candidate(
     name: &str,
     (cores, gib): (u64, u64),
@@ -75,7 +75,7 @@ fn candidate(
     }
 }
 
-/// Up to six hosts of several sizes and platforms, carrying up to three registry leases each,
+/// Up to six hosts of several sizes and platforms, busy with up to three allocations each,
 /// and the hosts open to jobs among them (most), each with a ceiling and host jobs or not.
 fn hosts(g: &mut Gen) -> (Vec<Candidate>, BTreeMap<HostId, OpenHost>) {
     let mut seq = 0;
@@ -161,7 +161,7 @@ fn booked(engine: &Engine, hosts: &[Candidate]) -> Vec<Option<js_types::sched::R
 /// Catches: a match held over the walk that changes which hosts the scheduler offers a job:
 /// a host given a job its platform does not satisfy, or a host left out of a job it could
 /// take, so a placement moves, appears or goes, beside a host-isolation job's taint and the
-/// host ports already held. Over generated hosts (sizes, platforms, registry leases, ceilings,
+/// host ports already held. Over generated hosts (sizes, platforms, allocations, ceilings,
 /// host jobs or not, some not open) and two passes of generated jobs, the second over what the
 /// first left queued and more, with the first's placements still held: the walk that holds the
 /// matches decides exactly what the walk that matches every host again for each job decides,
@@ -177,8 +177,8 @@ fn the_held_walk_places_as_the_walk_matching_each_round_over_generated_states() 
         let tables = Tables::new();
         let first = jobs(&mut g, &tables, "a");
         let later = jobs(&mut g, &tables, "b");
-        let mut held = Engine::build(Settings::default(), &built, at(0));
-        let mut fresh = Engine::build(Settings::default(), &built, at(0));
+        let mut held = engine_over(&built);
+        let mut fresh = engine_over(&built);
         let one: Walked = held.walk_jobs(&first, &open, at(1_000));
         assert_eq!(
             one,
@@ -283,8 +283,8 @@ fn four_hosts_ten_jobs() -> (Vec<Candidate>, BTreeMap<HostId, OpenHost>, Vec<Job
 #[test]
 fn a_pass_matches_each_open_host_once_per_platform() {
     let (built, open, queued) = four_hosts_ten_jobs();
-    let mut held = Engine::build(Settings::default(), &built, at(0));
-    let mut fresh = Engine::build(Settings::default(), &built, at(0));
+    let mut held = engine_over(&built);
+    let mut fresh = engine_over(&built);
     let before = (
         held.sched().match_evaluations(),
         fresh.sched().match_evaluations(),

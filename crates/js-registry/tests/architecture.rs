@@ -1,6 +1,6 @@
-//! The registry places nothing itself: its placer picks the host of every start and keeps
-//! the whole-node queue. This reads the crate's own source and fails when the code (not a
-//! comment or a string) names one of the ways the registry used to place by itself:
+//! The registry places nothing itself: it books nothing, and the engine of its placer places
+//! the jobs. This reads the crate's own source and fails when the code (not a comment or a
+//! string) names one of the ways the registry used to place by itself:
 //!
 //! - the first-free picker: the book's search for the first host by id that qualifies
 //!   (`HostBook::start_where`) and the gate that refused a class that shares a host for
@@ -176,7 +176,8 @@ fn sources(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Asserts that no source file of the crate's library uses a banned name in its code, and
-/// that the check read the files it guards (the start path and the whole-node modules).
+/// that the check read the files it guards (the registry and its placer side, and the
+/// whole-node module).
 /// Catches a first-free start path or a deadline give-up brought back into the registry.
 #[test]
 fn the_registry_holds_no_first_free_picker_and_no_deadline_give_up() {
@@ -187,9 +188,9 @@ fn the_registry_holds_no_first_free_picker_and_no_deadline_give_up() {
         .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
         .collect();
     for guarded in [
-        "registry/start.rs",
-        "whole/reserve.rs",
-        "registry/waiting.rs",
+        "registry.rs",
+        "registry/placer_side.rs",
+        "whole/requests.rs",
     ] {
         assert!(
             read.iter().any(|file| file == guarded),

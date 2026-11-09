@@ -3,8 +3,7 @@
 mod support;
 
 use js_agent_wire::{Phase, refusal};
-use js_provider::SeatError;
-use js_registry::{HostState, Refusal};
+use js_registry::{Binding, Credential, HostState, Refusal};
 use support::*;
 
 /// Asserts that a host claiming less than the pool promises is refused with its own
@@ -28,23 +27,18 @@ fn wrong_shape_refused() {
     assert!(fx.registry.hosts().is_empty());
 }
 
-/// Asserts that a host claiming more than the pool promises is booked as the pool's
-/// shape: a request above the pool's shape but within the claim finds no fit. A defect
-/// that booked the claim would let an agent inflate what a lease holds.
+/// Asserts that a host claiming more than the pool promises is listed with the pool's shape
+/// and its claim kept apart: the shape the registry books is the pool's, never the claim. A
+/// defect that booked the claim would let an agent inflate what a job may take.
 #[test]
 fn booked_shape_is_the_pool_shape_not_the_claim() {
-    let mut fx = fixture(4);
+    let fx = fixture(4);
     fx.join("big", "t");
-    let mut wanted = request();
-    wanted.resources = js_types::Resources::new(6000, 1, 0, None).unwrap();
-    let spec = js_provider::StartSpec::new(lease(1), wanted, &[class()]).unwrap();
-    let ack = js_provider::Pool::start(&mut fx.provider, spec);
-    assert_eq!(
-        ack,
-        js_provider::StartAck::Refused(js_provider::RefusalCode::NoFit)
-    );
     let listed = fx.registry.hosts();
     assert_eq!(listed[0].shape, pool_shape());
+    let claim = listed[0].claim.as_ref().unwrap();
+    assert_eq!(claim.resources().cpu_millis(), 8000);
+    assert_eq!(claim.resources().memory_bytes(), 16 << 30);
 }
 
 /// Asserts that a full pool refuses a host it does not know, and still takes the hello
@@ -63,13 +57,22 @@ fn pool_full_refused_but_rehello_of_known_host_ok() {
     assert_eq!(fx.join("a", "t"), 2);
 }
 
-/// Asserts that a seated host counts toward the limit although the seat itself is never
-/// refused for room, so a restart cannot drop a lease because the pool is full.
+/// Asserts that a host put back after a restart counts toward the limit although putting it
+/// back is never refused for room, so a restart cannot drop a taint because the pool is full.
 #[test]
-fn seat_ignores_the_limit_but_counts_toward_it() {
+fn restoring_a_host_ignores_the_limit_but_counts_toward_it() {
     let fx = fixture(1);
-    fx.provider.seat(&host("a"), lease(1), None).unwrap();
-    fx.provider.seat(&host("b"), lease(2), None).unwrap();
+    let tainted = |reason: &str| {
+        let taint = js_agent_wire::Taint {
+            reason: reason.into(),
+            run_id: None,
+            check: None,
+        };
+        Binding::new(Credential::of_token("t"), None).with_taint(Some(taint))
+    };
+    fx.registry.restore_tainted(&host("a"), tainted("one"));
+    fx.registry.restore_tainted(&host("b"), tainted("two"));
+    assert_eq!(fx.registry.hosts().len(), 2);
     let full = fx.registry.hello(&hello("c"), &cred("t")).unwrap_err();
     assert_eq!(full, Refusal::PoolFull);
 }
@@ -243,23 +246,23 @@ fn heartbeat_from_another_credential_refused_and_changes_nothing() {
     assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
 }
 
-/// Asserts that the listing says what an operator needs: the id, state, phase, the lease
-/// that holds the host, the labels and agent version the host announced, and the epoch.
+/// Asserts that the listing says what an operator needs: the id, state, phase, the labels and
+/// agent version the host announced, and the epoch; and that no lease is booked on a host.
 #[test]
 fn hosts_lists_what_the_operator_needs() {
-    let mut fx = fixture(4);
+    let fx = fixture(4);
     let epoch = fx.join("a", "t");
     fx.join("b", "t");
-    let ack = js_provider::Pool::start(&mut fx.provider, spec(1));
-    assert_eq!(started_on(&ack), Some("a"));
     let listed = fx.registry.hosts();
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].id, host("a"));
-    assert_eq!(listed[0].lease, Some(lease(1)));
+    assert_eq!(listed[0].state, HostState::Live);
     assert_eq!(listed[0].phase, Phase::Serving);
     assert_eq!(listed[0].labels, map(&[("rack", "r1")]));
     assert_eq!(listed[0].agent_version.as_deref(), Some("0.1.0"));
     assert_eq!(listed[0].epoch, epoch);
+    assert_eq!(listed[0].lease, None);
+    assert!(listed[0].leases.is_empty());
     assert_eq!(listed[1].lease, None);
 }
 
@@ -286,20 +289,10 @@ fn timing_is_validated_and_sent_in_the_welcome() {
     assert_eq!(welcome.epoch, 1);
 }
 
-/// Asserts that a credential never prints its digest, and a seat error from the table
-/// below passes through untouched.
+/// Asserts that a credential never prints its digest.
 #[test]
-fn credential_debug_hides_the_digest_and_seat_errors_pass_through() {
+fn credential_debug_hides_the_digest() {
     assert_eq!(format!("{:?}", cred("secret")), "Credential(..)");
-    let fx = fixture(4);
-    fx.provider.seat(&host("a"), lease(1), None).unwrap();
-    assert_eq!(
-        fx.provider.seat(&host("a"), lease(2), None),
-        Err(SeatError::Taken {
-            host: host("a"),
-            holder: lease(1)
-        })
-    );
 }
 
 /// Asserts that every refusal reads as a fixed sentence that repeats nothing the peer
@@ -350,15 +343,14 @@ fn every_refusal_has_a_fixed_text_without_peer_data() {
 #[test]
 fn a_reserved_id_is_refused_at_hello() {
     let fx = fixture(1);
-    assert!(fx.registry.reserved().is_empty());
     fx.registry.reserve([host("gpu-01")]);
     fx.registry.reserve([host("gpu-02")]);
-    let both = [host("gpu-01"), host("gpu-02")];
-    assert_eq!(fx.registry.reserved().into_iter().collect::<Vec<_>>(), both);
-    let refused = fx.registry.hello(&hello("gpu-01"), &cred("t")).unwrap_err();
-    assert_eq!(refused, Refusal::HostListed);
-    assert_eq!(refused.code(), refusal::HOST_LISTED);
-    assert!(!refused.to_string().contains("gpu-01"));
+    for reserved in ["gpu-01", "gpu-02"] {
+        let refused = fx.registry.hello(&hello(reserved), &cred("t")).unwrap_err();
+        assert_eq!(refused, Refusal::HostListed);
+        assert_eq!(refused.code(), refusal::HOST_LISTED);
+        assert!(!refused.to_string().contains(reserved));
+    }
     assert!(fx.registry.hosts().is_empty());
     assert!(fx.registry.bindings().is_empty());
     fx.registry.hello(&hello("free"), &cred("t")).unwrap();

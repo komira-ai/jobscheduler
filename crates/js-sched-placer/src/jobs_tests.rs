@@ -13,14 +13,15 @@ use js_sched::Backfill;
 use js_sched::failover::Refused;
 use js_sched::queue_status::Outcome;
 use js_state::{Store, StoreError};
-use js_types::sched::WorkKey;
-use js_types::{HostId, LeaseId, Resources};
+use js_types::{HostId, Resources};
 use js_types::{JobEventKind, ProviderId, QueueCode};
 use js_types::{ManualClock, Timestamp};
 
 use super::{JobHosts, JobStarts, OpenHost, PassMetrics};
-use crate::engine::rig::{Tables, at, every, host, hosts, mark, run, settings, spec_of, store};
-use crate::engine::{Engine, Settings};
+use crate::engine::Settings;
+use crate::engine::rig::{
+    Tables, at, engine_with, every, host, hosts, mark, run, settings, spec_of, store,
+};
 use crate::place::SchedPlacer;
 
 /// What a pass told its metrics and its starts.
@@ -73,19 +74,28 @@ struct Rig {
 }
 
 impl Rig {
-    /// A rig whose engine is built at zero over `hosts`, each with the registry leases given.
+    /// A rig whose engine is built at zero over `hosts`, each busy with the allocations
+    /// given: the jobs `held-<seq>` are placed on them in the tables and the engine takes the
+    /// allocations up as the pass does.
     fn new(held: &[(&str, &[u64])]) -> Self {
         let clock = ManualClock::new(Timestamp::from_millis(0));
         let placer = SchedPlacer::new(Settings::default(), clock.clone());
-        *placer.engine() = Engine::build(Settings::default(), &every(held), at(0));
+        let tables = Tables::new();
+        let hosts = every(held);
+        for candidate in &hosts {
+            placer
+                .engine()
+                .host_up(&candidate.host, &candidate.shape, at(0));
+        }
+        placer.engine().sync_jobs(&tables.occupy(&hosts));
         Self {
             placer,
             clock,
-            tables: Tables::new(),
+            tables,
         }
     }
 
-    /// Both hosts busy with a lease of the registry.
+    /// Both hosts busy with an allocation.
     fn busy() -> Self {
         Self::new(&[("a", &[1]), ("b", &[2])])
     }
@@ -419,47 +429,59 @@ fn an_ordinary_commit_that_fails_leaves_the_job_queued() {
     assert_eq!(rig.go(&recorder), std::slice::from_ref(&s.id));
 }
 
-/// The wall limit `walk_jobs` gives a share job of `wall_secs` placed on `b`, which a
-/// whole-host job marks with a tail ending at ten minutes: the job's start is expected a
-/// minute, so it fits the tail whatever its wall limit.
-fn backfilled(wall_secs: u64) -> Option<u64> {
+/// What `walk_jobs` does with a share job of `wall_secs` offered `b`, which a whole-host job
+/// marks with a tail ending at ten minutes: `a` is busy with a job of an hour and `b` with one
+/// of ten minutes, both placed at the start, so the mark is made on `b`. The job's placement
+/// on `b` with the wall limit it is given there, or `None` when it waits.
+fn backfilled(wall_secs: u64) -> Option<Option<u64>> {
     let tables = Tables::new();
     let whole = tables.whole("j");
     let resources = Resources::new(1000, 1 << 30, 0, None).unwrap();
-    let share = tables.submit_with("bf", Needs::Shape(resources), wall_secs);
+    let share = tables.submit_with("bf", Needs::Shape(resources.clone()), wall_secs);
     let backfill = Backfill::enforced(Duration::MAX);
     let settings = Settings {
         backfill,
         ..Settings::default()
     };
-    let busy = every(&[("a", &[1]), ("b", &[2])]);
-    let mut e = Engine::build(settings, &busy, at(0));
-    let ends = WorkKey::new("held", LeaseId::new(1, 2).to_string());
-    let lives = BTreeMap::from([(ends, 10), (WorkKey::new("job", "bf"), 1)]);
-    e.lives.set(lives);
+    let mut e = engine_with(settings, &every(&[("a", &[]), ("b", &[])]));
+    for (name, wall) in [("a", 3_600), ("b", 600)] {
+        let id = format!("busy-{name}");
+        let busy = tables.submit_with(&id, Needs::Shape(resources.clone()), wall);
+        let open = BTreeMap::from([(host(name), OpenHost::default())]);
+        let (decided, _) = e.walk_jobs(&[busy], &open, at(0));
+        assert_eq!(decided.len(), 1);
+    }
     let steps = run(&mut e, (&[whole], &[]), 20_000);
     assert_eq!(steps.len(), 1);
     let open = BTreeMap::from([(host("b"), OpenHost::default())]);
     let (decided, waiting) = e.walk_jobs(&[share], &open, at(20_000));
-    assert!(waiting.is_empty());
-    assert_eq!(decided.len(), 1);
-    assert_eq!(decided[0].1, host("b"));
-    decided[0].3.wall_limit_secs
+    match decided.first() {
+        Some(placed) => {
+            assert!(waiting.is_empty());
+            assert_eq!(placed.1, host("b"));
+            Some(placed.3.wall_limit_secs)
+        }
+        None => {
+            assert_eq!(waiting.len(), 1);
+            None
+        }
+    }
 }
 
-/// Catches: a job backfilled on a marked host given its own wall limit past the mark's tail
-/// (the marked host would wait for it), or cut when it already ends sooner. The mark's tail
-/// ends at 600 s and the pass is at 20 s: a one-hour job is cut to 520 s, the time left
-/// less the 60 s margin; a 100 s job is not cut.
+/// Catches: a job backfilled on a marked host that outlives the mark's tail (the marked host
+/// would wait for it), or a job that ends within the tail held back or cut. The mark's tail
+/// ends at 600 s and the pass is at 20 s: a 100 s job is placed on the marked host with its own
+/// wall limit; a one-hour job is not placed there and waits. The cut of a wall limit to the
+/// time left in the tail is `backfill_wall`, which `whole_jobs_tests` holds.
 #[test]
-fn a_job_backfilled_on_a_marked_host_has_its_wall_limit_cut_to_the_tail() {
-    assert_eq!(backfilled(3_600), Some(520));
-    assert_eq!(backfilled(100), None);
+fn a_job_is_backfilled_on_a_marked_host_only_when_it_ends_within_the_tail() {
+    assert_eq!(backfilled(100), Some(None));
+    assert_eq!(backfilled(3_600), None);
 }
 
 // ---- queue status ----------------------------------------------------------------------
 
-/// Both hosts full: eight one-core leases on each of their eight cores.
+/// Both hosts full: eight one-core allocations on each of their eight cores.
 fn full() -> Rig {
     let a: Vec<u64> = (1..=8).collect();
     let b: Vec<u64> = (9..=16).collect();

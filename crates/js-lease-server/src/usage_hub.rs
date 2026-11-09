@@ -22,16 +22,15 @@
 
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
 
 use js_agent_wire::{Ack, Heartbeat, NodeLoad, Outcome, ResultAck};
 use js_types::Clock;
 use js_types::{HostId, LeaseId};
 pub use js_usage::UsageCounters;
 use js_usage::{
-    AcceptedResult, AllocationLog, Beat, BeatLoad, DroppedReadings, EndedRow, Finish, Flushed,
-    HistoryWritten, TailSink, UsageHub,
+    AcceptedResult, Beat, BeatLoad, DroppedReadings, Finish, Flushed, HistoryWritten, UsageHub,
 };
 use tracing::{error, info, warn};
 
@@ -81,14 +80,6 @@ impl Usage {
         }
     }
 
-    /// The log the registry hands the record of each ended allocation to: the hub, which
-    /// queues it for the tick to write. It holds the hub weakly: the hub holds the registry
-    /// (as the source of run keys), so a strong hold would keep both, and the usage store
-    /// with its lock, alive after the server stops.
-    pub(crate) fn log(&self) -> Arc<dyn AllocationLog> {
-        Arc::new(HubLog(Arc::downgrade(&self.hub)))
-    }
-
     /// The sink the hub writes to, for a reader of what it holds.
     pub(crate) fn sink(&self) -> Arc<dyn UsageSink> {
         Arc::clone(&self.sink)
@@ -102,11 +93,6 @@ impl Usage {
     /// The sink's learned curves, for admission.
     pub(crate) fn curves(&self) -> Option<Arc<ProfileCurves>> {
         self.hub.curves()
-    }
-
-    /// The sink's tail sink, for the registry's tail counters.
-    pub(crate) fn tail(&self) -> Option<Arc<dyn TailSink>> {
-        self.hub.tail()
     }
 
     /// What has been counted so far, with the sink's own counts.
@@ -228,17 +214,6 @@ impl Usage {
     /// What is stored for `key`. Blocks.
     pub(crate) fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
         self.hub.key_profile(key)
-    }
-}
-
-/// The registry's log of ended allocations: the hub while it lives, nothing after.
-struct HubLog(Weak<UsageHub>);
-
-impl AllocationLog for HubLog {
-    fn ended(&self, row: EndedRow) {
-        if let Some(hub) = self.0.upgrade() {
-            hub.ended(row);
-        }
     }
 }
 

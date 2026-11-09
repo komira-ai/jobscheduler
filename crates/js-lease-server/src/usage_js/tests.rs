@@ -2,7 +2,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use js_registry::ERROR_EDGES_MS;
 use js_state::fake::{Fake, Flaw};
 use js_state::{
     Changes, Commit, CommitStats, Conflict, ManualClock, Revision, ScanPage, ScanRange, StoreError,

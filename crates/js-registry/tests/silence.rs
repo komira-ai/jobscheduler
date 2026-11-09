@@ -5,13 +5,10 @@
 mod support;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use js_agent_wire::DEFAULT_GRACE_MS;
-use js_provider::{Candidate, StartSpec};
-use js_registry::{DEFAULT_LOST_RETENTION_MS, MarkedTails, Placer, Registry, SequentialSessions};
-use js_types::HostId;
+use js_registry::DEFAULT_LOST_RETENTION_MS;
 use js_types::{Clock, Timestamp};
 use support::*;
 
@@ -45,35 +42,16 @@ fn silence_is_the_instant_the_grace_ran_out_and_clears_when_heard() {
     assert_eq!(fx.registry.silent_since(&host("never")), None);
 }
 
-/// A placer that books nothing through the registry and says it holds work on every host
-/// while `holding` is set.
-struct Holding(AtomicBool);
-
-impl Placer for Holding {
-    fn pick(&self, _: &StartSpec, _: &[Candidate], _: &MarkedTails) -> Option<usize> {
-        Some(0)
-    }
-
-    fn holds_work_on(&self, _: &HostId) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
 /// Catches a host forgotten after the lost retention while its placer holds work on it (a
 /// job's allocation that only the host or the provider frees), and one the registry keeps
 /// once the placer holds nothing there.
 #[test]
 fn a_host_its_placer_holds_work_on_is_not_forgotten_for_silence() {
-    let placer = Arc::new(Holding(AtomicBool::new(true)));
-    let mut fx = fixture(2);
-    fx.registry = Registry::with_sessions(
-        config(2).booking_whole_memory(),
-        fx.clock.clone(),
-        SequentialSessions::new(),
-        placer.clone(),
-    );
+    let placer = Arc::new(Holding::default());
+    let fx = with_placer(config(2), placer.clone());
     let epoch = fx.join("a", "t");
     let a = host("a");
+    placer.hold(&a);
     let silent = DEFAULT_GRACE_MS + DEFAULT_LOST_RETENTION_MS + 1;
     fx.clock.advance(Duration::from_millis(silent));
     let listed = |fx: &Fixture| fx.registry.hosts().into_iter().any(|view| view.id == a);
@@ -84,7 +62,7 @@ fn a_host_its_placer_holds_work_on_is_not_forgotten_for_silence() {
         fx.registry.check_heartbeat(&beat, &cred("t")).is_ok(),
         "the check refuses a host the registry keeps"
     );
-    placer.0.store(false, Ordering::SeqCst);
+    placer.release(&a);
     assert!(
         fx.registry.check_heartbeat(&beat, &cred("t")).is_err(),
         "the check admits a host the housekeeping would forget"

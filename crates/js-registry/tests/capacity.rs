@@ -5,6 +5,7 @@
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, InstanceIdentity, Taint};
@@ -14,13 +15,11 @@ use js_elastic::{
     HostName, HostRef, HostStatus, Observed, Offer, PriceUnit, ProviderCaps, Reason, Refusal,
     RefusalCode, Released, SchedulerId,
 };
-use js_provider::Pool;
 use js_registry::{
-    DEFAULT_LOST_RETENTION_MS, HostState, MIN_LOST_RETENTION_MS, PoolConfig, StaticCapacity,
+    Binding, DEFAULT_LOST_RETENTION_MS, HostState, MIN_LOST_RETENTION_MS, PoolConfig,
+    StaticCapacity,
 };
-use js_types::{
-    ExecMode, Model, ProviderId, Request, ResourceClass, Resources, Shape, accelerator_of,
-};
+use js_types::{Clock, ExecMode, Model, ProviderId, Resources, Shape, accelerator_of};
 use support::*;
 
 /// One hour on the manual clock: well within the default lost-host retention.
@@ -36,6 +35,18 @@ fn provider(fx: &Fixture) -> StaticCapacity {
 
 fn reference(id: &str) -> HostRef {
     HostRef(id.to_owned())
+}
+
+/// Puts `name` back as a host that reported a taint before a restart and has not said hello
+/// since: an awaiting host ([`js_registry::Registry::restore_tainted`]).
+fn restore_awaiting(fx: &Fixture, name: &str) {
+    let taint = Taint {
+        reason: "check".into(),
+        run_id: None,
+        check: None,
+    };
+    let binding = Binding::new(cred("t"), None).with_taint(Some(taint));
+    fx.registry.restore_tainted(&host(name), binding);
 }
 
 /// A pool of up to `max_machines` hosts that requires macOS and no architecture, so hosts of
@@ -127,22 +138,20 @@ fn hello_of(name: &str, instance: Option<&str>) -> Hello {
 /// Asserts that an acquire the hosts could serve (a macOS x86_64 offer, which their
 /// reported capabilities cover) and one they could not (a Linux GPU offer, which they do
 /// not) both answer `Refused(Capacity)`, and so does a repeat of the first with the same
-/// acquire id; and that a release of each host, booked live, booked lost, awaiting with a
-/// lease and unbooked live, is refused as foreign. The bookings, the host table, the
-/// bindings, the list and the capacity are the same after as before. It catches an
-/// acquire that books a host or answers anything but the capacity code the caller falls
-/// through on, and an acquire or a release that clears or changes a booking or a binding.
+/// acquire id; and that a release of each host, live, lost, awaiting and a second live, is
+/// refused as foreign. The host table, the bindings, the list and the capacity are the same
+/// after as before. It catches an acquire that answers anything but the capacity code the
+/// caller falls through on, and an acquire or a release that clears or changes a host or a
+/// binding.
 #[test]
 fn acquire_on_static_is_refused_with_capacity() {
-    let mut fx = macos_pool(8);
+    let fx = macos_pool(8);
     let a = fx.hello(&on_arch("a", "x86_64"), &cred("t")).unwrap().epoch;
-    assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
     fx.hello(&on_arch("l", "x86_64"), &cred("t")).unwrap();
-    assert_eq!(started_on(&fx.provider.start(spec(2))), Some("l"));
     fx.pass_grace();
     fx.beat("a", a);
     fx.join("b", "t");
-    fx.provider.seat(&host("w"), lease(3), None).unwrap();
+    restore_awaiting(&fx, "w");
     let static_hosts = provider(&fx);
     let states: Vec<(String, HostState)> = fx
         .registry
@@ -168,7 +177,6 @@ fn acquire_on_static_is_refused_with_capacity() {
 
     let snapshot = |fx: &Fixture, provider: &StaticCapacity| {
         (
-            fx.provider.booked(),
             fx.registry.hosts(),
             fx.registry.bindings(),
             provider.list(),
@@ -176,7 +184,6 @@ fn acquire_on_static_is_refused_with_capacity() {
         )
     };
     let before = snapshot(&fx, &static_hosts);
-    assert_eq!(before.0.len(), 3);
     for request in [&servable, &impossible, &servable] {
         assert_eq!(static_hosts.acquire(request), refused_for_capacity());
     }
@@ -237,20 +244,18 @@ fn a_silent_host_observes_unknown_and_a_removed_host_absent() {
     assert_eq!(static_hosts.observe(&not_an_id), Observed::Unknown);
 }
 
-/// Asserts that a host that holds a lease, silent for longer than the grace period and
-/// the lost-host retention together, still observes `Unknown` and still holds its lease;
-/// and that a host put back after a restart that has not said hello since (awaiting) is
-/// `Unknown` too, listed as awaiting, and keeps its lease past the retention. It catches
-/// a retention path that forgets, and so frees, a booked host.
+/// Asserts that a host its placer holds work on, silent for longer than the grace period
+/// and the lost-host retention together, still observes `Unknown` and is still listed; and
+/// that a host put back after a restart that has not said hello since (awaiting, with the
+/// taint it reported) is `Unknown` too, listed as awaiting, and kept past the retention. It
+/// catches a retention path that forgets a host that holds work or a taint.
 #[test]
-fn a_booked_silent_host_never_observes_absent() {
-    let mut fx = fixture(4);
+fn a_silent_host_with_work_or_a_taint_never_observes_absent() {
+    let holding = Arc::new(Holding::default());
+    let fx = with_placer(config(4), holding.clone());
     fx.join("a", "t");
-    assert!(matches!(
-        fx.provider.start(spec(1)),
-        js_provider::StartAck::Started { .. }
-    ));
-    fx.provider.seat(&host("w"), lease(2), None).unwrap();
+    holding.hold(&host("a"));
+    restore_awaiting(&fx, "w");
     let static_hosts = provider(&fx);
     assert_eq!(static_hosts.observe(&reference("w")), Observed::Unknown);
 
@@ -263,8 +268,6 @@ fn a_booked_silent_host_never_observes_absent() {
             "{id}"
         );
     }
-    assert_eq!(fx.provider.booked().get(&host("a")), Some(&lease(1)));
-    assert_eq!(fx.provider.booked().get(&host("w")), Some(&lease(2)));
     let statuses: Vec<(String, HostStatus)> = static_hosts
         .list()
         .unwrap()
@@ -313,7 +316,7 @@ fn static_provider_reports_hosts_supplied_and_nothing_to_launch() {
     fx.hello(&with_gpu("b", "nvidia-a10"), &cred("t")).unwrap();
     fx.hello(&with_gpu("odd", "Not_A_Class"), &cred("t"))
         .unwrap();
-    fx.provider.seat(&host("w"), lease(1), None).unwrap();
+    restore_awaiting(&fx, "w");
     let caps = static_hosts.capabilities();
     assert_eq!(caps.os, BTreeSet::from(["macos".to_owned()]));
     assert_eq!(
@@ -556,7 +559,7 @@ fn texts(items: &[&str]) -> Vec<String> {
 fn capabilities_follow_replacement_removal_and_forgetting() {
     let fx = open_pool(8);
     let static_hosts = provider(&fx);
-    fx.provider.seat(&host("w"), lease(1), None).unwrap();
+    restore_awaiting(&fx, "w");
     assert_eq!(static_hosts.capabilities(), ProviderCaps::default());
     assert_eq!(static_hosts.capacity().supplied, 1);
 
@@ -614,17 +617,12 @@ fn capabilities_follow_replacement_removal_and_forgetting() {
 }
 
 /// Asserts that a lost host that beats again, and an awaiting host whose agent says hello,
-/// observe `Present` again with their leases still booked on them; and that a host whose
-/// whole-node lease is committed but not yet reported ready observes `Present` as a
-/// machine while that lease reads `Unknown`: the machine is there, the allocation is not
-/// ready. It catches a provider that keeps a recovered host `Unknown`, drops a booking on
-/// recovery, or reads a lease's readiness as the machine's presence.
+/// observe `Present` again. It catches a provider that keeps a recovered host `Unknown`.
 #[test]
-fn a_host_recovers_from_silence_and_a_preparing_host_is_present() {
-    let mut fx = fixture(4);
+fn a_host_recovers_from_silence() {
+    let fx = fixture(4);
     let a = fx.join("a", "t");
-    assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
-    fx.provider.seat(&host("w"), lease(2), None).unwrap();
+    restore_awaiting(&fx, "w");
     let static_hosts = provider(&fx);
     fx.pass_grace();
     for id in ["a", "w"] {
@@ -643,35 +641,13 @@ fn a_host_recovers_from_silence_and_a_preparing_host_is_present() {
             "{id}"
         );
     }
-    assert_eq!(fx.provider.booked().get(&host("a")), Some(&lease(1)));
-    assert_eq!(fx.provider.booked().get(&host("w")), Some(&lease(2)));
-
-    let whole = ResourceClass::whole_node();
-    let name = ProviderId::new("builders").unwrap();
-    let mut fx = fixture_of(PoolConfig::new(name, whole.clone(), pool_shape(), 4));
-    fx.join("h", "t");
-    let request = Request {
-        class: whole.id().clone(),
-        ..request()
-    };
-    let spec = js_provider::StartSpec::new(lease(1), request, &[whole]).unwrap();
-    assert_eq!(fx.provider.start(spec), js_provider::StartAck::Unknown);
-    assert_eq!(fx.provider.booked().get(&host("h")), Some(&lease(1)));
-    assert_eq!(
-        fx.provider.observe(&lease(1)),
-        js_provider::Observed::Unknown
-    );
-    assert_eq!(
-        provider(&fx).observe(&reference("h")),
-        Observed::Present(HostStatus::Active)
-    );
 }
 
 /// Asserts the boundaries on the manual clock with a one-minute retention: a host is
 /// `Present` exactly at the grace period and `Unknown` one millisecond later, still
 /// `Unknown` exactly at grace plus retention and `Absent` one millisecond later. An
-/// awaiting host whose lease has ended is kept until grace plus retention after it was
-/// seated and forgotten one millisecond later. A tainted host, and a cordoned one while
+/// awaiting host whose cordon has lapsed is kept until grace plus retention after it was
+/// put back and forgotten one millisecond later. A tainted host, and a cordoned one while
 /// its cordon holds, stay `Unknown` long past the retention; the cordoned one is
 /// forgotten once its cordon has lapsed. It catches an off-by-one at either deadline, a
 /// retention that ignores its setting, and one that forgets a host kept for its taint or
@@ -695,14 +671,12 @@ fn grace_and_retention_boundaries_decide_unknown_and_absent() {
     advance(&fx, 1);
     assert_eq!(static_hosts.observe(&a), Observed::Absent);
 
-    let mut fx = open_pool(4);
+    let fx = open_pool(4);
     let static_hosts = provider(&fx);
     let w = reference("w");
-    fx.provider.seat(&host("w"), lease(1), None).unwrap();
-    assert!(matches!(
-        fx.provider.stop(&lease(1)),
-        js_provider::StopAck::Stopped { .. }
-    ));
+    let until = fx.clock.now().millis() + 1_000;
+    let cordoned = Binding::new(cred("t"), None).with_cordon(Some(until));
+    fx.registry.restore_tainted(&host("w"), cordoned);
     advance(&fx, DEFAULT_GRACE_MS + RETENTION_MS);
     assert_eq!(static_hosts.observe(&w), Observed::Unknown);
     advance(&fx, 1);
@@ -761,10 +735,14 @@ fn verify_instance_follows_the_binding_through_silence_restart_and_reuse() {
 
     let binding = fx.registry.bindings()[&host("a")].clone();
     let restarted = open_pool(4);
+    let taint = Taint {
+        reason: "check".into(),
+        run_id: None,
+        check: None,
+    };
     restarted
-        .provider
-        .seat(&host("a"), lease(1), Some(binding))
-        .unwrap();
+        .registry
+        .restore_tainted(&host("a"), binding.with_taint(Some(taint)));
     let after_restart = provider(&restarted);
     assert_eq!(restarted.registry.hosts()[0].state, HostState::Awaiting);
     assert_eq!(
@@ -799,18 +777,16 @@ fn verify_instance_follows_the_binding_through_silence_restart_and_reuse() {
     );
 }
 
-/// Asserts that a lost host holding a lease and an awaiting host holding one, both marked
-/// as ending, list as terminating, observe `Unknown` (they are silent), are no longer
-/// supplied, and keep their leases. It catches a status that lets the host's silence hide
-/// its releasing mark, a capacity that still counts an ending host, and a mark that frees
-/// a booking.
+/// Asserts that a lost host and an awaiting host, both marked as ending, list as terminating,
+/// observe `Unknown` (they are silent) and are no longer supplied. It catches a status that
+/// lets the host's silence hide its releasing mark, and a capacity that still counts an
+/// ending host.
 #[test]
 fn releasing_lost_and_awaiting_hosts_list_as_terminating() {
-    let mut fx = fixture(4);
+    let fx = fixture(4);
     fx.join("l", "t");
-    assert_eq!(started_on(&fx.provider.start(spec(1))), Some("l"));
     fx.pass_grace();
-    fx.provider.seat(&host("w"), lease(2), None).unwrap();
+    restore_awaiting(&fx, "w");
     let static_hosts = provider(&fx);
     assert_eq!(static_hosts.capacity().supplied, 2);
     for id in ["l", "w"] {
@@ -837,6 +813,4 @@ fn releasing_lost_and_awaiting_hosts_list_as_terminating() {
         );
     }
     assert_eq!(static_hosts.capacity().supplied, 0);
-    assert_eq!(fx.provider.booked().get(&host("l")), Some(&lease(1)));
-    assert_eq!(fx.provider.booked().get(&host("w")), Some(&lease(2)));
 }

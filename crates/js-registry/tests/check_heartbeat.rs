@@ -5,19 +5,18 @@
 mod support;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{
-    DEFAULT_GRACE_MS, ExclusiveRefusal, Heartbeat, HeldRun, HeldState, Isolation, JobSpec, Limits,
-    NodeLoad, Outcome, Phase, RefusalReason, RunResult, Taint, refusal,
+    DEFAULT_GRACE_MS, ExclusiveRefusal, Heartbeat, HeldRun, HeldState, NodeLoad, Outcome, Phase,
+    RefusalReason, RunResult, Taint, refusal,
 };
-use js_provider::{Observed, Pool, StartAck, StartSpec};
 use js_registry::{
     Binding, Credential, HeartbeatCheck, HostState, HostView, MIN_LOST_RETENTION_MS, OwnHost,
-    PoolConfig, Refusal, RequestRecord, RunState, RunView, TailCounters, WholeCounts,
-    WholeNodeConfig,
+    Refusal,
 };
-use js_types::{HostId, ProviderId, Request, ResourceClass};
+use js_types::HostId;
 use support::*;
 
 fn report(reason: &str) -> Taint {
@@ -25,15 +24,6 @@ fn report(reason: &str) -> Taint {
         reason: reason.into(),
         run_id: None,
         check: Some("leftovers".into()),
-    }
-}
-
-/// The taint a refused prepare records on a host (`host-unsafe`).
-fn host_unsafe() -> Taint {
-    Taint {
-        reason: "host-unsafe".into(),
-        run_id: None,
-        check: None,
     }
 }
 
@@ -66,16 +56,12 @@ fn exclusive_refusal(lease_id: &str, code: RefusalReason) -> ExclusiveRefusal {
     }
 }
 
-/// Everything the registry shows of its hosts: the listing (with each host's load and
-/// bookings), the bindings a caller persists, each host's own view (its cordon and
-/// session start), the counters, and the runs of lease 1.
+/// Everything the registry shows of its hosts: the listing (with each host's load), the
+/// bindings a caller persists, and each host's own view (its cordon and session start).
 type Snapshot = (
     Vec<HostView>,
     BTreeMap<HostId, Binding>,
     Vec<Option<OwnHost>>,
-    TailCounters,
-    WholeCounts,
-    Vec<RunView>,
 );
 
 fn snapshot(fx: &Fixture) -> Snapshot {
@@ -84,14 +70,7 @@ fn snapshot(fx: &Fixture) -> Snapshot {
         .iter()
         .map(|view| fx.registry.own_host(&view.id))
         .collect();
-    (
-        hosts,
-        fx.registry.bindings(),
-        own,
-        fx.registry.tail_counters(),
-        fx.registry.whole_counts(),
-        fx.registry.runs_of(&lease(1)),
-    )
+    (hosts, fx.registry.bindings(), own)
 }
 
 fn view(fx: &Fixture, name: &str) -> HostView {
@@ -107,48 +86,10 @@ fn edited(edit: impl Fn(&mut Heartbeat)) -> Heartbeat {
     message
 }
 
-/// A pool of whole-node hosts with the default whole-node settings.
-fn whole_config() -> PoolConfig {
-    let name = ProviderId::new("builders").unwrap();
-    PoolConfig::new(name, ResourceClass::whole_node(), pool_shape(), 4)
-        .with_whole_node(WholeNodeConfig::dedicated(4))
-        .unwrap()
-}
-
-fn whole_spec(sequence: u64) -> StartSpec {
-    let request = Request {
-        class: ResourceClass::whole_node().id().clone(),
-        ..request()
-    };
-    StartSpec::new(lease(sequence), request, &[ResourceClass::whole_node()]).unwrap()
-}
-
-/// A whole-node pool with host `a` joined (epoch 1) and lease 1 committed to it, not yet
-/// reported ready.
-fn committed() -> Fixture {
-    let fx = fixture_of(whole_config());
-    fx.join("a", "t");
-    assert_eq!(fx.provider.clone().start(whole_spec(1)), StartAck::Unknown);
-    fx
-}
-
-/// What the registry shows of lease 1 and its request, beside the snapshot.
-fn whole_state(fx: &Fixture) -> (Snapshot, Observed, Option<RequestRecord>) {
-    let request = Request {
-        class: ResourceClass::whole_node().id().clone(),
-        ..request()
-    };
-    (
-        snapshot(fx),
-        fx.provider.clone().observe(&lease(1)),
-        fx.registry.request_record(&request),
-    )
-}
-
 /// Asserts that a check records nothing, for a beat that would record a taint, change
 /// the phase, end a gap and count a beat: the host listing (state, phase, taint, whether
-/// it was heard since its hello), the bindings, each host's own view and the counters are
-/// identical before and after, both for an admitted check and a refused one; the
+/// it was heard since its hello), the bindings and each host's own view are identical
+/// before and after, both for an admitted check and a refused one; the
 /// heartbeat that follows then records all of it. It catches a check that writes the
 /// last-heard time, the phase, the beat count or the taint.
 #[test]
@@ -184,34 +125,6 @@ fn check_heartbeat_changes_nothing() {
     assert!(after.heard_since_hello);
     assert_eq!(after.taint, Some(report("residue")));
     assert_eq!(view(&fx, "b").state, HostState::Lost);
-}
-
-/// Asserts that a check leaves a committed whole-node lease as it was: a check of a ready
-/// report does not make the lease ready, and a check of a `host-unsafe` refusal of the
-/// lease (which would taint the host) neither ends the lease, nor counts a failure for
-/// its request, nor taints the host; the heartbeat that follows ends the lease and
-/// records the taint the check named. It catches a check that runs the whole-node part
-/// of the beat.
-#[test]
-fn check_heartbeat_changes_nothing_on_a_committed_whole_node_lease() {
-    let fx = committed();
-    let before = whole_state(&fx);
-    assert_ne!(before.1, Observed::Absent);
-    let mut ready = fx.heartbeat("a", 1);
-    ready.exclusive_ready = Some("1-1".into());
-    let check = fx.registry.check_heartbeat(&ready, &cred("t")).unwrap();
-    assert_eq!(check.taint, None);
-    assert_eq!(whole_state(&fx), before);
-
-    let mut refusing = fx.heartbeat("a", 1);
-    refusing.exclusive_refused = Some(exclusive_refusal("1-1", RefusalReason::HostUnsafe));
-    let check = fx.registry.check_heartbeat(&refusing, &cred("t")).unwrap();
-    assert_eq!(check.taint, Some(host_unsafe()));
-    assert_eq!(whole_state(&fx), before);
-
-    fx.registry.heartbeat(&refusing, &cred("t")).unwrap();
-    assert_eq!(fx.provider.clone().observe(&lease(1)), Observed::Absent);
-    assert_eq!(view(&fx, "a").taint, Some(host_unsafe()));
 }
 
 /// Checks `message` from host `a`, then sends it, and asserts that the taint the check
@@ -313,91 +226,6 @@ fn check_heartbeat_returns_the_taint_the_beat_then_records() {
     assert_eq!(view(&fx, "a").taint, Some(report("first")));
 }
 
-/// Asserts the same for the whole-node part of a beat: a `host-unsafe` refusal of the
-/// committed lease names the `host-unsafe` taint; one naming another lease, or a refusal
-/// whose reason does not taint (`not-quiet`), names none; a report beside a `host-unsafe`
-/// refusal names the report; a report beside a ready report for the lease names the
-/// report; a ready report alone names none; a `host-unsafe` refusal on a host with no
-/// lease committed names none; a host tainted before the refusal keeps its first taint
-/// and the check names none. (The wire refuses a heartbeat that carries both a ready
-/// report and a refusal, so that pair never reaches either call.) It catches a check
-/// that misses the taint a refused prepare records, or names one the beat does not
-/// record.
-#[test]
-fn check_heartbeat_returns_the_taint_a_refused_prepare_records() {
-    let unsafe_refusal = exclusive_refusal("1-1", RefusalReason::HostUnsafe);
-    let cases: Vec<(&str, Heartbeat, Option<Taint>)> = vec![
-        (
-            "host-unsafe for the committed lease",
-            edited(|m| m.exclusive_refused = Some(unsafe_refusal.clone())),
-            Some(host_unsafe()),
-        ),
-        (
-            "host-unsafe for another lease",
-            edited(|m| {
-                let other = exclusive_refusal("1-7", RefusalReason::HostUnsafe);
-                m.exclusive_refused = Some(other);
-            }),
-            None,
-        ),
-        (
-            "not-quiet for the committed lease",
-            edited(|m| {
-                let quiet = exclusive_refusal("1-1", RefusalReason::NotQuiet);
-                m.exclusive_refused = Some(quiet);
-            }),
-            None,
-        ),
-        (
-            "a report and host-unsafe",
-            edited(|m| {
-                m.taint = Some(report("residue"));
-                m.exclusive_refused = Some(unsafe_refusal.clone());
-            }),
-            Some(report("residue")),
-        ),
-        (
-            "a report and ready for the committed lease",
-            edited(|m| {
-                m.taint = Some(report("residue"));
-                m.exclusive_ready = Some("1-1".into());
-            }),
-            Some(report("residue")),
-        ),
-        (
-            "ready for the committed lease",
-            edited(|m| m.exclusive_ready = Some("1-1".into())),
-            None,
-        ),
-    ];
-    for (name, message, expected) in cases {
-        let fx = committed();
-        let message = Heartbeat {
-            session: fx.session("a"),
-            ..message
-        };
-        assert_eq!(check_then_beat(&fx, &message), expected, "{name}");
-    }
-
-    // A refusal on a host with no lease committed names no lease, and no taint.
-    let fx = fixture_of(whole_config());
-    fx.join("a", "t");
-    let mut uncommitted = fx.heartbeat("a", 1);
-    uncommitted.exclusive_refused = Some(unsafe_refusal.clone());
-    assert_eq!(check_then_beat(&fx, &uncommitted), None);
-
-    // A host tainted before its lease is refused keeps the first taint, and the check
-    // names none.
-    let fx = committed();
-    let mut first = fx.heartbeat("a", 1);
-    first.taint = Some(report("first"));
-    fx.registry.heartbeat(&first, &cred("t")).unwrap();
-    let mut refusing = fx.heartbeat("a", 1);
-    refusing.exclusive_refused = Some(unsafe_refusal);
-    assert_eq!(check_then_beat(&fx, &refusing), None);
-    assert_eq!(view(&fx, "a").taint, Some(report("first")));
-}
-
 /// Sends `message` with `credential` to both calls and asserts that each refuses it with
 /// the same refusal and that neither changed what the registry shows. Returns the
 /// refusal.
@@ -414,7 +242,7 @@ fn refused_alike(fx: &Fixture, message: &Heartbeat, credential: &Credential) -> 
 /// Asserts that a check refuses exactly what the heartbeat refuses, with the same
 /// refusal, in the same order: a host id that is not one (before a message that breaks
 /// the wire rules), a message that breaks the wire rules (before an unknown host), a
-/// ready report beside a refusal of the lease (which the wire rules forbid), an unknown
+/// ready report beside a refusal of a lease (which the wire rules forbid), an unknown
 /// host, a host awaiting its hello after a restart, a host forgotten
 /// after the lost-host retention, a credential the host is not bound to (before a stale
 /// epoch), a stale epoch (before a wrong session), a wrong session, and the session of
@@ -513,45 +341,13 @@ fn check_heartbeat_refuses_what_heartbeat_refuses() {
     assert_eq!(check.host, host("a"));
     fx.registry.heartbeat(&admitted, &ok).unwrap();
 
-    // A host lost for longer than the retention with no booking is forgotten, and both
+    // A host lost for longer than the retention that holds nothing is forgotten, and both
     // refuse it as unknown.
     fx.clock.advance(Duration::from_millis(
         js_agent_wire::DEFAULT_GRACE_MS + MIN_LOST_RETENTION_MS + 1,
     ));
     let forgotten = fx.heartbeat("a", 2);
     assert_eq!(refused_alike(&fx, &forgotten, &ok), Refusal::UnknownHost);
-}
-
-/// A job of one core, run `run`, with no lease bound.
-fn job(run: &str) -> JobSpec {
-    JobSpec {
-        run_id: run.into(),
-        lease_id: String::new(),
-        image: "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            .into(),
-        args: Vec::new(),
-        limits: Limits {
-            cpu_millis: 1000,
-            memory_bytes: 1 << 20,
-            disk_bytes: None,
-            pids: None,
-            wall_ms: 60_000,
-        },
-        gpu_indices: Vec::new(),
-        mounts: Vec::new(),
-        isolation: Isolation::Contained,
-        labels: Default::default(),
-        heartbeat_seq: 0,
-        files: Vec::new(),
-        valid_for_ms: 0,
-        bundle: None,
-        native: None,
-        network: Default::default(),
-        ports: Vec::new(),
-        run: None,
-        os: None,
-        arch: None,
-    }
 }
 
 fn held(run: &str, state: HeldState) -> HeldRun {
@@ -577,52 +373,25 @@ fn load(seq: u64) -> NodeLoad {
     }
 }
 
-fn run_state(fx: &Fixture, run: &str) -> RunState {
-    run_view(fx, run).state
-}
-
-fn run_view(fx: &Fixture, run: &str) -> RunView {
-    let runs = fx.registry.runs_of(&lease(1));
-    runs.into_iter().find(|view| view.run_id == run).unwrap()
-}
-
-/// Asserts that a check leaves the work on a host as it was, for a beat that would change
-/// it all: with lease 1 on host `a`, run `r1` running, `r2` queued and a load reading
-/// stored, a check of a heartbeat that lists only `r2`, reports `r1` succeeded, carries a
-/// newer load and another phase leaves the listing (load and bookings included), the
-/// bindings, the counters and the run views identical; the heartbeat that follows ends
-/// `r1` with its result, takes `r2` and the newer load. It catches a check that syncs
-/// the held list, acknowledges a result or takes a load reading.
+/// Asserts that a check leaves the held list and the load of a host as they were, for a beat
+/// that would change both: with a run `r1` listed as held and a load reading stored, a check
+/// of a heartbeat that lists none, carries a newer load and another phase leaves the
+/// listing (load and releasing state included), the bindings and the host views identical;
+/// the heartbeat that follows clears the held list, takes the newer load and the phase. It
+/// catches a check that syncs the held list or takes a load reading.
 #[test]
-fn check_heartbeat_changes_no_run_held_list_or_load() {
+fn check_heartbeat_changes_no_held_list_or_load() {
     let fx = fixture(2);
     fx.join("a", "t");
-    assert_eq!(started_on(&fx.provider.clone().start(spec(1))), Some("a"));
-    fx.registry
-        .queue_run(&host("a"), &lease(1), job("r1"))
-        .unwrap();
-    fx.registry
-        .queue_run(&host("a"), &lease(1), job("r2"))
-        .unwrap();
     let mut running = fx.heartbeat("a", 1);
     running.held = vec![held("r1", HeldState::Running)];
     running.load = Some(load(5));
     fx.registry.heartbeat(&running, &cred("t")).unwrap();
-    assert_ne!(run_state(&fx, "r1"), RunState::Queued);
-    assert_eq!(run_state(&fx, "r2"), RunState::Queued);
+    assert!(view(&fx, "a").releasing);
     assert_eq!(view(&fx, "a").load.map(|load| load.seq), Some(5));
 
     let mut message = fx.heartbeat("a", 1);
     message.phase = Phase::Draining;
-    message.held = vec![held("r2", HeldState::Running)];
-    message.results = vec![RunResult {
-        run_id: "r1".into(),
-        lease_id: "1-1".into(),
-        outcome: Outcome::Succeeded,
-        exit_code: Some(0),
-        detail: None,
-        log_tail: None,
-    }];
     message.load = Some(load(9));
     let before = snapshot(&fx);
     let check = fx.registry.check_heartbeat(&message, &cred("t")).unwrap();
@@ -630,85 +399,38 @@ fn check_heartbeat_changes_no_run_held_list_or_load() {
     assert_eq!(snapshot(&fx), before);
 
     fx.registry.heartbeat(&message, &cred("t")).unwrap();
-    let ended = run_view(&fx, "r1");
-    assert_eq!(ended.state, RunState::Ended);
-    let outcome = ended.result.map(|result| result.outcome);
-    assert_eq!(outcome, Some(Outcome::Succeeded));
-    assert_ne!(run_state(&fx, "r2"), RunState::Queued);
+    assert!(!view(&fx, "a").releasing);
     assert_eq!(view(&fx, "a").load.map(|load| load.seq), Some(9));
     assert_eq!(view(&fx, "a").phase, Phase::Draining);
 }
 
-/// Checks `message` from host `a`, expecting no taint, and asserts that the check changed
-/// nothing of the whole-node state.
-fn checked_unchanged(fx: &Fixture, message: &Heartbeat) {
-    let before = whole_state(fx);
-    let check = fx.registry.check_heartbeat(message, &cred("t")).unwrap();
-    assert_eq!(check.taint, None);
-    assert_eq!(whole_state(fx), before);
-}
-
-/// Asserts that a check leaves a ready whole-node lease and both stages of a restore as
-/// they were: a `host-unsafe` refusal of a lease already ready names no taint, and the
-/// heartbeat that carries it leaves the lease held and the host clean; after the lease
-/// ends, two checks before the first beat and two before the second advance nothing, so
-/// the host is still releasing after one beat and free after the second. It catches a
-/// check that advances the restore or ends a ready lease.
+/// Asserts that a previous release's prepare report names no taint and records none: a
+/// ready report, and a `host-unsafe` refusal of a lease, each alone, are checked and beaten
+/// and leave the host clean. The registry commits no whole-node lease any more, so the
+/// report has none to end.
 #[test]
-fn check_heartbeat_changes_nothing_on_a_ready_or_restoring_host() {
-    let fx = committed();
+fn a_previous_releases_prepare_report_records_no_taint() {
+    let fx = fixture(1);
+    fx.join("a", "t");
     let mut ready = fx.heartbeat("a", 1);
     ready.exclusive_ready = Some("1-1".into());
-    fx.registry.heartbeat(&ready, &cred("t")).unwrap();
-    let held_lease = fx.provider.clone().observe(&lease(1));
-    assert_ne!(held_lease, Observed::Absent);
-
     let mut refusing = fx.heartbeat("a", 1);
     refusing.exclusive_refused = Some(exclusive_refusal("1-1", RefusalReason::HostUnsafe));
-    checked_unchanged(&fx, &refusing);
-    fx.registry.heartbeat(&refusing, &cred("t")).unwrap();
-    assert_eq!(fx.provider.clone().observe(&lease(1)), held_lease);
-    assert_eq!(view(&fx, "a").taint, None);
-
-    fx.provider.clone().stop(&lease(1));
-    let plain = fx.heartbeat("a", 1);
-    assert!(view(&fx, "a").releasing);
-    checked_unchanged(&fx, &plain);
-    checked_unchanged(&fx, &plain);
-    fx.registry.heartbeat(&plain, &cred("t")).unwrap();
-    assert!(view(&fx, "a").releasing);
-    checked_unchanged(&fx, &plain);
-    checked_unchanged(&fx, &plain);
-    fx.registry.heartbeat(&plain, &cred("t")).unwrap();
-    assert!(!view(&fx, "a").releasing);
-}
-
-/// Asserts the precedence of the two taints a beat makes itself: a start refused as
-/// `host-tainted` beside a `host-unsafe` refusal of the committed lease names the
-/// `host-tainted` taint of that run, the check changes nothing, and the heartbeat records
-/// that taint and ends the lease. It catches a check that ranks the refused prepare
-/// first.
-#[test]
-fn check_heartbeat_names_a_refused_start_over_a_refused_prepare() {
-    let fx = committed();
-    let mut both = fx.heartbeat("a", 1);
-    let refused_start = result("r9", Outcome::FailedToStart, refusal::HOST_TAINTED);
-    both.results = vec![refused_start];
-    both.exclusive_refused = Some(exclusive_refusal("1-1", RefusalReason::HostUnsafe));
-    let before = whole_state(&fx);
-    let check = fx.registry.check_heartbeat(&both, &cred("t")).unwrap();
-    assert_eq!(check.taint, Some(tainted_start("r9")));
-    assert_eq!(whole_state(&fx), before);
-
-    fx.registry.heartbeat(&both, &cred("t")).unwrap();
-    assert_eq!(view(&fx, "a").taint, Some(tainted_start("r9")));
-    assert_eq!(fx.provider.clone().observe(&lease(1)), Observed::Absent);
+    for message in [ready, refusing] {
+        let before = snapshot(&fx);
+        let check = fx.registry.check_heartbeat(&message, &cred("t")).unwrap();
+        assert_eq!(check.taint, None);
+        assert_eq!(snapshot(&fx), before);
+        let reply = fx.registry.heartbeat(&message, &cred("t")).unwrap();
+        assert_eq!(reply.exclusive, None);
+        assert!(!reply.taint_ack);
+        assert_eq!(view(&fx, "a").taint, None);
+    }
 }
 
 /// Asserts that a heartbeat answers for the registry as it is when it arrives, not as a
 /// check found it: after a check, a new hello makes the checked heartbeat stale and it
 /// records nothing; another taint recorded first is kept over the one the check named;
-/// a committed lease that ends leaves the checked refusal naming no lease and no taint.
 /// It catches a heartbeat that applies an earlier check's answer.
 #[test]
 fn heartbeat_answers_for_the_registry_as_it_is_after_a_check() {
@@ -737,26 +459,21 @@ fn heartbeat_answers_for_the_registry_as_it_is_after_a_check() {
     assert_eq!(view(&fx, "a").taint, Some(report("first")));
     let bound = fx.registry.bindings()[&host("a")].taint().cloned();
     assert_eq!(bound, Some(report("first")));
-
-    let fx = committed();
-    let mut refusing = fx.heartbeat("a", 1);
-    refusing.exclusive_refused = Some(exclusive_refusal("1-1", RefusalReason::HostUnsafe));
-    let check = fx.registry.check_heartbeat(&refusing, &cred("t")).unwrap();
-    assert_eq!(check.taint, Some(host_unsafe()));
-    fx.provider.clone().stop(&lease(1));
-    fx.registry.heartbeat(&refusing, &cred("t")).unwrap();
-    assert_eq!(view(&fx, "a").taint, None);
 }
 
 /// A pool that forgets a lost host after the shortest retention, with host `a` joined
 /// (epoch 1).
 fn retaining() -> Fixture {
-    let config = config(4)
-        .with_lost_retention(MIN_LOST_RETENTION_MS)
-        .unwrap();
-    let fx = fixture_of(config);
+    let fx = fixture_of(retention_config());
     fx.join("a", "t");
     fx
+}
+
+/// The pool of [`retaining`].
+fn retention_config() -> js_registry::PoolConfig {
+    config(4)
+        .with_lost_retention(MIN_LOST_RETENTION_MS)
+        .unwrap()
 }
 
 /// Moves the clock to `past` milliseconds after the end of the grace and the retention,
@@ -777,7 +494,7 @@ fn admitted_alike(fx: &Fixture, message: &Heartbeat) {
 /// Asserts that a check refuses a silent host as forgotten exactly when the heartbeat
 /// does, each check made before any other call could forget the host: at the end of the
 /// grace and the retention the host is held and both admit; one millisecond later both
-/// refuse it as unknown; a host booked by a lease, tainted, or cordoned is kept past
+/// refuse it as unknown; a host its placer holds work on, tainted, or cordoned is kept past
 /// that, and both admit it. It catches a check whose retention rule differs from the one
 /// that forgets hosts.
 #[test]
@@ -795,8 +512,10 @@ fn check_heartbeat_forgets_a_host_exactly_when_heartbeat_does() {
     let beaten = fx.registry.heartbeat(&beat, &cred("t")).unwrap_err();
     assert_eq!(beaten, Refusal::UnknownHost);
 
-    let fx = retaining();
-    assert_eq!(started_on(&fx.provider.clone().start(spec(1))), Some("a"));
+    let holding = Arc::new(Holding::default());
+    let fx = with_placer(retention_config(), holding.clone());
+    fx.join("a", "t");
+    holding.hold(&host("a"));
     after_retention(&fx, 1);
     admitted_alike(&fx, &fx.heartbeat("a", 1));
 

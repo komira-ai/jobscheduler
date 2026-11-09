@@ -9,8 +9,7 @@
 //! tells the engine how the commit went ([`Engine::whole_job_placed`],
 //! [`Engine::whole_job_failed`]). The pass:
 //!
-//! 1. Takes the pool's whole-node settings when the whole-node round has not set them.
-//!    With none, only step 2 runs.
+//! 1. Takes the pool's whole-node settings. With none, only step 2 runs.
 //! 2. Unmarks every stored mark whose job is not a queued whole-host job (the table holds
 //!    none in normal operation: a cancel, a placement and a failed prepare delete the mark in
 //!    the commit that writes the job).
@@ -24,15 +23,16 @@
 //!    queued; after `claim_by` the mark is deleted and the job is queued without it, to be
 //!    marked again. The deadline of a stored mark was raised at boot by the store
 //!    ([`js_jobs::JobStore::raise_at_boot`]): the engine takes it as it is stored.
-//! 5. Runs one placement round of the queue, in the term of the whole-node leases.
+//! 5. Runs one placement round of the queue, in the term of the whole-host grants
+//!    ([`super::whole::WHOLE_TERM`]).
 //! 6. Reads the round, for each job in queue order: a job granted a quiet host that may take
 //!    a job now is committed there; a job granted any other host keeps the grant; a job with a
 //!    mark has it written when it differs from the stored one (at millisecond precision, so an
 //!    unchanged mark is never rewritten); a job with no mark and a stored mark has the mark
 //!    deleted.
 //!
-//! A failed prepare of a job is decided by [`failed_prepare`] with the lease path's rules (the
-//! registry's table of causes and `max_replace`); the count and the bars it gives are written
+//! A failed prepare of a job is decided by [`failed_prepare`] (the registry's table of causes
+//! and `max_replace`); the count and the bars it gives are written
 //! to the job's row with the requeue, so a restart loses neither. A job placed by backfill on
 //! a host a whole-host job marks has its wall limit cut to the time left in the mark's tail
 //! ([`backfill_wall`]).
@@ -41,8 +41,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::RefusalReason;
-use js_jobs::{Booked, Exclusion, FailedPrepare, JobId, JobRecord, MarkRecord, Needs};
-use js_registry::{WholeNodeConfig, prepare_exclusion};
+use js_jobs::{Exclusion, FailedPrepare, JobId, JobRecord, MarkRecord, Needs};
+use js_registry::{Exclusion as Barred, WholeNodeConfig, prepare_exclusion};
 use js_sched::queue_status::{self, Outcome};
 use js_sched::{Bar, Event, Request, RestoredMark, RestoredWhole};
 use js_state::StoreTime;
@@ -53,7 +53,6 @@ use js_types::sched::{
 };
 use js_whole::cost::DEFAULT_BACKFILL_MARGIN_MS;
 
-use super::prepare::{bar_of, stronger};
 use super::{Engine, Placed};
 use crate::map;
 
@@ -108,9 +107,7 @@ impl Engine {
     /// One pass of the whole-host jobs at `now` (see the module documentation): the writes it
     /// makes, in order.
     pub fn whole_jobs(&mut self, input: &WholeJobs<'_>, now: FarmTime) -> Vec<WholeJobStep> {
-        // The whole-node round, when it has run, set the settings.
-        let rounded = self.round.is_some();
-        if let Some(settings) = input.settings.filter(|_| !rounded) {
+        if let Some(settings) = input.settings {
             self.take_settings(settings);
         }
         let queue: Vec<&JobRecord> = input
@@ -145,7 +142,7 @@ impl Engine {
         match self.pending(operation).filter(|(_, on)| *on == worker) {
             Some((lease, _)) => {
                 let placed = Placed { lease, operation };
-                self.hold_job(job, host, (Booked::WholeHost, host_ports), placed);
+                self.hold_job(job, host, host_ports, placed);
             }
             None => {
                 let _ = self.sched.cancel_whole(operation);
@@ -330,6 +327,29 @@ fn mark_step(
     }
 }
 
+/// The hard bar of `exclusion`: the worker is neither marked for the job nor granted to it
+/// while it holds.
+fn bar_of(exclusion: Barred) -> Bar {
+    match exclusion {
+        Barred::Until(end) => Bar::Until(FarmTime::from_millis(end.millis())),
+        Barred::ForLife => Bar::ForLife,
+    }
+}
+
+/// The bar a worker keeps when `bar` is set on it over `kept`: a hard bar over a back-off,
+/// then the one that ends later (a bar for life never ends).
+fn stronger(kept: Option<Bar>, bar: Bar) -> Bar {
+    let strength = |bar: Bar| {
+        let end = match bar {
+            Bar::Backoff(end) | Bar::Until(end) => end.as_millis(),
+            Bar::ForLife => u64::MAX,
+        };
+        (!matches!(bar, Bar::Backoff(_)), end)
+    };
+    kept.filter(|kept| strength(*kept) > strength(bar))
+        .unwrap_or(bar)
+}
+
 /// The host and the exclusion of `bar` on `worker`, as the table keeps them.
 fn excluded((worker, bar): (WorkerId, Bar)) -> Option<(HostId, Exclusion)> {
     let host = map::host_id(&worker).ok();
@@ -415,8 +435,7 @@ fn store_of(at: FarmTime) -> StoreTime {
     StoreTime::from_duration(Duration::from_millis(at.as_millis()))
 }
 
-/// How the failed prepare of `job` on `host` at `now` ends under `settings` (the lease path's
-/// rules, [`super::prepare`]): the job's failed prepares plus this one; the bars the job keeps
+/// How the failed prepare of `job` on `host` at `now` ends under `settings`: the job's failed prepares plus this one; the bars the job keeps
 /// are its own with the host's exclusion merged in, the registry's table of causes
 /// ([`prepare_exclusion`], a back-off ending `reserve_backoff` after `now`) taking the
 /// stronger bar of the two on the host; and the job is terminal when the count reaches
