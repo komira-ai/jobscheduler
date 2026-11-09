@@ -116,56 +116,182 @@ mod tests {
         assert!(empty.to_string().contains("no container init"), "{empty}");
     }
 
-    /// Whether the process `pid` is still the `sleep 100000` the script below started (a pid
-    /// that is gone, or reused by another program, is not).
-    fn sleeping(pid: &str) -> bool {
-        std::fs::read(format!("/proc/{pid}/cmdline"))
-            .is_ok_and(|line| line == b"sleep\x00100000\x00")
+    /// What `/proc/<pid>/stat` says of a process: its state, its session and when it started
+    /// (clock ticks since boot). Exec changes none of what the test reads from it: a process
+    /// is alive (not a zombie) and in its session from the fork on, before the shell's forked
+    /// child has become `sleep` as after, and its start time is that of the fork.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Stat {
+        state: char,
+        session: u64,
+        start: u64,
     }
 
-    /// Runs the installed init with `options`, over a shell that leaves a child and a
-    /// grandchild whose parent has gone, writing their pids to `dir`, and exits 3. Returns the
-    /// init's exit code and the two pids.
-    fn run_leaving_two(init: &Path, dir: &Path, options: &[&str]) -> (Option<i32>, [String; 2]) {
+    /// The stat of `pid`, or `None` when there is no such process. The fields follow the
+    /// last `)`, since a command name may hold one.
+    fn stat(pid: i32) -> Option<Stat> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, after) = text.rsplit_once(')')?;
+        let fields: Vec<&str> = after.split_whitespace().collect();
+        Some(Stat {
+            state: fields.first()?.chars().next()?,
+            session: fields.get(3)?.parse().ok()?,
+            start: fields.get(19)?.parse().ok()?,
+        })
+    }
+
+    /// A process the init's program left, known by its pid and by the init it ran under. A
+    /// process in another session than the init's, or one that started before the init, is
+    /// not it. A pid the kernel gave to a later process of the same session would still pass;
+    /// the test does not guard against that.
+    struct Leftover {
+        pid: i32,
+        init: Stat,
+    }
+
+    impl Leftover {
+        /// Whether the process is still running: there, not a zombie, and not ruled out as
+        /// another process by its session or start time. Whether it has exec'd yet does not
+        /// matter.
+        fn running(&self) -> bool {
+            stat(self.pid).is_some_and(|now| {
+                !matches!(now.state, 'Z' | 'X')
+                    && now.session == self.init.session
+                    && now.start >= self.init.start
+            })
+        }
+    }
+
+    /// The processes a run left, killed (SIGKILL) when this is dropped, on every path out of
+    /// the test, a failed assertion's unwinding too, so none outlives it holding the test's
+    /// output open.
+    #[derive(Default)]
+    struct Leftovers(Vec<Leftover>);
+
+    impl Drop for Leftovers {
+        fn drop(&mut self) {
+            for left in &self.0 {
+                let pid = rustix::process::Pid::from_raw(left.pid);
+                if let Some(pid) = pid.filter(|_| left.running()) {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+        }
+    }
+
+    /// Proves what counts as a running leftover: a live process whose program is not
+    /// `sleep` (this test's own) does; a process in another session than the init's, or one
+    /// that started before the init, does not; nor does one that has ended, whether still a
+    /// zombie or reaped. Catches a check that would call a gone process running, or a live
+    /// one gone.
+    #[test]
+    fn a_leftover_runs_only_while_alive_in_the_inits_session_and_no_older_than_it() {
+        let me = i32::try_from(std::process::id()).expect("a pid");
+        let mine = stat(me).expect("this test's stat");
+        let left = |pid, init| Leftover { pid, init };
+        assert!(left(me, mine).running());
+        let other_session = Stat {
+            session: mine.session + 1,
+            ..mine
+        };
+        assert!(!left(me, other_session).running());
+        let started_later = Stat {
+            start: mine.start + 1,
+            ..mine
+        };
+        assert!(!left(me, started_later).running());
+
+        let mut ended = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .expect("a child");
+        let pid = i32::try_from(ended.id()).expect("a pid");
+        let at_start = stat(pid).expect("the child's stat");
+        // Waits for the child to exit without reaping it, so it is a zombie until the wait
+        // below.
+        let raw = rustix::process::Pid::from_raw(pid).expect("a positive pid");
+        rustix::process::waitid(
+            rustix::process::WaitId::Pid(raw),
+            rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+        )
+        .expect("the child exits");
+        assert_eq!(stat(pid).map(|now| now.state), Some('Z'));
+        assert!(!left(pid, at_start).running(), "a zombie is not running");
+        ended.wait().expect("reaped");
+        assert_eq!(stat(pid), None);
+        assert!(
+            !left(pid, at_start).running(),
+            "a reaped process is not running"
+        );
+    }
+
+    /// Runs the installed init with `options`, over a shell that leaves three processes,
+    /// writing their pids to `dir`, and exits 3: a forked child that never execs (it blocks
+    /// opening a FIFO no one writes to, before its `exec sleep`), a background `sleep` child,
+    /// and a `sleep` grandchild whose parent has gone. Returns the init's exit code and the
+    /// three processes, held to be killed.
+    fn run_leaving_three(init: &Path, dir: &Path, options: &[&str]) -> (Option<i32>, Leftovers) {
         let script = format!(
-            "sleep 100000 & echo $! > {d}/child; (sleep 100000 & echo $! > {d}/grandchild); exit 3",
+            "rm -f {d}/hold && mkfifo {d}/hold || exit 99; \
+             {{ read x < {d}/hold; exec sleep 100000; }} & echo $! > {d}/held; \
+             sleep 100000 & echo $! > {d}/child; \
+             (sleep 100000 & echo $! > {d}/grandchild); exit 3",
             d = dir.display()
         );
-        let status = std::process::Command::new(init)
+        let mut running = std::process::Command::new(init)
             .args(options)
             .args(["--", "/bin/sh", "-c", &script])
             .stdin(std::process::Stdio::null())
-            .status()
+            .spawn()
             .expect("the init runs");
-        let read = |name: &str| {
+        // The init is this test's child and is not reaped until the wait below, so its stat
+        // is there to read even if it has already exited.
+        let pid = i32::try_from(running.id()).expect("a pid");
+        let init_stat = stat(pid).expect("the init's stat");
+        let status = running.wait().expect("the init ends");
+        let mut left = Leftovers::default();
+        for name in ["held", "child", "grandchild"] {
             let text = std::fs::read_to_string(dir.join(name)).expect("a pid");
-            text.trim().to_owned()
-        };
-        (status.code(), [read("child"), read("grandchild")])
+            let pid = text.trim().parse().expect("a pid");
+            left.0.push(Leftover {
+                pid,
+                init: init_stat,
+            });
+        }
+        (status.code(), left)
     }
 
     /// Proves the init of a host container (`--end-descendants`) ends with its program's
-    /// code only once everything the program left is gone: a background child and a
-    /// grandchild whose parent had exited are both killed and reaped by the time it exits.
-    /// Without the option (a contained job's init, whose PID namespace the kernel ends) they
-    /// are left running. Catches a host job whose leftover processes keep `crun run`, and the
-    /// job, from ever ending.
+    /// code only once everything the program left is gone: a child that has not exec'd, a
+    /// background child and a grandchild whose parent had exited are all killed and reaped
+    /// (no such process is left) by the time it exits. Without the option (a contained job's
+    /// init, whose PID namespace the kernel ends) all three are left running. Catches a host
+    /// job whose leftover processes keep `crun run`, and the job, from ever ending. A
+    /// leftover counts as running from the fork on, whether or not it has exec'd, so neither
+    /// half depends on how far the shell's children got.
     #[test]
     fn a_host_init_ends_what_its_program_left_before_it_exits() {
         let dir = scratch("end-descendants");
         let init = install(&dir).expect("install");
-        let (code, left) = run_leaving_two(&init, &dir, &["--end-descendants"]);
+        let (code, left) = run_leaving_three(&init, &dir, &["--end-descendants"]);
         assert_eq!(code, Some(3));
-        for pid in &left {
-            assert!(!sleeping(pid), "process {pid} outlived the init");
+        for process in &left.0 {
+            assert_eq!(
+                stat(process.pid),
+                None,
+                "process {} outlived the init",
+                process.pid
+            );
         }
-        let (code, left) = run_leaving_two(&init, &dir, &[]);
+        let (code, left) = run_leaving_three(&init, &dir, &[]);
         assert_eq!(code, Some(3));
-        for pid in &left {
-            assert!(sleeping(pid), "process {pid} was ended without the option");
-            let _ = std::process::Command::new("kill")
-                .args(["-9", pid])
-                .status();
+        for process in &left.0 {
+            assert!(
+                process.running(),
+                "process {} was ended without the option",
+                process.pid
+            );
         }
     }
 }
