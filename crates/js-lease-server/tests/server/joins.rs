@@ -4,7 +4,7 @@
 use std::fs;
 use std::time::Duration;
 
-use js_lease::Clock;
+use js_types::Clock;
 use serde_json::{Value, json};
 
 use js_lease_server::{SharedClock, channel_ticker};
@@ -415,22 +415,20 @@ async fn a_heartbeat_renews_the_credential() {
     assert_eq!(second.status, 200, "{}", second.body);
 }
 
-/// Asserts that a second server over the state file of a running one is refused at start,
-/// naming `--state-file`, and so cannot hand a used token back. It catches a start that
-/// reads the file of tokens and serves while another process owns it.
+/// Asserts that a second server over the state files of a running one is refused at start,
+/// naming `--usage-db` (the usage file is locked by the first), and so cannot hand a used
+/// token back. It catches a start that reads the file of tokens and serves while another
+/// process owns it.
 #[tokio::test]
 async fn a_second_server_over_the_same_state_is_refused() {
     let h = start_agents("joins_second_server", false).await;
     let token = minted(&h, "i-1").await;
     assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 200);
-    // Usage is off for the second server: the usage file is locked by the first as well,
-    // and the lock under test is the state file's.
-    let mut args = replace(agent_args(&h.scratch, false), "--boot", "resume");
-    args.push("--usage-off".into());
+    let args = replace(agent_args(&h.scratch, false), "--boot", "resume");
     let (_, ticker) = channel_ticker();
-    let clock = SharedClock::new(js_lease::ManualClock::default());
+    let clock = SharedClock::new(js_types::ManualClock::default());
     let started = start(config(args).unwrap(), clock, ticker).await;
     let refusal = started.err().expect("the second start should be refused");
-    assert_eq!(refusal.flag(), "--state-file");
+    assert_eq!(refusal.flag(), "--usage-db");
     assert!(refusal.reason().contains("lock"), "{}", refusal.reason());
 }

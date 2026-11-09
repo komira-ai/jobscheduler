@@ -1,9 +1,9 @@
 //! When the shell vouches for the registry's view of its hosts.
 //!
-//! The registry is not persisted: after a restart it holds the hosts of the lease file
-//! (seated, waiting for a hello) and the hosts that have said hello since. A machine the
-//! scaler launched, or a host that holds no lease, is absent until its agent says hello
-//! again, and the step must not read that absence as "gone". The view is complete when
+//! The registry is not persisted: after a restart it holds the hosts that were tainted or
+//! cordoned (waiting for a hello) and the hosts that have said hello since. A machine the
+//! scaler launched is absent until its agent says hello again, and the step must not read
+//! that absence as "gone". The view is complete when
 //! every host that can be known has had its chance to announce itself:
 //!
 //! ```text
@@ -11,15 +11,13 @@
 //!            && (every host of the roster has been heard since start || uptime >= REGISTRY_QUIET)
 //! ```
 //!
-//! The roster is the scaler's records in `Booting`, `Registered` or `Draining`, and the
-//! hosts of the lease file at start, refused seats included (a seat the registry refuses
-//! is never heard, so only `REGISTRY_QUIET` releases it). A host is heard when a tick saw
-//! it `Live`. Once the view is complete it stays complete until the process ends: a
+//! The roster is the scaler's records in `Booting`, `Registered` or `Draining`. A host is
+//! heard when a tick saw it `Live`. Once the view is complete it stays complete until the process ends: a
 //! machine launched later is not the restart's to wait for.
 //!
 //! Uptime is counted from [`Scaler::new`](super::Scaler::new) and counted again from the
 //! moment the listeners are bound ([`Scaler::listening`](super::Scaler::listening)), so
-//! the time the server spends in startup (the seat of the lease file, TLS, the bind) is
+//! the time the server spends in startup (the store, TLS, the bind) is
 //! not part of it. It is the sum of the forward steps of the injected clock between two
 //! observations, never the difference of two readings: a clock that steps back adds
 //! nothing and does not stretch the uptime of a process that has already counted it.
@@ -91,37 +89,28 @@ pub(super) struct Gate {
     uptime: Duration,
     /// The most one observation adds to the uptime, or `None` for no limit.
     cap: Option<Duration>,
-    /// The hosts of the lease file at start.
-    leased: BTreeSet<String>,
     heard: BTreeSet<String>,
     done: bool,
 }
 
 impl Gate {
-    /// A gate whose uptime starts at `now`, with no host of the lease file.
+    /// A gate whose uptime starts at `now`.
     pub(super) fn starting(now: Millis) -> Self {
         Self {
             last: now,
             uptime: Duration::ZERO,
             cap: None,
-            leased: BTreeSet::new(),
             heard: BTreeSet::new(),
             done: false,
         }
     }
 
-    /// The listeners are bound at `now`: the uptime starts again from zero, no observation
-    /// adds more than `cap` to it from now on, and the hosts of the lease file join the
-    /// roster.
-    pub(super) fn bound<I: IntoIterator<Item = String>>(
-        &mut self,
-        (now, cap): (Millis, Option<Duration>),
-        leased: I,
-    ) {
+    /// The listeners are bound at `now`: the uptime starts again from zero, and no
+    /// observation adds more than `cap` to it from now on.
+    pub(super) fn bound(&mut self, (now, cap): (Millis, Option<Duration>)) {
         self.last = now;
         self.uptime = Duration::ZERO;
         self.cap = cap;
-        self.leased.extend(leased);
     }
 
     /// One tick at `now`: the verdict for the step. `live` are the hosts the registry
@@ -139,8 +128,7 @@ impl Gate {
         let ours = records.instances.iter().filter(|record| {
             [Phase::Booting, Phase::Registered, Phase::Draining].contains(&record.phase)
         });
-        let names = ours.map(|record| record.name.as_str());
-        let mut roster = names.chain(self.leased.iter().map(String::as_str));
+        let mut roster = ours.map(|record| record.name.as_str());
         let all_heard = roster.all(|name| self.heard.contains(name));
         self.done |= self.uptime >= REGISTRY_FLOOR && (all_heard || self.uptime >= REGISTRY_QUIET);
         self.done
@@ -170,10 +158,37 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapt::SharedClock;
+    use crate::clock::SharedClock;
     use crate::rate::{HelloLimit, HelloLimiter};
-    use js_lease::{Clock, ManualClock, Timestamp};
     use js_registry::Credential;
+    use js_scaler::{Record, StoredOffer};
+    use js_types::{Clock, ManualClock, Timestamp};
+
+    /// A machine of the scaler's named `name`, launched and not yet heard from: part of the
+    /// roster the view waits for.
+    fn booting(name: &str) -> Record {
+        Record {
+            pool: "gpu".to_owned(),
+            acquire: None,
+            name: name.to_owned(),
+            offer: StoredOffer::nothing("offer", None),
+            price_cents_per_hour: 0,
+            phase: Phase::Booting,
+            since: Millis::new(0),
+            launched_at: Millis::new(0),
+            token_expires: None,
+            cloud_id: None,
+            retry_at: None,
+            attempt: 0,
+            gone_at: None,
+            registered: false,
+            condemned: false,
+            clean_lists: 0,
+            last_clean: None,
+            seen_live: false,
+            ends_at: None,
+        }
+    }
 
     /// Only the second assert is an inequality that can fail: the floor is below the quiet
     /// period. The first holds whatever the constants are, because `REGISTRY_FLOOR` is
@@ -222,15 +237,15 @@ mod tests {
         let credential = Credential::of_token("pool-token");
         let names: Vec<String> = (0..HERD).map(|n| format!("host-{n}")).collect();
         let mut gate = Gate::starting(Millis::new(clock.now().millis()));
-        gate.bound(
-            (Millis::new(clock.now().millis()), None),
-            names.iter().cloned(),
-        );
+        gate.bound((Millis::new(clock.now().millis()), None));
+        let records = Records {
+            instances: names.iter().map(|name| booting(name)).collect(),
+            ..Records::default()
+        };
         let mut retry_at: Vec<u64> = vec![0; names.len()];
         let mut pending: Vec<usize> = (0..names.len()).collect();
         let mut admitted: Vec<&str> = Vec::new();
         let mut last_hello = None;
-        let records = Records::default();
         // Half seconds: an agent held for a second finds, half a second after it asks, that
         // it is not yet due.
         let mut halves = 0u64;

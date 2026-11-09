@@ -14,16 +14,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{CapacityProvider, SchedulerId};
-use js_lease::Clock as LeaseClock;
 use js_provider_ec2 as ec2;
 use js_provider_gce as gce;
 use js_provider_lambdalabs as lambda;
+use js_types::Clock as LeaseClock;
 use js_types::{AcceleratorNeed, ExecMode, MemoryPercent, Model, ResourceClass};
 
-use crate::adapt::SharedClock;
-use crate::capacity::{CapacitySource, StaticPoolSource};
+use crate::clock::SharedClock;
 use crate::config::read_private_reason;
 use crate::file::Launch;
+use crate::static_pool::StaticPoolSource;
 
 /// A table that a constructor refused: the field at fault, relative to the provider table,
 /// and why. The reason holds nothing the table said, and no secret.
@@ -118,7 +118,7 @@ pub struct ElasticBuilt {
 /// What a constructor builds.
 pub enum Built {
     /// Hosts that exist already, listed by the operator.
-    Static(Box<dyn CapacitySource>),
+    Static(StaticPoolSource),
     /// Hosts the scheduler launches.
     Elastic(ElasticBuilt),
 }
@@ -243,12 +243,12 @@ fn static_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErr
         field: refused.field,
         reason: refused.reason,
     })?;
-    let source = StaticPoolSource::new(path).with_classes(vec![ctx.class.clone()]);
+    let source = StaticPoolSource::new(path);
     let source = match ctx.memory_percent {
         Some(percent) => source.with_memory_percent(percent),
         None => source,
     };
-    Ok(Built::Static(Box::new(source)))
+    Ok(Built::Static(source))
 }
 
 /// The provider's clock over the server's: the milliseconds the server's clock reads.
@@ -374,7 +374,7 @@ fn gce_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError>
 
 #[cfg(test)]
 mod tests {
-    use js_lease::{ManualClock, Timestamp};
+    use js_types::{ManualClock, Timestamp};
 
     use super::*;
 

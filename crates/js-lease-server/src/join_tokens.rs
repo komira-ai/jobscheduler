@@ -125,19 +125,19 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_agent_wire::{HostCredential, InstanceIdentity};
-use js_lease::Clock;
 use js_registry::{Credential, SessionSource};
 use js_state::Store;
+use js_types::Clock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tracing::error;
 
-use crate::adapt::SharedClock;
 use crate::agent_state::{read_if_present, replace};
+use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::host_keys::{self, Extra, JOINS, Writes};
 
-/// The flag the refusals name: the file lives beside the lease file.
+/// The flag the refusals name: the file lives beside the state file.
 const FLAG: &str = "--state-file";
 
 /// The version this build writes.
@@ -249,7 +249,7 @@ struct Stored {
     extra: Extra,
 }
 
-/// Where the tokens are kept: the file beside the lease file, or the state store.
+/// Where the tokens are kept: the file beside the state file, or the state store.
 enum Keeper {
     File(PathBuf),
     Store(Arc<dyn Store>),

@@ -14,11 +14,11 @@ use js_elastic::{
     Held, HostRef, Offer, ProviderError, Reason, Refusal, RefusalCode, Released,
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};
-use js_lease::ManualClock;
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles,
 };
+use js_types::ManualClock;
 use js_types::{ExecMode, Model, ProviderId};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};

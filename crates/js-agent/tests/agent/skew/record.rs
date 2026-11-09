@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use js_agent::{Answer, Connector, Dialer, Handle, Transport};
 use js_client::{Client, ClientError};
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
+use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 use tokio::runtime::{Builder, Runtime};
 

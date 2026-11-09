@@ -434,16 +434,6 @@ impl HostBook {
         self.hosts.get(host).map(|listed| &listed.shape)
     }
 
-    /// Lists `host`, when it is listed, with `shape` from now on, keeping the leases booked
-    /// on it and what each books there; a host that is not listed is left unlisted. The
-    /// caller keeps the resources of `shape` those the host was listed with, so that what
-    /// is booked still fits.
-    pub fn reshape(&mut self, host: &HostId, shape: Shape) {
-        if let Some(listed) = self.hosts.get_mut(host) {
-            listed.shape = shape;
-        }
-    }
-
     /// Every listed host, in id order, with its shape and the leases booked on it.
     pub fn hosts(&self) -> Vec<HostCapacity> {
         let listed = self.hosts.iter();

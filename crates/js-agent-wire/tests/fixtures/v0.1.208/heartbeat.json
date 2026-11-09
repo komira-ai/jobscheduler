@@ -1,0 +1,77 @@
+{
+  "host_id": "builder-01",
+  "epoch": 4,
+  "session": "s3cret-1",
+  "phase": "serving",
+  "held": [
+    {
+      "run_id": "run-1",
+      "state": "running"
+    },
+    {
+      "run_id": "run-2",
+      "state": "exited_unacked"
+    }
+  ],
+  "results": [
+    {
+      "run_id": "run-2",
+      "lease_id": "7-3",
+      "outcome": "succeeded",
+      "exit_code": 0
+    },
+    {
+      "run_id": "run-3",
+      "lease_id": "7-4",
+      "outcome": "timed_out",
+      "exit_code": 137,
+      "detail": "wall limit"
+    }
+  ],
+  "load": {
+    "seq": 7,
+    "mono_usec": 9000000,
+    "cpu_usage_usec": 4500000,
+    "working_set_bytes": 3221225472,
+    "active_file_bytes": 1048576,
+    "actions_cpu_limited": true,
+    "covered": [
+      "3-4"
+    ],
+    "clocks": [
+      {
+        "lease_id": "3-4",
+        "started_mono_usec": 1000000
+      }
+    ],
+    "minutes": [
+      {
+        "lease_id": "3-4",
+        "minute": 2,
+        "cpu_mean_millis": 1500,
+        "cpu_peak_window_millis": 2500,
+        "ws_max_bytes": 2147483648
+      }
+    ]
+  },
+  "disk_gib": 400,
+  "jobs": [
+    {
+      "job_id": "job-1",
+      "state": "running"
+    },
+    {
+      "job_id": "job-2",
+      "state": "exited_unacked",
+      "result": {
+        "job_id": "job-2",
+        "allocation_id": "0123456789abcdef0123456789abcdef",
+        "outcome": "succeeded",
+        "exit_code": 0
+      }
+    }
+  ],
+  "retired_jobs": [
+    "job-0"
+  ]
+}

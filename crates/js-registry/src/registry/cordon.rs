@@ -1,9 +1,8 @@
 //! The cordon of a host: a host takes itself out of placement for a while without
 //! stopping its work, as an update of its agent needs.
 //!
-//! A cordoned host is offered no new lease, no whole-node commit and no reservation's
-//! start; the lease it holds, and the runs on it, go on. A cordon is a lease of its own:
-//! whoever sets it says how long it lasts, [`Registry::cordon`] renews it by setting it
+//! A cordoned host is offered no new job; the work it has goes on. A cordon is a lease of its
+//! own: whoever sets it says how long it lasts, [`Registry::cordon`] renews it by setting it
 //! again, and it lifts by itself at the time it lapses, so a requester that dies costs the
 //! time it asked for and no more. A cordon never shortens when it is set again; only
 //! [`Registry::uncordon`] ends it early.
@@ -16,13 +15,13 @@
 
 use std::time::Duration;
 
-use js_lease::Timestamp;
 use js_types::HostId;
+use js_types::Timestamp;
 
-use super::{HostView, Record, Registry, State};
+use super::{HostView, Record, Registry};
 
 /// The registry does not hold the host: it never said hello since the registry started,
-/// and it holds no lease, no taint and no cordon that a restart put back.
+/// and it holds no taint and no cordon that a restart put back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("the registry does not hold the host")]
 pub struct NotHeld;
@@ -77,7 +76,7 @@ pub struct Uncordoned {
 impl Registry {
     /// Cordons `host` until `lease` after now, or until later than that if it is cordoned
     /// for longer already: a repeat renews, and never shortens. From then on the host
-    /// takes no new lease (a lease it holds is untouched) until the cordon lapses or
+    /// takes no new job (the work it has is untouched) until the cordon lapses or
     /// [`Registry::uncordon`] ends it.
     ///
     /// # Errors
@@ -86,14 +85,7 @@ impl Registry {
     pub fn cordon(&self, host: &HostId, lease: Duration) -> Result<Cordoned, NotHeld> {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
-        let marks = self.marks_now(&guard);
-        let State {
-            book,
-            records,
-            runs,
-            ..
-        } = &mut *guard;
-        let record = records.get_mut(host).ok_or(NotHeld)?;
+        let record = guard.records.get_mut(host).ok_or(NotHeld)?;
         let placed = !record.cordoned(now);
         let wanted = now.plus(lease);
         record.cordon = Some(
@@ -102,7 +94,7 @@ impl Registry {
                 .filter(|held| *held > wanted)
                 .unwrap_or(wanted),
         );
-        let view = self.viewer((&*book, &*runs, marks), now);
+        let view = self.viewer(now);
         let host = OwnHost::of(view(host, &*record), &*record, now);
         Ok(Cordoned { host, placed })
     }
@@ -116,17 +108,10 @@ impl Registry {
     pub fn uncordon(&self, host: &HostId) -> Result<Uncordoned, NotHeld> {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
-        let marks = self.marks_now(&guard);
-        let State {
-            book,
-            records,
-            runs,
-            ..
-        } = &mut *guard;
-        let record = records.get_mut(host).ok_or(NotHeld)?;
+        let record = guard.records.get_mut(host).ok_or(NotHeld)?;
         let lifted = record.cordoned(now);
         record.cordon = None;
-        let view = self.viewer((&*book, &*runs, marks), now);
+        let view = self.viewer(now);
         let host = OwnHost::of(view(host, &*record), &*record, now);
         Ok(Uncordoned { host, lifted })
     }
@@ -136,7 +121,7 @@ impl Registry {
         let now = self.shared.clock.now();
         let guard = self.lock_at(now);
         let record = guard.records.get(host)?;
-        let view = self.viewer((&guard.book, &guard.runs, self.marks_now(&guard)), now);
+        let view = self.viewer(now);
         Some(OwnHost::of(view(host, record), record, now))
     }
 }

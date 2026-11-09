@@ -27,7 +27,7 @@ use serde_json::Value;
 use crate::agent_state::{read_if_present, replace};
 use crate::error::StartupError;
 
-/// The flag the refusals name: the file lives beside the lease file.
+/// The flag the refusals name: the file lives beside the state file.
 const FLAG: &str = "--state-file";
 
 /// The version of the file. A reader refuses any other.

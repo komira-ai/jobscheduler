@@ -1,7 +1,7 @@
 //! The writer lock over a Postgres store: a second server refused, a lost lock that stops the
 //! server, a store fenced by the lock's generation, and refusals that never show the
 //! connection URL; and the state a restart reads back from it, the first start's import of
-//! the files beside the lease file included.
+//! the files beside the state file included.
 //!
 //! Each test has a database of its own (`js_state::postgres::test_database`, the state schema
 //! applied), and an advisory lock is scoped to its database, so the tests do not see each
@@ -12,7 +12,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::process::Stdio;
-use std::time::Duration;
 
 use js_lease_server::{LockLost, RecordsFile, UnremovedFile};
 use js_scaler::Records;
@@ -29,7 +28,7 @@ use crate::store_support::{
     LIMIT, assert_unquoted, end_the_holder, holder, launch_ticking, revision, run_to_end,
     store_args, store_file, taken_address, unflushed, with_userinfo,
 };
-use crate::support::{Harness, Scratch, TOKEN, lease_file, replace, request};
+use crate::support::{Harness, Scratch, TOKEN, replace, request};
 
 /// A role no test server has and a password for it: neither may ever be printed.
 const ROLE: &str = "js_store_no_such_role";
@@ -38,9 +37,9 @@ const PASSWORD: &str = "store-secret-0123456789";
 /// Asserts that a second server on a Postgres store another server holds exits 2 with the
 /// one line naming the writer lock, and that it took the lock before anything else: it
 /// bound no listener (its listen address is taken, which would have been refused naming
-/// `--listen`), made no lease file and printed no address; the store's revision is
+/// `--listen`), made no state file and printed no address; the store's revision is
 /// unchanged, and the first server still holds the lock and serves. It catches a lock that
-/// is not taken, taken after the listener or the lease file, or released early.
+/// is not taken, taken after the listener or the state files, or released early.
 #[test]
 fn a_second_process_cannot_take_the_writer_lock() {
     let database = test_database();
@@ -66,7 +65,7 @@ fn a_second_process_cannot_take_the_writer_lock() {
     assert_eq!(ended.stdout, "", "no address was printed");
     assert!(
         !second.state().exists(),
-        "the second server made no lease file"
+        "the second server made no state file"
     );
     assert_eq!(revision(&url), before, "the second server wrote nothing");
     assert_eq!(
@@ -83,24 +82,20 @@ fn a_second_process_cannot_take_the_writer_lock() {
 }
 
 /// Asserts that when the session holding the writer lock is ended from another connection,
-/// the next tick stops the server: `lock_lost` names the loss, the tick neither ticks the
-/// lease table (a restored lease whose time ran out is still in the lease file) nor anything else,
-/// the shutdown runs no final tick (the lease file is unchanged) and answers the loss as an
-/// error, and the store's revision is unchanged. A tick before the loss runs as usual. It
-/// catches a server that keeps serving and writing after its session, and its lock, ended.
+/// the next tick stops the server: `lock_lost` names the loss, the tick does nothing else,
+/// the shutdown runs no final tick and answers the loss as an error, and the store's
+/// revision is unchanged. A tick before the loss runs as usual. It catches a server that
+/// keeps serving and writing after its session, and its lock, ended.
 #[test]
 fn losing_the_writer_lock_stops_the_server() {
     let database = test_database();
     let url = database.url();
     let scratch = Scratch::new("store_pg_lost");
-    fs::write(scratch.state(), lease_file(&[(1, "held", Some("gpu-01"))])).unwrap();
     let args = replace(store_args(&scratch, &url, &[]), "--boot", "resume");
     let runtime = Runtime::new().unwrap();
     let h = runtime.block_on(Harness::with(scratch, args, None));
     runtime.block_on(h.ticks.step());
     let before = revision(&url);
-    // Past the lease's wall end (7200 s): a tick of the table would now end it.
-    h.clock.advance(Duration::from_secs(7201));
     end_the_holder(&url);
 
     let lost: LockLost = runtime.block_on(async {
@@ -113,19 +108,10 @@ fn losing_the_writer_lock_stops_the_server() {
         "{said}"
     );
     assert_unquoted(&url, &said);
-    let leases = fs::read_to_string(h.scratch.state()).unwrap();
-    assert!(
-        leases.contains("lease_count = 1"),
-        "the lost tick expired nothing: {leases}"
-    );
 
-    let Harness {
-        running, scratch, ..
-    } = h;
+    let Harness { running, .. } = h;
     let stopped = runtime.block_on(running.shutdown());
     assert_eq!(stopped.err().map(|err| err.to_string()), Some(said));
-    let after = fs::read_to_string(scratch.state()).unwrap();
-    assert_eq!(after, leases, "no final tick wrote the lease file");
     assert_eq!(revision(&url), before, "nothing was written to the store");
 }
 
@@ -281,7 +267,7 @@ fn a_commit_after_another_process_took_the_lock_is_refused() {
 /// refuses another credential (403 `host-bound`) and the host still shows its taint, a used
 /// one-time token is refused for another host as used and goes on serving its own, and the
 /// store holds the token's digest and never its text, with no `.agents` or `.joins` file
-/// beside the lease file. It catches a Postgres store that loses what SQLite keeps.
+/// beside the state file. It catches a Postgres store that loses what SQLite keeps.
 #[test]
 fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
     let database = test_database();
@@ -341,7 +327,7 @@ fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
 }
 
 /// Asserts the first start's import over Postgres: with a bindings file, a records file and a
-/// file of hosts to remove beside the lease file, the first start leaves the store holding
+/// file of hosts to remove beside the state file, the first start leaves the store holding
 /// the binding, the records file's text, the hosts and the marker; a restart writes nothing
 /// to the store (its revision is the same) and still holds them, though the bindings file
 /// was removed in between. It catches an import that the Postgres backend does not commit

@@ -26,7 +26,7 @@
 //! through the seam (`Config::with_job_sources`); the node keeps the one source across a
 //! restart. So a seed replays with the job service on too (module `ids`).
 //!
-//! The lease file, the pool file, the token files and the store file live in a [`TestDir`]
+//! The state file's family, the pool file, the token files and the store file live in a [`TestDir`]
 //! the node owns.
 //!
 //! # The store
@@ -53,7 +53,7 @@
 //!
 //! [`ServerNode::restart`] stops the server and starts it again over the same directory and
 //! store, as an operator restarts the process: it drops the routers and the in-process
-//! server ([`InProcess::shutdown`]), which unlocks the lease file and gives up the store's
+//! server ([`InProcess::shutdown`]), which unlocks the state file and gives up the store's
 //! writer lock, and starts a new one with `--boot resume` on the same clock, keeping the
 //! node, its runtime, its tick and its count of calls. What the new server holds is what the
 //! old one wrote. A server that refuses to start again leaves the node down: a call from an
@@ -72,13 +72,13 @@ use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{Method, Request, Response, StatusCode};
 use js_jobs::ScriptedIds;
-use js_lease::{Clock as _, ManualClock, Timestamp};
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{Config, SharedClock, StartupError};
 use js_registry::{HostMark, HostState, HostView, Registry, SessionSource};
 use js_sim::{Event, NodeId, NodeInput, Output};
 use js_testkit::dir::TestDir;
 use js_types::sched::{Effect, FarmTime, StateMachine};
+use js_types::{Clock as _, ManualClock, Timestamp};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
 
@@ -158,7 +158,7 @@ impl Up {
         })
     }
 
-    /// Drops the routers, then the server: the lease file and the job store are unlocked
+    /// Drops the routers, then the server: the state file and the job store are unlocked
     /// once this returns.
     fn shutdown(self) {
         let Self {

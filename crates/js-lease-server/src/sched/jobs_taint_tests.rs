@@ -16,11 +16,11 @@ use js_state::fake::{Fake, Flaw};
 use serde_json::json;
 
 use super::tests::{clock, host, on_the_machine, queue_spec, sized};
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{FakeAgent, placing_rig, starts};
 use crate::agent_state::{self, BindingStore};
 use crate::agents::{Agents, assemble_placed, state_path};
-use crate::api::whole_view_tests::{Lines, process_sink};
+use crate::api::rig::{Lines, process_sink};
+use crate::clock::SharedClock;
 use crate::hosts::HostList;
 use crate::sched::engine_rig::{GIB, hello_of, pool};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
@@ -198,7 +198,7 @@ async fn the_first_taint_reason_stands() {
     let taint = host_job_taint("job-h");
     assert_eq!(registry_taint(&rig.agents, "host-a"), Some(taint.clone()));
     assert_eq!(bound_taint(&kept, "host-a"), Some(taint));
-    let list = HostList::of(Vec::new(), rig.agents.registry.hosts(), None);
+    let list = HostList::of(Vec::new(), rig.agents.registry.hosts());
     let body = serde_json::to_value(&list).unwrap();
     let wanted = json!({ "reason": "host-job", "run_id": "job-h" });
     assert_eq!(body["hosts"][0]["taint"], wanted);

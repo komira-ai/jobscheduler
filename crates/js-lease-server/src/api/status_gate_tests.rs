@@ -9,7 +9,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use tower::ServiceExt;
 
-use super::whole_view_tests::Rig;
+use super::rig::Rig;
 use super::{not_found, peer_may_read_status, pools, router, status_page};
 
 /// The peer extension the listener sets on a connection's requests.

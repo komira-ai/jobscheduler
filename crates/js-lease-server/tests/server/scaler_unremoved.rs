@@ -25,7 +25,7 @@ const NONE: &str = r#"{"version":1,"hosts":[]}"#;
 /// host, the registry does not hold it (so it takes the removal at once), and after the
 /// first tick the file lists none and is still owner-only. It runs with the hosts in their
 /// file and in the state store (`acquires/scaler/unremoved`, which then lists none, with no
-/// file beside the lease file). It catches a file or key that is read at start and then not
+/// file beside the state file). It catches a file or key that is read at start and then not
 /// used, one whose entries are never written back out, a file written readable by others,
 /// and a store mode that writes the file.
 #[tokio::test]

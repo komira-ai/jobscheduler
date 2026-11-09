@@ -1,5 +1,5 @@
-//! Pure conversions between this server's vocabulary (`js_types`: [`Shape`], [`Request`],
-//! [`HostId`], [`LeaseId`]) and the scheduler's (`js_sched` and `js_types::sched`).
+//! Pure conversions between this server's vocabulary (`js_types`: [`Shape`], [`Resources`],
+//! [`HostId`]) and the scheduler's (`js_sched` and `js_types::sched`).
 //!
 //! The two vocabularies keep different types on purpose (`js_types::sched` says so), so
 //! each conversion here says what it keeps and what it drops. None reads a clock or does
@@ -11,9 +11,9 @@
 //! | `Resources` gpu class | the `gpu.kind` platform key, on the host's `NodeCaps` and on the request's `needs`, as the canonical family of the class through the alias table (a class that is not a model name stays as written) |
 //! | `Shape` accelerator ([`Shape::accelerator`]) | the host's `accelerator.*` report entries ([`Accelerator::to_capabilities`]), and its `gpu.kind` |
 //! | a request's `accelerator.*` capabilities | passed to the scheduler's `needs` as they are; `gpu.kind` is the family of `accelerator.model`, else of the class |
-//! | `Shape` | the host's capacity and the `NodeCaps` its node report would give, serving ordinary and whole-machine leases |
+//! | `Shape` | the host's capacity and the `NodeCaps` its node report would give, serving ordinary and whole-machine work |
 //! | `HostId` | `WorkerId`, same text |
-//! | `LeaseId` | `sched::LeaseId`, printed `<term>-<seq>` |
+//! | `sched::LeaseId` | its text in the API, `<term>-<seq>` |
 
 use std::collections::BTreeMap;
 
@@ -21,14 +21,13 @@ use js_caps::{
     ACCEL_KEYS, ACCEL_MODEL_KEY, Accelerator, AcceleratorNeed, Model, NodeCaps, ReportError,
     RequestError,
 };
-use js_sched::Request as SchedRequest;
-use js_types::sched::{LeaseId as SchedLeaseId, LeaseKind, Qos, WorkKey, WorkerId};
-use js_types::{HostId, IdError, Request, Resources, Shape};
+use js_types::sched::{LeaseId as SchedLeaseId, WorkerId};
+use js_types::{HostId, IdError, Resources, Shape};
 
 /// The driver a shape's node reports: jobs run in containers.
 const DRIVER: &str = "container";
 
-/// The driver of a whole-machine lease ([`LeaseKind::WholeMachine`]): a host of a pool
+/// The driver of a whole-machine request (`LeaseKind::WholeMachine`): a host of a pool
 /// serves the pool's whole-node requests, which the engine queues as whole-machine
 /// requests (`crate::engine::whole`).
 const WHOLE_DRIVER: &str = "native-whole-machine";
@@ -60,13 +59,10 @@ pub enum MapError {
     /// A worker name is not a host id.
     #[error(transparent)]
     Host(#[from] IdError),
-    /// The text is not a lease id in the form [`lease_text`] prints.
-    #[error("lease id {0:?} is not <term>-<seq>")]
-    LeaseText(String),
 }
 
 /// The booking vector of `resources`: CPU, memory, GPU count and disk. The GPU class has no
-/// place in it; see [`needs`] and [`node_caps`].
+/// place in it; see [`needs_of`] and [`host`].
 pub fn booking(resources: &Resources) -> js_types::sched::Resources {
     js_types::sched::Resources::new(resources.cpu_millis(), resources.memory_bytes())
         .with_gpus(resources.gpus())
@@ -133,25 +129,17 @@ fn family_of(text: &str) -> String {
     }
 }
 
-/// What `request` requires of a node: its capabilities as platform requirements, its
-/// accelerator need as the `accelerator.*` keys of [`AcceleratorNeed::requested`] (its own
-/// keys over the need its booked GPUs state, so a booked full spelling pins its variant
-/// here too, without any key being stored with the request), and its GPU class as
-/// `gpu.kind`: the family of its `accelerator.model` when it states one, else of the class.
+/// What a run asking for `capabilities` and `resources` requires of a node: its
+/// capabilities as platform requirements, its accelerator need as the `accelerator.*` keys
+/// of [`AcceleratorNeed::requested`] (its own keys over the need its booked GPUs state, so a
+/// booked full spelling pins its variant here too, without any key being stored with the
+/// request), and its GPU class as `gpu.kind`: the family of its `accelerator.model` when it
+/// states one, else of the class.
 ///
 /// # Errors
 /// [`MapError::Needs`] when a capability is not a platform key;
 /// [`MapError::GpuClass`] when a `gpu.kind` capability names another family than the
 /// request's model or class.
-pub fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
-    needs_of(&request.capabilities, &request.resources)
-}
-
-/// What a run asking for `capabilities` and `resources` requires of a node, as [`needs`]
-/// says: a lease's request and a queued job's constraints alike.
-///
-/// # Errors
-/// As [`needs`].
 pub fn needs_of(
     capabilities: &js_types::Capabilities,
     resources: &Resources,
@@ -183,29 +171,6 @@ pub fn needs_of(
     Ok(js_caps::Request::parse(pairs)?)
 }
 
-/// The scheduler's request for `request` as a job named `dedup`.
-///
-/// The work key is the request's class and `dedup`. The request is an `action` lease at
-/// `batch` urgency, not hermetic (a job may use the network, so a silent host
-/// self-fences it) and not cacheable or joinable; a probe's is pinned to the worker of its
-/// host.
-///
-/// # Errors
-/// As [`needs`].
-pub fn job(request: &Request, dedup: &str) -> Result<SchedRequest, MapError> {
-    Ok(SchedRequest {
-        key: WorkKey::new(request.class.as_str(), dedup),
-        qos: Qos::Batch,
-        kind: LeaseKind::Action,
-        resources: booking(&request.resources),
-        needs: needs(request)?,
-        hermetic: false,
-        do_not_cache: true,
-        whole_worker: false,
-        pin: request.probe_host.as_ref().map(worker),
-    })
-}
-
 /// The scheduler's name for `host`: the same text.
 pub fn worker(host: &HostId) -> WorkerId {
     WorkerId::new(host.as_str())
@@ -224,30 +189,35 @@ pub fn lease_text(lease: SchedLeaseId) -> String {
     format!("{}-{}", lease.term, lease.seq)
 }
 
-/// The lease `text` names, only in the exact form [`lease_text`] prints: decimal digits
-/// without sign, space or leading zeros on each side of one `-`.
-///
-/// # Errors
-/// [`MapError::LeaseText`] for anything else.
-pub fn lease_id(text: &str) -> Result<SchedLeaseId, MapError> {
-    let refuse = || MapError::LeaseText(text.to_owned());
-    let (term, seq) = text.split_once('-').ok_or_else(refuse)?;
-    let id = SchedLeaseId::new(
-        term.parse().map_err(|_| refuse())?,
-        seq.parse().map_err(|_| refuse())?,
-    );
-    if lease_text(id) == text {
-        Ok(id)
-    } else {
-        Err(refuse())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use js_types::{Capabilities, ClassId};
+    use js_sched::Request as SchedRequest;
+    use js_types::sched::{LeaseKind, Qos, WorkKey};
+    use js_types::{Capabilities, ClassId, Request};
     use std::time::Duration;
+
+    /// What `request` requires of a node.
+    fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
+        needs_of(&request.capabilities, &request.resources)
+    }
+
+    /// The scheduler's request for `request` as a job named `dedup`: an `action` lease at
+    /// `batch` urgency, not hermetic and not cacheable, pinned to the worker of a probe's
+    /// host. A test reads whether a node can run it.
+    fn job(request: &Request, dedup: &str) -> Result<SchedRequest, MapError> {
+        Ok(SchedRequest {
+            key: WorkKey::new(request.class.as_str(), dedup),
+            qos: Qos::Batch,
+            kind: LeaseKind::Action,
+            resources: booking(&request.resources),
+            needs: needs(request)?,
+            hermetic: false,
+            do_not_cache: true,
+            whole_worker: false,
+            pin: request.probe_host.as_ref().map(worker),
+        })
+    }
 
     fn resources(cpu: u64, mem: u64, gpus: u64, class: Option<&str>) -> Resources {
         Resources::new(cpu, mem, gpus, class.map(str::to_owned)).unwrap()
@@ -377,20 +347,6 @@ mod tests {
         assert!(cpu_only.runnable_on(&caps, &capacity));
     }
 
-    /// A job request carries its class and dedup text as the work key and the fixed job
-    /// policy: action lease, batch, networked, uncached.
-    #[test]
-    fn a_job_request_has_the_job_policy() {
-        let got = job(&request(resources(1000, 5, 0, None), &[]), "job-7").unwrap();
-        assert_eq!(got.key, WorkKey::new("gpu-host", "job-7"));
-        assert_eq!(got.qos, Qos::Batch);
-        assert_eq!(got.kind, LeaseKind::Action);
-        assert_eq!(got.resources, js_types::sched::Resources::new(1000, 5));
-        assert!(!got.hermetic);
-        assert!(got.do_not_cache);
-        assert!(!got.joinable());
-    }
-
     /// Capabilities travel both ways: a host's `os` satisfies a request for it and not a
     /// request for another; an `arch` in the shape decides what `arch` requests match.
     #[test]
@@ -515,47 +471,13 @@ mod tests {
         }
     }
 
-    /// A lease id prints as `<term>-<seq>` and reads back, at the extremes too.
+    /// A lease prints as `<term>-<seq>`, the text of `js_types::LeaseId`, at the extremes too.
     #[test]
-    fn lease_ids_round_trip() {
+    fn a_lease_prints_as_term_and_seq() {
         for (term, seq) in [(0, 0), (1, 9), (3, 12), (u64::MAX, u64::MAX)] {
-            let id = SchedLeaseId::new(term, seq);
-            let text = lease_text(id);
+            let text = lease_text(SchedLeaseId::new(term, seq));
             assert_eq!(text, format!("{term}-{seq}"));
             assert_eq!(text, js_types::LeaseId::new(term, seq).to_string());
-            assert_eq!(lease_id(&text).unwrap(), id);
-        }
-    }
-
-    /// Anything but the printed form is refused, each with the text in the error:
-    /// missing or extra separators, empty sides, signs, spaces, leading zeros, the dotted
-    /// form of the scheduler's own printing, and overflow.
-    #[test]
-    fn malformed_lease_ids_are_refused() {
-        for bad in [
-            "",
-            "-",
-            "1",
-            "1-",
-            "-1",
-            "1-2-3",
-            "+1-2",
-            "1-+2",
-            " 1-2",
-            "1-2 ",
-            "01-2",
-            "1-02",
-            "1.2",
-            "a-b",
-            "-1-2",
-            "18446744073709551616-1",
-            "1-18446744073709551616",
-        ] {
-            assert_eq!(
-                lease_id(bad),
-                Err(MapError::LeaseText(bad.to_owned())),
-                "{bad:?}"
-            );
         }
     }
 

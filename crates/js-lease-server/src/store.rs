@@ -2,8 +2,7 @@
 //! writer lock, and the loss of that lock.
 //!
 //! The server takes the store's writer lock ([`WriterLock::acquire`]) first thing at start:
-//! before it reads anything from the store, before it reads the lease file or takes its
-//! `flock`, and before it binds a listener. The lock is tried once: when another process
+//! before it reads anything from the store, and before it binds a listener. The lock is tried once: when another process
 //! holds it the start is refused with one line naming the lock, and nothing else is done.
 //! The server then holds the lock for its life.
 //!
@@ -20,11 +19,11 @@
 //! What the store keeps: the host bindings, with their taints and cordons, and the join
 //! tokens' digests ([`crate::host_keys`]), and the scaler's records and the hosts the
 //! registry refused to remove (`acquires/scaler/records`, `acquires/scaler/unremoved`), read
-//! once at start after the lock is taken. The lease file, the job store and the usage
+//! once at start after the lock is taken. The job store and the usage
 //! database are where they are without the setting.
 //!
 //! The first start over a store imports the four files a server without the setting keeps
-//! beside the lease file (`.agents`, `.joins`, `.scaler`, `.scaler.unremoved`) once, right
+//! beside the state file (`.agents`, `.joins`, `.scaler`, `.scaler.unremoved`) once, right
 //! after the lock is taken and before anything is read from the store ([`ServerStore::import`]).
 
 use std::fs::{OpenOptions, Permissions};
@@ -87,7 +86,7 @@ impl ServerStore {
         Ok(Self { store, lock, names })
     }
 
-    /// The first start's import of the files beside the lease file at `state_file`, once,
+    /// The first start's import of the files beside the state file at `state_file`, once,
     /// and a no-op at every later start (see the `import` module). `records_needed` is true
     /// for a live elastic pool that is not at its first start, which does not start without
     /// its records.

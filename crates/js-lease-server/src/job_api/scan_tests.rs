@@ -142,9 +142,9 @@ fn the_job_api_reads_no_clock_and_names_no_provider() {
     assert_eq!(forbidden(text), FORBIDDEN);
 }
 
-/// What the read calls must not name: a lock, or the lease table or the registry that the
-/// server guards with one.
-const LOCKS: [&str; 5] = ["Mutex", "RwLock", ".lock(", "Registry", "LeaseTable"];
+/// What the read calls must not name: a lock, or the registry that the server guards with
+/// one.
+const LOCKS: [&str; 4] = ["Mutex", "RwLock", ".lock(", "Registry"];
 
 /// The words of [`LOCKS`] that `source` holds.
 fn locks(source: &str) -> Vec<&'static str> {
@@ -155,7 +155,7 @@ fn locks(source: &str) -> Vec<&'static str> {
 }
 
 /// Asserts that the read calls (`read.rs` and `read/view.rs`, both found among the sources)
-/// name no lock, no lease table and no registry, so none of them holds a lock of the server
+/// name no lock and no registry, so none of them holds a lock of the server
 /// across a read of the store; and that the check finds each word in a text that uses it.
 #[test]
 fn the_read_calls_take_no_lock() {
@@ -173,6 +173,6 @@ fn the_read_calls_take_no_lock() {
     for (name, text) in read {
         assert_eq!(locks(text), Vec::<&str>::new(), "{name}");
     }
-    let text = "let t: Mutex<LeaseTable<P, C>> = x; let r: RwLock<Registry> = y; t.lock();";
+    let text = "let t: Mutex<Table<P, C>> = x; let r: RwLock<Registry> = y; t.lock();";
     assert_eq!(locks(text), LOCKS);
 }

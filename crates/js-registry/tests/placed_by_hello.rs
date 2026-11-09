@@ -1,7 +1,7 @@
 //! A pool that places each host by what its hello reported (`PoolConfig::placing_by_hello`,
 //! the lease server's elastic pools): its shape is a floor that names no `arch`, every host
 //! is booked as the floor and placed by the capabilities its agent reported on top of it,
-//! and a request fits the pool by the capabilities the floor names. A pool without the
+//! and a request is placed by the capabilities the hosts reported. A pool without the
 //! setting (an agent or joined pool) places every host on its own shape, as before.
 
 mod support;
@@ -9,10 +9,9 @@ mod support;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use js_lease::{ManualClock, Timestamp};
-use js_provider::{Candidate, Pool, RefusalCode, StartAck, StartSpec};
-use js_registry::{MarkedTails, Placer, PoolConfig, RegisteredProvider, Registry};
+use js_registry::{Placer, PoolConfig, Registry};
 use js_types::{HostId, ProviderId, Request, Resources, Shape};
+use js_types::{ManualClock, Timestamp};
 use support::*;
 
 /// The floor of a pool whose hosts are launched from offers: 4 cores and 8 GiB, no
@@ -37,17 +36,16 @@ fn hello_of(host: &str, arch: &str) -> js_agent_wire::Hello {
     said
 }
 
-/// A lease numbered `sequence` of the pool's class that requires `capabilities`.
-fn needing(sequence: u64, capabilities: &[(&str, &str)]) -> StartSpec {
-    let request = Request {
+/// A request of the pool's class that requires `capabilities`.
+fn needing(capabilities: &[(&str, &str)]) -> Request {
+    Request {
         capabilities: map(capabilities),
         ..request()
-    };
-    StartSpec::new(lease(sequence), request, &[class()]).unwrap()
+    }
 }
 
-/// A placer that books the first candidate and writes down each host it is told is up,
-/// with the capabilities of the shape it is told.
+/// A placer that writes down each host it is told is up, with the capabilities of the shape
+/// it is told.
 #[derive(Default)]
 struct Shapes {
     said: Mutex<Vec<String>>,
@@ -60,10 +58,6 @@ impl Shapes {
 }
 
 impl Placer for Shapes {
-    fn pick(&self, _: &StartSpec, _: &[Candidate], _: &MarkedTails) -> Option<usize> {
-        Some(0)
-    }
-
     fn host_up(&self, host: &HostId, shape: &Shape) {
         let caps: Vec<String> = shape
             .capabilities()
@@ -77,12 +71,11 @@ impl Placer for Shapes {
 }
 
 /// A registry over `config` whose placer is `told` ([`Shapes`]), as the server sets a
-/// registry up (each host's whole memory booked), and its provider and clock.
-fn told_by(config: PoolConfig, told: &Arc<Shapes>) -> (Registry, RegisteredProvider, ManualClock) {
+/// registry up (each host's whole memory booked), and its clock.
+fn told_by(config: PoolConfig, told: &Arc<Shapes>) -> (Registry, ManualClock) {
     let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
     let registry = Registry::new(config.booking_whole_memory(), clock.clone(), told.clone());
-    let provider = registry.provider();
-    (registry, provider, clock)
+    (registry, clock)
 }
 
 /// Says hello for `said` to `registry` with the credential every test uses.
@@ -104,7 +97,7 @@ fn the_placer_is_told_the_capabilities_the_hello_reported_only_when_the_pool_pla
         .insert("runtime".into(), "container".into());
     let placed = |config: PoolConfig| {
         let told = Arc::new(Shapes::default());
-        let (registry, _, _) = told_by(config, &told);
+        let (registry, _) = told_by(config, &told);
         say(&registry, &said);
         told.said()
     };
@@ -120,7 +113,7 @@ fn the_placer_is_told_the_capabilities_the_hello_reported_only_when_the_pool_pla
 /// Catches: the reported value written over the pool's where both name a key (a pool that
 /// promises `isa_level=x86-64-v2` would then book a host by a level it does not promise),
 /// or a reported key that the pool names dropped. The pool names `os` and `isa_level`; the
-/// host reports a higher level, its `arch` and the same `os`: the placer and the book see
+/// host reports a higher level, its `arch` and the same `os`: the placer and the listing see
 /// the pool's level and `os`, with the host's `arch`.
 #[test]
 fn the_pools_value_stays_where_the_pool_and_the_hello_both_name_a_key() {
@@ -131,7 +124,7 @@ fn the_pools_value_stays_where_the_pool_and_the_hello_both_name_a_key() {
     );
     let config = PoolConfig::new(name, class(), shape, 4).placing_by_hello();
     let told = Arc::new(Shapes::default());
-    let (registry, provider, _) = told_by(config, &told);
+    let (registry, _) = told_by(config, &told);
     let mut said = hello_of("a", "x86_64");
     said.capabilities
         .insert("isa_level".into(), "x86-64-v3".into());
@@ -140,9 +133,9 @@ fn the_pools_value_stays_where_the_pool_and_the_hello_both_name_a_key() {
         told.said(),
         ["up a 4000 arch=x86_64,isa_level=x86-64-v2,os=macos"]
     );
-    let listed = provider.capacity();
+    let placed = registry.hosts().remove(0).placement_shape();
     assert_eq!(
-        listed[0].shape.capabilities(),
+        placed.capabilities(),
         &map(&[
             ("arch", "x86_64"),
             ("isa_level", "x86-64-v2"),
@@ -151,149 +144,89 @@ fn the_pools_value_stays_where_the_pool_and_the_hello_both_name_a_key() {
     );
 }
 
-/// Catches: a host that holds a lease kept on the shape it was booked with in a pool that
-/// places by hello, and a placer told another shape than the book lists (the engine and the
-/// book would disagree at every start, and the engine be rebuilt at each). The host is
-/// booked as `arm64`, goes silent and says hello again reporting `x86_64` while it holds
-/// the lease: the book lists it as `x86_64` with its lease kept and the placer is told
-/// `x86_64`.
+/// Catches: a host that says hello again kept on the shape it was listed with in a pool that
+/// places by hello, and a placer told another shape than the listing shows. The host is
+/// listed as `arm64`, goes silent and says hello again reporting `x86_64`: the listing places
+/// it as `x86_64` and the placer is told `x86_64`.
 #[test]
-fn a_host_that_holds_a_lease_is_placed_by_its_latest_hello() {
+fn a_host_that_says_hello_again_is_placed_by_its_latest_hello() {
     let told = Arc::new(Shapes::default());
-    let (registry, mut provider, clock) = told_by(by_hello(), &told);
+    let (registry, clock) = told_by(by_hello(), &told);
     say(&registry, &hello_of("a", "arm64"));
-    assert_eq!(started_on(&provider.start(spec(1))), Some("a"));
     told.said();
     clock.advance(std::time::Duration::from_millis(
         js_agent_wire::DEFAULT_GRACE_MS + 1,
     ));
     say(&registry, &hello_of("a", "x86_64"));
     assert_eq!(told.said(), ["up a 4000 arch=x86_64,os=macos"]);
-    let listed = provider.capacity().remove(0);
+    let placed = registry.hosts().remove(0).placement_shape();
     assert_eq!(
-        listed.shape.capabilities(),
+        placed.capabilities(),
         &map(&[("arch", "x86_64"), ("os", "macos")])
     );
-    assert_eq!(listed.leased_to, Some(lease(1)));
 }
 
-/// Catches: a host put back with its lease after a restart (listed with the pool's floor
-/// alone, which names no `arch`) left on the floor once its agent says hello, so that it is
-/// no node of js-sched for as long as it holds the lease and until it says hello again.
-/// The lease file puts back a lease on `a`, which then says hello reporting `arm64`: the
-/// book lists it with `arch` and the lease, and the placer is told so.
+/// Catches: a host of a pool that places by hello whose agent reports no `arch` placed by
+/// js-sched as some architecture. Such a host is no node of the scheduler, as a host of any
+/// shape the scheduler cannot describe is not: its placement shape has no `arch` and has no
+/// scheduler form.
 #[test]
-fn a_host_put_back_with_a_lease_is_placed_by_its_first_hello() {
-    let told = Arc::new(Shapes::default());
-    let (registry, provider, _) = told_by(by_hello(), &told);
-    assert_eq!(provider.seat_booked(&booking("a", 1, None), None), Ok(()));
-    assert_eq!(provider.capacity()[0].shape, floor());
-    say(&registry, &hello_of("a", "arm64"));
-    assert_eq!(told.said(), ["up a 4000 arch=arm64,os=macos"]);
-    let listed = provider.capacity().remove(0);
-    assert_eq!(
-        listed.shape.capabilities(),
-        &map(&[("arch", "arm64"), ("os", "macos")])
-    );
-    assert_eq!(listed.leased_to, Some(lease(1)));
-}
-
-/// Catches: a host of a pool that places by hello whose agent reports no `arch` left out
-/// of placement altogether, or placed by js-sched as some architecture. Such a host is no
-/// node of the scheduler, as a host of any shape the scheduler cannot describe is: a lease
-/// that needs no `arch` is booked on it by the fallback to the first host with room, which
-/// is counted, and a lease that needs an `arch` is not booked on it.
-#[test]
-fn a_host_that_reports_no_arch_is_placed_by_the_counted_fallback() {
+fn a_host_that_reports_no_arch_is_no_node_of_the_scheduler() {
     let fx = fixture_of(by_hello());
     let mut said = hello("a");
     said.capabilities.remove("arch");
     fx.hello(&said, &cred("t")).unwrap();
-    let mut provider = fx.provider.clone();
-    let needs = provider.start(needing(1, &[("arch", "x86_64")]));
-    assert_eq!(needs, StartAck::Refused(RefusalCode::NoCapacity));
-    assert_eq!(started_on(&provider.start(spec(2))), Some("a"));
-    assert_eq!(fx.placer.fallbacks().unmappable, 1);
+    let placed = fx.registry.hosts().remove(0).placement_shape();
+    assert!(!placed.capabilities().contains_key("arch"));
+    assert!(js_sched_placer::map::host(&placed).is_err());
 }
 
-/// Catches: an agent or joined pool (one that does not place by hello) placing by what a
-/// hello reported beyond the pool's shape. Its host reports `arch`, which its shape does
-/// not name: a lease that needs that `arch` is refused `no-fit`, and a lease that needs only
-/// what the shape names is booked on the host.
+/// Catches: a pool that places by hello still holding a request to the whole floor (a request
+/// that names `arch` would be turned away by a floor that names none, and no elastic host would
+/// ever take work that needs an architecture). With an `arm64` host and an `x86_64` host
+/// listed, a request that needs `x86_64` is placed on the `x86_64` host and not the `arm64`
+/// one, one that needs `arm64` (written `aarch64`, the other spelling) on the `arm64` one and
+/// not the other; one that names an `os` other than the floor's, and one that needs an
+/// accelerator the floor has none of, are placed on neither.
 #[test]
-fn a_pool_that_does_not_place_by_hello_places_by_its_shape_alone() {
-    let name = ProviderId::new("builders").unwrap();
-    let shape = Shape::new(floor().resources().clone(), map(&[("os", "macos")]));
-    let fx = fixture_of(PoolConfig::new(name, class(), shape, 4));
-    fx.hello(&hello_of("a", "x86_64"), &cred("t")).unwrap();
-    let mut provider = fx.provider.clone();
-    let needs = provider.start(needing(1, &[("arch", "x86_64")]));
-    assert_eq!(needs, StartAck::Refused(RefusalCode::NoFit));
-    let plain = provider.start(needing(2, &[("os", "macos")]));
-    assert_eq!(started_on(&plain), Some("a"));
-}
-
-/// Catches: a pool that places by hello still holding a request to the whole floor (a
-/// request that names `arch` would be refused `no-fit` by a floor that names none, and no
-/// elastic host would ever take work that needs an architecture), or one that no longer
-/// holds it to what the floor does name (resources, and a key the floor names with
-/// another value). With an `arm64` host and an `x86_64` host listed, a lease
-/// that needs `x86_64` is booked on the `x86_64` host though the `arm64` one comes first
-/// by id, one that needs `arm64` (written `aarch64`, the other spelling) on the `arm64`
-/// one, and one that needs either again while both are held is refused `no-capacity` (a
-/// host could free); a lease above the floor's cores, one that names `os` other than the
-/// floor's, and one that needs an accelerator the floor has none of, are refused `no-fit`. The engine agrees with the book throughout, so it is
-/// never rebuilt at a start (it would be at each one if it had been told the pool's shape at
-/// the hellos while the book lists the hosts' own).
-#[test]
-fn each_host_takes_the_leases_that_need_the_arch_it_reported() {
+fn each_host_takes_the_requests_that_need_the_arch_it_reported() {
     let name = ProviderId::new("builders").unwrap();
     let shape = Shape::new(floor().resources().clone(), map(&[("os", "macos")]));
     let config = PoolConfig::new(name, class(), shape, 4).placing_by_hello();
     let fx = fixture_of(config);
     fx.hello(&hello_of("a", "arm64"), &cred("t")).unwrap();
     fx.hello(&hello_of("x", "x86_64"), &cred("t")).unwrap();
-    let mut provider = fx.provider.clone();
-    let x86 = provider.start(needing(1, &[("arch", "x86_64")]));
-    assert_eq!(started_on(&x86), Some("x"));
-    let arm = provider.start(needing(2, &[("arch", "aarch64")]));
-    assert_eq!(started_on(&arm), Some("a"));
-    let again = provider.start(needing(3, &[("arch", "x86_64")]));
-    assert_eq!(again, StartAck::Refused(RefusalCode::NoCapacity));
-    let large = Request {
-        resources: Resources::new(4001, 1, 0, None).unwrap(),
-        ..request()
-    };
-    let large = StartSpec::new(lease(4), large, &[class()]).unwrap();
-    assert_eq!(provider.start(large), StartAck::Refused(RefusalCode::NoFit));
-    let linux = provider.start(needing(5, &[("os", "linux"), ("arch", "x86_64")]));
-    assert_eq!(linux, StartAck::Refused(RefusalCode::NoFit));
-    let gpu = provider.start(needing(6, &[("accelerator.model", "nvidia-a100")]));
-    assert_eq!(gpu, StartAck::Refused(RefusalCode::NoFit));
-    assert_eq!(fx.placer.resynced(), 0);
+    let x86 = needing(&[("arch", "x86_64")]);
+    assert!(placed_on(&fx, "x", &x86));
+    assert!(!placed_on(&fx, "a", &x86));
+    let arm = needing(&[("arch", "aarch64")]);
+    assert!(placed_on(&fx, "a", &arm));
+    assert!(!placed_on(&fx, "x", &arm));
+    let linux = needing(&[("os", "linux"), ("arch", "x86_64")]);
+    let gpu = needing(&[("accelerator.model", "nvidia-a100")]);
+    for host in ["a", "x"] {
+        assert!(!placed_on(&fx, host, &linux), "{host}");
+        assert!(!placed_on(&fx, host, &gpu), "{host}");
+    }
 }
 
-/// Catches: an elastic host booked for work that needs an architecture it did not report
-/// (an `x86_64` machine handed an `arm64` job), or such work refused as if no host could
-/// ever serve it. With one `x86_64` host listed and free, a lease that
-/// needs `arm64` is not booked on it: it is refused `no-capacity`, since an `arm64` host
-/// may still join; once one has said hello, the same lease is booked there. A lease that
-/// names an architecture no host reported is refused the same way, and the free `x86_64`
-/// host still takes the lease that needs it.
+/// Catches: an elastic host handed work that needs an architecture it did not report (an
+/// `x86_64` machine handed an `arm64` job). With one `x86_64` host listed, a request that
+/// needs `arm64` is not placed on it; once an `arm64` host has said hello, the same request is
+/// placed there. A request that names an architecture no host reported is placed on neither,
+/// and the `x86_64` host still takes the request that needs it.
 #[test]
-fn a_host_takes_no_lease_that_needs_an_arch_it_did_not_report() {
+fn a_host_takes_no_request_that_needs_an_arch_it_did_not_report() {
     let fx = fixture_of(by_hello());
     fx.hello(&hello_of("x", "x86_64"), &cred("t")).unwrap();
-    let mut provider = fx.provider.clone();
-    let arm = provider.start(needing(1, &[("arch", "arm64")]));
-    assert_eq!(arm, StartAck::Refused(RefusalCode::NoCapacity));
+    let arm = needing(&[("arch", "arm64")]);
+    assert!(!placed_on(&fx, "x", &arm));
     fx.hello(&hello_of("b", "arm64"), &cred("t")).unwrap();
-    let arm = provider.start(needing(2, &[("arch", "arm64")]));
-    assert_eq!(started_on(&arm), Some("b"));
-    let riscv = provider.start(needing(3, &[("arch", "riscv64")]));
-    assert_eq!(riscv, StartAck::Refused(RefusalCode::NoCapacity));
-    let x86 = provider.start(needing(4, &[("arch", "x86_64")]));
-    assert_eq!(started_on(&x86), Some("x"));
+    assert!(placed_on(&fx, "b", &arm));
+    let riscv = needing(&[("arch", "riscv64")]);
+    assert!(!placed_on(&fx, "x", &riscv));
+    assert!(!placed_on(&fx, "b", &riscv));
+    assert!(placed_on(&fx, "x", &needing(&[("arch", "x86_64")])));
 }
 
 /// Catches: admission reading a host's facts without the capabilities it is placed by (a
@@ -333,7 +266,7 @@ fn the_placer_is_told_the_hosts_accelerator_facts_in_any_pool() {
     let name = ProviderId::new("builders").unwrap();
     let shape = Shape::new(gpu, map(&[("os", "macos")]));
     let told = Arc::new(Shapes::default());
-    let (registry, provider, _) = told_by(PoolConfig::new(name, class(), shape, 4), &told);
+    let (registry, _) = told_by(PoolConfig::new(name, class(), shape, 4), &told);
     let a100_80 = "nvidia-a100-sxm4-80gb";
     let mut said = hello("gpu-1");
     said.shape.gpus = 1;
@@ -345,7 +278,7 @@ fn the_placer_is_told_the_hosts_accelerator_facts_in_any_pool() {
         memory_bytes: 80 << 30,
     }];
     say(&registry, &said);
-    let listed = provider.capacity().remove(0).shape;
+    let listed = registry.hosts().remove(0).placement_shape();
     let caps: Vec<String> = listed
         .capabilities()
         .iter()

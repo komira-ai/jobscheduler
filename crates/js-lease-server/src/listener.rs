@@ -269,7 +269,7 @@ async fn accept_all(
         // A cut task drops its connection (and the router clone in it) when it next runs,
         // and gives its share of the permit back after that, as does each HTTP/2 request
         // task of the connection: with every permit back, nothing of the server is held by a
-        // connection, and a restart finds the lease file (and the job store) free.
+        // connection, and a restart finds the job store free.
         let _ = slots.gate.acquire_many(all).await;
     }
 }
@@ -598,7 +598,7 @@ mod tests {
     /// `serve` in its own task on a one-thread runtime and looks at the state at once,
     /// so a cut task that is only woken, not yet run, is seen as alive. It catches a
     /// `serve` that returns while cut connection tasks still hold the router, which
-    /// lets a restart find the lease file still locked.
+    /// lets a restart find the job store still locked.
     #[tokio::test]
     async fn serve_returns_after_the_cut_connections_are_dropped() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

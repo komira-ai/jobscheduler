@@ -1,25 +1,19 @@
 //! Fixtures the registry tests share.
 #![allow(dead_code)]
 
-pub mod world;
-
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, Hello, Phase, ProtocolRange, Welcome, WireShape};
-use js_lease::{ManualClock, Timestamp};
-use js_provider::{StartAck, StartSpec};
-use js_registry::{
-    Credential, PoolConfig, Refusal, RegisteredProvider, Registry, SequentialSessions,
-};
+use js_registry::{Credential, Placer, PoolConfig, Refusal, Registry, SequentialSessions};
 use js_sched::{Backfill, LoadConfig, MemoryPercent};
 use js_sched_placer::engine::Settings;
 use js_sched_placer::place::SchedPlacer;
 use js_types::{
-    Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
-    Resources, Shape,
+    Admission, Capabilities, ClassId, HostId, ProviderId, Request, ResourceClass, Resources, Shape,
 };
+use js_types::{ManualClock, Timestamp};
 
 pub fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
@@ -62,7 +56,6 @@ pub fn sched_placer(percent: u32, clock: &ManualClock) -> Arc<SchedPlacer> {
 /// A pool of up to `max_machines` hosts on a clock that moves only when a test says.
 pub struct Fixture {
     pub registry: Registry,
-    pub provider: RegisteredProvider,
     pub clock: ManualClock,
     /// The registry's placer ([`sched_placer`]).
     pub placer: Arc<SchedPlacer>,
@@ -85,13 +78,49 @@ pub fn fixture_of(config: PoolConfig) -> Fixture {
     let placer = sched_placer(percent, &clock);
     let sessions = SequentialSessions::new();
     let registry = Registry::with_sessions(config, clock.clone(), sessions, placer.clone());
-    let provider = registry.provider();
     Fixture {
         registry,
-        provider,
         clock,
         placer,
         sessions: Mutex::new(BTreeMap::new()),
+    }
+}
+
+/// A fixture as [`fixture_of`] builds it, but with `placer` as the registry's placer in place
+/// of the production one.
+pub fn with_placer(config: PoolConfig, placer: Arc<dyn Placer>) -> Fixture {
+    let mut fx = fixture_of(config.clone());
+    fx.registry = Registry::with_sessions(
+        config.booking_whole_memory(),
+        fx.clock.clone(),
+        SequentialSessions::new(),
+        placer,
+    );
+    fx
+}
+
+/// A placer that holds work on the hosts it is told to, as the engine holds a job's
+/// allocation, and takes everything else as the defaults do.
+#[derive(Default)]
+pub struct Holding {
+    hosts: Mutex<BTreeSet<HostId>>,
+}
+
+impl Holding {
+    /// Holds work on `host` from now on.
+    pub fn hold(&self, host: &HostId) {
+        self.hosts.lock().unwrap().insert(host.clone());
+    }
+
+    /// Holds no work on `host` any more.
+    pub fn release(&self, host: &HostId) {
+        self.hosts.lock().unwrap().remove(host);
+    }
+}
+
+impl Placer for Holding {
+    fn holds_work_on(&self, host: &HostId) -> bool {
+        self.hosts.lock().unwrap().contains(host)
     }
 }
 
@@ -193,34 +222,7 @@ pub fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
 }
 
-pub fn lease(sequence: u64) -> LeaseId {
-    LeaseId::new(1, sequence)
-}
-
-/// The booking a lease file records for lease `sequence` held on `on`, booking `shares`
-/// (`None` for the whole host), started at 0 and bound to end at 0.
-pub fn booking(on: &str, sequence: u64, shares: Option<Resources>) -> js_lease::Booking {
-    booking_at(on, sequence, shares, 0, 0)
-}
-
-/// As [`booking`], started at `started_ms` and bound to end at `ends_ms`.
-pub fn booking_at(
-    on: &str,
-    sequence: u64,
-    shares: Option<Resources>,
-    started_ms: u64,
-    ends_ms: u64,
-) -> js_lease::Booking {
-    js_lease::Booking {
-        lease: lease(sequence),
-        host: host(on),
-        state: js_lease::LeaseState::Held,
-        shares,
-        started_at: Timestamp::from_millis(started_ms),
-        ends_at: Timestamp::from_millis(ends_ms),
-    }
-}
-
+/// A request of the pool's class for one core and a byte, which requires macOS.
 pub fn request() -> Request {
     Request {
         class: ClassId::new("mac-host").unwrap(),
@@ -233,13 +235,13 @@ pub fn request() -> Request {
     }
 }
 
-pub fn spec(sequence: u64) -> StartSpec {
-    StartSpec::new(lease(sequence), request(), &[class()]).unwrap()
-}
-
-pub fn started_on(ack: &StartAck) -> Option<&str> {
-    match ack {
-        StartAck::Started { host } => Some(host.as_str()),
-        _ => None,
-    }
+/// Whether a job asking for `request` is placed on the registered host `name`: the
+/// scheduler's picture of the host, from the shape the registry places it on
+/// ([`js_registry::HostView::placement_shape`]), meets what the request needs.
+pub fn placed_on(fx: &Fixture, name: &str, request: &Request) -> bool {
+    let hosts = fx.registry.hosts();
+    let host = hosts.iter().find(|host| host.id.as_str() == name).unwrap();
+    let (_, node) = js_sched_placer::map::host(&host.placement_shape()).unwrap();
+    let needs = js_sched_placer::map::needs_of(&request.capabilities, &request.resources);
+    needs.is_ok_and(|needs| needs.matches(&node))
 }

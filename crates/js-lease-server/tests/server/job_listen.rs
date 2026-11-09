@@ -1,5 +1,5 @@
 //! `--job-listen` and `server.job_listen`: the setting, the TLS rule it shares with
-//! `--listen`, an address in use, and the job store the server opens beside the lease file
+//! `--listen`, an address in use, and the job store the server opens beside the state file
 //! when the job service is on (and only then).
 
 use std::ffi::OsString;
@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 
-use js_lease::ManualClock;
 use js_lease_server::{Cli, Config, SharedClock, StartupError, channel_ticker, start};
+use js_types::ManualClock;
 
 use crate::agents_support::{agent_args, join, start_agents};
 use crate::config_support::{PoolText, file, load, refusal, server};
@@ -191,7 +191,7 @@ async fn job_listen_in_use_is_refused_naming_the_flag() {
 }
 
 /// Asserts that without `--job-listen` no job store is opened: after a start, an agent's
-/// join and a stop, no file of the job store is beside the lease file, and the server
+/// join and a stop, no file of the job store is beside the state file, and the server
 /// serves no job port. It catches a store opened (and a file made) by a server whose job
 /// service is off.
 #[tokio::test]
@@ -209,8 +209,8 @@ async fn job_listen_off_opens_no_job_store_and_creates_no_file() {
     );
 }
 
-/// Asserts the job store's file beside the lease file: made by the start, owned by the
-/// lease file's owner and owner-only (mode 0600), as is every file of the store beside it
+/// Asserts the job store's file beside the state file's path: made by the start, owned by the
+/// owner of the directory and owner-only (mode 0600), as is every file of the store beside it
 /// (its lock and SQLite's own); and a file already there with a looser mode is kept and
 /// made owner-only. It catches a store file that others on the host can read, which would
 /// show them the jobs' specs.
@@ -223,7 +223,7 @@ async fn job_listen_creates_the_store_file_with_the_neighbouring_mode() {
         }
         let args = job_args(&scratch, "127.0.0.1:0");
         let h = Harness::with(scratch, args, None).await;
-        let owner = fs::metadata(h.scratch.state()).unwrap().uid();
+        let owner = fs::metadata(&h.scratch.dir).unwrap().uid();
         let files = named(&h.scratch.dir, "leases.toml.jobs");
         assert!(
             files.contains(&h.scratch.path("leases.toml.jobs")),

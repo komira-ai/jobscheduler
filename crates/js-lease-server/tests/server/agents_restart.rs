@@ -4,29 +4,21 @@
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use js_lease_server::{SharedClock, StartupError, channel_ticker};
 use js_registry::Credential;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::agents_support::{
-    JOIN, JOIN_B, Session, agent_args, beat, entry, hello_with, hosts, job_hello, join, listed,
-    post, restarted_job_hosts, session, start_agents, start_agents_in, start_job_hosts_in,
+    JOIN, JOIN_B, Session, agent_args, beat, entry, hello_with, hosts, job_hello, join, post,
+    restarted_job_hosts, session, start_agents, start_job_hosts_in,
 };
 use crate::jobs_support::{
     JobBody, beat_with, commands, exited, job_agent, job_state, one_start, running, submit_body,
 };
-use crate::support::{
-    Harness, Kept, LogCapture, Scratch, base_args, config, kept_bindings, lease_file, replace,
-    start,
-};
+use crate::support::{Harness, Kept, Scratch, base_args, config, kept_bindings, replace, start};
 
-fn secs(n: u64) -> Duration {
-    Duration::from_secs(n)
-}
-
-/// The file of bindings beside the lease file.
+/// The file of bindings beside the state file.
 fn agent_file(scratch: &Scratch) -> PathBuf {
     let mut path = scratch.state().into_os_string();
     path.push(".agents");
@@ -187,49 +179,6 @@ async fn restart_keeps_the_instance_of_a_binding_in(kept: Kept) {
     assert_eq!(own.status, 200, "{}", own.body);
 }
 
-/// Asserts that an awaiting host whose agent never returns is forgotten once the restored
-/// lease on it has ended and a grace period and the retention have passed since the restart that
-/// seated it: it leaves the listing, its binding leaves the agent file at the tick, and
-/// its place in the pool is free for new hosts. Before that it is still listed, bound and
-/// counted. It catches an awaiting host that keeps its record, binding and `max_machines`
-/// slot until the next restart. It runs with the bindings in files and in the state store
-/// (where the binding row is deleted at the tick and no agent file is ever written), and
-/// catches in the store a binding row that outlives its host.
-#[tokio::test]
-async fn an_awaiting_host_that_never_returns_is_forgotten_with_its_binding() {
-    for kept in Kept::BOTH {
-        an_awaiting_host_that_never_returns_is_forgotten_with_its_binding_in(kept).await;
-    }
-}
-
-async fn an_awaiting_host_that_never_returns_is_forgotten_with_its_binding_in(kept: Kept) {
-    let first = start_agents_in("agents_awaiting_forgotten", false, kept).await;
-    join(&first, "burst-1").await;
-    let Harness {
-        running, scratch, ..
-    } = first;
-    running.shutdown().await.unwrap();
-    std::fs::write(scratch.state(), lease_file(&[(1, "held", Some("burst-1"))])).unwrap();
-    let args = kept.args(&scratch, agent_args(&scratch, false));
-    let h = Harness::with(scratch, replace(args, "--boot", "resume"), None).await;
-    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "awaiting");
-    h.clock.advance(secs(7201));
-    h.ticks.step().await;
-    assert_eq!(listed(&hosts(&h).await), ["burst-1"]);
-    assert!(kept_bindings(&h).contains("burst-1"));
-
-    h.clock.advance(secs(86_400));
-    h.ticks.step().await;
-    assert!(listed(&hosts(&h).await).is_empty());
-    let text = kept_bindings(&h);
-    assert!(!text.contains("burst-1"), "{text}");
-    if kept == Kept::Store {
-        assert!(!agent_file(&h.scratch).exists());
-    }
-    join(&h, "burst-2").await;
-    join(&h, "burst-3").await;
-}
-
 /// Asserts what the file of bindings is: written when a hello admits a host, mode 0600,
 /// holding a digest of the token and never the token, rewritten (a new file) only when
 /// the bindings change, and left alone by a tick or a heartbeat. It catches a file other
@@ -300,7 +249,7 @@ async fn a_failed_binding_write_is_counted_and_retried_at_the_next_tick() {
 /// Starts a server over `args` and returns the refusal.
 async fn refused(args: Vec<std::ffi::OsString>) -> StartupError {
     let (_, ticker) = channel_ticker();
-    let clock = SharedClock::new(js_lease::ManualClock::default());
+    let clock = SharedClock::new(js_types::ManualClock::default());
     let started = start(config(args).unwrap(), clock, ticker).await;
     started.err().expect("the start should be refused")
 }
@@ -369,36 +318,4 @@ async fn a_server_started_without_agents_leaves_the_agent_file_as_it_was() {
     let plain = Harness::with(scratch, args, None).await;
     assert_eq!(fs::read(agent_file(&plain.scratch)).unwrap(), before);
     assert_eq!(plain.call("GET", "/v1/hosts", None).await.status, 200);
-}
-
-/// Asserts what is done with bookings of the lease file that no source can seat: two
-/// leases on one static host (the lower id keeps it) and two on one unknown host (seated
-/// on the registry as an awaiting host, where the lower id keeps it) leave two leases on
-/// the hosts, log the other two by id, and list the unknown host as awaiting. It catches a booking
-/// handed to the wrong source, and one lost without a word.
-#[tokio::test]
-async fn bookings_nobody_can_seat_are_logged_and_dropped() {
-    let logs = LogCapture::start();
-    let scratch = Scratch::new("agents_unseatable");
-    let leases = [
-        (1, "held", Some("gpu-01")),
-        (2, "held", Some("gpu-01")),
-        (3, "held", Some("ghost-1")),
-        (4, "held", Some("ghost-1")),
-    ];
-    fs::write(scratch.state(), lease_file(&leases)).unwrap();
-    let args = replace(agent_args(&scratch, true), "--boot", "resume");
-    let h = Harness::with(scratch, args, None).await;
-    let listing: Value = hosts(&h).await;
-    assert!(entry(&listing, "gpu-02").get("lease").is_none());
-    assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
-    assert_eq!(entry(&listing, "ghost-1")["state"], "awaiting");
-    assert_eq!(entry(&listing, "ghost-1")["lease"], "1-3");
-    let text = logs.text();
-    for dropped in ["lease=1-2", "lease=1-4"] {
-        assert!(text.contains(dropped), "{dropped}: {text}");
-    }
-    for kept in ["lease=1-1", "lease=1-3"] {
-        assert!(!text.contains(kept), "{kept}: {text}");
-    }
 }

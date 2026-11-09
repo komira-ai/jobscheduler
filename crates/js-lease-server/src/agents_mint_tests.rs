@@ -6,9 +6,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use js_elastic::{AcquireId, SchedulerId};
-use js_lease::{ManualClock, Timestamp};
 use js_registry::{PoolConfig, SequentialSessions};
 use js_testkit::dir::TestDir;
+use js_types::{ManualClock, Timestamp};
 use js_types::{ResourceClass, Resources, Shape};
 
 use super::*;

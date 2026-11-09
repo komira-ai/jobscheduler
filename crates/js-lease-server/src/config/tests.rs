@@ -1,9 +1,5 @@
-//! Unit tests of the configuration: the token and its file, the default limits and a pool's
-//! prepare timeout.
+//! Unit tests of the configuration: the token and its file, and the default limits.
 
-use js_registry::WholeNodeConfig;
-
-use super::agent_setup::with_whole_node;
 use super::*;
 
 /// Asserts that a token compares equal only to itself and prints without its bytes.
@@ -71,24 +67,4 @@ fn the_default_limits_are_the_flag_defaults() {
     ])
     .unwrap();
     assert_eq!(Limits::from(&cli), Limits::default());
-}
-
-/// Asserts how a pool's whole-node settings reach the lease table's settings: none
-/// leaves the flags' settings untouched (every figure), a pool's `prepare_timeout`
-/// replaces only the prepare timeout, and a zero one is a startup error naming the
-/// pool flag. It catches a pool key that is dropped on the way, and one that also
-/// disturbs the ceiling on the wall time.
-#[test]
-fn a_pools_prepare_timeout_replaces_only_the_prepare_timeout() {
-    let secs = Duration::from_secs;
-    let flags = Settings::new().with_max_wall(secs(3600)).unwrap();
-    assert_eq!(with_whole_node(flags, None).unwrap(), flags);
-    let mut whole = WholeNodeConfig::dedicated(2);
-    whole.prepare_timeout_ms = 1_200_000;
-    let set = with_whole_node(flags, Some(&whole)).unwrap();
-    assert_eq!(set.prepare_timeout(), secs(1200));
-    assert_eq!(set.max_wall(), Some(secs(3600)));
-    whole.prepare_timeout_ms = 0;
-    let err = with_whole_node(flags, Some(&whole)).err().unwrap();
-    assert!(err.to_string().contains("--agent-pool-config"), "{err}");
 }

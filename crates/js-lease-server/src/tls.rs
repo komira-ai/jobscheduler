@@ -20,9 +20,9 @@ use rustls::sign::CertifiedKey;
 use tokio_rustls::TlsAcceptor;
 use x509_parser::parse_x509_certificate;
 
-use js_lease::Clock;
+use js_types::Clock;
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::config::{TlsFiles, read_private};
 use crate::error::StartupError;
 

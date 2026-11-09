@@ -6,23 +6,19 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::RefusalReason;
-use js_jobs::{Exclusion, JobRecord, MarkRecord};
-use js_registry::{MarkedTails, Standing, WholeHost, WholeNodeConfig, WholeRound};
+use js_jobs::{Exclusion, JobId, JobRecord, MarkRecord};
+use js_registry::WholeNodeConfig;
 use js_sched::{Bar, Event, OpState, WholeState};
 use js_state::StoreTime;
-use js_types::LeaseId;
 use js_types::sched::{LeaseKind, WorkKey};
 
-use super::{PrepareCause, WholeJobStep, WholeJobs, backfill_wall, failed_prepare};
+use super::{PrepareCause, WholeJobStep, WholeJobs, failed_prepare};
+use crate::engine::Engine;
 use crate::engine::rig::{
-    Tables, at, beat, engine, every, host, hosts, mark, run, run_with, settings, store,
+    Tables, at, beat, engine, host, hosts, mark, run, run_with, settings, store,
 };
 use crate::engine::whole::WHOLE_TERM;
-use crate::engine::{Engine, Settings};
 use crate::map;
-
-/// Both hosts busy with a lease of the registry.
-const BUSY: [(&str, &[u64]); 2] = [("a", &[1]), ("b", &[2])];
 
 /// A pass of `e` at `now_ms` with the pool settings given (`None`: the pool has none).
 fn pass(
@@ -57,30 +53,12 @@ fn unmark(job: &JobRecord) -> WholeJobStep {
     WholeJobStep::Unmark(job.id.clone())
 }
 
-/// A registry round with nothing waiting, over the hosts `a` and `b`.
-fn empty_round() -> WholeRound {
-    let stand = |name: &str| WholeHost {
-        id: host(name),
-        standing: Standing::Live,
-        open: true,
-    };
-    WholeRound {
-        settings: settings(),
-        waiting: Vec::new(),
-        hosts: vec![stand("a"), stand("b")],
-        outside: MarkedTails::new(),
-        lives: BTreeMap::new(),
-    }
-}
-
-/// Catches: the pool's settings taken from a pass when the registry's own round set them
-/// (the two would swap the scheduler's settings back and forth), settings swapped in again
-/// when they have not changed, a pool with none given a queue, and a stored mark left behind
-/// for a job that is not queued because the pool has no settings. With none, the pass
-/// deletes the stray mark and queues nothing; with settings they are taken once and again
-/// only when they differ; after a registry round they are not taken.
+/// Catches: settings swapped in again when they have not changed, a pool with none given a
+/// queue, and a stored mark left behind for a job that is not queued because the pool has no
+/// settings. With none, the pass deletes the stray mark and queues nothing; with settings they
+/// are taken once and again only when they differ.
 #[test]
-fn the_pool_settings_are_taken_without_a_round_and_only_when_they_differ() {
+fn the_pool_settings_are_taken_and_only_when_they_differ() {
     let tables = Tables::new();
     let j = tables.whole("j");
     let gone = tables.whole("gone");
@@ -103,9 +81,6 @@ fn the_pool_settings_are_taken_without_a_round_and_only_when_they_differ() {
         ..first.clone()
     };
     pass(&mut e, (&queue, &[]), Some(&second), 22_000);
-    assert_eq!(e.whole_settings, Some(second.clone()));
-    e.round = Some(empty_round());
-    pass(&mut e, (&queue, &[]), Some(&first), 23_000);
     assert_eq!(e.whole_settings, Some(second));
 }
 
@@ -432,10 +407,10 @@ fn a_back_off_on_a_jobs_row_is_kept_soft_in_the_mark_written() {
     assert_eq!(marked.exclusions, BTreeMap::from([(host("a"), backoff)]));
 }
 
-/// Catches: a grant a round of another term made (a start or a job placed in it) kept for
-/// the job, numbered as the next lease. `j` marks `a`; `a`'s lease ends and a plain tick
-/// grants `a` to `j` in the registry's term: it is put back at once, and the next pass
-/// commits it in the whole-node term.
+/// Catches: a grant a round of another term made (a job placed in it) kept for the job,
+/// numbered as the next allocation. `j` marks `a`; the allocation on `a` is let go and a
+/// plain tick grants `a` to `j` outside the whole-host term: it is put back at once, and the
+/// next pass commits it in the whole-host term.
 #[test]
 fn a_grant_outside_the_whole_round_is_put_back_for_a_job_too() {
     let tables = Tables::new();
@@ -444,7 +419,7 @@ fn a_grant_outside_the_whole_round_is_put_back_for_a_job_too() {
     let queue = [j.clone()];
     run(&mut e, (&queue, &[]), 20_000);
     let operation = e.whole_jobs[&j.id];
-    e.ended(LeaseId::new(1, 1));
+    e.job_failed(&JobId::parse("held-1").unwrap());
     e.feed(at(21_000), Event::Tick);
     assert_eq!(e.sched.state(operation), Some(&OpState::Queued));
     let steps = run(&mut e, (&queue, &[]), 22_000);
@@ -457,41 +432,21 @@ fn a_grant_outside_the_whole_round_is_put_back_for_a_job_too() {
     assert_eq!(e.pending_on(&a)[0].term, WHOLE_TERM);
 }
 
-/// Catches: the registry's round standing the engine down while a whole-host job is queued
-/// (the cordons and phases it set would go, and the round would be forgotten), the job's mark
-/// shown to the registry as one of its requests' reservations, and a round that never stands
-/// down once the last job has left. With `j` marked, a round with nothing waiting is taken
-/// and answers no reservation; once `j` has left the queue the next round stands down.
+/// Catches: the whole-host round run for no job, an operation kept for a job that left the
+/// queue, and a mark kept for it. With `j` queued and marked the engine queues its
+/// operation; once `j` has left the queue the next pass cancels the operation, and the
+/// scheduler queues nothing.
 #[test]
-fn the_registrys_round_stands_down_only_when_no_job_is_queued_either() {
+fn the_engine_queues_a_whole_host_job_only_while_it_is_queued() {
     let tables = Tables::new();
     let j = tables.whole("j");
     let mut e = engine(&[("a", &[1]), ("b", &[2])]);
     run(&mut e, (std::slice::from_ref(&j), &[]), 20_000);
-    assert!(e.whole_round(empty_round(), at(21_000)).is_empty());
-    assert!(e.round.is_some());
+    assert_eq!(e.whole_jobs.len(), 1);
+    assert_eq!(e.sched.queued_len(), 1);
     run(&mut e, (&[], &[]), 22_000);
-    assert!(e.whole_round(empty_round(), at(23_000)).is_empty());
-    assert!(e.round.is_none());
-}
-
-/// Catches: the queue of whole-host jobs carried over a rebuild (it is a cache of the table,
-/// and a copy would hold a mark for a job the table has since changed), or a rebuilt
-/// engine that does not queue the jobs again. After a rebuild nothing is queued and the pool
-/// has no settings; the next pass queues `j` again and takes the settings.
-#[test]
-fn a_rebuild_does_not_carry_the_whole_host_jobs() {
-    let tables = Tables::new();
-    let j = tables.whole("j");
-    let mut e = engine(&BUSY);
-    run(&mut e, (std::slice::from_ref(&j), &[]), 20_000);
-    let mut rebuilt = e.rebuild(Settings::default(), &every(&BUSY), at(21_000));
-    assert!(rebuilt.whole_jobs.is_empty());
-    assert_eq!(rebuilt.whole_settings, None);
-    assert_eq!(rebuilt.sched.queued_len(), 0);
-    run(&mut rebuilt, (std::slice::from_ref(&j), &[]), 22_000);
-    assert_eq!(rebuilt.whole_jobs.len(), 1);
-    assert_eq!(rebuilt.whole_settings, Some(settings()));
+    assert!(e.whole_jobs.is_empty());
+    assert_eq!(e.sched.queued_len(), 0);
 }
 
 /// The failed prepare of `job` on `a` at 1000 s, for `cause`, under the test's settings.
@@ -573,20 +528,4 @@ fn a_failed_prepare_adds_to_the_count_and_keeps_the_stronger_bar() {
         expected.insert(host("other"), Exclusion::ForLife);
         assert_eq!(failed.prepare_bars, expected, "{earlier:?}");
     }
-}
-
-/// Catches: a backfilled job's wall limit not cut to the time left in the tail less the
-/// margin, cut when it is already shorter (it would be lengthened), and a limit that goes
-/// below zero when the tail is nearly spent. A tail with 200 s left less the 60 s margin
-/// leaves 140 s: a ten-minute request is cut to it, a 100 s request is kept; with a minute
-/// or less left, or the tail past, the limit is zero.
-#[test]
-fn a_backfilled_wall_is_cut_to_the_tail_less_the_margin_and_never_lengthened() {
-    let secs = Duration::from_secs;
-    let tail = at(200_000);
-    assert_eq!(backfill_wall(secs(600), tail, at(0)), secs(140));
-    assert_eq!(backfill_wall(secs(100), tail, at(0)), secs(100));
-    assert_eq!(backfill_wall(secs(600), at(60_000), at(0)), secs(0));
-    assert_eq!(backfill_wall(secs(600), at(30_000), at(0)), secs(0));
-    assert_eq!(backfill_wall(secs(600), tail, at(300_000)), secs(0));
 }

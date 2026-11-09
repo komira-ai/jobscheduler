@@ -167,12 +167,12 @@ async fn a_refusal_before_the_body_reaches_a_client_that_half_closed() {
 /// The agent routes over a pool of four hosts, with their files under `dir`: the pool's
 /// join token is forty `j`s, and a credential may say five hellos in a burst.
 fn agent_routes(dir: &std::path::Path) -> Router {
-    use js_lease::{ManualClock, Timestamp};
     use js_registry::{PoolConfig, Registry, SequentialSessions};
+    use js_types::{ManualClock, Timestamp};
     use js_types::{ProviderId, ResourceClass, Resources, Shape};
 
     let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
-    let shared = crate::adapt::SharedClock::new(clock.clone());
+    let shared = crate::clock::SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_owned())).unwrap();
     let arch = ("arch".to_owned(), "x86_64".to_owned());
     let shape = Shape::new(resources, [arch].into_iter().collect());

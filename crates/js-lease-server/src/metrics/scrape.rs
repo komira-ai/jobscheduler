@@ -11,14 +11,14 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
-use js_lease::Clock;
 use js_state::StoreTime;
+use js_types::Clock;
 use tracing::warn;
 
 use super::Recorder;
 use super::render::{HostSeen, JobsSeen, Snapshot, Split, render};
 use crate::api::{Peer, Shared, not_found, peer_may_read_status};
-use crate::hosts::{HostEntry, HostList, LeasesOn, listing};
+use crate::hosts::{HostEntry, HostList, listing};
 use crate::job_pass::store_time;
 use crate::job_store::ServerJobs;
 use crate::util::blocking;
@@ -68,7 +68,7 @@ pub(crate) async fn snapshot(
     shared: &Shared,
     page: NonZeroUsize,
 ) -> Result<Snapshot, JobStoreError> {
-    let (list, leases) = listing(shared).await;
+    let list = listing(shared);
     let tables = shared
         .agents()
         .and_then(|agents| agents.jobs.clone().map(|jobs| (jobs, agents.clock.clone())));
@@ -79,7 +79,7 @@ pub(crate) async fn snapshot(
         }
         None => None,
     };
-    Ok(combine(list, &leases, jobs))
+    Ok(combine(list, jobs))
 }
 
 /// Every job of `jobs` counted by state at `now`, `page` at a time, and the live allocations.
@@ -103,25 +103,19 @@ fn read_jobs(
     Ok((seen, jobs.live_allocations()?))
 }
 
-/// The snapshot of the hosts of `list`, each booked with its leases in `leases` and the live
-/// allocations of `jobs`, and of the jobs.
-fn combine(
-    list: HostList,
-    leases: &LeasesOn,
-    jobs: Option<(JobsSeen, Vec<AllocationRecord>)>,
-) -> Snapshot {
+/// The snapshot of the hosts of `list`, each booked with the live allocations of `jobs`, and of
+/// the jobs.
+fn combine(list: HostList, jobs: Option<(JobsSeen, Vec<AllocationRecord>)>) -> Snapshot {
     let (jobs, live) = jobs.map_or((None, Vec::new()), |(seen, live)| (Some(seen), live));
     let hosts = list.hosts.into_iter();
-    let hosts = hosts.map(|entry| host_seen(entry, leases, &live)).collect();
+    let hosts = hosts.map(|entry| host_seen(entry, &live)).collect();
     Snapshot { jobs, hosts }
 }
 
-/// What `entry` has booked, of CPU and memory: its leases and its jobs' allocations, one
-/// that books the whole host counted as its whole shape.
-fn host_seen(entry: HostEntry, leases: &LeasesOn, live: &[AllocationRecord]) -> HostSeen {
+/// What `entry` has booked, of CPU and memory: its jobs' allocations, one that books the
+/// whole host counted as its whole shape.
+fn host_seen(entry: HostEntry, live: &[AllocationRecord]) -> HostSeen {
     let whole = (entry.shape.cpu_millis, entry.shape.memory_bytes);
-    let leased = leases.get(&entry.id).into_iter().flatten();
-    let leased = leased.map(|held| (held.resources.cpu_millis(), held.resources.memory_bytes()));
     let allocated = live.iter().filter(|allocation| allocation.host == entry.id);
     let allocated = allocated.map(|allocation| match allocation.booked {
         Booked::Shape {
@@ -137,7 +131,7 @@ fn host_seen(entry: HostEntry, leases: &LeasesOn, live: &[AllocationRecord]) -> 
             memory.saturating_add(more_memory),
         )
     };
-    let (cpu, memory) = leased.chain(allocated).fold((0, 0), add);
+    let (cpu, memory) = allocated.fold((0, 0), add);
     HostSeen {
         host: entry.id,
         cpu: Split::of(whole.0, cpu),

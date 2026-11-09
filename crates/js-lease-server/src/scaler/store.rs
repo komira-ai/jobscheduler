@@ -20,7 +20,7 @@ use js_scaler::Records;
 use crate::agent_state::{read_if_present, replace};
 use crate::error::StartupError;
 
-/// The flag the refusals name: the file lives beside the lease file.
+/// The flag the refusals name: the file lives beside the state file.
 const FLAG: &str = "--state-file";
 
 /// Where the scaler's records are kept.

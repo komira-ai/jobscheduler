@@ -2,12 +2,11 @@
 
 mod support;
 
-use js_agent_wire::{JobSpec, refusal};
-use js_lease::{ManualClock, Timestamp};
-use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
-use js_registry::{PoolConfig, Refusal, Registry, RunRefusal, SequentialSessions, WholeNodeConfig};
-use js_types::{ExecMode, MemoryPercent, ProviderId, Request, RequestId, ResourceClass, Resources};
-use support::world::{HOUR_S, World};
+use std::sync::{Arc, Mutex};
+
+use js_agent_wire::refusal;
+use js_registry::{Placer, PoolConfig, Refusal};
+use js_types::{ExecMode, HostId, MemoryPercent, Shape};
 use support::*;
 
 /// The memory the pool lists: 8 GiB.
@@ -24,72 +23,65 @@ fn ninety() -> PoolConfig {
     config(4).with_memory_percent(percent(90))
 }
 
-fn asking(sequence: u64, memory_bytes: u64) -> StartSpec {
-    let wanted = Request {
-        resources: Resources::new(1000, memory_bytes, 0, None).unwrap(),
-        ..request()
-    };
-    StartSpec::new(lease(sequence), wanted, &[class()]).unwrap()
+/// A placer that writes down the memory of the shape each host is listed with.
+#[derive(Default)]
+struct Told {
+    memory: Mutex<Vec<u64>>,
 }
 
-fn job(memory_bytes: u64) -> JobSpec {
-    let mut spec = support::world::job("r1");
-    spec.limits.memory_bytes = memory_bytes;
-    spec
+impl Placer for Told {
+    fn host_up(&self, _: &HostId, shape: &Shape) {
+        self.memory
+            .lock()
+            .unwrap()
+            .push(shape.resources().memory_bytes());
+    }
 }
 
-/// Asserts that at 90 a pool of 8 GiB hosts books floor(8 GiB x 90 / 100) bytes: a lease
-/// of that many is placed and one byte more finds no fit, although the host's own claim
-/// (16 GiB) is larger than both. It catches a percent that is not applied, one rounded
-/// up, and a booking that follows the claim.
+/// Asserts that at 90 a pool of 8 GiB hosts lists floor(8 GiB x 90 / 100) bytes as bookable,
+/// although the host's own claim (16 GiB) is larger than both: the view shows the cut as its
+/// shape and its bookable memory, and the claim apart. It catches a percent that is not
+/// applied, one rounded up, and a listing that follows the claim.
 #[test]
-fn ninety_percent_books_exactly_the_cut_memory() {
+fn ninety_percent_lists_exactly_the_cut_memory() {
     assert_eq!(NINETY, 7_730_941_132);
-    let mut fx = fixture_of(ninety());
+    let fx = fixture_of(ninety());
     fx.join("a", "t");
-    assert_eq!(started_on(&fx.provider.start(asking(1, NINETY))), Some("a"));
-    let mut fx = fixture_of(ninety());
-    fx.join("a", "t");
-    let over = fx.provider.start(asking(1, NINETY + 1));
-    assert_eq!(over, StartAck::Refused(RefusalCode::NoFit));
+    let view = &fx.registry.hosts()[0];
+    assert_eq!(view.shape.resources().memory_bytes(), NINETY);
+    assert_eq!(view.memory.bookable_bytes(), NINETY);
+    let claim = view.claim.as_ref().unwrap();
+    assert_eq!(claim.resources().memory_bytes(), 16 << 30);
 }
 
-/// Asserts that a pool without a percent books all of the listed memory and one byte
-/// more is refused: the default of 100 changes nothing.
+/// Asserts that a pool without a percent lists all of the listed memory: the default of 100
+/// changes nothing.
 #[test]
-fn the_default_books_all_of_the_listed_memory() {
-    let mut fx = fixture(4);
+fn the_default_lists_all_of_the_listed_memory() {
+    let fx = fixture(4);
     fx.join("a", "t");
-    assert_eq!(started_on(&fx.provider.start(asking(1, LISTED))), Some("a"));
-    let mut fx = fixture(4);
-    fx.join("a", "t");
-    let over = fx.provider.start(asking(1, LISTED + 1));
-    assert_eq!(over, StartAck::Refused(RefusalCode::NoFit));
+    let view = &fx.registry.hosts()[0];
+    assert_eq!(view.shape.resources().memory_bytes(), LISTED);
+    assert_eq!(view.memory.bookable_bytes(), LISTED);
     assert_eq!(config(4).memory_percent(), MemoryPercent::FULL);
 }
 
-/// Asserts that a host claiming far more than the pool lists is booked at the pool's
-/// numbers all the same: the listing the provider gives the lease table shows the listed
-/// memory (8 GiB, which the placer cuts to the percent) with the cut as its bookable
-/// memory, and the registry's own view shows the cut. It catches a booking that follows
-/// the agent's claim, which would let an agent inflate a lease.
+/// Asserts that a host claiming far more than the pool lists is listed at the pool's numbers
+/// all the same: the placer is told the whole listed memory (8 GiB, which it cuts to the
+/// percent), never the 512 GiB the host claims, and the registry's own view shows the cut. It
+/// catches a listing that follows the agent's claim, which would let an agent inflate what a
+/// job may take.
 #[test]
-fn a_larger_claim_never_raises_what_is_booked() {
-    let fx = fixture_of(ninety());
+fn a_larger_claim_never_raises_what_is_listed() {
+    let told = Arc::new(Told::default());
+    let fx = with_placer(ninety(), told.clone());
     let mut big = hello("big");
     big.shape.memory_bytes = 512 << 30;
     fx.hello(&big, &cred("t")).unwrap();
-    let listed = fx.provider.capacity();
-    // The lease table is listed the whole listed memory (the placer holds the percent), never
-    // the 512 GiB the host claims.
-    assert_eq!(listed[0].shape.resources().memory_bytes(), LISTED);
-    assert_eq!(listed[0].memory.bookable_bytes(), NINETY);
+    assert_eq!(*told.memory.lock().unwrap(), [LISTED]);
     let view = &fx.registry.hosts()[0];
     assert_eq!(view.shape.resources().memory_bytes(), NINETY);
-    let mut fx = fixture_of(ninety());
-    fx.hello(&big, &cred("t")).unwrap();
-    let over = fx.provider.start(asking(1, NINETY + 1));
-    assert_eq!(over, StartAck::Refused(RefusalCode::NoFit));
+    assert_eq!(view.memory.bookable_bytes(), NINETY);
 }
 
 /// Asserts that the hello is held to the whole listed memory, not the cut: a host that
@@ -114,96 +106,6 @@ fn a_hello_is_held_to_the_unreduced_memory() {
     exact.shape.memory_bytes = LISTED;
     assert!(fx.hello(&exact, &cred("t")).is_ok());
     assert_eq!(fx.registry.hosts().len(), 1);
-}
-
-/// Asserts that a run's memory limit is bound by the cut memory when the registry books the
-/// cut (a pool not set to book the whole memory, placed by a placer that holds all of what
-/// is booked): the exact cut is queued and one byte more is refused `limits-exceed-shape`.
-/// It catches a run bound that still reads the unreduced shape, which would let a job use
-/// the memory the pool keeps back.
-#[test]
-fn a_run_is_bound_by_the_cut_memory() {
-    let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
-    let placer = sched_placer(100, &clock);
-    let sessions = SequentialSessions::new();
-    let registry = Registry::with_sessions(ninety(), clock, sessions, placer);
-    let mut provider = registry.provider();
-    registry.hello(&hello("a"), &cred("t")).unwrap();
-    assert_eq!(started_on(&provider.start(asking(1, 1))), Some("a"));
-    let queued = registry.queue_run(&host("a"), &lease(1), job(NINETY));
-    assert!(queued.is_ok(), "{queued:?}");
-    let mut over = job(NINETY + 1);
-    over.run_id = "r2".into();
-    let refused = registry.queue_run(&host("a"), &lease(1), over);
-    assert_eq!(refused.unwrap_err(), RunRefusal::LimitsExceedShape);
-}
-
-/// Asserts that a whole-node pool books the cut memory too: a request of the exact cut is
-/// committed (the whole host is held, not ready yet) and one byte more finds no fit.
-#[test]
-fn a_whole_node_request_sees_the_cut_memory() {
-    let whole = || {
-        let name = ProviderId::new("builders").unwrap();
-        let pool = PoolConfig::new(name, ResourceClass::whole_node(), pool_shape(), 4);
-        let pool = pool.with_whole_node(WholeNodeConfig::dedicated(4)).unwrap();
-        pool.with_memory_percent(percent(90))
-    };
-    let ask = |sequence: u64, memory_bytes: u64| {
-        let wanted = Request {
-            class: ResourceClass::whole_node().id().clone(),
-            resources: Resources::new(1000, memory_bytes, 0, None).unwrap(),
-            ..request()
-        };
-        StartSpec::new(lease(sequence), wanted, &[ResourceClass::whole_node()]).unwrap()
-    };
-    let mut fx = fixture_of(whole());
-    fx.join("a", "t");
-    assert_eq!(fx.provider.start(ask(1, NINETY)), StartAck::Unknown);
-    assert_eq!(fx.provider.booked().len(), 1);
-    let mut fx = fixture_of(whole());
-    fx.join("a", "t");
-    let over = fx.provider.start(ask(1, NINETY + 1));
-    assert_eq!(over, StartAck::Refused(RefusalCode::NoFit));
-}
-
-/// Asserts that a whole-node booking that has to wait for a busy host sees the cut memory
-/// too: a request of the exact cut reserves the host (a draining mark) and commits it when
-/// the host's lease ends, and a request one byte over the cut is refused `no-fit` and
-/// leaves no mark. It catches a reservation path that reads the unreduced shape.
-#[test]
-fn a_reserved_host_is_held_to_the_cut_memory() {
-    let whole_ninety = || {
-        let name = ProviderId::new("builders").unwrap();
-        let pool = PoolConfig::new(name, ResourceClass::whole_node(), pool_shape(), 4);
-        let pool = pool.with_whole_node(WholeNodeConfig::dedicated(4)).unwrap();
-        pool.with_memory_percent(percent(90))
-    };
-    let ask = |sequence: u64, name: &str, memory_bytes: u64| {
-        let wanted = Request {
-            class: ResourceClass::whole_node().id().clone(),
-            resources: Resources::new(1000, memory_bytes, 0, None).unwrap(),
-            ..request()
-        };
-        let spec = StartSpec::new(lease(sequence), wanted, &[ResourceClass::whole_node()]);
-        spec.unwrap().with_request_id(RequestId::new(name).unwrap())
-    };
-    let mut exact = World::of(whole_ninety(), &["a"]);
-    exact.share(1, HOUR_S);
-    exact.owners.insert(2, "r1".to_string());
-    exact.provider.start(ask(2, "r1", NINETY));
-    exact.check();
-    assert_eq!(exact.reserved_host("r1"), Some("a".to_string()));
-    exact.stop(1);
-    exact.fx.registry.advance();
-    exact.provider.start(ask(2, "r1", NINETY));
-    exact.check();
-    assert_eq!(exact.lease_on("a"), Some(lease(2)));
-    let mut over = World::of(whole_ninety(), &["a"]);
-    over.share(1, HOUR_S);
-    let refused = over.provider.start(ask(2, "r1", NINETY + 1));
-    over.check();
-    assert_eq!(refused, StartAck::Refused(RefusalCode::NoFit));
-    assert_eq!(over.reserved_host("r1"), None);
 }
 
 /// Asserts that the registry's view lists the memory the pool lists, the percent and the

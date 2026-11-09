@@ -15,9 +15,7 @@ packaging/js-agent/
 packaging/js-agent-macos/
 crates/js-agent/src/
 crates/js-cli/src/
-crates/js-lease/src/
 crates/js-lease-server/src/
-crates/js-pool-static/src/
 crates/js-provider-lambdalabs/src/
 crates/js-mdm/src/
 crates/js-registry/src/

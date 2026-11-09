@@ -137,8 +137,7 @@ pub trait Effects: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Why the registry refused: a lease is booked on the host ([`Busy::Lease`]). It is asked again at the
-    /// next tick.
+    /// Why the registry refused ([`Busy`]); the host is asked again at the next tick.
     fn remove(&self, host: &str) -> Result<(), Busy>;
 
     /// Forgets the host's network device, if its network mode has one. Best effort.

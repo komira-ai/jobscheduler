@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use js_cli::Services;
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{
     Cli as ServerCli, Config, Running, SharedClock, TickHandle, channel_ticker, start,
 };
 use js_pool_static::EXAMPLE_CONFIG;
 use js_testkit::dir::TestDir;
+use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
 use tokio::runtime::Runtime;
 

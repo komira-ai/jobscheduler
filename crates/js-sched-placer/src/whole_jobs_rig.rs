@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use js_jobs::interfere::Interfere;
 use js_jobs::{
-    Constraints, JobFiles, JobId, JobRecord, JobSpec, JobStore, MarkRecord, Needs, NetworkPolicy,
-    NewJob, RandomIds,
+    AllocationRecord, Booked, Constraints, JobFiles, JobId, JobRecord, JobSpec, JobStore,
+    MarkRecord, Needs, NetworkPolicy, NewJob, RandomIds,
 };
 use js_registry::WholeNodeConfig;
 use js_state::fake::{Fake, Flaw};
@@ -41,8 +41,8 @@ pub(crate) fn hosts(names: &[&str]) -> BTreeSet<HostId> {
     names.iter().map(|name| host(name)).collect()
 }
 
-/// A host of 8 cores and 16 GiB named `name`, carrying the one-core leases `1-<seq>` of
-/// `seqs`.
+/// A host of 8 cores and 16 GiB named `name`, busy with the one-core allocations of the jobs
+/// `held-<seq>` for each of `seqs` (described as the held bookings `1-<seq>`).
 pub(crate) fn candidate(name: &str, seqs: &[u64]) -> Candidate {
     let caps = [("arch".to_owned(), "x86_64".to_owned())]
         .into_iter()
@@ -60,15 +60,52 @@ pub(crate) fn candidate(name: &str, seqs: &[u64]) -> Candidate {
     }
 }
 
-/// The hosts `hosts`, each with the leases given.
+/// The hosts `hosts`, each busy with the allocations given.
 pub(crate) fn every(hosts: &[(&str, &[u64])]) -> Vec<Candidate> {
     let every = hosts.iter().map(|(name, seqs)| candidate(name, seqs));
     every.collect()
 }
 
-/// An engine built at zero over `hosts`, each with the leases given.
+/// The job `held-<seq>`, whose allocation occupies a host in the fixtures.
+pub(crate) fn held_job(held: &Held) -> JobId {
+    JobId::parse(&format!("held-{}", held.lease.sequence())).unwrap()
+}
+
+/// What `held` books, as an allocation of a job books it.
+pub(crate) fn booked_by(held: &Held) -> Booked {
+    let resources = &held.resources;
+    Booked::Shape {
+        cpu_millis: resources.cpu_millis(),
+        memory_bytes: resources.memory_bytes(),
+        disk_bytes: resources.disk_bytes(),
+        accelerators: resources.gpus(),
+    }
+}
+
+/// An engine built at zero over `hosts`: each said hello, and the allocation of every job
+/// they are busy with is taken up as the pass takes up an allocation of the job table.
+pub(crate) fn engine_over(hosts: &[Candidate]) -> Engine {
+    engine_with(Settings::default(), hosts)
+}
+
+/// As [`engine_over`], with `settings`.
+pub(crate) fn engine_with(settings: Settings, hosts: &[Candidate]) -> Engine {
+    let mut engine = Engine::build(settings, at(0));
+    for candidate in hosts {
+        engine.host_up(&candidate.host, &candidate.shape, at(0));
+    }
+    for candidate in hosts {
+        for held in &candidate.leases {
+            let (job, booked) = (held_job(held), booked_by(held));
+            engine.take_job(&job, &candidate.host, booked, Vec::new());
+        }
+    }
+    engine
+}
+
+/// An engine built at zero over `hosts`, each busy with the allocations given.
 pub(crate) fn engine(hosts: &[(&str, &[u64])]) -> Engine {
-    Engine::build(Settings::default(), &every(hosts), at(0))
+    engine_over(&every(hosts))
 }
 
 /// The settings of the passes: a job waits ten seconds before it marks a busy host, and a
@@ -154,6 +191,32 @@ impl Tables {
             client: None,
         };
         self.jobs.insert_queued(new).unwrap().record
+    }
+
+    /// Places a job `held-<seq>` on the host of each of `hosts` for each allocation they are
+    /// busy with, in the tables, and answers the allocation rows: the job table's record of
+    /// what [`engine_over`] takes up.
+    pub(crate) fn occupy(&self, hosts: &[Candidate]) -> Vec<AllocationRecord> {
+        let mut rows = Vec::new();
+        for candidate in hosts {
+            for held in &candidate.leases {
+                let (job, booked) = (held_job(held), booked_by(held));
+                let spec = spec_of(Needs::Shape(held.resources.clone()), 600);
+                let new = NewJob {
+                    id: Some(job.clone()),
+                    spec,
+                    priority: 0,
+                    client: None,
+                };
+                self.jobs.insert_queued(new).unwrap();
+                let (_, row) = self
+                    .jobs
+                    .place(&job, candidate.host.clone(), booked)
+                    .unwrap();
+                rows.push(row);
+            }
+        }
+        rows
     }
 
     /// Records the queued job `id` that needs the whole host, with a wall limit of ten minutes.

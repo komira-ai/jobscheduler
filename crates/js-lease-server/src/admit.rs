@@ -72,8 +72,7 @@ impl Admit {
 /// A job with host isolation is offered only the registered hosts whose hello reported
 /// `host-jobs`, and no provider: a machine not launched yet has reported nothing.
 ///
-/// The hosts are read from the registry alone, whose lock the read takes and lets go at once;
-/// the lease table's lock is never taken. The launching providers' catalogs are read from the
+/// The hosts are read from the registry alone, whose lock the read takes and lets go at once. The launching providers' catalogs are read from the
 /// server's cache, as a lease's are ([`Admit::decide`]): the read calls no provider and answers
 /// at once. A catalog the cache has never fetched may offer.
 pub(crate) struct JobAdmission {

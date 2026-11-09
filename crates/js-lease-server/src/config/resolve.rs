@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use super::Config;
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::{self, Load, Resolved};
 use crate::kinds::{Kinds, SecretFiles};

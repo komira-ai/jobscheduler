@@ -460,7 +460,7 @@ generated paragraph above.
 - `ListHosts` lists every host, by id, as `GET /v1/hosts` does (one function reads both), with
   the resources booked on it in `booked`: one `HostBooking` per live allocation (booked or
   releasing, until the host confirms the job's container gone), in the order they were booked,
-  then one per lease the server restored from its lease file and still holds, under the lease id's text. A
+  then (never now, because the server holds no lease) one per lease, under the lease id's text. A
   whole-host booking is the host's whole shape. `booked` is read-only: no call creates or ends
   a booking.
 - `CordonHost` takes a registered host out of placement for `cordon_secs` (300 when absent,

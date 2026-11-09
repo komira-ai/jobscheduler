@@ -6,11 +6,11 @@
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_lease::{ManualClock, Timestamp};
 use js_logmint::fake::FakeMinter;
 use js_logmint::{RoleArn, StsEndpoint};
 use js_logstore::fake::FakeStore;
 use js_logstore::{Clock as _, Endpoint};
+use js_types::{ManualClock, Timestamp};
 
 use super::*;
 use crate::agent_api::job_rig::{

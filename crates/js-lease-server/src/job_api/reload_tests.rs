@@ -19,8 +19,8 @@ use tracing::Level;
 
 use super::access_tests::{Events, info};
 use super::writes_rig::{Fixed, Writes, wire};
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{OneClock, START_MS, tables_on};
+use crate::clock::SharedClock;
 use crate::config::LiveClients;
 use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN, JOIN};
 use crate::in_process::InProcess;
@@ -60,7 +60,7 @@ impl Reloading {
         ];
         let config = rig.config_of_flags(&extra).expect("the flags start");
         let clients: LiveClients = config.clients.clone();
-        let clock = SharedClock::new(js_lease::ManualClock::default());
+        let clock = SharedClock::new(js_types::ManualClock::default());
         let server = InProcess::start(config, clock).expect("the server starts");
         let store_clock = Arc::new(ManualClock::default());
         store_clock.advance(Duration::from_millis(START_MS));

@@ -2,7 +2,7 @@
 //! and the bindings, and how they are put together at start.
 //!
 //! Without a store setting the join tokens and the bindings are kept in files beside the
-//! lease file; with one, in the state store ([`crate::host_keys`]), read once at start.
+//! state file; with one, in the state store ([`crate::host_keys`]), read once at start.
 //! Every change of them that the server makes itself is written under one gate
 //! ([`Agents::host_writes`]), from its commit to the registry's taking it: a hello, the
 //! taint a heartbeat brings, a cordon or its lift, and the save of each tick. With the store
@@ -24,17 +24,15 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, InstanceIdentity};
 use js_elastic::HostName;
-use js_lease::Clock;
-use js_registry::{Binding, Cordoned, Credential, OsSessions, ProfileLives, Registry, Uncordoned};
-use js_types::{HostId, ProviderId};
-use js_usage::{ProfileCurves, ProfileKey, TailSink};
+use js_registry::{Binding, Cordoned, Credential, OsSessions, Registry, Uncordoned};
+use js_types::Clock;
+use js_types::{HostCapacity, HostId, ProviderId};
 use tracing::{error, info, warn};
 
 use self::taints::restore_job_taints;
-use crate::adapt::SharedClock;
 use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::AgentTokens;
-use crate::capacity::CapacitySource;
+use crate::clock::SharedClock;
 use crate::config::{AgentSetup, Hosts, placer, split};
 use crate::error::StartupError;
 use crate::fence::Fence;
@@ -42,7 +40,6 @@ use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
-use crate::layered::LayeredSource;
 use crate::logs::{self, LogGrants};
 use crate::metrics::Meter;
 use crate::rate::HelloLimiter;
@@ -53,35 +50,8 @@ use crate::usage_map::limits_of;
 use crate::usage_setup::UsageSetup;
 use crate::util::blocking;
 
-/// The source of lives the estimate feed reads: the learned curves, or [`NoLives`] for a
-/// sink that keeps none.
-fn lives_of(curves: Option<Arc<ProfileCurves>>) -> Arc<dyn ProfileLives> {
-    match curves {
-        Some(curves) => curves,
-        None => Arc::new(NoLives),
-    }
-}
-
-/// Gives `registry` the sink its tail counters are kept in. Stored counters that cannot be
-/// read (or were bucketed by other edges) are said once; the counters then start at zero.
-fn keep_tail(registry: &Registry, tail: Arc<dyn TailSink>) {
-    if let Err(error) = registry.set_tail_sink(tail) {
-        warn!(%error, "the stored tail counters are not read; they count on from zero");
-    }
-}
-
-/// The source of lives of a usage sink that keeps no curves: no profile has a known life.
-struct NoLives;
-
-impl ProfileLives for NoLives {
-    fn wall_minutes_p90(&self, _: &ProfileKey) -> Option<u32> {
-        None
-    }
-}
-
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
-/// nothing else of the server's: the lease table's lock is taken before the registry's
-/// (the table calls the provider, which calls the registry), never the reverse.
+/// nothing else of the server's.
 pub(crate) struct Agents {
     pub(crate) registry: Registry,
     pub(crate) tokens: AgentTokens,
@@ -166,7 +136,7 @@ impl CordonFault {
 /// over, at a later hello).
 pub(crate) type Session = (u64, Option<u64>);
 
-/// Where a file of the agent side is kept: beside the lease file at `state_file`, with
+/// Where a file of the agent side is kept: beside the state file at `state_file`, with
 /// `suffix` added to its name.
 pub(crate) fn state_path(state_file: &Path, suffix: &str) -> PathBuf {
     let mut name = state_file.file_name().unwrap_or_default().to_os_string();
@@ -174,15 +144,15 @@ pub(crate) fn state_path(state_file: &Path, suffix: &str) -> PathBuf {
     state_file.with_file_name(name)
 }
 
-/// What [`assemble`] returns: the capacity source the lease table runs on, and the agent
-/// side when it is on.
-pub(crate) type Assembled = (Box<dyn CapacitySource>, Option<Arc<Agents>>);
+/// What [`assemble`] returns: the hosts the static pool lists, and the agent side when it
+/// is on.
+pub(crate) type Assembled = (Vec<HostCapacity>, Option<Arc<Agents>>);
 
-/// The capacity source the lease table runs on, and the agent side when it is on.
+/// The hosts of the static pool, and the agent side when it is on.
 ///
-/// Without agent flags this is the source `--pool-config` names, untouched. With them it
-/// is a [`LayeredSource`] over that source (if given) and a registry on `clock`, seeded
-/// with the bindings the previous run persisted. The agent side mints the host credentials
+/// Without agent flags the hosts are those `--pool-config` names. With them the agent side
+/// is a registry on `clock`, seeded with the bindings the previous run persisted, which
+/// refuses a hello for the id of any host the static pool lists. The agent side mints the host credentials
 /// of live logs with `logs` ([`crate::logs`]); without agent flags no host reports, and
 /// `logs` is dropped.
 #[cfg(test)]
@@ -197,7 +167,7 @@ pub(crate) fn assemble(
 }
 
 /// [`assemble`], with the join tokens and the bindings kept in the state store `kept` when
-/// there is one, instead of the files beside the lease file.
+/// there is one, instead of the files beside the state file.
 pub(crate) fn assemble_in(
     hosts: Hosts,
     usage: UsageSetup,
@@ -222,7 +192,7 @@ pub(crate) fn assemble_placed(
 }
 
 /// The join tokens, the bindings read at start and their store: from the files beside the
-/// lease file at `state_file`, or from the state store `kept`, whose refusal names its
+/// state file `state_file`, or from the state store `kept`, whose refusal names its
 /// setting when a value cannot be read as written.
 fn open_hosts(
     clock: &SharedClock,
@@ -255,7 +225,7 @@ fn placed_in(
     logs: Option<Arc<LogGrants>>,
 ) -> Result<(Assembled, Option<Arc<SchedPlacer>>), StartupError> {
     match hosts {
-        Hosts::Static(source) => Ok(((source, None), None)),
+        Hosts::Static(source) => Ok(((source.hosts()?, None), None)),
         Hosts::Layered {
             static_pool,
             agents,
@@ -266,7 +236,6 @@ fn placed_in(
                 mint_provider,
                 hello_limit,
                 require_host_credential,
-                estimate_feed,
                 cpu_slack,
                 max_lease_wall,
                 job_limits,
@@ -283,22 +252,6 @@ fn placed_in(
             let placer = placer(max_lease_wall, cpu_slack, memory, clock);
             let registry = Registry::new(pool, clock.clone(), placer.clone());
             let usage = usage.build(clock, limits)?;
-            // Each lease booking that ends leaves its record in the usage store's history.
-            usage
-                .iter()
-                .for_each(|usage| registry.set_allocation_log(usage.log()));
-            // The tail counters are kept in the usage store when there is one, and the
-            // registry counts on from what it holds; with none they are in memory only.
-            let tail = usage.iter().find_map(|usage| usage.tail());
-            tail.into_iter().for_each(|tail| keep_tail(&registry, tail));
-            // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
-            // drain order. Set before the bookings are put back, so a lease restored from
-            // the lease file keeps the start and the bound it records. A sink that keeps
-            // no curves gives a source that knows no profile: every lease is then costed
-            // at its bound, restored ones included. Off, no source is set, no estimate is
-            // passed and every lease is costed at its bound.
-            let lives = lives_of(usage.iter().find_map(|usage| usage.curves()));
-            estimate_feed.then(|| registry.set_lives(lives));
             // The one job store of the server, when the job service is on. It is opened
             // before the bindings are put back: a host a host job tainted whose binding lost
             // the taint (a crash between the placement and the binding's write) gets it from
@@ -315,7 +268,8 @@ fn placed_in(
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }
-            let source = LayeredSource::new(static_pool, registry.clone(), bindings.clone());
+            let listed = static_pool.map_or_else(|| Ok(Vec::new()), |source| source.hosts())?;
+            registry.reserve(listed.iter().map(|host| host.host.clone()));
             let agents = Agents {
                 registry,
                 tokens,
@@ -339,7 +293,7 @@ fn placed_in(
                 fence: Fence::new(),
                 placing: Mutex::default(),
             };
-            Ok(((Box::new(source), Some(Arc::new(agents))), Some(placer)))
+            Ok(((listed, Some(Arc::new(agents))), Some(placer)))
         }
     }
 }
@@ -817,10 +771,6 @@ impl Agents {
 
 #[path = "agents_taints.rs"]
 mod taints;
-
-#[cfg(test)]
-#[path = "agents_tail_tests.rs"]
-mod tail_tests;
 
 #[cfg(test)]
 #[path = "agents_mint_tests.rs"]

@@ -4,7 +4,6 @@
 mod support;
 
 use js_agent_wire::Hello;
-use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, Refusal};
 use js_types::{ExecMode, ProviderId, Request, Shape};
 use support::*;
@@ -18,7 +17,7 @@ fn pool(exec: ExecMode) -> Fixture {
 fn disk_pool(disk: &str) -> Fixture {
     let shape = Shape::new(
         pool_shape().resources().clone(),
-        map(&[("os", "macos"), ("disk-gib", disk)]),
+        map(&[("os", "macos"), ("arch", ARCH), ("disk-gib", disk)]),
     );
     let name = ProviderId::new("builders").unwrap();
     fixture_of(PoolConfig::new(name, class(), shape, 4))
@@ -31,38 +30,37 @@ fn reporting(host: &str, pairs: &[(&str, &str)]) -> Hello {
     hello
 }
 
-/// The start of lease 1 for a request that requires `pairs` besides `os`.
-fn wanting(pairs: &[(&str, &str)]) -> StartSpec {
+/// A request that requires `pairs` besides `os`.
+fn wanting(pairs: &[(&str, &str)]) -> Request {
     let mut asked: Request = request();
     asked.capabilities.extend(map(pairs));
-    StartSpec::new(lease(1), asked, &[class()]).unwrap()
+    asked
 }
 
 /// Asserts that a pool of `sandbox-exec` hosts serves a job that requires `sandbox-exec`
-/// or names no mode, and refuses, as one no host could ever serve, a job that requires
-/// `container`; and the same the other way round. It catches a mode that is not part of
+/// or names no mode, and does not place a job that requires `container`; and the same the
+/// other way round. It catches a mode that is not part of
 /// the match, which would send a macOS job to a container host.
 #[test]
 fn a_job_requiring_a_mode_never_goes_to_the_other_mode() {
-    let mut mac = pool(ExecMode::SandboxExec);
+    let mac = pool(ExecMode::SandboxExec);
     let on_mac = reporting(
         "m",
         &[("runtime", "sandbox-exec"), ("exec", "sandbox-exec")],
     );
     mac.hello(&on_mac, &cred("t")).unwrap();
-    let wrong = mac.provider.start(wanting(&[("exec", "container")]));
-    assert_eq!(wrong, StartAck::Refused(RefusalCode::NoFit));
-    assert!(mac.provider.booked().is_empty());
-    let right = mac.provider.start(wanting(&[("exec", "sandbox-exec")]));
-    assert_eq!(started_on(&right), Some("m"));
+    assert!(!placed_on(&mac, "m", &wanting(&[("exec", "container")])));
+    assert!(placed_on(&mac, "m", &wanting(&[("exec", "sandbox-exec")])));
 
-    let mut box_ = pool(ExecMode::Container);
+    let box_ = pool(ExecMode::Container);
     let in_box = reporting("c", &[("runtime", "container")]);
     box_.hello(&in_box, &cred("t")).unwrap();
-    let wrong = box_.provider.start(wanting(&[("exec", "sandbox-exec")]));
-    assert_eq!(wrong, StartAck::Refused(RefusalCode::NoFit));
-    let either = box_.provider.start(wanting(&[]));
-    assert_eq!(started_on(&either), Some("c"));
+    assert!(!placed_on(
+        &box_,
+        "c",
+        &wanting(&[("exec", "sandbox-exec")])
+    ));
+    assert!(placed_on(&box_, "c", &wanting(&[])));
 }
 
 /// Asserts that the mode a pool books is the one its hosts were admitted on: a host that
@@ -77,23 +75,22 @@ fn the_booked_mode_is_held_to_what_the_host_reports() {
     assert!(mac.registry.hosts().is_empty());
 }
 
-/// Asserts that a pool that declares no mode books none: a job that requires one finds no
-/// host unless the pool's capabilities name it, and a job that names none is served.
+/// Asserts that a pool that declares no mode books none: a job that requires one is not
+/// placed unless the pool's capabilities name it, and a job that names none is.
 #[test]
 fn a_pool_without_a_mode_serves_only_jobs_that_ask_for_none() {
-    let mut fx = fixture(4);
+    let fx = fixture(4);
     fx.join("a", "t");
-    let asking = fx.provider.start(wanting(&[("exec", "container")]));
-    assert_eq!(asking, StartAck::Refused(RefusalCode::NoFit));
-    assert_eq!(started_on(&fx.provider.start(wanting(&[]))), Some("a"));
+    assert!(!placed_on(&fx, "a", &wanting(&[("exec", "container")])));
+    assert!(placed_on(&fx, "a", &wanting(&[])));
 }
 
 /// Asserts that `disk-gib` is a minimum: a job asking for the pool's promise exactly, or
-/// less, is placed; one asking for more than the pool promises is refused as unservable;
-/// and a host that reports less disk than the pool promises is not admitted.
+/// less, is placed; one asking for more than the pool promises is not; and a host that reports
+/// less disk than the pool promises is not admitted.
 #[test]
 fn a_job_requiring_disk_is_placed_by_the_promise_hosts_were_held_to() {
-    let mut fx = disk_pool("100");
+    let fx = disk_pool("100");
     let small = reporting("s", &[("disk-gib", "99")]);
     assert_eq!(
         fx.hello(&small, &cred("t")).unwrap_err(),
@@ -106,8 +103,6 @@ fn a_job_requiring_disk_is_placed_by_the_promise_hosts_were_held_to() {
     );
     let big = reporting("big", &[("disk-gib", "250")]);
     fx.hello(&big, &cred("t")).unwrap();
-    let more = fx.provider.start(wanting(&[("disk-gib", "101")]));
-    assert_eq!(more, StartAck::Refused(RefusalCode::NoFit));
-    let edge = fx.provider.start(wanting(&[("disk-gib", "100")]));
-    assert_eq!(started_on(&edge), Some("big"));
+    assert!(!placed_on(&fx, "big", &wanting(&[("disk-gib", "101")])));
+    assert!(placed_on(&fx, "big", &wanting(&[("disk-gib", "100")])));
 }

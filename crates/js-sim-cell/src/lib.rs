@@ -121,7 +121,7 @@
 //! The crate keeps the kernel's rules although its layer does not demand them: no clock,
 //! no random source and no hashed collection, so a run replays from its seed. The server
 //! it runs is production code and keeps them only where the cell gives it the means: it
-//! reads the cell's clock, its lease table times its saves on that clock, its job store
+//! reads the cell's clock, its metrics time on that clock, its job store
 //! stamps its rows with that clock and mints its ids from a script drawn from the seed,
 //! and usage recording, which reads the system's clock, is off. Its session secrets are random;
 //! the agents echo them, and no trace line holds one.

@@ -26,7 +26,7 @@ machines an elastic provider launched can join it.
 
 ## The DefaultProvider
 
-**What it is.** The set of hosts that registered themselves with the scheduler. Its core is the merged `js-registry` (`RegisteredProvider`,
+**What it is.** The set of hosts that registered themselves with the scheduler. Its core is the merged `js-registry` (its `RegisteredProvider`, deleted with the lease table, was its core;
 `merged-code.md`). It answers for a pool through the same trait as every other kind (5.5), with these fixed answers:
 
 - `acquire` is `Refused(capacity)`: it has nothing to launch. The scheduler never asks it to (a provider says whether it can launch; the

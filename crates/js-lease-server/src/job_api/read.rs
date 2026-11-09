@@ -3,7 +3,7 @@
 //!
 //! Every call reads the tables through [`Reads`], which offers the two reads they need (one
 //! job, one page of jobs) and no write, so no read call changes any state. None takes a lock:
-//! the service holds no handle on the lease table or the registry. Time is read from the
+//! the service holds no handle on the registry. Time is read from the
 //! service's clock, and only to tell an ended job whose retention end has passed.
 //!
 //! # Answers
@@ -74,12 +74,12 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use js_jobs::{ClientName, JobId, JobPage, JobRecord, JobState, MAX_PAGE, keys};
-use js_lease::Clock;
 use js_proto::v1::{
     self, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
     GetResultResponse, ListJobsRequest, ListJobsResponse,
 };
 use js_state::{ResumeToken, StoreTime};
+use js_types::Clock;
 use js_types::HostId;
 use tonic::{Request, Response, Status};
 

@@ -31,7 +31,6 @@ js-guest                    0      0
 js-guest-wire               0      0
 js-host-step                0      0
 js-jobs                     0      0
-js-lease                    0      0
 js-lease-server             0      0
 js-logmint                  0      0
 js-logstore                 0      0
@@ -48,7 +47,6 @@ js-pool-static              0      0
 js-proto                    0      -
 js-provider                 0      0
 js-provider-ec2             0      0
-js-provider-fake            0      0
 js-provider-gce             0      0
 js-provider-lambdalabs      0      0
 js-registry                 0      0

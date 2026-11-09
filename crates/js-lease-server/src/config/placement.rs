@@ -11,7 +11,7 @@ use js_registry::PoolConfig;
 use js_sched::{Backfill, MemoryPercent};
 
 use super::CpuSlack;
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::Registering;
 use crate::sched::engine::Settings;
@@ -86,10 +86,9 @@ pub(crate) fn split(pool: PoolConfig) -> (PoolConfig, MemoryPercent) {
 }
 
 /// The placer the registry takes: its one engine is built with `cpu_slack`, the share
-/// `memory` of each host's memory, and backfill: a lease may backfill a host a whole-node
-/// request has set aside, since the lease table ends every lease at its wall time, so
-/// every bound is enforced, up to `max_lease_wall` (`server.max_lease_wall`; none: any
-/// wall time the table took). `clock` is the registry's.
+/// `memory` of each host's memory, and backfill: work may backfill a host a whole-node
+/// request has set aside, up to `max_lease_wall` (`server.max_lease_wall`; none: any wall
+/// time). `clock` is the registry's.
 pub(crate) fn placer(
     max_lease_wall: Option<Duration>,
     cpu_slack: CpuSlack,

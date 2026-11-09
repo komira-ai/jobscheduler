@@ -20,7 +20,7 @@ use js_types::HostId;
 use super::restore_job_taints;
 use crate::agent_api::job_rig::{BOOKED, placed, spec, tables};
 use crate::agent_state::BindingStore;
-use crate::api::whole_view_tests::{Lines, process_sink};
+use crate::api::rig::{Lines, process_sink};
 use crate::job_store::ServerJobs;
 
 /// The flag a refusal names.

@@ -13,13 +13,11 @@ js-agent-wire = { path = "../js-agent-wire" }
 js-api-gateway = { path = "../js-api-gateway" }
 js-elastic = { path = "../js-elastic" }
 js-jobs = { path = "../js-jobs" }
-js-lease = { path = "../js-lease" }
 js-logmint = { path = "../js-logmint" }
 js-logstore = { path = "../js-logstore" }
 js-platform = { path = "../js-platform" }
 js-pool-static = { path = "../js-pool-static" }
 js-proto = { path = "../js-proto" }
-js-provider = { path = "../js-provider" }
 js-provider-ec2 = { path = "../js-provider-ec2" }
 js-provider-gce = { path = "../js-provider-gce" }
 js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
@@ -30,6 +28,7 @@ js-sched-placer = { path = "../js-sched-placer" }
 # The store the server's state is kept in (`--store`): the Postgres backend, and SQLite for
 # tests and single-node development (src/store.rs).
 js-state = { path = "../js-state", features = ["postgres"] }
+js-system-clock = { path = "../js-system-clock" }
 js-types = { path = "../js-types" }
 # The host updater's hook contract (`js-lease-server update-hook`, src/update_hook): the exit
 # status and last line, the state directory and its record, the unit manager, the release link.
@@ -49,7 +48,7 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
-toml.workspace = true
+toml = { workspace = true, features = ["display"] }
 tokio ={ workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls.workspace = true
 # The job service: its generated gRPC server and the bearer layer in front of both of its
@@ -73,6 +72,8 @@ in-process = []
 # Linux only, and the tests run on macOS too.
 nix = { workspace = true, features = ["fs"] }
 js-agent = { path = "../js-agent" }
+# `Candidate`, the host a placement test offers the engine (src/sched/jobs_tests.rs).
+js-provider = { path = "../js-provider" }
 # The output tails of the v1 acceptance target's jobs, which the job service's JSON carries
 # as base64 (tests/v1_acceptance/rig.rs).
 base64.workspace = true
@@ -84,7 +85,6 @@ js-conformance = { path = "../js-conformance" }
 js-lease-server = { path = ".", features = ["in-process"] }
 # The elastic fake cloud with its own bill (tests/server/elastic_fake_e2e.rs).
 js-elastic-fake = { path = "../js-elastic-fake" }
-js-provider-fake = { path = "../js-provider-fake" }
 # What the server's tests read of the placer: its fallback counters, the engines it built and
 # its scheduler (src/sched/*_tests.rs).
 js-sched-placer = { path = "../js-sched-placer", features = ["test-support"] }

@@ -1,4 +1,4 @@
-//! Why a whole-node lease failed to become ready, and what each reason does (design
+//! Why the prepare of a whole-host job failed, and what each reason does (design
 //! `whole-node.md`, section 5, items 3 and 4).
 //!
 //! The reasons are data: every row is the pair (what happens to the host, what happens
@@ -15,7 +15,7 @@ pub(crate) enum HostEffect {
     ExcludeForBackoff,
     /// The host is left out of this request's placements for the rest of its life.
     ExcludeForLife,
-    /// The host is tainted, as for any finding; a tainted host takes no lease.
+    /// The host is tainted, as for any finding; a tainted host takes no job.
     Taint,
 }
 
@@ -60,9 +60,6 @@ const ROWS: [(RefusalReason, Row); 5] = [
     ),
 ];
 
-/// The code recorded for a lease that was not ready by its deadline.
-pub(crate) const PREPARE_TIMEOUT_CODE: &str = "prepare-timeout";
-
 /// How a prepare failed: the agent refused with a code, or the deadline passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Cause {
@@ -79,14 +76,6 @@ impl Cause {
         };
         ROWS[reason as usize].1
     }
-
-    /// The code text a terminal failure names.
-    pub(crate) fn code(self) -> String {
-        match self {
-            Self::Refused(reason) => reason.into(),
-            Self::Timeout => PREPARE_TIMEOUT_CODE.to_string(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -102,16 +91,13 @@ mod tests {
         }
     }
 
+    /// A prepare that passed its deadline without a ready report acts as `setup-failed`: the
+    /// same row, so the host is left out for a back-off.
     #[test]
-    fn a_timeout_acts_as_setup_failed_and_names_its_own_code() {
+    fn a_timeout_acts_as_setup_failed() {
         assert_eq!(
             Cause::Timeout.row(),
             Cause::Refused(RefusalReason::SetupFailed).row()
-        );
-        assert_eq!(Cause::Timeout.code(), "prepare-timeout");
-        assert_eq!(
-            Cause::Refused(RefusalReason::HostUnsafe).code(),
-            "host-unsafe"
         );
     }
 }

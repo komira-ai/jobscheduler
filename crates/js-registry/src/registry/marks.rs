@@ -2,82 +2,64 @@
 //! (design `pools-providers-network.md`, sections 6.2 and 6.3).
 //!
 //! A host goes `unmarked -> Draining -> Releasing -> removed`. `Draining` and `Releasing`
-//! are the two marks. A marked host takes no start of any kind: no lease is booked on it
-//! (ordinary or whole-node), no reservation is set on it, and no run is queued on it
-//! ([`crate::Registry::queue_run`]). They are not the whole-node marks (`Reserved`, `Held`),
-//! which serve one request and have a deadline; these serve no request and have none.
+//! are the two marks. A marked host takes no new job; the job engine reads the mark in the
+//! host's view ([`crate::HostView::mark`]).
 //!
 //! # The quiet rule
 //!
 //! [`Registry::drain`] and [`Registry::release_host`] set their mark only if the host is
-//! quiet at that moment, and they check and set under the one lock that books hosts, so no
-//! start can land between the check and the mark. Quiet means: no lease booked, no run
-//! the host lists or the registry holds live, no whole-node lease committed or being
-//! restored, and no whole-node reservation on the host. The registry has no other
-//! notion of work on a host (it holds no stream), so these are all the ways a host can
-//! be busy. A busy host answers [`Busy`] and keeps the mark it had. So a host that is
-//! `Releasing` was quiet when it was marked and has been unbookable since: nothing can
-//! have started on it that the release would cut. Work that a host reports afterwards (a
-//! run listed in a later heartbeat, which the registry cannot prevent) is not cut by the
-//! registry; the caller reads it as the host going busy before it calls `release_host`.
+//! quiet at that moment, and they check and set under the registry's lock. Quiet means: the
+//! host lists no run (the previous release's work). The registry has no other notion of work
+//! on a host (it holds no stream; the jobs on a host are the job tables'), so that is all
+//! it can tell. A busy host answers [`Busy`] and keeps the mark it had. Work that a host
+//! reports afterwards (a run listed in a later heartbeat, which the registry cannot
+//! prevent) is not cut by the registry; the caller reads it as the host going busy before
+//! it calls `release_host`.
 //!
 //! # Persistence
 //!
-//! The marks are held in memory only, like the whole-node marks. A restart forgets them: a
-//! host that was draining is a plain idle host again, and the scaler that owns the
-//! decision drains it again. A host whose release was already under way is the exception
-//! that cannot wait for the scaler's next step: the scaler's own records say which hosts
-//! those are, and it marks them with [`Registry::mark_ending`] before any hello is
-//! admitted, so such a host that says hello again is admitted already `Releasing`.
+//! The marks are held in memory only. A restart forgets them: a host that was draining is a
+//! plain idle host again, and the scaler that owns the decision drains it again. A host
+//! whose release was already under way is the exception that cannot wait for the scaler's
+//! next step: the scaler's own records say which hosts those are, and it marks them with
+//! [`Registry::mark_ending`] before any hello is admitted, so such a host that says hello
+//! again is admitted already `Releasing`.
 //!
 //! So after a restart a host the scaler had retired ([`Registry::retire`]) is bookable again
-//! until the scaler's next tick retires it again: a lease may be booked on it in that gap, bounded
-//! by one tick plus the margin of the cloud lifetime.
+//! until the scaler's next tick retires it again: a job may be placed on it in that gap,
+//! bounded by one tick plus the margin of the cloud lifetime.
 
-use js_provider::HostBook;
 use js_types::HostId;
 
 use super::{HostMark, Record, Registry, State};
-use crate::runs::Runs;
-use crate::whole::reserve::Reservation;
 
 /// A host mark of scale-down, held in a host's record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Leaving {
+    /// Set by [`Registry::drain`] on a quiet host, or by [`Registry::retire`] on any host.
     Draining,
-    /// Draining because the host reached its maximum age ([`Registry::retire`]): it shows
-    /// as `Draining`, and unlike a plain drain (set only on a quiet host) it still runs
-    /// work for a lease already booked on it.
-    Retiring,
     Releasing,
 }
 
 impl Leaving {
     pub(super) fn mark(self) -> HostMark {
         match self {
-            Self::Draining | Self::Retiring => HostMark::Draining,
+            Self::Draining => HostMark::Draining,
             Self::Releasing => HostMark::Releasing,
         }
     }
 }
 
-/// Why a mark call was refused. The first four say the host is busy, or not the host the
+/// Why a mark call was refused. The first two say the host is busy, or not the host the
 /// call is for; the rest say the call does not apply to the mark the host has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Busy {
     /// The registry does not hold the host.
     #[error("the registry does not hold the host")]
     UnknownHost,
-    /// A lease is booked on the host.
-    #[error("a lease is booked on the host")]
-    Lease,
-    /// The host lists a run, or the registry holds a live run of the host.
+    /// The host lists a run.
     #[error("the host has runs")]
     Runs,
-    /// The host is set aside for a waiting whole-node request, holds a whole-node lease
-    /// or is restoring after one.
-    #[error("the host is set aside for, or restoring from, a whole-node lease")]
-    Whole,
     /// [`Registry::release_host`] on a host that is not draining.
     #[error("the host is not draining")]
     NotDraining,
@@ -92,7 +74,7 @@ pub enum Busy {
 
 impl Registry {
     /// Marks `host` [`HostMark::Draining`] if it is quiet (see the module documentation
-    /// of the marks): from then on it takes no start. Draining a draining host is `Ok`
+    /// of the marks): from then on it takes no new job. Draining a draining host is `Ok`
     /// and changes nothing. The mark has no deadline; only [`Registry::undrain`] and
     /// [`Registry::release_host`] end it, and no placement path does.
     ///
@@ -102,32 +84,21 @@ impl Registry {
     /// the state it had.
     pub fn drain(&self, host: &HostId) -> Result<(), Busy> {
         let mut guard = self.lock();
-        let marks = self.marks_now(&guard);
-        let State {
-            book,
-            records,
-            runs,
-            ..
-        } = &mut *guard;
-        let record = records.get_mut(host).ok_or(Busy::UnknownHost)?;
+        let record = guard.records.get_mut(host).ok_or(Busy::UnknownHost)?;
         match record.leaving {
             Some(Leaving::Releasing) => return Err(Busy::Releasing),
-            Some(Leaving::Draining | Leaving::Retiring) => return Ok(()),
+            Some(Leaving::Draining) => return Ok(()),
             None => {}
         }
-        quiet(book, runs, &marks, host, record)?;
+        quiet(record)?;
         record.leaving = Some(Leaving::Draining);
         Ok(())
     }
 
     /// Marks `host` [`HostMark::Draining`] whether or not it is quiet, for a host that has
-    /// reached the scaler's `max_age`. From then on it takes no start (no lease, no
-    /// reservation, no run) and no work it has is cut: a lease already booked runs to its
-    /// own end, which the server's ceiling on the wall time bounds. The mark wins over a
-    /// `Reserved` or `Held` one in what [`Registry::hosts`](crate::Registry) shows. The
-    /// release still goes through [`Registry::release_host`], which asks the host to be
-    /// quiet. A request set aside the host loses its reservation. Retiring a retired host is
-    /// `Ok` and changes nothing; retiring a plainly draining one makes it retired.
+    /// reached the scaler's `max_age`. From then on it takes no new job, and no work it has
+    /// is cut. The release still goes through [`Registry::release_host`], which asks the host
+    /// to be quiet. Retiring a draining host is `Ok` and changes nothing.
     ///
     /// # Errors
     ///
@@ -139,19 +110,14 @@ impl Registry {
         match record.leaving {
             Some(Leaving::Releasing) => Err(Busy::Releasing),
             _ => {
-                record.leaving = Some(Leaving::Retiring);
-                // A request set aside this host would wait on a host that is leaving,
-                // and no machine is launched for a request that holds one: it is let go,
-                // so the scaler sees it unreserved. A whole-node lease already committed
-                // on the host is not a mark and runs on.
-                self.placer().whole_drop_host(host);
+                record.leaving = Some(Leaving::Draining);
                 Ok(())
             }
         }
     }
 
-    /// Clears the draining mark of `host`, so it takes starts again. A host with no mark
-    /// is left as it is.
+    /// Clears the draining mark of `host`, so it takes jobs again. A host with no mark is
+    /// left as it is.
     ///
     /// # Errors
     ///
@@ -162,7 +128,7 @@ impl Registry {
         let record = guard.records.get_mut(host).ok_or(Busy::UnknownHost)?;
         match record.leaving {
             Some(Leaving::Releasing) => Err(Busy::Releasing),
-            Some(Leaving::Draining | Leaving::Retiring) | None => {
+            Some(Leaving::Draining) | None => {
                 record.leaving = None;
                 Ok(())
             }
@@ -170,31 +136,22 @@ impl Registry {
     }
 
     /// Marks the draining `host` [`HostMark::Releasing`], only if it is still quiet: the
-    /// check and the mark are made under the lock that books hosts. After this the
-    /// registry books nothing on the host, so a release that follows cuts no work.
-    /// Releasing a releasing host is `Ok`. A busy host stays draining, and the caller
-    /// undrains it or tries again.
+    /// check and the mark are made under the registry's lock. Releasing a releasing host is
+    /// `Ok`. A busy host stays draining, and the caller undrains it or tries again.
     ///
     /// # Errors
     ///
     /// [`Busy::NotDraining`] for a host with no mark, [`Busy::UnknownHost`] for a host the
-    /// registry does not hold, and the reason it is busy otherwise.
+    /// registry does not hold, and [`Busy::Runs`] for a host that lists a run.
     pub fn release_host(&self, host: &HostId) -> Result<(), Busy> {
         let mut guard = self.lock();
-        let marks = self.marks_now(&guard);
-        let State {
-            book,
-            records,
-            runs,
-            ..
-        } = &mut *guard;
-        let record = records.get_mut(host).ok_or(Busy::UnknownHost)?;
+        let record = guard.records.get_mut(host).ok_or(Busy::UnknownHost)?;
         match record.leaving {
             None => return Err(Busy::NotDraining),
             Some(Leaving::Releasing) => return Ok(()),
-            Some(Leaving::Draining | Leaving::Retiring) => {}
+            Some(Leaving::Draining) => {}
         }
-        quiet(book, runs, &marks, host, record)?;
+        quiet(record)?;
         record.leaving = Some(Leaving::Releasing);
         Ok(())
     }
@@ -206,15 +163,12 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// [`Busy::NotReleasing`] for a host with another mark or none, and [`Busy::Lease`]
-    /// for a host with a lease booked (a lease booked on a releasing host would be lost
-    /// with it).
+    /// [`Busy::NotReleasing`] for a host with another mark or none.
     pub fn remove(&self, host: &HostId) -> Result<(), Busy> {
         let mut guard = self.lock();
         let State {
             book,
             records,
-            runs,
             ending,
             ..
         } = &mut *guard;
@@ -225,11 +179,8 @@ impl Registry {
         if record.leaving != Some(Leaving::Releasing) {
             return Err(Busy::NotReleasing);
         }
-        if !book.remove_free(host) {
-            return Err(Busy::Lease);
-        }
+        book.remove_free(host);
         records.remove(host);
-        runs.forget(host);
         ending.remove(host);
         self.tell_gone(host);
         Ok(())
@@ -241,10 +192,9 @@ impl Registry {
     /// take work, however the registry came to hold it: a scaler that restarts with a
     /// release in flight calls this for every such machine before the server admits a
     /// hello, because the marks are held in memory and a host whose release was under way
-    /// would otherwise say hello again unmarked and be booked before its machine is gone.
-    /// A lease already booked on the host is not cut; the mark only stops new starts, and
-    /// [`Registry::remove`] answers [`Busy::Lease`] until that lease is over. Marking a
-    /// releasing host again changes nothing. [`Registry::remove`] ends it.
+    /// would otherwise say hello again unmarked and be given work before its machine is
+    /// gone. Work the host already has is not cut; the mark only stops new work.
+    /// Marking a releasing host again changes nothing. [`Registry::remove`] ends it.
     pub fn mark_ending(&self, host: &HostId) {
         let mut guard = self.lock();
         guard.ending.insert(host.clone());
@@ -254,23 +204,9 @@ impl Registry {
     }
 }
 
-/// Whether `host` is quiet, or the first way it is not.
-fn quiet(
-    book: &HostBook,
-    runs: &Runs,
-    marks: &[Reservation],
-    host: &HostId,
-    record: &Record,
-) -> Result<(), Busy> {
-    if book.booked().contains_key(host) {
-        return Err(Busy::Lease);
-    }
-    let marked = marks.iter().any(|mark| mark.host == *host);
-    let whole = [marked, !record.exclusive.is_free()];
-    if whole.into_iter().any(|set| set) {
-        return Err(Busy::Whole);
-    }
-    match record.quiet(runs, host) {
+/// Whether `record`'s host is quiet, or the way it is not.
+fn quiet(record: &Record) -> Result<(), Busy> {
+    match record.quiet() {
         true => Ok(()),
         false => Err(Busy::Runs),
     }

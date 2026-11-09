@@ -1,5 +1,7 @@
 # The estimate feed: what it measures and when to turn it on
 
+**Status: the feed is gone.** `--estimate-feed` and the file key `server.estimate_feed` are still accepted, with the refusals below (beside `--usage-off`, without an agent pool), but they do nothing: the server logs `--estimate-feed is deprecated and does nothing: no lease is costed by an estimate any more (drop the flag)`. The lease table, the registry's runs, the profile lives (`lives.rs`, `history.rs`) and the tail counters that this note describes as *Built* are deleted, so no lease is costed by an estimate, backfill is given no estimated end, and no stop is counted as estimated or not. What remains is the usage store's ended row of each freed job allocation (section 2). The sections below record what the feed did when it existed and why the owner was asked to decide on it; read their *Built* statements as describing the release before the lease table was deleted.
+
 Design section 13, question 3, asks: is the estimate feed on by default, and what evidence in the tail counters would justify it? Step 10 of section 12.1 asks for that decision. This note is what the owner decides from. It changes no code, flag or default.
 
 Each statement is one of three kinds, and the note keeps them apart:
@@ -43,7 +45,7 @@ The feed reads the raw P90, not the life admission charges a lease (`lives.rs` h
 
 ### The tail counters
 
-`TailCounters` (`crates/js-registry/src/tail_counters.rs`) has these fields:
+`TailCounters` (`crates/js-registry/src/tail_counters.rs`, deleted with the lease code) had these fields:
 
 | field | counts |
 |---|---|

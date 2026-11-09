@@ -13,13 +13,13 @@ releases it, its max wall time (`ends_at`, the acquisition plus the max wall tim
 deadline passes before the host is ready. The reaper is a periodic tick, the only place time acts: it stops and frees every lease that has
 reached its end, and retries a start, a stop, an acquire or a release whose outcome was unknown, freeing a lease only when the provider is
 observed without it (5.6). So a client that disappears keeps its lease until its max wall time, never longer. The
-lease table in this repository (`js-lease`) implements this.
+lease table that implemented this in this repository (`js-lease`) is deleted; the job service of `js-lease-server` ends a job at its wall.
 
 The reaper also owns the machines. In the same tick it (a) releases an elastic host that has been idle past its pool's `idle_timeout` (5.10) (a registered `default` host is never
 released, and no minimum is kept), and a tainted elastic host with no lease (5.12), through `release`, and (b) releases a leaked instance: one that `list` returns, that carries this scheduler's tags,
 and that no pool host or acquire record accounts for after a grace of ticks. A `list` that fails reaps nothing. The reaper acts on
 nothing in its first N ticks after start, and never releases an instance whose agent is connected and holding leases: that instance is
-adopted as a pool host from its tags and its hello, or alerts. Pool scaling (5.8) also runs only in `tick`, so `js-lease` stays the one place time acts and scaling is deterministic under an injected clock.
+adopted as a pool host from its tags and its hello, or alerts. Pool scaling (5.8) also runs only in `tick`, so the server's tick stays the one place time acts and scaling is deterministic under an injected clock.
 
 ## 12.2 Usage record (always on)
 The scheduler's record is per machine lease: instance-hours (attribution, not a charge; a host shared by many leases is attributed to them

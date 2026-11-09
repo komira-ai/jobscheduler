@@ -1,23 +1,21 @@
-//! What a heartbeat is checked against, and what taint it records, shared by
-//! [`Registry::check_heartbeat`], which changes nothing, and [`Registry::heartbeat`],
-//! which records the beat. Both run the same checks in the same order and compute the
-//! taint from the same [`Plan`], so the two cannot answer differently for one state.
+//! What a heartbeat is checked against, what taint it records and how it is answered,
+//! shared by [`Registry::check_heartbeat`], which changes nothing, and
+//! [`Registry::heartbeat`], which records the beat. Both run the same checks in the same
+//! order and compute the taint by the same [`taint_after`], so the two cannot answer
+//! differently for one state.
 
 use std::ops::Deref;
 use std::sync::PoisonError;
 
 use js_agent_wire::refusal as refusal_code;
-use js_agent_wire::{Heartbeat, Outcome, Taint};
-use js_lease::Timestamp;
+use js_agent_wire::{Ack, Command, Heartbeat, HeartbeatReply, Outcome, ResultAck, Taint, limits};
 use js_provider::HostBook;
-use js_types::{HostId, LeaseId};
+use js_types::HostId;
+use js_types::Timestamp;
 
 use crate::config::PoolConfig;
 use crate::credential::Credential;
 use crate::refusal::Refusal;
-use crate::whole::ending::prepare_taint;
-use crate::whole::exclusive::Exclusive;
-use crate::whole::reasons::{Cause, HostEffect};
 
 use super::{Record, Registry};
 
@@ -29,74 +27,56 @@ pub struct HeartbeatCheck {
     pub host: HostId,
     /// The taint the beat would record on a host that has none: the taint the heartbeat
     /// reports; else, when a start it reports was refused as `host-tainted`, a taint
-    /// naming that run; else, when it refuses the whole-node lease committed to the host
-    /// for a reason that taints the host (`host-unsafe`), a `host-unsafe` taint. `None`
-    /// when the beat records none: it carries none of these, or the host is tainted
-    /// already, since the first taint is kept. After the beat,
+    /// naming that run. `None` when the beat records none: it carries none of these, or the
+    /// host is tainted already, since the first taint is kept. After the beat,
     /// [`crate::HostView::taint`] and the binding ([`Registry::bindings`]) carry this
     /// taint.
     pub taint: Option<Taint>,
 }
 
-/// What a beat does to one record's taint and whole-node state, computed from the
-/// record without changing it.
-pub(super) struct Plan<'a> {
-    /// The host's taint once the beat's own report, or a start it reports refused as
-    /// `host-tainted`, is counted: the host's first taint is kept.
-    pub(super) taint: Option<Taint>,
-    /// The whole-node state after the beat and the ready report it carries.
-    pub(super) exclusive: Exclusive,
-    /// The heartbeat's typed refusal of the lease committed to the host, when it names
-    /// that lease: the lease, the cause and the agent's detail.
-    pub(super) refused: Option<(LeaseId, Cause, &'a str)>,
+/// The taint the host holds once the beat is recorded: the host's own, else the one the
+/// beat reports, else (the first taint is kept) one that names a start the agent refused
+/// as `host-tainted`. An agent that refuses a start because its host is tainted may be
+/// unable to write its own marker (a full disk), so that refusal taints the host here as a
+/// report would. A start refused as `quota-unavailable` is the host's fault too, and
+/// taints nothing.
+pub(super) fn taint_after(record: &Record, heartbeat: &Heartbeat) -> Option<Taint> {
+    let refused_start = heartbeat.results.iter().find(|result| {
+        let by_host = result.detail.as_deref() == Some(refusal_code::HOST_TAINTED);
+        by_host && result.outcome == Outcome::FailedToStart
+    });
+    let reported = heartbeat.taint.clone().or_else(|| {
+        refused_start.map(|result| Taint {
+            reason: refusal_code::HOST_TAINTED.to_string(),
+            run_id: Some(result.run_id.clone()),
+            check: None,
+        })
+    });
+    record.taint.clone().or(reported)
 }
 
-impl<'a> Plan<'a> {
-    pub(super) fn of(record: &Record, heartbeat: &'a Heartbeat) -> Self {
-        // An agent that refuses a start because its host is tainted may be unable to write
-        // its own marker (a full disk), so that refusal taints the host here as a report
-        // would. It is the host's fault: the result is answered like any other. A start
-        // refused as `quota-unavailable` is the host's fault too, and taints nothing.
-        let refused_start = heartbeat.results.iter().find(|result| {
-            let by_host = result.detail.as_deref() == Some(refusal_code::HOST_TAINTED);
-            by_host && result.outcome == Outcome::FailedToStart
-        });
-        let reported = heartbeat.taint.clone().or_else(|| {
-            refused_start.map(|result| Taint {
-                reason: refusal_code::HOST_TAINTED.to_string(),
-                run_id: Some(result.run_id.clone()),
-                check: None,
-            })
-        });
-        let taint = record.taint.clone().or(reported);
-        let clean = taint.is_none();
-        let exclusive = record.exclusive.after_beat();
-        let exclusive = match &heartbeat.exclusive_ready {
-            Some(ready) => exclusive.report_ready(ready, clean),
-            None => exclusive,
-        };
-        // A typed refusal of the lease committed to the host ends it at once; one for any
-        // other lease says nothing about this host's preparation.
-        let refused = heartbeat.exclusive_refused.as_ref().and_then(|refused| {
-            let lease = exclusive.committed()?;
-            let named = lease.to_string() == refused.lease_id;
-            named.then_some((lease, Cause::Refused(refused.code), refused.detail.as_str()))
-        });
-        Self {
-            taint,
-            exclusive,
-            refused,
-        }
-    }
-
-    /// The taint the host holds once the beat is recorded: the refused prepare adds
-    /// the `host-unsafe` taint (as the failed prepare's ending does) when its reason
-    /// taints the host and nothing else did.
-    fn taint_after(&self) -> Option<Taint> {
-        let taints = self
-            .refused
-            .is_some_and(|(_, cause, _)| cause.row().host == HostEffect::Taint);
-        self.taint.clone().or(taints.then(prepare_taint))
+/// The reply to the heartbeat of an agent that keys its work by run, which this registry no
+/// longer queues: a cancel for each run the heartbeat lists as held, at most
+/// [`limits::MAX_COMMANDS`] of them, and an `UnknownLease` acknowledgement for each result
+/// it carries, so the agent kills what it holds and drops what it reports. The taint
+/// acknowledgement is that of the heartbeat; the rest of the reply is left empty, and the
+/// transport adds the job half.
+pub(super) fn answer(heartbeat: &Heartbeat) -> HeartbeatReply {
+    let cancels = heartbeat.held.iter().map(|run| Command::Cancel {
+        run_id: run.run_id.clone(),
+    });
+    let acks = heartbeat.results.iter().map(|result| ResultAck {
+        run_id: result.run_id.clone(),
+        ack: Ack::UnknownLease,
+    });
+    HeartbeatReply {
+        commands: cancels.take(limits::MAX_COMMANDS).collect(),
+        result_acks: acks.collect(),
+        taint_ack: heartbeat.taint.is_some(),
+        exclusive: None,
+        job_acks: Vec::new(),
+        retired_acks: Vec::new(),
+        log_grant: None,
     }
 }
 
@@ -143,7 +123,7 @@ pub(super) fn admitted<R: Deref<Target = Record>>(
 
 /// Whether the housekeeping every locking call runs first ([`super::State::forget_lost`])
 /// would forget `host` at `now`: its record is out of retention, and the host book lists
-/// it with no booking. Reads only, so a check can answer as if the housekeeping had run.
+/// it. Reads only, so a check can answer as if the housekeeping had run.
 fn forgotten(
     book: &HostBook,
     (host, record): (&HostId, &Record),
@@ -151,8 +131,7 @@ fn forgotten(
     config: &PoolConfig,
 ) -> bool {
     let silent = record.out_of_retention(now, config.grace_ms(), config.lost_retention_ms());
-    let free = !book.booked().contains_key(host);
-    [silent, book.contains(host), free].into_iter().all(|ok| ok)
+    [silent, book.contains(host)].into_iter().all(|ok| ok)
 }
 
 impl Registry {
@@ -162,20 +141,17 @@ impl Registry {
     /// taint the beat would record ([`HeartbeatCheck::taint`]).
     ///
     /// This does not mutate: the host's last-heard time, phase, epoch, session, held runs,
-    /// load, taint and whole-node state, its booking and its binding stay as they were, and
-    /// no run is touched. Unlike every other call it does not run the registry's
-    /// time-driven housekeeping (forgetting hosts lost for longer than the retention with
-    /// no booking and no work their placer holds on them, expiring waits, sweeping idle
-    /// requests) either: it answers as if that
-    /// had run, so a host the housekeeping would forget is refused as unknown, as
-    /// [`Registry::heartbeat`] refuses it after forgetting it. The rest of the
-    /// housekeeping touches no host record, so it changes no answer here.
+    /// load, taint and its binding stay as they were. Unlike every other call it does not
+    /// run the registry's time-driven housekeeping (forgetting hosts lost for longer than the
+    /// retention that their placer holds no work on) either: it answers as if that had run,
+    /// so a host the housekeeping would forget is refused as unknown, as
+    /// [`Registry::heartbeat`] refuses it after forgetting it.
     ///
     /// It lets a caller make a taint durable before the registry records it: check, commit
     /// the taint, then call [`Registry::heartbeat`]. The answer holds for the registry as
-    /// it is at the call; a call in between (a hello that replaces the session, a lease
-    /// that ends) can change what the heartbeat then does, and the heartbeat answers for
-    /// the registry as it is then.
+    /// it is at the call; a call in between (a hello that replaces the session) can change
+    /// what the heartbeat then does, and the heartbeat answers for the registry as it is
+    /// then.
     pub fn check_heartbeat(
         &self,
         heartbeat: &Heartbeat,
@@ -199,7 +175,7 @@ impl Registry {
         let record = admitted(kept, heartbeat, credential)?;
         let taint = match record.taint {
             Some(_) => None,
-            None => Plan::of(record, heartbeat).taint_after(),
+            None => taint_after(record, heartbeat),
         };
         Ok(HeartbeatCheck { host, taint })
     }
@@ -212,7 +188,7 @@ mod tests {
     use std::time::Duration;
 
     use js_agent_wire::{DEFAULT_GRACE_MS, Hello, Phase, ProtocolRange, WireShape};
-    use js_lease::ManualClock;
+    use js_types::ManualClock;
     use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
 
     use super::*;
@@ -279,13 +255,12 @@ mod tests {
         }
     }
 
-    /// The raw state a check must leave as it is: the host records, whether the host book
-    /// lists the host, and the count of dropped reservations. Read without the
-    /// housekeeping every other call runs first.
-    fn raw(registry: &Registry, host: &HostId) -> (Vec<HostId>, bool, u64) {
+    /// The raw state a check must leave as it is: the host records and whether the host book
+    /// lists the host. Read without the housekeeping every other call runs first.
+    fn raw(registry: &Registry, host: &HostId) -> (Vec<HostId>, bool) {
         let state = registry.shared.state.lock().unwrap();
         let records = state.records.keys().cloned().collect();
-        (records, state.book.contains(host), state.dropped)
+        (records, state.book.contains(host))
     }
 
     /// Asserts that a check with housekeeping due changes the raw state not at all: a host
@@ -305,7 +280,7 @@ mod tests {
         let lost = Duration::from_millis(DEFAULT_GRACE_MS + MIN_LOST_RETENTION_MS + 1);
         clock.advance(lost);
         let before = raw(&registry, &host);
-        assert_eq!(before, (vec![host.clone()], true, 0));
+        assert_eq!(before, (vec![host.clone()], true));
 
         let checked = registry.check_heartbeat(&beat, &credential).unwrap_err();
         assert_eq!(checked, Refusal::UnknownHost);
@@ -313,6 +288,6 @@ mod tests {
 
         let beaten = registry.heartbeat(&beat, &credential).unwrap_err();
         assert_eq!(beaten, Refusal::UnknownHost);
-        assert_eq!(raw(&registry, &host), (Vec::new(), false, 0));
+        assert_eq!(raw(&registry, &host), (Vec::new(), false));
     }
 }

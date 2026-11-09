@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use axum::http::Uri;
 use hyper_util::rt::TokioIo;
-use js_lease::Timestamp;
 use js_lease_server::{
     Config, HostLimits, KeyProfile, LoadIn, NoUsage, NodeRow, Observation, OwnerOnlyFiles,
     ProfileKey, RunEnd, SinkCounters, UsageFault, UsageSink,
@@ -22,6 +21,7 @@ use js_proto::v1::{
     ListProvidersRequest, UncordonHostRequest,
 };
 use js_types::HostId;
+use js_types::Timestamp;
 use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::pem::PemObject;

@@ -1,13 +1,10 @@
-//! The hosts of a pool that register themselves, the lease-level [`js_provider::Pool`]
-//! over them ([`RegisteredProvider`], the allocation port the lease table books on), and
-//! the `static` machine provider over the same host table ([`StaticCapacity`], a
-//! [`js_elastic::CapacityProvider`] that never launches).
+//! The hosts of a pool that register themselves, and the `static` machine provider over the
+//! same host table ([`StaticCapacity`], a [`js_elastic::CapacityProvider`] that never
+//! launches).
 //!
 //! An operator of a static pool lists every host in a file. Here a machine says hello
 //! (design 5.8): it names its id, the pool it wants to join and the shape it offers, and
-//! the registry admits it or says why not. The lease table then leases admitted hosts
-//! through [`RegisteredProvider`] the way it leases a static pool's, so a consumer asks
-//! for a lease and never learns which kind of host it got.
+//! the registry admits it or says why not. The job engine then places jobs on admitted hosts.
 //!
 //! This crate is the decisions only: no network, no commands to the host, no files. The
 //! transport that carries [`js_agent_wire::Hello`] and [`js_agent_wire::Heartbeat`]
@@ -24,10 +21,9 @@
 //!   ([`Binding`]); a later hello or heartbeat that does not match is refused as
 //!   host-bound. Without an instance identity the binding is at the level of the pool
 //!   credential only: all hosts of a pool share the join token, so a holder of the pool
-//!   token can say hello for an unbound-instance host id once that host is lost, and
-//!   takes over its booking. Per-host tokens or client certificates close that later
-//!   (design D18). [`Credential`] equality is on a digest; the constant-time compare of
-//!   the token belongs to the transport.
+//!   token can say hello for an unbound-instance host id once that host is lost. Per-host
+//!   tokens or client certificates close that later (design D18). [`Credential`] equality
+//!   is on a digest; the constant-time compare of the token belongs to the transport.
 //! - **Session secret.** Every admitted hello is answered with a fresh secret from the
 //!   registry's [`SessionSource`] ([`OsSessions`] in production); the registry keeps its
 //!   SHA-256 digest only. A heartbeat must carry the secret issued at that host's last
@@ -36,120 +32,55 @@
 //!   who also knows the host id and epoch, cannot keep a host live, revive it or set its
 //!   phase. A new hello replaces the secret. The one way in for a pool-token holder is a
 //!   hello, and only for an id that is not instance-bound and is lost, as above.
-//! - **Retention, and what it does not do.** A lost host with no booking is forgotten,
-//!   binding included, after [`PoolConfig::with_lost_retention`], so ids made up by a
-//!   token holder who then goes silent stop filling the pool. That is all it bounds:
-//!   silent squatters. A holder of the pool token can still lock the pool out, because
-//!   it can say hello for `max_machines` made-up ids and keep them live with the
-//!   sessions it was issued, or refill the pool every grace plus retention. The
-//!   transport must rate-limit hellos per credential, and per-host credentials (design
-//!   D18) close it; the registry has no per-credential cap. A booked host, or one its
-//!   placer holds work on ([`Placer::holds_work_on`]), is never forgotten.
-//! - **Booked shape.** A host is booked as the pool's configured shape
-//!   ([`PoolConfig::new`]), and the host's claim only has to offer at least that. A
-//!   claim bigger than the pool's shape is never leased out, so an agent cannot inflate
-//!   what a lease holds.
-//! - **Loss.** A host silent for more than the grace period is lost: it takes no new
-//!   lease, and the lease it holds stays booked and reads `Unknown` (never `Absent`)
-//!   until the host is heard again or the lease is stopped.
-//! - **Phase.** Only a serving host takes a new lease. A phase the wire does not know
+//! - **Retention, and what it does not do.** A lost host that its placer holds no work on
+//!   is forgotten, binding included, after [`PoolConfig::with_lost_retention`], so ids made
+//!   up by a token holder who then goes silent stop filling the pool. That is all it
+//!   bounds: silent squatters. A holder of the pool token can still lock the pool out,
+//!   because it can say hello for `max_machines` made-up ids and keep them live with the
+//!   sessions it was issued, or refill the pool every grace plus retention. The transport
+//!   must rate-limit hellos per credential, and per-host credentials (design D18) close
+//!   it; the registry has no per-credential cap. A host its placer holds work on
+//!   ([`Placer::holds_work_on`]) is never forgotten.
+//! - **Loss.** A host silent for more than the grace period is lost: it takes no new job.
+//! - **Phase.** Only a serving host takes a new job. A phase the wire does not know
 //!   reads as quarantined, which takes none.
-//! - **Runs.** [`Registry::queue_run`] queues a container run for the host a lease
-//!   holds, and [`Registry::heartbeat`] answers with it. A start is carried on every
-//!   reply until the host lists the run; a stop is a retained intent carried on every
-//!   reply until the host no longer lists it; a run the host lists that the registry
-//!   holds no live record of is answered with a cancel, never adopted. A result gets an
-//!   acknowledgement (accepted, duplicate, stale, unknown lease, or mismatch for a run
-//!   of another host). The limits of a run count against the booked shape until the run
-//!   leaves the host's held list, which the host does only after cleanup. When a lease is
-//!   stopped with live runs, the booking is freed at once but the host is not bookable
-//!   until a heartbeat lists none of them. Run records are in memory only: a restart
-//!   forgets them, and nothing here is persisted. A host that lists a run the registry
-//!   has no record of (after a restart, say) is told to cancel it, and the agent kills it
-//!   without a result: the work is lost, even though its lease may still hold the host.
-//!   A run is started from the lease time it has left at each reply, and not at all once
-//!   that is gone.
+//! - **Heartbeat reply.** The registry queues no run. A previous release's agent that
+//!   still keys its work by run is answered with a cancel for each run it lists as held and
+//!   an `UnknownLease` acknowledgement for each result it reports, so it kills what it holds
+//!   and drops what it reports ([`Registry::heartbeat`]). The job half of the reply is the
+//!   transport's.
 //! - **Taint.** The first taint a host reports, or that the caller sets with
 //!   [`Registry::taint_host`] (the first one stands), is kept with its binding
 //!   ([`Binding::taint`], [`Registry::bindings`]), so that a caller that persists
 //!   bindings keeps it across a restart ([`Registry::restore_tainted`]). A tainted host
-//!   is sent no start, takes no new run and no new lease (a lease already on it is left
-//!   alone until it ends), and is never forgotten for being silent; its
-//!   live runs finish and are acknowledged. The registry never clears a taint.
+//!   takes no new job and is never forgotten for being silent. The registry never clears a
+//!   taint.
 //! - **Cordon.** A host can cordon itself for a while ([`Registry::cordon`]): it takes no
-//!   new lease, no whole-node commit and no reservation's start until the cordon lapses
-//!   or [`Registry::uncordon`] ends it, and the lease it holds is untouched. The requester
-//!   sets the length, a repeat renews and never shortens, and nothing ticks: the lapse is
-//!   read when a host is placed. The cordon is kept with the binding
-//!   ([`Binding::with_cordon`]) and put back by [`Registry::restore_tainted`], so a
-//!   restart keeps it; a host that is cordoned is not forgotten for being silent.
-//! - **Whole-node commit.** A lease of a `Whole` class is committed, not granted
-//!   (design `whole-node.md` sections 5 and 8): the registry books it only on a
-//!   host that is live, serving, clean, quiet and clear of another whole-node lease or a
-//!   restore, and answers `Unknown`, so the lease stays pending. The host's heartbeat
-//!   replies name the lease in `exclusive`; the lease reads `Unknown` until the agent
-//!   reports `exclusive_ready` for exactly that lease, then `Present`, which is when a
-//!   consumer is given its token. Until then no run is queued
-//!   ([`RunRefusal::NotReady`]) or started. A new session (hello) voids the
-//!   preparation. When the lease ends the host stays unbookable until two heartbeats
-//!   have followed the stop and the last shows it serving with nothing held. A `BookAll`
-//!   lease is granted at once and none of this applies; neither does it to a static
-//!   pool, which has no agent to wait for and holds a `Whole` lease at once. The state
-//!   is in memory only.
-//! - **Placement.** Every registry is made with its placer ([`Registry::new`], the engine
-//!   of `js-sched-placer` in the lease server). A start is shown every host that could take
-//!   it and books the one the placer picks ([`Placer::pick`]); the booking, the room and
-//!   every refusal stay the registry's. A class that books part of a host is leasable: its
-//!   leases share a host that has room.
-//! - **Reservation and drain.** A whole-node request that carries an id and finds no
-//!   host to commit waits ([`Registry::queue_position`]) on the placer's wait list, and,
-//!   on each tick ([`Registry::advance`], run by every observe), the placer's pass gives it
-//!   a host in queue order ([`Placer::whole_round`], design `whole-node.md` sections 3, 4
-//!   and 6): a quiet host at once, else after `drain_after` the host that costs least to
-//!   drain, which then takes no other request's start and no new lease. The request's own
-//!   next start commits the lease on it ([`Registry::reservations`]). Nothing is stopped
-//!   for a reservation; the deadline is informational: a reservation that reaches it with
-//!   the host still busy is kept, gives nothing up and counts nothing. Cancelling the
-//!   request or letting it expire drops the reservation at once. The marks, the wait
-//!   list's order, the failed-prepare counts and the exclusions of requests that carry an
-//!   id are the placer's; they are handed out as a ledger
-//!   ([`Registry::reservation_ledger`]) for the caller to keep and are put back at a start
-//!   ([`Registry::restore_reservations`]); see the `ledger` module of the registry for what
-//!   is kept and what is dropped at a restore.
+//!   new job until the cordon lapses or [`Registry::uncordon`] ends it, and the work it
+//!   has is untouched. The requester sets the length, a repeat renews and never shortens,
+//!   and nothing ticks: the lapse is read when a host is placed. The cordon is kept with
+//!   the binding ([`Binding::with_cordon`]) and put back by [`Registry::restore_tainted`],
+//!   so a restart keeps it; a host that is cordoned is not forgotten for being silent.
 //! - **Scale-down marks.** A scaler that gives hosts back marks them in two steps,
 //!   [`Registry::drain`] and then [`Registry::release_host`] ([`HostMark::Draining`],
-//!   [`HostMark::Releasing`]). A marked host takes no start of any kind: no lease, no
-//!   whole-node commit, no reservation, no run. Each call sets its mark only if the host is
-//!   quiet (no lease, no run, nothing whole-node) and checks that under the lock that books
-//!   hosts, so a host that is releasing was quiet when marked and was never booked after;
-//!   a busy host answers [`Busy`] and keeps its mark. [`Registry::undrain`] ends a drain,
+//!   [`HostMark::Releasing`]). A marked host takes no new job. Each call sets its mark only
+//!   if the host is quiet (it lists no run) and checks that under the registry's lock; a
+//!   busy host answers [`Busy`] and keeps its mark. [`Registry::undrain`] ends a drain,
 //!   [`Registry::remove`] drops a releasing host and frees its place in the machine limit.
-//!   The marks have no deadline, are in memory only, and are not the whole-node
-//!   reservations above. [`Registry::waiting`] lists the whole-node requests that found no
-//!   host, with the host each holds a mark on; [`Registry::set_launchable`] tells the
-//!   registry that a request no listed host could serve can still wait, because a machine
-//!   could be launched for it.
-//! - **Restart.** The lease file is the record of leases and hosts re-announce
-//!   themselves, so [`RegisteredProvider::seat`] puts a booking back on an awaiting host
-//!   that the agent's next hello completes. The seat takes the binding the caller
-//!   persisted; with none, the first hello for that id binds it and takes the lease,
-//!   from any holder of the pool token. That is the restart gap a caller that persists
-//!   bindings closes.
+//!   The marks have no deadline and are in memory only.
+//! - **Whole-host jobs.** [`prepare_exclusion`] is the table of what a failed prepare does
+//!   to its host, which the job engine reads, and [`Registry::taint_after_prepare`] records
+//!   the taint of a `host-unsafe` refusal.
 
 mod capacity;
 mod config;
 mod credential;
-mod lives;
 mod load;
 mod placer;
-mod provider;
 mod refusal;
 mod registry;
-mod runs;
 mod session;
-mod tail_counters;
 mod whole;
-use js_whole::config as whole_config;
 
 pub use capacity::StaticCapacity;
 pub use config::{
@@ -161,20 +92,12 @@ pub use js_whole::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, DEFAULT_RESERVE_BACKOFF_MS,
     WholeNodeConfig,
 };
-pub use lives::ProfileLives;
 pub use load::{BadLease, node_load};
-pub use placer::{
-    LeaseTimes, MAX_WAITING_REQUESTS, MarkedTails, Placer, PrepareFailure, Presented, ProbeHost,
-    SeatedLease, Standing, Waiter, WaitingRequest, WaitingWhole, WholeHost, WholeKept, WholeRound,
-};
-pub use provider::RegisteredProvider;
+pub use placer::Placer;
 pub use refusal::Refusal;
 pub use registry::{
-    Busy, Cordoned, HeartbeatCheck, HostMark, HostState, HostView, Launchable, NotHeld, OwnHost,
-    Registry, Restored, Uncordoned, Waiting, WholeCounts,
+    Busy, Cordoned, HeartbeatCheck, HostMark, HostState, HostView, NotHeld, OwnHost, Registry,
+    Uncordoned,
 };
-pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
-pub use tail_counters::{ERROR_EDGES_MS, TailCounters};
-pub use whole::requests::{Exclusion, NotReady, RequestKey, RequestRecord, prepare_exclusion};
-pub use whole::reserve::Reservation;
+pub use whole::requests::{Exclusion, prepare_exclusion};

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use hyper::Uri;
 use js_elastic::Secret;
-use js_lease::{Clock, Timestamp};
+use js_types::{Clock, Timestamp};
 use rustls::crypto::ring::default_provider;
 use serde::Deserialize;
 use serde_json::json;
@@ -18,7 +18,7 @@ use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 use ureq::{Agent, Error as TransportError};
 
 use super::{ApiFailure, NetworkError, OAuthClient};
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 
 /// The address of Tailscale's API.
 pub const API_BASE: &str = "https://api.tailscale.com";

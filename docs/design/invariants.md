@@ -54,8 +54,6 @@ per consumer, the floor for ordinary work) never exceeded and a held lease never
 a host not bookable until restored and clean; the starvation bounds; host jobs only in a whole-node lease; reservations and the failed-prepare
 count of a request survive a restart (W13); a typed readiness refusal is acted on at once and counted toward `max_replace` (W14).
 
-Added for the service (5.16, [deployment.md](deployment.md)): a boot never issues an id from an earlier term; a second table over the
-same lease file fails at the lock; a lease held before a restart is held after it unless its host was observed absent; with the boot
-grace set, no held lease expires before the grace has passed on the table's clock, and an absent observation still drops a lease at once.
+Added for the service (5.16, [deployment.md](deployment.md)): a second server over the same state file fails at the lock. (The lease invariants that followed, on terms, held leases and the boot grace of a lease table, went with the lease table.)
 
 A kbf case: an out-of-memory kill at the top rung of a half-node lease is rerun in a whole-node lease (7.4).

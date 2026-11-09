@@ -43,15 +43,14 @@
 //!    only on a host that reported it runs host jobs, and a host such a job is placed on is
 //!    open to no job behind it in the same walk, since the host is tainted from the job's
 //!    commit on. The engine's free capacity on a host is what its
-//!    shape leaves after the job allocations and the registry's lease bookings on it, which
-//!    the engine holds side by side, so a job and a lease can never book the same room (row
-//!    25). A host port is a resource of the allocation too: a host where an allocation the
-//!    engine holds already has a port the job declares has no room for it, so one host never
-//!    holds a port twice, and the job waits as for room. Each placement is held in the
-//!    engine at once, with its ports, so a job or a lease placed while the pass commits does
-//!    not take its room or its port. A job placed on a host a whole-host job marks (backfill)
-//!    gets the wall limit of the time left in the mark's tail less the backfill margin, when
-//!    that is shorter than its own ([`super::whole_jobs::backfill_wall`]).
+//!    shape leaves after the job allocations on it. A host port is a resource of the
+//!    allocation too: a host where an allocation the engine holds already has a port the job
+//!    declares has no room for it, so one host never holds a port twice, and the job waits
+//!    as for room. Each placement is held in the engine at once, with its ports, so a job
+//!    placed while the pass commits does not take its room or its port. A job is placed on a
+//!    host a whole-host job marks (backfill) only if its wall limit ends, with the backfill
+//!    margin to spare, by the start the mark expects, so its own wall limit is the one it is
+//!    given.
 //! 5. **Commits each placement** with [`js_jobs::JobStore::place_with`]: in one transaction the
 //!    job becomes placed on the host and its allocation is written as booked, with the host
 //!    ports the job declares and the wall limit of step 4. Only after the store reports the
@@ -102,7 +101,7 @@ use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId,
 use js_types::{HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
-use super::whole_jobs::{WholeJobStep, WholeJobs, backfill_wall};
+use super::whole_jobs::{WholeJobStep, WholeJobs};
 use super::{Engine, Placed, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
@@ -145,8 +144,6 @@ pub type Decided = (JobId, HostId, Booked, Placement);
 pub struct JobHold {
     /// Its host.
     host: HostId,
-    /// What it books there.
-    booked: Booked,
     /// The host ports it holds there, sorted, each once: the job's declared ports, booked with
     /// the allocation and let go with it.
     host_ports: Vec<u16>,
@@ -201,19 +198,17 @@ impl Engine {
         here.any(|hold| hold.host_ports.iter().any(|port| ports.contains(port)))
     }
 
-    /// Takes up each of `holds`, as an engine built again takes up what the one before it
-    /// held of the job allocations.
-    pub(super) fn take_jobs(&mut self, holds: &BTreeMap<JobId, JobHold>) {
-        for (job, hold) in holds {
-            self.take_job(job, &hold.host, hold.booked, hold.host_ports.clone());
-        }
-    }
-
     /// Takes up the allocation of `job` on `host`, booking `booked` and the host ports
     /// `host_ports`, as a lease recovered after a restart is: held there (on a host that has not
     /// said hello yet, until its first heartbeat lists it or the engine's grace runs out), and
     /// never placed again by the engine alone.
-    fn take_job(&mut self, job: &JobId, host: &HostId, booked: Booked, host_ports: Vec<u16>) {
+    pub(super) fn take_job(
+        &mut self,
+        job: &JobId,
+        host: &HostId,
+        booked: Booked,
+        host_ports: Vec<u16>,
+    ) {
         let placed = Placed {
             lease: SchedLeaseId::new(0, self.taken),
             operation: self.sched.next_operation(),
@@ -223,24 +218,21 @@ impl Engine {
         let _ = self
             .sched
             .take_in(recovered_as(placed, host, key, booking(booked)));
-        self.hold_job(job, host, (booked, host_ports), placed);
+        self.hold_job(job, host, host_ports, placed);
     }
 
-    /// Records that the engine holds the allocation of `job` on `host` as `placed`, booking
-    /// `booked` (what it books of the host and its host ports), and holds its operation to
-    /// no host.
+    /// Records that the engine holds the allocation of `job` on `host` as `placed`, holding
+    /// the host ports `host_ports`, and holds its operation to no host.
     pub(super) fn hold_job(
         &mut self,
         job: &JobId,
         host: &HostId,
-        booked: (Booked, Vec<u16>),
+        host_ports: Vec<u16>,
         placed: Placed,
     ) {
-        let (booked, host_ports) = booked;
         self.sched.place_only_on(placed.operation, BTreeSet::new());
         let hold = JobHold {
             host: host.clone(),
-            booked,
             host_ports,
             placed,
         };
@@ -402,29 +394,12 @@ impl Engine {
         for ((walker, host), capable) in decided {
             match host {
                 Some(host) => {
-                    let placement = self.backfill_placement(walker.wall, &host, now);
-                    placements.push((walker.job, host, walker.booked, placement));
+                    placements.push((walker.job, host, walker.booked, Placement::default()));
                 }
                 None => waiting.push((walker.job, !capable.is_empty())),
             }
         }
         (placements, waiting)
-    }
-
-    /// What the commit of a job placed on `host` writes beside its booking: when a whole-host job
-    /// marks `host` and the mark's tail ends, the wall limit is cut to the time left in the tail
-    /// less the backfill margin ([`backfill_wall`]), if that is shorter than the job's own
-    /// `wall`; otherwise nothing.
-    fn backfill_placement(&self, wall: Duration, host: &HostId, now: FarmTime) -> Placement {
-        let marked = self.sched.whole_room(&map::worker(host)).marked_for;
-        let mark = marked.and_then(|operation| self.sched.whole_mark(operation));
-        let tail = mark.and_then(|mark| mark.tail_end);
-        let cut = tail.map(|end| backfill_wall(wall, end, now));
-        let cut = cut.filter(|cut| *cut < wall);
-        Placement {
-            wall_limit_secs: cut.map(|cut| cut.as_secs()),
-            ..Placement::default()
-        }
     }
 
     /// One placement round for `walker`, held to `room`, the hosts the walk leaves open to
@@ -478,8 +453,7 @@ impl Engine {
         match placed {
             Some((lease, host)) => {
                 let placed = Placed { lease, operation };
-                let booked = (walker.booked, walker.host_ports.clone());
-                self.hold_job(&walker.job, &host, booked, placed);
+                self.hold_job(&walker.job, &host, walker.host_ports.clone(), placed);
                 Some(host)
             }
             None => {

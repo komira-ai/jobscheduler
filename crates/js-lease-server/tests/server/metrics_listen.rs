@@ -5,8 +5,8 @@
 use std::ffi::OsString;
 use std::net::SocketAddr;
 
-use js_lease::ManualClock;
 use js_lease_server::{Config, SharedClock, StartupError, channel_ticker, start};
+use js_types::ManualClock;
 
 use crate::config_support::{PoolText, file, load, refusal, server};
 use crate::support::{Harness, Scratch, TOKEN, args_with, base_args, config, request};

@@ -1,17 +1,12 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use js_provider::{HostBook, SeatError};
-use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
-use js_types::{HostId, LeaseId, MemoryHeadroom, MemoryPercent, ProviderId, ResourceClass};
+use js_provider::HostBook;
+use js_types::{HostCapacity, MemoryHeadroom, MemoryPercent, ProviderId, ResourceClass};
 
 use crate::config::{self, ConfigError};
 
-/// A provider over a fixed list of hosts, each leased whole. See the crate docs for
-/// the placement rules, which live in [`HostBook`].
-///
-/// The pool remembers every lease id it has stopped (see [`HostBook`]), in memory only,
-/// as the pool is.
+/// A fixed list of hosts read from an operator's file. See the crate docs for what the
+/// pool keeps of them.
 #[derive(Debug)]
 pub struct StaticPool {
     id: ProviderId,
@@ -68,59 +63,27 @@ impl StaticPool {
         Self::from_toml_with_percent(id, &source, percent)
     }
 
-    /// The same pool serving `classes` instead of the shipped one. The pool leases a
-    /// whole host whatever the class says, so `start` refuses, with `UnsupportedClass`,
-    /// a class whose admission does not book a whole host (`BookAll` or `Whole`) instead
-    /// of leasing it a whole host.
+    /// The same pool serving `classes` instead of the shipped one.
     pub fn with_classes(mut self, classes: Vec<ResourceClass>) -> Self {
         self.classes = classes;
         self
     }
 
-    /// The hosts that are booked and the lease holding each, read from the pool's own
-    /// table.
-    pub fn booked(&self) -> BTreeMap<HostId, LeaseId> {
-        self.book.booked()
-    }
-
-    /// Books `host` for `lease` without a start: the way to put back a booking the
-    /// pool lost with its process, when the lease file still records it. The booking is
-    /// what a start would have made, so the lease then observes `Present` on `host`
-    /// and a stop frees it. Seating a lease on the host it already holds changes
-    /// nothing.
-    ///
-    /// The pool refuses, and books nothing, when `host` is not listed, when another
-    /// lease holds it, when `lease` holds another host, or when `lease` was stopped.
-    pub fn seat(&mut self, host: &HostId, lease: LeaseId) -> Result<(), SeatError> {
-        self.book.seat(host, lease)
-    }
-}
-
-impl Pool for StaticPool {
-    fn id(&self) -> ProviderId {
+    /// The id the pool was made with.
+    pub fn id(&self) -> ProviderId {
         self.id.clone()
     }
 
-    fn classes(&self) -> Vec<ResourceClass> {
+    /// The resource classes the pool serves: `gpu-host` unless
+    /// [`with_classes`](StaticPool::with_classes) named others.
+    pub fn classes(&self) -> Vec<ResourceClass> {
         self.classes.clone()
     }
 
-    fn start(&mut self, spec: StartSpec) -> StartAck {
-        let gate = HostBook::class_gate(&self.classes, &spec);
-        self.book.start_where(&spec, gate, &|_, _| true)
-    }
-
-    fn stop(&mut self, lease: &LeaseId) -> StopAck {
-        StopAck::Stopped {
-            read_back: self.book.stop(lease),
-        }
-    }
-
-    fn observe(&mut self, lease: &LeaseId) -> Observed {
-        self.book.read(lease)
-    }
-
-    fn capacity(&self) -> Vec<HostCapacity> {
+    /// Every host the file lists, in id order, with its shape (the memory cut to the
+    /// schedulable percent) and the memory it was listed with. The server shows these
+    /// beside the hosts that register themselves.
+    pub fn hosts(&self) -> Vec<HostCapacity> {
         self.book.hosts()
     }
 }

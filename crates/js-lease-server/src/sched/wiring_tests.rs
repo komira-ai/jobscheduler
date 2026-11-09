@@ -1,26 +1,20 @@
-//! `--placement` wired into the server, in process: the configuration read from the flags,
-//! the agent side assembled from it as the server assembles it, hosts registered with the
-//! registry, and leases started on its provider. No listener is bound and no connection is
-//! made; the host listing is the body `GET /v1/hosts` serialises.
+//! The fixtures of the placement tests: the configuration read from the flags, the agent side
+//! assembled from it as the server assembles it, and hosts registered with the registry. No
+//! listener is bound and no connection is made.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use js_agent_wire::Hello;
-use js_lease::{ManualClock, Timestamp};
-use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
-use js_registry::{Credential, RegisteredProvider};
+use js_registry::Credential;
 use js_testkit::dir::TestDir;
-use js_types::{HostId, LeaseId, Request, ResourceClass, Resources};
-use serde_json::{Value, json};
+use js_types::{ManualClock, Timestamp};
+use serde_json::json;
 
-use crate::adapt::SharedClock;
 use crate::agents::{Agents, assemble};
+use crate::clock::SharedClock;
 use crate::config::{Cli, Config};
-use crate::hosts::HostList;
 
 /// The join token of the pool.
 pub(super) const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
@@ -114,17 +108,15 @@ pub(super) fn hello(host: &str) -> Hello {
     serde_json::from_value(body).unwrap()
 }
 
-/// The agent side of a server, the provider of its registry, and the directory of their
-/// files. The fields drop in order, so the directory goes after what writes into it.
+/// The agent side of a server and the directory of its files. The fields drop in order, so
+/// the directory goes after what writes into it.
 struct Served {
-    agents: Arc<Agents>,
-    provider: RegisteredProvider,
+    _agents: Arc<Agents>,
     _dir: TestDir,
 }
 
 /// The agent side of a server over [`POOL`] with `extra` flags, assembled as the server
-/// assembles it, with hosts `h1` and `h2` registered, and the provider of its registry
-/// serving the class `share`.
+/// assembles it, with hosts `h1` and `h2` registered.
 fn serving(name: &str, extra: &[&str]) -> Served {
     serving_of(name, POOL, extra)
 }
@@ -141,10 +133,8 @@ fn serving_of(name: &str, pool: &str, extra: &[&str]) -> Served {
     for host in ["h1", "h2"] {
         agents.registry.hello(&hello(host), &credential).unwrap();
     }
-    let provider = agents.registry.provider().with_classes(vec![sharing()]);
     Served {
-        agents,
-        provider,
+        _agents: agents,
         _dir: dir,
     }
 }
@@ -170,254 +160,4 @@ fn fixtures_of_one_name_have_their_own_directories() {
         "{}",
         state.display()
     );
-}
-
-/// The class `share`, which books part of a host, as a pool's `share_class` names it.
-pub(super) fn sharing() -> ResourceClass {
-    crate::agent_pool::share_class("share").unwrap()
-}
-
-/// A lease of one core of class `share`, numbered `sequence`.
-pub(super) fn sharing_spec(sequence: u64) -> StartSpec {
-    let request = Request {
-        class: sharing().id().clone(),
-        resources: Resources::new(1000, 1 << 20, 0, None).unwrap(),
-        capabilities: BTreeMap::new(),
-        max_wall: Duration::from_secs(600),
-        labels: BTreeMap::new(),
-        validation_run: None,
-        probe_host: None,
-    };
-    StartSpec::new(LeaseId::new(1, sequence), request, &[sharing()]).unwrap()
-}
-
-pub(super) fn host_of(ack: &StartAck) -> Option<&str> {
-    match ack {
-        StartAck::Started { host } => Some(host.as_str()),
-        _ => None,
-    }
-}
-
-/// Asserts that with no `--placement` flag the scheduler places a lease of a class that
-/// books part of a host: its tie break gives lease 1 to `h2`, and lease 2 goes beside it,
-/// as with `--placement js-sched` (the test below). It catches a default that does not
-/// place with the scheduler, or refuses the class.
-#[test]
-fn with_no_flag_the_scheduler_places_a_sharing_class() {
-    let mut served = serving("default", &[]);
-    let first = served.provider.start(sharing_spec(1));
-    let second = served.provider.start(sharing_spec(2));
-    assert_eq!(
-        (host_of(&first), host_of(&second)),
-        (Some("h2"), Some("h2"))
-    );
-    let held = served.agents.registry.hosts();
-    let h2 = held.iter().find(|v| v.id.as_str() == "h2").unwrap();
-    assert_eq!(h2.leases, [LeaseId::new(1, 1), LeaseId::new(1, 2)]);
-}
-
-/// Asserts that with `--placement js-sched` a lease is placed by the scheduler and not by
-/// the registry's first-host-by-id: the scheduler breaks the tie between the two empty
-/// hosts by a hash of the lease and the host, which gives lease 1 to `h2`, where the
-/// registry would have booked `h1`. The second lease is placed beside the first on `h2`,
-/// which has room and which the lease fits more tightly than the empty `h1`. The capacity
-/// listing, the registry's view and the body of `GET /v1/hosts` read both back in booking
-/// order; a guard, it fails if a listing shows only the first lease.
-#[test]
-fn with_the_flag_the_scheduler_places_the_leases() {
-    let Served {
-        agents,
-        mut provider,
-        _dir,
-    } = serving("sched", &["--placement", "js-sched"]);
-    let first = provider.start(sharing_spec(1));
-    let second = provider.start(sharing_spec(2));
-    assert_eq!(
-        (host_of(&first), host_of(&second)),
-        (Some("h2"), Some("h2"))
-    );
-    let listed: BTreeMap<HostId, Vec<LeaseId>> = provider
-        .capacity()
-        .into_iter()
-        .map(|host| (host.host, host.leases))
-        .collect();
-    let held = vec![LeaseId::new(1, 1), LeaseId::new(1, 2)];
-    assert_eq!(listed[&HostId::new("h2").unwrap()], held);
-    assert!(listed[&HostId::new("h1").unwrap()].is_empty());
-
-    let views = agents.registry.hosts();
-    let of = |name: &str| views.iter().find(|v| v.id.as_str() == name).unwrap();
-    assert_eq!(of("h2").leases, held);
-    assert_eq!(of("h2").lease, Some(held[0]));
-    assert!(of("h1").leases.is_empty());
-    let reserved = agents.registry.reserved();
-    let list = HostList::of(provider.capacity(), views.clone(), Some(&reserved));
-    let body: Value = serde_json::to_value(&list).unwrap();
-    let hosts = body["hosts"].as_array().unwrap();
-    let entry = |name: &str| hosts.iter().find(|h| h["id"] == name).unwrap().clone();
-    assert_eq!(entry("h2")["leases"], json!(["1-1", "1-2"]));
-    assert_eq!(entry("h2")["lease"], "1-1");
-    assert!(entry("h1").get("leases").is_none());
-}
-
-/// Asserts that a host with room takes a second lease and a full one takes none: eight
-/// leases of one core land on `h2` (the lease fits the loaded host more tightly than the
-/// empty one), and the ninth, with `h2`'s eight cores booked, goes to `h1`.
-#[test]
-fn with_the_flag_a_host_with_room_takes_a_second_lease_and_a_full_one_none() {
-    let mut served = serving("full", &["--placement", "js-sched"]);
-    let hosts: Vec<Option<String>> = (1..=9)
-        .map(|n| host_of(&served.provider.start(sharing_spec(n))).map(str::to_owned))
-        .collect();
-    let named = |host: &str| Some(host.to_owned());
-    let mut expected = vec![named("h2"); 8];
-    expected.push(named("h1"));
-    assert_eq!(hosts, expected);
-}
-
-/// A lease of one core of class `share`, numbered `sequence`, a probe pinned to `host`.
-fn probe_spec(sequence: u64, host: &str) -> StartSpec {
-    probe_of(sequence, host, |_| {})
-}
-
-/// [`probe_spec`] with `change` made to its request.
-fn probe_of(sequence: u64, host: &str, change: impl FnOnce(&mut Request)) -> StartSpec {
-    let mut request = sharing_spec(sequence).request().clone();
-    request.probe_host = Some(HostId::new(host).unwrap());
-    change(&mut request);
-    StartSpec::new(LeaseId::new(1, sequence), request, &[sharing()]).unwrap()
-}
-
-fn cordon(served: &Served, host: &str) {
-    let host = HostId::new(host).unwrap();
-    served
-        .agents
-        .registry
-        .cordon(&host, Duration::from_secs(600))
-        .unwrap();
-}
-
-/// Asserts that with `--placement js-sched` a probe lands on its cordoned host while the
-/// ordinary leases of its shape started beside it go to the open host, never the cordoned
-/// one; the cordon is the same after. It catches the cordon read for a probe (it would
-/// never run), the probe placed elsewhere, and the cordon opened to ordinary work.
-#[test]
-fn with_the_flag_a_probe_lands_on_its_cordoned_host_and_ordinary_leases_do_not() {
-    let mut served = serving("probe_lands", &["--placement", "js-sched"]);
-    cordon(&served, "h2");
-    let before = served.agents.registry.hosts();
-    let probed = served.provider.start(probe_spec(1, "h2"));
-    assert_eq!(host_of(&probed), Some("h2"));
-    let ordinary: Vec<Option<String>> = (2..=4)
-        .map(|n| host_of(&served.provider.start(sharing_spec(n))).map(str::to_owned))
-        .collect();
-    assert_eq!(ordinary, vec![Some("h1".to_owned()); 3]);
-    let cordon_of = |views: &[js_registry::HostView]| {
-        let h2 = views.iter().find(|v| v.id.as_str() == "h2").unwrap();
-        h2.cordon_until
-    };
-    let after = served.agents.registry.hosts();
-    assert!(cordon_of(&after).is_some());
-    assert_eq!(cordon_of(&after), cordon_of(&before));
-}
-
-/// Asserts that with `--placement js-sched` a probe the rule refuses is answered its
-/// code and books nothing: an unknown host, an open one, a host that is not serving, one
-/// smaller than the probe, and one that does not satisfy its platform. It catches a
-/// refusal answered `no-capacity` (a client would wait for ever), and a probe placed on
-/// another host in its stead.
-#[test]
-fn with_the_flag_a_probe_the_rule_refuses_is_answered_by_name() {
-    let pool = POOL.replace("max_machines = 2", "max_machines = 3");
-    let mut served = serving_of("probe_refused", &pool, &["--placement", "js-sched"]);
-    let refused = |served: &mut Served, spec| match served.provider.start(spec) {
-        StartAck::Refused(code) => code,
-        ack => panic!("expected a refusal, got {ack:?}"),
-    };
-    assert_eq!(
-        refused(&mut served, probe_spec(1, "h9")),
-        RefusalCode::ProbeHostUnknown
-    );
-    assert_eq!(
-        refused(&mut served, probe_spec(2, "h1")),
-        RefusalCode::ProbeHostNotCordoned
-    );
-    cordon(&served, "h2");
-    let big = probe_of(3, "h2", |r| {
-        r.resources = Resources::new(16_000, 1 << 20, 0, None).unwrap();
-    });
-    assert_eq!(refused(&mut served, big), RefusalCode::ProbeHostTooSmall);
-    let mac = probe_of(4, "h2", |r| {
-        r.capabilities.insert("os".to_owned(), "macos".to_owned());
-    });
-    assert_eq!(refused(&mut served, mac), RefusalCode::ProbeHostMismatch);
-    let mut draining = hello("h3");
-    draining.phase = js_agent_wire::Phase::Draining;
-    let credential = Credential::of_token(JOIN);
-    served
-        .agents
-        .registry
-        .hello(&draining, &credential)
-        .unwrap();
-    cordon(&served, "h3");
-    assert_eq!(
-        refused(&mut served, probe_spec(5, "h3")),
-        RefusalCode::ProbeHostNotServing
-    );
-    assert!(served.provider.booked().is_empty());
-}
-
-/// Asserts that with `--placement js-sched` a probe whose cordoned host is full is
-/// `no-capacity`, not placed on the free host beside it, and placed on its host once a
-/// lease there ends. It catches a probe that oversubscribes its host, spills to another,
-/// or never gets its host back.
-#[test]
-fn with_the_flag_a_probe_on_its_full_host_waits_for_room_there() {
-    let mut served = serving("probe_full", &["--placement", "js-sched"]);
-    // Eight one-core leases fill `h2`'s eight cores (see the test above).
-    for n in 1..=8 {
-        assert_eq!(host_of(&served.provider.start(sharing_spec(n))), Some("h2"));
-    }
-    cordon(&served, "h2");
-    let full = served.provider.start(probe_spec(9, "h2"));
-    assert_eq!(full, StartAck::Refused(RefusalCode::NoCapacity));
-    let h1 = HostId::new("h1").unwrap();
-    let on = |served: &Served, host: &HostId| {
-        let listed = served.provider.capacity();
-        listed.into_iter().find(|c| c.host == *host).unwrap().leases
-    };
-    assert!(on(&served, &h1).is_empty());
-    served.provider.stop(&LeaseId::new(1, 1));
-    let placed = served.provider.start(probe_spec(10, "h2"));
-    assert_eq!(host_of(&placed), Some("h2"));
-    assert!(on(&served, &h1).is_empty());
-}
-
-/// Asserts that a probe is judged against the memory the pool books, after
-/// `memory_schedulable_percent`, not the host's whole memory: with half of 16 GiB
-/// schedulable a 12 GiB probe is too small for its host, and a 6 GiB one is placed. It
-/// catches a probe that skips the percent and books memory the pool keeps back.
-#[test]
-fn with_the_flag_a_probe_is_held_to_the_memory_percent() {
-    let pool = format!("memory_schedulable_percent = 50\n{POOL}");
-    let mut served = serving_of("probe_percent", &pool, &["--placement", "js-sched"]);
-    cordon(&served, "h1");
-    let sized = |sequence, gib: u64| {
-        probe_of(sequence, "h1", |r| {
-            r.resources = Resources::new(1000, gib << 30, 0, None).unwrap();
-        })
-    };
-    let refused = served.provider.start(sized(1, 12));
-    assert_eq!(refused, StartAck::Refused(RefusalCode::ProbeHostTooSmall));
-    assert_eq!(host_of(&served.provider.start(sized(2, 6))), Some("h1"));
-}
-
-/// Asserts that with no `--placement` flag a probe is placed on its cordoned host, as
-/// under `--placement js-sched`. It catches a default that refuses probes.
-#[test]
-fn with_no_flag_a_probe_lands_on_its_cordoned_host() {
-    let mut served = serving("probe_default", &[]);
-    cordon(&served, "h1");
-    let ack = served.provider.start(probe_spec(1, "h1"));
-    assert_eq!(host_of(&ack), Some("h1"));
 }

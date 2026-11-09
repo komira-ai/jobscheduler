@@ -1,9 +1,9 @@
 //! The in-process server (`js_lease_server::in_process`, cargo feature `in-process`): the
-//! routers answer with no listener, one `tick()` runs the pool checks, the lease table with
+//! routers answer with no listener, one `tick()` runs the pool checks, the job pass with
 //! the agent registry, and the scaler in that order on the injected clock, and the seam ends
 //! in the same job and host listings as the tick loop does after the same inputs.
 //!
-//! Time is the test's clock ([`support::clock`]) and the lease table's timings a clock of
+//! Time is the test's clock ([`support::clock`]) and the metrics' timings a clock of
 //! the test's own ([`support::Stepping`]); nothing sleeps and nothing measures elapsed time.
 
 // This file is the root of its test binary, so its modules are found by path.

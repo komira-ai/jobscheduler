@@ -75,21 +75,24 @@ js-contain = { path = "../js-contain" }
 # The `js join-token` verb's library entry point mints the join tokens the join round trip
 # starts agents with (tests/agent/join_round_trip.rs).
 js-cli = { path = "../js-cli" }
-js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
 # The STS minter the uploader's tests against the S3-compatible test store take their
 # credentials from (tests/agent/lifecycle/live_logs.rs, tests/crun_stand_in/s3_compat.rs).
 js-logmint = { path = "../js-logmint" }
 # The in-memory log store the uploader's tests put to (src/logs, tests/crun_stand_in).
 js-logstore = { path = "../js-logstore", features = ["fake"] }
-js-provider = { path = "../js-provider" }
 # The providers' verifiers of a signed identity, which the hello of `--identity-source` is
 # checked against (tests/agent/identity.rs).
 js-provider-ec2 = { path = "../js-provider-ec2" }
 js-provider-gce = { path = "../js-provider-gce" }
 js-registry = { path = "../js-registry" }
-# The production placer the quota tests give their registry (tests/agent/jobs/quota_start.rs).
+# The job tables the quota tests queue jobs on (tests/agent/jobs/quota_start.rs).
+js-jobs = { path = "../js-jobs", features = ["test-support"] }
+# The production placer the quota tests give their registry and run a pass of
+# (tests/agent/jobs/quota_start.rs).
 js-sched-placer = { path = "../js-sched-placer" }
+# The in-memory store under those job tables.
+js-state = { path = "../js-state", features = ["test-support"] }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 # The recording VM driver the VM runtime's tests drive (tests/agent/vm).
 js-vm-lease = { path = "../js-vm-lease", features = ["fake"] }

@@ -5,7 +5,7 @@
 //! the HTTP/JSON gateway (`POST /v1/jobs`). Each case runs against a server whose `--store` is
 //! a SQLite file (`--allow-sqlite-store`) and against one whose store is a Postgres database
 //! of its own. Linux only: only Linux runs the crun runtime. With either store the jobs and
-//! their usage rows are in the job store the server keeps beside its lease file; `--store`
+//! their usage rows are in the job store the server keeps beside its state file; `--store`
 //! holds the hosts, the join tokens and the scaler records. So the Postgres cases run the
 //! whole path with the server's state in Postgres, and the restart and the usage row (which
 //! `GetUsage` lists beside the usage store's) are read from that job store in both.

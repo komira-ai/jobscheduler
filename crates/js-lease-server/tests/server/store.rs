@@ -85,7 +85,6 @@ async fn sqlite_is_refused_unless_the_dev_flag_is_set() {
     assert_eq!(pools.json()["store"]["lock"], "held");
     // A tick asks the lock first; on SQLite the store holds it, and the tick runs.
     h.ticks.step().await;
-    assert_eq!(h.running.save_errors(), 0);
     h.running.shutdown().await.unwrap();
 
     let scratch = Scratch::new("store_sqlite_gate_file");
@@ -229,7 +228,7 @@ async fn a_second_process_cannot_take_the_writer_lock_on_sqlite() {
 
 /// Asserts that a store setting beside an elastic pool starts the server, whose scaler keeps
 /// its records in the store: the server holds the store, and its ticks write no records file
-/// beside the lease file. It catches a guard that still refuses an elastic pool with a store
+/// beside the state file. It catches a guard that still refuses an elastic pool with a store
 /// setting, and a scaler that still writes its file with one.
 #[tokio::test]
 async fn a_store_with_an_elastic_pool_starts_and_writes_no_records_file() {
@@ -246,7 +245,7 @@ async fn a_store_with_an_elastic_pool_starts_and_writes_no_records_file() {
 
 /// Asserts that agent registration from the flags, whose bindings and join tokens the store
 /// keeps, starts over a SQLite store with the dev flag and serves, and that a tick writes no
-/// agent state or join token file beside the lease file. It catches a guard that still
+/// agent state or join token file beside the state file. It catches a guard that still
 /// refuses agent registration with a store setting, and a store mode that writes the files.
 #[tokio::test]
 async fn agent_registration_starts_over_a_store_and_writes_no_files() {
@@ -309,9 +308,10 @@ async fn a_sqlite_store_that_cannot_be_opened_is_refused() {
     assert!(free.is_ok(), "the refused start released the lock");
 }
 
-/// Asserts that a server started without a store setting holds no store and makes no file
-/// besides those it made before the setting existed (the lease file and its lock). It
-/// catches a store or a lock file made, or the lock taken, without the setting.
+/// Asserts that a server started without a store setting, with no agent registration, holds
+/// no store and makes no file at all beside the state file's path: neither a lease file nor a
+/// lock. It catches a store or a lock file made, or the lock taken, without the setting, and
+/// a lease file made.
 #[tokio::test]
 async fn without_a_store_setting_nothing_changes() {
     let h = Harness::new("store_none").await;
@@ -325,7 +325,7 @@ async fn without_a_store_setting_nothing_changes() {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect()
     };
-    let expected = ["leases.toml", "leases.toml.lock", "pool.toml", "token"];
+    let expected = ["pool.toml", "token"];
     let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
     assert_eq!(names(&h.scratch), expected);
     let Harness {

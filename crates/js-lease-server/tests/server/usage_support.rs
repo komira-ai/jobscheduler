@@ -1,5 +1,5 @@
 //! What the usage tests share: a sink that keeps its rows in memory and records what it
-//! is asked, a key source over a map, and the messages an agent sends with a load.
+//! is asked, and the messages an agent sends with a load.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -9,8 +9,8 @@ use std::sync::mpsc;
 use std::thread::{self, ThreadId};
 
 use js_lease_server::{
-    DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, NodeRow, Observation, Observed,
-    ProfileKey, RunEnd, RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
+    DropReason, Fit, HostLimits, KeyProfile, LoadIn, NodeRow, Observation, Observed, ProfileKey,
+    RunEnd, RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 use js_types::sched::usage::MinutePoint;
 use js_types::{HostId, LeaseId};
@@ -313,39 +313,21 @@ impl UsageSink for Fake {
     }
 }
 
-/// A key source that names the key of each run id it was given.
-pub struct Keys(pub BTreeMap<String, ProfileKey>);
-
-impl KeySource for Keys {
-    fn key_of(&self, run_id: &str) -> Option<ProfileKey> {
-        self.0.get(run_id).cloned()
-    }
-}
-
-/// A server with agents on and this sink, naming runs by `keys`, over `scratch` and the
-/// arguments `args`.
+/// A server with agents on and this sink, over `scratch` and the arguments `args`.
 pub async fn start_over(
     scratch: Scratch,
     args: Vec<std::ffi::OsString>,
     fake: &Arc<Fake>,
-    keys: &[(&str, &str)],
 ) -> Harness {
-    let map = keys
-        .iter()
-        .map(|(run, key)| (run.to_string(), ProfileKey::parse(key).unwrap()))
-        .collect();
-    let config = config(args)
-        .unwrap()
-        .with_usage_sink(fake.clone())
-        .with_key_source(Arc::new(Keys(map)));
+    let config = config(args).unwrap().with_usage_sink(fake.clone());
     Harness::over(scratch, config).await
 }
 
 /// A server with agents on (no static pool) and the fake as its sink.
-pub async fn start_usage(name: &str, fake: &Arc<Fake>, keys: &[(&str, &str)]) -> Harness {
+pub async fn start_usage(name: &str, fake: &Arc<Fake>) -> Harness {
     let scratch = Scratch::new(name);
     let args = agent_args(&scratch, false);
-    start_over(scratch, args, fake, keys).await
+    start_over(scratch, args, fake).await
 }
 
 /// A load of the wire, with these minutes of lease `1-1`.

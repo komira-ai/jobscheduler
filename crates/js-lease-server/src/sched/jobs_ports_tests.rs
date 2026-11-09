@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use js_agent_wire::{NetworkCeiling, PortRange};
 use js_jobs::{Booked, DeclaredPort, JobId, JobRecord, JobSpec, JobState, NetworkPolicy};
-use js_lease::ManualClock;
 use js_registry::Credential;
 use js_sched::Prediction;
 use js_sched::ceiling::{BeyondCeiling, within_ceiling};
@@ -17,6 +16,7 @@ use js_sched_placer::engine::Placed;
 use js_sched_placer::engine::jobs::{JOB_TERM, JobStarts, NoStarts, OpenHost, job_request};
 use js_sched_placer::map;
 use js_sched_placer::place::SchedPlacer;
+use js_types::ManualClock;
 // The job's network level, named `Level` here as in `job_start.rs`: the server's own
 // `network` module is the only place that path may be named.
 use js_types::JobNetwork as Level;
@@ -411,7 +411,7 @@ fn served_with(name: &str, ports: &[u16]) -> (Arc<Agents>, ManualClock, js_testk
     let dir = scratch(name);
     let config = config_of(dir.path(), &pool(1, 8000, ""), &["--placement", "js-sched"]);
     let moving = clock();
-    let shared = crate::adapt::SharedClock::new(moving.clone());
+    let shared = crate::clock::SharedClock::new(moving.clone());
     let assembled = assemble_placed(
         config.hosts,
         config.usage,

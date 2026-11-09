@@ -14,13 +14,13 @@ use js_elastic::{
     AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, CatalogFuture, CheckResult,
     Held, HostRef, Offer, PriceUnit, ProviderError, Released, Secret, SlotName,
 };
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::network::{Contribution, LaunchCtx, NetworkError, NetworkMode};
 use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, LaunchInputs, OwnerOnlyFiles,
     Running, SharedClock, TickHandle, channel_ticker, start_with_checks,
 };
 use js_types::{ExecMode, Model, accelerator_of};
+use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
 use tokio_rustls::TlsConnector;
 

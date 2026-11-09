@@ -71,8 +71,8 @@
 //! own under the agent's scratch root, sized by [`ElasticConfig::scratch_gib`]).
 //!
 //! The provider is not wired to a scheduler. The calls block, each under a time limit, so
-//! they must not run under a lock that other work waits on. It does not implement the
-//! lease-level `Pool` trait of `js-provider`, which is called under the lease table's lock.
+//! they must not run under a lock that other work waits on. It does not implement any
+//! trait that is called under a lock.
 
 mod aborter;
 mod api;

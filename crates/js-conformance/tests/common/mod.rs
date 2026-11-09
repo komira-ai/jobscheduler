@@ -1,4 +1,4 @@
-//! What the registry and layered conformance tests share.
+//! What the real-agent tests share.
 
 use std::collections::BTreeMap;
 

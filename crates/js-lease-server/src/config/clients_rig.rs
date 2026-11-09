@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use js_testkit::dir::TestDir;
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::config::{Cli, Config};
 use crate::error::StartupError;
 use crate::kinds::{Kinds, OwnerOnlyFiles};
@@ -161,7 +161,7 @@ impl ClientsRig {
     /// The configuration the file `text` gives, its secret files read owner-only.
     pub(crate) fn config_of_file(&self, text: &str) -> Result<Config, StartupError> {
         let path = self.write("js.toml", text, 0o644);
-        let clock = SharedClock::new(js_lease::ManualClock::default());
+        let clock = SharedClock::new(js_types::ManualClock::default());
         Config::from_config_file(&path, &Kinds::standard(), &OwnerOnlyFiles, clock)
     }
 }

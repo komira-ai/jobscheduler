@@ -8,7 +8,7 @@
 //! enabled and neither cooling down nor braked. The scaler keeps the pool's cooldown and its
 //! brake and applies them itself: a cooling pool launches nothing before the answer is read,
 //! and a tripped pool still shows what it would launch. Passing them in too would hide those
-//! lines, and turn the registry's `launchable` answer for a cooling pool from yes to no. The
+//! lines, and turn the `launchable` answer for a cooling pool from yes to no. The
 //! pool's total is `max_instances`, which the caps hold, so the input sets none. No
 //! configuration key gives a provider a `purchase` order yet, so the view has none and that
 //! tie of the pick does not separate two offers.
@@ -56,7 +56,7 @@ fn with_input<R>(
 
 /// The offer pass 2 picks for a launch for `demand` in the pool of `settings`, whose
 /// provider lists `offers` and holds `machines` (records and launches that count against
-/// the caps), with nothing refused: the registry's `launchable` answer. `Err` when it picks
+/// the caps), with nothing refused: the `launchable` answer. `Err` when it picks
 /// none, with what the pool shows for it: `Unpriced` when an offer would serve but has no
 /// price, `MaxInstances` when the provider holds its share, and nothing when no offer
 /// serves at all.

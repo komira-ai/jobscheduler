@@ -248,7 +248,7 @@ impl Settings {
     }
 
     /// The mode the pool is in at `now`: `launch`, except that a pool whose `live_until` has
-    /// come is in `Plan`. The step and the registry's `Launchable` ask this and never read
+    /// come is in `Plan`. The step and [`launchable`](crate::launchable) ask this and never read
     /// `launch` alone.
     #[must_use]
     pub fn mode(&self, now: Millis) -> LaunchMode {

@@ -133,7 +133,7 @@ pub fn restart(store: Store) -> Scenario {
 /// used token for every binding to one, and the stop fell inside the burst (some tokens
 /// used, not all); after the restart every host is seated and serving. Red for a server
 /// that keeps a token's use or a binding out of the store (in memory, or in a file beside
-/// the lease file), and for one that loses either across the restart.
+/// the state file), and for one that loses either across the restart.
 pub fn hellos(store: Store) -> Scenario {
     let spec = ServerSpec::registered_pool(POOL, Shape::gpu_host(), HELLO_HOSTS);
     Scenario::new("a_hello_that_consumes_a_join_token_commits_the_binding_with_it")

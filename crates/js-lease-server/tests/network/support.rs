@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Artifact, BootPlan, BootStep, HostName, SchedulerId, Secret};
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::SharedClock;
 use js_lease_server::network::{
     API_TIMEOUT, LaunchCtx, OAuthClient, TailscaleApi, TailscaleMode, TailscaleSettings,
 };
 use js_testkit::dir::TestDir;
+use js_types::{ManualClock, Timestamp};
 
 use crate::fake::{CLIENT_SECRET, Fake};
 

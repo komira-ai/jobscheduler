@@ -23,8 +23,8 @@ use tower::Service;
 use super::submit::{self, Ctx};
 use super::writes_rig::{CEILING, Fixed};
 use super::{Bearer, JobApi, grpc};
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{BOOKED, OneClock, START_MS, tables_on};
+use crate::clock::SharedClock;
 use crate::config::{Clients, Entry, LiveClients, Role, parse_token};
 use crate::job_store::ServerJobs;
 

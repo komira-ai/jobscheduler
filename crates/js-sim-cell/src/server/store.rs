@@ -18,10 +18,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use js_lease::ManualClock;
 #[cfg(feature = "postgres")]
 use js_state::postgres::{PostgresConfig, PostgresStore, TestDatabase};
 use js_state::sqlite::{Options, SqliteStore};
+use js_types::ManualClock;
 
 use super::StoreClock;
 

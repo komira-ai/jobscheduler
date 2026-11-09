@@ -20,11 +20,11 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   durable state written before every answer, agents that re-hello, the boot grace (D34), placed work that does not depend on the service
   (D22), and a disruption budget that keeps automated drains from restarting it unseen. Not mitigated: the outage itself; an external
   store and an election are the way out (D33, 5.16).
-- **K29. The lease file is rewritten whole on every change.** The cost grows with the table. Acceptable while the table holds machine leases
+- **K29. The lease file is rewritten whole on every change.** (The lease file is deleted; the risk applies to a deployment that still runs a lease-era release.) The cost grows with the table. Acceptable while the table holds machine leases
   (hundreds to thousands of rows); the first deployment records the rewrite time as a number the operator watches, and an external store
   replaces the file when it is a noticeable share of the tick (D33).
-- **K30. The volume is the state.** A network filesystem breaks the rename, fsync and lock rules; a deleted claim deletes the leases; a
-  snapshot may hold the lease file and the binding file from different moments. Mitigated by a block volume of a local filesystem, reclaim
+- **K30. The volume is the state.** A network filesystem breaks the rename, fsync and lock rules; a deleted claim deletes the jobs; a
+  snapshot may hold the job store and the binding file from different moments. Mitigated by a block volume of a local filesystem, reclaim
   policy `Retain`, `--boot resume` (a missing file stops the pod), scheduled snapshots and a verify mode that checks the two files against
   each other before a restore is trusted (5.16, step 50).
 - **K31. The container runs as root to read root-owned secrets.** The merged server reads a secret only from a file owned by its own user,

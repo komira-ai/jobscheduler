@@ -3,7 +3,7 @@
 //! Once per tick the shell reads the job tables, the registry and the provider,
 //! calls the pure step, and runs the actions it returns in order. Everything it does to the world goes through
 //! [`Effects`], and every tick runs on the pool for blocking calls, because the calls block
-//! (a file sync, a provider's HTTP request). No lock of the registry or the lease table is
+//! (a file sync, a provider's HTTP request). No lock of the registry is
 //! held across any of them, and neither is the shell's own memory: a tick works on a copy
 //! of it and swaps the copy in when it is done, so the status page and the checks never
 //! wait for a provider's call.
@@ -39,9 +39,9 @@
 //!   write-ahead fails the removal is still attempted: when it succeeds there is nothing to
 //!   keep, and when it is refused the host stays in memory and the next tick writes it.
 //!   After a restart [`Scaler::retry_removals`] adds the file's hosts to the set, and the
-//!   first tick tries them: the new registry holds the host of a gone machine when the lease
-//!   file seated a lease on it, and nothing else removes it but the registry's own
-//!   `forget_lost` (24 hours after the host was lost, and only when no lease is booked on it).
+//!   first tick tries them: the new registry holds the host of a gone machine when it was tainted
+//!   or cordoned, and nothing else removes it but the registry's own `forget_lost` (24 hours
+//!   after the host was lost).
 //!   Two windows remain, both with a crash as the second event: between the write of the
 //!   records that call the machine gone and the write-ahead of its host (the records are
 //!   written first because no call may run before the file holds the records it depends on),
@@ -108,17 +108,17 @@ use std::time::Duration;
 use js_alert::{AlertSink, Notifier};
 use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
 use js_jobs::JobId;
-use js_lease::{Booking, Clock};
-use js_registry::{HostState, HostView, Launchable, SessionSource};
+use js_registry::{HostState, HostView, SessionSource};
 use js_scaler::{
     AcquireResult, Action, Budgets, HostFacts, Input, Millis, OfferCooldown, Phase, PoolInput,
-    Records, ReleaseResult, Settings, State, launchable, step,
+    Records, ReleaseResult, Settings, State, step,
 };
 use js_sched::failover::Refused;
+use js_types::Clock;
 use js_types::{ExecMode, HostId, RequestId};
 use tracing::{debug, info, warn};
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::metrics::Meter;
 use crate::sched::engine::jobs::open_to_jobs;
 use crate::util::blocking;
@@ -135,10 +135,9 @@ pub(crate) use live::Live;
 pub use store::RecordsFile;
 pub use unremoved::UnremovedFile;
 
-/// What the last tick saw, kept for the registry's question "could a launch serve this
-/// request".
+/// What the last tick saw, which [`Scaler::registry_complete`] and [`Scaler::last_tick`]
+/// read.
 struct Snapshot {
-    state: State,
     input: Input,
     now: Millis,
 }
@@ -309,17 +308,16 @@ impl Scaler {
     }
 
     /// The server's listeners are bound: the time before the scaler vouches for the
-    /// registry's view counts from now, and `leased`, the bookings of the lease file at start
-    /// (refused seats included), are hosts it waits to hear from first. No tick adds more
-    /// than `cap` to the time counted, when given: a leap of the wall clock is not uptime.
-    pub fn listening(&self, cap: Option<Duration>, leased: &[Booking]) {
+    /// registry's view counts from now. No tick adds more than `cap` to the time counted,
+    /// when given: a leap of the wall clock is not uptime.
+    pub fn listening(&self, cap: Option<Duration>) {
         let now = Millis::new(self.core.clock.now().millis());
         let mut gate = self
             .core
             .gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        gate.bound((now, cap), leased.iter().map(|b| b.host.to_string()));
+        gate.bound((now, cap));
     }
 
     /// Counts each launch the scaler asks a provider for, and each that fails over, with
@@ -376,20 +374,6 @@ impl Scaler {
             .unwrap_or_else(PoisonError::into_inner);
         seen.as_ref()
             .is_some_and(|seen| seen.input.registry_complete)
-    }
-
-    /// The registry's question "could a launch serve this request", answered from what the
-    /// last tick saw: yes when some pool that is live and available has an offer that fits
-    /// and the caps allow one more machine. No when no tick has run yet.
-    pub fn launchable(&self) -> Launchable {
-        let last = Arc::clone(&self.core.last);
-        Launchable::new(move |demand| {
-            let seen = last.lock().unwrap_or_else(PoisonError::into_inner);
-            let allowed = seen
-                .as_ref()
-                .map(|seen| launchable(&seen.state, &seen.input, seen.now, demand));
-            allowed.unwrap_or(false)
-        })
     }
 
     /// One tick, on the pool for blocking calls. Before it, the provider's notice stream is
@@ -528,11 +512,7 @@ impl Core {
         work.acquired = answers.acquired;
         work.released = answers.released;
         *self.memory() = work;
-        let seen = Snapshot {
-            state: next,
-            input,
-            now,
-        };
+        let seen = Snapshot { input, now };
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(seen);
     }
 

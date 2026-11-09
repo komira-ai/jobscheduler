@@ -84,8 +84,8 @@ fn a_pool_switched_to_plan_loses_its_go_and_the_next_go_begins_again() {
 
 /// Asserts that a pool past `live_until` launches nothing, to the millisecond: a
 /// millisecond short of it a request gets a machine; at it, and long after, the request
-/// gets none, the pool shows `Plan` with the launch it would make, and the registry's
-/// `Launchable` says no. It catches a go that never ends, and an end one step late.
+/// gets none, the pool shows `Plan` with the launch it would make, and `launchable`
+/// says no. It catches a go that never ends, and an end one step late.
 #[test]
 fn a_pool_past_live_until_launches_nothing() {
     for (now, launches, mode) in [

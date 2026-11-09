@@ -24,9 +24,9 @@ use std::sync::{Mutex, PoisonError};
 
 use js_agent_wire::Taint;
 use js_jobs::{HOST_JOB_TAINT, JobId};
-use js_lease::Clock;
 use js_registry::{Registry, WholeNodeConfig};
 use js_sched::ceiling::ceiling_of;
+use js_types::Clock;
 use js_types::HostId;
 use tracing::warn;
 

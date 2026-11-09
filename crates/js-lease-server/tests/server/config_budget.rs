@@ -2,9 +2,9 @@
 //! `[server]` and `[budget.<kind>]`, the refusals between them, and a go that has expired
 //! by the time the file is read. Nothing here waits.
 
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Config, Launch, OwnerOnlyFiles, SharedClock};
 use js_scaler::{Budgets, Millis, Totals};
+use js_types::{ManualClock, Timestamp};
 
 use crate::config_support::{PoolText, file, kinds, load, quote, refusal, server};
 use crate::support::Scratch;

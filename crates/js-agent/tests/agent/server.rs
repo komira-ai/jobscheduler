@@ -12,8 +12,8 @@ use js_agent::{
 };
 use js_agent_wire::ProtocolRange;
 use js_client::{Client, ClientError, Reply};
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
+use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 

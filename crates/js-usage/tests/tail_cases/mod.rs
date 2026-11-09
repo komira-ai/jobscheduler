@@ -23,7 +23,7 @@ use js_usage::{
     TailSink, TailSinkCounters, TailSinkError, TailTotals,
 };
 
-/// The edges the sinks under test count by (the registry's `ERROR_EDGES_MS`).
+/// The edges the sinks under test count by (the edges the rows of an earlier release were bucketed by).
 pub const EDGES: [i64; TAIL_BUCKETS - 1] = [-300_000, -60_000, -10_000, 0, 10_000, 60_000, 300_000];
 
 /// Edges other than [`EDGES`].

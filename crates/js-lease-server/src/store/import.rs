@@ -1,5 +1,5 @@
 //! The first start over a store: the files a server without the setting keeps beside the
-//! lease file, imported once.
+//! state file, imported once.
 //!
 //! Right after the writer lock is taken, and before anything else is read from the store, a
 //! start looks for the marker `meta/server-state-imported`. Without it, and with nothing in
@@ -15,7 +15,7 @@
 //! With the marker present the files are not read: each one still there is named once at
 //! info level and ignored. A store that already holds server state without the marker (one a
 //! build that kept host bindings in the store but had no import wrote) is not imported over:
-//! only the marker is written. The lease file is not imported; it stays where it is.
+//! only the marker is written. A lease file of an earlier release is not read.
 //!
 //! The server never deletes or changes the files. They hold what the server held at the
 //! import, and go stale from its first write after it: a rollback to a build without the
@@ -43,10 +43,10 @@ const MARKER: &[u8] = b"{\"version\":1}";
 /// already holds that state.
 const HELD: [&str; 2] = ["hosts/", "acquires/"];
 
-/// The files beside the lease file the import reads.
+/// The files beside the state file the import reads.
 const FILES: [&str; 4] = [".agents", ".joins", ".scaler", ".scaler.unremoved"];
 
-/// Imports the files beside the lease file at `state_file` into `store` once (see the module
+/// Imports the files beside the state file at `state_file` into `store` once (see the module
 /// docs). `records_needed`: a live elastic pool not at its first start, whose missing records
 /// file is refused. `refuse` makes a refusal naming the store's setting.
 ///
@@ -77,7 +77,7 @@ pub(super) fn run(
         true => files(state_file, records_needed)?,
         false => {
             info!(
-                "the store already holds server state without the import marker: the state files beside the lease file are not imported"
+                "the store already holds server state without the import marker: the files beside the state file are not imported"
             );
             Vec::new()
         }
@@ -91,7 +91,7 @@ pub(super) fn run(
     committed.map_err(|err| refuse(format!("the import of the state files failed: {err}")))?;
     info!(
         keys,
-        "the import marker is set: the state files beside the lease file are not read again; the store holds the server's state"
+        "the import marker is set: the files beside the state file are not read again; the store holds the server's state"
     );
     Ok(())
 }
@@ -155,7 +155,7 @@ mod tests {
         StartupError::new("--store", reason)
     }
 
-    /// A lease file's path in a scratch directory of the test's own.
+    /// A state file's path in a scratch directory of the test's own.
     fn state(name: &str) -> (TestDir, PathBuf) {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let path = dir.path().join("state");
@@ -319,7 +319,7 @@ mod tests {
 
     /// Asserts that the server's own import names its store setting when the store fails:
     /// a read that fails and a commit that fails are refusals of `--store`. It catches a
-    /// refusal that names no setting, or the lease file's flag.
+    /// refusal that names no setting, or the state file's flag.
     #[test]
     fn the_server_store_names_its_setting_when_the_import_fails() {
         let (_dir, path) = state("import_named");

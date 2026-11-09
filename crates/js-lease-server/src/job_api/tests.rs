@@ -15,7 +15,6 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::http::{HeaderValue, Request as HttpRequest, StatusCode, Uri, header};
 use hyper_util::rt::TokioIo;
 use js_jobs::JobStore;
-use js_lease::{Clock, ManualClock, Timestamp};
 use js_proto::FILE_DESCRIPTOR_SET;
 use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
@@ -31,6 +30,7 @@ use js_state::fake::{Fake, Flaw};
 use js_state::sqlite::{Options, SqliteStore};
 use js_testkit::dir::TestDir;
 use js_types::HostId;
+use js_types::{Clock, ManualClock, Timestamp};
 use prost_types::FileDescriptorSet;
 use tokio::io::DuplexStream;
 use tonic::client::Grpc;
@@ -47,9 +47,9 @@ use super::{
     Bearer, JobApi, UNIMPLEMENTED, cancel, fleet, gateway, gateway_over, grpc, grpc_over, read,
     submit,
 };
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::config::{Clients, LiveClients, parse_token};
-use crate::hosts::{HostList, LeasesOn};
+use crate::hosts::HostList;
 use crate::job_store::ServerJobs;
 use crate::status::Status as PoolStatus;
 
@@ -425,8 +425,8 @@ struct NoHosts;
 
 #[tonic::async_trait]
 impl fleet::Hosts for NoHosts {
-    async fn hosts(&self) -> (HostList, LeasesOn) {
-        (HostList::of(Vec::new(), Vec::new(), None), LeasesOn::new())
+    async fn hosts(&self) -> HostList {
+        HostList::of(Vec::new(), Vec::new())
     }
 
     async fn cordon(&self, _: &HostId, _: Duration) -> Result<bool, fleet::Refused> {

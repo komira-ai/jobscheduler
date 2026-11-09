@@ -18,7 +18,6 @@ use js_jobs::{
     AllocationRecord, Booked, Constraints, JobId, JobRecord, JobSpec, JobStore, JobStoreError,
     Needs, NetworkPolicy, NewJob, RandomIds,
 };
-use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, JobTables, Scaler, SharedClock};
 use js_registry::{Busy, HostMark, HostState, HostView, SequentialSessions, SessionSource};
 use js_scaler::{
@@ -29,6 +28,7 @@ use js_types::{
     AcceleratorNeed, ExecMode, HostId, ImageDigestRef, JobNetwork, Labels, MemoryHeadroom, Model,
     Requirements, Resources, Shape, accelerator_of,
 };
+use js_types::{ManualClock, Timestamp};
 
 /// The wall time every test clock starts at.
 pub const START: u64 = 1_000_000_000_000;
@@ -177,7 +177,7 @@ impl Effects for Handle {
                 world.hosts.retain(|view| view.id.as_str() != host);
                 Ok(())
             }
-            false => Err(Busy::Lease),
+            false => Err(Busy::Runs),
         }
     }
 

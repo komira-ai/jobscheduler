@@ -5,8 +5,8 @@
 mod support;
 
 use js_agent_wire::{Heartbeat, RefusalReason, Taint};
-use js_lease::Timestamp;
 use js_registry::{Exclusion, prepare_exclusion};
+use js_types::Timestamp;
 use support::*;
 
 /// The taint the registry holds for host `name`.

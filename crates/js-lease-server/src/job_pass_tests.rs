@@ -25,7 +25,7 @@ use super::{Passed, run, store_time};
 use crate::agent_api::job_rig::{
     FakeAgent, Rig, clocked_rig, clocked_rig_keeping, spec, starts, stops,
 };
-use crate::api::whole_view_tests::{Lines, process_sink};
+use crate::api::rig::{Lines, process_sink};
 use crate::config::FeedRetention;
 use crate::job_api::JobApi;
 use crate::job_api::read::{Ctx, Silence};
@@ -111,7 +111,7 @@ fn needing(cpu_millis: u64) -> JobSpec {
 
 /// The milliseconds of the rig's clock now.
 fn now_ms(rig: &Rig) -> u64 {
-    js_lease::Clock::now(&rig.shared).millis()
+    js_types::Clock::now(&rig.shared).millis()
 }
 
 /// A provider whose reading of each host the test sets: present unless set.

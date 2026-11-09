@@ -21,7 +21,6 @@ use js_jobs::{
     Booked, Constraints, EndReason, JobEnd, JobId, JobSpec, JobState, JobStore, Needs,
     NetworkPolicy, NewJob, Output, ResourceUsage,
 };
-use js_lease::Timestamp;
 use js_proto::v1::{
     self, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
     GetResultResponse, ListJobsRequest, ListJobsResponse,
@@ -31,6 +30,7 @@ use js_state::recording::RecordingStore;
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{ManualClock, Store, StoreTime};
 use js_testkit::dir::TestDir;
+use js_types::Timestamp;
 use js_types::{HostId, ImageDigestRef, Labels, Resources};
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use serde_json::{Value, json};
@@ -45,7 +45,7 @@ use tower::ServiceExt;
 
 use super::tests::{SERVICE, TOKEN, connect, scratch, token};
 use super::{JobApi, gateway, grpc, read};
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::job_store::ServerJobs;
 
 /// The time the clocks start at, in milliseconds since the Unix epoch.
@@ -57,7 +57,7 @@ pub(super) const BIG: u64 = (1 << 53) + 1;
 /// The service's view of the store's clock: the same reading, in milliseconds.
 struct ServiceClock(Arc<ManualClock>);
 
-impl js_lease::Clock for ServiceClock {
+impl js_types::Clock for ServiceClock {
     fn now(&self) -> Timestamp {
         let since = js_state::Clock::now(&*self.0).as_duration();
         Timestamp::from_millis(u64::try_from(since.as_millis()).expect("the time fits"))

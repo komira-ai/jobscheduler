@@ -14,13 +14,12 @@
 //! - **Observe** answers [`Observed::Present`] while the host is in the table and live,
 //!   [`Observed::Unknown`] while it is in the table and silent (lost, or awaiting its
 //!   first hello since a restart), and [`Observed::Absent`] only once the table no longer
-//!   holds it: silence never frees (design 5.6). A host that holds a lease is never
-//!   forgotten, so a booked host never observes `Absent`.
+//!   holds it: silence never frees (design 5.6). A host its placer holds work on is never
+//!   forgotten, so such a host never observes `Absent`.
 //!
 //! It is a handle over the [`Registry`] it was made from: each call takes the registry's
 //! one lock once, like every other registry call, reads the registry's own clock and
-//! none of its own, and blocks on nothing else. It is not the lease-level
-//! [`crate::RegisteredProvider`], which books leases on the same hosts.
+//! none of its own, and blocks on nothing else.
 
 use std::collections::BTreeSet;
 
@@ -93,7 +92,7 @@ impl CapacityProvider for StaticCapacity {
     /// The operating systems, architectures (in the one spelling `normalise_arch` gives)
     /// and GPU classes the hosts in the table reported at their last hello. A host that
     /// has not said hello since a restart has reported nothing and adds nothing; a GPU
-    /// class that is not in the agent's spelling is left out. Whole-host leases and host
+    /// class that is not in the agent's spelling is left out. Whole-host jobs and host
     /// ports are offered when any host has reported, since every host runs `js-agent`.
     /// With no host that has reported, it is empty.
     fn capabilities(&self) -> ProviderCaps {

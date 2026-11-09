@@ -3,7 +3,7 @@
 
 use std::io::Write;
 
-use js_lease::SystemClock;
+use js_system_clock::SystemClock;
 use tokio::runtime::Builder;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;

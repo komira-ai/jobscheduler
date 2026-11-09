@@ -102,7 +102,7 @@ impl World {
     }
 
     /// Writes the server's view of `host`: the cordon in a file of its own, there only while
-    /// there is one, and the rest in the lease file. One file a cordon has its own, so that a
+    /// there is one, and the rest in the state file. One file a cordon has its own, so that a
     /// cordon placed or lifted is a file that appears or goes.
     fn write_host(&self, host: &HostReading) -> io::Result<()> {
         let bare = HostReading {

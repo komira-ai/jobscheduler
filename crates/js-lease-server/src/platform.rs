@@ -3,7 +3,7 @@
 //!
 //! For `default` the job engine books each job's allocation on a host, so the platform
 //! answers only the three required calls of [`ContainerPlatform`]; the five calls of a job's
-//! life keep their default answer. The server still runs the fixed order of `layered.rs`,
+//! life keep their default answer. The server still runs a fixed order,
 //! registered hosts and then the elastic provider; this type is what that order becomes.
 
 use std::sync::Arc;
@@ -14,9 +14,9 @@ use js_registry::Registry;
 use js_sched::admission_ever::{Admission, PoolLimits, can_ever_serve};
 use js_types::Requirements;
 
-use crate::adapt::SharedClock;
 use crate::admit::{self, Launching};
 use crate::catalogs::{Cached, Catalogs};
+use crate::clock::SharedClock;
 
 /// The `default` platform: its machine providers, first to last, the host table of its
 /// `static` provider, whose hosts register themselves, and the cache of its launching

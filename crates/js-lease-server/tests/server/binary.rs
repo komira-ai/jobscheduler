@@ -74,8 +74,7 @@ async fn the_program_serves_and_stops_on_sigterm() {
     kill_process(pid, Signal::TERM).unwrap();
     let status = child.0.wait().unwrap();
     assert!(status.success(), "{status:?}");
-    let saved = std::fs::read_to_string(scratch.state()).unwrap();
-    assert!(saved.contains("lease_count = 0"));
+    assert!(!scratch.state().exists(), "the program made no lease file");
 }
 
 /// Asserts that the real program exits 2 and names the flag when a start is refused.

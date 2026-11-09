@@ -1124,7 +1124,7 @@ dependencies = [
  "js-cli",
  "js-client",
  "js-contain",
- "js-lease",
+ "js-jobs",
  "js-lease-server",
  "js-logmint",
  "js-logstore",
@@ -1132,11 +1132,11 @@ dependencies = [
  "js-mac-provision",
  "js-mac-session",
  "js-oci",
- "js-provider",
  "js-provider-ec2",
  "js-provider-gce",
  "js-registry",
  "js-sched-placer",
+ "js-state",
  "js-testkit",
  "js-treestore",
  "js-types",
@@ -1265,11 +1265,11 @@ dependencies = [
  "hyper",
  "js-client",
  "js-conformance",
- "js-lease",
  "js-lease-server",
  "js-pool-static",
  "js-proto",
  "js-testkit",
+ "js-types",
  "prost",
  "prost-reflect",
  "rcgen",
@@ -1312,12 +1312,7 @@ dependencies = [
  "js-agent",
  "js-agent-wire",
  "js-caps",
- "js-lease",
- "js-lease-server",
- "js-pool-static",
  "js-proto",
- "js-provider",
- "js-provider-fake",
  "js-registry",
  "js-sched",
  "js-sched-placer",
@@ -1430,23 +1425,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "js-lease"
-version = "0.1.0"
-dependencies = [
- "js-pool-static",
- "js-provider",
- "js-provider-fake",
- "js-system-clock",
- "js-testkit",
- "js-types",
- "serde",
- "thiserror",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "js-lease-server"
 version = "0.1.0"
 dependencies = [
@@ -1465,7 +1443,6 @@ dependencies = [
  "js-elastic",
  "js-elastic-fake",
  "js-jobs",
- "js-lease",
  "js-lease-server",
  "js-logmint",
  "js-logstore",
@@ -1474,7 +1451,6 @@ dependencies = [
  "js-proto",
  "js-provider",
  "js-provider-ec2",
- "js-provider-fake",
  "js-provider-gce",
  "js-provider-lambdalabs",
  "js-registry",
@@ -1482,6 +1458,7 @@ dependencies = [
  "js-sched",
  "js-sched-placer",
  "js-state",
+ "js-system-clock",
  "js-testkit",
  "js-types",
  "js-update-hook",
@@ -1727,14 +1704,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "js-provider-fake"
-version = "0.1.0"
-dependencies = [
- "js-provider",
- "js-types",
-]
-
-[[package]]
 name = "js-provider-gce"
 version = "0.1.0"
 dependencies = [
@@ -1786,16 +1755,10 @@ dependencies = [
  "js-agent-wire",
  "js-caps",
  "js-elastic",
- "js-lease",
- "js-pool-static",
  "js-provider",
  "js-sched",
  "js-sched-placer",
- "js-sim",
- "js-state",
- "js-testkit",
  "js-types",
- "js-usage",
  "js-whole",
  "serde_json",
  "sha2 0.11.1",
@@ -1869,7 +1832,6 @@ dependencies = [
  "js-elastic",
  "js-elastic-fake",
  "js-jobs",
- "js-lease",
  "js-lease-server",
  "js-registry",
  "js-sim",

@@ -1,5 +1,10 @@
 # The merged code and what it becomes
 
+> Status: a plan of the extraction steps, kept as history. The `Pool` port, `BoxedPool`, `FakePool`
+> (`js-provider-fake`), `RegisteredProvider` and the lease table it names are deleted; `HostBook`,
+> `Observed`, `ChooseOver`, `SeatError` and `StartAck` stay in `js-provider`, and `js-pool-static`
+> stays as the static pool file without a `Pool` impl (D36).
+
 Moved from design.md section 5.9. Section numbers refer to design.md.
 
 | Merged item | Becomes | Follow-up |

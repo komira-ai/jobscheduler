@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
+
 use js_agent_wire::{
     DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, PROTOCOL_MAJOR, ValidationError, Welcome,
+    limits,
 };
+use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
 use js_provider::HostBook;
 use js_types::{
-    ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS, ACCEL_MEMORY_GIB_KEY,
-    ACCEL_MODEL_KEY, Admission, Capabilities, ExecMode, HostId, MemoryHeadroom, MemoryPercent,
-    Model, ProviderId, ResourceClass, Resources, Shape,
+    ACCEL_KEYS, Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId,
+    ResourceClass, Shape,
 };
 
 use crate::WholeNodeConfig;
@@ -76,12 +79,12 @@ pub struct PoolConfig {
 }
 
 impl PoolConfig {
-    /// A pool called `name` that leases `class`, holds at most `max_machines` hosts, and
+    /// A pool called `name` of hosts of `class`, holds at most `max_machines` hosts, and
     /// books every host as `shape`.
     ///
     /// `shape` is both the floor a host's claim must meet to join and, cut to the pool's
     /// [`memory percent`](PoolConfig::with_memory_percent) (all of it unless set), the
-    /// shape the pool books: a lease is placed and sized against the booked shape, never
+    /// shape the pool books: a job is placed and sized against the booked shape, never
     /// against what a host says about itself, so a host that claims more than the pool
     /// promises gains nothing. Its `disk_bytes` is both floor and booking, uncut. Timing
     /// starts at the wire defaults, and a lost host that holds no
@@ -189,9 +192,9 @@ impl PoolConfig {
     }
 
     /// The same pool booking `percent` of the memory of its shape, rounded down, for
-    /// every host: a lease, a whole-node lease, a run and a reservation are all placed and
-    /// sized against the cut memory. A host's hello is still held to the whole shape, so a
-    /// host must really have the memory the pool lists; the pool books less of it.
+    /// every host: a job is placed and sized against the cut memory. A host's hello is still
+    /// held to the whole shape, so a host must really have the memory the pool lists; the pool
+    /// books less of it.
     ///
     /// The cut is made here and nowhere else, on the memory the operator configured, and
     /// never on what a host claims.
@@ -204,11 +207,9 @@ impl PoolConfig {
 
     /// The same pool, whose book takes the whole memory of `[shape]` though the pool keeps
     /// its memory percent: for a placer that holds every host to the percent itself (the
-    /// engine the lease server places with). The percent still decides what fits
-    /// the pool, so a request above the share is refused `NoFit`, and the host listing
-    /// ([`crate::Registry::hosts`]) still shows each host's shape cut to it beside the
-    /// memory headroom ([`PoolConfig::memory_headroom`]); only the room the book checks,
-    /// and the capacity it lists to the lease table, are the whole memory.
+    /// engine the server places with). The host listing ([`crate::Registry::hosts`]) still
+    /// shows each host's shape cut to the percent beside the memory headroom
+    /// ([`PoolConfig::memory_headroom`]); only the shape the book lists is the whole memory.
     #[must_use]
     pub fn booking_whole_memory(mut self) -> Self {
         self.whole_memory = true;
@@ -220,13 +221,11 @@ impl PoolConfig {
     /// is: each host is placed on the pool's booked shape with the capabilities its last
     /// hello reported added, `arch` included, where the pool's shape does not name them
     /// (the pool's value stays where both name a key), and with the hello's
-    /// `accelerator.*` facts as for any pool. A request then fits the pool when the pool's
-    /// shape fits its resources and the capabilities the pool's shape names
-    /// (`accelerator.*` included); the capabilities it does not name are the hosts' to
-    /// meet. For a pool whose hosts are launched from offers that may differ, such as in
-    /// `arch` (an elastic pool of the lease server). The numbers booked are still the
-    /// pool's. Without it a host is placed on the pool's shape with only the hello's
-    /// `accelerator.*` facts, and a request must fit the pool's shape whole.
+    /// `accelerator.*` facts as for any pool. A job's capabilities the pool's shape does
+    /// not name are then the hosts' to meet, by what their hellos reported. For a pool whose hosts are launched from offers that may differ, such as in
+    /// `arch` (an elastic pool of the server). The numbers booked are still the pool's.
+    /// Without it a host is placed on the pool's shape with only the hello's
+    /// `accelerator.*` facts.
     #[must_use]
     pub fn placing_by_hello(mut self) -> Self {
         self.by_hello = true;
@@ -304,10 +303,9 @@ impl PoolConfig {
         Ok(self)
     }
 
-    /// The same pool, whose hosts also take leases of `class`, a class that books part of a
-    /// host (`Book`), beside its own class: leases of `class` share a host that has room,
-    /// placed by the registry's placer ([`crate::Placer::pick`]). Its provider
-    /// ([`crate::Registry::provider`]) serves both classes.
+    /// The same pool, which also names `class`, a class that books part of a host (`Book`),
+    /// beside its own class. The registry only keeps the class for the pool's configuration
+    /// ([`PoolConfig::share_class`]); it books no lease with it.
     ///
     /// # Errors
     /// [`ConfigError::ShareClass`] when `class` books whole hosts or has the pool's own id.
@@ -342,24 +340,13 @@ impl PoolConfig {
         &self.name
     }
 
-    pub(crate) fn class(&self) -> &ResourceClass {
-        &self.class
-    }
-
     /// The shape the pool books for every host of it.
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
 
-    /// The shape every host of the pool is booked as: [`Self::shape`], with its memory cut
-    /// to the pool's memory percent (not with [`Self::booking_whole_memory`]) and the pool's
-    /// execution mode when it declares one.
-    pub(crate) fn booked(&self) -> &Shape {
-        &self.booked
-    }
-
-    /// The shape a request must fit to fit the pool: [`Self::booked`], with its memory cut
-    /// to the percent even with [`Self::booking_whole_memory`].
+    /// The shape a request must fit to fit the pool: the shape every host is booked as, with
+    /// its memory cut to the percent even with [`Self::booking_whole_memory`].
     pub(crate) fn fit(&self) -> &Shape {
         &self.fit
     }
@@ -370,52 +357,16 @@ impl PoolConfig {
     }
 
     /// Lists `host` in `book` for a hello whose accepted `claim` is known. The host books
-    /// as [`Self::booked`] does (the pool's numbers are the booking limits), but its
+    /// as the pool does (the pool's numbers are the booking limits), but its
     /// `accelerator.*` capabilities are those of the claim, which a hello validated, and
     /// not the pool floor's, so placement sees the host's real family, variant facts and
     /// measured memory; in a pool that places by hello ([`Self::placing_by_hello`]) the
     /// claim's other capabilities the pool's shape does not name are added too. A host
-    /// already listed and free is listed again with that shape. One holding a lease keeps
-    /// the shape it was booked with, except in a pool that places by hello, where it takes
-    /// the new shape with its leases (the numbers are the pool's either way): a host put
-    /// back with a lease after a restart, listed with the pool's shape alone, is then
-    /// placed by its hello as soon as it says one.
+    /// already listed is listed again with that shape.
     pub(crate) fn list_claimed(&self, book: &mut HostBook, host: HostId, claim: Option<&Shape>) {
         let shape = placement_shape(&self.booked, claim, self.by_hello);
         book.remove_free(&host);
-        if self.by_hello {
-            book.reshape(&host, shape.clone());
-        }
         book.insert_host_with(host, shape, self.memory_headroom());
-    }
-
-    /// Whether `request` fits the pool: [`Self::fit`] fits its resources and capabilities.
-    /// In a pool that places by hello ([`Self::placing_by_hello`]) only the capabilities
-    /// the fit shape names count, with the `accelerator.*` ones: the others are the hosts'
-    /// to meet, by what their hellos reported.
-    ///
-    /// Every hello is held to the fit shape, so its accelerator is a floor, not each host's:
-    /// unless it pins a variant, a host may be any variant of its family, with its own
-    /// memory per device, form factor and interconnect, and is placed by those
-    /// (`placement_shape`). Such a floor answers only for the vendor, the family and the
-    /// count, so a request it fits on those ([`floor_terms`]) fits the pool, and the hosts
-    /// answer for the rest. A floor that pins a variant answers for all of it.
-    pub(crate) fn fits(&self, request: &js_types::Request) -> bool {
-        let fit = &self.fit;
-        let named = |key: &String| {
-            ACCEL_KEYS.contains(&key.as_str()) || fit.capabilities().contains_key(key)
-        };
-        let mut wanted = request.capabilities.clone();
-        if self.by_hello {
-            wanted.retain(|key, _| named(key));
-        }
-        let pins = fit
-            .accelerator()
-            .is_some_and(|floor| floor.variant.is_some());
-        let whole = fit.satisfies(&request.resources, &wanted);
-        let terms = floor_terms(&request.resources, &wanted).filter(|_| !pins);
-        let vouched = terms.is_some_and(|(resources, wanted)| fit.satisfies(&resources, &wanted));
-        [whole, vouched].into_iter().any(|fits| fits)
     }
 
     pub(crate) fn max_machines(&self) -> usize {
@@ -434,43 +385,6 @@ impl PoolConfig {
         self.lost_retention_ms
     }
 }
-/// The accelerator keys whose facts only a host states: a floor that pins no variant
-/// cannot answer for them.
-const HOST_STATED: [&str; 3] = [
-    ACCEL_MEMORY_GIB_KEY,
-    ACCEL_FORM_FACTOR_KEY,
-    ACCEL_INTERCONNECT_KEY,
-];
-
-/// What of a request for `resources` and `capabilities` a floor that pins no accelerator
-/// variant answers for: its GPU class and `accelerator.model` read as their family (a name
-/// that is not a model name as written), and none of [`HOST_STATED`]. `None` when the
-/// resources cannot be built again, which a valid request never is.
-fn floor_terms(
-    resources: &Resources,
-    capabilities: &Capabilities,
-) -> Option<(Resources, Capabilities)> {
-    let family = |text: &str| {
-        let parsed = Model::parse(text).map(|model| model.canonical().model.to_string());
-        parsed.unwrap_or(text.to_owned())
-    };
-    let class = resources.gpu_class().map(family);
-    let (cpu, memory, gpus) = (
-        resources.cpu_millis(),
-        resources.memory_bytes(),
-        resources.gpus(),
-    );
-    let disk = resources.disk_bytes();
-    let resources = Resources::new(cpu, memory, gpus, class)
-        .ok()?
-        .with_disk_bytes(disk);
-    let mut capabilities = capabilities.clone();
-    capabilities.retain(|key, _| !HOST_STATED.contains(&key.as_str()));
-    let model = capabilities.get_mut(ACCEL_MODEL_KEY);
-    model.into_iter().for_each(|model| *model = family(model));
-    Some((resources, capabilities))
-}
-
 /// The shape a registered host is placed on: the resources and capabilities the pool books
 /// (`booked`), with its `accelerator.*` capabilities replaced by those of the host's
 /// validated claim, so its real family, variant facts and measured memory are matched while
@@ -491,4 +405,46 @@ pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>, by_hello: b
         .collect();
     capabilities.extend(added);
     Shape::new(booked.resources().clone(), capabilities)
+}
+
+/// The quota in bytes a host enforces on a run that sets no `disk_bytes`: its
+/// `scratch-default-gib` whole GiB, when it reports `scratch-quota` as `project`. `None`
+/// when it does not, or when the default is absent, not a whole number, zero, or too
+/// large to count in bytes (above the wire's `MAX_DISK_BYTES`): a host that says it bounds disk and not by how much is
+/// treated as one that does not, so the server never books a guess.
+pub(crate) fn quota_default(capabilities: &BTreeMap<String, String>) -> Option<u64> {
+    let quota = capabilities
+        .get(SCRATCH_QUOTA)
+        .is_some_and(|value| value == SCRATCH_QUOTA_PROJECT);
+    let gib = capabilities
+        .get(SCRATCH_DEFAULT_GIB)
+        .and_then(|value| value.parse::<u64>().ok());
+    let bytes = gib.and_then(|gib| gib.checked_mul(1 << 30));
+    let counts = |bytes: &u64| (1..=limits::MAX_DISK_BYTES).contains(bytes);
+    bytes.filter(|bytes| [quota, counts(bytes)].into_iter().all(|ok| ok))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts the bytes of a default: the largest whole-GiB default within the wire's
+    /// `MAX_DISK_BYTES` counts and the next GiB does not, and the quota capability is
+    /// needed. It catches a default accepted above the wire maximum, which a sum over
+    /// 2^18 runs could overflow.
+    #[test]
+    fn the_default_is_bounded_by_the_wire_maximum() {
+        let caps = |quota: &str, gib: &str| {
+            BTreeMap::from([
+                (SCRATCH_QUOTA.to_owned(), quota.to_owned()),
+                (SCRATCH_DEFAULT_GIB.to_owned(), gib.to_owned()),
+            ])
+        };
+        let top = limits::MAX_DISK_BYTES >> 30;
+        assert_eq!(top, 65_535);
+        assert_eq!(quota_default(&caps("project", "65535")), Some(top << 30));
+        assert_eq!(quota_default(&caps("project", "65536")), None);
+        assert_eq!(quota_default(&caps("project", "1")), Some(1 << 30));
+        assert_eq!(quota_default(&caps("no", "1")), None);
+    }
 }

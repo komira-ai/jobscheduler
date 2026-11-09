@@ -1,45 +1,37 @@
 //! The server's side of the usage hub: what turns a heartbeat into the plain values
 //! [`js_usage::UsageHub`] reads, and runs it where the server needs it to run.
 //!
-//! The hub itself (what is kept between heartbeats, whose minutes, the grace of a clean
-//! run, the schedule of flushes and prunes) is `js-usage`'s, and its rules are written
-//! there. [`Usage`] is the part that knows the wire:
+//! The hub itself (what is kept between heartbeats, whose minutes, the schedule of flushes
+//! and prunes) is `js-usage`'s, and its rules are written there. [`Usage`] is the part that
+//! knows the wire:
 //!
 //! * the heartbeat's load is checked (`NodeLoad::vet`) and mapped to plain values, and the
 //!   records that did not map are counted;
-//! * of the results a heartbeat carried, those the registry acknowledged `ACCEPTED` are
-//!   handed on, with the lease id parsed and the outcome reduced to clean or not;
-//! * a panic in the sink or the key source is caught and counted as a fault, so it never
-//!   costs the heartbeat its reply;
+//! * the results a heartbeat carried are not handed on: no lease is held, so none is
+//!   accepted, and the hub learns nothing from a run;
+//! * a panic in the sink is caught and counted as a fault, so it never costs the heartbeat
+//!   its reply;
 //! * the hub blocks on the sink, so `tick` and `finish` run it on the pool for blocking
-//!   calls, and what a flush found is logged here (`node minute`, dropped readings);
-//! * the hub is the registry's log of ended allocations ([`Usage::log`]): the registry
-//!   hands it a record with its own lock released and the hub only queues it, so a stop
-//!   never waits on the store; the tick writes the queue, and a run of failed writes is
-//!   logged once, when it begins, and again when a write succeeds after it.
+//!   calls, and what a flush found is logged here (`node minute`, dropped readings).
 //!
 //! The registry's lock is not held when these methods run.
 
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
-use js_agent_wire::{Ack, Heartbeat, NodeLoad, Outcome, ResultAck};
-use js_lease::Clock;
-use js_types::{HostId, LeaseId};
+use js_agent_wire::{Heartbeat, NodeLoad};
+use js_types::Clock;
+use js_types::HostId;
 pub use js_usage::UsageCounters;
-use js_usage::{
-    AcceptedResult, AllocationLog, Beat, BeatLoad, DroppedReadings, EndedRow, Finish, Flushed,
-    HistoryWritten, TailSink, UsageHub,
-};
+use js_usage::{Beat, BeatLoad, DroppedReadings, Flushed, NoKeys, UsageHub};
 use tracing::{error, info, warn};
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::usage::{
-    HostLimits, KeyProfile, KeySource, NodeRow, ProfileCurves, ProfileKey, UsageFault, UsageSink,
+    HostLimits, KeyProfile, NodeRow, ProfileCurves, ProfileKey, UsageFault, UsageSink,
 };
-use crate::usage_map::{host_of, lease_of, load_in};
+use crate::usage_map::{host_of, load_in};
 use crate::util::blocking;
 
 /// The usage side of the server: the hub, the sink it writes to, and the clock it is run by.
@@ -48,45 +40,23 @@ pub(crate) struct Usage {
     /// The sink the hub writes to, which the job service's `GetUsage` reads.
     sink: Arc<dyn UsageSink>,
     clock: SharedClock,
-    /// Whether the last write of the history queue failed: a run of failures is logged
-    /// once.
-    history_failing: AtomicBool,
-}
-
-/// Whether a run that ended with `outcome` is one to learn from: it succeeded, or failed
-/// on its own. Killed, timed out, out of memory, failed to start and an outcome this
-/// version does not know are not.
-fn finish_of(outcome: Outcome) -> Finish {
-    match matches!(outcome, Outcome::Succeeded | Outcome::Failed) {
-        true => Finish::Clean,
-        false => Finish::Unclean,
-    }
 }
 
 impl Usage {
-    /// The usage side over `sink` and `keys`, for hosts the pool books as `limits`. The
-    /// first flush falls due [`js_usage::FLUSH_EVERY_MINUTES`] after this.
-    pub(crate) fn new(
-        sink: Arc<dyn UsageSink>,
-        keys: Arc<dyn KeySource>,
-        clock: SharedClock,
-        limits: HostLimits,
-    ) -> Self {
+    /// The usage side over `sink`, for hosts the pool books as `limits`. The first flush
+    /// falls due [`js_usage::FLUSH_EVERY_MINUTES`] after this.
+    pub(crate) fn new(sink: Arc<dyn UsageSink>, clock: SharedClock, limits: HostLimits) -> Self {
         let started = clock.now().millis() / 60_000;
         Self {
-            hub: Arc::new(UsageHub::new(Arc::clone(&sink), keys, limits, started)),
+            hub: Arc::new(UsageHub::new(
+                Arc::clone(&sink),
+                Arc::new(NoKeys),
+                limits,
+                started,
+            )),
             sink,
             clock,
-            history_failing: AtomicBool::new(false),
         }
-    }
-
-    /// The log the registry hands the record of each ended allocation to: the hub, which
-    /// queues it for the tick to write. It holds the hub weakly: the hub holds the registry
-    /// (as the source of run keys), so a strong hold would keep both, and the usage store
-    /// with its lock, alive after the server stops.
-    pub(crate) fn log(&self) -> Arc<dyn AllocationLog> {
-        Arc::new(HubLog(Arc::downgrade(&self.hub)))
     }
 
     /// The sink the hub writes to, for a reader of what it holds.
@@ -104,75 +74,36 @@ impl Usage {
         self.hub.curves()
     }
 
-    /// The sink's tail sink, for the registry's tail counters.
-    pub(crate) fn tail(&self) -> Option<Arc<dyn TailSink>> {
-        self.hub.tail()
-    }
-
     /// What has been counted so far, with the sink's own counts.
     pub(crate) fn counters(&self) -> UsageCounters {
         self.hub.counters()
     }
 
     /// What a heartbeat that the registry accepted tells the usage side. `load` is the
-    /// heartbeat's load, cloned from it (the registry keeps its own copy for the hosts view); `acks` are the registry's verdicts on its
-    /// results; `holds` says whether the registry holds a lease for a host. Blocks on the
-    /// sink: call it on the pool for blocking calls. A panic in the sink or the key source
-    /// is caught and counted as a fault: it must not cost the beat its reply.
-    pub(crate) fn on_beat(
-        &self,
-        beat: &Heartbeat,
-        load: Option<NodeLoad>,
-        acks: &[ResultAck],
-        holds: &dyn Fn(&LeaseId, &HostId) -> bool,
-    ) {
-        let ran = catch_unwind(AssertUnwindSafe(|| self.beat(beat, load, acks, holds)));
+    /// heartbeat's load, cloned from it (the registry keeps its own copy for the hosts
+    /// view). Blocks on the sink: call it on the pool for blocking calls. A panic in the
+    /// sink is caught and counted as a fault: it must not cost the beat its reply.
+    pub(crate) fn on_beat(&self, beat: &Heartbeat, load: Option<NodeLoad>) {
+        let ran = catch_unwind(AssertUnwindSafe(|| self.beat(beat, load)));
         if ran.is_err() {
             self.hub.note_fault();
             error!(host = %beat.host_id, "the usage side panicked on a heartbeat; the beat is served");
         }
     }
 
-    fn beat(
-        &self,
-        beat: &Heartbeat,
-        load: Option<NodeLoad>,
-        acks: &[ResultAck],
-        holds: &dyn Fn(&LeaseId, &HostId) -> bool,
-    ) {
+    fn beat(&self, beat: &Heartbeat, load: Option<NodeLoad>) {
         let Some(host) = host_of(&beat.host_id) else {
             self.hub.note_records_dropped(1);
             return;
         };
-        let mut unparsable = 0;
-        let results: Vec<AcceptedResult<'_>> = beat
-            .results
-            .iter()
-            .filter(|result| {
-                let accepted =
-                    |ack: &ResultAck| ack.run_id == result.run_id && ack.ack == Ack::Accepted;
-                acks.iter().any(accepted)
-            })
-            .filter_map(|result| match lease_of(&result.lease_id) {
-                Some(lease) => Some(AcceptedResult {
-                    lease,
-                    run_id: &result.run_id,
-                    finish: finish_of(result.outcome),
-                }),
-                None => {
-                    unparsable += 1;
-                    None
-                }
-            })
-            .collect();
-        self.hub.note_records_dropped(unparsable);
         let hub_beat = Beat {
             host: &host,
             epoch: beat.epoch,
             load: beat_load(load),
-            results: &results,
+            results: &[],
         };
-        self.hub.on_beat(hub_beat, self.now_minute(), holds);
+        // No lease holds a host: the registry queues no run.
+        self.hub.on_beat(hub_beat, self.now_minute(), &|_, _| false);
     }
 
     /// What every tick of the server does for usage: flush when
@@ -187,31 +118,13 @@ impl Usage {
         if let Some(Err(fault)) = ticked.prune {
             error!(error = %fault, "cannot prune the usage store");
         }
-        self.report_history(ticked.history);
     }
 
-    /// The flush at shutdown, whatever the schedule says, and a last write of the history
-    /// queue.
+    /// The flush at shutdown, whatever the schedule says.
     pub(crate) async fn finish(&self) {
         let (hub, now) = (Arc::clone(&self.hub), self.now_minute());
-        let (flushed, history) = blocking(move || (hub.finish(now), hub.write_history())).await;
+        let flushed = blocking(move || hub.finish(now)).await;
         report(flushed);
-        self.report_history(history);
-    }
-
-    /// Logs a write of the history queue: the first failure of a run of them, and the first
-    /// write that succeeds after one.
-    fn report_history(&self, written: Option<HistoryWritten>) {
-        let failing = &self.history_failing;
-        match written {
-            Some(Ok(rows)) if failing.swap(false, Ordering::SeqCst) => {
-                info!(rows, "the allocation history is written again");
-            }
-            Some(Err(fault)) if !failing.swap(true, Ordering::SeqCst) => {
-                error!(error = %fault, "cannot write the allocation history; its records stay queued");
-            }
-            _ => {}
-        }
     }
 
     /// The rows of `host` from minute `from` to minute `to`, at most `limit`. Blocks.
@@ -228,17 +141,6 @@ impl Usage {
     /// What is stored for `key`. Blocks.
     pub(crate) fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
         self.hub.key_profile(key)
-    }
-}
-
-/// The registry's log of ended allocations: the hub while it lives, nothing after.
-struct HubLog(Weak<UsageHub>);
-
-impl AllocationLog for HubLog {
-    fn ended(&self, row: EndedRow) {
-        if let Some(hub) = self.0.upgrade() {
-            hub.ended(row);
-        }
     }
 }
 

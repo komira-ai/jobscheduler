@@ -10,7 +10,7 @@
 //!
 //! # The backend
 //!
-//! The store is a `js-state` SQLite file beside the lease file, `<state file>.jobs`: the
+//! The store is a `js-state` SQLite file beside the state file, `<state file>.jobs`: the
 //! single-node development backend. It moves into the shared store when the server's state
 //! does. The file is the server user's and owner-only (mode 0600), as the agent side's files
 //! beside it are: it holds the jobs' specs, which may carry secrets. A file already there is
@@ -116,10 +116,10 @@ pub(crate) struct Opened {
     pub(crate) store: Arc<dyn Store>,
 }
 
-/// The suffix of the job store's file, after the lease file's name.
+/// The suffix of the job store's file, after the state file's name.
 pub(crate) const SUFFIX: &str = ".jobs";
 
-/// Opens the job store beside the lease file `state_file`, as `setup` says, on the clock and
+/// Opens the job store beside the state file `state_file`, as `setup` says, on the clock and
 /// id source of `sources`, and raises its
 /// deadlines for this boot in one transaction ([`JobStore::raise_at_boot`]) before the server
 /// ticks or serves; the same transaction replaces the file contents a row of an ended job
@@ -195,12 +195,12 @@ mod tests {
         }
     }
 
-    /// Asserts that the store is opened beside the lease file under its suffix, with the
+    /// Asserts that the store is opened beside the state file under its suffix, with the
     /// retention it was given, and that a second open of the same file while the first is
     /// held is refused naming the flag, with the store's own reason. It catches a store
     /// opened with the default retention whatever the setting says, and one opened twice.
     #[test]
-    fn the_store_is_opened_once_beside_the_lease_file_with_its_retention() {
+    fn the_store_is_opened_once_beside_the_state_file_with_its_retention() {
         let dir = scratch("opened");
         let state = dir.path().join("leases.toml");
         let jobs = open(&state, setup(259_200), &JobSources::default())

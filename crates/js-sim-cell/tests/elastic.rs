@@ -22,7 +22,6 @@ use std::time::Duration;
 
 use js_agent_wire::InstanceIdentity;
 use js_elastic_fake::{Billing, Knobs};
-use js_lease::{ManualClock, Timestamp};
 use js_sim::Faults;
 use js_sim_cell::elastic::offer;
 use js_sim_cell::{
@@ -32,6 +31,7 @@ use js_sim_cell::{
 use js_testkit::dir::TestDir;
 use js_types::HostId;
 use js_types::sched::FarmTime;
+use js_types::{ManualClock, Timestamp};
 
 /// How many seeds each scenario runs.
 const SEEDS: u64 = 2;

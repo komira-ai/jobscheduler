@@ -12,10 +12,10 @@ use js_types::ExecMode;
 
 use super::kept::{self, ScalerKeeper};
 use super::{Launcher, Live, RecordsFile, Scaler, UnremovedFile};
-use crate::adapt::SharedClock;
 use crate::agents::{Agents, state_path};
 use crate::catalogs::Catalogs;
 use crate::checks::Health;
+use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::{ElasticPlan, Launch};
 use crate::network::{DefaultMode, NetworkError, NetworkMode};
@@ -27,7 +27,7 @@ pub(crate) struct Parts<'a> {
     pub(crate) agents: Arc<Agents>,
     /// The server's clock.
     pub(crate) clock: SharedClock,
-    /// The lease file, beside which the records are kept without a store setting.
+    /// The state file, beside which the records are kept without a store setting.
     pub(crate) state_file: &'a Path,
     /// The state store the records are kept in instead, with a store setting.
     pub(crate) store: Option<&'a ServerStore>,
@@ -78,7 +78,7 @@ fn network_mode(
 impl ElasticPlan {
     /// The scaler settings the plan gives: the design's defaults besides the plan's own, and
     /// the prepare timeout of the whole-node settings of the pool `registry` serves, the
-    /// figure the lease table and the registry count too. A registry whose pool has no
+    /// figure the registry counts too. A registry whose pool has no
     /// whole-node settings gets the dedicated defaults, which an elastic file pool has anyway.
     pub fn scaler_settings(&self, registry: &Registry) -> Settings {
         let fallback = WholeNodeConfig::dedicated(self.max_instances);
@@ -130,8 +130,7 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
 
 /// The scaler of `plan`, with the records of an earlier run read back, every machine they
 /// show as being released marked in the registry, the hosts the registry would not remove
-/// then queued to be removed on the first tick, and the registry's `Launchable` set to
-/// answer from it.
+/// then queued to be removed on the first tick.
 ///
 /// # Errors
 ///
@@ -199,6 +198,5 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         records,
     );
     scaler.retry_removals(unremoved);
-    registry.set_launchable(Some(scaler.launchable()));
     Ok(scaler)
 }

@@ -8,18 +8,18 @@ use std::sync::Arc;
 use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use js_lease::{ManualClock, Timestamp};
 use js_logmint::fake::FakeMinter;
 use js_logmint::{MintError, Minter};
 use js_logstore::fake::FakeStore;
 use js_logstore::{Endpoint, Unavailable};
+use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use super::rig::Rig;
 use super::router;
-use super::whole_view_tests::Rig;
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{LOG_BUCKET, LOG_ENDPOINT, LOG_REGION, START_MS, grants_over};
+use crate::clock::SharedClock;
 use crate::logs::{LogGrants, StoreClock};
 use crate::util::blocking;
 

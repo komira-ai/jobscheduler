@@ -31,18 +31,18 @@ use std::fmt::Write;
 use std::sync::{Arc, PoisonError};
 
 use js_elastic::{Demand, Instant, OfferKey};
-use js_lease::{Clock, Timestamp};
 use js_scaler::{
     Brake, Cooldown, HelloDimension, LaunchMode, Millis, Phase, Record, Records,
     State as ScalerState,
 };
 use js_sched::failover::{AcquireMemory, PassedOver};
+use js_types::{Clock, Timestamp};
 use js_types::{ExecMode, ProviderId, RequestId};
 use serde::Serialize;
 
-use crate::adapt::SharedClock;
 use crate::catalogs::Catalogs;
 use crate::checks::{Checked, State, Verdict};
+use crate::clock::SharedClock;
 use crate::hosts::MemoryView;
 use crate::logs::{LogCounters, LogGrants};
 use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};

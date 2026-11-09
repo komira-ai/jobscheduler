@@ -233,15 +233,15 @@ mod tests {
     };
     use js_jobs::Booked;
     use js_jobs::interfere::Interfere;
-    use js_lease::{ManualClock, Timestamp};
     use js_registry::{PoolConfig, Registry, SequentialSessions};
     use js_state::fake::Fake;
     use js_testkit::dir::TestDir;
     use js_types::{ExecMode, Model, ResourceClass, Resources, Shape, accelerator_of};
+    use js_types::{ManualClock, Timestamp};
 
     use super::*;
-    use crate::adapt::SharedClock;
     use crate::agent_api::job_rig::{placed, spec, tables};
+    use crate::clock::SharedClock;
     use crate::job_store::ServerJobs;
     use crate::network::DefaultMode;
     use crate::scaler::{RecordsFile, UnremovedFile};

@@ -16,15 +16,14 @@ and start, a few seconds to at most the bounds below.
 What a restart keeps is what the server keeps on disk; what it holds only in memory is lost with
 the process. At this release:
 
-- **Kept:** the lease file and the files beside it (cordons, taints, registered hosts, the
+- **Kept:** the files beside the state file (cordons, taints, registered hosts, the
   scaler's records), the job store (`<state file>.jobs`, with `--job-listen`) and the usage file.
-  A lease outlives the restart.
-- **Lost:** runs. They are in memory only. After the restart a host that lists one is told to
-  cancel it, and its work is lost; `GET` and `DELETE` of its run id answer 410 `run-forgotten`.
+  A lease file left by an earlier release is neither read nor written, and stays as it was.
+- **Lost:** nothing that the server holds only in memory is a run: it has none. A host of an
+  older agent that lists a run after the restart is told to cancel it.
 
-So an update ends every run in flight. It will end none once runs are kept in the store; until
-then, update when no run you care about is in flight. The store (`--store`) holds the host bindings,
-the join tokens and the scaler's records, not the leases or the runs; the hook uses it for its writer
+A job outlives the restart: it is in the job store, and its host keeps running it. The store (`--store`)
+holds the host bindings, the join tokens and the scaler's records; the hook uses it for its writer
 lock (below).
 
 ## What the hook needs

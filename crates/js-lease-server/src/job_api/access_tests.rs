@@ -33,10 +33,10 @@ use super::read_tests::json_of;
 use super::tests::TOKEN;
 use super::writes_rig::{Fixed, Writes, id as job_id, wire};
 use super::{JobApi, submit};
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{OneClock, START_MS, tables_on};
+use crate::clock::SharedClock;
 use crate::config::{Clients, Entry, LiveClients, Role, parse_token};
-use crate::hosts::{HostList, LeasesOn};
+use crate::hosts::HostList;
 use crate::status::PoolsView;
 
 /// The token of `ci`, a client.
@@ -104,8 +104,8 @@ struct AnyHost;
 
 #[tonic::async_trait]
 impl Hosts for AnyHost {
-    async fn hosts(&self) -> (HostList, LeasesOn) {
-        (HostList::of(Vec::new(), vec![h1()], None), LeasesOn::new())
+    async fn hosts(&self) -> HostList {
+        HostList::of(Vec::new(), vec![h1()])
     }
 
     async fn cordon(&self, _: &HostId, _: Duration) -> Result<bool, Refused> {

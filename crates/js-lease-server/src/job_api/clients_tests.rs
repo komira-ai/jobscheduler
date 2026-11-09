@@ -23,8 +23,8 @@ use super::read_tests::{from_json, json_of};
 use super::tests::{Recording, TOKEN, call, connect, methods, send_all, value};
 use super::writes_rig::{Fixed, Said, Via, Writes, id as job_id, said, to_json, wire};
 use super::{gateway_over, grpc_over};
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{OneClock, START_MS, tables_on};
+use crate::clock::SharedClock;
 use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN, JOIN};
 use crate::config::{Cli, Clients, Config, Entry, LiveClients, Role, parse_token};
 
@@ -338,7 +338,7 @@ impl Captured {
     fn start() -> Captured {
         let text = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&text);
-        crate::api::whole_view_tests::process_sink();
+        crate::api::rig::process_sink();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .with_writer(move || Buffer(Arc::clone(&sink)))

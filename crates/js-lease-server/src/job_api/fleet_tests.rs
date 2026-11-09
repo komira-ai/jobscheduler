@@ -1,6 +1,5 @@
 //! The fleet calls over the server's own state: a registry on a manual clock with hosts
-//! that said hello, the lease table over it, the agent side that saves the bindings into a
-//! scratch directory, and the job tables over the in-memory store on a manual clock of its
+//! that said hello, the agent side that saves the bindings into a scratch directory, and the job tables over the in-memory store on a manual clock of its
 //! own. The pools and the history come from the server's own status, usage sink and job
 //! store, or from fakes where a test needs a view the server would take a provider to make. Nothing
 //! here opens a socket or sleeps: gRPC runs over an in-memory stream.
@@ -15,16 +14,16 @@ use axum::http::Uri;
 use hyper_util::rt::TokioIo;
 use js_agent_wire::{Hello, Phase as AgentPhase, Taint};
 use js_jobs::interfere::Interfere;
-use js_jobs::{DeclaredPort, EndReason, JobSpec, JobStore, Needs};
-use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
+use js_jobs::{DeclaredPort, EndReason, JobId, JobSpec, JobState, JobStore, Needs, NewJob};
 use js_proto::FILE_DESCRIPTOR_SET;
-use js_provider::{HostCapacity, Pool as _, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, HostView, PoolConfig, Registry, SequentialSessions};
 use js_scaler::Phase;
 use js_state::Store;
 use js_state::fake::{Fake, Flaw};
 use js_testkit::dir::TestDir;
-use js_types::{LeaseId, MemoryHeadroom, ProviderId, Request as LeaseRequest};
+use js_types::HostCapacity;
+use js_types::{ManualClock, Timestamp};
+use js_types::{MemoryHeadroom, ProviderId};
 use js_types::{ResourceClass, Resources, Shape};
 use js_usage::{Booked as UsageBooked, Used};
 use prost_types::FileDescriptorSet;
@@ -37,9 +36,9 @@ use tonic_prost::prost::Message;
 use tower::Service;
 
 use super::*;
-use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_api::job_rig::{BOOKED, placed, spec};
 use crate::agents::Agents;
+use crate::clock::SharedClock;
 use crate::config::parse_token;
 use crate::job_store::ServerJobs;
 use crate::pool::{NextLaunch, NoOffer};
@@ -95,21 +94,16 @@ fn server(name: &str, agents: bool) -> Server {
         shape,
         4,
     );
+    let placer = Arc::new(js_sched_placer::place::SchedPlacer::new(
+        js_sched_placer::engine::Settings::default(),
+        clock.clone(),
+    ));
     let registry = Registry::with_sessions(
         pool,
         clock.clone(),
         SequentialSessions::new(),
-        Arc::new(js_sched_placer::place::SchedPlacer::default()),
+        placer.clone(),
     );
-    let settings = Settings::new();
-    let table = LeaseTable::open(
-        BoxedPool::new(Box::new(registry.provider())),
-        shared_clock.clone(),
-        settings,
-        dir.path().join("leases.toml"),
-        Boot::Initialise,
-    )
-    .unwrap();
     let store_clock = Arc::new(js_state::ManualClock::default());
     let store = Arc::new(Interfere::new(Fake::with_flaw(
         store_clock.clone(),
@@ -119,9 +113,11 @@ fn server(name: &str, agents: bool) -> Server {
     let job_history: Arc<dyn History> = Arc::new(StoreHistory(dynamic.clone()));
     let jobs =
         Arc::new(JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap());
-    let side = Agents::over(registry.clone(), &shared_clock, dir.path()).with_jobs(jobs.clone());
+    let side = Agents::over(registry.clone(), &shared_clock, dir.path())
+        .with_jobs(jobs.clone())
+        .with_placer(placer);
     let token = parse_token(&[b'c'; 40]).unwrap();
-    let shared = Arc::new(Shared::new(table, token, agents.then(|| Arc::new(side))));
+    let shared = Arc::new(Shared::new(token, agents.then(|| Arc::new(side))));
     let usage = Arc::new(Fake::with_flaw(Arc::default(), Flaw::None));
     let usage_store: Arc<dyn Store> = usage.clone();
     let sink = Arc::new(NodeUsage::over(usage_store, 1 << 20, 0, no_names()).unwrap());
@@ -166,31 +162,9 @@ impl Server {
             .unwrap();
     }
 
-    /// Asks the registry for a lease of sequence `n` through the provider the lease routes
-    /// hold.
-    fn lease(&self, n: u64) -> StartAck {
-        let request = LeaseRequest {
-            class: ResourceClass::gpu_host().id().clone(),
-            resources: resources(),
-            capabilities: Default::default(),
-            max_wall: Duration::from_secs(600),
-            labels: Default::default(),
-            validation_run: None,
-            probe_host: None,
-        };
-        let spec = StartSpec::new(LeaseId::new(1, n), request, &[ResourceClass::gpu_host()]);
-        self.registry.provider().start(spec.unwrap())
-    }
-
     /// The bindings file the agent side writes, if it has written one.
     fn bindings_file(&self) -> Option<String> {
         std::fs::read_to_string(self.dir.path().join("bindings")).ok()
-    }
-}
-
-fn started(host: &str) -> StartAck {
-    StartAck::Started {
-        host: HostId::new(host).unwrap(),
     }
 }
 
@@ -259,17 +233,14 @@ fn whole(host: &wire::Host, job: &str) -> wire::HostBooking {
 
 /// Asserts that each host lists exactly what is booked on it: on `h1` a whole-host job (as
 /// the host's whole shape) and an ordinary job (its share and its declared host port), in
-/// the order they were booked, not in job id order; on `h2` the lease held through the lease
-/// routes, under its id's text, as the whole host it books; on `h3` nothing. A releasing
+/// the order they were booked, not in job id order; on `h2` and `h3` nothing. A releasing
 /// allocation (its cancel asked, its stop not confirmed) is still listed, and once it is
 /// freed it is gone. It catches bookings read from the jobs instead of the allocations, a
-/// releasing allocation dropped, the lease routes' bookings missing, and bookings on the
-/// wrong host.
+/// releasing allocation dropped, and bookings on the wrong host.
 #[tokio::test]
 async fn the_host_list_shows_booked_resources() {
     let s = server("booked", true);
     s.register("h2");
-    assert_eq!(s.lease(1), started("h2"));
     s.register("h1");
     s.register("h3");
     let whole_spec = JobSpec {
@@ -292,8 +263,7 @@ async fn the_host_list_shows_booked_resources() {
     let h1 = find(&hosts, "h1");
     let share = booking("job-a", 1500, 1 << 30, 2 << 30, 0, &[8080]);
     assert_eq!(h1.booked, [whole(h1, "job-w"), share.clone()]);
-    let h2 = find(&hosts, "h2");
-    assert_eq!(h2.booked, [whole(h2, "1-1")]);
+    assert!(find(&hosts, "h2").booked.is_empty());
     assert!(find(&hosts, "h3").booked.is_empty());
 
     s.jobs.request_cancel(&job.id).unwrap();
@@ -405,17 +375,34 @@ async fn cordon_of_an_unknown_or_static_host_is_not_found() {
     assert_eq!(statics.bindings_file(), None);
 }
 
-/// Asserts that a cordon placed by the call keeps a new lease off the host, and that once
-/// the call lifts it the host takes one. It shows the call reaches the registry's own
-/// cordon, the one placement reads, and not a copy of it.
+/// Asserts that a cordon placed by the call keeps a queued job off the host, and that once
+/// the call lifts it the next pass places the job there. It shows the call reaches the
+/// registry's own cordon, the one placement reads, and not a copy of it.
 #[tokio::test]
-async fn a_cordoned_host_takes_nothing_new() {
+async fn a_cordoned_host_takes_no_job() {
     let s = server("cordon-placement", true);
     s.register("h1");
+    let agents = s.shared.agents().unwrap();
+    let id = JobId::parse("job-q").unwrap();
+    let new = NewJob {
+        id: Some(id.clone()),
+        spec: spec(),
+        priority: 0,
+        client: None,
+    };
+    s.jobs.insert_queued(new).unwrap();
     cordon(&s.api, "h1", Some(600)).await.unwrap();
-    assert_eq!(s.lease(1), StartAck::Refused(RefusalCode::NoCapacity));
+    agents.place_jobs();
+    assert_eq!(
+        s.jobs.get_job(&id).unwrap().unwrap().state,
+        JobState::Queued
+    );
     uncordon(&s.api, "h1").await.unwrap();
-    assert_eq!(s.lease(2), started("h1"));
+    agents.place_jobs();
+    assert_eq!(
+        s.jobs.get_job(&id).unwrap().unwrap().state,
+        JobState::Placed
+    );
 }
 
 /// Asserts that a cordon and an uncordon whose bindings cannot be written are `UNAVAILABLE`
@@ -461,26 +448,24 @@ fn ended(id: &str, end: u64) -> EndedRow {
     }
 }
 
-/// Everything the reads could change: the registry's hosts and leases, the bindings file,
-/// the job tables, the usage rows, and the counters of failed writes and of the sink.
+/// Everything the reads could change: the registry's hosts, the bindings file, the job
+/// tables, the usage rows, and the counters of failed writes and of the sink.
 type Snapshot = (
     Vec<HostView>,
-    LeasesOn,
     Option<String>,
     Vec<(String, js_state::Versioned)>,
     Vec<(String, js_state::Versioned)>,
-    (u64, u64),
+    u64,
     crate::usage::SinkCounters,
 );
 
 fn snapshot(s: &Server) -> Snapshot {
     (
         s.registry.hosts(),
-        s.registry.held(),
         s.bindings_file(),
         s.store.scan_prefix("").unwrap(),
         s.usage.scan_prefix("").unwrap(),
-        (s.shared.agent_errors(), s.shared.save_errors()),
+        s.shared.agent_errors(),
         s.sink.counters(),
     )
 }
@@ -493,7 +478,6 @@ fn snapshot(s: &Server) -> Snapshot {
 async fn reads_change_nothing() {
     let s = server("reads", true);
     s.register("h2");
-    assert_eq!(s.lease(1), started("h2"));
     s.register("h1");
     placed(&s.jobs, "job-a", "h1", spec(), BOOKED);
     cordon(&s.api, "h1", Some(600)).await.unwrap();
@@ -531,14 +515,11 @@ fn api_over(
     JobApi::new(jobs, clock).with_fleet(Ctx::served(hosts, pools, history))
 }
 
-/// The hosts of a fake: listed from these capacity entries, registry views, reserved ids
-/// and leases, as the server lists them, and answering every cordon and uncordon with
-/// `answer`.
+/// The hosts of a fake: listed from these static hosts and registry views, as the server
+/// lists them, and answering every cordon and uncordon with `answer`.
 struct FakeHosts {
     capacity: Vec<HostCapacity>,
     views: Vec<HostView>,
-    reserved: Option<BTreeSet<HostId>>,
-    leases: LeasesOn,
     answer: Result<bool, Refused>,
 }
 
@@ -547,8 +528,6 @@ impl FakeHosts {
         FakeHosts {
             capacity: Vec::new(),
             views: Vec::new(),
-            reserved: None,
-            leases: LeasesOn::new(),
             answer: Ok(true),
         }
     }
@@ -556,10 +535,8 @@ impl FakeHosts {
 
 #[tonic::async_trait]
 impl Hosts for FakeHosts {
-    async fn hosts(&self) -> (HostList, LeasesOn) {
-        let reserved = self.reserved.as_ref();
-        let list = HostList::of(self.capacity.clone(), self.views.clone(), reserved);
-        (list, self.leases.clone())
+    async fn hosts(&self) -> HostList {
+        HostList::of(self.capacity.clone(), self.views.clone())
     }
 
     async fn cordon(&self, _: &HostId, _: Duration) -> Result<bool, Refused> {

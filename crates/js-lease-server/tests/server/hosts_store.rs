@@ -1,6 +1,6 @@
 //! The host bindings and the join tokens kept in the state store (`--store`; SQLite with the
 //! dev flag here, and one restart over Postgres in `store_postgres.rs`): what a restart reads
-//! back, that nothing is written beside the lease file, and that a stored value that cannot
+//! back, that nothing is written beside the state file, and that a stored value that cannot
 //! be read as written refuses the start.
 
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ use crate::support::{
     Harness, Kept, Scratch, T0, config, kept_bindings, kept_joins, request, start,
 };
 
-/// The file `suffix` names beside `h`'s lease file.
+/// The file `suffix` names beside `h`'s state file.
 fn beside(h: &Harness, suffix: &str) -> PathBuf {
     let mut path = h.scratch.state().into_os_string();
     path.push(suffix);

@@ -9,7 +9,7 @@
 //! `catalogs` module) is filled by the tick, not by a pass. The two halves run on the
 //! runtime's blocking pool, each with its own panic caught, and each call is bounded by
 //! the time limit of the client that makes it. A pass never exits the process
-//! and never holds up a tick of the lease table: the loop is a task of its own.
+//! and never holds up a tick of the server: the loop is a task of its own.
 //!
 //! A pool begins `Checking` and stays so until one pass has been recorded. It is
 //! `Available` when every check of the last pass held, and `Unavailable` otherwise, with
@@ -25,14 +25,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{CapacityProvider, CheckResult, Offer};
-use js_lease::{Clock, Timestamp};
 use js_types::normalise_arch;
+use js_types::{Clock, Timestamp};
 use serde::Serialize;
 use tokio::runtime::Handle;
 use tokio::task::spawn_blocking;
 use tracing::{info, warn};
 
-use crate::adapt::SharedClock;
+use crate::clock::SharedClock;
 use crate::kinds::Floor;
 use crate::network::{NetworkError, NetworkMode};
 use crate::ticker::Ticker;

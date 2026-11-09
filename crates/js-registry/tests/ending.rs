@@ -5,8 +5,7 @@
 
 mod support;
 
-use js_agent_wire::Taint;
-use js_provider::{Pool, RefusalCode, StartAck};
+use js_agent_wire::{HeldRun, HeldState, Taint};
 use js_registry::{Binding, Busy, HostMark, HostState, HostView};
 use support::*;
 
@@ -17,11 +16,11 @@ fn view(fx: &Fixture, name: &str) -> HostView {
 
 /// Asserts the restart case. A registry that has just started holds no host; the scaler
 /// marks the host `a` ending (its records say the release was under way), and only then
-/// does `a` say hello again. It is admitted, listed `Releasing`, and a lease request finds
-/// no capacity for it, though it is live and idle. Without the mark the same hello is
-/// admitted unmarked and the lease lands, which is the window the mark closes. A host the
-/// scaler did not mark, in the same registry, is admitted unmarked. It catches a mark that
-/// is held only on records the registry already has.
+/// does `a` say hello again. It is admitted and listed `Releasing`, though it is live and
+/// idle. Without the mark the same hello is admitted unmarked, which is the window the mark
+/// closes. A host the scaler did not mark, in the same registry, is admitted unmarked, and a
+/// drain marks it as it does any quiet host. It catches a mark that is held only on records
+/// the registry already has.
 #[test]
 fn a_host_marked_before_its_hello_is_admitted_releasing() {
     let fx = fixture(2);
@@ -32,14 +31,8 @@ fn a_host_marked_before_its_hello_is_admitted_releasing() {
     assert_eq!(view(&fx, "a").mark, Some(HostMark::Releasing));
     assert_eq!(view(&fx, "a").state, HostState::Live);
     assert_eq!(view(&fx, "b").mark, None);
-    let mut provider = fx.registry.provider();
-    assert_eq!(started_on(&provider.start(spec(1))), Some("b"));
-    provider.stop(&lease(1));
     fx.registry.drain(&host("b")).unwrap();
-    assert_eq!(
-        provider.start(spec(2)),
-        StartAck::Refused(RefusalCode::NoCapacity)
-    );
+    assert_eq!(view(&fx, "b").mark, Some(HostMark::Draining));
 }
 
 /// Asserts that the mark survives the host going lost and saying hello again, and that
@@ -73,21 +66,22 @@ fn removing_a_host_that_never_said_hello_ends_its_mark() {
 }
 
 /// Asserts that marking a host the registry already holds marks it at once, with no quiet
-/// check: a host that holds a lease is listed `Releasing` and keeps the lease, `remove`
-/// refuses it as `Busy::Lease` while the lease stands, and succeeds once the lease is
-/// stopped. It catches a mark that cuts a lease, and a remove that drops a host with work
-/// booked on it.
+/// check: a host that lists a run is listed `Releasing` and still lists the run, and `remove`
+/// drops it, since it asks nothing of the host's runs. It catches a mark that waits for the
+/// host to be quiet, and a remove that refuses a host being given back.
 #[test]
-fn marking_a_known_host_does_not_cut_its_lease() {
+fn marking_a_known_host_does_not_wait_for_its_runs() {
     let fx = fixture(1);
     fx.join("a", "t");
-    let mut provider = fx.registry.provider();
-    assert_eq!(started_on(&provider.start(spec(1))), Some("a"));
+    let mut listing = fx.heartbeat("a", 1);
+    listing.held = vec![HeldRun {
+        run_id: "r1".into(),
+        state: HeldState::Running,
+    }];
+    fx.registry.heartbeat(&listing, &cred("t")).unwrap();
     fx.registry.mark_ending(&host("a"));
     assert_eq!(view(&fx, "a").mark, Some(HostMark::Releasing));
-    assert_eq!(view(&fx, "a").lease, Some(lease(1)));
-    assert_eq!(fx.registry.remove(&host("a")), Err(Busy::Lease));
-    provider.stop(&lease(1));
+    assert!(view(&fx, "a").releasing);
     assert_eq!(fx.registry.remove(&host("a")), Ok(()));
     assert!(fx.registry.hosts().is_empty());
 }
@@ -148,37 +142,21 @@ fn a_silent_host_that_books_nothing_is_drained_released_and_removed() {
     assert!(fx.registry.hosts().is_empty());
 }
 
-/// Asserts that silence does not make a booked host quiet: a lost host and an awaiting
-/// one that still hold a lease are refused `drain` with `Busy::Lease` and keep no mark. It
-/// catches a rule that lets silence stand for "books nothing", which would cut a lease the
-/// registry still holds.
+/// Asserts that silence does not make a host that lists a run quiet: a lost host that still
+/// lists a run is refused `drain` with `Busy::Runs` and keeps no mark. It catches a rule that
+/// lets silence stand for "has nothing", which would cut work the registry still sees.
 #[test]
-fn a_silent_host_that_still_holds_a_lease_is_not_drained() {
+fn a_silent_host_that_still_lists_a_run_is_not_drained() {
     let fx = fixture(2);
     fx.join("a", "t");
-    let mut provider = fx.registry.provider();
-    assert_eq!(started_on(&provider.start(spec(1))), Some("a"));
+    let mut listing = fx.heartbeat("a", 1);
+    listing.held = vec![HeldRun {
+        run_id: "r1".into(),
+        state: HeldState::Running,
+    }];
+    fx.registry.heartbeat(&listing, &cred("t")).unwrap();
     fx.pass_grace();
     assert_eq!(view(&fx, "a").state, HostState::Lost);
-    assert_eq!(fx.registry.drain(&host("a")), Err(Busy::Lease));
-    fx.provider.seat(&host("b"), lease(2), None).unwrap();
-    assert_eq!(view(&fx, "b").state, HostState::Awaiting);
-    assert_eq!(fx.registry.drain(&host("b")), Err(Busy::Lease));
+    assert_eq!(fx.registry.drain(&host("a")), Err(Busy::Runs));
     assert_eq!(view(&fx, "a").mark, None);
-    assert_eq!(view(&fx, "b").mark, None);
-}
-
-/// Asserts that `snapshot` answers what `hosts` and `waiting` answer, one after the other,
-/// when nothing moves between them: the host with its mark, and the wait list. It catches a
-/// snapshot that drops a part of either, or reads a host without the marks.
-#[test]
-fn a_snapshot_holds_the_hosts_and_the_wait_list() {
-    let fx = fixture(2);
-    fx.join("a", "t");
-    assert_eq!(fx.registry.drain(&host("a")), Ok(()));
-    let (hosts, waiting) = fx.registry.snapshot();
-    assert_eq!(hosts, fx.registry.hosts());
-    assert_eq!(waiting, fx.registry.waiting());
-    assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].mark, Some(HostMark::Draining));
 }

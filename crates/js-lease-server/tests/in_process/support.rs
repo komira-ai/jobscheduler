@@ -14,11 +14,11 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
-use js_lease::{ManualClock, Monotonic, Timestamp};
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker};
 use js_pool_static::EXAMPLE_CONFIG;
 use js_testkit::dir::TestDir;
+use js_types::{ManualClock, Monotonic, Timestamp};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -114,14 +114,14 @@ pub fn args(scratch: &Scratch, boot: &str, agents: bool) -> Vec<OsString> {
     args
 }
 
-/// The configuration of [`args`], its lease table timed on `monotonic`.
+/// The configuration of [`args`], its metrics timed on `monotonic`.
 pub fn config(scratch: &Scratch, boot: &str, agents: bool, monotonic: &Stepping) -> Config {
     let cli = Cli::try_parse_from(args(scratch, boot, agents)).unwrap();
     let config = Config::from_cli(cli).unwrap();
     config.with_monotonic(Arc::new(monotonic.clone()))
 }
 
-/// A monotonic clock that moves by `step` at every reading, so a step of the lease table
+/// A monotonic clock that moves by `step` at every reading, so a step
 /// timed with one reading before and one after lasts exactly `step`, and no real clock is
 /// read.
 #[derive(Debug, Clone)]

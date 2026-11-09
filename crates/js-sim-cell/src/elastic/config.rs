@@ -79,7 +79,7 @@ fn elastic(cloud: Cloud) -> ElasticBuilt {
 
 /// The files the configuration file of an elastic pool's server names.
 pub(crate) struct Files<'a> {
-    /// The lease file.
+    /// The state file.
     pub(crate) state: &'a Path,
     /// The file that holds the client token.
     pub(crate) token: &'a Path,
@@ -92,7 +92,7 @@ pub(crate) struct Files<'a> {
 /// The configuration file of a server whose one pool is `cloud`'s elastic pool: the lease
 /// file, the client token's file and the store's file of `files`,
 /// usage recording off, and booting `initialise` (which reads
-/// the lease file, and the join tokens and the scaler's saved state from the store, when
+/// the state file, and the join tokens and the scaler's saved state from the store, when
 /// they are there, so a restart over the same files and store reads them too).
 ///
 /// The pool is of class `whole-node` and launches for real (`launch = "live"`); its

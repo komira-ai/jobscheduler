@@ -147,7 +147,7 @@ fn told(entry: &Value) -> wire::Host {
 #[tokio::test]
 async fn the_hosts_json_and_grpc_agree() {
     let hosts = every_kind();
-    let (list, _) = hosts.hosts().await;
+    let list = hosts.hosts().await;
     let body = serde_json::to_value(&list).unwrap();
     let api = api_over(Arc::new(hosts), Arc::new(FakePools(no_pools)), None);
     let listed = list_hosts(&api, Request::new(ListHostsRequest {})).await;
@@ -169,7 +169,7 @@ async fn the_hosts_json_and_grpc_agree() {
         cordon_until: Some(Timestamp::from_millis(T0 + 60_000)),
         ..view("r-1", HostState::Lost, Some(HostMark::Draining))
     }];
-    let (list, _) = pinned.hosts().await;
+    let list = pinned.hosts().await;
     let body = serde_json::to_string(&list).unwrap();
     let expected = concat!(
         r#"{"hosts":[{"id":"r-1","source":"registered","state":"lost","lost":true,"#,
@@ -187,25 +187,10 @@ async fn the_hosts_json_and_grpc_agree() {
     assert_eq!(body, expected);
 }
 
-/// Asserts that a lease held on a host of the fake listing is told under its id's text, and
-/// that a cordon whose host is gone from the listing by the time it is read back (a host
-/// forgotten in between) is `NOT_FOUND` `unknown-host`, as is a refusal of the fake.
+/// Asserts that a cordon whose host is gone from the listing by the time it is read back (a
+/// host forgotten in between) is `NOT_FOUND` `unknown-host`, as is a refusal of the fake.
 #[tokio::test]
 async fn a_cordon_whose_host_is_gone_is_not_found() {
-    let mut hosts = FakeHosts::new();
-    hosts.leases.insert(
-        HostId::new("gone").unwrap(),
-        vec![Held {
-            lease: LeaseId::new(3, 4),
-            resources: Resources::new(250, 4096, 0, None).unwrap(),
-            whole: false,
-        }],
-    );
-    hosts.views = vec![view("gone", HostState::Live, None)];
-    let api = api_over(Arc::new(hosts), Arc::new(FakePools(no_pools)), None);
-    let listed = list(&api).await;
-    assert_eq!(listed[0].booked, [booking("3-4", 250, 4096, 0, 0, &[])]);
-
     let api = api_over(
         Arc::new(FakeHosts::new()),
         Arc::new(FakePools(no_pools)),

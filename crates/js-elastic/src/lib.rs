@@ -40,8 +40,7 @@
 //!   provider (`LiveArgs`, `LiveCloud`, `run`): a dry run by default, a spend run only
 //!   with the plan hash the dry run printed, and a cleanup that always runs.
 //!
-//! Nothing here does I/O or reads a clock; the lease-level `Pool` of `js-provider` (the
-//! scheduler's allocation port) is a different trait.
+//! Nothing here does I/O or reads a clock.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 

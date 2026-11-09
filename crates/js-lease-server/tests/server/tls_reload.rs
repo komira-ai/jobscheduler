@@ -15,7 +15,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use js_lease::Timestamp;
+use js_types::Timestamp;
 
 use crate::binary::launch;
 use crate::support::{Harness, LogCapture, Scratch, TOKEN, args_with, base_args, config, guard};

@@ -13,8 +13,6 @@ use js_jobs::{
     AllocationStep, Booked, Constraints, Isolation, JobEnd, JobId, JobSpec, JobState, Needs,
     NewJob, Output,
 };
-use js_lease::{ManualClock, Timestamp};
-use js_provider::{Candidate, Pool};
 use js_registry::{Credential, Placer};
 use js_sched::Event;
 use js_sched_placer::engine::Engine;
@@ -24,17 +22,18 @@ use js_sched_placer::place::SchedPlacer;
 use js_state::Store;
 use js_state::fake::Fake;
 use js_types::sched::FarmTime;
-use js_types::{HostId, LeaseId, Resources, Shape};
+use js_types::{HostId, Resources, Shape};
+use js_types::{ManualClock, Timestamp};
 
-use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{placed, spec, tables};
 use crate::agents::{Agents, assemble_placed};
+use crate::clock::SharedClock;
 use crate::job_alloc::{Freed, free_allocation};
 use crate::job_store::ServerJobs;
 use crate::metrics::NoMetrics;
 use crate::per_job::{BeatContext, serve};
 use crate::sched::engine::Settings;
-use crate::sched::engine_rig::{GIB, T0, hello_of, pool, rig, share_of};
+use crate::sched::engine_rig::{GIB, T0, hello_of, pool};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
 
 /// The host `name`.
@@ -577,41 +576,6 @@ fn a_large_share_job_among_a_steady_small_stream_is_documented_not_starved_by_de
     );
 }
 
-/// Asserts that on one host a lease and a job share the room without overbooking: with a
-/// lease and a job placed, a second job and a second lease that need more than is left both
-/// wait or are refused; stopping the lease frees its room in the engine at once, before any
-/// pass, and the next pass gives exactly that room to the front job. It catches an engine
-/// that counts only job allocations or only lease bookings (section 8, row 25).
-#[test]
-fn lease_and_job_bookings_cannot_overbook_a_host() {
-    let sched = ["--placement", "js-sched"];
-    let mut rig = rig("jobs-beside-leases", &pool(1, 8000, ""), &["h1"], &sched);
-    let (_store, jobs) = tables();
-    let on_h1 = open(&["h1"]);
-    let memory =
-        |rig: &crate::sched::engine_rig::Rig| rig.placer().booked_on("h1").unwrap().memory_bytes;
-    assert_eq!(rig.start(share_of(1, 1000, 6 * GIB)).as_deref(), Some("h1"));
-    queue(&jobs, "job-1", 6, 0);
-    let placed = |rig: &crate::sched::engine_rig::Rig| {
-        let placed = rig
-            .placer()
-            .place_jobs(&jobs, &on_h1, (&NoStarts, &NoMetrics))
-            .unwrap();
-        placed.iter().map(ToString::to_string).collect::<Vec<_>>()
-    };
-    assert_eq!(placed(&rig), ["job-1"]);
-    queue(&jobs, "job-2", 6, 0);
-    assert_eq!(placed(&rig), NONE);
-    assert_eq!(rig.start(share_of(2, 1000, 6 * GIB)), None);
-    assert_eq!(memory(&rig), 12 * GIB);
-    rig.provider.stop(&LeaseId::new(1, 1));
-    assert_eq!(memory(&rig), 6 * GIB);
-    queue(&jobs, "job-3", 5, 0);
-    assert_eq!(placed(&rig), ["job-2"]);
-    assert_eq!(state(&jobs, "job-3"), JobState::Queued);
-    assert_eq!(memory(&rig), 12 * GIB);
-}
-
 /// Asserts that, for a pool with no whole-node settings (`place_jobs` passes none), a job that
 /// books the whole host, and one whose constraints are no platform requirement, are not placed
 /// and hold no host back from the jobs behind them; that a job naming its `arch` is placed on
@@ -645,12 +609,10 @@ fn a_whole_host_job_or_one_no_host_could_describe_holds_back_no_one() {
     assert_eq!(state(&jobs, "job-5"), JobState::Queued);
 }
 
-/// Asserts that the engine keeps a job's booking through its own events: an engine built
-/// again (when it disagrees with the registry) carries it, a heartbeat of its host lists
-/// its lease so the scheduler keeps it past a placement round, and a host the registry
-/// forgets is kept as a worker while it holds one. It catches a rebuild that drops the job
-/// allocations, a heartbeat that gives them up, and a forgotten host taking its bookings
-/// with it.
+/// Asserts that the engine keeps a job's booking through its own events: a heartbeat of its
+/// host lists its allocation so the scheduler keeps it past a placement round, and a host the
+/// registry forgets is kept as a worker while it holds one. It catches a heartbeat that gives
+/// the allocations up, and a forgotten host taking its bookings with it.
 #[test]
 fn the_engine_keeps_a_jobs_booking_through_its_own_events() {
     let clock = clock();
@@ -660,27 +622,22 @@ fn the_engine_keeps_a_jobs_booking_through_its_own_events() {
     assert_eq!(pass(&placer, &jobs, &["host-a"]), ["job-a"]);
     let a = host("host-a");
     let worker = map::worker(&a);
-    let every = [Candidate {
-        host: a.clone(),
-        shape: shape(),
-        leases: Vec::new(),
-    }];
     let now = placer.now();
-    let mut rebuilt = placer.engine().rebuild(Settings::default(), &every, now);
+    let mut engine = placer.engine();
     let memory = |engine: &Engine| engine.sched().booked(&worker).unwrap().memory_bytes;
-    assert_eq!(memory(&rebuilt), 10 * GIB);
+    assert_eq!(memory(&engine), 10 * GIB);
     let later = FarmTime::from_millis(now.as_millis() + 5_000);
-    rebuilt.heard(&a, None, later);
-    rebuilt.feed(later, Event::Tick);
-    assert_eq!(rebuilt.job_leases_on(&a).count(), 1);
-    let held = rebuilt.job_leases_on(&a).collect::<Vec<_>>();
-    assert_eq!(rebuilt.sched().leases_on(&worker), held);
-    rebuilt.host_gone(&a);
-    assert_eq!(memory(&rebuilt), 10 * GIB);
-    rebuilt.job_failed(&JobId::parse("job-a").unwrap());
-    assert_eq!(memory(&rebuilt), 0);
-    rebuilt.host_gone(&a);
-    assert!(rebuilt.sched().capacity(&worker).is_none());
+    engine.heard(&a, None, later);
+    engine.feed(later, Event::Tick);
+    assert_eq!(engine.job_leases_on(&a).count(), 1);
+    let held = engine.job_leases_on(&a).collect::<Vec<_>>();
+    assert_eq!(engine.sched().leases_on(&worker), held);
+    engine.host_gone(&a);
+    assert_eq!(memory(&engine), 10 * GIB);
+    engine.job_failed(&JobId::parse("job-a").unwrap());
+    assert_eq!(memory(&engine), 0);
+    engine.host_gone(&a);
+    assert!(engine.sched().capacity(&worker).is_none());
 }
 
 /// Asserts that a pass whose read of either table fails answers the error and places

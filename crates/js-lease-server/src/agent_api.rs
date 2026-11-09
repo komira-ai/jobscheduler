@@ -81,8 +81,8 @@ use axum::routing::{get, post};
 use js_agent_wire::{
     Heartbeat, HeartbeatReply, Hello, HostCredential, ProtocolRange, Welcome, refusal,
 };
-use js_lease::Clock;
 use js_registry::{Credential, Refusal};
+use js_types::Clock;
 use js_types::{HostId, Resources, Shape};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -384,15 +384,7 @@ async fn heartbeat(
         logs.and_then(|logs| logs.on_beat(&heartbeat.host_id, heartbeat.log_grant_state));
     if let Some(usage) = &agents.usage {
         let usage = Arc::clone(usage);
-        let acks = reply.result_acks.clone();
-        let registry = agents.registry.clone();
-        blocking(move || {
-            let holds = |lease: &js_types::LeaseId, host: &js_types::HostId| {
-                registry.host_of(lease).as_ref() == Some(host)
-            };
-            usage.on_beat(&heartbeat, load, &acks, &holds);
-        })
-        .await;
+        blocking(move || usage.on_beat(&heartbeat, load)).await;
     }
     Ok(Json(reply))
 }

@@ -8,7 +8,7 @@
 //! (`whole::reserve`), `reserve_backoff`, `prepare_timeout` and
 //! `max_replace` (the prepare failure handling, and how long a request's record is
 //! kept) and the dedicated defaults for a pool that has none; the lease server also
-//! hands `prepare_timeout` to its lease table.
+//! hands `prepare_timeout` to its job pass.
 
 /// How long a host stays excluded for a request after a failed prepare: five minutes.
 pub const DEFAULT_RESERVE_BACKOFF_MS: u64 = 300_000;

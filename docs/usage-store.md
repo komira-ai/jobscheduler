@@ -1,24 +1,26 @@
 # The usage store
 
-The server keeps what it measured and what it learned in one `js-state` store: the SQLite file `--usage-db` names (`usage.db` beside the lease file unless given). `js-usage` owns the rows; the server opens the store and hands it to them. A server without agent registration, or with `--usage-off` (`server.usage_off`), runs without one. These key spaces live there:
+The server keeps what it measured and what it learned in one `js-state` store: the SQLite file `--usage-db` names (`usage.db` beside the state file unless given). `js-usage` owns the rows; the server opens the store and hands it to them. A server without agent registration, or with `--usage-off` (`server.usage_off`), runs without one. These key spaces live there:
 
 | prefix | one row per | written | kept |
 |---|---|---|---|
-| `usage/node/<host>/<hour>` | node and hour: up to 60 minutes of the node's CPU, working set and lease count | by the flush, every five minutes | 14 days (`NODE_RETENTION_MINUTES`) |
-| `usage/key/<profile key>` | profile key: the ring of its last runs that ended cleanly, from which its cost curve and its P90 wall time are fitted | when a clean run of the key ends | under `--profile-store-bytes`, least recently used key first |
-| `usage/ended/<ended-at>/<id>` | ended allocation: the record below | by the tick after the allocation ended | `--history-retention-days` (default 90) |
+| `usage/node/<host>/<hour>` | node and hour: up to 60 minutes of the node's CPU, working set and lease count (always zero now: no lease is held) | by the flush, every five minutes | 14 days (`NODE_RETENTION_MINUTES`) |
+| `usage/key/<profile key>` | profile key: the ring of its last runs that ended cleanly, from which its cost curve and its P90 wall time are fitted | when a clean run of the key ends (nothing ends one now: the server has no run, so it writes none) | under `--profile-store-bytes`, least recently used key first |
+| `usage/ended/<ended-at>/<id>` | ended allocation: the record below | not by the server any more (a job's row is written by the job store, below); rows of the lease era stay until the prune | `--history-retention-days` (default 90) |
 | `usage/ended-id/<id>` | ended allocation: the key of its record, so an allocation is recorded once | with its record, in one transaction | deleted with its record |
-| `usage/tail/<counter>` | tail counter: the counter's total since the rows were first written (below) | by the flush, every five minutes, and at shutdown | never reset by the server |
+| `usage/tail/<counter>` | tail counter: the counter's total since the rows were first written (below) | not by the server any more (the tail counters are deleted); rows of the lease era stay | never reset by the server |
 
 Every row starts with a version byte.
 
+**What the server writes now.** The flush writes the node rows. The registry's history of ended leases, the profile rings and the tail counters were deleted with the lease table (`--estimate-feed` is accepted and does nothing), so the server writes no `usage/key`, `usage/ended` or `usage/tail` row, and the usage hub has no run to learn a profile from. The sections below on the record of an ended allocation, queue wait, why a lease ended, the estimate and the tail counters describe those rows as the lease-era server wrote them: `js-usage` still reads them, the prune still deletes the ended records, and a job's record is written by the job store with the same fields.
+
 ## The record of an ended allocation
 
-`<ended-at>` is the end in milliseconds since the Unix epoch, zero-padded to 20 digits, so a scan of the prefix is in time order; `<id>` names the allocation. The record is the first form of the allocation record of the design (section 10.1, "Usage history"): an allocation is a lease's booking on a host, and `<id>` is the lease id's text (`<term>-<sequence>`), or a job's allocation, and `<id>` is the job id. A job's row is written, under the same key and with the same fields, in the transaction that frees the job's allocation, and it is in the job store beside the lease file (`<state file>.jobs`), not in the usage store; `GetUsage` lists the rows of both stores (see below).
+`<ended-at>` is the end in milliseconds since the Unix epoch, zero-padded to 20 digits, so a scan of the prefix is in time order; `<id>` names the allocation. The record is the first form of the allocation record of the design (section 10.1, "Usage history"): an allocation is a job's booking on a host, and `<id>` is the job id. Before the lease table was deleted it could also be a lease's booking, with the lease id's text (`<term>-<sequence>`) as `<id>`; such rows are still readable and are pruned like any other. A job's row is written, under the same key and with the same fields, in the transaction that frees the job's allocation, and it is in the job store beside the state file (`<state file>.jobs`), not in the usage store; `GetUsage` lists the rows of both stores (see below).
 
 | field | what it holds |
 |---|---|
-| `id` | the allocation: the lease id's text, or the job id |
+| `id` | the allocation: the job id (or, in a lease-era row, the lease id's text) |
 | `profile` | the profile key a run of the lease named, if one did (the first a run of the lease was queued with) |
 | `host` | the host it was booked on; absent for a request cancelled before it had one |
 | `booked` | what it booked: whether the whole host, and the CPU (thousandths of a core) and memory (bytes); absent with no host |

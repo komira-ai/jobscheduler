@@ -46,8 +46,6 @@ What is real, the production code as it runs in the server:
   command-line parser from a `ServerSpec`;
 - the registry (`js-registry`): registration through the real hello and its limiter, loss
   after the grace, forgetting after the lost retention;
-- the lease table (`js-lease`) and its file, which the server still keeps and times its
-  saves on the cell's clock; no client of the cell reaches it;
 - the store the server keeps its host bindings, join tokens and scaler's records in
   (`--store`, `server.store` for an elastic pool's server): by default a SQLite file in
   the server's directory, with `--allow-sqlite-store`, or a Postgres database of its own
@@ -422,8 +420,8 @@ submission order; a job is its id (`sim-job-<n>` for item `n` of the job front),
 allocation its 32 hex digits (`<a>` below). The capacity check of `no-double-booking`
 counts the jobs an agent runs beside its runs.
 
-The job front hears no lease, and no whole-node lease is asked for: the lease table the
-server still keeps is empty in every scenario of the cell. The checks over leases, runs and
+The job front hears no lease, and no whole-node lease is asked for: the server has no lease
+table, so no scenario of the cell has one. The checks over leases, runs and
 ready reports (the rows from `no-lease-on-a-lost-host` through `marked-hosts-serve-no-ordinary-start`,
 and the lease parts of the others) therefore find nothing to flag in a scenario, and
 `tests/invariants.rs` runs them over hand-built observations. A whole-host item holds its host
@@ -616,8 +614,7 @@ model:
   `set_bus_faults`. Today one scenario does:
   `a_cancel_before_the_host_lists_the_start_ends_cancelled_and_frees_the_allocation` in
   `tests/jobs.rs` turns `reorder` on for every message from 2 s to 30 s. None turns
-  `duplicate` on. A result or a stop sent again is covered by the server's HTTP tests
-  (`crates/js-lease-server/tests/server/runs.rs`).
+  `duplicate` on. A result or a stop sent again is not modelled by the cell.
 - **Heartbeats in flight together, and answers read after their request timed out.** The
   real agent has one call in flight at a time: it sends its next heartbeat an interval after
   it read the answer to the last, gives a call `REQUEST_LIMIT` (10 s), and drops the answer

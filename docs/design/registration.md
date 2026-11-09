@@ -55,7 +55,7 @@ hello in message metadata, never in a log line.
   stays unused for its instance. If the file cannot be written for that, the token stays tied to the host that named it and the operator
   mints another. The instance a hello names is the hello's own claim: the binding guards against mix-ups (a token delivered to the wrong
   machine, a host id reused by another instance), not against the holder of a token, who can name the instance too; and the client token can
-  mint a token for any instance id. One server owns the state file at a time (the lock beside the lease file refuses a second one), and
+  mint a token for any instance id. One server owns the state file at a time (the lock beside the state file refuses a second one), and
   the file of tokens is written whole through a new temporary file, so a file a crash left under that name never decides its mode.
 - *Host credential (replaces a one-time token at the first hello).* A hello says `accepts_host_credential: true` when the agent has a
   state root (`--state-root`) to keep one in. The first hello of a host that registers with an unused one-time token and says so is
@@ -86,5 +86,5 @@ hello in message metadata, never in a log line.
   tokens the pool's `join_token_file`, and the three server keys are refused when no pool registers agents. They have the flags'
   names and defaults (`--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`; `--placement` and `server.placement` are deprecated and do nothing: `js-sched` places every job, `js-sched` is accepted with a warning and `registry` is refused at start), and the flags work as before when
   `--config` is absent.
-- *Source.* The `DefaultProvider` (providers.md) is served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answers from admitted agents and ignores the bookings it is given: the lease
-  file records leases and agents re-announce them.
+- *Source.* The `DefaultProvider` (providers.md) was served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answered from admitted agents. `CapacitySource` and the lease
+  file are deleted; the server lists the hosts of the registry and of the static pool file.

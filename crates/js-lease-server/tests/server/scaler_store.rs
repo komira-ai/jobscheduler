@@ -28,14 +28,14 @@ const HOST: &str = "js-imported";
 /// When the imported cordon lapses.
 const CORDON_UNTIL: u64 = T0 + 3_600_000;
 
-/// The file `suffix` names beside the lease file of `scratch`.
+/// The file `suffix` names beside the state file of `scratch`.
 fn beside(scratch: &Scratch, suffix: &str) -> PathBuf {
     let mut path = scratch.state().into_os_string();
     path.push(suffix);
     PathBuf::from(path)
 }
 
-/// Writes `text` owner-only at the file `suffix` beside the lease file of `scratch`.
+/// Writes `text` owner-only at the file `suffix` beside the state file of `scratch`.
 fn write_beside(scratch: &Scratch, suffix: &str, text: &str) -> PathBuf {
     let path = beside(scratch, suffix);
     fs::write(&path, text).unwrap();
@@ -69,7 +69,7 @@ fn joins_file() -> String {
     )
 }
 
-/// The four files beside the lease file of `scratch`: the bindings, the join tokens, the
+/// The four files beside the state file of `scratch`: the bindings, the join tokens, the
 /// records (none of them in flight) and one host to remove. Returns the records' text.
 fn the_four_files(scratch: &Scratch) -> String {
     write_beside(scratch, ".agents", &agents_file("residue"));
@@ -253,7 +253,7 @@ async fn a_damaged_file_stops_the_import_and_writes_nothing() {
 }
 
 /// Asserts that a live pool that is not at its first start, over an empty store with no
-/// records file beside the lease file, is refused before anything is imported, as it is
+/// records file beside the state file, is refused before anything is imported, as it is
 /// without a store: the refusal names the records file and the remedy, and the store holds
 /// no key. It catches an import that sets the marker for a pool whose records are lost, after
 /// which the file could no longer be restored and imported.
@@ -275,7 +275,7 @@ async fn a_live_pool_without_its_records_file_is_refused_before_the_import() {
 
 /// Asserts that a fresh install, with no files, gets the marker at its first start and
 /// nothing else, and that files that appear later are not read: a restart with a bindings
-/// file and a file of hosts to remove beside the lease file leaves the store as it was, and
+/// file and a file of hosts to remove beside the state file leaves the store as it was, and
 /// names each of the two files once in an info line. It catches an import that waits for a
 /// file to set the marker (a later stale file would then be imported over newer state) and a
 /// stale file read or ignored without a word.
@@ -321,7 +321,7 @@ async fn import_with_no_files_still_sets_the_marker() {
 
 /// Asserts that a store that already holds server state without the marker (as one written
 /// by a build that kept host bindings in the store but had no import) is not imported over:
-/// with a bindings file beside the lease file, the start writes the marker and no binding. It
+/// with a bindings file beside the state file, the start writes the marker and no binding. It
 /// catches an import that runs for a store that is not empty, which would put stale files
 /// over newer state.
 #[tokio::test]

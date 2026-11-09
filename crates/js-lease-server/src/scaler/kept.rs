@@ -1,5 +1,5 @@
 //! Where the scaler's records and the hosts the registry refused to remove are kept: the two
-//! files beside the lease file ([`RecordsFile`], [`UnremovedFile`]), or, with a store setting
+//! files beside the state file ([`RecordsFile`], [`UnremovedFile`]), or, with a store setting
 //! (`--store`, `server.store`), two keys of the state store.
 //!
 //! | key | value |
