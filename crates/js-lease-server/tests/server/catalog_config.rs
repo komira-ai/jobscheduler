@@ -136,7 +136,7 @@ fn the_scaler_settings_carry_the_providers_limits() {
     let config = load(&scratch, &limited(&scratch, limits)).unwrap();
     let plan = config.elastic_pool().unwrap();
     let settings = plan.scaler_settings(&registry());
-    assert_eq!(settings.provider, plan.provider().id());
+    assert_eq!(settings.provider, plan.providers().next().unwrap().id());
     assert_eq!(settings.provider_share, Some(3));
     assert_eq!(
         settings.allowed_instance_types,

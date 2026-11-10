@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use js_elastic::{AcquireId, Dimension, HostRef, Offer};
 use js_sched::failover::{AcquireMemory, Refused};
-use js_types::RequestId;
+use js_types::{ProviderId, RequestId};
 
 use crate::record::{OfferCooldown, Records};
 use crate::settings::Blocked;
@@ -22,6 +22,9 @@ pub struct AcquirePlan {
     pub attempt: u32,
     /// The pool the machine is for.
     pub pool: String,
+    /// The machine provider to ask: the one pass 2 picked for the launch, and for a retry
+    /// the one the record names.
+    pub provider: ProviderId,
     /// The name to give the machine, chosen before the launch.
     pub name: String,
     /// What to launch: the offer the machine's record holds, at the stored price.

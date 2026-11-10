@@ -22,28 +22,36 @@
 //!   takes it back ([`Action::Undrain`]) instead of launching.
 //!   [`Offer::fit`](js_elastic::Offer::fit) judges every fit, so a request never lands on
 //!   an offer of another operating system or architecture.
-//! * Launch. Up to `max_step` launches per step, each to the offer pass 2 of placement picks
-//!   for the request (`js_sched::acquire::pick`, design 5.6, step 5; the scaler does not
-//!   choose): with the pool as its one machine provider, the cheapest available fitting
-//!   offer inside the pool's `provider_limits` (`allowed_instance_types`,
+//! * Launch. Up to `max_step` launches per step, each to the provider and offer pass 2 of
+//!   placement picks for the request (`js_sched::acquire::pick`, design 5.6, step 5; the
+//!   scaler does not choose): the pool's machine providers in their order
+//!   ([`Settings::providers`]: the first, then [`Settings::later`]), the first with a usable
+//!   offer and room under its share taking the launch, and within it the cheapest available
+//!   fitting offer inside its own `provider_limits` (`allowed_instance_types`,
 //!   `max_price_cents_per_hour`), then the fewest accelerators, the least spare CPU and
 //!   memory, and the offer id and zone. A provider's refusal is failed over within the
-//!   request's attempt ([`js_sched::failover`]): an offer refused for `capacity` is not
-//!   asked again in the attempt and its other zones are asked next, an instance type refused
-//!   for `quota` is passed over in its region for [`Settings::quota_backoff`] for every
-//!   request, and a request every offer was refused for waits [`Settings::acquire_retry`],
-//!   or until the pool's catalog is fetched again ([`PoolInput::catalog_refreshed`]). Neither
+//!   request's attempt ([`js_sched::failover`]) and charged to the provider that gave it: an
+//!   offer refused for `capacity` is not asked again in the attempt, its other zones are
+//!   asked next, then the provider's other offers, then the next provider's; an instance type
+//!   refused for `quota` is passed over in its region for its provider's `quota_backoff` for
+//!   every request; and a request every offer of every provider was refused for waits
+//!   [`Settings::acquire_retry`], or until a catalog of the pool is fetched again
+//!   ([`PoolInput::catalog_refreshed`]), and then asks the first provider again. A record
+//!   names the provider that launched it when the pool has several ([`Record::provider`]),
+//!   and a retry, a hello's verdict and a cool-down go by that provider. Neither
 //!   answer cools the pool or counts toward its brake. An offer with no price, or a price of zero, is never launched (zero would
 //!   pass both spend caps; a request that fits only such an offer shows
-//!   [`Blocked::Unpriced`]), and a provider that holds its share ([`Settings::provider_share`])
-//!   launches nothing and shows [`Blocked::MaxInstances`]. A launch is made when the pool
+//!   [`Blocked::Unpriced`]), and a provider that holds its share ([`Settings::provider_share`],
+//!   [`ProviderSettings::share`]) is passed over, the pool showing [`Blocked::MaxInstances`]
+//!   when no provider takes the launch. A launch is made when the pool
 //!   is in `Live` mode, its checks pass, its list of machines was read, it is not
 //!   cooling off, no launch of it is waiting for the time its provider named, and the caps
 //!   hold: `max_instances`, `max_spend_per_hour` over the stored prices of the machines
 //!   held, and `max_spend_per_day` over what the machines cost in the last 24 hours (a
 //!   machine that still runs keeps accruing, a launch that waits counts at its least cost).
 //!   Server-wide totals ([`Budgets`]) are held beside the pool's caps: over the records of
-//!   every pool of the server, and of every pool of the provider kind, the cost in the last 24
+//!   every pool of the server, and of every pool that has a provider of the kind of the
+//!   provider launching, the cost in the last 24
 //!   hours, in the last 30 days (rolling) and since the pool's go ([`Go`]: its first launch since it
 //!   was last in `Plan`, written to the records with that launch and lost when the pool is seen
 //!   in `Plan`) may not
@@ -190,8 +198,8 @@ pub use record::{
 };
 pub use settings::{
     ACQUIRE_RETRY, BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked,
-    Health, LaunchMode, OFFER_COOLDOWN, QUOTA_BACKOFF, SIZE_TOLERANCE_PERCENT, Settings,
-    UNNAMED_PROVIDER,
+    Health, LaunchMode, OFFER_COOLDOWN, ProviderSettings, QUOTA_BACKOFF, SIZE_TOLERANCE_PERCENT,
+    Settings, UNNAMED_PROVIDER,
 };
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;
@@ -266,15 +274,17 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
             })
             .map(|record| record.name.clone())
             .collect();
-        let machines = holding(settings, &state.records.instances, &[], &idle).len();
-        let price = decide(settings, &pool.offers, demand, machines)
-            .ok()
-            .and_then(|offer| offer.price_cents_per_hour);
-        let within = price.is_some_and(|price| {
+        let machines = holding(settings, &state.records.instances, &[], &idle);
+        let decided = decide(pool, demand, &machines).ok();
+        let price = decided
+            .as_ref()
+            .and_then(|(_, offer)| offer.price_cents_per_hour);
+        let within = price.zip(decided).is_some_and(|(price, (provider, _))| {
             let all = (state.records.instances.as_slice(), [].as_slice());
+            let scope = (settings, provider.kind.as_str());
             [
                 check(settings, now, &state.records.instances, &[], &idle, price).is_ok(),
-                budget::check(input, &state.records, settings, now, all, price).is_ok(),
+                budget::check(input, &state.records, scope, now, all, price).is_ok(),
             ]
             .into_iter()
             .all(|ok| ok)

@@ -442,7 +442,7 @@ fn pools_are_counted_and_a_static_pool_launches_nothing() {
     let second = PoolText::elastic(&scratch).set("name", &quote("b"));
     assert_eq!(
         refusal(&scratch, &file(&server, &[&first, &second])),
-        "pool \"b\": several elastic pools are parsed; running them needs the ordered walk of design 5.6"
+        "pool \"b\": several elastic pools are parsed; this version runs one, as the server keeps one registry of agents"
     );
     let live = PoolText::static_pool(&scratch, "hosts").set("launch", "\"live\"");
     assert_eq!(

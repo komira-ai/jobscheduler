@@ -344,6 +344,14 @@ pub struct Record {
     /// rollback restarts from it); the first list after a restart states it again.
     #[serde(default, skip_serializing)]
     pub ends_at: Option<Millis>,
+    /// The machine provider it was launched by, as pass 2 names it, when its pool has more
+    /// than one ([`Settings::later`](crate::Settings::later)); `None` for a machine of the
+    /// pool's first provider in a pool that has one. It is written only when set, so a
+    /// server whose pools each have one provider writes the file the release before this
+    /// field reads (a rollback restarts from it). A record that names none is the first
+    /// provider's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// The value of [`Record::seen_live`] for a file that has none: `true`.
@@ -352,6 +360,13 @@ fn seen_live_default() -> bool {
 }
 
 impl Record {
+    /// The machine provider it names ([`Record::provider`]), when that is a valid id.
+    pub(crate) fn provider_id(&self) -> Option<ProviderId> {
+        self.provider
+            .as_deref()
+            .and_then(|name| ProviderId::new(name).ok())
+    }
+
     /// Whether the machine counts toward `max_instances` and `max_spend_per_hour`: it
     /// exists or may exist. A refused acquire, a gone machine and a failed acquire that
     /// two clean lists have settled do not.

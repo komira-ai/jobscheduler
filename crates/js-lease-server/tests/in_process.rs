@@ -19,6 +19,8 @@ mod jobs;
 mod providers;
 #[path = "in_process/support.rs"]
 mod support;
+#[path = "in_process/walk.rs"]
+mod walk;
 
 use std::sync::Arc;
 use std::time::Duration;

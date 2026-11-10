@@ -1,10 +1,11 @@
 //! What one step reads: demand, pools and their offers, hosts, and the answers the
 //! caller got from the provider since the last step.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Acquired, Demand, Held, Offer, Released, SchedulerId};
-use js_types::{HostId, RequestId};
+use js_types::{HostId, ProviderId, RequestId};
 
 use crate::budget::Budgets;
 use crate::settings::{Health, Settings};
@@ -119,18 +120,26 @@ pub struct PoolInput {
     pub settings: Settings,
     /// What the pool's checks say.
     pub health: Health,
-    /// What the provider could launch now.
+    /// What the pool's first provider could launch now.
     pub offers: Vec<Offer>,
-    /// The machines the provider lists. `None` when the list failed: that is never read as
-    /// an empty list.
+    /// What each of the pool's later providers ([`Settings::later`]) could launch now, by
+    /// provider; one with no entry offers nothing. Empty by default.
+    pub later_offers: BTreeMap<ProviderId, Vec<Offer>>,
+    /// The machines the pool's providers list, every provider's. `None` when a list
+    /// failed: that is never read as an empty list.
     pub held: Option<Vec<Held>>,
+    /// The provider that listed each machine of `held` that is not the first provider's, by
+    /// the provider's id for the machine ([`Held::id`]); a machine with no entry is the first
+    /// provider's. Empty by default.
+    pub listed_by: BTreeMap<String, ProviderId>,
     /// The acquire ids the provider holds an unresolved call for: an earlier call of the
     /// acquire got no answer and may have landed (a provider that answers `Deferred` for
     /// such an acquire does so with this set). The shell fills it from the provider; a
     /// `Planned` record with one of these ids is kept when no request waits for it, so its
     /// retry settles the call instead of leaving a machine nobody counts.
     pub unresolved: Vec<AcquireId>,
-    /// Whether a fetch of the pool's provider's catalog completed since the last step. A
+    /// Whether a fetch of a catalog of one of the pool's providers completed since the
+    /// last step. A
     /// request waiting `acquire_retry` after every offer was refused for it is asked about
     /// again at once (design 5.6, step 5).
     pub catalog_refreshed: bool,
@@ -213,6 +222,18 @@ pub struct Input {
     pub reclaimed: Vec<String>,
 }
 
+impl PoolInput {
+    /// The offers of the pool's provider `provider`: the first's ([`PoolInput::offers`]) for
+    /// `None` or the first's id, a later one's from [`PoolInput::later_offers`], and none for
+    /// a provider the pool does not have.
+    pub(crate) fn offers_of(&self, provider: Option<&ProviderId>) -> &[Offer] {
+        match provider.filter(|id| **id != self.settings.provider) {
+            None => &self.offers,
+            Some(id) => self.later_offers.get(id).map_or(&[][..], Vec::as_slice),
+        }
+    }
+}
+
 impl Input {
     /// The `boot_timeout` of the pool named `pool`, or zero for a pool this input does not
     /// have (its records are billed the minimum).
@@ -223,11 +244,15 @@ impl Input {
             .map_or(Duration::ZERO, |each| each.settings.boot_timeout)
     }
 
-    /// The provider kind of the pool named `pool`, if this input has the pool.
-    pub(crate) fn kind_of(&self, pool: &str) -> Option<&String> {
+    /// The provider kinds of the pool named `pool`, one for each of its providers, if this
+    /// input has the pool.
+    pub(crate) fn kinds_of(&self, pool: &str) -> Option<Vec<String>> {
         self.pools
             .iter()
             .find(|each| each.settings.pool == pool)
-            .map(|each| &each.settings.kind)
+            .map(|each| {
+                let providers = each.settings.providers().into_iter();
+                providers.map(|provider| provider.kind).collect()
+            })
     }
 }

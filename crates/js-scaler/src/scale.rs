@@ -14,7 +14,7 @@ use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
 use crate::pick::walk;
 use crate::record::{CooldownReason, Phase, Record, Records};
-use crate::settings::{Blocked, Health, LaunchMode, Settings};
+use crate::settings::{Blocked, Health, LaunchMode, ProviderSettings, Settings};
 use crate::state::{AcquirePlan, Action, PlanLine, State};
 
 /// The phases of a machine that is on its way and so covers a request that fits it.
@@ -33,25 +33,23 @@ pub(crate) struct Claims {
     records: BTreeSet<usize>,
 }
 
-/// The actions that start a launch: the join token, valid for `valid_for`, then the
-/// acquire.
-fn launch_actions(
-    record: &Record,
-    valid_for: Duration,
-    lifetime: Option<Duration>,
-) -> impl Iterator<Item = Action> {
+/// The actions that start a launch of `record` in the pool of `settings`: the join token,
+/// valid for the pool's token life, then the acquire, to the provider the record names.
+fn launch_actions(record: &Record, settings: &Settings) -> impl Iterator<Item = Action> {
     let mint = Action::Mint {
         host: record.name.clone(),
-        valid_for,
+        valid_for: settings.token_life(),
     };
+    let provider = settings.provider_of(record.provider_id().as_ref()).provider;
     let acquire = record.acquire.clone().map(|acquire| {
         Action::Acquire(Box::new(AcquirePlan {
             acquire,
             attempt: record.attempt,
             pool: record.pool.clone(),
+            provider,
             name: record.name.clone(),
             offer: record.offer.to_offer(record.price_cents_per_hour),
-            lifetime,
+            lifetime: settings.lifetime(),
         }))
     });
     [Some(mint), acquire].into_iter().flatten()
@@ -59,7 +57,7 @@ fn launch_actions(
 
 /// The offer `record` was launched from, as a request's fit judges it: the stored shape,
 /// and, when it holds no ISA level, the level the pool's catalog states now for the same
-/// offer in the same zone. The records file does not keep the level
+/// offer in the same zone, of the provider that launched it. The records file does not keep the level
 /// ([`crate::StoredOffer::isa_level`]), so a record read back after a restart has none;
 /// the level is a fact of the offer, which the catalog states again, so a machine still
 /// booting for a request that asked for a level keeps covering it. An offer the catalog no
@@ -67,8 +65,10 @@ fn launch_actions(
 /// ([`crate::StoredOffer::accelerator_facts`]): a record that holds none takes the
 /// catalog's accelerator for the offer when it spells the stored class and count.
 fn launched_offer(record: &Record, pool: &PoolInput) -> Offer {
-    let listed = pool
-        .offers
+    // The offers of the provider that launched the machine: a record that names none is the
+    // first provider's.
+    let offers = pool.offers_of(record.provider_id().as_ref());
+    let listed = offers
         .iter()
         .find(|listed| (&listed.id, &listed.zone) == (&record.offer.id, &record.offer.zone));
     let mut offer = record.offer.to_offer(0);
@@ -512,12 +512,13 @@ impl Pass<'_> {
                 .map(|(_, record)| record.clone())
                 .collect();
             let price = self.records.instances[i].price_cents_per_hour;
+            let provider = settings.provider_of(self.records.instances[i].provider_id().as_ref());
             let within =
                 check(settings, self.now, &others, &[], &BTreeSet::new(), price).and_then(|()| {
                     budget::check(
                         self.input,
                         &self.records,
-                        settings,
+                        (settings, &provider.kind),
                         self.now,
                         (&others, &[]),
                         price,
@@ -532,11 +533,7 @@ impl Pass<'_> {
                     record.retry_at = None;
                     record.attempt += 1;
                     record.token_expires = Some(now.plus(settings.token_life()));
-                    self.actions.extend(launch_actions(
-                        record,
-                        settings.token_life(),
-                        settings.lifetime(),
-                    ));
+                    self.actions.extend(launch_actions(record, settings));
                     sent += 1;
                 }
                 Err(blocked) => {
@@ -595,16 +592,15 @@ impl Pass<'_> {
             .all(|ok| ok);
             let machines = holding(settings, &self.records.instances, &staged, &BTreeSet::new());
             let decided = walk(
-                settings,
-                (&pool.offers, pool.catalog_refreshed),
+                pool,
                 (&request.id, &request.demand),
-                machines.len(),
+                &machines,
                 &mut self.memory,
                 self.now,
             );
             held_back = held_back.or(decided.as_ref().err().copied().flatten());
-            let offer = decided.ok().filter(|_| room);
-            match offer.map(|offer| self.stage(settings, &offer, &staged)) {
+            let chosen = decided.ok().filter(|_| room);
+            match chosen.map(|(provider, offer)| self.stage(settings, &provider, &offer, &staged)) {
                 Some(Ok(record)) => {
                     staged.push(record);
                     served.push(request);
@@ -640,11 +636,7 @@ impl Pass<'_> {
                     .insert(record.name.clone(), request.id.clone());
             }
             for record in staged {
-                self.actions.extend(launch_actions(
-                    &record,
-                    settings.token_life(),
-                    settings.lifetime(),
-                ));
+                self.actions.extend(launch_actions(&record, settings));
                 self.records.instances.push(record);
             }
         } else {
@@ -674,6 +666,7 @@ impl Pass<'_> {
     fn stage(
         &self,
         settings: &Settings,
+        provider: &ProviderSettings,
         offer: &Offer,
         staged: &[Record],
     ) -> Result<Record, Blocked> {
@@ -690,7 +683,7 @@ impl Pass<'_> {
         budget::check(
             self.input,
             &self.records,
-            settings,
+            (settings, &provider.kind),
             self.now,
             records,
             price,
@@ -733,6 +726,10 @@ impl Pass<'_> {
             last_clean: None,
             seen_live: false,
             ends_at: None,
+            // A pool of one provider names none, so its records are those of before.
+            provider: settings
+                .several()
+                .then(|| provider.provider.as_str().to_owned()),
         };
         (!repeat).then_some(record).ok_or(Blocked::Entropy)
     }
@@ -773,7 +770,10 @@ impl Pass<'_> {
         let no_offer = uncovered
             .iter()
             .filter_map(|request| {
-                let offers = input.pools.iter().flat_map(|pool| pool.offers.iter());
+                let offers = input.pools.iter().flat_map(|pool| {
+                    let later = pool.later_offers.values().flatten();
+                    pool.offers.iter().chain(later)
+                });
                 nearest_miss(offers, &request.demand).map(|miss| (request.id.clone(), miss))
             })
             .collect();

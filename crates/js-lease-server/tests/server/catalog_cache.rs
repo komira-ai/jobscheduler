@@ -294,6 +294,7 @@ fn plan() -> AcquirePlan {
         acquire,
         attempt: 0,
         pool: "burst".to_owned(),
+        provider: js_scaler::UNNAMED_PROVIDER,
         offer: list_a().remove(0),
         lifetime: None,
     }

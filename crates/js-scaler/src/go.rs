@@ -44,13 +44,17 @@ impl Pass<'_> {
 
     /// Notes the provider kind the pool launches with, for the kind totals that outlive the
     /// pool's place in the file. Written with the launch that notes it, and only when it
-    /// changes; a pool with no kind notes none.
+    /// changes; a pool with no kind notes none. A pool whose providers are of more than one
+    /// kind notes none and forgets the one it had, so that once it leaves the file its
+    /// records count in every kind's total, the cautious side.
     pub(crate) fn note_kind(&mut self, settings: &Settings) {
-        if !settings.kind.is_empty() {
-            let kinds = &mut self.records.pool_kinds;
-            if kinds.get(&settings.pool) != Some(&settings.kind) {
-                kinds.insert(settings.pool.clone(), settings.kind.clone());
-            }
+        let kinds = &mut self.records.pool_kinds;
+        let providers = settings.providers();
+        let mixed = providers.iter().any(|each| each.kind != settings.kind);
+        if mixed {
+            kinds.remove(&settings.pool);
+        } else if !settings.kind.is_empty() && kinds.get(&settings.pool) != Some(&settings.kind) {
+            kinds.insert(settings.pool.clone(), settings.kind.clone());
         }
     }
 

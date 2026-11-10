@@ -8,7 +8,9 @@
 //! comes from its binding alone ([`rank`]): a host whose binding names no instance (it joined
 //! with the pool's join token) is of the `static` provider, and one whose binding names an
 //! instance (it joined with a token minted for that instance) is of the pool's launching
-//! provider, the one machine provider of the pool that launches. Nothing here reads a host's
+//! providers. A binding does not say which launching provider launched its machine, so a
+//! pool that launches with several ranks every launched host at the place of the first of
+//! them the platform lists; the engine's score decides among them. Nothing here reads a host's
 //! name, its address, the provider text its instance carries or a catalog. Pure: no I/O, no
 //! clock.
 
@@ -31,8 +33,9 @@ pub(crate) fn static_then(pool: &ProviderId) -> Vec<ProviderId> {
 /// The machine providers of the pool `pool`, first to last: those of each of its platforms
 /// whose jobs run on hosts of ours, in the order the pool lists its platforms and each
 /// platform its `machine_providers`, each once, as the provider a binding names: a `static`
-/// machine provider as [`STATIC`], the one that launches as `pool`, the provider the scaler
-/// mints the pool's machines under. `None` when `resolved` holds no such platform for the
+/// machine provider as [`STATIC`], each one that launches as `pool`, the provider the scaler
+/// mints the pool's machines under, so that several launching providers are one entry at the
+/// place of the first. `None` when `resolved` holds no such platform for the
 /// pool: the order is then [`static_then`].
 pub(crate) fn order_of(resolved: &Resolved, pool: &ProviderId) -> Option<Vec<ProviderId>> {
     let named = resolved.pool(pool.as_str())?;

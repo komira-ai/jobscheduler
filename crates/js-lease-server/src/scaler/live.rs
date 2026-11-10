@@ -1,18 +1,25 @@
 //! The real [`Effects`]: the server's registry, job tables and join tokens, the pool's
-//! provider and network mode, and where the scaler's records are kept (the files, or the
+//! providers and network mode, and where the scaler's records are kept (the files, or the
 //! state store).
+//!
+//! A pool may launch with several providers. Their lists are read as one list, which fails
+//! when any of them fails, and the shell keeps which provider listed (or launched) each
+//! machine, so that a release or a read by id goes to that provider. A machine no provider
+//! has listed since the start is released by the first provider that does not refuse it as
+//! another's, and is gone only when every provider says so. The provider's notices are the
+//! first provider's; a later provider's reclaimed machine shows in its list.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, Acquired, CapacityProvider, Demand, EventStream, Held, HostName, HostRef, Offer,
-    ProviderError, Released, SchedulerId, Secret,
+    AcquireId, Acquired, CapacityProvider, Claim, Demand, EventStream, Held, HostName, HostRef,
+    Instant, Offer, ProviderError, Released, SchedulerId, Secret,
 };
 use js_jobs::{JobId, JobStoreError};
 use js_registry::{Busy, HostView};
-use js_scaler::{AcquirePlan, Health, Records};
+use js_scaler::{AcquirePlan, Health, Millis, Records};
 use js_sched::queue_status::Outcome;
 use js_sched_placer::place::SchedPlacer;
 use js_types::{HostId, ProviderId};
@@ -29,7 +36,10 @@ pub(crate) struct Live {
     agents: Arc<Agents>,
     pool: ProviderId,
     scheduler: SchedulerId,
-    provider: Arc<dyn CapacityProvider>,
+    /// The pool's providers, first to last; never empty.
+    providers: Vec<Arc<dyn CapacityProvider>>,
+    /// Which of `providers` listed or launched each machine, by its provider's id for it.
+    located: Mutex<BTreeMap<String, usize>>,
     launcher: Launcher,
     /// Where the records and the hosts the registry would not remove are saved.
     kept: ScalerKeeper,
@@ -40,13 +50,13 @@ pub(crate) struct Live {
 
 impl Live {
     /// The effects for the pool `pool` of `scheduler`: its machines are launched and
-    /// released through `provider` and `launcher`, its tokens, hosts and job tables are
+    /// released through `providers` (first to last, never empty) and `launcher`, its tokens, hosts and job tables are
     /// `agents`', its records and the hosts the registry would not remove are kept by `kept`,
     /// its health and offers are what its `checks` found, and a job that books
     /// the whole host asks for `whole_host`, the pool's floor.
     pub(crate) fn new(
         (agents, pool, scheduler): (Arc<Agents>, ProviderId, SchedulerId),
-        provider: Arc<dyn CapacityProvider>,
+        providers: Vec<Arc<dyn CapacityProvider>>,
         launcher: Launcher,
         (kept, checks): (ScalerKeeper, Arc<Mutex<Checks>>),
         whole_host: Demand,
@@ -55,12 +65,27 @@ impl Live {
             agents,
             pool,
             scheduler,
-            provider,
+            providers,
+            located: Mutex::new(BTreeMap::new()),
             launcher,
             kept,
             checks,
             whole_host,
         }
+    }
+
+    /// Which provider listed or launched the machine `id`, if one has.
+    fn located(&self, id: &HostRef) -> Option<&Arc<dyn CapacityProvider>> {
+        let located = self.located.lock().unwrap_or_else(PoisonError::into_inner);
+        let at = located.get(&id.0).copied();
+        drop(located);
+        at.and_then(|at| self.providers.get(at))
+    }
+
+    /// Notes that the provider at `at` holds the machines `ids`.
+    fn locate<'h>(&self, at: usize, ids: impl Iterator<Item = &'h HostRef>) {
+        let mut located = self.located.lock().unwrap_or_else(PoisonError::into_inner);
+        located.extend(ids.map(|id| (id.0.clone(), at)));
     }
 
     /// The name `host` if this scheduler gave it to a machine.
@@ -103,16 +128,51 @@ impl Effects for Live {
         (seen.for_scaler(), seen.offers.clone())
     }
 
+    /// Every provider's list, first to last; a list that fails fails the whole.
     fn list(&self) -> Result<Vec<Held>, ProviderError> {
-        self.provider.list()
+        let mut all = Vec::new();
+        for (at, provider) in self.providers.iter().enumerate() {
+            let held = provider.list()?;
+            self.locate(at, held.iter().map(|each| &each.id));
+            all.extend(held);
+        }
+        Ok(all)
     }
 
     fn unresolved(&self) -> Vec<AcquireId> {
-        self.provider.unresolved()
+        let each = self
+            .providers
+            .iter()
+            .flat_map(|provider| provider.unresolved());
+        each.collect()
     }
 
+    /// What the provider that holds `id` says; for a machine no provider has listed since
+    /// the start, gone only when every provider says it is. A provider may read another's
+    /// reference as unknown rather than absent, so such a machine of a pool of several
+    /// providers may not be read gone here; its release, which each provider is asked in
+    /// turn, settles it. Reading it gone on one provider's word could stop the count of a
+    /// machine another provider still bills.
     fn is_gone(&self, id: &HostRef) -> bool {
-        self.provider.is_gone(id)
+        match self.located(id) {
+            Some(provider) => provider.is_gone(id),
+            None => self.providers.iter().all(|provider| provider.is_gone(id)),
+        }
+    }
+
+    fn listed_by(&self) -> BTreeMap<String, ProviderId> {
+        let located = self.located.lock().unwrap_or_else(PoisonError::into_inner);
+        let later = located.iter().filter(|(_, at)| **at > 0);
+        let named = later.filter_map(|(id, at)| {
+            let provider = self.providers.get(*at);
+            provider.map(|provider| (id.clone(), provider.id()))
+        });
+        named.collect()
+    }
+
+    fn later_offers(&self, now: Millis) -> BTreeMap<ProviderId, Vec<Offer>> {
+        self.launcher
+            .later_offers(Instant::from_millis(now.as_millis()))
     }
 
     fn catalog_fetches(&self) -> u64 {
@@ -157,12 +217,36 @@ impl Effects for Live {
         }
     }
 
+    /// Launches through the launcher, noting the provider the plan named as the one that
+    /// holds every machine its answer names.
     fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired {
-        self.launcher.acquire(plan, token)
+        let answer = self.launcher.acquire(plan, token);
+        if let Acquired::Accepted { held, extras } = &answer {
+            let at = self
+                .providers
+                .iter()
+                .position(|each| each.id() == plan.provider);
+            let ids = std::iter::once(&held.id).chain(extras.iter().map(|each| &each.id));
+            self.locate(at.unwrap_or_default(), ids);
+        }
+        answer
     }
 
+    /// Releases through the provider that holds `id`; a machine no provider has listed
+    /// since the start goes to each provider in turn until one does not refuse it as
+    /// another's.
     fn release(&self, id: &HostRef) -> Released {
-        self.provider.release(id)
+        if let Some(provider) = self.located(id) {
+            return provider.release(id);
+        }
+        let mut answer = Released::Refused(Claim::Foreign);
+        for provider in &self.providers {
+            answer = provider.release(id);
+            if answer != Released::Refused(Claim::Foreign) {
+                break;
+            }
+        }
+        answer
     }
 
     fn revoke(&self, host: &str) -> bool {
@@ -210,7 +294,9 @@ impl Effects for Live {
     }
 
     fn events(&self) -> Option<EventStream> {
-        self.provider.events()
+        self.providers
+            .first()
+            .and_then(|provider| provider.events())
     }
 
     fn remove(&self, host: &str) -> Result<(), Busy> {
@@ -241,6 +327,7 @@ mod tests {
 
     use super::*;
     use crate::agent_api::job_rig::{placed, spec, tables};
+    use crate::catalogs::Catalogs;
     use crate::clock::SharedClock;
     use crate::job_store::ServerJobs;
     use crate::network::DefaultMode;
@@ -326,7 +413,7 @@ mod tests {
     }
 
     /// The name of the host launched for `acquire`.
-    fn name(acquire: &str) -> String {
+    pub(super) fn name(acquire: &str) -> String {
         let acquire = AcquireId::new(acquire).unwrap();
         HostName::derive(&scheduler(), &acquire).to_string()
     }
@@ -353,6 +440,16 @@ mod tests {
     }
 
     fn live(name: &str) -> (Live, TestDir) {
+        live_with(name, vec![Arc::new(Stub)], Arc::new(Catalogs::new()))
+    }
+
+    /// [`live`] over `providers`, first to last, whose launcher hands its answers to
+    /// `catalogs`.
+    pub(super) fn live_with(
+        name: &str,
+        providers: Vec<Arc<dyn CapacityProvider>>,
+        catalogs: Arc<Catalogs>,
+    ) -> (Live, TestDir) {
         quiet_logs();
         let dir = dir(name);
         let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
@@ -372,7 +469,7 @@ mod tests {
         );
         let agents = Arc::new(Agents::over(registry, &shared, &dir));
         let launcher = Launcher::new(
-            Arc::new(Stub),
+            Arc::clone(&providers[0]),
             Arc::new(DefaultMode::new(
                 "https://sched.example.org:7301",
                 Vec::new(),
@@ -387,6 +484,12 @@ mod tests {
                 },
             )]),
         );
+        let later = providers.iter().skip(1);
+        let launcher = later
+            .fold(launcher, |launcher, each| {
+                launcher.with_provider(Arc::clone(each))
+            })
+            .with_catalogs(catalogs);
         let kept = ScalerKeeper::Files {
             records: RecordsFile::new(dir.join("records")),
             unremoved: UnremovedFile::new(dir.join("unremoved")),
@@ -394,7 +497,7 @@ mod tests {
         let checks = Arc::new(Mutex::new(Checks::default()));
         let live = Live::new(
             (agents, pool, scheduler()),
-            Arc::new(Stub),
+            providers,
             launcher,
             (kept, checks),
             floor(),
@@ -413,7 +516,7 @@ mod tests {
         (live, store, jobs)
     }
 
-    fn offer() -> Offer {
+    pub(super) fn offer() -> Offer {
         Offer {
             id: "gpu_1x_a10".to_owned(),
             zone: Some("us-west-1".to_owned()),
@@ -451,6 +554,7 @@ mod tests {
             acquire,
             attempt: 0,
             pool: "burst".to_owned(),
+            provider: js_scaler::UNNAMED_PROVIDER,
             offer: offer(),
             lifetime: None,
         };
@@ -462,7 +566,7 @@ mod tests {
         assert!(!live.holds_work("js-nobody"));
         assert_eq!(live.checks(), (Health::Checking, Vec::new()));
         assert!(
-            live.provider.catalog().await.is_err(),
+            live.providers[0].catalog().await.is_err(),
             "the checks read the catalog"
         );
         assert_eq!(live.list(), Ok(Vec::new()));
@@ -476,19 +580,19 @@ mod tests {
         assert!(!live.is_gone(&id));
         assert!(live.events().is_none(), "the stand-in sends no notices");
         // The stand-in's calls the shell does not make, so that it is whole.
-        assert_eq!(live.provider.id().as_str(), "stub");
-        assert!(!live.provider.can_launch());
+        assert_eq!(live.providers[0].id().as_str(), "stub");
+        assert!(!live.providers[0].can_launch());
         assert_eq!(
-            live.provider.capabilities(),
+            live.providers[0].capabilities(),
             js_elastic::ProviderCaps::default()
         );
-        assert_eq!(live.provider.capacity().can_add, Some(0));
+        assert_eq!(live.providers[0].capacity().can_add, Some(0));
         let hello = js_elastic::Hello {
             name: name("a1"),
             instance_id: None,
             identity: None,
         };
-        assert_eq!(live.provider.verify_instance(&hello), None);
+        assert_eq!(live.providers[0].verify_instance(&hello), None);
     }
 
     /// Asserts that the job tables are read whole, the queued jobs and the live allocations,
@@ -658,3 +762,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "live_providers_tests.rs"]
+mod providers_tests;

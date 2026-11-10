@@ -27,8 +27,10 @@
 //!   write of them, so a restart keeps them. The scaler's pick reads the offers of the pool's checks, not this
 //!   view.
 //!
-//! Caches are keyed by [`CapacityProvider::id`]. The server has at most one launching
-//! provider today (one elastic pool); two providers of one kind would share an id.
+//! Caches are keyed by [`CapacityProvider::id`]. A pool may launch with several providers,
+//! and the scaler reads the offers of each one after the first through
+//! [`Catalogs::offers_for_pass2`]; the configuration refuses two providers of one id in a
+//! pool, so no two share a cache.
 //!
 //! The `js check` credential probe (the pool's checks) does not read through here: its point
 //! is a live answer from the provider, so it calls the provider itself.

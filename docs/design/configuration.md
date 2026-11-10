@@ -87,7 +87,7 @@ A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches not
 `max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents;
 `server.agent_listen` is required as for an elastic pool. A file may declare any number of joined and elastic pools, each with its own
 `join_token_file`, but the server starts only on a file with at most one pool that registers agents: with more it refuses naming the
-second (`several elastic pools are parsed; running them needs the ordered walk of design 5.6`, or `several pools register agents; ...`
+second (`several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`, or `several pools register agents; ...`
 when they are not all elastic). At most one pool of the agentless `static` provider kind is served; that kind is deprecated, and a later
 version removes it.
 
@@ -275,7 +275,14 @@ A pool written with `provider = { kind = "lambdalabs", ... }` is read as exactly
 table, the `static` machine provider, and a `default` platform naming the two, `static` first. The loader's names start with `+`, which no
 name in the file may hold. The job pass places a job on a free host of the first machine provider in the order the pool lists its
 platforms and each platform its `machine_providers` (any order, a launching provider before `static` included), and on a host of a later
-provider only when no host of an earlier one can take it now. A pool's platforms must reach exactly one machine provider that launches.
+provider only when no host of an earlier one can take it now. A pool's platforms must reach at least one machine provider that launches,
+and may reach several: pass 2 asks them for a machine in the same order (design 5.6, step 5), each inside its own `provider_limits`
+entry and share, a `capacity` refusal falling through to the provider's other offers and then to the next provider, and a request that
+every provider refused waits the soonest `acquire_retry` among them. Two machine providers of one kind (one provider id) in one pool
+are refused (`its provider is "lambdalabs", as is that of an earlier machine provider of the pool; a pool reaches each provider once`),
+and every provider must launch hosts of the pool's `exec` mode. The pool's floor is the fewest GPUs of a class every provider's hosts
+share (none when they share no class). Its health is its first launching provider's checks, the scaler reads that provider's notices,
+and a later provider's offers are its cached catalog.
 
 **Parsed and checked; what acts on them.** `max_queue_wait`, `start_timeout`, `path_grace` (each a positive duration) and the
 `provider_limits` tables are read and checked at start. Admission of a lease request (design 5.6, step 2) reads the limits: an offer

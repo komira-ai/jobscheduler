@@ -22,8 +22,8 @@ use crate::support::{Scratch, T0, TOKEN};
 pub const API_KEY: &str = "PLANTED-API-KEY-VALUE";
 pub const OAUTH_SECRET: &str = "PLANTED-OAUTH-SECRET-VALUE";
 
-/// An elastic provider that launches nothing.
-struct NullElastic;
+/// An elastic provider that launches nothing, under the id it holds.
+pub struct NullElastic(pub &'static str);
 
 impl CapacityProvider for NullElastic {
     fn catalog(&self) -> CatalogFuture<'_> {
@@ -51,7 +51,7 @@ impl CapacityProvider for NullElastic {
     }
 
     fn id(&self) -> js_types::ProviderId {
-        js_types::ProviderId::known("null")
+        js_types::ProviderId::known(self.0)
     }
 
     fn can_launch(&self) -> bool {
@@ -90,7 +90,7 @@ fn kind_error(field: &str, reason: impl Into<String>) -> KindError {
 fn built(gpus: u64, exec: Vec<ExecMode>) -> Built {
     Built::Elastic(ElasticBuilt {
         idle_costs: false,
-        provider: Box::new(NullElastic),
+        provider: Box::new(NullElastic("null")),
         floor: Floor {
             gpus,
             gpu_class: Some(Model::parse("nvidia-a10").unwrap()),
@@ -136,7 +136,7 @@ fn cloud_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
 fn broken_floor(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
     Ok(Built::Elastic(ElasticBuilt {
         idle_costs: false,
-        provider: Box::new(NullElastic),
+        provider: Box::new(NullElastic("null")),
         floor: Floor {
             gpus: 1,
             gpu_class: None,
@@ -145,11 +145,11 @@ fn broken_floor(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, Kind
     }))
 }
 
-/// A kind that launches hosts of either mode, with no GPU.
+/// A kind that launches hosts of either mode, with no GPU, under the provider id `any`.
 fn any_mode(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
     Ok(Built::Elastic(ElasticBuilt {
         idle_costs: false,
-        provider: Box::new(NullElastic),
+        provider: Box::new(NullElastic("any")),
         floor: Floor {
             gpus: 0,
             gpu_class: None,
@@ -159,7 +159,7 @@ fn any_mode(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindErro
 }
 
 /// The kinds of the tests: `static` as the server ships it, `lambdalabs` as
-/// [`cloud_kind`], and two more.
+/// [`cloud_kind`] (provider id `null`), and two more.
 pub fn kinds() -> Kinds {
     Kinds::standard()
         .with("lambdalabs", cloud_kind)

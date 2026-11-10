@@ -2,6 +2,7 @@
 //! input and a time it names; none reads a clock or waits.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_elastic::{
@@ -143,7 +144,9 @@ pub fn pool(settings: Settings) -> PoolInput {
         settings,
         health: Health::Available,
         offers: vec![offer("a10", 60)],
+        later_offers: BTreeMap::new(),
         held: Some(Vec::new()),
+        listed_by: BTreeMap::new(),
         unresolved: Vec::new(),
         catalog_refreshed: false,
     }
@@ -373,5 +376,6 @@ pub fn record(phase: Phase, price: u64, launched: u64) -> Record {
         last_clean: None,
         seen_live: false,
         ends_at: None,
+        provider: None,
     }
 }

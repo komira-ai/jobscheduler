@@ -684,6 +684,7 @@ pub fn record(name: &str, phase: Phase) -> Record {
         // nothing new to write down.
         seen_live: true,
         ends_at: None,
+        provider: None,
     }
 }
 

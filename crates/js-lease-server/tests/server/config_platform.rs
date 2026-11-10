@@ -273,7 +273,7 @@ fn starting_several_elastic_pools_is_refused_until_the_walk_lands() {
         .to_string();
     assert_eq!(
         said,
-        "pool \"cpu\": several elastic pools are parsed; running them needs the ordered walk of design 5.6"
+        "pool \"cpu\": several elastic pools are parsed; this version runs one, as the server keeps one registry of agents"
     );
 }
 
@@ -825,9 +825,12 @@ fn max_instances_and_max_machines_are_the_same_cap() {
 
 /// Asserts that a platform may list its machine providers in any order, a launching one
 /// before `static` included, and a pool its platforms in any order, each resolved as
-/// written (the job pass walks them in that order); and that a pool whose platforms reach no
-/// launching provider, or two, is refused. It catches an order the file asks for that is
-/// refused or reordered, and a pool with no launching provider, or two, that starts.
+/// written (the job pass walks them in that order); that a pool whose platforms reach no
+/// launching provider is refused; and that one whose two platforms reach two machine
+/// providers of one kind is refused naming the second, since the scheduler tells providers
+/// apart by their kind's id. It catches an order the file asks for that is refused or
+/// reordered, a pool with no launching provider that starts, and two providers of one id
+/// that start.
 #[test]
 fn any_machine_provider_order_resolves_as_written() {
     let scratch = Scratch::new("platform_order");
@@ -848,10 +851,10 @@ fn any_machine_provider_order_resolves_as_written() {
     let text = doc(&scratch, &split, &[&on(&["cloud", "ours"], &scratch)]);
     let pool = resolved(&scratch, &text).pools[0].platforms.clone();
     assert_eq!(pool, [PlatformId::new("cloud"), PlatformId::new("ours")]);
-    let one = "a pool's platforms reach exactly one machine provider that launches in this version; a pool of registered hosts alone is kind = \"joined\"";
+    let none = "a pool's platforms reach no machine provider that launches; a pool of registered hosts alone is kind = \"joined\"";
     let text = doc(&scratch, &split, &[&on(&["ours"], &scratch)]);
     let cloud_unnamed = refused(&scratch, &text);
-    assert_eq!(cloud_unnamed, format!("pool \"gpu\": platforms: {one}"));
+    assert_eq!(cloud_unnamed, format!("pool \"gpu\": platforms: {none}"));
     let two = [
         rack(),
         lambda(&scratch, "lambda-a"),
@@ -862,7 +865,7 @@ fn any_machine_provider_order_resolves_as_written() {
     let text = doc(&scratch, &two, &[&on(&["east", "west"], &scratch)]);
     assert_eq!(
         refused(&scratch, &text),
-        format!("pool \"gpu\": platforms: {one}")
+        "machine_provider \"lambda-b\": kind: its provider is \"null\", as is that of an earlier machine provider of the pool; a pool reaches each provider once"
     );
     let cloud = [lambda(&scratch, "lambda"), platform("cloud", &["lambda"])];
     let alone = resolved(

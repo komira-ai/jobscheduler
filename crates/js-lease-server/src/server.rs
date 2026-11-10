@@ -360,16 +360,19 @@ pub(crate) fn prepare(
     let logs = crate::logs::from_config(&logs, clock);
     let kept = (state_file.as_path(), store.as_ref());
     let (static_hosts, agents) = assemble_in(hosts, usage, clock, kept, logs)?;
-    let launching = elastic.iter().map(|plan| Launching {
-        provider: Arc::clone(&plan.provider),
-        share: plan.share,
-        limits: plan.limits.clone(),
+    // Every launching provider of the elastic pool: admission asks each whether it could
+    // ever serve a job, and the scaler's tick fetches each one's catalog. An elastic plan
+    // comes only with a pool whose hosts register (agents), so a server with a catalog to
+    // fetch always has a scaler.
+    let providers = || elastic.iter().flat_map(|plan| plan.providers.iter());
+    let launching = providers().map(|each| Launching {
+        provider: Arc::clone(&each.provider),
+        share: each.share,
+        limits: each.limits.clone(),
     });
-    // The scaler's tick fetches the catalogs. An elastic plan comes only with a pool whose
-    // hosts register (agents), so a server with a catalog to fetch always has a scaler.
-    let catalogs = elastic.iter().fold(Catalogs::new(), |catalogs, plan| {
-        let provider = Arc::clone(&plan.provider);
-        catalogs.with(provider, plan.catalog_refresh, plan.offer_cooldown)
+    let catalogs = providers().fold(Catalogs::new(), |catalogs, each| {
+        let provider = Arc::clone(&each.provider);
+        catalogs.with(provider, each.catalog_refresh, each.offer_cooldown)
     });
     let cached = Cached::new(Arc::new(catalogs), clock.clone());
     let admit = Admit::new(launching.collect(), cached.clone());
