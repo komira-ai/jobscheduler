@@ -445,6 +445,13 @@ impl ServerNode {
         self.calls.get(&key).copied().unwrap_or(0)
     }
 
+    /// How many calls from any host on `route` were answered, whatever the status.
+    #[must_use]
+    pub fn answered_total(&self, route: Route) -> u64 {
+        let on = self.calls.iter().filter(|(key, _)| key.route == route);
+        on.map(|(_, count)| *count).sum()
+    }
+
     /// Answers an agent's call; anything but a call, and any call while the server is
     /// down, is ignored.
     fn on_message(&mut self, from: NodeId, msg: Msg) {

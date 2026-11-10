@@ -140,6 +140,7 @@ pub mod front;
 pub mod invariant;
 pub mod jobs;
 mod ledger;
+mod load;
 mod node;
 pub mod observe;
 pub mod replay;
@@ -168,6 +169,7 @@ pub use jobs::{
     LostAnswer, ResultMade,
 };
 pub use ledger::{Acked, Completion, Ledger};
+pub use load::Load;
 pub use node::CellNode;
 pub use observe::{
     AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,

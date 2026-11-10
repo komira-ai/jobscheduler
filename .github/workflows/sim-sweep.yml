@@ -81,3 +81,21 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
         run: cargo test --release --locked -p js-sim-cell --test sweep -- --start "$SEED_START" --count "$SEED_COUNT" --shards "$SHARDS" --shard "$SHARD"
+
+  # The scale scenario at its full size, two thousand hosts and twenty thousand jobs on one
+  # seed (crates/js-sim-cell/tests/scale.rs): too long for a pull request, so it is ignored
+  # there and named here. The server's cost of a placement grows with the hosts, so the run
+  # is long; a failing bound names the count that is over.
+  scale:
+    name: scale (2,000 hosts, 20,000 jobs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Run the scale scenario
+        run: cargo test --release --locked -p js-sim-cell --test scale -- --ignored a_run_of_two_thousand_hosts_and_twenty_thousand_jobs_stays_in_its_bounds

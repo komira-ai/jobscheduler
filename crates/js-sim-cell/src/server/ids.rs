@@ -6,8 +6,9 @@
 //! server orders by both. The cell gives it instead, through the in-process seam
 //! (`Config::with_job_sources`), js-jobs's scripted source over [`SCRIPT_LEN`] ids drawn
 //! from the seed ([`seeded`]), and the cell's own clock ([`StoreClock`]). The script
-//! starts over after its last id, so ids repeat only after that many placements, more than
-//! any scenario makes. The node keeps one source across a restart of the server, so a
+//! starts over after its last id, so ids repeat only after that many mints (one a placement, so
+//! 65,536 placements; the scale scenario, `tests/scale.rs`, makes 20,000 and states that no
+//! allocation id repeats). The node keeps one source across a restart of the server, so a
 //! restarted server goes on with the script rather than starting it again.
 
 use std::time::Duration;
@@ -17,7 +18,7 @@ use js_state::StoreTime;
 use js_types::{Clock as _, ManualClock};
 
 /// How many ids the script holds before it starts over.
-pub const SCRIPT_LEN: usize = 4_096;
+pub const SCRIPT_LEN: usize = 65_536;
 
 /// The ids the server of a cell of `seed` mints, in the order it mints them: a function of
 /// the seed alone.
@@ -81,6 +82,18 @@ mod tests {
             one[..SCRIPT_LEN].iter().copied().collect();
         assert_eq!(distinct.len(), SCRIPT_LEN);
         assert_eq!(one[SCRIPT_LEN], one[0], "the script starts over");
+    }
+
+    /// Catches: a script that starts over before the largest run of the cell (twenty
+    /// thousand placements, `tests/scale.rs`) has minted its last id: the checker keys an
+    /// allocation by its id, so a repeat made one job's row stand for another's (at the
+    /// 4,097th placement, `one-allocation-per-job` flagged the second job).
+    #[test]
+    fn no_id_repeats_in_twenty_thousand_mints() {
+        let source = seeded(7);
+        let ids: Vec<[u8; 16]> = (0..20_000).map(|_| source.mint().unwrap()).collect();
+        let distinct: std::collections::BTreeSet<[u8; 16]> = ids.iter().copied().collect();
+        assert_eq!(distinct.len(), 20_000);
     }
 
     /// Catches: a store clock that reads another clock, or another unit, than the cell's
