@@ -47,31 +47,20 @@ memory_bytes = 17179869184
 arch = "x86_64"
 "#;
 
-/// The base flags plus the agent flags: the join token file holds [`JOIN`] and
-/// [`JOIN_B`]; the static pool is dropped when `keep_static` is false.
-pub fn agent_args(scratch: &Scratch, keep_static: bool) -> Vec<OsString> {
+/// The base flags (whose pool is [`POOL`]) plus the shared join token file, which holds
+/// [`JOIN`] and [`JOIN_B`].
+pub fn agent_args(scratch: &Scratch) -> Vec<OsString> {
     let mut args = base_args(scratch);
-    if !keep_static {
-        let at = args.iter().position(|arg| arg == "--pool-config").unwrap();
-        args.drain(at..at + 2);
-    }
     let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n{JOIN_B}\n"), 0o600);
-    let pool = scratch.write("agent-pool.toml", POOL, 0o644);
-    let flags = [
-        ("--agent-token-file", tokens.into_os_string()),
-        ("--agent-pool-config", pool.into_os_string()),
-    ];
-    for (flag, value) in flags {
-        args.push(flag.into());
-        args.push(value);
-    }
+    args.push("--agent-token-file".into());
+    args.push(tokens.into_os_string());
     args
 }
 
-/// The agent flags over [`JOB_POOL`] without the static pool, the job service on a loopback
+/// The agent flags over [`JOB_POOL`], the job service on a loopback
 /// port, so that a host which says hello with [`job_hello`] runs jobs.
 pub fn job_host_args(scratch: &Scratch) -> Vec<OsString> {
-    let mut args = agent_args(scratch, false);
+    let mut args = agent_args(scratch);
     scratch.write("agent-pool.toml", JOB_POOL, 0o644);
     args.extend(["--job-listen", "127.0.0.1:0"].map(Into::into));
     args
@@ -81,7 +70,7 @@ pub fn job_host_args(scratch: &Scratch) -> Vec<OsString> {
 pub async fn start_job_hosts_in(name: &str, kept: Kept) -> Harness {
     let scratch = Scratch::new(&kept.named(name));
     let args = kept.args(&scratch, job_host_args(&scratch));
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// [`restarted`] for a server started with [`start_job_hosts_in`].
@@ -93,33 +82,33 @@ pub async fn restarted_job_hosts(first: Harness) -> Harness {
     running.shutdown().await.unwrap();
     let args = kept.args(&scratch, job_host_args(&scratch));
     let args = replace(args, "--boot", "resume");
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// A server with agent registration on, over a fresh scratch directory.
-pub async fn start_agents(name: &str, keep_static: bool) -> Harness {
-    start_agents_in(name, keep_static, Kept::Files).await
+pub async fn start_agents(name: &str) -> Harness {
+    start_agents_in(name, Kept::Files).await
 }
 
 /// [`start_agents`], keeping the bindings and the join tokens as `kept` says.
-pub async fn start_agents_in(name: &str, keep_static: bool, kept: Kept) -> Harness {
+pub async fn start_agents_in(name: &str, kept: Kept) -> Harness {
     let scratch = Scratch::new(&kept.named(name));
-    let args = kept.args(&scratch, agent_args(&scratch, keep_static));
-    Harness::with(scratch, args, None).await
+    let args = kept.args(&scratch, agent_args(&scratch));
+    Harness::with(scratch, args).await
 }
 
 /// Stops `first` and starts another server over its scratch directory with
 /// `--boot resume`, as the program does after a restart: a new registry, nothing carried
 /// over but the files, and the store when `first` kept its hosts in one.
-pub async fn restarted(first: Harness, keep_static: bool) -> Harness {
+pub async fn restarted(first: Harness) -> Harness {
     let kept = Kept::of(&first);
     let Harness {
         running, scratch, ..
     } = first;
     running.shutdown().await.unwrap();
-    let args = kept.args(&scratch, agent_args(&scratch, keep_static));
+    let args = kept.args(&scratch, agent_args(&scratch));
     let args = replace(args, "--boot", "resume");
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// A hello a host of the pool sends: the floor shape exactly, in the pool `burst`.

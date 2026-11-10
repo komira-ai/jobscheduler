@@ -13,7 +13,6 @@ use js_cli::Services;
 use js_lease_server::{
     Cli as ServerCli, Config, Running, SharedClock, TickHandle, channel_ticker, start,
 };
-use js_pool_static::EXAMPLE_CONFIG;
 use js_testkit::dir::TestDir;
 use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
@@ -183,17 +182,10 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// A plain-http server over the shipped two-host pool. It admits no agents, so it has
-    /// no join-token route.
+    /// A plain-http server whose agents register hosts into [`POOL`], so the join-token
+    /// route exists. No host has said hello.
     pub fn new(name: &str) -> Self {
         Self::build_in(Scratch::new(name), &[])
-    }
-
-    /// A plain-http server whose agents register hosts, so the join-token route exists.
-    pub fn agents(name: &str) -> Self {
-        let scratch = Scratch::new(name);
-        let pool = Self::agent_pool(&scratch);
-        Self::build_in(scratch, &["--agent-pool-config", &pool])
     }
 
     /// A server over TLS with a certificate made for the test, admitting agents; the
@@ -204,27 +196,12 @@ impl Harness {
         let cert = scratch.write("cert.pem", &made.cert.pem(), 0o644);
         let key = scratch.write("key.pem", &made.signing_key.serialize_pem(), 0o600);
         let (cert, key) = (cert.to_str().unwrap(), key.to_str().unwrap());
-        let pool = Self::agent_pool(&scratch);
-        let extra = [
-            "--tls-cert",
-            cert,
-            "--tls-key",
-            key,
-            "--agent-pool-config",
-            &pool,
-        ];
-        Self::build_in(scratch, &extra)
+        Self::build_in(scratch, &["--tls-cert", cert, "--tls-key", key])
     }
 
-    /// The path of an agent pool config written into `scratch`.
-    fn agent_pool(scratch: &Scratch) -> String {
-        let pool = scratch.write("agent-pool.toml", POOL, 0o644);
-        pool.to_str().unwrap().to_owned()
-    }
-
-    /// A server in `scratch` with these extra server flags.
+    /// A server in `scratch` over the agent pool [`POOL`], with these extra server flags.
     fn build_in(scratch: Scratch, extra: &[&str]) -> Self {
-        let pool = scratch.write("pool.toml", EXAMPLE_CONFIG, 0o644);
+        let pool = scratch.write("agent-pool.toml", POOL, 0o644);
         let token_file = scratch.write("token", TOKEN, 0o600);
         let state = scratch.path("leases.toml");
         let mut args: Vec<OsString> = vec![
@@ -235,7 +212,7 @@ impl Harness {
             state.into(),
             "--boot".into(),
             "initialise".into(),
-            "--pool-config".into(),
+            "--agent-pool-config".into(),
             pool.into(),
             "--token-file".into(),
             token_file.clone().into(),

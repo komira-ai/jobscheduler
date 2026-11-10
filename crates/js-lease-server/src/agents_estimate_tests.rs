@@ -80,7 +80,13 @@ fn refused(name: &str, extra: &[&str], spoil: impl Fn(&Path)) -> String {
     let config = config(dir.path(), extra);
     spoil(dir.path());
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
-    let assembled = assemble(config.hosts, config.usage, &clock, &config.state_file, None);
+    let assembled = assemble(
+        config.agents,
+        config.usage,
+        &clock,
+        &config.state_file,
+        None,
+    );
     match assembled {
         Err(err) => err.to_string(),
         Ok(_) => panic!("{name}: assembled"),

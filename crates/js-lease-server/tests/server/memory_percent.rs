@@ -1,6 +1,6 @@
 //! `memory_schedulable_percent`: the share of the memory an operator configured that the
-//! server books, for a static hosts file, a `[[pool]]` of the configuration file and the
-//! agent pool file, and what the routes show of it.
+//! server books, for a `[[pool]]` of the configuration file and the agent pool file, and
+//! what the routes show of it.
 
 use serde_json::{Value, json};
 
@@ -9,15 +9,9 @@ use crate::config_support::{
     PoolText, file, load, quote, quoted, refusal, server, server_with_agents,
 };
 use crate::jobs_support::{JobBody, submit_body};
-use crate::support::{Harness, Scratch, base_args, config, replace, request};
+use crate::support::{Harness, Scratch, config, replace, request};
 
 const GIB: u64 = 1 << 30;
-
-/// The memory the static hosts list: 251 GiB.
-const LISTED: u64 = 251 * GIB;
-
-/// What 90 percent of it books, rounded down.
-const NINETY: u64 = LISTED * 90 / 100;
 
 /// The memory the agent pool lists: 16 GiB, as `agents_support::POOL` has it.
 const POOLED: u64 = 16 * GIB;
@@ -25,69 +19,8 @@ const POOLED: u64 = 16 * GIB;
 /// What 90 percent of the agent pool's memory books, rounded down.
 const POOLED_NINETY: u64 = POOLED * 90 / 100;
 
-/// A hosts file of one 251 GiB host with `line` (a `memory_schedulable_percent` line, or
-/// nothing) before it.
-fn hosts_text(line: &str) -> String {
-    format!(
-        "{line}\n[[host]]\nid = \"big-01\"\ngpu_class = \"nvidia-a100\"\n\n[host.resources]\n\
-         cpu_millis = 64000\nmemory_bytes = {LISTED}\ngpus = 8\n\n[host.capabilities]\n\
-         isa = \"x86-64-v3\"\n"
-    )
-}
-
-/// A server over a static hosts file given by the flag `--pool-config`.
-async fn flagged(name: &str, hosts_line: &str) -> Harness {
-    let scratch = Scratch::new(name);
-    let path = scratch.write("big-hosts.toml", &hosts_text(hosts_line), 0o644);
-    let args = replace(base_args(&scratch), "--pool-config", path.into_os_string());
-    Harness::with(scratch, args, None).await
-}
-
-/// A server over the configuration file whose only pool is a static pool over a hosts
-/// file with `hosts_line`, and the `[[pool]]` key `pool_percent` when given.
-async fn configured(name: &str, hosts_line: &str, pool_percent: Option<&str>) -> Harness {
-    let scratch = Scratch::new(name);
-    let path = scratch.write("big-hosts.toml", &hosts_text(hosts_line), 0o644);
-    let mut pool = PoolText::static_pool(&scratch, "big").set(
-        "provider",
-        &format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&path)),
-    );
-    if let Some(percent) = pool_percent {
-        pool = pool.set("memory_schedulable_percent", percent);
-    }
-    let text = file(&server(&scratch, "listen = \"127.0.0.1:0\""), &[&pool]);
-    let config = load(&scratch, &text).unwrap();
-    Harness::over(scratch, config).await
-}
-
-/// Asserts that the `[[pool]]` key books the cut for a static pool, and that it is the
-/// pool's key that counts when the hosts file says another: 90 in the pool over 50 in the
-/// file shows 90 booked, once (not 45), and a file with 50 and no pool key shows half. It
-/// catches the two being multiplied and a pool key that is ignored for a static pool.
-#[tokio::test]
-async fn the_pool_key_books_the_cut_of_a_static_pool() {
-    let h = configured("mempct_pool_90", "", Some("90")).await;
-    let shown = entry(&hosts(&h).await, "big-01");
-    assert_eq!(shown["shape"]["memory_bytes"], NINETY);
-    assert_eq!(shown["memory"]["schedulable_percent"], 90);
-    let both = configured(
-        "mempct_pool_over_file",
-        "memory_schedulable_percent = 50",
-        Some("90"),
-    );
-    let both = both.await;
-    let shown = entry(&hosts(&both).await, "big-01");
-    assert_eq!(shown["shape"]["memory_bytes"], NINETY);
-    assert_eq!(shown["memory"]["schedulable_percent"], 90);
-    let file_only = configured("mempct_file_only", "memory_schedulable_percent = 50", None).await;
-    let shown = entry(&hosts(&file_only).await, "big-01");
-    assert_eq!(shown["shape"]["memory_bytes"], LISTED / 2);
-    assert_eq!(shown["memory"]["schedulable_percent"], 50);
-}
-
 /// Asserts that a percent of 0, 101 or a word is refused when the configuration is
-/// checked, naming the pool and the field, for a static pool and for an elastic one, and
-/// that a hosts file with such a value is refused naming the field and the file. It
+/// checked, naming the pool and the field, for a joined pool and for an elastic one. It
 /// catches a pool that starts booking nothing, or more than the host has.
 #[test]
 fn a_percent_outside_one_to_a_hundred_is_refused() {
@@ -100,7 +33,7 @@ fn a_percent_outside_one_to_a_hundred_is_refused() {
         ("\"ninety\"", "must be an integer"),
     ];
     for (value, reason) in cases {
-        let pool = PoolText::static_pool(&scratch, "hosts").set(key, value);
+        let pool = PoolText::joined("hosts").set(key, value);
         let said = refusal(&scratch, &file(&server(&scratch, ""), &[&pool]));
         assert_eq!(said, format!("pool \"hosts\": {key}: {reason}"));
         let elastic = PoolText::elastic(&scratch).set(key, value);
@@ -110,23 +43,6 @@ fn a_percent_outside_one_to_a_hundred_is_refused() {
             format!("pool \"gpu\": {key}: {reason}")
         );
     }
-    let hosts = scratch.write(
-        "zero-hosts.toml",
-        &hosts_text("memory_schedulable_percent = 0"),
-        0o644,
-    );
-    let pool = PoolText::static_pool(&scratch, "hosts").set(
-        "provider",
-        &format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&hosts)),
-    );
-    let said = refusal(&scratch, &file(&server(&scratch, ""), &[&pool]));
-    assert_eq!(
-        said,
-        format!(
-            "pool \"hosts\": provider.hosts_file: {}: memory_schedulable_percent must be from 1 to 100",
-            hosts.display()
-        )
-    );
 }
 
 /// The agent pool file with `memory_schedulable_percent = 90` before its `[shape]`.
@@ -137,19 +53,19 @@ fn ninety_pool() -> String {
     )
 }
 
-/// A server with agent registration on, no static pool and the job service on a loopback
-/// port, whose agent pool file is `text`.
+/// A server with agent registration on and the job service on a loopback port, whose agent
+/// pool file is `text`.
 async fn registering(name: &str, text: &str) -> Harness {
     let scratch = Scratch::new(name);
     let path = scratch.write("agent-pool-memory.toml", text, 0o644);
     let mut args = replace(
-        agent_args(&scratch, false),
+        agent_args(&scratch),
         "--agent-pool-config",
         path.into_os_string(),
     );
     args.push("--job-listen".into());
     args.push("127.0.0.1:0".into());
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// Submits a job `id` that needs `memory_bytes` and answers the status and the error code,
@@ -250,7 +166,7 @@ async fn the_agent_pool_default_is_unchanged_and_bad_values_are_refused() {
         );
         let path = scratch.write("agent-pool-memory.toml", &text, 0o644);
         let args = replace(
-            agent_args(&scratch, false),
+            agent_args(&scratch),
             "--agent-pool-config",
             path.clone().into_os_string(),
         );
@@ -263,8 +179,8 @@ async fn the_agent_pool_default_is_unchanged_and_bad_values_are_refused() {
     }
 }
 
-/// Asserts that `GET /v1/hosts` shows, for a registered host and for a static one, the
-/// memory listed, the percent and the bookable memory, and that `shape.memory_bytes` is
+/// Asserts that `GET /v1/hosts` shows, for a registered host, the memory listed, the percent
+/// and the bookable memory, and that `shape.memory_bytes` is
 /// the bookable memory. It catches a listing that shows the unreduced figure as what is
 /// booked.
 #[tokio::test]
@@ -291,21 +207,6 @@ async fn hosts_show_the_listed_memory_the_percent_and_the_bookable_memory() {
             "bookable_bytes": POOLED_NINETY,
         })
     );
-    let h = flagged("mempct_hosts_static", "memory_schedulable_percent = 90").await;
-    let shown = entry(&hosts(&h).await, "big-01");
-    assert_eq!(shown["shape"]["memory_bytes"], NINETY);
-    assert_eq!(
-        shown["memory"],
-        json!({
-            "configured_bytes": LISTED,
-            "schedulable_percent": 90,
-            "bookable_bytes": NINETY,
-        })
-    );
-    let h = flagged("mempct_hosts_static_default", "").await;
-    let shown = entry(&hosts(&h).await, "big-01");
-    assert_eq!(shown["memory"]["schedulable_percent"], 100);
-    assert_eq!(shown["memory"]["bookable_bytes"], LISTED);
 }
 
 /// Asserts that `GET /v1/pools` and `/status` show an elastic pool's floor memory (1 GiB),

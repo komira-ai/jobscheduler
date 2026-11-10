@@ -16,7 +16,6 @@ js-jobs = { path = "../js-jobs" }
 js-logmint = { path = "../js-logmint" }
 js-logstore = { path = "../js-logstore" }
 js-platform = { path = "../js-platform" }
-js-pool-static = { path = "../js-pool-static" }
 js-proto = { path = "../js-proto" }
 js-provider-ec2 = { path = "../js-provider-ec2" }
 js-provider-gce = { path = "../js-provider-gce" }

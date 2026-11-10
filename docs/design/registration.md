@@ -87,4 +87,4 @@ hello in message metadata, never in a log line.
   names and defaults (`--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`; `--placement` and `server.placement` are deprecated and do nothing: `js-sched` places every job, `js-sched` is accepted with a warning and `registry` is refused at start), and the flags work as before when
   `--config` is absent.
 - *Source.* The `DefaultProvider` (providers.md) was served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answered from admitted agents. `CapacitySource` and the lease
-  file are deleted; the server lists the hosts of the registry and of the static pool file.
+  file are deleted; the server lists the hosts of the registry (the static pool file was later removed).

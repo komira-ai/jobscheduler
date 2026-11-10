@@ -14,35 +14,32 @@ use crate::file::{ElasticPlan, Launch, Server};
 /// How the configuration file names the two TLS settings in a refusal.
 const KEY_PAIR: &str = "server.tls_cert and server.tls_key";
 
-/// What the listeners and the advertised address must be, given whether a pool launches
-/// hosts; the warnings the server shows.
-pub(crate) fn check_listeners(server: &Server, elastic: bool) -> Result<Vec<String>, StartupError> {
-    if elastic {
-        let apart = match server.agent_listen {
-            Some(agent) => agent != server.listen,
-            None => false,
-        };
-        if !apart {
+/// What the listeners and the advertised address must be, the file's pool being one whose
+/// hosts register agents; the warnings the server shows.
+pub(crate) fn check_listeners(server: &Server) -> Result<Vec<String>, StartupError> {
+    let agent = match server.agent_listen {
+        Some(agent) if agent != server.listen => agent,
+        _ => {
             return Err(StartupError::at(
                 "server.agent_listen",
                 "required with an elastic pool; must differ from server.listen",
             ));
         }
-        let refused = match &server.advertise_url {
-            Some(url) => plain_http(url),
-            None => false,
-        };
-        if refused {
-            return Err(StartupError::at(
-                "server.advertise_url",
-                "http:// is refused by agents; use https (or loopback)",
-            ));
-        }
+    };
+    let refused = match &server.advertise_url {
+        Some(url) => plain_http(url),
+        None => false,
+    };
+    if refused {
+        return Err(StartupError::at(
+            "server.advertise_url",
+            "http:// is refused by agents; use https (or loopback)",
+        ));
     }
-    let mut listeners = vec![("server.listen", server.listen)];
-    if let Some(agent) = server.agent_listen {
-        listeners.push(("server.agent_listen", agent));
-    }
+    let mut listeners = vec![
+        ("server.listen", server.listen),
+        ("server.agent_listen", agent),
+    ];
     if let Some(job) = server.agents.job_listen() {
         listeners.push((job.flag, job.addr));
     }

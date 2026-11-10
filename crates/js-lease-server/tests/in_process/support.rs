@@ -16,7 +16,6 @@ use axum::body::Body;
 use axum::http::Request;
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker};
-use js_pool_static::EXAMPLE_CONFIG;
 use js_testkit::dir::TestDir;
 use js_types::{ManualClock, Monotonic, Timestamp};
 use serde_json::{Value, json};
@@ -87,25 +86,20 @@ impl Scratch {
     }
 }
 
-/// The flags of a test server: an ephemeral loopback port, `boot`, the shipped two-host
-/// pool, an owner-only token file and, with `agents`, registration of
-/// hosts into [`POOL`] with [`JOIN`].
-pub fn args(scratch: &Scratch, boot: &str, agents: bool) -> Vec<OsString> {
-    let pool = scratch.write("pool.toml", EXAMPLE_CONFIG, 0o644);
+/// The flags of a test server: an ephemeral loopback port, `boot`, an owner-only token file,
+/// and registration of hosts into [`POOL`] with [`JOIN`].
+pub fn args(scratch: &Scratch, boot: &str) -> Vec<OsString> {
     let token = scratch.write("token", TOKEN, 0o600);
-    let mut flags: Vec<(&str, OsString)> = vec![
+    let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
+    let pool = scratch.write("agent-pool.toml", POOL, 0o644);
+    let flags: Vec<(&str, OsString)> = vec![
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", scratch.state().into_os_string()),
         ("--boot", boot.into()),
-        ("--pool-config", pool.into_os_string()),
         ("--token-file", token.into_os_string()),
+        ("--agent-token-file", tokens.into_os_string()),
+        ("--agent-pool-config", pool.into_os_string()),
     ];
-    if agents {
-        let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
-        let pool = scratch.write("agent-pool.toml", POOL, 0o644);
-        flags.push(("--agent-token-file", tokens.into_os_string()));
-        flags.push(("--agent-pool-config", pool.into_os_string()));
-    }
     let mut args: Vec<OsString> = vec!["js-lease-server".into()];
     for (flag, value) in flags {
         args.push(flag.into());
@@ -115,8 +109,8 @@ pub fn args(scratch: &Scratch, boot: &str, agents: bool) -> Vec<OsString> {
 }
 
 /// The configuration of [`args`], its metrics timed on `monotonic`.
-pub fn config(scratch: &Scratch, boot: &str, agents: bool, monotonic: &Stepping) -> Config {
-    let cli = Cli::try_parse_from(args(scratch, boot, agents)).unwrap();
+pub fn config(scratch: &Scratch, boot: &str, monotonic: &Stepping) -> Config {
+    let cli = Cli::try_parse_from(args(scratch, boot)).unwrap();
     let config = Config::from_cli(cli).unwrap();
     config.with_monotonic(Arc::new(monotonic.clone()))
 }
@@ -162,11 +156,11 @@ pub struct Cell {
 }
 
 impl Cell {
-    pub fn start(name: &str, agents: bool) -> Self {
+    pub fn start(name: &str) -> Self {
         let scratch = Scratch::new(name);
         let (clock, shared) = clock();
         let monotonic = Stepping::of(Duration::from_millis(1));
-        let config = config(&scratch, "initialise", agents, &monotonic);
+        let config = config(&scratch, "initialise", &monotonic);
         let server = InProcess::start(config, shared).unwrap();
         Self {
             server,

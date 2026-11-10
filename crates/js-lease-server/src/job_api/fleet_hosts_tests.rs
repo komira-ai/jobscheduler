@@ -36,8 +36,8 @@ fn view(id: &str, state: HostState, mark: Option<HostMark>) -> HostView {
     }
 }
 
-/// The hosts of every kind a listing shows: a static one, and registered ones live, lost,
-/// awaiting, tainted, reserved, held, draining, releasing and cordoned.
+/// The hosts of every kind a listing shows: registered ones live (one of them with GPUs and
+/// scratch disk), lost, awaiting, tainted, reserved, held, draining, releasing and cordoned.
 fn every_kind() -> FakeHosts {
     let tainted = HostView {
         taint: Some(Taint {
@@ -54,16 +54,9 @@ fn every_kind() -> FakeHosts {
     let gpu = Resources::new(64_000, 1 << 30, 8, Some("nvidia-a100".to_owned()))
         .unwrap()
         .with_disk_bytes(5 << 30);
-    let static_host = HostCapacity {
-        host: HostId::new("s-1").unwrap(),
-        shape: Shape::new(gpu, BTreeMap::new()),
-        memory: MemoryHeadroom::full(1 << 30),
-        leased_to: None,
-        leases: Vec::new(),
-    };
     FakeHosts {
-        capacity: vec![static_host],
         views: vec![
+            gpu_host(gpu),
             view("r-live", HostState::Live, None),
             view("r-lost", HostState::Lost, None),
             view("r-awaiting", HostState::Awaiting, None),
@@ -78,6 +71,16 @@ fn every_kind() -> FakeHosts {
     }
 }
 
+/// A live registered host `s-1` booking `gpu`, with no capability, and all of its 1 GiB of
+/// memory.
+fn gpu_host(gpu: Resources) -> HostView {
+    HostView {
+        shape: Shape::new(gpu, BTreeMap::new()),
+        memory: MemoryHeadroom::full(1 << 30),
+        ..view("s-1", HostState::Live, None)
+    }
+}
+
 /// The host that the body of `GET /v1/hosts` writes as `entry`, as `ListHosts` should tell
 /// it, read from the JSON alone, with nothing booked.
 fn told(entry: &Value) -> wire::Host {
@@ -88,16 +91,18 @@ fn told(entry: &Value) -> wire::Host {
             .map(|(key, value)| (key.clone(), text(value)))
             .collect()
     };
-    let source = match entry["source"].as_str().unwrap() {
-        "static" => wire::HostSource::Static,
-        _ => wire::HostSource::Registered,
-    };
-    let state = match entry.get("state").and_then(Value::as_str) {
-        Some("live") => wire::HostState::Live,
-        Some("lost") => wire::HostState::Lost,
-        Some("awaiting") => wire::HostState::Awaiting,
-        _ => wire::HostState::Unspecified,
-    };
+    assert_eq!(entry["source"], "registered");
+    let source = wire::HostSource::Registered;
+    let states = [
+        ("live", wire::HostState::Live),
+        ("lost", wire::HostState::Lost),
+        ("awaiting", wire::HostState::Awaiting),
+    ];
+    let state = states
+        .into_iter()
+        .find(|(name, _)| entry["state"] == *name)
+        .map(|(_, state)| state)
+        .unwrap();
     let mark = match entry.get("mark").and_then(Value::as_str) {
         Some("reserved") => wire::HostMark::Reserved,
         Some("held") => wire::HostMark::Held,
@@ -141,8 +146,8 @@ fn told(entry: &Value) -> wire::Host {
 
 /// Asserts that for one listing with a host of every kind, each host of `ListHosts` is the
 /// host the body of `GET /v1/hosts` writes for it, field by field, in the same order; and
-/// that the body of a static host and of a registered one with every optional field is the
-/// text the route has always written. It catches the two views built by two functions that
+/// that the body of a registered host with every optional field, and of one with GPUs and
+/// scratch disk, is the text the route has always written. It catches the two views built by two functions that
 /// drift, and a change of the body that the typed fields of the entries could make.
 #[tokio::test]
 async fn the_hosts_json_and_grpc_agree() {
@@ -157,18 +162,24 @@ async fn the_hosts_json_and_grpc_agree() {
     assert_eq!(listed, written);
     let states: BTreeSet<i32> = listed.iter().map(|host| host.state).collect();
     let marks: BTreeSet<i32> = listed.iter().map(|host| host.mark).collect();
-    assert_eq!((states.len(), marks.len()), (4, 5));
+    assert_eq!((states.len(), marks.len()), (3, 5));
 
+    let gpu = Resources::new(64_000, 1 << 30, 8, Some("nvidia-a100".to_owned()))
+        .unwrap()
+        .with_disk_bytes(5 << 30);
     let mut pinned = every_kind();
-    pinned.views = vec![HostView {
-        taint: Some(Taint {
-            reason: "dirty-scratch".to_owned(),
-            run_id: None,
-            check: None,
-        }),
-        cordon_until: Some(Timestamp::from_millis(T0 + 60_000)),
-        ..view("r-1", HostState::Lost, Some(HostMark::Draining))
-    }];
+    pinned.views = vec![
+        HostView {
+            taint: Some(Taint {
+                reason: "dirty-scratch".to_owned(),
+                run_id: None,
+                check: None,
+            }),
+            cordon_until: Some(Timestamp::from_millis(T0 + 60_000)),
+            ..view("r-1", HostState::Lost, Some(HostMark::Draining))
+        },
+        gpu_host(gpu),
+    ];
     let list = pinned.hosts().await;
     let body = serde_json::to_string(&list).unwrap();
     let expected = concat!(
@@ -178,11 +189,12 @@ async fn the_hosts_json_and_grpc_agree() {
         r#""bookable_bytes":1048576},"capabilities":{"os":"linux"},"labels":{"rack":"r2"},"#,
         r#""agent_version":"0.1.0","releasing":false,"taint":{"reason":"dirty-scratch"},"#,
         r#""mark":"draining","cordon":{"expires_at_ms":1800000060000}},"#,
-        r#"{"id":"s-1","source":"static","shape":{"cpu_millis":64000,"#,
+        r#"{"id":"s-1","source":"registered","state":"live","lost":false,"#,
+        r#""phase":"serving","shape":{"cpu_millis":64000,"#,
         r#""memory_bytes":1073741824,"gpus":8,"gpu_class":"nvidia-a100","#,
         r#""disk_bytes":5368709120},"memory":{"configured_bytes":1073741824,"#,
         r#""schedulable_percent":100,"bookable_bytes":1073741824},"capabilities":{},"#,
-        r#""labels":{}}]}"#,
+        r#""labels":{"rack":"r2"},"agent_version":"0.1.0","releasing":false}]}"#,
     );
     assert_eq!(body, expected);
 }

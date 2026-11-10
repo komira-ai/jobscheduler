@@ -83,7 +83,7 @@ async fn serve(name: &str, pool_class: &str, hello: &Value) -> Harness {
     hello["capabilities"]["arch"] = json!("x86_64");
     hello["capabilities"]["per-job"] = json!("true");
     scratch.write("agent-pool.toml", &pool(pool_class), 0o644);
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     job_agent(&h, &hello).await;
     h
 }

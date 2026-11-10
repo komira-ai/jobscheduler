@@ -298,7 +298,8 @@ async fn keep_alive(tag: &str) -> String {
     out
 }
 
-/// The routes of a server with no agent flags.
+/// The routes of a server on the base flags: agent registration with no shared join token
+/// file.
 async fn routes(tag: &str) -> String {
     let harness = Harness::new(&format!("gpu_path_{tag}_routes")).await;
     matrix(&harness, TOKEN).await
@@ -308,8 +309,8 @@ async fn routes(tag: &str) -> String {
 /// client token, which the agent routes refuse.
 async fn routes_with_agents(tag: &str) -> String {
     let scratch = Scratch::new(&format!("gpu_path_{tag}_routes_agents"));
-    let args = agent_args(&scratch, true);
-    let harness = Harness::with(scratch, args, None).await;
+    let args = agent_args(&scratch);
+    let harness = Harness::with(scratch, args).await;
     matrix(&harness, TOKEN).await
 }
 
@@ -318,7 +319,7 @@ fn args_with_state_dir(scratch: &Scratch, agents: bool) -> (Vec<OsString>, PathB
     let dir = scratch.path("state");
     fs::create_dir_all(&dir).unwrap();
     let args = match agents {
-        true => agent_args(scratch, true),
+        true => agent_args(scratch),
         false => base_args(scratch),
     };
     let args = replace(args, "--state-file", dir.join("leases.toml"));
@@ -355,12 +356,15 @@ fn tree(root: &Path) -> String {
 /// shutdown, with and without the agent flags (where an agent also joins).
 async fn state_files(tag: &str) -> String {
     let mut out = String::new();
-    for (label, agents) in [("without agent flags", false), ("with agent flags", true)] {
+    for (label, agents) in [
+        ("without a join token file", false),
+        ("with a join token file", true),
+    ] {
         let scratch = Scratch::new(&format!("gpu_path_{tag}_files_{agents}"));
         let (args, _) = args_with_state_dir(&scratch, agents);
         let dir = scratch.dir.clone();
         let _ = writeln!(out, "{label}\n  before start: {}", tree(&dir));
-        let harness = Harness::with(scratch, args, None).await;
+        let harness = Harness::with(scratch, args).await;
         let _ = writeln!(out, "  after start: {}", tree(&dir));
         if agents {
             join(&harness, "node-a").await;

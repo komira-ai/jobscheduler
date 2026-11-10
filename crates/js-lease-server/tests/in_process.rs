@@ -50,7 +50,7 @@ fn secs(n: u64) -> Duration {
 /// a status page served to a request with no peer.
 #[tokio::test]
 async fn an_in_process_server_answers_a_hello_and_a_heartbeat_with_no_socket() {
-    let cell = Cell::start("hello", true);
+    let cell = Cell::start("hello");
     let welcome = cell.agent("/v1/agent/hello", &hello_body("host-a")).await;
     assert_eq!(welcome.status, 200, "{:?}", welcome.body);
     assert!(
@@ -94,7 +94,7 @@ async fn an_in_process_server_answers_a_hello_and_a_heartbeat_with_no_socket() {
 /// not run the registry or forgets the host.
 #[tokio::test]
 async fn an_in_process_tick_runs_the_registry_so_a_silent_host_reads_lost() {
-    let cell = Cell::start("lost", true);
+    let cell = Cell::start("lost");
     let welcome = cell.agent("/v1/agent/hello", &hello_body("host-a")).await;
     assert_eq!(welcome.status, 200, "{:?}", welcome.body);
     let registry = cell.server.registry().unwrap();
@@ -151,7 +151,7 @@ enum Input {
 /// stamped by one fixed store clock and its ids from one fixed source, so that the two
 /// servers write equal rows.
 fn equal_config(scratch: &Scratch, monotonic: &Stepping) -> Config {
-    let mut flags = args(scratch, "initialise", true);
+    let mut flags = args(scratch, "initialise");
     flags.push("--job-listen".into());
     flags.push("127.0.0.1:0".into());
     let cli = Cli::try_parse_from(flags).unwrap();
@@ -343,7 +343,7 @@ async fn a_second_in_process_server_starts_over_the_state_file_after_the_first_i
     let scratch = Scratch::new("restart");
     let monotonic = Stepping::of(Duration::from_millis(1));
     let start = |boot: &str| {
-        let mut flags = args(&scratch, boot, true);
+        let mut flags = args(&scratch, boot);
         flags.push("--job-listen".into());
         flags.push("127.0.0.1:0".into());
         // The usage file has its own lock, which would be the one a second server names.

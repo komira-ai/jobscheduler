@@ -138,23 +138,6 @@ pub(crate) struct AgentKeys {
 }
 
 impl AgentKeys {
-    /// The first key given, in the order of the reference.
-    pub(crate) fn first_given(&self) -> Option<&'static str> {
-        let given = [
-            ("agent_hello_burst", self.burst.is_some()),
-            ("agent_hello_interval", self.interval.is_some()),
-            (
-                "require_host_credential",
-                self.require_host_credential.is_some(),
-            ),
-            ("placement", self.placement.is_some()),
-            ("estimate_feed", self.estimate_feed.is_some()),
-            ("cpu_slack", self.cpu_slack.is_some()),
-            ("job_listen", self.job_listen.is_some()),
-        ];
-        given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
-    }
-
     /// The hello limit: the keys' values, or the flags' defaults.
     pub(crate) fn hello_limit(&self) -> HelloLimit {
         let default = HelloLimit::default();

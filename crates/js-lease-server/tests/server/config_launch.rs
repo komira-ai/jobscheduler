@@ -87,7 +87,7 @@ fn the_scheduler_id_defaults_and_is_checked() {
 /// architecture (two here), and each way it can be wrong is refused naming the field and
 /// the architecture: not a table, a key that is no architecture, an unknown key, a missing
 /// or non-https address, and a hash that is missing or not 64 lower-case hex digits (short,
-/// long, upper case, or a digit that is not hex in either place of a pair). A static pool
+/// long, upper case, or a digit that is not hex in either place of a pair). A joined pool
 /// has no use for it. It catches a download over plain http (the bootstrap refuses it, so
 /// the machine would boot and never join) and a hash that is not checked.
 #[test]
@@ -179,11 +179,11 @@ fn the_agent_pin_is_an_https_address_and_a_hash() {
         case(agent(URL, bad), hash);
     }
 
-    let hosts = PoolText::static_pool(&scratch, "hosts").set("agent", &agent(URL, SHA));
+    let hosts = PoolText::joined("hosts").set("agent", &agent(URL, SHA));
     let text = file(&server(&scratch, ""), &[&hosts]);
-    assert_eq!(
-        refusal(&scratch, &text),
-        "pool \"hosts\": agent: only for an elastic pool"
+    assert!(
+        refusal(&scratch, &text).starts_with("pool \"hosts\": agent: unknown field; known: "),
+        "a joined pool takes no agent pin"
     );
 }
 

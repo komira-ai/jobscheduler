@@ -2,9 +2,8 @@
 //!
 //! [`HostBook`] is the table of hosts a server lists: each host's shape, the leases it holds
 //! and what each books there, and every lease it has stopped. The registry of
-//! self-registered hosts (`js-registry`) lists its hosts in one, and the static pool file
-//! (`js-pool-static`) lists its hosts in one, so neither copies the rules of a host's shape
-//! and its memory. The registry reads it for which hosts are listed and what they offer; the
+//! self-registered hosts (`js-registry`) lists its hosts in one, and so does the test fake
+//! `js-pool-fake`, so neither copies the rules of a host's shape and its memory. The registry reads it for which hosts are listed and what they offer; the
 //! booking calls ([`HostBook::start_where`], [`HostBook::start_by`], [`HostBook::start_over`],
 //! [`HostBook::seat`], [`HostBook::stop`]) are kept with their tests and no server code calls
 //! them: the scheduler books work on a host through its job tables, not through this table.

@@ -8,7 +8,7 @@ use js_scaler::{Budgets, Millis, Totals};
 use toml::Value;
 use toml::value::{Datetime, Offset};
 
-use super::{Launch, LoadedHosts, Section};
+use super::{Launch, Registering, Section};
 use crate::error::StartupError;
 use crate::kinds::Kinds;
 
@@ -83,10 +83,7 @@ pub(super) fn read_budgets(
 /// - a total is set and the pool is live without a `max_age` or a `max_lease_wall`: the
 ///   totals then bound nothing about a machine that runs on, since a busy host is never
 ///   retired and the overrun bound ([`js_scaler::overrun`]) needs both.
-pub(super) fn notes(hosts: &LoadedHosts, budgets: &Budgets, now: Millis) -> Vec<String> {
-    let LoadedHosts::Registering { registering, .. } = hosts else {
-        return Vec::new();
-    };
+pub(super) fn notes(registering: &Registering, budgets: &Budgets, now: Millis) -> Vec<String> {
     let Some(plan) = registering.plan.as_ref() else {
         return Vec::new();
     };

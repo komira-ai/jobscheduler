@@ -185,7 +185,7 @@ async fn restart_keeps_the_instance_of_a_binding_in(kept: Kept) {
 /// users can read, one that holds the secret, and a rewrite on every tick or heartbeat.
 #[tokio::test]
 async fn the_binding_file_is_private_and_written_only_on_change() {
-    let h = start_agents("agents_binding_file", false).await;
+    let h = start_agents("agents_binding_file").await;
     let path = agent_file(&h.scratch);
     assert!(!path.exists());
     let a = join(&h, "burst-1").await;
@@ -229,7 +229,7 @@ async fn the_binding_file_is_private_and_written_only_on_change() {
 /// is never tried again.
 #[tokio::test]
 async fn a_failed_binding_write_is_counted_and_retried_at_the_next_tick() {
-    let h = start_agents("agents_binding_failure", false).await;
+    let h = start_agents("agents_binding_failure").await;
     let blocker = h.scratch.path("leases.toml.agents.tmp");
     fs::create_dir(&blocker).unwrap();
     let me = join(&h, "burst-1").await;
@@ -262,7 +262,7 @@ async fn refused(args: Vec<std::ffi::OsString>) -> StartupError {
 #[tokio::test]
 async fn a_binding_file_that_cannot_be_trusted_refuses_the_start() {
     let scratch = Scratch::new("agents_binding_refused");
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     let path = agent_file(&scratch);
     let digest = Credential::of_token(JOIN).to_hex();
     let good = format!("version = 1\n[[host]]\nid = \"burst-1\"\ncredential = \"{digest}\"\n");
@@ -298,7 +298,7 @@ async fn a_binding_file_that_cannot_be_trusted_refuses_the_start() {
         format!("{good}note = \"x\"\n").replace("version = 1", "version = 7\nfuture = true");
     fs::write(&path, future).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    let _h = Harness::with(scratch, args, None).await;
+    let _h = Harness::with(scratch, args).await;
 }
 
 /// Asserts that a server started without the agent flags over the files of one that had them
@@ -306,7 +306,7 @@ async fn a_binding_file_that_cannot_be_trusted_refuses_the_start() {
 /// that cannot be started back without agents.
 #[tokio::test]
 async fn a_server_started_without_agents_leaves_the_agent_file_as_it_was() {
-    let first = start_agents("agents_compat", false).await;
+    let first = start_agents("agents_compat").await;
     join(&first, "burst-1").await;
     let Harness {
         running, scratch, ..
@@ -315,7 +315,7 @@ async fn a_server_started_without_agents_leaves_the_agent_file_as_it_was() {
     let before = fs::read(agent_file(&scratch)).unwrap();
 
     let args = replace(base_args(&scratch), "--boot", "resume");
-    let plain = Harness::with(scratch, args, None).await;
+    let plain = Harness::with(scratch, args).await;
     assert_eq!(fs::read(agent_file(&plain.scratch)).unwrap(), before);
     assert_eq!(plain.call("GET", "/v1/hosts", None).await.status, 200);
 }

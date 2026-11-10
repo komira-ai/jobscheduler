@@ -70,7 +70,7 @@ pub(crate) fn from_server(
     max_job_wall: Duration,
     logs: logs::Ctx,
 ) -> Option<JobApi> {
-    let agents = state.agents()?;
+    let agents = state.agents();
     let jobs = agents.jobs.clone()?;
     let silence: Arc<dyn read::Silence> = Arc::new(agents.registry.clone());
     let read = read::Ctx::default().with_silence(silence);

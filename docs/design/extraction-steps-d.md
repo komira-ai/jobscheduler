@@ -19,7 +19,7 @@ numbers refer to design.md.
 
 **Phase E. Capacity providers and pools.** Steps 27 to 29 need no agent. Step 30 needs steps 20 and 21a. Step 31 is tested on fake agents.
 
-27. `js-config`: the schema of 5.7, the loader and its validation; the merged `--pool-config` file loads as one implicit provider (the
+27. `js-config`: the schema of 5.7, the loader and its validation; the merged `--pool-config` file loaded as one implicit provider (the
     test-only `static` kind, a stepping stone). *Proves:* each rule of 5.7 refuses with the key and line, including `min_machines` and `min`
     (a pool specifies `max_machines` only) and a `static` provider without `--allow-test-providers`; an old file loads unchanged; the
     layering test: no crate below the binary names a provider kind.

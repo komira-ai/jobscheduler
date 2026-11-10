@@ -3,8 +3,7 @@
 
 use std::time::Duration;
 
-use js_lease_server::{BODY_LIMIT, StaticPoolSource};
-use js_pool_static::EXAMPLE_CONFIG;
+use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
@@ -30,7 +29,7 @@ fn empty_reply() -> Value {
 /// session.
 #[tokio::test]
 async fn a_registered_host_is_welcomed_heard_and_listed() {
-    let h = start_agents("agents_registered", false).await;
+    let h = start_agents("agents_registered").await;
     assert!(listed(&hosts(&h).await).is_empty());
 
     let me = join(&h, "burst-1").await;
@@ -45,26 +44,12 @@ async fn a_registered_host_is_welcomed_heard_and_listed() {
     assert!(host.get("lease").is_none());
 }
 
-/// Asserts that an id the static pool lists cannot be registered: a hello for it is
-/// refused 403 `host-listed`, and no registered host appears. It catches two hosts of one
-/// name in the table.
-#[tokio::test]
-async fn host_id_clash_refused() {
-    let h = start_agents("agents_clash", true).await;
-    let clash = hello_with(&h, JOIN, "gpu-01").await;
-    assert_eq!(clash.status, 403, "{}", clash.body);
-    assert_eq!(clash.json(), json!({ "error": "host-listed" }));
-    let listing = hosts(&h).await;
-    assert_eq!(listed(&listing), ["gpu-01", "gpu-02"]);
-    assert_eq!(entry(&listing, "gpu-01")["source"], "static");
-}
-
 /// Asserts that the join token opens no client route and no listing: every route of the
 /// client API, and the paths of the removed lease API, answer 401 with an empty body to
 /// it, whatever the method. It catches the two secrets being one.
 #[tokio::test]
 async fn join_token_does_not_open_client_routes() {
-    let h = start_agents("agents_join_on_client_routes", true).await;
+    let h = start_agents("agents_join_on_client_routes").await;
     let routes = [
         ("GET", "/v1/hosts"),
         ("POST", "/v1/agent/join-tokens"),
@@ -86,13 +71,13 @@ async fn join_token_does_not_open_client_routes() {
 /// register hosts, and a join token that is checked against the wrong secret.
 #[tokio::test]
 async fn client_token_does_not_open_agent_routes() {
-    let h = start_agents("agents_client_on_agent_routes", true).await;
+    let h = start_agents("agents_client_on_agent_routes").await;
     let hello = post(&h, "/v1/agent/hello", Some(TOKEN), &hello_body("burst-1")).await;
     assert_eq!((hello.status, hello.body.as_str()), (401, ""));
     let beat = json!({ "host_id": "burst-1", "epoch": 1, "session": "x", "phase": "serving" });
     let heard = post(&h, "/v1/agent/heartbeat", Some(TOKEN), &beat).await;
     assert_eq!((heard.status, heard.body.as_str()), (401, ""));
-    assert_eq!(listed(&hosts(&h).await), ["gpu-01", "gpu-02"]);
+    assert!(listed(&hosts(&h).await).is_empty());
 }
 
 /// Asserts that a request to an agent route without a token, with an empty or wrong one,
@@ -100,7 +85,7 @@ async fn client_token_does_not_open_agent_routes() {
 /// an empty body, for both routes; and that the right token passes the check.
 #[tokio::test]
 async fn no_token_401_empty_body() {
-    let h = start_agents("agents_no_token", false).await;
+    let h = start_agents("agents_no_token").await;
     let wrong = JOIN.replace('A', "Z");
     for path in ["/v1/agent/hello", "/v1/agent/heartbeat"] {
         for token in [None, Some(""), Some("nope"), Some(wrong.as_str())] {
@@ -131,7 +116,7 @@ async fn no_token_401_empty_body() {
 /// a 404 for the client token.
 #[tokio::test]
 async fn agent_routes_take_post_only() {
-    let h = start_agents("agents_methods", false).await;
+    let h = start_agents("agents_methods").await;
     for path in ["/v1/agent/hello", "/v1/agent/heartbeat"] {
         let refused = request(h.addr(), "GET", path, Some(JOIN), None).await;
         assert_eq!(refused.status, 405, "{path}");
@@ -142,13 +127,14 @@ async fn agent_routes_take_post_only() {
     assert_eq!(unknown.status, 404);
 }
 
-/// Asserts that a server started with no agent flag has no agent route (the client
-/// token gets the 404 of any unknown route, a join-shaped token the 401), lists its two
-/// static hosts as static, keeps no agent file beside the state file, and counts no
-/// agent error. It catches the agent side leaking into the GPU service's path.
+/// Asserts that a server on the base flags (no shared join token file) lists no host until
+/// one says hello, keeps no agent file beside the state file after a tick with nothing to
+/// write, and counts no agent error; a hello with the client token is refused 401 with an
+/// empty body. It catches a server that lists a host no agent registered (the removed
+/// removed agentless pool's hosts), and one that writes the agent file with nothing in it.
 #[tokio::test]
-async fn static_pool_alone_unchanged() {
-    let h = Harness::new("agents_off").await;
+async fn a_server_lists_no_host_until_one_says_hello() {
+    let h = Harness::new("agents_none_yet").await;
     let hello = request(
         h.addr(),
         "POST",
@@ -157,23 +143,14 @@ async fn static_pool_alone_unchanged() {
         Some(hello_body("burst-1").to_string().as_bytes()),
     )
     .await;
-    assert_eq!(hello.status, 404, "{}", hello.body);
-    let joined = request(h.addr(), "POST", "/v1/agent/hello", Some(JOIN), Some(b"{}")).await;
-    assert_eq!(joined.status, 401);
-
-    let listing = hosts(&h).await;
-    assert_eq!(listed(&listing), ["gpu-01", "gpu-02"]);
-    assert_eq!(entry(&listing, "gpu-01")["source"], "static");
-    assert_eq!(entry(&listing, "gpu-01")["shape"]["gpus"], 8);
-    assert_eq!(entry(&listing, "gpu-01")["capabilities"]["driver"], "550");
-    assert!(entry(&listing, "gpu-01").get("state").is_none());
-
-    assert!(entry(&listing, "gpu-02").get("lease").is_none());
+    assert_eq!((hello.status, hello.body.as_str()), (401, ""));
+    assert!(listed(&hosts(&h).await).is_empty());
     h.ticks.step().await;
     let mut agent_file = h.scratch.state().into_os_string();
     agent_file.push(".agents");
     assert!(!std::path::Path::new(&agent_file).exists());
     assert_eq!(h.running.agent_errors(), 0);
+    assert!(listed(&hosts(&h).await).is_empty());
 }
 
 /// Asserts that bodies that are not the message get fixed codes and nothing of what the
@@ -184,7 +161,7 @@ async fn static_pool_alone_unchanged() {
 /// decode failure that is a 500 or a hang.
 #[tokio::test]
 async fn malformed_and_oversized_bodies_get_fixed_codes() {
-    let h = start_agents("agents_malformed", false).await;
+    let h = start_agents("agents_malformed").await;
     let marker = "SECRET-MARKER-9f3c";
     let routes = [
         ("/v1/agent/hello", "invalid-hello"),
@@ -227,7 +204,7 @@ async fn malformed_and_oversized_bodies_get_fixed_codes() {
 /// that reaches the registry unchecked.
 #[tokio::test]
 async fn every_decoded_message_is_validated_before_use() {
-    let h = start_agents("agents_validated", false).await;
+    let h = start_agents("agents_validated").await;
     let marker = "hostile-marker";
     let mut bad_label = hello_body("burst-1");
     bad_label["labels"] = json!({ "jobscheduler.dev/owner": marker });
@@ -273,7 +250,7 @@ async fn every_decoded_message_is_validated_before_use() {
 /// tells an agent to say hello when it should wait, and a code that is not the wire's.
 #[tokio::test]
 async fn refusals_have_their_status_and_code() {
-    let h = start_agents("agents_refusals", false).await;
+    let h = start_agents("agents_refusals").await;
     let a = join(&h, "burst-1").await;
     let mut elsewhere = hello_body("burst-2");
     elsewhere["pool"] = json!("other");
@@ -341,16 +318,15 @@ async fn refusals_have_their_status_and_code() {
 }
 
 /// Asserts the listing of registered hosts: id, source, state, phase, lease, shape,
-/// capabilities, labels and agent version, with the static hosts beside them in id order;
-/// and that a host silent past the grace period reads `lost` with `lost: true`, and live
+/// capabilities, labels and agent version; and that a host silent past the grace period reads `lost` with `lost: true`, and live
 /// again after a heartbeat. It catches a listing that hides a lost host or shows the
 /// host's own claim instead of the shape that is booked.
 #[tokio::test]
 async fn hosts_lists_registered_hosts_with_their_state() {
-    let h = start_agents("agents_hosts", true).await;
+    let h = start_agents("agents_hosts").await;
     let a = join(&h, "burst-1").await;
     let listing = hosts(&h).await;
-    assert_eq!(listed(&listing), ["burst-1", "gpu-01", "gpu-02"]);
+    assert_eq!(listed(&listing), ["burst-1"]);
     let host = entry(&listing, "burst-1");
     assert_eq!(host["source"], "registered");
     assert_eq!(host["state"], "live");
@@ -444,9 +420,9 @@ async fn heartbeats_hammered_during_job_calls_complete() {
 #[tokio::test]
 async fn hello_rate_limit_holds_a_credential_not_the_others() {
     let scratch = crate::support::Scratch::new("agents_rate");
-    let mut args = crate::agents_support::agent_args(&scratch, false);
+    let mut args = crate::agents_support::agent_args(&scratch);
     args.extend(["--agent-hello-burst", "2", "--agent-hello-interval", "10s"].map(Into::into));
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
 
     let a = join(&h, "burst-1").await;
     let live = hello_with(&h, JOIN, "burst-1").await;
@@ -490,9 +466,9 @@ async fn hello_rate_limit_holds_a_credential_not_the_others() {
 async fn refusals_for_the_hello_limit_are_logged_once_per_interval() {
     let logs = LogCapture::start();
     let scratch = crate::support::Scratch::new("agents_rate_log");
-    let mut args = crate::agents_support::agent_args(&scratch, false);
+    let mut args = crate::agents_support::agent_args(&scratch);
     args.extend(["--agent-hello-burst", "1", "--agent-hello-interval", "10s"].map(Into::into));
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     let held = "held to the rate limit";
     assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 200);
     for _ in 0..5 {
@@ -511,35 +487,4 @@ async fn refusals_for_the_hello_limit_are_logged_once_per_interval() {
         assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 429);
     }
     assert_eq!(logs.text().matches(held).count(), 3, "{}", logs.text());
-}
-
-/// Asserts that a static source supplied by the caller replaces the pool file of a server
-/// that has no agent flags: the host list names the supplied source's one host,
-/// `supplied-1`, as a static host, and none of the file's `gpu-01` and `gpu-02`. It catches
-/// a supplied source that is dropped for the file the flags name.
-#[tokio::test]
-async fn a_supplied_source_replaces_the_pool_file_of_a_static_server() {
-    let scratch = crate::support::Scratch::new("agents_supplied_alone");
-    let args = crate::support::base_args(&scratch);
-    let one = "[[host]]\nid = \"supplied-1\"\n[host.resources]\ncpu_millis = 8000\nmemory_bytes = 17179869184\ngpus = 0\n";
-    let supplied = StaticPoolSource::new(scratch.write("supplied.toml", one, 0o644));
-    let h = Harness::with(scratch, args, Some(supplied)).await;
-    let listing = hosts(&h).await;
-    assert_eq!(listed(&listing), ["supplied-1"]);
-    assert_eq!(entry(&listing, "supplied-1")["source"], "static");
-}
-
-/// Asserts that a static source supplied by the caller (a provider of its own, as the
-/// library allows) is layered under the registered hosts exactly as the pool file is: its
-/// ids are refused to registering hosts. It catches a layer that works only for the source
-/// the flags build.
-#[tokio::test]
-async fn a_supplied_static_source_refuses_its_ids_to_registering_hosts() {
-    let scratch = crate::support::Scratch::new("agents_supplied");
-    let args = crate::agents_support::agent_args(&scratch, false);
-    let supplied = StaticPoolSource::new(scratch.write("supplied.toml", EXAMPLE_CONFIG, 0o644));
-    let h = Harness::with(scratch, args, Some(supplied)).await;
-    join(&h, "burst-1").await;
-    let clash = hello_with(&h, JOIN, "gpu-02").await;
-    assert_eq!(clash.json(), json!({ "error": "host-listed" }));
 }

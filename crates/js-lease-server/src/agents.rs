@@ -26,14 +26,14 @@ use js_agent_wire::{Heartbeat, Hello, InstanceIdentity};
 use js_elastic::HostName;
 use js_registry::{Binding, Cordoned, Credential, OsSessions, Registry, Uncordoned};
 use js_types::Clock;
-use js_types::{HostCapacity, HostId, ProviderId};
+use js_types::{HostId, ProviderId};
 use tracing::{error, info, warn};
 
 use self::taints::restore_job_taints;
 use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::AgentTokens;
 use crate::clock::SharedClock;
-use crate::config::{AgentSetup, Hosts, placer, split};
+use crate::config::{AgentSetup, placer, split};
 use crate::error::StartupError;
 use crate::fence::Fence;
 use crate::host_keys::Writes;
@@ -149,51 +149,46 @@ pub(crate) fn state_path(state_file: &Path, suffix: &str) -> PathBuf {
     state_file.with_file_name(name)
 }
 
-/// What [`assemble`] returns: the hosts the static pool lists, and the agent side when it
-/// is on.
-pub(crate) type Assembled = (Vec<HostCapacity>, Option<Arc<Agents>>);
+/// What [`assemble`] returns: the agent side.
+pub(crate) type Assembled = Arc<Agents>;
 
-/// The hosts of the static pool, and the agent side when it is on.
-///
-/// Without agent flags the hosts are those `--pool-config` names. With them the agent side
-/// is a registry on `clock`, seeded with the bindings the previous run persisted, which
-/// refuses a hello for the id of any host the static pool lists. The agent side mints the host credentials
-/// of live logs with `logs` ([`crate::logs`]); without agent flags no host reports, and
-/// `logs` is dropped.
+/// The agent side: a registry on `clock` over the pool of `agents`, seeded with the
+/// bindings the previous run persisted. It mints the host credentials of live logs with
+/// `logs` ([`crate::logs`]).
 #[cfg(test)]
 pub(crate) fn assemble(
-    hosts: Hosts,
+    agents: Box<AgentSetup>,
     usage: UsageSetup,
     clock: &SharedClock,
     state_file: &Path,
     logs: Option<Arc<LogGrants>>,
 ) -> Result<Assembled, StartupError> {
-    assemble_in(hosts, usage, clock, (state_file, None), logs)
+    assemble_in(agents, usage, clock, (state_file, None), logs)
 }
 
 /// [`assemble`], with the join tokens and the bindings kept in the state store `kept` when
 /// there is one, instead of the files beside the state file.
 pub(crate) fn assemble_in(
-    hosts: Hosts,
+    agents: Box<AgentSetup>,
     usage: UsageSetup,
     clock: &SharedClock,
     (state_file, kept): (&Path, Option<&ServerStore>),
     logs: Option<Arc<LogGrants>>,
 ) -> Result<Assembled, StartupError> {
-    let placed = placed_in(hosts, usage, clock, (state_file, kept), logs);
+    let placed = placed_in(agents, usage, clock, (state_file, kept), logs);
     placed.map(|(assembled, _)| assembled)
 }
 
-/// [`assemble`], with the placer the registry was given; none for static hosts only.
+/// [`assemble`], with the placer the registry was given.
 #[cfg(test)]
 pub(crate) fn assemble_placed(
-    hosts: Hosts,
+    agents: Box<AgentSetup>,
     usage: UsageSetup,
     clock: &SharedClock,
     state_file: &Path,
     logs: Option<Arc<LogGrants>>,
-) -> Result<(Assembled, Option<Arc<SchedPlacer>>), StartupError> {
-    placed_in(hosts, usage, clock, (state_file, None), logs)
+) -> Result<(Assembled, Arc<SchedPlacer>), StartupError> {
+    placed_in(agents, usage, clock, (state_file, None), logs)
 }
 
 /// The join tokens, the bindings read at start and their store: from the files beside the
@@ -221,89 +216,79 @@ fn open_hosts(
     Ok((joins, bindings, store))
 }
 
-/// [`assemble_in`], with the placer the registry was given; none for static hosts only.
+/// [`assemble_in`], with the placer the registry was given.
 fn placed_in(
-    hosts: Hosts,
+    agents: Box<AgentSetup>,
     usage: UsageSetup,
     clock: &SharedClock,
     (state_file, kept): (&Path, Option<&ServerStore>),
     logs: Option<Arc<LogGrants>>,
-) -> Result<(Assembled, Option<Arc<SchedPlacer>>), StartupError> {
-    match hosts {
-        Hosts::Static(source) => Ok(((source.hosts()?, None), None)),
-        Hosts::Layered {
-            static_pool,
-            agents,
-        } => {
-            let AgentSetup {
-                tokens,
-                pool,
-                mint_provider,
-                hello_limit,
-                require_host_credential,
-                cpu_slack,
-                max_lease_wall,
-                job_limits,
-                jobs,
-                job_sources,
-                providers,
-            } = *agents;
-            let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
-            let joins = joins.requiring_credential(require_host_credential);
-            let booked = pool.shape().resources();
-            let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
-            // The scheduler picks the host of a start, and books the share of each host's
-            // memory the pool's percent says; the registry books the whole shape.
-            let (pool, memory) = split(pool);
-            let placer = placer(max_lease_wall, cpu_slack, memory, clock);
-            let registry = Registry::new(pool, clock.clone(), placer.clone());
-            let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
-            let usage = usage.build(clock, limits)?;
-            // The one job store of the server, when the job service is on. It is opened
-            // before the bindings are put back: a host a host job tainted whose binding lost
-            // the taint (a crash between the placement and the binding's write) gets it from
-            // the job store's row first. Its commit failing refuses the start, as a store
-            // that cannot be read does.
-            let (jobs, job_feed, job_state) = match jobs {
-                Some(setup) => {
-                    let opened = job_store::open(state_file, setup, &job_sources)?;
-                    restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
-                    (Some(opened.jobs), Some(opened.feed), Some(opened.store))
-                }
-                None => (None, None, None),
-            };
-            for (host, binding) in &bindings {
-                registry.restore_tainted(host, binding.clone());
-            }
-            let listed = static_pool.map_or_else(|| Ok(Vec::new()), |source| source.hosts())?;
-            registry.reserve(listed.iter().map(|host| host.host.clone()));
-            let agents = Agents {
-                registry,
-                tokens,
-                joins,
-                mint_provider,
-                limiter: HelloLimiter::new(hello_limit, clock.clone()),
-                clock: clock.clone(),
-                store,
-                host_writes: tokio::sync::Mutex::new(()),
-                errors: AtomicU64::new(0),
-                usage,
-                jobs,
-                job_feed,
-                job_state,
-                placer: Some(placer.clone()),
-                unclean: Mutex::default(),
-                logs,
-                job_limits,
-                listed_sessions: Mutex::default(),
-                meter: OnceLock::new(),
-                fence: Fence::new(),
-                placing: Mutex::default(),
-                providers,
-            };
-            Ok(((listed, Some(Arc::new(agents))), Some(placer)))
+) -> Result<(Assembled, Arc<SchedPlacer>), StartupError> {
+    let AgentSetup {
+        tokens,
+        pool,
+        mint_provider,
+        hello_limit,
+        require_host_credential,
+        cpu_slack,
+        max_lease_wall,
+        job_limits,
+        jobs,
+        job_sources,
+        providers,
+    } = *agents;
+    let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
+    let joins = joins.requiring_credential(require_host_credential);
+    let booked = pool.shape().resources();
+    let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
+    // The scheduler picks the host of a start, and books the share of each host's
+    // memory the pool's percent says; the registry books the whole shape.
+    let (pool, memory) = split(pool);
+    let placer = placer(max_lease_wall, cpu_slack, memory, clock);
+    let registry = Registry::new(pool, clock.clone(), placer.clone());
+    let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
+    let usage = usage.build(clock, limits)?;
+    // The one job store of the server, when the job service is on. It is opened
+    // before the bindings are put back: a host a host job tainted whose binding lost
+    // the taint (a crash between the placement and the binding's write) gets it from
+    // the job store's row first. Its commit failing refuses the start, as a store
+    // that cannot be read does.
+    let (jobs, job_feed, job_state) = match jobs {
+        Some(setup) => {
+            let opened = job_store::open(state_file, setup, &job_sources)?;
+            restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
+            (Some(opened.jobs), Some(opened.feed), Some(opened.store))
         }
+        None => (None, None, None),
+    };
+    for (host, binding) in &bindings {
+        registry.restore_tainted(host, binding.clone());
     }
+    let agents = Agents {
+        registry,
+        tokens,
+        joins,
+        mint_provider,
+        limiter: HelloLimiter::new(hello_limit, clock.clone()),
+        clock: clock.clone(),
+        store,
+        host_writes: tokio::sync::Mutex::new(()),
+        errors: AtomicU64::new(0),
+        usage,
+        jobs,
+        job_feed,
+        job_state,
+        placer: Some(placer.clone()),
+        unclean: Mutex::default(),
+        logs,
+        job_limits,
+        listed_sessions: Mutex::default(),
+        meter: OnceLock::new(),
+        fence: Fence::new(),
+        placing: Mutex::default(),
+        providers,
+    };
+    Ok((Arc::new(agents), placer))
 }
 
 impl Agents {

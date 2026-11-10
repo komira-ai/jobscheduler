@@ -36,22 +36,13 @@ fn token() -> Token {
     parse_token(&TOKEN).unwrap()
 }
 
-/// A server state in `dir` whose agent side holds `jobs` (when given), or that has no agent
-/// side at all when `agents` is false.
-fn state(
-    dir: &TestDir,
-    agents: bool,
-    jobs: Option<Arc<crate::job_store::ServerJobs>>,
-) -> Arc<Shared> {
-    Arc::new(bare_state(dir, agents, jobs))
+/// A server state in `dir` whose agent side holds `jobs` (when given).
+fn state(dir: &TestDir, jobs: Option<Arc<crate::job_store::ServerJobs>>) -> Arc<Shared> {
+    Arc::new(bare_state(dir, jobs))
 }
 
 /// The state of [`state`], not yet shared, for a test that gives it more.
-fn bare_state(
-    dir: &TestDir,
-    agents: bool,
-    jobs: Option<Arc<crate::job_store::ServerJobs>>,
-) -> Shared {
+fn bare_state(dir: &TestDir, jobs: Option<Arc<crate::job_store::ServerJobs>>) -> Shared {
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(NOW_MS)));
     let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
     let pool = PoolConfig::new(
@@ -74,8 +65,7 @@ fn bare_state(
         Some(jobs) => side.with_jobs(jobs),
         None => side,
     };
-    let side = agents.then(|| Arc::new(side));
-    Shared::new(token(), side)
+    Shared::new(token(), Arc::new(side))
 }
 
 /// The ceiling the service is built with: one hour, so that it differs from the default.
@@ -95,10 +85,10 @@ fn scratch(name: &str) -> TestDir {
 fn the_job_store_is_one_handle_shared_by_the_service() {
     let dir = scratch("one_handle");
     let (_, jobs) = tables();
-    let state = state(&dir, true, Some(Arc::new(jobs)));
+    let state = state(&dir, Some(Arc::new(jobs)));
     let logs = logs::Ctx::default();
     let api = from_server(&state, WALL, logs).expect("the server holds a job store");
-    let held = state.agents().unwrap().jobs.as_ref().unwrap();
+    let held = state.agents().jobs.as_ref().unwrap();
     assert!(Arc::ptr_eq(&api.jobs, held));
 
     let id = JobId::parse("job-through-the-state").unwrap();
@@ -128,15 +118,13 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
     assert_eq!(api.submit.ceiling(), Some(WALL));
 }
 
-/// Asserts that no job service is built from a server that holds no job store: one whose
-/// agent side has none (the job service is off), and one with no agent side at all. It
-/// catches a service built over a store of its own when the server has none.
+/// Asserts that no job service is built from a server that holds no job store (its agent
+/// side has none: the job service is off). It catches a service built over a store of its
+/// own when the server has none.
 #[test]
 fn without_a_job_store_the_server_builds_no_job_service() {
     let dir = scratch("no_store");
-    assert!(from_server(&state(&dir, true, None), WALL, logs::Ctx::default()).is_none());
-    let other = scratch("no_agents");
-    assert!(from_server(&state(&other, false, None), WALL, logs::Ctx::default()).is_none());
+    assert!(from_server(&state(&dir, None), WALL, logs::Ctx::default()).is_none());
 }
 
 /// Asserts that the fleet group of the job service built from the server's state is served
@@ -151,7 +139,7 @@ async fn the_fleet_group_is_served_over_the_servers_own_handles() {
     let (_, jobs) = tables();
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(NOW_MS)));
     let pools = Arc::new(Status::new(None, None, Vec::new(), clock));
-    let given = bare_state(&dir, true, Some(Arc::new(jobs))).with_pools(Arc::clone(&pools));
+    let given = bare_state(&dir, Some(Arc::new(jobs))).with_pools(Arc::clone(&pools));
     let served = Arc::new(given);
     let api =
         from_server(&served, WALL, logs::Ctx::default()).expect("the server holds a job store");
@@ -160,7 +148,7 @@ async fn the_fleet_group_is_served_over_the_servers_own_handles() {
 
     let other = scratch("fleet_no_status");
     let (_, jobs) = tables();
-    let bare = state(&other, true, Some(Arc::new(jobs)));
+    let bare = state(&other, Some(Arc::new(jobs)));
     assert!(bare.pools().is_none());
     let api = from_server(&bare, WALL, logs::Ctx::default()).expect("the server holds a job store");
     assert_ne!(api.fleet, fleet::Ctx::default());
@@ -178,7 +166,7 @@ async fn answer(
 ) -> (StatusCode, Option<String>, String) {
     let dir = scratch("port");
     let (_, jobs) = tables();
-    let state = state(&dir, true, Some(Arc::new(jobs)));
+    let state = state(&dir, Some(Arc::new(jobs)));
     let clients = crate::config::Clients::only(&token(), "--token-file");
     let clients = crate::config::LiveClients::new(clients);
     let router = port(
@@ -256,7 +244,7 @@ async fn the_port_routes_by_content_type() {
 async fn the_served_calls_are_the_ones_the_server_serves() {
     let dir = scratch("served");
     let (_, jobs) = tables();
-    let state = state(&dir, true, Some(Arc::new(jobs)));
+    let state = state(&dir, Some(Arc::new(jobs)));
     let api = Arc::new(from_server(&state, WALL, logs::Ctx::default()).unwrap());
     let clients = crate::config::Clients::only(&token(), "--token-file");
     let clients = crate::config::LiveClients::new(clients);

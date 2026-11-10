@@ -62,7 +62,7 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   request. (a) Asynchronous acquire: the table records `acquiring` and returns, the scaler calls outside the lock, and the result is an
   event. (b) Keep the synchronous call with a timeout and answer every slow launch Unknown. Recommend (a).
 - **D20. Config format and validation.** One TOML file, `deny_unknown_fields`, validated whole at load, secrets as paths, no reload in
-  the first slice (a restart re-reads it). Alternatives: one file per provider, or YAML. Recommend one TOML file, as `js-pool-static` does.
+  the first slice (a restart re-reads it). Alternatives: one file per provider, or YAML. Recommend one TOML file, as the former `js-pool-static` hosts file did.
 - **D21. Who pays cold start. SUPERSEDED by D38.** It offered (a) the queue pays, or (b) `min_machines` idle hosts per pool. There is no
   `min_machines`: the queue pays, and the wait counts toward `UNSERVABLE_WAIT` (8.2).
 - **D22. Work-session topology.** (a) The agent dials the consumer; (b) the consumer dials the agent; (c) the scheduler relays. Recommend
@@ -125,11 +125,10 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   queue. A queued request whose last capable host leaves keeps waiting for `regain_grace` before it is refused (D41). Refusing whenever no
   host is free now was considered and rejected: it turns an ordinary busy fleet into errors and moves the queue into every caller (two
   requests for the one GPU host would refuse the second). Text in [providers.md](providers.md).
-- **D36. The static pool is for testing only. Settled by the project owner.** Operator-listed hosts are a test provider: `js-pool-static`
-  stays for tests and conformance, a production configuration declares none (`--allow-test-providers` gates it), and every production host
-  registers through `js-agent`. The single-host GPU lease service's operator-listed pool (`--pool-config`) is the stepping stone: its two
-  machines move to running `js-agent` and registering with a `default` provider (step 54), after which the file is retired. Until then it
-  keeps working unchanged.
+- **D36. The static pool is for testing only. Settled by the project owner.** Operator-listed hosts are a test fake: `js-pool-static`
+  is renamed `js-pool-fake`, a test double no other crate depends on, and every production host registers through `js-agent`. The single-host
+  GPU lease service's operator-listed pool (`--pool-config`) was the stepping stone; it was removed (the flag is refused at start with a
+  migration message), and its machines run `js-agent` and register with a `default` provider.
 - **D37. The default provider and elastic registration. Direction settled by the project owner; the details are chosen here.** (a) The
   `default` kind (`DefaultProvider`) is the hosts that registered themselves; it never creates or destroys compute, has no acquire and no
   release, and its core is the merged `RegisteredProvider`. (b) An elastic provider's `acquire` boots a machine running `js-agent`, which

@@ -258,10 +258,10 @@ async fn listed(h: &Harness) -> Vec<String> {
         .collect()
 }
 
-/// The flags of a server with agent registration on, no static pool and the job service on
+/// The flags of a server with agent registration on and the job service on
 /// a loopback port.
 fn jobs_without_static(scratch: &Scratch) -> Vec<std::ffi::OsString> {
-    let mut args = agent_args(scratch, false);
+    let mut args = agent_args(scratch);
     args.extend(["--job-listen", "127.0.0.1:0"].map(Into::into));
     args
 }
@@ -274,7 +274,7 @@ fn jobs_without_static(scratch: &Scratch) -> Vec<std::ffi::OsString> {
 async fn a_static_only_pool_without_a_capable_host_refuses() {
     let scratch = Scratch::new("admission_static_only");
     let args = jobs_without_static(&scratch);
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     refused(&submit_body(&h, &one_gpu("no-host")).await);
     assert_eq!(job_of(&h, "no-host").await.status, 404);
     join(&h, "h1").await;
@@ -294,7 +294,7 @@ async fn a_static_only_pool_without_a_capable_host_refuses() {
 async fn a_refusal_records_nothing() {
     let scratch = Scratch::new("admission_records_nothing");
     let args = jobs_without_static(&scratch);
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     join(&h, "h1").await;
     let too_big = JobBody::new("sixteen").gpus(16, "nvidia-a100").json();
     refused(&submit_body(&h, &too_big).await);

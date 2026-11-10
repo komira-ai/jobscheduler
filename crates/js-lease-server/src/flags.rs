@@ -63,12 +63,16 @@ fn given(command: &Command, matches: &ArgMatches) -> Vec<String> {
     found.into_iter().map(|(_, flag)| flag).collect()
 }
 
+/// Why `--pool-config`, and a `[[pool]]` whose provider is the old kind `static`, are
+/// refused: the agentless hosts-file pool is not served any more, and its hosts are served
+/// by running `js-agent` on each. It names no path and nothing of the hosts file.
+pub(crate) const AGENTLESS_REMOVED: &str = "the agentless hosts-file pool was removed: run js-agent on each listed host and use --agent-pool-config, or a [[pool]] of kind = \"joined\" (with its shape and max_machines)";
+
 /// The refusal of `flag` given beside `--config`: it names the flag and where the file
 /// takes its place.
 pub(crate) fn beside_config(flag: &str) -> StartupError {
     let instead = match flag {
         "--token-file" => "set server.client_token_file".to_owned(),
-        "--pool-config" => "add a [[pool]] with provider kind static".to_owned(),
         "--agent-pool-config" => "add a [[pool]] with an elastic provider".to_owned(),
         "--agent-token-file" => "set join_token_file of the [[pool]]".to_owned(),
         "--client-token" => "add a [[client]] table".to_owned(),

@@ -11,7 +11,7 @@
 //! service holds no registry of its own:
 //!
 //! - [`Hosts`], over the server's shared state ([`Shared`]): the listing that
-//!   `GET /v1/hosts` writes ([`hosts::listing`]: the static pool's hosts and the registry's),
+//!   `GET /v1/hosts` writes ([`hosts::listing`]: the registry's hosts),
 //!   and the registry's cordon of a host, saved before it is acknowledged.
 //! - [`Pools`], over the status of the pools ([`PoolStatus`]): what `GET /v1/pools` writes,
 //!   mapped here field by field, so nothing but the fields named below leaves the server.
@@ -453,7 +453,6 @@ fn job_booking(allocation: &AllocationRecord, whole: &wire::Shape) -> wire::Host
 
 fn source(source: Source) -> wire::HostSource {
     match source {
-        Source::Static => wire::HostSource::Static,
         Source::Registered => wire::HostSource::Registered,
     }
 }
@@ -745,14 +744,12 @@ impl Hosts for Shared {
     }
 
     async fn cordon(&self, host: &HostId, length: Duration) -> Result<bool, Refused> {
-        let agents = self.agents().ok_or(Refused::UnknownHost)?;
-        let cordoned = agents.cordon(host, length).await;
+        let cordoned = self.agents().cordon(host, length).await;
         Ok(cordoned.map_err(refused_cordon)?.placed)
     }
 
     async fn uncordon(&self, host: &HostId) -> Result<bool, Refused> {
-        let agents = self.agents().ok_or(Refused::UnknownHost)?;
-        let uncordoned = agents.uncordon(host).await;
+        let uncordoned = self.agents().uncordon(host).await;
         Ok(uncordoned.map_err(refused_cordon)?.lifted)
     }
 }

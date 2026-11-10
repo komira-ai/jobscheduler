@@ -18,10 +18,10 @@ use crate::support::{JOIN, Scratch, Stepping, TOKEN, args, clock, hello_body, ro
 const IMAGE: &str =
     "team/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/// The configuration of [`args`] (with agent registration when `agents`), with the job
-/// service on (`--job-listen` on the loopback, never bound in process) when `jobs`.
-fn job_config(scratch: &Scratch, agents: bool, jobs: bool) -> Config {
-    let mut args = args(scratch, "initialise", agents);
+/// The configuration of [`args`], with the job service on (`--job-listen` on the loopback,
+/// never bound in process) when `jobs`.
+fn job_config(scratch: &Scratch, jobs: bool) -> Config {
+    let mut args = args(scratch, "initialise");
     if jobs {
         args.push("--job-listen".into());
         args.push("127.0.0.1:0".into());
@@ -47,7 +47,7 @@ async fn the_job_service_is_served_through_the_seam_on_the_given_clock_and_ids()
     let store_clock = Arc::new(StoreClock::default());
     store_clock.advance(Duration::from_secs(42));
     let ids = Arc::new(ScriptedIds::new([7; 16], []));
-    let config = job_config(&scratch, true, true).with_job_sources(store_clock, ids);
+    let config = job_config(&scratch, true).with_job_sources(store_clock, ids);
     let server = InProcess::start(config, shared).unwrap();
     let agents = server.agent_router();
     let hello = routed(
@@ -89,27 +89,26 @@ async fn the_job_service_is_served_through_the_seam_on_the_given_clock_and_ids()
     assert_eq!(refused.status, 401, "{:?}", refused.body);
 }
 
-/// Asserts that a server with agent registration and no `--job-listen`, and one with no
-/// agent registration at all (whose job sources are then given to nothing), start through
-/// the seam with no job router and no job tables. It catches a seam that opens the job
-/// tables, or serves the job service, when the configuration turned it off, and a
-/// `with_job_sources` that fails a server with no agent side.
+/// Asserts that a server with no `--job-listen`, with and without job sources given (which
+/// then go to nothing), starts through the seam with its registry and no job router and no
+/// job tables. It catches a seam that opens the job tables, or serves the job service, when
+/// the configuration turned it off, and a `with_job_sources` that fails a server without
+/// the job service.
 #[tokio::test]
 async fn without_the_job_service_the_seam_has_no_job_router_and_no_tables() {
     let registering = Scratch::new("jobs-off");
     let (_clock, shared) = clock();
-    let server = InProcess::start(job_config(&registering, true, false), shared).unwrap();
+    let server = InProcess::start(job_config(&registering, false), shared).unwrap();
     assert!(server.registry().is_some());
     assert!(server.job_router().is_none());
     assert!(server.jobs().is_none());
 
-    let fixed = Scratch::new("jobs-static");
+    let sourced = Scratch::new("jobs-off-sourced");
     let (_clock, shared) = clock();
     let ids = Arc::new(ScriptedIds::new([1; 16], []));
-    let config =
-        job_config(&fixed, false, false).with_job_sources(Arc::new(StoreClock::default()), ids);
+    let config = job_config(&sourced, false).with_job_sources(Arc::new(StoreClock::default()), ids);
     let server = InProcess::start(config, shared).unwrap();
-    assert!(server.registry().is_none());
+    assert!(server.registry().is_some());
     assert!(server.job_router().is_none());
     assert!(server.jobs().is_none());
 }
