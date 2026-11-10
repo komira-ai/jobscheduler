@@ -152,6 +152,37 @@ fn a_first_install_whose_agent_said_hello_is_drained_under_a_cordon_before_the_s
     assert_retired(&rig);
 }
 
+/// A host that holds no lease but still has runs to finish (`releasing`) is not idle: the
+/// rollback keeps the unit up under the cordon until the runs are done, then stops it. Catches
+/// a stop that reads `leases == 0` alone and lands on runs still finishing.
+#[test]
+fn a_first_install_whose_host_is_still_releasing_is_not_stopped_until_it_is_done() {
+    let rig = cut_over("hook-rollback-first-releasing", true);
+    rig.world.alter_host(|host| host.releasing = true);
+    assert_eq!(rig.host().leases, 0);
+    let spy = Spy::new(&rig);
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        assert_eq!(
+            spy.world.show(UNIT).unwrap().active,
+            "active",
+            "not stopped while runs are finishing"
+        );
+        if ticks == base + 2 {
+            spy.world.alter_host(|host| host.releasing = false);
+        }
+    });
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        rig.world.ticks() - base,
+        2,
+        "it stops at the look after the runs end"
+    );
+    assert_eq!(spy.act_names(), [stop()]);
+    assert_retired(&rig);
+}
+
 /// A lease still held at the drain bound ends the step `drain_bound` (class environment) with
 /// the agent running and the record kept; once the lease ends, a rerun stops it and succeeds.
 #[test]
