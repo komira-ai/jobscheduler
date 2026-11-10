@@ -136,7 +136,10 @@ pub enum Invariant {
     /// running run ([`Observations::stops`]). A stop of a job, which the job front makes no
     /// request for, sent to a host the listing sets aside ([`crate::ServerHost::set_aside`])
     /// is one the job's client asked for by the time the answer was read
-    /// ([`Observations::cancels`]), or a violation ([`Observations::job_replies`]).
+    /// ([`Observations::cancels`]), or a violation ([`Observations::job_replies`]). The
+    /// cell's listing sets no host aside for a job (the engine's marks are in the job store,
+    /// not the registry's listing), so this job part too is held only over hand-built and
+    /// hand-edited histories.
     DrainKillsNothing,
     /// Step check. A host the server's listing sets aside for a whole-host request is sent
     /// no start of a lease of an item that did not ask for a whole host, unless the start

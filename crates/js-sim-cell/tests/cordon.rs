@@ -82,6 +82,13 @@ fn cordoned_host(cell: &Cell) -> Option<Cordon> {
 
 /// A scenario of two hosts and the long job of item 0, the cordon of its host at 20 s, and
 /// the twelve short jobs at 25 s, as `build` adds to it, named `name`.
+/// Unmet unless the cell made exactly one cordon: a scenario whose action found no running
+/// job to cordon the host of would otherwise pass without testing a cordon.
+fn cordoned_once(cell: &mut Cell) -> Option<String> {
+    let count = cell.observations().cordons.len();
+    (count != 1).then(|| format!("wanted one cordon, got {count}"))
+}
+
 fn world(name: &str) -> Scenario {
     let spec = ServerSpec::whole_node_pool("burst", Shape::cpu_host(), HOSTS);
     Scenario::new(name)
@@ -115,10 +122,7 @@ fn a_cordoned_host_keeps_its_running_job_and_takes_no_new_one() {
         .expect(Expect::allocations_of(ItemId(0), 1))
         .expect(Expect::allocation_step(ItemId(0), AllocationStep::Freed))
         .expect(Expect::no_allocation_live())
-        .expect_that("cordoned_once", |cell| {
-            let count = cell.observations().cordons.len();
-            (count != 1).then(|| format!("wanted one cordon, got {count}"))
-        })
+        .expect_that("cordoned_once", cordoned_once)
         .expect_that("no_placement_on_the_cordoned_host", |cell| {
             let cordon = cordoned_host(cell)?;
             let reads = &cell.observations().allocation_reads;
@@ -149,6 +153,7 @@ fn a_cancel_the_client_asks_for_on_a_cordoned_host_ends_the_job_without_a_violat
     let scenario = world("a_cancel_the_client_asks_for_on_a_cordoned_host_ends_the_job_without_a_violation");
     scenario
         .at(Duration::from_secs(40), cancel_work(items(0..1)))
+        .expect_that("cordoned_once", cordoned_once)
         .expect(Expect::all_items_terminal())
         .expect(Expect::terminal_count(1, HowEnded::Cancelled))
         .expect(Expect::job_state(ItemId(0), JobState::Cancelled))
@@ -175,6 +180,7 @@ fn a_cordon_holds_over_a_restart_and_ends_at_the_uncordon() {
             submit_work(MORE, Work::run_for(SHORT)),
         )
         .at(Duration::from_secs(120), UncordonItemsHost)
+        .expect_that("cordoned_once", cordoned_once)
         .expect(Expect::all_items_terminal())
         .expect(Expect::terminal_count(
             1 + MORE as usize,

@@ -207,7 +207,7 @@ fn a_half_previous_release_fleet_runs_ordinary_and_whole_host_jobs_to_the_end() 
     Scenario::new("a_half_previous_release_fleet_runs_ordinary_and_whole_host_jobs_to_the_end")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(pool(MIXED_HOSTS))
-        .previous_release_hosts("burst", MIXED_HOSTS / 2)
+        .hosts_as("burst", MIXED_HOSTS / 2, AgentProfile::PreviousRelease)
         .hosts("burst", MIXED_HOSTS / 2)
         .work(12, Work::run_for(RUN))
         .work(6, Work::whole_host(RUN))
@@ -227,8 +227,7 @@ fn a_half_previous_release_fleet_runs_ordinary_and_whole_host_jobs_to_the_end() 
 /// launched twice, no allocation live and every host serving at the end, under all
 /// invariants. An upgrade restarts the agent, so a job on the host it restarts may end
 /// lost; the scenario does not say which. Catches a server that double-places or strands a
-/// job when a host's hello changes release under it, and an upgrade that does not restart
-/// the process (the hosts would never read lost).
+/// job when a host's hello changes release under it.
 #[test]
 fn upgrading_every_agent_one_by_one_while_jobs_run_ends_each_job_once() {
     let jobs = 16;
@@ -236,7 +235,7 @@ fn upgrading_every_agent_one_by_one_while_jobs_run_ends_each_job_once() {
         Scenario::new("upgrading_every_agent_one_by_one_while_jobs_run_ends_each_job_once")
             .scratch(env!("CARGO_TARGET_TMPDIR"))
             .server(pool(UPGRADE_HOSTS))
-            .previous_release_hosts("burst", UPGRADE_HOSTS)
+            .hosts_as("burst", UPGRADE_HOSTS, AgentProfile::PreviousRelease)
             .work(12, Work::run_for(secs(120)))
             .work(4, Work::whole_host(secs(120)));
     for host in 0..UPGRADE_HOSTS {

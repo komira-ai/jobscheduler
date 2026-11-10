@@ -77,7 +77,7 @@ What is simulated:
   cut link. Duplication and reordering are off unless a scenario turns them on.
 - the agents: the conformance suite's in-process agent (`FakeAgent`) behind the real
   wire, the agent a cell runs by the hundred. A group of hosts can say the previous
-  release's hello (`Scenario::previous_release_hosts`, `AgentProfile`: the wire is
+  release's hello (`Scenario::hosts_as(pool, count, AgentProfile::PreviousRelease)`, `AgentProfile`: the wire is
   unchanged, so the hello's version, credential flag and capabilities are what differ). It runs nothing; a run ends by itself after
   the time its `Work` names. A host can instead run the real agent lifecycle of
   `js-agent` (`Scenario::real_hosts`, `AgentKind::Real`) over an in-memory container
@@ -169,7 +169,7 @@ with `#[path = ...]`; they are not binaries of their own.
 | `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: whole-host jobs placed in turn on one host, the record of a client cancel, the whole-host expectations (at the end and at a virtual time), the expectations over a job's placements and launches (`jobs_placed_again`, `kept_off_a_failed_host`, `no_job_launched`) and `marks_held`, the action that cancels a job when it is placed, a host that refuses as unsafe and is not serving at the end, and the server spec's class, job service address and architecture, and that no placement flag is passed. |
 | `usage` | `tests/usage.rs` | The usage history family: the usage rows the server writes for the allocations it freed, read through `GET /v1/usage` once a scenario has settled, against what the cell read freed. A clean scenario (twenty-two ordinary and whole-host jobs, two cancelled, a restart of the server between) holds both usage invariants, and the same scenario with `UsageReadFault` applied to the rows the cell read (a lost, a doubled and a mis-written row) fails exactly the invariant that names it; a server that is down at the end has no usage read and no violation. |
 | `cordon` | `tests/cordon.rs` | The cordon family: an operator cordons the host of a running job (`POST /v1/hosts/{id}:cordon`, through the job service's router); the job runs to its end there, twelve more jobs are all placed on the other host, a cancel the client asks for ends its job cancelled, and a restart of the server keeps the cordon until the uncordon. The calls the cell makes, and what it writes down of them, are shown on a cell of its own. |
-| `skew` | `tests/skew.rs` | The version-skew family: a fleet of hosts whose agents say the previous release's (v0.1.213) hello beside hosts of this release (`Scenario::previous_release_hosts`, `AgentProfile`) runs ordinary and whole-host jobs to the end; every previous-release agent is upgraded one by one (`upgrade_agents`) while jobs run; a hello the server refuses (protocol majors 2 to 3) fails the same kind of scenario; and the profile's hello is held to the recording of the previous release field by field. |
+| `skew` | `tests/skew.rs` | The version-skew family: a fleet of hosts whose agents say the previous release's (v0.1.213) hello beside hosts of this release (`Scenario::hosts_as(pool, count, AgentProfile::PreviousRelease)`, `AgentProfile`) runs ordinary and whole-host jobs to the end; every previous-release agent is upgraded one by one (`upgrade_agents`) while jobs run; a hello the server refuses (protocol majors 2 to 3) fails the same kind of scenario; and the profile's hello is held to the recording of the previous release field by field. |
 | `elastic` | `tests/elastic.rs` | The elastic family: the demand of a hundred queued whole-host jobs scales an empty pool of at most forty machines up and back to none, billed as EC2 bills and as Lambda bills, each over two seeds; and cells driven by hand: a machine that boots with the token of its launch payload, the recording wrapper's times, a pool that does not join, machines the cloud drops or preempts, a foreign machine, the operator's brake reset, and an acquire armed to crash the server (down from the tick of that acquire until a restart, after which no second acquire is made). The scenarios are in `tests/cell/elastic.rs`. |
 | `elastic_faults` | `tests/elastic_faults.rs` | The elastic fault family: the cloud loses the first acquire's answer (the call landed, or did not), denies launches, refuses them for capacity, answers 429 for five minutes, holds two machines that are not the scheduler's under a quota, preempts a machine mid-run, lags 60 s in its list, and boots machines that never join until three boot failures trip the brake and the operator resets it through the server's route, each over sixteen seeds; and two negative cases, a cloud that refuses every release (`launched-machines-settle` names the machine) and a hand-built record of a pool that ignores its brake (`no-acquire-while-plan-only`). The scenarios are in `tests/cell/elastic_faults.rs`. |
 | `elastic_fault_actions` | `tests/elastic_fault_actions.rs` | The machinery the elastic fault family added: each action that scripts the cloud, sets its knobs, preempts, drops or adds a machine, switches whether machines join or resets the brake by the route, shown to change what it says; `Expect::pool_tripped` and `Expect::machines_launched`; and the cloud's counts in the cell's total. |
@@ -221,7 +221,9 @@ from the Actions tab (`workflow_dispatch`, with the first seed, the seed count a
 shard count as inputs). Each shard is a job of its own on a GitHub-hosted runner, and a
 red job's log holds each failure and its `replay:` line. A nightly run starts at the run's
 id (`github.run_id`), so each night sweeps seeds no night swept before; the binary's first
-line of output (`sweep: seeds <a>..<b>, shard <i> of <n> of seeds ...`) names them. It is not a check of pull requests.
+line of output (`sweep: seeds <a>..<b>, shard <i> of <n> of seeds ...`) names them. Its job
+`scale` runs the scale family's full-size scenario (two thousand hosts and twenty thousand
+jobs on one seed), which `tests/scale.rs` ignores in a pull request's run. It is not a check of pull requests.
 
 ## The determinism lint
 
@@ -350,6 +352,12 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `wholeHost`;
 - the actions, at a virtual time after the start, with `.at(after, action)`:
   `submit_work`, `cancel_work(items(range))`, `kill_agents`, `replace_agents`, `upgrade_agents`,
+  for the whole-host prepare `agent_silent_on_prepare(agents)`,
+  `agent_refuses_prepare(agents, reason)` (each of `REFUSAL_REASONS`),
+  `agent_prepare_delay(agents, delay)` and `cancel_when_preparing(item, within)`, for a host's
+  cordon `cordon_host(agent, secs)` and `uncordon_host(agent)` (through
+  `POST /v1/hosts/{id}:cordon` and `:uncordon`), `set_usage_fault(fault)` (a
+  `UsageReadFault` applied to the usage rows the cell reads at the end),
   `kill_agents_for_good` (a host gone, not a fault), `partition_agents(agents, lasting)`,
   `set_bus_faults(faults)` and `restart_server()` (the server started again over its
   files and store with `--boot resume`); for the store, `stop_server()` (the server
@@ -377,7 +385,10 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   host and heard done with the job's result), and for whole hosts
   `Expect::every_host_serving()`, `Expect::serving_but(&agents)` and
   `Expect::held_after_the_runs_on_its_host(item)` (the item was placed only after every job
-  launched on its host had made its result), and for an elastic pool
+  launched on its host had made its result), and for the prepare handshake
+  `Expect::jobs_placed_again(n)`, `Expect::kept_off_a_failed_host(span)`,
+  `Expect::no_job_launched()` and `Expect::marks_held(n)` (the engine's marks in the job
+  store, when judged), and for an elastic pool
   `Expect::pool_tripped(pool, tripped)` (the scaler's brake, when judged) and
   `Expect::machines_launched(pool, n)` (the machines the fake launched for the
   scheduler, foreign ones left out), judged once per
@@ -432,9 +443,12 @@ table, so no scenario of the cell has one. The checks over leases, runs and
 ready reports (the rows from `no-lease-on-a-lost-host` through `marked-hosts-serve-no-ordinary-start`,
 and the lease parts of the others) therefore find nothing to flag in a scenario, and
 `tests/invariants.rs` runs them over hand-built observations. Two of them also read a job's
-history, so a scenario of the whole-host path does hold the placement to them:
-`held-means-ready` reads the job and allocation tables against the agents' ready reports, and
-`drain-kills-nothing` the stops sent to a host the listing sets aside. `whole-host-is-exclusive`
+history: `held-means-ready` reads the job and allocation tables against the agents' ready
+reports, so a scenario of the whole-host path does hold the placement to it; and
+`drain-kills-nothing` reads the stops sent to a host the listing sets aside, but the listing sets
+no host aside for a job (the engine's marks are in the job store, which `Expect::marks_held`
+reads), so its job part is held only over hand-built histories and the hand-edited history of
+the `whole_host` family's negative case. `whole-host-is-exclusive`
 and `marked-hosts-serve-no-ordinary-start` read nothing of a job. A whole-host item holds its host
 from its `placed` to its `released`, as the job front hears them.
 

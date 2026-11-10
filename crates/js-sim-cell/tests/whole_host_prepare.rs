@@ -28,6 +28,11 @@ const SEEDS: u64 = 16;
 /// The scenarios of fifty hosts run over this many.
 const SCALE_SEEDS: u64 = 2;
 
+/// Each step of the race's sweep runs over this many seeds: which side of the deadline the
+/// ready report lands on is set by the step's preparation time, and the sweep's thirteen
+/// steps are the race's spread.
+const RACE_SEEDS: u64 = 4;
+
 /// A host whose agent never answers its prepare fails it at the server's deadline, 600 s
 /// from the placement, and the job is placed again on the other host, which the failed host
 /// is barred from for the back-off; agents made ready then take the next try, and the job
@@ -127,7 +132,7 @@ fn the_refusal_scenario_covers_every_reason_the_wire_has() {
 #[test]
 fn a_ready_report_racing_the_prepare_deadline_never_double_books() {
     for scenario in whole_host_prepare::race_sweep() {
-        scenario.run_seeds(SEEDS);
+        scenario.run_seeds(RACE_SEEDS);
     }
 }
 

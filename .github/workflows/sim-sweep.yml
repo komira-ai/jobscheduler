@@ -7,6 +7,10 @@
 # reading the repository. It writes nothing anywhere: a failing seed is printed in its
 # shard's log, with the failure report and the command that replays it.
 #
+# Beside the sweep, the job `scale` runs the scale scenario at its full size (two thousand
+# hosts and twenty thousand jobs on one seed, crates/js-sim-cell/tests/scale.rs), which a
+# pull request leaves out for its length.
+#
 # A nightly run starts at the run's id, so each night sweeps seeds no night swept before;
 # the sweep binary's first line of output (`sweep: seeds ...`) names each shard's seeds.
 #

@@ -39,7 +39,7 @@
 //! Size, in agent requests a seed: [`SMALL`] beats 50 hosts about 30 times (1,500, with
 //! the hellos); [`FULL`] beats 2,000 hosts about 30 times (about 60,000).
 //!
-//! The negative case, [`a_per_host_call_for_each_job_passes_the_read_bound`], runs a
+//! The negative case, [`a_per_host_call_for_each_job_fails_the_read_bound`], runs a
 //! client that makes a call for each host for each job, and shows the read bound is
 //! what fails.
 
@@ -274,7 +274,7 @@ fn a_run_of_two_thousand_hosts_and_twenty_thousand_jobs_stays_in_its_bounds() {
 /// count it reports is the honest run's plus a read for each host for each job. Catches: a
 /// bound too loose to see a cost that grows with the hosts.
 #[test]
-fn a_per_host_call_for_each_job_passes_the_read_bound() {
+fn a_per_host_call_for_each_job_fails_the_read_bound() {
     let honest = Rc::new(Flag::new(Load::default()));
     scenario(NEGATIVE, None, &honest).run_seeds(1);
     let hosts = NEGATIVE.hosts;

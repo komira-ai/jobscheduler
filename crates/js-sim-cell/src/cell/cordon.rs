@@ -13,8 +13,9 @@ use crate::cordon::{Cordon, Uncordon};
 use crate::server::CLIENT_TOKEN;
 use crate::usage::{self, UsageReadFault};
 
-/// The longest cordon the server grants, in seconds: it cuts a longer one to this.
-pub const MAX_CORDON_SECS: u32 = 3_600;
+/// The longest cordon the server grants, in seconds, as the server's `MAX_CORDON` (js-lease-server's
+/// cordon module) says: it cuts a longer one to this.
+const MAX_CORDON_SECS: u32 = 3_600;
 
 impl Cell {
     /// Cordons the host of agent `index` for `secs` seconds, as an operator does: `POST

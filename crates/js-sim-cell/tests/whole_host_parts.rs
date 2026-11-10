@@ -15,7 +15,8 @@ use std::time::Duration;
 use js_agent_wire::RefusalReason;
 use js_sim::Faults;
 use js_sim_cell::actions::{
-    agent_refuses_prepare, agent_silent_on_prepare, agents, cancel_when_preparing, submit_work,
+    agent_refuses_prepare, agent_silent_on_prepare, agents, cancel_when_preparing, restart_server,
+    stop_server, submit_work,
 };
 use js_sim_cell::server::{ARCH, ARCH_KEY, virtual_time};
 use js_sim_cell::{
@@ -252,8 +253,10 @@ fn unmet(scenario: Scenario) -> String {
 /// placed again (one job placed more than once, not none), is never placed again sooner
 /// than the deadline and back-off after the allocation before (900 s met, 2,000 s fails,
 /// naming the job, the host and when), and launches nothing; one job that does run is
-/// named by `no_job_launched`; no mark is held, and one is wanted and not found. Catches a statement met by any history (a vacuous one), one
-/// that counts a job once per allocation, and one that names another thing than it judges.
+/// named by `no_job_launched`; no mark is held, one is wanted and not found, and a store
+/// that cannot be read (the server stopped) is named unreadable, not read as no mark.
+/// Catches a statement met by any history (a vacuous one), one that counts a job once per
+/// allocation, and one that names another thing than it judges.
 #[test]
 fn the_prepare_expectations_are_met_and_fail_on_the_real_server() {
     one_silent_host()
@@ -265,6 +268,14 @@ fn the_prepare_expectations_are_met_and_fail_on_the_real_server() {
     assert_eq!(
         unmet(one_silent_host().expect(Expect::marks_held(1))),
         "job-marks: wanted 1, got 0"
+    );
+    let down = one_silent_host()
+        .at(secs(30), stop_server())
+        .at(secs(50), restart_server())
+        .expect_at(secs(40), Expect::marks_held(0));
+    assert_eq!(
+        unmet(down),
+        "at 40000 ms job-marks: wanted 0, got unreadable"
     );
     assert_eq!(
         unmet(one_silent_host().expect(Expect::jobs_placed_again(0))),

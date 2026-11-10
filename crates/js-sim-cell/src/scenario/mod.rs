@@ -272,16 +272,9 @@ impl Scenario {
     }
 
     /// This scenario, with `count` more hosts of `pool` with correct fake agents that say
-    /// hello as the previous release's agent does ([`AgentProfile::PreviousRelease`]). A
-    /// scenario that also calls [`Scenario::hosts`] has a fleet of both releases;
+    /// hello as `profile` says. With [`AgentProfile::PreviousRelease`] beside
+    /// [`Scenario::hosts`] it has a fleet of both releases;
     /// [`crate::actions::upgrade_agents`] turns one into the other.
-    #[must_use]
-    pub fn previous_release_hosts(self, pool: &str, count: usize) -> Self {
-        self.add_hosts(pool, count, Kind::Profiled(AgentProfile::PreviousRelease))
-    }
-
-    /// This scenario, with `count` more hosts of `pool` with correct fake agents that say
-    /// hello as `profile` says.
     #[must_use]
     pub fn hosts_as(self, pool: &str, count: usize, profile: AgentProfile) -> Self {
         self.add_hosts(pool, count, Kind::Profiled(profile))

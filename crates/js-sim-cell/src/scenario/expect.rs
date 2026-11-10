@@ -342,8 +342,9 @@ fn observed(seen: &Seen, cell: &Cell) -> (String, String, String) {
             let server = cell.server().and_then(ServerNode::server);
             let jobs = server.and_then(|server| server.jobs());
             let marks = jobs.and_then(|jobs| jobs.marks().ok());
-            let held = marks.map_or(0, |marks| marks.len());
-            ("job-marks".to_owned(), count.to_string(), held.to_string())
+            let held =
+                marks.map_or_else(|| "unreadable".to_owned(), |marks| marks.len().to_string());
+            ("job-marks".to_owned(), count.to_string(), held)
         }
         Seen::HeldAfterRuns(item) => {
             let [name, wanted, got] = held_after_runs::judged(observations, *item);

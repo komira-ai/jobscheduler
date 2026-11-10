@@ -81,7 +81,9 @@ fn the_usage_rows_of_a_clean_scenario_match_every_ended_allocation() {
     let jobs = (FIRST + WHOLE + LATER) as usize;
     scenario("clean_usage", UsageReadFault::None)
         .expect_that("one_row_per_job_over_several_pages", move |cell| {
-            let rows = cell.observations().usage.as_ref()?;
+            let Some(rows) = cell.observations().usage.as_ref() else {
+                return Some("wanted the usage history read, got none".to_owned());
+            };
             let paged = rows.len() > PAGE_SIZE as usize;
             let whole = rows.iter().filter(|row| row.cpu_millis == 0).count();
             let met = (rows.len() == jobs) & paged & (whole == WHOLE as usize);
