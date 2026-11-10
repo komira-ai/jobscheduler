@@ -119,7 +119,7 @@ fn attest_runs_no_repository_code_and_signs_only_the_files_the_build_summed() {
         .find("      - name: Write and check SHA256SUMS\n        id: sums\n")
         .expect("the sums step");
     let written = sums
-        .find("sha256sum -- *.tar.gz *.tar.zst js-agent-index.json > SHA256SUMS")
+        .find("sha256sum -- *.tar.gz *.deb > SHA256SUMS")
         .expect("the sums");
     let output = sums
         .find("          sha256=\"$(sha256sum SHA256SUMS | cut -d ' ' -f 1)\"\n          echo \"sha256=$sha256\" >> \"$GITHUB_OUTPUT\"\n")
@@ -149,8 +149,8 @@ fn signing_jobs(workflows: &[(&str, String)]) -> Vec<String> {
     found
 }
 
-/// Asserts that artifacts.yml's `attest` is the one job of the two files that signs, with four
-/// provenance steps (the sums and the three packages), and that no file names release.yml as a
+/// Asserts that artifacts.yml's `attest` is the one job of the two files that signs, with three
+/// provenance steps (the sums and the two .debs), and that no file names release.yml as a
 /// signer. And, on release.yml with an attestation step put back into `publish`, that the same
 /// check finds it. Catches a signing step left in or added to release.yml, whose attestations no
 /// farm host trusts.
@@ -167,7 +167,7 @@ fn only_artifacts_yml_signs() {
         artifacts
             .matches("uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2")
             .count(),
-        4
+        3
     );
     for (file, text) in &both {
         assert!(

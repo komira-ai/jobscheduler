@@ -109,6 +109,8 @@ ruzstd = "0.9.1"
 rustix = { version = "1.1.5", default-features = false, features = ["std", "process"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
+# The YAML parser the workflow lint of the apt jobs (crates/xtask/tests/apt_workflow) reads each workflow with.
+saphyr-parser = "0.1.0"
 # macOS only (js-mac-session): the caller's code signature against a pinned requirement.
 security-framework = { version = "3.7.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }

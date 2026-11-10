@@ -263,7 +263,6 @@ fn the_pull_request_build_makes_the_binaries_of_the_release_s_macos_leg() {
     );
     for needle in [
         "cargo xtask release stage --bin \"$bin\" --target \"$TARGET\"",
-        "cargo xtask release hostkeeper-package --binary \"target/$TARGET/release/js-agent\" --target \"$TARGET\"",
         "otool -l",
         "--version",
     ] {
