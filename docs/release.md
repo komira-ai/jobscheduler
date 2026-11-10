@@ -273,7 +273,78 @@ tar -xOf js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar index.json
 an engine that uses the containerd image store, `docker load` reports that same digest as the image
 ID. Deploy by that digest, not by a tag the image does not have.
 
-<!-- run contract: written separately -->
+#### Running the image
+
+What a deployer gives the container, and what it can expect back. The server's flags, with their
+defaults and refusals, are documented in `crates/js-lease-server/src/lib.rs` ("Flags"); this is
+what changes when the server runs in a container.
+
+**Command.** The entrypoint is `/usr/local/bin/js-lease-server` and the image has no command, so
+everything after the image in `docker run` is the server's flags: either the flags themselves or
+`--config <path>`, the one file that replaces them. The server's own required settings apply
+(`--boot`, `--state-file`, `--token-file`, `--agent-pool-config` or the file's `[[pool]]`, and
+`--store` where the state is kept in a store). The image adds no flag and no environment variable.
+
+**Network and ports.** The image exposes no port: each listener is where its flag puts it.
+
+| Flag | Default | Serves | Note for a container |
+|---|---|---|---|
+| `--listen` | `127.0.0.1:7300` | the API, the agents, `GET /healthz` | an address off the loopback needs `--tls-cert` and `--tls-key`. With the default, run on the host's network or nothing outside the container reaches it |
+| `--job-listen` | off | the job service | same TLS rule |
+| `--metrics-listen` | off | `GET /metrics` | a private address |
+| `--ready-listen` | off | `GET /readyz` | the loopback only: the probe must run in the container's network namespace (the host's network, or a sidecar in the same namespace). The image has no shell and no HTTP client, so an engine `HEALTHCHECK` that runs a command inside it cannot be used |
+
+**Files and volumes.** The image declares no volume and runs as `65532:65532`. Mount:
+
+| What | Mode in the container | Why |
+|---|---|---|
+| the directory of `--state-file` | read-write, owned by `65532` | the server writes `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and, unless `--usage-db` puts it elsewhere, `usage.db` beside them. This is the state that must outlive the container |
+| `--usage-db`'s directory, when it is not that one | read-write, owned by `65532` | the usage file |
+| `--token-file`, `--client-token` files, `--agent-token-file`, `--store`, `--tls-key` | read-only, owned by `65532`, mode 0600 or 0400 | the server refuses a secret file that is not owner-only. For `--tls-key` a symbolic link, as secret mounts make, is followed and the file it leads to is checked |
+| `--agent-pool-config` or `--config`, `--tls-cert` | read-only | |
+| the store's `sslrootcert`, or the directory of a Postgres Unix socket | read-only | the store URL names them |
+
+**Readiness and health.** Two routes answer two questions:
+
+- `GET /readyz` on `--ready-listen`: 503 `waiting for the store's writer lock` while another process
+  holds it, 503 `starting` until every listener serves, 200 `ready`, then 503 `draining` from SIGTERM
+  until the process exits. Route traffic to a container only while it answers 200. With
+  `--ready-listen` and a store, a server whose store's writer lock is held waits for it instead of
+  exiting, so a replacement can be started before the old process has let the lock go.
+- `GET /healthz` on `--listen`: 200 `ok` while the tick loop runs; 503 `tick loop stopped`, or 503
+  `store unreachable` once the store paths have failed for `--store-unreachable-after`. It says
+  nothing about the writer lock.
+
+**Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
+`/readyz` 503 `draining` at once, stops accepting, gives the requests in flight `--drain-timeout`
+(`10s` by default) to finish, cuts what is still open, ticks once more and exits 0. Give the engine a
+stop timeout longer than `--drain-timeout` plus that last tick, for example
+`docker stop --time 30` with the default drain, so the engine's `SIGKILL` never cuts the drain. A
+signal while the server waits for the lock or starts ends it at once with status 0, without taking
+the lock.
+
+**Exit status.** 0 after a stop. 2 when the start is refused: a bad flag or file, the store
+unreachable, or (without `--ready-listen`) another process holding the store's writer lock. Do not
+restart a container in a loop on 2: the same flags are refused again. 1 when the server stops on its
+own while running, such as when it loses the store's writer lock.
+
+**One writer per store.** Two servers never serve one store at once: the writer lock lets one in.
+With `--ready-listen`, a second server waits and answers 503 until the first lets the lock go.
+
+An example, with the server on the host's network, its state in `/var/lib/js-lease-server` and its
+flags in a file under `/etc/js-lease-server`, run by the image ID `docker load` printed (the manifest's digest on an engine with the containerd image store):
+
+```sh
+docker load -i js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar
+docker run --name js-lease-server --network host --stop-timeout 30 \
+  -v /var/lib/js-lease-server:/var/lib/js-lease-server \
+  -v /etc/js-lease-server:/etc/js-lease-server:ro \
+  sha256:<image id> \
+  --config /etc/js-lease-server/server.toml
+```
+
+with the `[server]` table of `server.toml` setting `state_file = "/var/lib/js-lease-server/state"`,
+`ready_listen = "127.0.0.1:<port>"` and the rest of the server's settings.
 
 ### The apt repository
 
