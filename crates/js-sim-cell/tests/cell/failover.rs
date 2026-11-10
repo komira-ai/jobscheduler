@@ -4,9 +4,10 @@
 //! fake behind a recording wrapper (`ServerSpec::ordered`). `tests/failover.rs` runs each
 //! over sixteen seeds; `tests/replay.rs` pins the headline's first seed in the golden file.
 //!
-//! Every host is a [`Shape::cpu_host`] (8 cores) and every job asks for all of a host's
-//! cores ([`JOB_CPU_MILLIS`]), so each host, registered or launched, runs one job at a time
-//! and the queue of jobs past the static hosts is demand on the clouds, one machine a job.
+//! Every host is a [`Shape::cpu_host`] (8 cores, no GPU) and every job asks for a whole
+//! host ([`Work::whole_host`]): the pool is of class `whole-node`, which keeps no host for
+//! ordinary work. So each host, registered or launched, runs one job at a time, and the
+//! queue of jobs past the static hosts is demand on the clouds, one machine a job.
 //!
 //! The headline's numbers are the constants from [`STATIC_HOSTS`] to [`CUT_FOR`]. An
 //! elastic pool's hosts beat at the registry's defaults (5 s, held lost after 15 s of
@@ -28,7 +29,6 @@ use js_sim_cell::actions::{
 use js_sim_cell::{
     Counter, ElasticPool, Expect, HowEnded, OfferSpec, Scenario, ServerSpec, Shape, Work,
 };
-use js_types::Resources;
 
 /// The pool's name.
 pub const POOL: &str = "burst";
@@ -68,9 +68,6 @@ pub const REPLACE_AFTER: Duration = Duration::from_secs(20);
 
 /// How long each job runs once started.
 pub const RUN: Duration = Duration::from_secs(300);
-
-/// Each job's CPU: a whole host's cores.
-pub const JOB_CPU_MILLIS: u64 = 8_000;
 
 /// How long after its last fault the headline settles: the two waves of jobs (the second
 /// ends about 730 s from the start), the machines' idle time (60 s) and their release.
@@ -140,10 +137,9 @@ pub fn server(statics: usize, ec2: u64, lambda: u64) -> ServerSpec {
     ServerSpec::ordered(POOL, shape(), statics, providers)
 }
 
-/// One job: [`RUN`] long, asking for a whole host's cores.
+/// One job: [`RUN`] long, asking for a whole host.
 pub fn job() -> Work {
-    let needs = Resources::new(JOB_CPU_MILLIS, 1 << 30, 0, None).unwrap_or_default();
-    Work::run_for(RUN).needs(needs)
+    Work::whole_host(RUN)
 }
 
 /// `scenario` over [`server`] of `statics` registered hosts, each of which says hello, and

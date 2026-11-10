@@ -338,7 +338,7 @@ mod tests {
         let second = ElasticPool::lambda_like("lambda", offers, 4)
             .failover(Duration::from_secs(90), Duration::from_secs(30));
         let first = Cloud::ordered(&first, &Shape::cpu_host(), &[]);
-        let second = Cloud::ordered(&second, &Shape::cpu_host(), &[first.clone()]);
+        let second = Cloud::ordered(&second, &Shape::cpu_host(), std::slice::from_ref(&first));
         let files = Files {
             state: Path::new("/scratch/leases.toml"),
             token: Path::new("/scratch/token"),

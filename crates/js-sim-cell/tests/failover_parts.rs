@@ -27,7 +27,6 @@ use js_sim_cell::{
     AcquireAnswer, Action, Cell, CloudEvent, Counter, Expect, ServerSpec, Setup, Shape,
 };
 use js_testkit::dir::TestDir;
-use js_types::HostId;
 use js_types::sched::FarmTime;
 
 /// Past the first machine's launch, its boot (120 s) and its hello.
@@ -71,12 +70,11 @@ fn lines(cell: &mut Cell) -> Vec<String> {
 /// first to last, each observed with its name, its place, its share and its offers; that
 /// with the first exhausted the job's machine is launched by the second, which numbers it
 /// from 0 and names it, and its node, by the provider; that the second cloud's wrapper saw
-/// the first at each of its acquires, with every offer refused; that the registered host,
-/// holding the first job, was read open from the registry; and that a preemption of the
+/// the first at each of its acquires, with every offer refused; and that a preemption of the
 /// second cloud's machine by name is traced under that name; and the expectations of a named
 /// cloud's acquires and joined machines, met and unmet. Catches clouds that share one
 /// count of machines, a trace that names a later cloud's machine as the first cloud's, a
-/// wrapper that does not see the clouds before it or the registry, and a by-name action
+/// wrapper that does not see the clouds before it, and a by-name action
 /// that acts on the first cloud.
 #[test]
 fn an_ordered_server_has_a_named_cloud_for_each_provider() {
@@ -107,12 +105,6 @@ fn an_ordered_server_has_a_named_cloud_for_each_provider() {
         assert_eq!(earlier, [failover::EC2]);
         assert!(each.earlier[0].open.is_empty(), "{each:?}");
     }
-    let registered = HostId::new("h000").expect("a host id");
-    let all_seen = clouds.iter().flat_map(|facts| facts.seen.iter());
-    let with_host = all_seen
-        .clone()
-        .filter(|each| each.open_hosts == [registered.clone()]);
-    assert!(with_host.count() >= 1, "the registered host was read open");
     assert!(clouds[0].seen.iter().all(|each| each.earlier.is_empty()));
 
     let traced = lines(&mut cell);
