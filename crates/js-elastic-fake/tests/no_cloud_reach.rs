@@ -94,6 +94,15 @@ const GCE_HOST_FILES: [&str; 9] = [
     "crates/js-provider-gce/tests/live_cloud.rs",
 ];
 
+/// The release's apt publisher's role exchange (`cargo xtask channels assume`), by path prefix:
+/// the audience of the job's OIDC token is the STS host's name, which the publish role's trust
+/// policy requires, and the aws CLI it runs makes the one call to STS. It runs only in the
+/// release's apt read and write jobs, after their gate on the owner's environment settings.
+const APT_ROLE_FILES: [&str; 2] = [
+    "crates/xtask/src/channels/assume.rs",
+    "crates/xtask/src/channels/assume/",
+];
+
 /// The one file that may name the production host: the default address of the
 /// `lambdalabs` kind, which a pool's `api_url` overrides.
 const LAMBDA_DEFAULT_ADDRESS: &str = "crates/js-provider-lambdalabs/src/kind.rs";
@@ -147,6 +156,7 @@ fn rules() -> Vec<Rule> {
                 .into_iter()
                 .chain(EC2_HOST_FILES)
                 .chain(GCE_HOST_FILES)
+                .chain(APT_ROLE_FILES)
                 .collect(),
         },
         Rule {
@@ -291,6 +301,7 @@ fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
     let rules = rules();
     let host = joined(&["https://api.", "lambda", "labs.com/v1"]);
     let type_url = format!("{}jobscheduler.v1.Refusal", type_url_prefix());
+    let sts_audience = joined(&["sts.", "amazon", "aws.com"]);
     let planted = [
         file("crates/js-lease-server/tests/x.rs", &host),
         file(
@@ -335,8 +346,20 @@ fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
         file(TYPE_URL_FILES[0], &type_url),
         file(TYPE_URL_FILES[1], &type_url),
         file(SIGNING_VECTOR_FILE, &signing_vector_hosts().join("\n")),
+        file(APT_ROLE_FILES[0], &sts_audience),
+        file(&format!("{}tests.rs", APT_ROLE_FILES[1]), &sts_audience),
     ];
     assert_eq!(violations(&guarded, &rules), Vec::<String>::new());
+
+    // The role exchange's allowance is its own files only: the rest of the apt publisher
+    // naming the same host is still named.
+    let beside = [file(
+        "crates/xtask/src/channels/apt/write.rs",
+        &sts_audience,
+    )];
+    let found = violations(&beside, &rules);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].contains("crates/xtask/src/channels/apt/write.rs"));
 
     // The signing-vector exception takes out the two hosts and nothing else, in that file
     // only: another host of the same cloud there is still named, and so are the two hosts
