@@ -1061,7 +1061,7 @@ Order that follows from the dependencies: 1, 2, 5, 12 and 25 can start now. 3 an
 
 **Macs.** Built: native runtime; the pool of reused users (reset between bookings, replaced when a reset is not clean); Seatbelt profile; packet-filter rule; teardown verdicts; isolation test; package and updater hook; disclaiming privacy-grant responsibility for every job process; a job start's environment; mount inputs and `cwd`; adoption after restart; soft stop; a deadline the helper holds. Remaining: `stage` inputs (step 17); a VM runtime with a network path; read model `allow`; notarized binaries; automated isolation test per release. MDM placement is out of scope here.
 
-**Cross-cutting.** A readiness endpoint; a Kubernetes or other supervisor definition in the repository; a deny list of hosts; spot reclaim handling; a Linux arm64 archive; a VM runtime; a safe restore verb; reservations of capacity (question 24).
+**Cross-cutting.** A Kubernetes or other supervisor definition in the repository; a deny list of hosts; spot reclaim handling; a Linux arm64 archive; a VM runtime; a safe restore verb; reservations of capacity (question 24).
 
 ## 13. Open questions
 

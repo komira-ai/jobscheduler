@@ -243,7 +243,8 @@ holds. Any other path, on that port, is a 404.
   prints `ready on <addr>` as soon as it is bound, and `listening on <addr>` when the start is done. The port is the last listener
   closed at a stop and answers through the whole drain of the others.
 - **A signal while waiting.** SIGTERM or ctrl-c while the server waits for the lock or starts ends the process with status 0, at
-  once, without a drain and with the lock not taken.
+  once, without a drain and with the lock not taken. A server without `--ready-listen` does the same with a signal that arrives
+  before its start is done.
 - **`/healthz`** is another question, served on `--listen`: whether the tick loop and the store paths work.
 
 ### Machine providers, platforms and pool settings

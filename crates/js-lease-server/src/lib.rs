@@ -650,7 +650,8 @@
 //! readiness route answering 503 `draining` from now on) stops accepting, gives the
 //! requests in flight `--drain-timeout` to finish (a connection still open then is cut),
 //! ticks once more and exits 0. A second signal while it drains is not needed: the drain is
-//! bounded.
+//! bounded. A SIGTERM or ctrl-c that arrives before the start is done (with or without
+//! `--ready-listen`) ends the process at once with status 0, with no drain: nothing serves yet.
 //!
 //! SIGHUP reloads the TLS pair (`--tls-cert`, `--tls-key`) without a restart, so a
 //! renewed certificate is served while the whole-host reservations in memory stay.
