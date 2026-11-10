@@ -59,9 +59,9 @@
 #                         adopted) and Restart=always brings it back. Raise it with either flag.
 #   ExecStart=/opt/js-agent/link/current/js-agent
 #                         the program is run through a release link, which nothing in this
-#                         repository moves any more: the hostkeeper package of js-agent
-#                         (packaging/js-agent/hostkeeper) runs the agent through hostkeeper's own
-#                         link instead. The tmpfiles file makes this link, once, pointing at
+#                         repository moves any more: the Debian package of js-agent
+#                         (packaging/js-agent/deb) runs /usr/bin/js-agent from its own unit
+#                         instead. The tmpfiles file makes this link, once, pointing at
 #                         /usr/bin, so the program is the package's /usr/bin/js-agent; it never
 #                         replaces a link that is there
 #   Wants=/After=js-agent-crun-gpu.service

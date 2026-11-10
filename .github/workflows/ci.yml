@@ -223,8 +223,7 @@ jobs:
   #
   # On a pull request the job then makes, from the pull request's commit, what the release's
   # macOS leg makes after a merge (artifacts.yml, `build` for aarch64-apple-darwin): the release
-  # build of each binary of that leg, its archive directory (`release stage`) and the
-  # hostkeeper package of js-agent for macos-arm64 (`release hostkeeper-package`), with the
+  # build of each binary of that leg and its archive directory (`release stage`), with the
   # leg's checks (each binary's minos is at most the pinned macOS and its --version prints
   # the version). The version is the workspace's, not stamped, and nothing is uploaded. A push
   # to main skips those steps: the release's own leg makes the same files from that commit.
@@ -301,8 +300,7 @@ jobs:
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         run: rustup target add aarch64-apple-darwin
       # crates/xtask/src/release/macos_leg.rs: for each binary, the release build, `release
-      # stage`, its minos against the pinned macOS and its --version; then the hostkeeper
-      # package of js-agent.
+      # stage`, its minos against the pinned macOS and its --version.
       - name: Build, stage and package the release's macOS binaries
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:

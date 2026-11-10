@@ -22,21 +22,19 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`, for each of the two Linux architectures) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), each target on a GitHub-hosted runner of its own architecture, checks that
    the Linux ones are static and that `--version` prints the release version, and packages them:
    `cargo xtask release stage` lays down the files of each archive (`crates/xtask/src/release/stage.rs`
-   lists them) and `tar` makes it. Each of the three targets also packages the `js-agent` it built for
-   hostkeeper with `cargo xtask release hostkeeper-package` (below). `sums` writes the hostkeeper
-   release index of the three packages with `cargo xtask release hostkeeper-index`, then one
-   `SHA256SUMS` over the archives, the packages and the index.
-5. artifacts.yml's `attest` attests every archive, package and the index with build provenance
+   lists them) and `tar` makes it. Each of the two Linux targets also packages the `js-agent` it
+   built as a Debian package with `cargo xtask release deb` (below), which `dpkg-deb` then reads.
+   `sums` writes one `SHA256SUMS` over the archives and the two Debian packages.
+5. artifacts.yml's `attest` attests every archive and Debian package with build provenance
    (`actions/attest-build-provenance`, from `SHA256SUMS`), after refusing sums other than the ones
-   `sums` made and files that differ from them; it then attests each package alone and keeps the
-   bundle of that attestation beside it as `<package>.sigstore.json`, the file hostkeeper verifies
-   a package with. Its `verify` then checks the attestations the way a user does (below), and each
-   package from its bundle the way a host does. The signer of every attestation is
-   `.github/workflows/artifacts.yml`, not `release.yml`: that is the one workflow of this
-   repository a farm host trusts (see [The hostkeeper packages of js-agent](#the-hostkeeper-packages-of-js-agent)).
+   `sums` made and files that differ from them; it then attests each Debian package alone and keeps
+   the bundle of that attestation beside it as `<package>.sigstore.json`. Its `verify` then checks
+   the attestations the way a user does (below), and each Debian package from its bundle. The
+   signer of every attestation is `.github/workflows/artifacts.yml`, not `release.yml`: the apt jobs
+   below publish a package only after checking its attestation by that file.
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
-   commit), uploads the archives, the packages and their bundles, the index and `SHA256SUMS` to it,
-   and publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a
+   commit), uploads the archives, the Debian packages and their bundles and `SHA256SUMS` to it, and
+   publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a Debian
    package without its bundle.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
@@ -70,21 +68,32 @@ A gap to know: a waiting run replaced by a newer push is made up by the newer pu
 push fails `ci` (or its release run fails), nothing releases the replaced change until the next push
 that passes `ci` and ships code. Nothing runs on a timer.
 
-7. `gamma` (off until its variables are set, below) sets the release as the desired version of the
-   services `js-server` and then `js-agent` on the update coordinator and waits for each to
-   converge.
+7. The apt jobs (off until their settings exist, below) publish the two Debian packages into the
+   suite `testing` of the apt repository at `https://packages.komira.ai/apt`; `check-apt` installs
+   `js-agent` from that suite in a clean Ubuntu container on an amd64 and an arm64 runner; only when
+   both installs passed are the same packages promoted into the suite `stable`
+   ([The apt repository](#the-apt-repository)).
+8. `gamma` (off until its variables are set, below) sets the release as the desired version of the
+   service `js-server` on the update coordinator and waits for it to converge.
 
-Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums and
-verify (plus `attestations: read` for verify), `id-token` and `attestations` write for `attest`,
-`actions: read` alone for `ci-passed`, `contents` write for `publish` (the tag and the release), `id-token` write alone for `gamma`.
+After the run, `.github/workflows/hostkeeper-desired.yml` (off until its variable is set) sets the
+release as hostkeeper's desired version of `js-agent` ([Deploying through
+hostkeeper](#deploying-through-hostkeeper)).
+
+Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums,
+verify, the apt index jobs and `check-apt` (plus `attestations: read` for verify), `id-token` and
+`attestations` write for `attest`, `actions: read` alone for `ci-passed`, `contents` write for
+`publish` (the tag and the release), `contents: read` and `id-token` write for the apt read and
+write jobs (the token is exchanged for the apt publish role), `id-token` write alone for `gamma`.
 The `artifacts` job of release.yml grants `contents: read` and the two writes of `attest`, since a
 called workflow's jobs can hold no more than the calling job grants; each job of artifacts.yml then
 asks for its own. No job
 that holds a write permission runs repository code, except that `gamma` runs the `xtask` binary
 that `deploy-tool` built in a job with no token: the build, whose scripts run code from the locked
 dependency set, never shares a job with the token service's address and key. The rules (SHA-pinned
-actions, no permission at the top, `id-token` write in `attest` and `gamma` only, signing in
-artifacts.yml's `attest` only) are pinned by `crates/xtask/tests/release_workflow`.
+actions, no permission at the top, `id-token` write in `attest`, the apt read and write jobs and
+`gamma` only, signing in artifacts.yml's `attest` only) are pinned by
+`crates/xtask/tests/release_workflow`, and the apt jobs by `crates/xtask/tests/apt_workflow`.
 
 ## What is released
 
@@ -95,10 +104,9 @@ dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.r
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
 so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`,
 `packaging/js-lease-server/updater.d/js-lease-server.toml`, the host updater's declaration, which the
-Linux `js-lease-server` archives carry as they are, and the files under
-`packaging/js-agent/hostkeeper/` and `packaging/js-agent-macos/hostkeeper/` (markdown aside),
-which the hostkeeper packages of `js-agent` are made of (`release hostkeeper-package` compiles
-them in).
+Linux `js-lease-server` archives carry as they are, and the files under `packaging/js-agent/deb/`
+(markdown aside), which the Debian package of `js-agent` is made of (`release deb` compiles them
+in).
 
 A file in one of the excluded places still ships when a shipped source compiles it in. `plan` reads
 the `include_str!`, `include_bytes!` and `include!` calls of every shipped `.rs` file (not those
@@ -155,12 +163,10 @@ For version `X.Y.Z`:
 | `js-mdm-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-mdm` binary for arm64 Linux hosts and `LICENSE` |
 | `js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-session` root helper for Apple silicon Macs and `LICENSE` |
 | `js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-provision` pf anchor installer for Apple silicon Macs and `LICENSE` |
-| `js-agent-X.Y.Z-linux-x86_64.tar.zst` | the hostkeeper package of `js-agent` for x86_64 Linux hosts (below) |
-| `js-agent-X.Y.Z-linux-arm64.tar.zst` | the hostkeeper package of `js-agent` for arm64 Linux hosts |
-| `js-agent-X.Y.Z-macos-arm64.tar.zst` | the hostkeeper package of `js-agent` for Apple silicon Macs |
-| `js-agent-X.Y.Z-<platform>.tar.zst.sigstore.json` | for each of the three packages, the Sigstore bundle of its own build provenance attestation, which hostkeeper verifies the package with offline |
-| `js-agent-index.json` | the release index of the three packages: for each platform the package's file name, SHA-256 and size |
-| `SHA256SUMS` | SHA-256 of the fifteen archives, the three packages and the index (not of the bundles) |
+| `js-agent_X.Y.Z_amd64.deb` | the Debian package of `js-agent` for x86_64 Linux hosts (below) |
+| `js-agent_X.Y.Z_arm64.deb` | the Debian package of `js-agent` for arm64 Linux hosts |
+| `js-agent_X.Y.Z_<arch>.deb.sigstore.json` | for each of the two Debian packages, the Sigstore bundle of its own build provenance attestation |
+| `SHA256SUMS` | SHA-256 of the fifteen archives and the two Debian packages (not of the bundles) |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
@@ -176,58 +182,173 @@ repository's `artifacts.yml`, the workflow that signs every release file. A host
 `crates/xtask/tests/js_lease_server_declaration.rs` reads it as the declaration's shape and with the
 hook's own reader, and `crates/xtask/tests/release_stage.rs` fails if the archive leaves it out.
 What the server's hook does is in [lease-server-update.md](lease-server-update.md). The `js-agent`
-archives carry no declaration: the agent is updated through hostkeeper (next section).
+archives carry no declaration: the agent is updated through hostkeeper (below).
 
-### The hostkeeper packages of js-agent
+### The Debian package of js-agent
 
-`js-agent` is a hostkeeper service, named `js-agent`. A hostkeeper package is a `.tar.zst` that holds
-`bin/js-agent`, a `manifest.toml` and the unit files (`units/`) hostkeeper links into place, and for
-the Linux packages `files/tmpfiles.conf`. `build` makes one per platform from the binary it just
-built, with `cargo xtask release hostkeeper-package --binary <path> --target <triple> --version X.Y.Z
---out dist`:
+`js-agent` is a hostkeeper service, named `js-agent`, installed on a Linux host from its Debian
+package by hostkeeper's `apt` installer. `build` makes the package of each Linux architecture from
+the binary it just built, with `cargo xtask release deb --binary <path> --version X.Y.Z --platform
+linux-x86_64|linux-arm64 --out dist` (`crates/xtask/src/release/deb.rs`), and `dpkg-deb` reads its
+control and its files back:
 
-| Target | Platform | Unit |
+| File | Mode | From |
 |---|---|---|
-| `x86_64-unknown-linux-musl` | `linux-x86_64` | `js-agent-crun.service` and its GPU oneshot |
-| `aarch64-unknown-linux-musl` | `linux-arm64` | the same |
-| `aarch64-apple-darwin` | `macos-arm64` | the launchd job `js-agent` |
+| `/usr/bin/js-agent` | 0755 | the release binary, byte for byte |
+| `/usr/lib/systemd/system/js-agent-crun.service` | 0644 | `packaging/js-agent/deb/js-agent-crun.service`, the agent run with crun |
+| `/usr/lib/systemd/system/js-agent-crun-gpu.service` | 0644 | `packaging/js-agent/deb/js-agent-crun-gpu.service`, the oneshot that writes the GPU drop-in |
+| `/usr/lib/tmpfiles.d/js-agent-crun.conf` | 0644 | `packaging/js-agent/deb/tmpfiles.conf`, the directories of the unit |
+| `/usr/lib/systemd/system/js-agent.service` | 0644 | `packaging/js-agent/js-agent.service`, the agent run through Docker or Podman on a host without hostkeeper |
+| `/usr/lib/tmpfiles.d/js-agent.conf` | 0644 | `packaging/js-agent/tmpfiles.conf`, the directories of that unit |
+| `/usr/share/js-agent/crun_host_setup.sh` | 0755 | `packaging/js-agent/crun_host_setup.sh`, the held host setup script |
+| `/usr/share/doc/js-agent/copyright` | 0644 | `LICENSE` |
 
-The files come from the repository, compiled into `xtask` (`packaging/js-agent/hostkeeper` for Linux,
-`packaging/js-agent-macos/hostkeeper` for a Mac); the verb fills in the version, the platform and
-`min_hostkeeper` in the manifest template, and refuses a version that is not `X.Y.Z`, a binary that
-does not print that version, and a target it has no platform for. The manifest's `[params]` are the
-inputs of `js-agent update-hook` (`js_agent::update_hook::params::KEYS`;
-`crates/xtask/tests/hostkeeper_package` checks the manifests against that list). The package
-carries no server address, pool, token or host name: the host's own flags are in `/etc/js-agent/flags`
-(read with `--flags-file`) and its join token in `/etc/js-agent/token`, which an operator places.
+The package is `js-agent`, version `X.Y.Z`, architecture `amd64` or `arm64`, with no dependency (the
+binary is static) and no maintainer script; nothing enables or starts its units. hostkeeper runs
+`js-agent-crun.service` (the manifest's `run` unit, below); `js-agent.service` is the unit of a host
+that installs the package by hand and starts it as that unit's header says. The bytes depend
+only on the binary and the packaging files: root-owned entries, a fixed modification time, sorted
+names, gzip without a name. The verb refuses a version that is not `X.Y.Z`, a binary that does not
+carry the version's `--version` line, and a file that is already there. The package carries no
+server address, pool, token or host name: the host's own flags are in `/etc/js-agent/flags` (read
+with `--flags-file`) and its join token in `/etc/js-agent/token`, which an operator places
+(`packaging/js-agent/deb/README.md`).
 
-`cargo xtask release hostkeeper-index --dir dist --version X.Y.Z` writes `js-agent-index.json` from the
-three packages. It refuses a directory that lacks one of them or holds another `.tar.zst`. `SHA256SUMS`
-lists the packages and the index, artifacts.yml's `attest` attests them, and attests each package
-alone so that its bundle (`<package>.sigstore.json`) can sit beside it, and `verify` checks each one
-as it does an archive and each package from its bundle, so hostkeeper can trust a package it fetched
-by the attestation of artifacts.yml. hostkeeper's channel-sync stages a package only with its bundle
-beside it.
+The `.deb` replaces the hostkeeper archive package of earlier releases (`js-agent-X.Y.Z-<platform>.tar.zst`
+and `js-agent-index.json`): hostkeeper installs native packages only. The pull-request check
+`.github/workflows/js-agent-deb.yml` builds the x86_64 package the same way on every pull request
+that changes the agent or its packaging, and publishes nothing.
 
-hostkeeper's channel-sync does not trust a package by its name: it needs an entry for the service
-that says whose attestation is accepted. For `js-agent` the entry is:
+### The apt repository
 
-| Field | Value |
+The packages are published into the shared apt repository at `https://packages.komira.ai/apt` (an S3
+bucket behind a CDN; component `main`, architectures `amd64` and `arm64`), in two suites over one
+pool: `testing` first, then `stable`. The pool path of this repository's packages is
+`pool/jobscheduler/`, the one prefix its publish role may write to (besides the suites' indexes). The
+jobs are tierstore's (`crates/xtask/src/channels`, `cargo xtask channels ...`); they keep the entries
+of every other product of the repository as they are.
+
+| Job | Environment | What it does |
+|---|---|---|
+| `testing-apt-read` | `apt-publish` | assumes the publish role through the job's OIDC token (`channels assume`) and reads the suite's index and the ETag of each file from the bucket (`channels apt read`) |
+| `testing-apt-index` | `apt-signing` | checks the two packages against `SHA256SUMS` and their attestation by artifacts.yml at this commit, merges them into the index read (`channels apt index`) and signs `Release` (`InRelease`, `Release.gpg`) with the repository's subkey (`channels apt sign`), which it then removes |
+| `testing-apt-write` | `apt-publish` | checks the packages again, uploads each once to the pool (never over other bytes), writes the signed index with `If-Match` on the ETags read, and invalidates `/apt/dists/*` on the CDN (`channels apt write`) |
+| `check-apt` | none | on an amd64 and an arm64 runner, in a clean Ubuntu container pinned by digest: adds the repository with its keyring, installs `js-agent=X.Y.Z` from `testing`, and checks the version, the files, that nothing is enabled and that nothing runs (`channels check-apt`) |
+| `stable-apt-read`, `stable-apt-index`, `stable-apt-write` | as above | only when `check-apt` passed on both: read both suites, list in `stable` the entries `testing` holds for this version, held to the digests of `SHA256SUMS` (`channels apt promote`), sign, and write the index alone (`--no-pool`): `stable` serves the very bytes `testing` was checked with |
+
+No job holds both the signing key and the cloud role. A write that loses the race for the shared
+index to another product's release (an `If-Match` that fails) says so (`conflict=true`) and the next
+attempt reads, merges, signs and writes again: each suite has three attempts (`-2` and `-3` jobs);
+the third fails the run if it loses too. Each job first runs `channels gate` on its settings: with
+none of them set it does nothing and passes (a notice), with some of them set it fails naming the
+missing ones.
+
+What the project owner sets (Settings, Environments; both restricted to `main`):
+
+| Environment | Variables | Secrets |
+|---|---|---|
+| `apt-publish` | `APT_PUBLISH_ROLE_ARN` (the role this repository's release assumes; it may write `apt/pool/jobscheduler/` and the suites), `APT_BUCKET`, `APT_DISTRIBUTION_ID` (the CDN distribution), `APT_HOSTNAME` (`packages.komira.ai`) | none |
+| `apt-signing` | `APT_GPG_FINGERPRINT` (the signing subkey; several, comma-separated, during a rotation) | `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` |
+
+To install the agent by hand from the repository:
+
+```sh
+curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
+cat > /etc/apt/sources.list.d/komira.sources <<'SOURCES'
+Types: deb
+URIs: https://packages.komira.ai/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
+SOURCES
+apt-get update && apt-get install js-agent
+```
+
+### Deploying through hostkeeper
+
+`.github/workflows/hostkeeper-desired.yml` sets the desired version of the hostkeeper service
+`js-agent` on hostkeeper's coordinator, through hostkeeper's reusable workflow `set-desired.yml`
+pinned at a hostkeeper release (its `hkctl` is downloaded and its attestation checked before any
+step holds a token). It starts after every run of `release` on `main` that succeeded (it acts when
+that run's `publish` succeeded, on the newest published release), or by hand from `main` with a
+version (a rollback may name an older one). Its `check` job (`cargo xtask release desired`,
+`crates/xtask/src/release/desired.rs`) refuses a release unless the suite `stable` lists both of
+its Debian packages, read through the CDN as a host reads it, with the digests of its `SHA256SUMS`,
+and writes the release's targets: for each of `linux-x86_64` and `linux-arm64` one `apt` entry
+naming the host's repository entry `komira-stable`, the Debian version `X.Y.Z`, the package's
+SHA-256 as the pin, and the manifest:
+
+| Manifest field | Value |
 |---|---|
-| service | `js-agent` |
-| repository | `komira-ai/jobscheduler` |
-| workflow | `.github/workflows/artifacts.yml` |
-| refs | `refs/heads/main` |
+| `package` | `js-agent` |
+| `hook.command` | `/usr/bin/js-agent update-hook` (hostkeeper runs it from the staged copy of the package) |
+| `hook.timeoutSecs` | prepare 3900, cutover 4320, verify 615, rollback 8220, cleanup 120; no uninstall: hostkeeper refuses an uninstall order of the agent |
+| `hook.verifyDeadlineSecs`, `hook.cleanupRetries` | 9000, 3 |
+| `run` | `js-agent-crun.service` |
+| `params` | the inputs of `js-agent update-hook` (`js_agent::update_hook::params::KEYS`): the unit, the hook's state directory, hostkeeper's `current` link, the flags and token files, the state root, the runtime, the cordon and drain bounds and the step bounds |
+| `minHostkeeper` | `0.1.225`, the first hostkeeper whose daemon runs a native entry's hook command |
+| `installerBounds` | stage 600, activate 300, remove 300 |
 
-This is what `gh attestation verify ... --signer-workflow komira-ai/jobscheduler/.github/workflows/artifacts.yml
---source-ref refs/heads/main` checks (below). It is the same signer hostkeeper's and tierstore's
-packages have (their own `.github/workflows/artifacts.yml`), so a farm host trusts one workflow
-path, in any repository of the organisation. A release whose assets have no `.sigstore.json` was
-attested by `release.yml`, before the signing moved; a host that trusts only `artifacts.yml` refuses
-it and takes the releases after it. The entry is hostkeeper's configuration, not this
-repository's: this repository documents it and does not set it.
+There is no `macos-arm64` entry (below). The set does not wait for the fleet: the coordinator rolls
+the version out by its own plan.
 
-The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`. The js-agent Debian package (`.github/workflows/js-agent-deb.yml`) is built for x86_64 only: there is no arm64 deb, and an arm64 host takes the agent from its release archive.
+**Which hosts.** Every deployment of hostkeeper targets a host group (hostkeeper's
+`docs/design/hostgroups.md`), and the group a call names is an input of `set-desired.yml` that
+hostkeeper has not built yet (HostGroups, HG7). Until it is, the call names only the service, and the
+coordinator's current placement decides the hosts: its rollout file's `[[service]]` entry for
+`js-agent` (its roles) and the hosts assigned the service. When HG7 lands, the call gains the
+`host_group` input and the coordinator's allow-list entry its `host_groups`.
+
+**It is off by default.** Until the repository variable `JS_AGENT_SETS_DESIRED` is `true`, exactly,
+both jobs are skipped. Its other settings are repository variables, none of them secret:
+
+| Variable | Meaning |
+|---|---|
+| `JS_AGENT_SETS_DESIRED` | `true` turns the workflow on |
+| `HOSTKEEPER_COORDINATOR_URL` | the coordinator's private listener, `https://<host>[:<port>]` |
+| `HOSTKEEPER_COORDINATOR_CA` | the PEM certificates of the CA that listener chains to |
+| `HOSTKEEPER_TAILNET_CLIENT_ID` | the client ID of the tailnet's federated identity for this repository; empty: the runner does not join the tailnet |
+| `HOSTKEEPER_TAILNET_AUDIENCE` | the audience of that federated identity |
+| `HOSTKEEPER_TAILNET_COORDINATOR` | the coordinator's name on the tailnet, which the join pings |
+| `HOSTKEEPER_TAILNET_TAG` | the tag the join gives the runner's node, the one that identity issues (such as `tag:ci`) |
+
+The coordinator lets the job's OIDC token set the version only through an entry of its allow-list
+(`[[remote_operator]]` of its `--oidc-config`) for this repository:
+
+```toml
+[[remote_operator]]
+issuer = "https://token.actions.githubusercontent.com"
+audience = "jobscheduler-hostkeeper-desired"
+repository_id = "<gh api repos/komira-ai/jobscheduler --jq .id>"
+repository = "komira-ai/jobscheduler"
+job_workflow_ref = ["komira-ai/hostkeeper/.github/workflows/set-desired.yml@318bcc93c9bcd009d40597c45227278742acc622"]
+refs = ["refs/heads/main"]
+event_names = ["workflow_run", "workflow_dispatch"]
+runner_environment = "github-hosted"
+services = ["js-agent"]
+```
+
+`job_workflow_ref` is hostkeeper's `set-desired.yml` at the commit this repository pins, so moving
+the pin (a reviewed change of the `uses:` line, `hostkeeper_version` and `hostkeeper_commit`
+together) moves the entry. The coordinator's rollout file needs a `[[service]]` entry for
+`js-agent`, and each host the `komira-stable` repository entry.
+
+### macOS
+
+The Mac has no native package hostkeeper can install yet, so no `macos-arm64` target: a Mac whose
+daemon announces only `macos-pkg` is ordered nothing for `js-agent`. The signed installer package
+(`.github/workflows/js-agent-macos-pkg.yml`, `packaging/js-agent-macos`) is not ready for hostkeeper's
+`macos-pkg` installer. What is missing: a release job that builds, signs and attests the `.pkg` (the
+workflow runs by hand only); `productsign --timestamp` and hostkeeper's signature check of the signed
+package (`release check-pkg-signature`: the chain of the Developer ID Installer identity to Apple's
+root, a trusted timestamp); hosting under `pkg/js-agent/<version>/` at `packages.komira.ai` with a
+testing-to-stable promotion, which the publish role may not write today; the `macos-pkg` target
+entry (its store, locator, digest and size, and the manifest with the package identifier and launchd
+label); a decision on notarization, which changes the bytes after signing; and js-agent's hook reading
+the `.pkg`'s tree under `tree/Library/...`. The Mac archives (`*-aarch64-apple-darwin.tar.gz`) are
+released as before.
+
+The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
 
 Not yet proven: that the Mac archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when they are built again on a hosted arm64 runner. The Linux archives of both architectures are held to this by the comparison in `publish`, as every archive is; for the Mac ones and the Linux arm64 ones it is watched on the first real release. `crates/xtask/tests/release_archive_compat.rs` checks the archiving half for the arm64 agent archive: the workflow's `tar` options and `gzip -n` make the same bytes from the same files, whatever the working directory and the files' own times.
 
@@ -247,7 +368,7 @@ gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R 
 `git rev-parse` needs a clone with the tags; without one, the commit is the one the release page shows
 for the tag. For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'` instead
 (`js-[0-9]*` keeps the other archives out of the match), and for the agent
-`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'` (the hostkeeper package: `-p 'js-agent-*-linux-x86_64.tar.zst' -p js-agent-index.json`), and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`.
+`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'` (the Debian package: `-p 'js-agent_*_amd64.deb'`), and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`.
 
 On an arm64 Linux host, write `aarch64-unknown-linux-musl` where these say `x86_64-unknown-linux-musl`,
 in the pattern and in the file name: for the agent `-p 'js-agent-*-aarch64-unknown-linux-musl.tar.gz'`
@@ -261,13 +382,14 @@ from this repository by the `artifacts` workflow (which the `release` workflow c
 names. A release whose assets have no `.sigstore.json` was signed by `release.yml`: check it with
 `--signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml`.
 
-A hostkeeper package can also be checked from its bundle, as a host does, with
-`gh attestation verify js-agent-X.Y.Z-linux-x86_64.tar.zst --bundle js-agent-X.Y.Z-linux-x86_64.tar.zst.sigstore.json`
-and the same flags (download the bundle with `-p 'js-agent-*-linux-x86_64.tar.zst.sigstore.json'`).
+A Debian package can also be checked from its bundle, as the apt jobs do, with
+`gh attestation verify js-agent_X.Y.Z_amd64.deb --bundle js-agent_X.Y.Z_amd64.deb.sigstore.json`
+and the same flags (download the bundle with `-p 'js-agent_*_amd64.deb.sigstore.json'`).
 
 ## Configuration the project owner must set
 
-The workflow needs no secret and no environment. It does need repository settings that only the
+Apart from the apt jobs' two environments ([The apt repository](#the-apt-repository)), the
+workflow needs no secret and no environment. It does need repository settings that only the
 project owner can make. This section says what to set; it does not say what has been set. At the time
 of writing the repository has no ruleset and no branch protection, so none of the following holds
 until it is set.
@@ -284,7 +406,10 @@ until it is set.
   (js-agent-macos-pkg.yml), so a change that breaks the Mac build or package cannot merge;
   `tools/held/required-checks/require_macos_checks.sh` adds them (a dry run by default,
   `--apply` to change the protection).
-- **No environment** is used by `release`, so no environment needs approvers or secrets.
+- **The environments `apt-publish` and `apt-signing`**, restricted to `main`, with the variables and
+  secrets [The apt repository](#the-apt-repository) lists. Until they exist every apt job passes
+  doing nothing, and the release ends with the GitHub release published and no package in the
+  repository.
 
 Not proven until the first real run on `main`, and fixed there if it differs:
 
@@ -298,30 +423,27 @@ Not proven until the first real run on `main`, and fixed there if it differs:
 
 ## The gamma step
 
-After a release is published, `gamma` tells the farm's update coordinator which version of each
-service is wanted, so the hosts that run js-lease-server and js-agent update themselves. It runs
-`cargo xtask deploy` (`crates/xtask/src/deploy.rs`, which documents the calls) for two services, in
-this order, each waiting for its hosts before the next is set (servers upgrade before agents, so a
-failed or blocked `js-server` leaves `js-agent` untouched):
+After a release is published, `gamma` tells the farm's update coordinator which version of the
+lease server is wanted, so the hosts that run js-lease-server update themselves. It runs
+`cargo xtask deploy` (`crates/xtask/src/deploy.rs`, which documents the calls) for one service,
+`js-server`, the binary `js-lease-server`. js-agent is not set here: it is a hostkeeper service,
+set by `hostkeeper-desired.yml` ([Deploying through hostkeeper](#deploying-through-hostkeeper)).
+js-lease-server is not deployed by hostkeeper and has no Debian package: the host updater installs
+it from its archive with its declaration (above).
 
-| Service | Binary it runs |
-|---|---|
-| `js-server` | `js-lease-server` |
-| `js-agent` | `js-agent` |
-
-Per service the job reads `GET /v1/convergence?service=NAME` (the hosts live now are the baseline),
+The job reads `GET /v1/convergence?service=NAME` (the hosts live now are the baseline),
 sets the version with `POST /v1/desired` (`{"service": NAME, "version": V, ...}`), then polls the
 convergence every 30 seconds with a fresh OIDC token each time (audience: the coordinator's URL).
 It passes when the coordinator says `converged` and every role has at least as many hosts at the
 version as were live before. It fails when a host failed its update (`blocked`), when a role lost
 hosts, when the counts have not changed for 20 minutes, after 60 minutes, when the token is
 refused (401, 403: the coordinator's allow-list must name this repository, this workflow on `main`
-and these two services), or when another writer replaced the desired version.
+and the service), or when another writer replaced the desired version.
 
 **The version text** is the release version `X.Y.Z` of the `plan` job: the text `release stamp`
 puts in the build, which each binary prints as the last word of `--version`
-(`build` checks it) and which `js-lease-server` and `js-agent` report as their version in the
-coordinator heartbeat. It is not the tag (`vX.Y.Z`) and has no commit suffix. It is defined in
+(`build` checks it) and which `js-lease-server` reports as its version in the coordinator
+heartbeat. It is not the tag (`vX.Y.Z`) and has no commit suffix. It is defined in
 one place, `deploy::check_version`, which refuses anything but three numbers without leading
 zeros, so a different form fails the job before any call is made, whether or not a coordinator
 is set. The workflow passes the plan's `version` output and derives nothing from it.
@@ -336,8 +458,8 @@ Repository variables (Settings, Secrets and variables, Actions, Variables):
 | `JS_COORDINATOR_CA` | the CA certificate (public, PEM text) the coordinator's certificate chains to; unset: the runner's system roots |
 | `TS_CLIENT_ID`, `TS_AUDIENCE` | when the coordinator is reachable only on a Tailscale network: the trust credential the job joins it with, as an ephemeral node tagged `tag:ci`, using its own OIDC token; either unset: no join |
 
-The coordinator must already run the services `js-server` and `js-agent` and allow this
-repository's `release` workflow on `main` to set them; until it does, the calls are refused and
+The coordinator must already run the service `js-server` and allow this repository's `release`
+workflow on `main` to set it; until it does, the calls are refused and
 the job fails, so leave `JS_COORDINATOR_URL` unset until then. The job fails the run's last step
 only: the release is already published, and "Re-run failed jobs" repeats the step.
 
@@ -359,6 +481,9 @@ whose upload did not finish is deleted before it is uploaded again.
 | What happened | State | What to do |
 |---|---|---|
 | `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
+| An apt job of `testing` failed, or all three attempts lost the race | The release is published; the suite holds this version or not | Re-run failed jobs: a re-run of a read job reads again, and a write never puts other bytes in the pool under a name it holds. A package already in the pool is accepted when its bytes are equal. |
+| `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted and hosts are not ordered it (`hostkeeper-desired.yml` acts only after a run that succeeded). Fix forward: the next release supersedes it in `testing`. |
+| An apt job of `stable` failed | `testing` holds the version, `stable` may not | Re-run failed jobs. |
 | `publish` failed before the release was published (an upload, the draft) | A draft release, no tag | Re-run failed jobs. The run finds the draft of the version, deletes a half-uploaded file, adds the files it lacks and publishes it. |
 | `main` moved after such a failure and the new push plans the same version | A draft at the older commit | Nothing to do: the new run deletes the stale draft (or one holding a file that differs), makes a new one and publishes it. |
 | `publish` says the tag appeared and names another commit | A draft, nothing published, a tag on the wrong commit | The tag was pushed by hand. Check that the commit is not on `main` (`git merge-base --is-ancestor <commit> origin/main` says no, exit status 1), delete the tag (`git push origin :refs/tags/vX.Y.Z`; the tag ruleset lets the owner), and re-run failed jobs. If the commit is on `main`, see the row for a release on the wrong commit. |
