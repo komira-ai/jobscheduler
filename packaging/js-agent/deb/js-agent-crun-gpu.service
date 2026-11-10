@@ -1,17 +1,18 @@
 # The GPU flags of js-agent-crun.service, made from the host's NVIDIA nodes before each start of
-# that unit. It is the unit of packaging/js-agent/js-agent-crun-gpu.service in the hostkeeper
-# package (packaging/js-agent/hostkeeper), which hostkeeper links as
-#   /etc/systemd/system/js-agent-crun-gpu.service
-# and which runs the agent through hostkeeper's `current` link. It is not in the manifest's
-# `run` list: js-agent-crun.service pulls it in (Wants=) and starts after it (After=); nothing
-# enables it. crates/xtask/tests/hostkeeper_package pins the settings described here.
+# that unit. It is the unit of packaging/js-agent/deb/js-agent-crun-gpu.service in the js-agent
+# .deb, installed as
+#   /usr/lib/systemd/system/js-agent-crun-gpu.service
+# and runs /usr/bin/js-agent. It is not in the manifest's `run` list: js-agent-crun.service pulls
+# it in (Wants=) and starts after it (After=); nothing enables it.
+# crates/xtask/tests/js_agent_deb_units.rs pins the settings described here.
 #
 # `js-agent crun-gpu-dropin` runs `nvidia-smi -L` (which also makes the driver create the nodes of
 # the GPUs and nvidiactl) and checks the flags against the GPUs it lists, the ones the agent checks
 # at start; a list that differs from the nvidia<N> nodes is a warning. It lists /dev, and writes
 #   /run/systemd/system/js-agent-crun.service.d/zz-gpu.conf
 # with an `ExecStart=` reset and the crun unit's ExecStart (after its drop-ins in
-# /etc/systemd/system/js-agent-crun.service.d and in the /run directory above, by name) followed
+# /etc/systemd/system/js-agent-crun.service.d, which `--dropin-dir` names because the unit is in
+# /usr/lib/systemd/system, and in the /run directory above, by name) followed
 # by `--gpu-device`, `--gpu-mount` and `--gpu-env` flags, once the agent's own start check accepts
 # them. The name sorts after `override.conf`, the drop-in `systemctl edit` writes, so the GPU flags
 # are not dropped by it. The drop-in is in /run, so a reboot starts from the unit again. Nothing is written, and an earlier
@@ -36,5 +37,5 @@ After=systemd-modules-load.service systemd-udev-settle.service nvidia-persistenc
 
 [Service]
 Type=oneshot
-ExecStart=/var/lib/hostkeeper/packages/js-agent/current/bin/js-agent crun-gpu-dropin --out /run/systemd/system/js-agent-crun.service.d/zz-gpu.conf --unit /etc/systemd/system/js-agent-crun.service --dev-root /dev --driver-root /opt/nvidia-driver --nvidia-smi /usr/bin/nvidia-smi
+ExecStart=/usr/bin/js-agent crun-gpu-dropin --out /run/systemd/system/js-agent-crun.service.d/zz-gpu.conf --unit /usr/lib/systemd/system/js-agent-crun.service --dropin-dir /etc/systemd/system/js-agent-crun.service.d --dev-root /dev --driver-root /opt/nvidia-driver --nvidia-smi /usr/bin/nvidia-smi
 ExecStopPost=/usr/bin/systemctl daemon-reload

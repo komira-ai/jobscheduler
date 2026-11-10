@@ -40,8 +40,6 @@ prost-types.workspace = true
 js-testkit = { path = "../js-testkit" }
 rustls.workspace = true
 rustls-native-certs.workspace = true
-# `release hostkeeper-package` compresses the packages hostkeeper unpacks.
-ruzstd.workspace = true
 # The runner user's uid and gid, and `uname -m`, for `crun-tests`.
 rustix = { workspace = true, features = ["process", "system"] }
 serde.workspace = true
@@ -75,11 +73,6 @@ js-mac-session = { path = "../js-mac-session" }
 # the job service.
 protox.workspace = true
 rcgen.workspace = true
-# hostkeeper's unpacker, manifest loader, release-index parser and placer: the js-agent packages
-# and their index are read with the code a host runs (tests/hostkeeper_package).
-hostkeeper-config.workspace = true
-hostkeeper-placed.workspace = true
-hostkeeper-unpack.workspace = true
 
 [lints]
 workspace = true

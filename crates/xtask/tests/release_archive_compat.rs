@@ -1,5 +1,5 @@
 //! The Linux js-agent archive keeps its name, its top directory and its members (the binary and
-//! `LICENSE`): the agent is updated as a hostkeeper package, so its archive carries no host
+//! `LICENSE`): the agent is updated by hostkeeper from its .deb, so its archive carries no host
 //! updater's declaration. Both archives here are made the way a release makes them, and both are
 //! read by the program a host reads them with:
 //!

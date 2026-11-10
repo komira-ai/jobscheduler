@@ -157,7 +157,7 @@ fn failed(ran: &Ran) -> &str {
 }
 
 #[test]
-fn the_whole_leg_builds_stages_checks_and_packages_every_entry() {
+fn the_whole_leg_builds_stages_and_checks_every_entry() {
     let rig = Rig::new("leg-passes");
     let ran = rig.run(BOTH, "11.0", &[]);
     assert_eq!((ran.status, ran.stderr.as_str()), (0, ""), "{}", ran.stdout);
@@ -168,9 +168,8 @@ fn the_whole_leg_builds_stages_checks_and_packages_every_entry() {
             .to_string()
     };
     let lines: Vec<&str> = ran.stdout.lines().collect();
-    assert_eq!(lines.len(), 9, "{lines:?}");
     assert_eq!(
-        lines[..8],
+        lines,
         [
             "js built".to_owned(),
             format!("staged {}: js, LICENSE", stage("js")),
@@ -182,11 +181,6 @@ fn the_whole_leg_builds_stages_checks_and_packages_every_entry() {
             "js-agent prints \"js-agent 1.2.3\"".to_owned(),
         ]
     );
-    assert!(
-        lines[8].starts_with("js-agent-1.2.3-macos-arm64.tar.zst: sha256 "),
-        "{}",
-        lines[8]
-    );
     for bin in ["js", "js-agent"] {
         assert!(PathBuf::from(stage(bin)).join(bin).is_file());
         assert_eq!(
@@ -194,7 +188,15 @@ fn the_whole_leg_builds_stages_checks_and_packages_every_entry() {
             "licence text\n"
         );
     }
-    assert!(out.join("js-agent-1.2.3-macos-arm64.tar.zst").is_file());
+    let leftovers: Vec<String> = fs::read_dir(&out)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        leftovers.len(),
+        2,
+        "only the two archive directories are made: {leftovers:?}"
+    );
     let repo = rig.dir.canonicalize().unwrap().display().to_string();
     assert_eq!(
         rig.cargo_log(),
@@ -217,17 +219,6 @@ fn a_malformed_builds_entry_is_refused_before_cargo_runs() {
         assert_eq!(rig.cargo_log(), "", "{entry}");
         assert!(!rig.out().exists());
     }
-}
-
-#[test]
-fn builds_without_a_js_agent_binary_are_refused_before_cargo_runs() {
-    let rig = Rig::new("leg-no-agent");
-    let ran = rig.run("js-cli:js", "11.0", &[]);
-    assert_eq!(
-        failed(&ran),
-        "--builds has no js-agent binary to make the hostkeeper package of"
-    );
-    assert_eq!(rig.cargo_log(), "");
 }
 
 #[test]
@@ -269,17 +260,13 @@ fn a_failing_build_ends_the_run_naming_the_command() {
             rig.path("cargo").display()
         )
     );
-    // The first entry was done; the package of the agent was not made.
+    // The first entry was done; the second was not staged.
     assert!(
         rig.out()
             .join(format!("stage-js/js-{VERSION}-{TARGET}"))
             .is_dir()
     );
-    assert!(
-        !rig.out()
-            .join("js-agent-1.2.3-macos-arm64.tar.zst")
-            .exists()
-    );
+    assert!(!rig.out().join("stage-js-agent").exists());
 }
 
 #[test]
@@ -301,19 +288,6 @@ fn an_archive_directory_that_exists_already_fails_the_leg() {
     assert_eq!(
         failed(&ran),
         format!("{}: File exists (os error 17)", top.display())
-    );
-}
-
-#[test]
-fn a_hostkeeper_package_that_exists_already_fails_the_leg() {
-    let rig = Rig::new("leg-package-fails");
-    let package = rig.out().join("js-agent-1.2.3-macos-arm64.tar.zst");
-    fs::create_dir_all(rig.out()).unwrap();
-    fs::write(&package, "old").unwrap();
-    let ran = rig.run(BOTH, "11.0", &[]);
-    assert_eq!(
-        failed(&ran),
-        format!("{}: File exists (os error 17)", package.display())
     );
 }
 

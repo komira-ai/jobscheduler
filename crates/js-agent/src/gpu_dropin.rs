@@ -2,7 +2,7 @@
 //! device nodes before the unit starts.
 //!
 //! ```text
-//! js-agent crun-gpu-dropin --out FILE [--unit FILE] [--dev-root DIR] [--driver-root DIR] [--nvidia-smi PATH]
+//! js-agent crun-gpu-dropin --out FILE [--unit FILE] [--dropin-dir DIR]... [--dev-root DIR] [--driver-root DIR] [--nvidia-smi PATH]
 //! ```
 //!
 //! `js-agent-crun-gpu.service` runs it before each start of `js-agent-crun.service`, then reloads
@@ -14,7 +14,8 @@
 //! 2. lists the nodes below `--dev-root` ([`Nodes`]): `nvidia<N>`, `nvidiactl`, `nvidia-modeset`,
 //!    `nvidia-uvm`, `nvidia-uvm-tools` and the entries of `nvidia-caps/`;
 //! 3. reads the `ExecStart=` that applies to the unit (`--unit`, then the `*.conf` drop-ins of
-//!    its `.d` directory and of `--out`'s directory, by name, but not `--out`'s own name); a
+//!    its `.d` directory, of `--out`'s directory and of each `--dropin-dir`, by name, but not
+//!    `--out`'s own name); a
 //!    quoted word is refused, since the verb splits on white space; a `--flags-file` there is
 //!    expanded as the agent expands it ([`crate::flags_file`]) for the checks below, and kept as
 //!    it is in the drop-in, so the agent reads the file again at its own start;
@@ -85,6 +86,11 @@ struct Args {
     /// The unit whose `ExecStart=` the drop-in extends.
     #[arg(long, default_value = "/etc/systemd/system/js-agent-crun.service")]
     unit: PathBuf,
+    /// A directory of `*.conf` drop-ins of the unit besides the unit's own `.d` directory and
+    /// `--out`'s: the one systemd reads from `/etc/systemd/system` when the unit is a
+    /// package's, in `/usr/lib/systemd/system`. It wins over those for a name in both.
+    #[arg(long)]
+    dropin_dir: Vec<PathBuf>,
     /// The directory the nodes are listed and read in (`/dev` on a host). The flags name them
     /// below `/dev`.
     #[arg(long, default_value = "/dev")]
@@ -312,7 +318,7 @@ fn generate(
         remove_stale(&args.out, err);
         return Ok(());
     }
-    let base = unit_exec_start(&args.unit, &args.out)?;
+    let base = unit_exec_start(&args.unit, &args.dropin_dir, &args.out)?;
     if base.contains(['"', '\'']) {
         return Err(format!(
             "the ExecStart of {} quotes a word, which this verb does not split as systemd does",
@@ -400,8 +406,9 @@ fn caps(dir: &Path) -> Result<Vec<String>, String> {
 
 /// The `ExecStart=` that applies to `unit`: the unit's, then that of each `*.conf` drop-in of the
 /// unit's `.d` directory and of `out`'s directory (where systemd's runtime drop-ins are), by name,
-/// the unit's own directory winning for a name in both, and leaving out `out`'s own name.
-fn unit_exec_start(unit: &Path, out: &Path) -> Result<String, String> {
+/// the unit's own directory winning for a name in both, then each of `extra` in order, and leaving
+/// out `out`'s own name.
+fn unit_exec_start(unit: &Path, extra: &[PathBuf], out: &Path) -> Result<String, String> {
     let read = |path: &Path| {
         std::fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))
     };
@@ -412,10 +419,11 @@ fn unit_exec_start(unit: &Path, out: &Path) -> Result<String, String> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
     let mut confs: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for dir in [out.parent(), Some(Path::new(&own_dir))]
+    let dirs = [out.parent(), Some(Path::new(&own_dir))]
         .into_iter()
         .flatten()
-    {
+        .chain(extra.iter().map(PathBuf::as_path));
+    for dir in dirs {
         if !dir.is_dir() {
             continue;
         }

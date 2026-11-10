@@ -7,8 +7,6 @@
 //!   before the build, so `--version` of every binary prints it. Nothing is committed.
 //! - [`stage`]: lays down the files of one release archive, the binary, `LICENSE` and, in the
 //!   Linux archives of `js-lease-server`, the host updater's declaration.
-//! - [`hostkeeper_package`], [`hostkeeper_index`]: the hostkeeper package of `js-agent` for one
-//!   platform, and the release index of the three.
 //!
 //! What ships is computed, not listed: the workspace crates the shipped binaries
 //! (`js-lease-server`, `js` from `js-cli`, `js-agent`, `js-bundle` from `js-bundle-cli`, `js-mac-session`, `js-mac-provision`, `js-mdm`) depend on, through normal and build
@@ -17,8 +15,7 @@
 //! `examples/`, markdown and `Cargo.lock`; so do the root `Cargo.toml`, `Cargo.lock`,
 //! `rust-toolchain.toml` and everything under `.cargo/`, the host updater's declarations
 //! ([`stage::DECLARATIONS`]), which the js-lease-server archives carry as they are, and the
-//! files of the hostkeeper packages of js-agent ([`HOSTKEEPER_DIRS`]), which
-//! `release hostkeeper-package` compiles in.
+//! files of the js-agent .deb ([`DEB_DIRS`]), which `release deb` compiles in.
 //! Everything else does not: docs,
 //! markdown, `.github/`, and the crates no shipped binary depends on (`xtask`,
 //! `js-coverage`, `js-conformance`). A file in one of the excluded places that a shipped
@@ -34,8 +31,6 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
-pub mod hostkeeper_index;
-pub mod hostkeeper_package;
 pub mod include;
 pub mod macos_leg;
 pub mod plan;
@@ -129,11 +124,6 @@ pub enum Error {
         /// The line of the include.
         line: usize,
     },
-    /// `release hostkeeper-package` was given a target it makes no package for.
-    #[error(
-        "no hostkeeper package for the target {0:?}: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl or aarch64-apple-darwin"
-    )]
-    UnknownTarget(String),
     /// The binary does not hold the text its `--version` is made of for the version, so it is
     /// not a build of the version the package would name.
     #[error(
@@ -145,23 +135,9 @@ pub enum Error {
         /// The version asked for.
         version: String,
     },
-    /// The tar of a package could not be written.
-    #[error("cannot write {what} of the package: {why}")]
-    Archive {
-        /// What was being written.
-        what: String,
-        /// The reason.
-        why: String,
-    },
-    /// The packages `release hostkeeper-index` found are not the three of the version.
-    #[error("the hostkeeper packages: {0}")]
-    Packages(String),
     /// An entry of `release macos-leg --builds` that is not `<package>:<bin>`.
     #[error("--builds entry {0:?} is not <package>:<bin>")]
     BadBuild(String),
-    /// `release macos-leg --builds` names no `js-agent` binary, which the hostkeeper package is of.
-    #[error("--builds has no js-agent binary to make the hostkeeper package of")]
-    NoAgentBuild,
     /// A macOS version that is not dotted numbers.
     #[error("not a macOS version of dotted numbers: {0:?}")]
     BadMacosVersion(String),
@@ -360,17 +336,13 @@ fn is_archived(path: &str) -> bool {
     stage::DECLARATIONS
         .iter()
         .any(|(_, source)| *source == path)
-        || (HOSTKEEPER_DIRS.iter().any(|dir| path.starts_with(dir)) && !path.ends_with(".md"))
+        || (DEB_DIRS.iter().any(|dir| path.starts_with(dir)) && !path.ends_with(".md"))
 }
 
-/// The directories of the files the hostkeeper packages of js-agent are made of (manifest
-/// templates, units, the plist, the tmpfiles file): `release hostkeeper-package` compiles them
-/// in, so a change to one is a change of a release asset; the markdown beside them is not
-/// compiled in and does not ship.
-pub const HOSTKEEPER_DIRS: [&str; 2] = [
-    "packaging/js-agent/hostkeeper/",
-    "packaging/js-agent-macos/hostkeeper/",
-];
+/// The directories of the files the js-agent .deb is made of (the units and the tmpfiles file):
+/// `release deb` compiles them in, so a change to one is a change of a release asset; the
+/// markdown beside them is not compiled in and does not ship.
+pub const DEB_DIRS: [&str; 1] = ["packaging/js-agent/deb/"];
 
 /// The directory at the root whose files (`config.toml`: rustflags, linker, build settings)
 /// change how every binary is built.
