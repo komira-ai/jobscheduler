@@ -31,6 +31,8 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
+pub mod deb;
+pub mod desired;
 pub mod include;
 pub mod macos_leg;
 pub mod plan;

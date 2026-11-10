@@ -15,6 +15,13 @@
 //!   <dir>` ([`release::macos_leg`]): on a pull request, the release's macOS leg from that commit:
 //!   the release build of each binary, its archive directory, its minimum macOS and its
 //!   `--version`; nothing is uploaded.
+//! - `release deb --binary <path> --version <X.Y.Z> --platform linux-x86_64|linux-arm64 --out <dir>`
+//!   ([`release::deb`]): the js-agent Debian package of one Linux platform, byte for byte the same
+//!   for the same inputs.
+//! - `release desired --repo <owner/repo> --version <X.Y.Z> --after-run <id> --dir <dir> [--output <file>]`
+//!   ([`release::desired`]): the targets the hostkeeper set of js-agent is given for a release, or
+//!   `set=false`; refused unless the release's `.deb`s are in the stable apt index at the digests
+//!   of its `SHA256SUMS`.
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
@@ -108,6 +115,9 @@ pub enum Error {
     /// A release verb failed.
     #[error(transparent)]
     Release(#[from] release::Error),
+    /// `release desired` set nothing, or could not tell.
+    #[error(transparent)]
+    Desired(release::desired::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
@@ -317,6 +327,10 @@ enum ReleaseVerb {
     Stage(release::stage::StageArgs),
     /// Build, stage, check and package the darwin leg of a release.
     MacosLeg(release::macos_leg::LegArgs),
+    /// Build the Debian package of js-agent for one Linux platform.
+    Deb(release::deb::DebArgs),
+    /// What the hostkeeper set of js-agent is given for a release, or why it sets nothing.
+    Desired(release::desired::DesiredArgs),
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -408,6 +422,11 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
+            ReleaseVerb::Deb(args) => release::deb::run(&args)?,
+            ReleaseVerb::Desired(args) => release::desired::run(&args).map_err(|e| match e {
+                release::desired::Error::Usage(why) => Error::Usage(why),
+                other => Error::Desired(other),
+            })?,
         }),
     }
 }
