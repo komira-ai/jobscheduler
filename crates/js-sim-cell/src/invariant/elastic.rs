@@ -3,10 +3,11 @@
 //! [`Invariant::ThrottleHonoured`] after every step, and
 //! [`Invariant::LaunchedMachinesSettle`] at the end.
 //!
-//! Each reads [`Observations::cloud`]: an invariant about an argument of a call or its time
-//! reads the recording wrapper's calls, one about what the cloud holds reads what the cell
-//! read of the fake. A step reads only the calls recorded since the last one, each once,
-//! and the count of running machines. A cell without an elastic pool has nothing to check.
+//! Each reads every cloud of [`Observations::clouds`] on its own: an invariant about an
+//! argument of a call or its time reads the recording wrapper's calls, one about what the
+//! cloud holds reads what the cell read of the fake. A step reads only the calls recorded
+//! since the last one, each once, and the count of running machines. A cell without an
+//! elastic pool has nothing to check.
 
 use std::collections::BTreeSet;
 
@@ -19,9 +20,16 @@ use crate::elastic::{AcquireAnswer, CloudCall, CloudEvent, CloudFacts};
 use crate::observe::Observations;
 use crate::text;
 
-/// What the step invariants of the cloud have read.
+/// What the step invariants of the clouds have read, one cloud at a time.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Indices {
+    /// What was read of each cloud, in the order of [`Observations::clouds`].
+    clouds: Vec<OneCloud>,
+}
+
+/// What the step invariants of one cloud have read.
+#[derive(Clone, Debug, Default)]
+struct OneCloud {
     /// How many of the cloud's calls were read.
     read: usize,
     /// Since when the pool's brake reads tripped, with no reset since.
@@ -34,11 +42,21 @@ pub(super) struct Indices {
 }
 
 impl Indices {
-    /// Checks the calls recorded since the last step, and the count of running machines.
+    /// Checks the calls each cloud recorded since the last step, and its count of running
+    /// machines.
     pub(super) fn step(&mut self, observations: &Observations, found: &mut Found) {
-        let Some(cloud) = &observations.cloud else {
-            return;
-        };
+        let clouds = &observations.clouds;
+        self.clouds.resize_with(clouds.len(), OneCloud::default);
+        for (read, cloud) in self.clouds.iter_mut().zip(clouds) {
+            read.step(cloud, found);
+        }
+    }
+}
+
+impl OneCloud {
+    /// Checks the calls `cloud` recorded since the last step, and its count of running
+    /// machines.
+    fn step(&mut self, cloud: &CloudFacts, found: &mut Found) {
         for call in cloud.calls.iter().skip(self.read) {
             self.read_call(cloud, call, found);
         }
@@ -135,9 +153,13 @@ impl Indices {
 /// cloud still runs has work (its agent runs a run or a job) or is leaving the pool
 /// (drained or being released).
 pub(super) fn settle(observations: &Observations, found: &mut Found) {
-    let Some(cloud) = &observations.cloud else {
-        return;
-    };
+    for cloud in &observations.clouds {
+        settle_one(observations, cloud, found);
+    }
+}
+
+/// [`settle`] for one cloud.
+fn settle_one(observations: &Observations, cloud: &CloudFacts, found: &mut Found) {
     for id in &cloud.running {
         let machine = cloud.machines.get(id);
         let host = machine.map(|machine| &machine.host);

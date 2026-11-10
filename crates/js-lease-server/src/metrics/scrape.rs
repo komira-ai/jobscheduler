@@ -69,9 +69,8 @@ pub(crate) async fn snapshot(
     page: NonZeroUsize,
 ) -> Result<Snapshot, JobStoreError> {
     let list = listing(shared);
-    let tables = shared
-        .agents()
-        .and_then(|agents| agents.jobs.clone().map(|jobs| (jobs, agents.clock.clone())));
+    let agents = shared.agents();
+    let tables = agents.jobs.clone().map(|jobs| (jobs, agents.clock.clone()));
     let jobs = match tables {
         Some((jobs, clock)) => {
             let now = store_time(clock.now().millis());

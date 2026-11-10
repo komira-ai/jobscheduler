@@ -221,7 +221,7 @@ impl Rig {
 /// The server state the host book is read from, over `rig`'s agent side.
 fn shared_over(rig: &Rig) -> Shared {
     let token = parse_token(&[b'q'; 40]).unwrap();
-    Shared::new(token, Some(Arc::clone(&rig.agents)))
+    Shared::new(token, Arc::clone(&rig.agents))
 }
 
 /// Asserts that the first hello with a join token commits the token's use and the host's

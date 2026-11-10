@@ -43,7 +43,7 @@ async fn beat_load(h: &Harness, session: &Session, load: Option<Value>) {
 /// stopped sending one, and a load that no client can poll.
 #[tokio::test]
 async fn the_hosts_listing_shows_the_latest_load_of_each_host() {
-    let h = start_agents("agents_load", false).await;
+    let h = start_agents("agents_load").await;
     guard(async {
         let a = join(&h, "a").await;
         let b = join(&h, "b").await;

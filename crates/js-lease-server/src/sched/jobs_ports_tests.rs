@@ -414,15 +414,15 @@ fn served_with(name: &str, ports: &[u16]) -> (Arc<Agents>, ManualClock, js_testk
     let moving = clock();
     let shared = crate::clock::SharedClock::new(moving.clone());
     let assembled = assemble_placed(
-        config.hosts,
+        config.agents,
         config.usage,
         &shared,
         &config.state_file,
         None,
     );
-    let ((_, agents), _) = assembled.unwrap();
+    let (agents, _) = assembled.unwrap();
     let (_store, jobs) = tables();
-    let agents = Arc::try_unwrap(agents.unwrap()).ok().unwrap();
+    let agents = Arc::try_unwrap(agents).ok().unwrap();
     let agents = agents.with_jobs(Arc::new(jobs));
     say_hello(&agents, ports);
     (Arc::new(agents), moving, dir)

@@ -9,7 +9,7 @@ use crate::support::{Harness, TOKEN, request};
 /// (the join-token mint, behind the client token), and that the refusal mints nothing.
 #[tokio::test]
 async fn oversized_bodies_are_refused() {
-    let h = start_agents("oversized", false).await;
+    let h = start_agents("oversized").await;
     let big = vec![b' '; js_lease_server::BODY_LIMIT + 1];
     let reply = request(
         h.addr(),

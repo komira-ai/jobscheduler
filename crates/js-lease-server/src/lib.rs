@@ -11,10 +11,7 @@
 //!   refuse a start (a token file anyone can read, a listen address off the loopback
 //!   without TLS).
 //! - [`Kinds`]: the provider kinds a `[[pool]]` of the configuration file may name,
-//!   compiled in (`static` and `lambdalabs`).
-//! - [`StaticPoolSource`]: the hosts the operator lists in a pool file (`--pool-config`),
-//!   read once at start. They are listed beside the hosts that register themselves (see
-//!   "Agents" below), and no work is placed on them.
+//!   compiled in (`lambdalabs`, `ec2` and `gce`).
 //! - [`network`]: how a machine the service launches reaches it (the `default` and
 //!   `tailscale` modes), and [`bootstrap`]: the script such a machine boots with, rendered
 //!   from a plan with its secrets masked or filled. A provider receives the rendered
@@ -44,7 +41,7 @@
 //! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
 //! | `--store-unreachable-after <duration>` | `60s`: how long the store paths of the tick (the job pass over the job tables) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both. Zero or an unparsable value is refused at start naming the flag |
 //! | `--boot initialise\|resume` | required: `initialise` is the first start (a live elastic pool may have no records yet), `resume` a later one (its records must exist); the server reads no lease file at either, so `resume` without one starts |
-//! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
+//! | `--pool-config <path>` | removed, and hidden from `--help`: the agentless hosts-file pool is not served. A start that gives it is refused naming it, with the migration (run `js-agent` on each listed host and use `--agent-pool-config`, or a `[[pool]]` of `kind = "joined"`; see "Migrating an agentless pool" in `docs/design/configuration.md`). `--agent-pool-config` is required |
 //! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
 //! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk the pool books for every host and the floor a hello must meet; zero or absent books none; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that books disk and does not name `scratch-quota` refuses every agent that does not report disk, which no current agent does; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project` (reason `below-floor`), or whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than `disk_bytes` (reason `quota-default-unfit`), with `shape-not-accepted`; a pool that books no disk and does not name `scratch-quota` refuses with `shape-not-accepted` (reason `quota-without-pool-disk`) a host that runs with `--scratch-quota`), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on; `share_class?`: a class that books part of a host, served beside `class` so that its work shares a host with room (it may not name `class`); a joined pool of the file takes the same key |
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
@@ -78,8 +75,8 @@
 //! `--config <path>` reads a `[server]` table and `[[pool]]` tables instead of the flags
 //! above, and no flag may be given beside it: the first one on the command line is refused,
 //! such as `--listen: not allowed with --config; set server.listen`, before the file is read
-//! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
-//! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
+//! and with exit status 2. `--token-file` is `server.client_token_file`,
+//! `--agent-pool-config` is a `[[pool]]` table, `--agent-token-file` is a pool's
 //! `join_token_file`, a `--client-token` a `[[client]]` table, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
 //! secret is the path of a file that only its owner can use. A refusal names where it is,
 //! `server.listen: ...` or `pool "gpu": provider.api_key_file: ...`, and never repeats a
@@ -128,9 +125,12 @@
 //! # file and alert_repeat_after are refused without the URL.
 //!
 //! [[pool]]
-//! name     = "gpu-static"
-//! class    = "gpu-host"
-//! provider = { kind = "static", hosts_file = "/etc/jobscheduler/hosts.toml" }
+//! kind         = "joined"
+//! name         = "gpu"
+//! class        = "gpu-host"
+//! max_machines = 2
+//! shape        = { cpu_millis = 64000, memory_bytes = 549755813888, gpus = 8, gpu_class = "nvidia-a100" }
+//! capabilities = { arch = "x86_64" }
 //! ```
 //!
 //! A `[logs]` table says where live logs go ([`LogsConfig`], whose module lists its keys); no
@@ -141,11 +141,10 @@
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
 //! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `boot_fail_cooldown_max`, `boot_fail_trip_after`, `boot_fail_reset_after`, `launch`, `exec`, `join_token_file`, `agent` and `network`.
-//! Every pool, static or elastic, may set `memory_schedulable_percent`, a whole number from
+//! Every pool, joined or elastic, may set `memory_schedulable_percent`, a whole number from
 //! 1 to 100 (default 100): the share of the pool's configured memory that is booked, rounded
-//! down. A static pool books that share of each host's `memory_bytes` (the pool's key
-//! replaces the one in its hosts file); an elastic pool books that share of its floor's
-//! memory, 1 GiB. An agent's own claim never raises it, and a hello must still meet the
+//! down. A joined pool books that share of its `shape`'s `memory_bytes`; an elastic pool
+//! books that share of its floor's memory, 1 GiB. An agent's own claim never raises it, and a hello must still meet the
 //! whole floor. `0`, above `100`, a negative number or a word is refused naming the pool and
 //! the field.
 //! An elastic pool may also set `live_until`, a TOML date-time with an offset such as
@@ -227,10 +226,12 @@
 //! `join_token_file`, but this version starts only on a file with at most one pool that
 //! registers agents (an elastic or a joined pool): with more it refuses to start, naming the
 //! second, `several elastic pools are parsed; this version runs one, as the server keeps one
-//! registry of agents` ([`Config::resolve_file`] still reads such a file). At most one pool whose
-//! provider is the agentless `static` kind is served. That kind is deprecated: the
-//! `static` machine provider below is a different thing (hosts that run `js-agent` and
-//! register themselves), and a later version removes the agentless kind.
+//! registry of agents` ([`Config::resolve_file`] still reads such a file). A file with no
+//! pool that registers agents is refused naming `pool`. The removed agentless hosts-file
+//! pool, a `[[pool]]` whose `provider` is of kind `static` (with or without a
+//! `hosts_file`), is refused at start naming the pool and those keys, with the migration;
+//! the `static` machine provider below is a different thing (hosts that run `js-agent` and
+//! register themselves).
 //!
 //! ## Machine providers, platforms and pool settings
 //!
@@ -401,7 +402,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` (a host of the pool file, listed with no state) or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (work still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when the host a reservation is draining is expected to be drained at the latest; reaching it gives nothing up, and the mark stays) are those of a registered host; so is `cordon {expires_at_ms}`, present while the host is cordoned (see "Cordon" below: a cordon left by a dead hook lapses within its last `lease_secs`, at most 3600 s after its last extension, or the host's own `:uncordon` lifts it) |
+//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `registered` (every listed host said hello; the value `static` of the removed agentless pool is not written any more), and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (work still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when the host a reservation is draining is expected to be drained at the latest; reaching it gives nothing up, and the mark stays) are those of a registered host; so is `cordon {expires_at_ms}`, present while the host is cordoned (see "Cordon" below: a cordon left by a dead hook lapses within its last `lease_secs`, at most 3600 s after its last extension, or the host's own `:uncordon` lifts it) |
 //! | `GET /healthz` | 200 `ok`, no token; 503 `tick loop stopped` once the tick loop has stopped; else 503 `store unreachable` while the tick's store paths have failed for `--store-unreachable-after` (until a tick's store work succeeds) |
 //! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `fenced`, `stale_cursor`) and never an error's text, `lock` `none`, `held` or `lost`, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `POST /v1/pools/{pool}/brake/reset` | 202 `{pool, reset: "requested"}`; 401; 404 for another pool |
@@ -436,10 +437,9 @@
 //!
 //! With `--agent-pool-config` (and, for hosts that join with a token shared by the pool,
 //! `--agent-token-file`) a machine can register itself as
-//! a host of the pool the pool file describes, beside the static pool (if any). The
-//! machine's agent calls two routes with a join token, on the same listener, body cap,
-//! timeouts and connection cap as everything else. Without the pool file the routes do not
-//! exist and the server builds exactly what it always has.
+//! a host of the pool the pool file describes. The machine's agent calls two routes with a
+//! join token, on the same listener, body cap, timeouts and connection cap as everything
+//! else. A server always has the pool file (or a registering `[[pool]]` of `--config`).
 //!
 //! | request | answers |
 //! |---|---|
@@ -466,8 +466,7 @@
 //! committed to the store) before it is acknowledged and survives a restart; an uncordon is written
 //! the same way. The routes are served by the agent routes' listener (`agent_listen`, if any).
 //!
-//! A host of the static pool file is listed (`GET /v1/hosts`, with `source` `static`) and
-//! takes no work; a hello for its id is refused. A registered host takes work only while it
+//! A registered host takes work only while it
 //! is live (heard within the grace period) and serving. A host that goes silent reads
 //! `Unknown` until it is heard again.
 //!
@@ -552,8 +551,7 @@
 //! only whether a live elastic pool's records may be missing (`initialise`) or must exist
 //! (`resume`).
 //!
-//! The static pool is built again from `--pool-config` at every start and lists the same
-//! hosts. The registry holds nothing else across a restart except the hosts that had
+//! The registry holds nothing else across a restart except the hosts that had
 //! reported a taint or were cordoned: each is put back as an *awaiting* host, bound as it
 //! was and tainted or cordoned as it was, and it counts toward `max_machines`, until its
 //! agent says hello again. An awaiting host whose agent has not returned is forgotten,
@@ -679,7 +677,6 @@ mod rate;
 mod scaler;
 mod sched;
 mod server;
-mod static_pool;
 mod status;
 mod store;
 mod store_health;
@@ -724,7 +721,6 @@ pub use scaler::{
     RETRY_AFTER, RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_with_checks};
-pub use static_pool::StaticPoolSource;
 pub use store::LockLost;
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{

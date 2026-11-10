@@ -114,7 +114,7 @@ impl Rig {
         };
         let agents = Agents::over(registry.clone(), &shared_clock, &dir);
         let token = parse_token(&[b'c'; 40]).unwrap();
-        let shared = Shared::new(token, Some(Arc::new(agents)));
+        let shared = Shared::new(token, Arc::new(agents));
         registry.hello(&hello, &Credential::of_token("t")).unwrap();
         let served = status.then(|| {
             let status = Status::new(None, None, Vec::new(), shared_clock.clone());

@@ -14,7 +14,7 @@ use js_types::ManualClock;
 use crate::agents_support::{agent_args, join, start_agents};
 use crate::config_support::{PoolText, file, load, refusal, server};
 use crate::jobs_support::job_args;
-use crate::support::{Harness, Scratch, args_with, config};
+use crate::support::{Harness, Scratch, config, without_agent_pool};
 
 /// A `[server]` table whose listeners let a pool that registers agents start, with `extra`
 /// lines after them.
@@ -56,11 +56,10 @@ fn named(dir: &std::path::Path, prefix: &str) -> Vec<PathBuf> {
 }
 
 /// Asserts that the flag and the file key give the same address, that neither given is
-/// off, that each needs agent registration (the flag `--agent-pool-config`, the key a pool
-/// that registers agents) and is refused naming itself without it, that the key must be an
+/// off, that the flag needs `--agent-pool-config` and is refused naming itself without it,
+/// that the key must be an
 /// address, and that the flag beside `--config` is refused naming the key that takes its
-/// place, as every flag is. It catches a key read and dropped, a flag or key that turns a
-/// job service on that has no agent side to hold its store, and a flag let through beside
+/// place, as every flag is. It catches a key read and dropped, and a flag let through beside
 /// the file.
 #[test]
 fn job_listen_flag_and_config_key_agree() {
@@ -74,10 +73,7 @@ fn job_listen_flag_and_config_key_agree() {
     )
     .unwrap();
     assert_eq!(by_key.job_listen(), Some(want));
-    assert_eq!(
-        config(agent_args(&scratch, true)).unwrap().job_listen(),
-        None
-    );
+    assert_eq!(config(agent_args(&scratch)).unwrap().job_listen(), None);
     assert_eq!(
         load(&scratch, &joined_file(&scratch, ""))
             .unwrap()
@@ -85,19 +81,11 @@ fn job_listen_flag_and_config_key_agree() {
         None
     );
 
-    let alone = args_with(&scratch, &["--job-listen", "127.0.0.1:7302"]);
+    let mut alone = without_agent_pool(&scratch);
+    alone.extend(["--job-listen", "127.0.0.1:7302"].map(OsString::from));
     assert_eq!(
         refused(config(alone)).1,
         "--job-listen: requires --agent-pool-config"
-    );
-    let hosts = PoolText::static_pool(&scratch, "hosts");
-    let static_only = file(
-        &server(&scratch, "job_listen = \"127.0.0.1:7302\""),
-        &[&hosts],
-    );
-    assert_eq!(
-        refusal(&scratch, &static_only),
-        "server.job_listen: needs an elastic pool, whose hosts register agents"
     );
     assert_eq!(
         refusal(&scratch, &joined_file(&scratch, "job_listen = 7302")),
@@ -196,7 +184,7 @@ async fn job_listen_in_use_is_refused_naming_the_flag() {
 /// service is off.
 #[tokio::test]
 async fn job_listen_off_opens_no_job_store_and_creates_no_file() {
-    let h = start_agents("job_listen_off_store", true).await;
+    let h = start_agents("job_listen_off_store").await;
     assert_eq!(h.running.job_addr(), None);
     let _node = join(&h, "node-a").await;
     let Harness {
@@ -222,7 +210,7 @@ async fn job_listen_creates_the_store_file_with_the_neighbouring_mode() {
             scratch.write("leases.toml.jobs", "", 0o644);
         }
         let args = job_args(&scratch, "127.0.0.1:0");
-        let h = Harness::with(scratch, args, None).await;
+        let h = Harness::with(scratch, args).await;
         let owner = fs::metadata(&h.scratch.dir).unwrap().uid();
         let files = named(&h.scratch.dir, "leases.toml.jobs");
         assert!(

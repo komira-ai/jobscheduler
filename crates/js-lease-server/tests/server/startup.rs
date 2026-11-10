@@ -70,7 +70,7 @@ async fn token_file_trailing_newline_is_trimmed() {
     let args = base_args(&scratch);
     let with_newline = scratch.write("nl", &format!("{TOKEN}\n"), 0o600);
     let args = replace(args, "--token-file", with_newline);
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     let reply = request(h.addr(), "GET", "/v1/hosts", Some(TOKEN), None).await;
     assert_eq!(reply.status, 200);
 }
@@ -176,7 +176,7 @@ fn a_server_given_a_removed_lease_flag_refuses_to_start() {
 
     for key in ["default_ttl", "max_ttl"] {
         let scratch = Scratch::new(&format!("removed_ttl_key_{key}"));
-        let pool = PoolText::static_pool(&scratch, "hosts");
+        let pool = PoolText::joined("hosts");
         let extra = format!("{key} = \"5m\"");
         let text = file(&server(&scratch, &extra), &[&pool]);
         let said = refusal(&scratch, &text);
@@ -244,21 +244,19 @@ fn clock() -> js_types::ManualClock {
     js_types::ManualClock::default()
 }
 
-/// Asserts that a pool file that is missing or wrong and a listen address already in use are
-/// each refused naming their flag.
+/// Asserts that an agent pool file that is missing or wrong and a listen address already in
+/// use are each refused naming their flag.
 #[tokio::test]
 async fn other_start_refusals_name_their_flag() {
     let scratch = Scratch::new("refusals_files");
 
-    for (name, text) in [("typo.toml", "[[host]]\nidd = 1\n"), ("missing.toml", "")] {
+    for (name, text) in [("typo.toml", "namee = \"burst\"\n"), ("missing.toml", "")] {
         let pool = scratch.write(name, text, 0o644);
         if name == "missing.toml" {
             fs::remove_file(&pool).unwrap();
         }
-        let args = replace(base_args(&scratch), "--pool-config", pool);
-        let (_, ticker) = channel_ticker();
-        let started = start(config(args).unwrap(), SharedClock::new(clock()), ticker).await;
-        assert_eq!(flag_of(started), "--pool-config");
+        let args = replace(base_args(&scratch), "--agent-pool-config", pool);
+        assert_eq!(config(args).err().unwrap().flag(), "--agent-pool-config");
     }
 
     let busy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

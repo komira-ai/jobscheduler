@@ -31,7 +31,7 @@ const TOKEN: [u8; 40] = [b'q'; 40];
 /// A server over the job rig `rig`'s agent side.
 pub(super) fn shared_over(rig: &Rig) -> Arc<Shared> {
     let token = parse_token(&TOKEN).unwrap();
-    Arc::new(Shared::new(token, Some(Arc::clone(&rig.agents))))
+    Arc::new(Shared::new(token, Arc::clone(&rig.agents)))
 }
 
 /// What the fixture is made of, by the ids a leak would show.

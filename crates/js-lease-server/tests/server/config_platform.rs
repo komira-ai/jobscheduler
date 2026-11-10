@@ -4,10 +4,7 @@
 
 use std::time::Duration;
 
-use js_lease_server::{
-    BuildCtx, Built, Config, KindError, Kinds, OwnerOnlyFiles, PlatformKind, Resolved,
-    StartupError, StaticPoolSource,
-};
+use js_lease_server::{Config, Kinds, OwnerOnlyFiles, PlatformKind, Resolved, StartupError};
 use js_platform::PlatformId;
 
 use crate::config_support::{
@@ -15,18 +12,9 @@ use crate::config_support::{
 };
 use crate::support::Scratch;
 
-/// A provider kind that builds a pool of listed hosts, as the agentless `static` kind
-/// does, under another name.
-fn listed_kind(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
-    Ok(Built::Static(StaticPoolSource::new("hosts.toml")))
-}
-
-/// The kinds of the tests, a hostless platform kind and a listed-hosts provider kind
-/// added.
+/// The kinds of the tests, a hostless platform kind added.
 fn platform_kinds() -> Kinds {
-    kinds()
-        .with_platform(PlatformKind::hostless("test-hostless"))
-        .with("listed", listed_kind)
+    kinds().with_platform(PlatformKind::hostless("test-hostless"))
 }
 
 fn resolve(scratch: &Scratch, text: &str) -> Result<Resolved, StartupError> {
@@ -101,7 +89,7 @@ fn ours(scratch: &Scratch) -> Vec<String> {
 
 /// The file of the golden `config_two_elastic.txt`: two `lambdalabs` machine providers
 /// with their own key files, two platforms, the elastic pools `gpu` (settings and limits
-/// given, `catalog_refresh` among them) and `cpu`, and an agentless static pool.
+/// given, `catalog_refresh` among them) and `cpu`.
 fn two_elastic(scratch: &Scratch) -> String {
     let tables = [
         rack(),
@@ -121,8 +109,7 @@ fn two_elastic(scratch: &Scratch) -> String {
     let cpu = on(&["west"], scratch)
         .set("name", &quote("cpu"))
         .set("max_instances", "2");
-    let hosts = PoolText::static_pool(scratch, "hosts");
-    doc(scratch, &tables, &[&gpu, &cpu, &hosts])
+    doc(scratch, &tables, &[&gpu, &cpu])
 }
 
 /// Asserts that a pool written with `provider = { kind = "lambdalabs", ... }` resolves to
@@ -241,7 +228,7 @@ fn provider_and_platforms_on_one_pool_are_refused() {
 }
 
 /// Asserts that one file with two `lambdalabs` machine providers (each with its own key
-/// file), two `default` platforms, two elastic pools and an agentless static pool resolves
+/// file), two `default` platforms, and two elastic pools resolves
 /// (the refusals of a second registering pool are gone), with each pool's platforms, cap,
 /// settings and limits as written.
 #[test]
@@ -392,7 +379,7 @@ fn a_platform_kind_not_built_is_refused() {
     let table = "[[machine_provider]]\nname = \"cloud\"\nkind = \"nonsense\"\n";
     assert_eq!(
         refused(&scratch, &beside(&scratch, table)),
-        "machine_provider \"cloud\": kind: unknown machine provider kind \"nonsense\"; known: any-mode, broken-floor, ec2, gce, lambdalabs, listed, static"
+        "machine_provider \"cloud\": kind: unknown machine provider kind \"nonsense\"; known: any-mode, broken-floor, ec2, gce, lambdalabs, static"
     );
 }
 
@@ -553,9 +540,8 @@ fn gce_pool_needs_the_lifetime_keys() {
 /// Asserts the names and the other keys of the two tables: a name missing, outside the
 /// grammar (a `+` included, so no name can be one the loader makes) or taken by an earlier
 /// table of its kind; a `static` machine provider with a key of its own; a platform
-/// without `machine_providers`; a table that is not an array of tables; and a provider
-/// kind that builds listed hosts named as a machine provider. Each is refused naming the
-/// table and the key. It catches a collision with a name the loader makes and a key read
+/// without `machine_providers`; and a table that is not an array of tables. Each is refused
+/// naming the table and the key. It catches a collision with a name the loader makes and a key read
 /// as nothing.
 #[test]
 fn the_tables_check_their_names_and_keys() {
@@ -594,18 +580,6 @@ fn the_tables_check_their_names_and_keys() {
         refused(&scratch, &text),
         "machine_provider: must be an array of tables, written [[machine_provider]]"
     );
-    let tables = [
-        rack(),
-        "[[machine_provider]]\nname = \"odd\"\nkind = \"listed\"\n".to_owned(),
-        platform("ours", &["rack", "odd"]),
-    ];
-    assert_eq!(
-        refused(
-            &scratch,
-            &doc(&scratch, &tables, &[&on(&["ours"], &scratch)])
-        ),
-        "machine_provider \"odd\": kind: builds a pool of listed hosts, not a machine provider"
-    );
 }
 
 /// Asserts that a declared machine provider no platform names and a declared platform no
@@ -628,8 +602,8 @@ fn a_table_nothing_names_is_refused() {
 
 /// Asserts the queue settings: with none given they are the defaults (`max_queue_wait`
 /// 1h, `start_timeout` 15m, `path_grace` 15s); given they are read as written; and a zero
-/// or a word is refused naming the key. On an agentless static pool each is refused as a
-/// key of an elastic pool. It catches a default that drifts and a setting read as zero.
+/// or a word is refused naming the key. On a joined pool each is refused as a field it does
+/// not know. It catches a default that drifts and a setting read as zero.
 #[test]
 fn pool_settings_default_and_parse() {
     let scratch = Scratch::new("platform_settings");
@@ -660,11 +634,10 @@ fn pool_settings_default_and_parse() {
                 format!("pool \"gpu\": {key}: must be a positive duration such as 600s, 10m or 1h")
             );
         }
-        let hosts = PoolText::static_pool(&scratch, "hosts").set(key, &quote("1m"));
-        assert_eq!(
-            refused(&scratch, &doc(&scratch, &[], &[&hosts])),
-            format!("pool \"hosts\": {key}: only for an elastic pool")
-        );
+        let hosts = PoolText::joined("hosts").set(key, &quote("1m"));
+        let said = refused(&scratch, &doc(&scratch, &[], &[&hosts]));
+        let unknown = format!("pool \"hosts\": {key}: unknown field; known: ");
+        assert!(said.starts_with(&unknown), "{said}");
     }
 }
 
@@ -782,17 +755,15 @@ fn provider_limits_are_validated() {
         refused(&scratch, &limited(&scratch, "3")),
         "pool \"gpu\": provider_limits: must be a table"
     );
-    let hosts = PoolText::static_pool(&scratch, "hosts").set("provider_limits", "{}");
-    assert_eq!(
-        refused(&scratch, &doc(&scratch, &[], &[&hosts])),
-        "pool \"hosts\": provider_limits: only for an elastic pool"
-    );
+    let hosts = PoolText::joined("hosts").set("provider_limits", "{}");
+    let said = refused(&scratch, &doc(&scratch, &[], &[&hosts]));
+    let unknown = "pool \"hosts\": provider_limits: unknown field; known: ";
+    assert!(said.starts_with(unknown), "{said}");
 }
 
 /// Asserts that `max_machines` and `max_instances` are one cap: either spelling resolves
 /// to the same cap and the same description, giving both is refused naming both, a zero
-/// is refused under the spelling given, and an agentless static pool refuses the new
-/// spelling as it refuses the old. It catches a second cap that is read and ignored.
+/// is refused under the spelling given. It catches a second cap that is read and ignored.
 #[test]
 fn max_instances_and_max_machines_are_the_same_cap() {
     let scratch = Scratch::new("platform_cap");
@@ -815,11 +786,6 @@ fn max_instances_and_max_machines_are_the_same_cap() {
     assert_eq!(
         refused(&scratch, &doc(&scratch, &[], &[&zero])),
         "pool \"gpu\": max_machines: must be at least 1"
-    );
-    let hosts = PoolText::static_pool(&scratch, "hosts").set("max_machines", "2");
-    assert_eq!(
-        refused(&scratch, &doc(&scratch, &[], &[&hosts])),
-        "pool \"hosts\": max_machines: only for an elastic pool"
     );
 }
 

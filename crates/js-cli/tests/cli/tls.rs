@@ -42,7 +42,7 @@ fn another_certificate_is_not_trusted_and_http_ignores_it() {
     let got = h.js.go(&words);
     assert_eq!(got.code, 1, "{}", got.err);
 
-    let plain = Harness::agents("tls_plain");
+    let plain = Harness::new("tls_plain");
     let js = Js {
         server: plain.js.server.clone(),
         token_file: plain.js.token_file.clone(),

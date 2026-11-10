@@ -104,7 +104,7 @@ fn private_addresses_are_the_loopback_private_ranges_and_the_tailnet() {
     }
 }
 
-/// Loads a file with `listen` and TLS files and the shipped static pool.
+/// Loads a file with `listen` and TLS files and one joined pool.
 fn listening(name: &str, listen: &str) -> js_lease_server::Config {
     let scratch = Scratch::new(name);
     let cert = scratch.write("cert.pem", "x", 0o644);
@@ -114,7 +114,7 @@ fn listening(name: &str, listen: &str) -> js_lease_server::Config {
         quoted(&cert),
         quoted(&key)
     );
-    let hosts = PoolText::static_pool(&scratch, "hosts");
+    let hosts = PoolText::joined("hosts");
     load(&scratch, &file(&server(&scratch, &extra), &[&hosts])).unwrap()
 }
 

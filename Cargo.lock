@@ -1244,7 +1244,6 @@ dependencies = [
  "js-client",
  "js-conformance",
  "js-lease-server",
- "js-pool-static",
  "js-proto",
  "js-testkit",
  "js-types",
@@ -1425,7 +1424,6 @@ dependencies = [
  "js-logmint",
  "js-logstore",
  "js-platform",
- "js-pool-static",
  "js-proto",
  "js-provider",
  "js-provider-ec2",
@@ -1626,7 +1624,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "js-pool-static"
+name = "js-pool-fake"
 version = "0.1.0"
 dependencies = [
  "js-provider",

@@ -2,7 +2,8 @@
 //! double-booked, nothing lost", the four of a whole host held, drained and served
 //! (`whole.rs`), the five of a job, its allocations and its result (`jobs.rs`), the five
 //! of an elastic pool's cloud (`elastic.rs`), the two of the usage history (`usage.rs`), the one of
-//! a cordon (`cordon.rs`), and the [`Checker`] that tests them.
+//! a cordon (`cordon.rs`), the four of the walk over a pool's machine providers (`walk.rs`),
+//! and the [`Checker`] that tests them.
 //!
 //! The checker runs a step check ([`Checker::step`]) after every kernel step and every
 //! client call, and an end check ([`Checker::end`]) once, after the scenario has been
@@ -48,6 +49,7 @@ mod elastic;
 mod jobs;
 mod results;
 mod usage;
+mod walk;
 mod whole;
 mod whole_jobs;
 
@@ -215,11 +217,38 @@ pub enum Invariant {
     /// of the host reads a stop of such a job that the client did not ask for
     /// (`invariant/cordon.rs`).
     CordonNeverKillsRunningJob,
+    /// Step check. An acquire of a machine provider is made only when every provider
+    /// before it in the pool's order could not serve: at the moment of the call, as the
+    /// recording wrapper saw each earlier cloud, it held its share of the pool's machines,
+    /// or the latest answer to each of its offers was a definite refusal (`capacity`, or
+    /// `quota` within its `quota_backoff`). An earlier provider that was asked and gave no
+    /// answer, or deferred, or was never asked, could still serve. Two things it reads
+    /// more coarsely than the scaler: an offer's latest answer is over every request, while
+    /// the scaler declines an offer for one request's attempt; and a machine counts toward
+    /// its provider's share while the cloud shows it, through the end of its release,
+    /// while the scaler counts it until it confirms the machine gone (`invariant/walk.rs`).
+    ProviderOrder,
+    /// Step check. (a) No acquire id has more than one machine, over every cloud of the
+    /// pool, as the cell read the clouds themselves. (b) An acquire id a cloud answered
+    /// with no answer or a deferral is never presented to another cloud: it is settled
+    /// under its own id with its own provider (`invariant/walk.rs`).
+    NoSecondLaunchForOneAcquire,
+    /// Step check. After a cloud refused an acquire of an offer in a zone for `quota`, it is
+    /// asked for no acquire of that offer in that zone (a zone being its own region, as the
+    /// server reads them) within its `quota_backoff` of virtual time, from the step after
+    /// that answer on (`invariant/walk.rs`).
+    QuotaPassOverHonoured,
+    /// Step check. No acquire is made at an instant when a registered host was open to a
+    /// new job (as the recording wrapper read the server's registry inside the input that
+    /// made the call) and held no job (as the job tables, once read past that instant, say
+    /// of the allocations booked on it then). Every host of the cell is of one shape, so
+    /// such a host could serve any job (`invariant/walk.rs`).
+    FreeHostBeatsAcquire,
 }
 
 impl Invariant {
     /// Every invariant.
-    pub const ALL: [Invariant; 24] = [
+    pub const ALL: [Invariant; 28] = [
         Invariant::NoDoubleBooking,
         Invariant::AtMostOneLaunch,
         Invariant::OneTerminalAnswer,
@@ -244,6 +273,10 @@ impl Invariant {
         Invariant::UsageRowPerEndedAllocation,
         Invariant::UsageTotalsMatchTerminalJobs,
         Invariant::CordonNeverKillsRunningJob,
+        Invariant::ProviderOrder,
+        Invariant::NoSecondLaunchForOneAcquire,
+        Invariant::QuotaPassOverHonoured,
+        Invariant::FreeHostBeatsAcquire,
     ];
 
     /// A stable kebab-case name, as a failure writes it.
@@ -274,6 +307,10 @@ impl Invariant {
             Invariant::UsageRowPerEndedAllocation => "usage-row-per-ended-allocation",
             Invariant::UsageTotalsMatchTerminalJobs => "usage-totals-match-terminal-jobs",
             Invariant::CordonNeverKillsRunningJob => "cordon-never-kills-running-job",
+            Invariant::ProviderOrder => "provider-order",
+            Invariant::NoSecondLaunchForOneAcquire => "no-second-launch-for-one-acquire",
+            Invariant::QuotaPassOverHonoured => "quota-pass-over-honoured",
+            Invariant::FreeHostBeatsAcquire => "free-host-beats-acquire",
         }
     }
 
@@ -298,7 +335,11 @@ impl Invariant {
             | Invariant::OnlyOwnMachinesReleased
             | Invariant::NoAcquireWhilePlanOnly
             | Invariant::ThrottleHonoured
-            | Invariant::CordonNeverKillsRunningJob => Checked::EveryStep,
+            | Invariant::CordonNeverKillsRunningJob
+            | Invariant::ProviderOrder
+            | Invariant::NoSecondLaunchForOneAcquire
+            | Invariant::QuotaPassOverHonoured
+            | Invariant::FreeHostBeatsAcquire => Checked::EveryStep,
             Invariant::SettlesWhenQuiet
             | Invariant::BookingsMatchAgents
             | Invariant::NoResultLost
@@ -467,8 +508,10 @@ pub struct Checker {
     jobs: jobs::Indices,
     /// What the whole-host invariants have read of the job tables and the agents' answers.
     whole_jobs: whole_jobs::Indices,
-    /// What the invariants of the elastic pool's cloud have read.
+    /// What the invariants of the elastic pool's clouds have read.
     cloud: elastic::Indices,
+    /// What the invariants of the walk over the pool's providers have read.
+    walk: walk::Indices,
 }
 
 impl Checker {
@@ -515,6 +558,7 @@ impl Checker {
         self.jobs.step(observations, touched, &mut found);
         self.whole_jobs.step(&self.ready, observations, &mut found);
         self.cloud.step(observations, &mut found);
+        self.walk.step(observations, &mut found);
         cordon::check(observations, &mut found);
         found.list
     }

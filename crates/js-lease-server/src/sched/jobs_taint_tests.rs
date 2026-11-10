@@ -198,7 +198,7 @@ async fn the_first_taint_reason_stands() {
     let taint = host_job_taint("job-h");
     assert_eq!(registry_taint(&rig.agents, "host-a"), Some(taint.clone()));
     assert_eq!(bound_taint(&kept, "host-a"), Some(taint));
-    let list = HostList::of(Vec::new(), rig.agents.registry.hosts());
+    let list = HostList::of(rig.agents.registry.hosts());
     let body = serde_json::to_value(&list).unwrap();
     let wanted = json!({ "reason": "host-job", "run_id": "job-h" });
     assert_eq!(body["hosts"][0]["taint"], wanted);
@@ -279,14 +279,14 @@ fn boot(dir: &Path) -> Arc<Agents> {
     let config = config_of(dir, &pool(1, 8000, ""), &extra);
     let shared = SharedClock::new(clock());
     let assembled = assemble_placed(
-        config.hosts,
+        config.agents,
         config.usage,
         &shared,
         &config.state_file,
         None,
     );
-    let ((_, agents), _) = assembled.unwrap();
-    agents.unwrap()
+    let (agents, _) = assembled.unwrap();
+    agents
 }
 
 /// A server that ran a host job to its placement and stopped (`binding_written` says whether

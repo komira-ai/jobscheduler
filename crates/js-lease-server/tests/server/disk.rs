@@ -6,30 +6,12 @@ use serde_json::{Value, json};
 
 use crate::agents_support::POOL;
 use crate::jobs_support::{JobBody, job_agent, job_args, job_of, per_job_hello, submit_body};
-use crate::support::{Harness, Scratch, base_args, replace};
+use crate::support::{Harness, Scratch};
 
 const GIB: u64 = 1 << 30;
 
-/// The disk the one listed host has.
+/// The scratch disk the registered host books.
 const DISK: u64 = 100 * GIB;
-
-/// A hosts file of one host with 8 cores, 64 GiB, 8 GPUs and `disk` bytes of scratch disk.
-fn hosts_text(disk: u64) -> String {
-    format!(
-        "[[host]]\nid = \"big-01\"\ngpu_class = \"nvidia-a100\"\n\n[host.resources]\n\
-         cpu_millis = 8000\nmemory_bytes = {}\ngpus = 8\ndisk_bytes = {disk}\n\n\
-         [host.capabilities]\nisa = \"x86-64-v3\"\n",
-        64 * GIB
-    )
-}
-
-/// A server over a static hosts file whose one host has `disk` bytes of scratch disk.
-async fn serve(name: &str, disk: u64) -> Harness {
-    let scratch = Scratch::new(name);
-    let path = scratch.write("big-hosts.toml", &hosts_text(disk), 0o644);
-    let args = replace(base_args(&scratch), "--pool-config", path.into_os_string());
-    Harness::with(scratch, args, None).await
-}
 
 /// A server with the job service on and one registered host, `burst-1`, of 8 cores, 16 GiB
 /// and one `nvidia-a100`, whose pool file and hello list `disk` bytes of scratch disk and
@@ -49,7 +31,7 @@ async fn registered(name: &str, disk: Option<u64>) -> Harness {
         hello["shape"]["disk_bytes"] = json!(disk);
         hello["capabilities"]["disk-gib"] = json!(gib);
     }
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     job_agent(&h, &hello).await;
     h
 }
@@ -130,10 +112,10 @@ async fn a_bad_disk_bytes_is_a_400_and_books_nothing() {
 /// out.
 #[tokio::test]
 async fn the_hosts_list_shows_the_disk() {
-    let h = serve("disk_listed", DISK).await;
+    let h = registered("disk_listed", Some(DISK)).await;
     let listed = h.call("GET", "/v1/hosts", None).await.json();
     assert_eq!(listed["hosts"][0]["shape"]["disk_bytes"], json!(DISK));
-    let h = serve("disk_listed_none", 0).await;
+    let h = registered("disk_listed_none", None).await;
     let listed = h.call("GET", "/v1/hosts", None).await.json();
     assert!(listed["hosts"][0]["shape"].get("disk_bytes").is_none());
 }

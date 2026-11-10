@@ -27,7 +27,7 @@ fn job_ids(page: &GetUsageResponse) -> Vec<&str> {
 /// window end included.
 #[tokio::test]
 async fn usage_lists_ended_allocations() {
-    let s = server("usage-records", true);
+    let s = server("usage-records");
     let rows = [
         EndedRow {
             host: Some(HostId::new("h1").unwrap()),
@@ -158,7 +158,7 @@ async fn pages(api: &JobApi, request: GetUsageRequest, between: impl Fn()) -> Ve
 /// is 100 records. It catches an off-by-one cursor and a filter applied after the limit.
 #[tokio::test]
 async fn usage_pages_and_filters() {
-    let s = server("usage-pages", true);
+    let s = server("usage-pages");
     for n in 1..=7 {
         let host = match n {
             2 | 5 => "h1",
@@ -412,7 +412,7 @@ fn job_ended(s: &Server, row: &EndedRow) {
 /// one source only.
 #[tokio::test]
 async fn usage_pages_across_lease_and_job_records() {
-    let s = server("usage-both", true);
+    let s = server("usage-both");
     for n in 1..=6u64 {
         let host = match n {
             1 | 4 => "h1",
@@ -491,7 +491,7 @@ async fn usage_pages_across_lease_and_job_records() {
 /// lookup of that record ignoring the request's filters.
 #[tokio::test]
 async fn usage_lists_a_lease_and_a_job_record_with_the_same_key() {
-    let s = server("usage-tie", true);
+    let s = server("usage-tie");
     let lease = EndedRow {
         host: Some(HostId::new("h1").unwrap()),
         ..ended("1-2", 7000)
@@ -619,7 +619,7 @@ async fn the_page_token_names_the_source_of_its_record() {
     ] {
         assert_eq!(Cursor::parse(text), None, "{text}");
     }
-    let s = server("usage-last-ms", true);
+    let s = server("usage-last-ms");
     s.sink.allocation_ended(&ended("1-2", u64::MAX)).unwrap();
     job_ended(&s, &ended("1-2", u64::MAX));
     let last = GetUsageRequest {
@@ -642,7 +642,7 @@ async fn the_page_token_names_the_source_of_its_record() {
 /// part of the page.
 #[tokio::test]
 async fn usage_serves_each_source_alone_and_fails_when_either_fails() {
-    let s = server("usage-one-source", true);
+    let s = server("usage-one-source");
     for n in 1..=3u64 {
         job_ended(&s, &ended(&format!("j{n}"), n * 1000));
         s.sink
@@ -692,7 +692,7 @@ async fn usage_serves_each_source_alone_and_fails_when_either_fails() {
 /// none of its handles.
 #[tokio::test]
 async fn a_job_history_does_not_serve_an_unserved_group() {
-    let s = server("usage-unserved", true);
+    let s = server("usage-unserved");
     let job_history: Arc<dyn History> = Arc::new(StoreHistory(s.store.clone()));
     let fleet = Ctx::default().with_job_history(Some(job_history));
     assert_eq!(fleet, Ctx::default());

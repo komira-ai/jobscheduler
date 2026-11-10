@@ -133,6 +133,9 @@ pub struct ServerSpec {
     resume: bool,
     /// The elastic pool, for a server of [`ServerSpec::elastic_pool`].
     elastic: Option<ElasticPool>,
+    /// The launching machine providers of the pool, first to last, for a server of
+    /// [`ServerSpec::ordered`].
+    providers: Vec<ElasticPool>,
     /// Which store the server keeps its state in (`--store`).
     store: Store,
 }
@@ -157,6 +160,7 @@ impl ServerSpec {
             lost_retention: Duration::from_millis(DEFAULT_LOST_RETENTION_MS),
             resume: false,
             elastic: None,
+            providers: Vec::new(),
             store: Store::default(),
         }
     }
@@ -185,6 +189,38 @@ impl ServerSpec {
     #[must_use]
     pub fn elastic(&self) -> Option<&ElasticPool> {
         self.elastic.as_ref()
+    }
+
+    /// A server whose one pool, `pool_name`, of class `shared-host` (which books each job's share of a host; the server books every host of it at 1 core and 1 GiB), places over an
+    /// ordered list of machine providers (design 4.2 and 5.6): first a `static` one, the
+    /// `hosts` hosts that register themselves with [`JOIN_TOKEN`] (the pool's shared join
+    /// token), then one machine provider that launches for each of `providers`, first to
+    /// last, each its own cloud ([`crate::Cloud::ordered`]), named by its pool's name, with
+    /// that pool's `max_instances` as its share (`provider_limits` `max_machines`) and its
+    /// `quota_backoff` and `acquire_retry` ([`ElasticPool::failover`]). The node reads the
+    /// configuration from a file, as for [`ServerSpec::elastic_pool`], whose notes on the
+    /// heartbeat, the shape and the floor hold here too: in particular the hosts beat at the
+    /// registry's defaults, which a pool of the file does not set. The pool's idle time is
+    /// the first provider's. Every name is a machine provider's name in the file, so each is
+    /// 1 to 63 characters of `[a-z0-9._-]`, none is `registered`, and no two are alike.
+    #[must_use]
+    pub fn ordered(
+        pool_name: &str,
+        shape: Shape,
+        hosts: usize,
+        providers: Vec<ElasticPool>,
+    ) -> Self {
+        Self {
+            providers,
+            ..Self::whole_node_pool(pool_name, shape, hosts)
+        }
+    }
+
+    /// The launching machine providers of a server of [`ServerSpec::ordered`], first to
+    /// last; none for any other.
+    #[must_use]
+    pub fn providers(&self) -> &[ElasticPool] {
+        &self.providers
     }
 
     /// A server whose one pool, `pool_name`, of class [`WHOLE_CLASS`], books `shape` for
@@ -381,10 +417,10 @@ impl ServerSpec {
     /// # Errors
     ///
     /// When a file cannot be written, or the server refuses its command line; for a spec of
-    /// [`ServerSpec::elastic_pool`], whose server the server node configures over the cloud
-    /// it owns; and as [`ServerSpec::args`].
+    /// [`ServerSpec::elastic_pool`] or of [`ServerSpec::ordered`], whose server the server
+    /// node configures over the clouds it owns; and as [`ServerSpec::args`].
     pub fn config(&self, dir: &Path, clock: &ManualClock) -> Result<Config, StartupError> {
-        if self.elastic.is_some() {
+        if self.elastic.is_some() | !self.providers.is_empty() {
             let reason =
                 "an elastic pool's server is configured by the server node, over its cloud";
             return Err(StartupError::new("elastic", reason));
@@ -407,10 +443,12 @@ impl ServerSpec {
 }
 
 impl ServerSpec {
-    /// The configuration of the server of `cloud`'s elastic pool, serving the job service,
-    /// over the store `at`: the client token file, the store file and the
-    /// configuration file written into `dir` ([`elastic::config::text`]), read by the
-    /// server with the cell's `sim-cloud` kind over `cloud`, on `clock`, the metrics
+    /// The configuration of the server of an elastic pool, serving the job service, over
+    /// the store `at`: the client token file, the store file and the configuration file
+    /// written into `dir` (for the one cloud of [`ServerSpec::elastic_pool`],
+    /// [`elastic::config::text`]; for the clouds of [`ServerSpec::ordered`],
+    /// [`elastic::config::ordered_text`], with the file of the shared join token), read by
+    /// the server with the cell's `sim-cloud` kind over `clouds`, on `clock`, the metrics
     /// timed on `clock`, and the scaler drawing its acquire ids from `entropy`.
     ///
     /// # Errors
@@ -420,7 +458,7 @@ impl ServerSpec {
         &self,
         dir: &Path,
         clock: &ManualClock,
-        cloud: &Cloud,
+        clouds: &[Cloud],
         entropy: Arc<dyn SessionSource>,
         at: &StoreAt,
     ) -> Result<Config, StartupError> {
@@ -433,10 +471,23 @@ impl ServerSpec {
             store: Path::new(&store),
             allow_sqlite: at.is_sqlite(),
         };
-        let text = elastic::config::text(cloud, &files);
+        let one = clouds.first().filter(|_| self.providers.is_empty());
+        let text = match one {
+            Some(cloud) => elastic::config::text(cloud, &files),
+            None => {
+                let line = format!("{JOIN_TOKEN}\n");
+                let joins = write(dir, "agent-tokens", &line, "join_token_file")?;
+                let ordered = elastic::config::Ordered {
+                    pool: &self.pool,
+                    hosts: self.hosts,
+                    joins: Path::new(&joins),
+                };
+                elastic::config::ordered_text(clouds, &files, &ordered)
+            }
+        };
         let file = write(dir, "js.toml", &text, "--config")?;
         let shared = SharedClock::new(clock.clone());
-        let config = elastic::config::read(Path::new(&file), cloud, shared)?;
+        let config = elastic::config::read(Path::new(&file), clouds, shared)?;
         let config = config.with_monotonic(Arc::new(Virtual(clock.clone())));
         Ok(config.with_entropy(entropy))
     }

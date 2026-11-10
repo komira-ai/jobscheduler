@@ -26,7 +26,6 @@
 --max-requests default=100 required=false
 --metrics-listen default=none required=false
 --placement default=none required=false values=registry|js-sched
---pool-config default=none required=false
 --profile-store-bytes default=268435456 required=false
 --read-timeout default=30s required=false
 --require-host-credential default=none required=false values=true|false
@@ -59,8 +58,8 @@ GET /v1/leases
 GET /v1/hosts
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 200 {"hosts":[]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"hosts":[]} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases/1-1/renew
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
@@ -86,11 +85,11 @@ DELETE /v1/leases/1-1/runs/r1
 POST /v1/agent/hello
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 401 [type -; headers connection,content-length,date]
 POST /v1/agent/heartbeat
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 401 [type -; headers connection,content-length,date]
 GET /v1/sched/jobs
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
@@ -206,12 +205,12 @@ POST /v1/workers
 GET /v1/hosts/gpu-01
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 401 [type -; headers connection,content-length,date]
+  valid token, again: 401 [type -; headers connection,content-length,date]
 POST /v1/hosts/gpu-01
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 401 [type -; headers connection,content-length,date]
 GET /v1/agent
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
@@ -267,8 +266,8 @@ GET /v1/leases
 GET /v1/hosts
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
-  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
-  valid token, again: 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token: 200 {"hosts":[]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"hosts":[]} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases/1-1/renew
   no token: 401 [type -; headers connection,content-length,date]
   wrong token: 401 [type -; headers connection,content-length,date]
@@ -459,19 +458,19 @@ POST /v1/leases/1-1/hold
 
 == keep-alive ==
 GET /healthz (token none, close asked false): 200 ok [type text/plain; charset=utf-8; headers content-length,content-type,date] [connection -]
-GET /v1/hosts (token valid, close asked false): 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers content-length,content-type,date] [connection -]
+GET /v1/hosts (token valid, close asked false): 200 {"hosts":[]} [type application/json; headers content-length,content-type,date] [connection -]
 GET /v1/hosts (token wrong, close asked false): 401 [type -; headers content-length,date] [connection -]
-GET /v1/hosts (token valid, close asked false): 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers content-length,content-type,date] [connection -]
-GET /v1/hosts (token valid, close asked true): 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"memory":{"configured_bytes":549755813888,"schedulable_percent":100,"bookable_bytes":549755813888},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date] [connection close]
+GET /v1/hosts (token valid, close asked false): 200 {"hosts":[]} [type application/json; headers content-length,content-type,date] [connection -]
+GET /v1/hosts (token valid, close asked true): 200 {"hosts":[]} [type application/json; headers connection,content-length,content-type,date] [connection close]
 bytes after the last reply: 0
 
 == state-files ==
-without agent flags
-  before start: pool.toml state/ token
-  after start: pool.toml state/ token
-  after shutdown: pool.toml state/ token
-with agent flags
-  before start: agent-pool.toml agent-tokens pool.toml state/ token
-  after start: agent-pool.toml agent-tokens pool.toml state/ state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
-  after an agent joins: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml.agents state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
-  after shutdown: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml.agents state/usage.db state/usage.db.lock token
+without a join token file
+  before start: agent-pool.toml state/ token
+  after start: agent-pool.toml state/ state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
+  after shutdown: agent-pool.toml state/ state/usage.db state/usage.db.lock token
+with a join token file
+  before start: agent-pool.toml agent-tokens state/ token
+  after start: agent-pool.toml agent-tokens state/ state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
+  after an agent joins: agent-pool.toml agent-tokens state/ state/leases.toml.agents state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
+  after shutdown: agent-pool.toml agent-tokens state/ state/leases.toml.agents state/usage.db state/usage.db.lock token

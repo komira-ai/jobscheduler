@@ -663,15 +663,15 @@ pub(super) fn served(name: &str) -> (Arc<Agents>, Arc<Interfere<Fake>>, js_testk
     let config = config_of(dir.path(), &pool(1, 8000, ""), &["--placement", "js-sched"]);
     let shared = SharedClock::new(clock());
     let assembled = assemble_placed(
-        config.hosts,
+        config.agents,
         config.usage,
         &shared,
         &config.state_file,
         None,
     );
-    let ((_, agents), _) = assembled.unwrap();
+    let (agents, _) = assembled.unwrap();
     let (store, jobs) = tables();
-    let agents = Arc::try_unwrap(agents.unwrap()).ok().unwrap();
+    let agents = Arc::try_unwrap(agents).ok().unwrap();
     let agents = agents.with_jobs(Arc::new(jobs));
     let hello = hello_of("h1", 16_000, 32 * GIB);
     agents

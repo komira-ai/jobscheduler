@@ -71,7 +71,7 @@ fn joins_file_exists(h: &Harness) -> bool {
 /// carries another host, and a second credential for a host that has one.
 #[tokio::test]
 async fn the_first_hello_that_asks_swaps_the_token_for_a_credential() {
-    let h = start_agents("cred_swap", false).await;
+    let h = start_agents("cred_swap").await;
     let token = minted(&h, "i-1").await;
     let welcome = asking(&h, &token, "burst-1", "i-1").await;
     let secret = credential(&welcome);
@@ -122,7 +122,7 @@ async fn the_first_hello_that_asks_swaps_the_token_for_a_credential() {
 /// shared token.
 #[tokio::test]
 async fn an_older_agent_and_a_pool_token_keep_the_token_path() {
-    let h = start_agents("cred_older", false).await;
+    let h = start_agents("cred_older").await;
     let token = minted(&h, "i-1").await;
     let welcome = hello(&h, &token, "burst-1", "i-1").await;
     assert!(
@@ -164,13 +164,13 @@ async fn the_credential_outlives_a_restart() {
 }
 
 async fn the_credential_outlives_a_restart_in(kept: Kept) {
-    let h = start_agents_in("cred_restart", false, kept).await;
+    let h = start_agents_in("cred_restart", kept).await;
     let token = minted(&h, "i-1").await;
     let secret = credential(&asking(&h, &token, "burst-1", "i-1").await);
     let kept_text = kept_joins(&h);
     assert!(kept_text.contains("burst-1"), "{kept_text}");
     assert!(!kept_text.contains(&secret), "{kept_text}");
-    let h = restarted(h, false).await;
+    let h = restarted(h).await;
     assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 401);
     let welcome = asking(&h, &secret, "burst-1", "i-1").await;
     assert_eq!(welcome.status, 200, "{}", welcome.body);
@@ -189,7 +189,7 @@ async fn the_credential_outlives_a_restart_in(kept: Kept) {
 /// host that never heard its welcome register a second time.
 #[tokio::test]
 async fn a_lost_welcome_leaves_no_way_in_until_the_instance_is_released() {
-    let h = start_agents("cred_lost", false).await;
+    let h = start_agents("cred_lost").await;
     let token = minted(&h, "i-1").await;
     let lost = asking(&h, &token, "burst-1", "i-1").await;
     assert_eq!(lost.status, 200, "{}", lost.body);
@@ -222,7 +222,7 @@ async fn a_revoke_ends_the_credential() {
 }
 
 async fn a_revoke_ends_the_credential_in(kept: Kept) {
-    let h = start_agents_in("cred_revoke", false, kept).await;
+    let h = start_agents_in("cred_revoke", kept).await;
     let token = minted(&h, "i-1").await;
     let welcome = asking(&h, &token, "burst-1", "i-1").await;
     let secret = credential(&welcome);
@@ -239,7 +239,7 @@ async fn a_revoke_ends_the_credential_in(kept: Kept) {
     }
     assert!(!kept_joins(&h).contains("burst-1"));
     assert_eq!(joins_file_exists(&h), kept == Kept::Files);
-    let h = restarted(h, false).await;
+    let h = restarted(h).await;
     assert_eq!(asking(&h, &secret, "burst-1", "i-1").await.status, 401);
 }
 
@@ -249,7 +249,7 @@ async fn a_revoke_ends_the_credential_in(kept: Kept) {
 /// catches a credential that never ends.
 #[tokio::test]
 async fn the_credential_ends_after_a_day_of_silence() {
-    let h = start_agents("cred_silence", false).await;
+    let h = start_agents("cred_silence").await;
     let token = minted(&h, "i-1").await;
     let welcome = asking(&h, &token, "burst-1", "i-1").await;
     let secret = credential(&welcome);
@@ -273,7 +273,7 @@ async fn the_credential_ends_after_a_day_of_silence() {
 #[tokio::test]
 async fn the_credential_is_shown_once_and_stored_never() {
     let logs = LogCapture::start();
-    let h = start_agents("cred_secret", false).await;
+    let h = start_agents("cred_secret").await;
     let token = minted(&h, "i-1").await;
     let welcome = asking(&h, &token, "burst-1", "i-1").await;
     let secret = credential(&welcome);
@@ -312,7 +312,7 @@ async fn the_credential_is_shown_once_and_stored_never() {
 /// token). It catches a welcome with the credential that a cache may store.
 #[tokio::test]
 async fn a_welcome_is_not_cacheable() {
-    let h = start_agents("cred_no_store", false).await;
+    let h = start_agents("cred_no_store").await;
     let token = minted(&h, "i-1").await;
     let issuing = asking(&h, &token, "burst-1", "i-1").await;
     credential(&issuing);
@@ -335,9 +335,9 @@ async fn a_welcome_is_not_cacheable() {
 /// A server with agent registration on and `--require-host-credential`.
 async fn start_requiring(name: &str) -> Harness {
     let scratch = Scratch::new(name);
-    let mut args = agent_args(&scratch, false);
+    let mut args = agent_args(&scratch);
     args.push("--require-host-credential".into());
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// Asserts the switch on: the first hello of a one-time token that does not ask is refused
@@ -372,13 +372,13 @@ async fn the_switch_refuses_an_unasked_first_hello_of_a_one_time_token() {
 #[test]
 fn the_switch_needs_agent_registration() {
     let scratch = Scratch::new("cred_required_flag");
-    let mut args = crate::support::base_args(&scratch);
+    let mut args = crate::support::without_agent_pool(&scratch);
     args.push("--require-host-credential".into());
     assert_eq!(
         crate::support::config(args).err().unwrap().to_string(),
         "--require-host-credential: requires --agent-pool-config"
     );
-    let mut args = agent_args(&scratch, false);
+    let mut args = agent_args(&scratch);
     args.push("--require-host-credential".into());
     assert!(Cli::try_parse_from(args).is_ok());
 }

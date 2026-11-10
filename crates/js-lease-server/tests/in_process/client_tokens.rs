@@ -126,7 +126,7 @@ async fn the_tick_says_when_a_client_token_changed_and_when_its_file_went_bad() 
     let (kept, _scope) = Kept::scoped();
     let scratch = Scratch::new("client_tokens_tick");
     let file = scratch.write("ci-token", FIRST, 0o600);
-    let mut flags: Vec<OsString> = args(&scratch, "initialise", true);
+    let mut flags: Vec<OsString> = args(&scratch, "initialise");
     flags.extend(
         [
             "--job-listen".to_owned(),

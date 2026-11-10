@@ -40,11 +40,8 @@ const KEY_WARNING: &str = "server.placement is deprecated and does nothing: js-s
 fn args_over(scratch: &Scratch, pool: &str, extra: &[&str]) -> Vec<OsString> {
     let mut args = base_args(scratch);
     let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
-    let pool = scratch.write("agent-pool.toml", pool, 0o644);
-    let flags = [
-        ("--agent-token-file", tokens.into_os_string()),
-        ("--agent-pool-config", pool.into_os_string()),
-    ];
+    scratch.write("agent-pool.toml", pool, 0o644);
+    let flags = [("--agent-token-file", tokens.into_os_string())];
     for (flag, value) in flags {
         args.push(flag.into());
         args.push(value);
@@ -147,7 +144,7 @@ fn placement_registry_is_refused_with_a_clear_message() {
     );
     assert!(said.contains("[possible values: js-sched]"), "{said}");
     for value in ["js-sched", "registry"] {
-        let mut bare = base_args(&scratch);
+        let mut bare = crate::support::without_agent_pool(&scratch);
         bare.extend(["--placement", value].map(OsString::from));
         let said = parsed(bare).err().unwrap();
         assert_eq!(said, "--placement: requires --agent-pool-config");

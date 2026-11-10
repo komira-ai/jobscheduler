@@ -72,10 +72,6 @@ pub(super) fn config_result(
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", dir.join("leases.toml").into_os_string()),
         ("--boot", boot.into()),
-        (
-            "--pool-config",
-            write(dir, "pool.toml", js_pool_static::EXAMPLE_CONFIG, 0o644),
-        ),
         ("--token-file", write(dir, "token", &"t".repeat(40), 0o600)),
         (
             "--agent-token-file",
@@ -126,9 +122,14 @@ fn serving_of(name: &str, pool: &str, extra: &[&str]) -> Served {
     let dir = scratch(name);
     let config = config_of(dir.path(), pool, extra);
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(1_000_000)));
-    let (_source, agents) =
-        assemble(config.hosts, config.usage, &clock, &config.state_file, None).unwrap();
-    let agents = agents.unwrap();
+    let agents = assemble(
+        config.agents,
+        config.usage,
+        &clock,
+        &config.state_file,
+        None,
+    )
+    .unwrap();
     let credential = Credential::of_token(JOIN);
     for host in ["h1", "h2"] {
         agents.registry.hello(&hello(host), &credential).unwrap();

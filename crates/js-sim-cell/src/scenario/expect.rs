@@ -2,12 +2,12 @@
 //! seed after the end check ([`super::Scenario::expect`]) or at a virtual time
 //! ([`super::Scenario::expect_at`]).
 //!
-//! Every statement but [`Expect::answer`] and the last thirteen reads what the cell observed
+//! Every statement but [`Expect::answer`] and the last sixteen reads what the cell observed
 //! (`launched_on.rs` and `held_after_runs.rs` hold the two that need more than a count;
 //! [`Expect::marks_held`] reads the server's job store when it is judged).
-//! [`Expect::answer`] reads an answer the client kept (`answer.rs`). The two from
-//! [`Expect::pool_tripped`] on read the elastic pool's cloud and its brake when they are
-//! judged (`cloud.rs`). The eleven from [`Expect::jobs_read`] on read the server's job and
+//! [`Expect::answer`] reads an answer the client kept (`answer.rs`). The five from
+//! [`Expect::pool_tripped`] to [`Expect::machines_joined`] read the elastic pool's clouds
+//! when they are judged, and the first of them its brake (`cloud.rs`). The eleven from [`Expect::jobs_read`] on read the server's job and
 //! allocation tables as the cell read them, and the jobs the agents launched (`jobs.rs`).
 
 use std::time::Duration;
@@ -154,11 +154,38 @@ impl Expect {
     /// The cloud of elastic pool `pool` has launched exactly `count` machines for the
     /// scheduler by the time this is judged, by the elastic fake: every machine it made
     /// (`ElasticFake::launched`) but those added as another's
-    /// ([`crate::Cell::add_foreign_machine`]), whether it still runs or not. A pool that is
-    /// not the cell's elastic pool is `no-pool`.
+    /// ([`crate::Cell::add_foreign_machine`]), whether it still runs or not. For a cell of
+    /// [`crate::ServerSpec::ordered`], `pool` names one of its machine providers. A pool the
+    /// cell has no cloud of is `no-pool`.
     #[must_use]
     pub fn machines_launched(pool: &str, count: usize) -> Self {
         Self(Wanted::Cloud(CloudFact::Launched(pool.to_owned(), count)))
+    }
+
+    /// The recording wrapper of the cloud of `pool` (as [`Expect::machines_launched`] names
+    /// it) holds exactly `count` acquires by the time this is judged, whatever they were
+    /// answered: each time the server asked that cloud for a machine.
+    #[must_use]
+    pub fn acquires(pool: &str, count: usize) -> Self {
+        Self(Wanted::Cloud(CloudFact::Acquires(pool.to_owned(), count)))
+    }
+
+    /// The recording wrapper of the cloud of `pool` holds at most `count` acquires by the
+    /// time this is judged: a bound counted from the scenario's virtual times, never
+    /// measured.
+    #[must_use]
+    pub fn acquires_at_most(pool: &str, count: usize) -> Self {
+        Self(Wanted::Cloud(CloudFact::AcquiresAtMost(
+            pool.to_owned(),
+            count,
+        )))
+    }
+
+    /// Exactly `count` of the machines the cloud of `pool` launched have had their host
+    /// listed by the server by the time this is judged: they said hello and joined.
+    #[must_use]
+    pub fn machines_joined(pool: &str, count: usize) -> Self {
+        Self(Wanted::Cloud(CloudFact::Joined(pool.to_owned(), count)))
     }
 
     /// The answer to `call` was `status`, with `body` (compared as JSON) when one is

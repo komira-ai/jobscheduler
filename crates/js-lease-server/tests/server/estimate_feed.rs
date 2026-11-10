@@ -17,11 +17,8 @@ use crate::support::{Scratch, base_args, config};
 fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
     let mut args = base_args(scratch);
     let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
-    let pool = scratch.write("agent-pool.toml", POOL, 0o644);
-    let flags = [
-        ("--agent-token-file", tokens.into_os_string()),
-        ("--agent-pool-config", pool.into_os_string()),
-    ];
+    scratch.write("agent-pool.toml", POOL, 0o644);
+    let flags = [("--agent-token-file", tokens.into_os_string())];
     for (flag, value) in flags {
         args.push(flag.into());
         args.push(value);
@@ -54,7 +51,7 @@ fn the_flag_warns_and_changes_nothing_and_needs_an_agent_pool_and_usage() {
     assert_eq!(fed.warnings(), [FLAG_WARNING]);
     assert_eq!(fed.cpu_slack(), plain.cpu_slack());
     assert_eq!(fed.usage_db(), plain.usage_db());
-    let mut bare = base_args(&scratch);
+    let mut bare = crate::support::without_agent_pool(&scratch);
     bare.push("--estimate-feed".into());
     let said = parsed(bare).err().unwrap();
     assert_eq!(said, "--estimate-feed: requires --agent-pool-config");
@@ -70,7 +67,7 @@ fn the_flag_warns_and_changes_nothing_and_needs_an_agent_pool_and_usage() {
 /// Asserts the file's key: `server.estimate_feed` leaves no warning when left out or
 /// `false`, and the warning in full, naming the key, when `true`, for a pool whose hosts
 /// register agents; `true` beside `usage_off = true` is refused naming the key, and `false`
-/// beside it is accepted. A static pool and a bad value are refused in `config_one_file`.
+/// beside it is accepted. A bad value is refused in `config_one_file`.
 #[test]
 fn the_key_warns_when_on_and_is_refused_beside_usage_off() {
     let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";

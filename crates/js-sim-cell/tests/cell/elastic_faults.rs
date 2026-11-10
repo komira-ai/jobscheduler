@@ -334,7 +334,7 @@ pub fn a_refused_release(refused: bool) -> Scenario {
 /// Whether every machine the cloud launched for the scheduler joined (the server's listing
 /// showed its host): the machines that never did, by number, when any did not.
 pub fn every_machine_joined(cell: &mut Cell) -> Option<String> {
-    let Some(cloud) = cell.observations().cloud.as_ref() else {
+    let Some(cloud) = cell.observations().cloud() else {
         return Some("the cell has no elastic pool".to_owned());
     };
     let silent = cloud.machines.values().filter(|machine| !machine.joined);
@@ -394,11 +394,7 @@ pub fn foreign_still_run(cell: &mut Cell) -> Option<String> {
         return Some("the cell has no elastic pool".to_owned());
     };
     let running = cloud.fake().running().len();
-    let ours = cell
-        .observations()
-        .cloud
-        .as_ref()
-        .map_or(0, |c| c.running.len());
+    let ours = cell.observations().cloud().map_or(0, |c| c.running.len());
     let foreign = running.saturating_sub(ours);
     (foreign != 2).then(|| format!("it runs {foreign} foreign machines"))
 }

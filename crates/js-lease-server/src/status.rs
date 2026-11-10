@@ -120,7 +120,7 @@ pub(crate) struct PoolView {
     /// null before the first. A watcher outside the server reads it as the heartbeat.
     pub(crate) last_tick_ms: Option<u64>,
     /// Whether the pool has a scaler: it ticks, so `last_tick_ms` is a heartbeat that must
-    /// move. A pool without one (a plan-only or static pool) has no heartbeat.
+    /// move. A pool without one (a plan-only or joined pool) has no heartbeat.
     pub(crate) scaler: bool,
     pub(crate) next_launch: Option<NextLaunch>,
 }

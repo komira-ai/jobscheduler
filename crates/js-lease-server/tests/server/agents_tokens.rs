@@ -10,7 +10,9 @@ use js_lease_server::{Cli, run};
 use serde_json::json;
 
 use crate::agents_support::{JOIN, JOIN_B, agent_args, beat, hello_with, join, post, session};
-use crate::support::{Harness, LogCapture, Scratch, TOKEN, base_args, config, replace};
+use crate::support::{
+    Harness, LogCapture, Scratch, TOKEN, base_args, config, replace, without_agent_pool,
+};
 
 fn secs(n: u64) -> std::time::Duration {
     std::time::Duration::from_secs(n)
@@ -23,14 +25,6 @@ fn flag_of(args: Vec<OsString>) -> (&'static str, String) {
     (err.flag(), err.reason().to_string())
 }
 
-/// `base_args` without its `--pool-config`.
-fn without_pool_config(scratch: &Scratch) -> Vec<OsString> {
-    let mut args = base_args(scratch);
-    let at = args.iter().position(|arg| arg == "--pool-config").unwrap();
-    args.drain(at..at + 2);
-    args
-}
-
 /// `args` with `flag` and its `value` added.
 fn with_flag(mut args: Vec<OsString>, flag: &str, value: impl Into<OsString>) -> Vec<OsString> {
     args.push(flag.into());
@@ -38,26 +32,76 @@ fn with_flag(mut args: Vec<OsString>, flag: &str, value: impl Into<OsString>) ->
     args
 }
 
-/// Asserts that a server with neither a static pool nor agent registration is refused,
-/// naming `--pool-config`, and that the program ends with status 2 and says so; and that
-/// the static pool alone and agent registration alone both start. It catches a server
-/// that starts with nothing to lease, and a refusal that names no flag.
+/// The refusal of the removed `--pool-config`, as the program prints it: the flag, then the
+/// migration.
+const POOL_CONFIG_REFUSED: &str = "--pool-config: the agentless hosts-file pool was removed: run js-agent on each listed host and use --agent-pool-config, or a [[pool]] of kind = \"joined\" (with its shape and max_machines)";
+
+/// Asserts that a server with no agent registration is refused, naming
+/// `--agent-pool-config` with the exact reason, and that the program ends with status 2 and
+/// says so on one line; and that the base flags (which name the pool file) start. It catches
+/// a server that starts with no host to serve, and a refusal that names no flag.
 #[test]
-fn neither_source_configured_refused() {
+fn a_start_without_agent_registration_is_refused_naming_the_pool_flag() {
     let scratch = Scratch::new("agents_neither");
-    let (flag, reason) = flag_of(without_pool_config(&scratch));
-    assert_eq!(flag, "--pool-config");
-    assert!(reason.contains("--agent-pool-config"), "{reason}");
+    let refused = config(without_agent_pool(&scratch)).err().unwrap();
+    assert_eq!(
+        refused.to_string(),
+        "--agent-pool-config: required: a server serves the hosts that run js-agent and register"
+    );
 
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = run(without_pool_config(&scratch), &mut out, &mut err);
+    let code = run(without_agent_pool(&scratch), &mut out, &mut err);
     assert!(code == ExitCode::from(2));
-    let err = String::from_utf8(err).unwrap();
-    assert!(err.starts_with("js-lease-server: --pool-config:"), "{err}");
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        "js-lease-server: --agent-pool-config: required: a server serves the hosts that run js-agent and register\n"
+    );
+    assert!(out.is_empty());
 
     assert!(config(base_args(&scratch)).is_ok());
-    assert!(config(agent_args(&scratch, false)).is_ok());
-    assert!(config(agent_args(&scratch, true)).is_ok());
+    assert!(config(agent_args(&scratch)).is_ok());
+}
+
+/// Asserts that the removed `--pool-config` is refused naming the flag, with the migration
+/// to `--agent-pool-config` (or a joined pool) as the whole message, before any other check:
+/// beside a valid start, beside a start with no agent pool (so the refusal is not the one of
+/// the missing pool), for a path that does not exist and for a directory, and through the
+/// program, which ends with status 2, prints the message on one line and nothing on standard
+/// output. The path is never repeated. It catches the flag accepted and ignored (the
+/// operator would think the listed hosts are served), a refusal behind another one, a
+/// refusal that names no flag or no replacement, and one that echoes the path.
+#[test]
+fn the_pool_config_flag_is_refused_naming_it_with_the_replacement() {
+    let scratch = Scratch::new("agents_pool_config");
+    let hosts = scratch.write("hosts.toml", "[[host]]\nid = \"gpu-01\"\n", 0o644);
+    let missing = scratch.path("no-such-hosts.toml");
+    let directory = scratch.path("");
+    for path in [&hosts, &missing, &directory] {
+        for base in [base_args(&scratch), without_agent_pool(&scratch)] {
+            let refused = config(with_flag(base, "--pool-config", path))
+                .err()
+                .unwrap();
+            assert_eq!(refused.flag(), "--pool-config");
+            assert_eq!(refused.to_string(), POOL_CONFIG_REFUSED);
+            assert!(!refused.to_string().contains("hosts.toml"));
+        }
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let args = with_flag(base_args(&scratch), "--pool-config", path);
+        let code = run(args, &mut out, &mut err);
+        assert!(code == ExitCode::from(2));
+        let said = String::from_utf8(err).unwrap();
+        assert_eq!(said, format!("js-lease-server: {POOL_CONFIG_REFUSED}\n"));
+        assert!(out.is_empty());
+    }
+    let beside = vec![
+        OsString::from("js-lease-server"),
+        "--config".into(),
+        scratch.path("js.toml").into_os_string(),
+        "--pool-config".into(),
+        hosts.into_os_string(),
+    ];
+    let refused = config(beside).err().unwrap();
+    assert_eq!(refused.to_string(), POOL_CONFIG_REFUSED);
 }
 
 /// Asserts that the token file needs the pool file (the refusal names the pool flag), that
@@ -68,30 +112,28 @@ fn neither_source_configured_refused() {
 #[test]
 fn agent_flags_come_together() {
     let scratch = Scratch::new("agents_together");
-    let full = agent_args(&scratch, true);
+    let full = agent_args(&scratch);
     let value_of = |flag: &str| {
         let at = full.iter().position(|arg| arg == flag).unwrap();
         full[at + 1].clone()
     };
     let only_tokens = with_flag(
-        base_args(&scratch),
+        without_agent_pool(&scratch),
         "--agent-token-file",
         value_of("--agent-token-file"),
     );
-    assert_eq!(flag_of(only_tokens).0, "--agent-pool-config");
-    let only_pool = with_flag(
-        base_args(&scratch),
-        "--agent-pool-config",
-        value_of("--agent-pool-config"),
+    assert_eq!(
+        config(only_tokens).err().unwrap().to_string(),
+        "--agent-pool-config: required with --agent-token-file"
     );
-    assert!(config(only_pool).is_ok());
+    assert!(config(base_args(&scratch)).is_ok());
 
-    let burst = with_flag(base_args(&scratch), "--agent-hello-burst", "5");
+    let burst = with_flag(without_agent_pool(&scratch), "--agent-hello-burst", "5");
     assert_eq!(
         config(burst).err().unwrap().to_string(),
         "--agent-hello-burst: requires --agent-pool-config"
     );
-    let interval = with_flag(base_args(&scratch), "--agent-hello-interval", "5s");
+    let interval = with_flag(without_agent_pool(&scratch), "--agent-hello-interval", "5s");
     assert_eq!(
         config(interval).err().unwrap().to_string(),
         "--agent-hello-interval: requires --agent-pool-config"
@@ -108,7 +150,7 @@ fn agent_flags_come_together() {
 #[test]
 fn token_file_mode_0644_refused_naming_the_flag() {
     let scratch = Scratch::new("agents_token_modes");
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     for mode in [0o600, 0o400] {
         fs::set_permissions(
             scratch.path("agent-tokens"),
@@ -139,7 +181,7 @@ fn token_file_mode_0644_refused_naming_the_flag() {
 #[test]
 fn token_file_contents_are_checked() {
     let scratch = Scratch::new("agents_token_contents");
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     let put = |text: &str| {
         let path = scratch.write("tokens", text, 0o600);
         replace(args.clone(), "--agent-token-file", path)
@@ -181,7 +223,7 @@ fn token_file_contents_are_checked() {
 #[test]
 fn agent_pool_file_errors_name_the_flag() {
     let scratch = Scratch::new("agents_pool_file");
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     let put = |name: &str, text: &str| {
         let path = scratch.write(name, text, 0o644);
         replace(args.clone(), "--agent-pool-config", path)
@@ -213,9 +255,9 @@ fn agent_pool_file_errors_name_the_flag() {
 #[tokio::test]
 async fn token_rotation_second_token_admits() {
     let scratch = Scratch::new("agents_rotation");
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     let old = join(&h, "burst-1").await;
     assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 401);
 
@@ -260,9 +302,9 @@ async fn token_rotation_second_token_admits() {
 async fn a_token_file_that_cannot_be_read_keeps_the_tokens_in_force() {
     let logs = LogCapture::start();
     let scratch = Scratch::new("agents_reload_failure");
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     let path = h.scratch.path("agent-tokens");
     let me = join(&h, "burst-1").await;
 
@@ -308,7 +350,7 @@ async fn a_token_file_that_cannot_be_read_keeps_the_tokens_in_force() {
 #[tokio::test]
 async fn the_hello_limit_of_a_token_that_left_the_file_is_dropped() {
     let scratch = Scratch::new("agents_rate_rotation");
-    let mut args = agent_args(&scratch, false);
+    let mut args = agent_args(&scratch);
     args.extend(
         [
             "--agent-hello-burst",
@@ -318,7 +360,7 @@ async fn the_hello_limit_of_a_token_that_left_the_file_is_dropped() {
         ]
         .map(Into::into),
     );
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     let path = h.scratch.path("agent-tokens");
     assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 200);
     assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 200);

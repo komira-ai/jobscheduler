@@ -62,7 +62,7 @@ fn the_default_limits_are_the_flag_defaults() {
         "js-lease-server",
         "--state-file=a",
         "--boot=resume",
-        "--pool-config=b",
+        "--agent-pool-config=b",
         "--token-file=c",
     ])
     .unwrap();

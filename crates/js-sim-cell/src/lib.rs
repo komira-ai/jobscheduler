@@ -16,7 +16,7 @@
 //!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
 //!   [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
-//!   step and once at the end, and the one-line [`Violation`] it reports. Twenty-four
+//!   step and once at the end, and the one-line [`Violation`] it reports. Twenty-eight
 //!   properties: no host booked past what it holds, no lease on two hosts and no host
 //!   listed twice ([`Invariant::NoDoubleBooking`]); each run launched at most once
 //!   ([`Invariant::AtMostOneLaunch`]); one terminal answer per item
@@ -51,7 +51,13 @@
 //!   ([`Invariant::UsageRowPerEndedAllocation`]), and each job's rows adding up to what its
 //!   freed allocations booked ([`Invariant::UsageTotalsMatchTerminalJobs`]); and the one of
 //!   a cordon: no placement on a cordoned host and no end of a job running there but its
-//!   own ([`Invariant::CordonNeverKillsRunningJob`]).
+//!   own ([`Invariant::CordonNeverKillsRunningJob`]); and the four of the walk over a
+//!   pool's machine providers: no acquire of a provider while one before it could serve
+//!   ([`Invariant::ProviderOrder`]), no acquire id with two machines or presented to a
+//!   second provider after it went unanswered ([`Invariant::NoSecondLaunchForOneAcquire`]),
+//!   no acquire of an instance type in a region inside the backoff of its quota refusal
+//!   ([`Invariant::QuotaPassOverHonoured`]), and no acquire while a registered host was
+//!   open and held no job ([`Invariant::FreeHostBeatsAcquire`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
 //! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
@@ -77,7 +83,11 @@
 //!   token and host id from ([`Payload`]); the seed's entropy the scaler names machines
 //!   with ([`SeededEntropy`]); and what the invariants read of the cloud ([`CloudFacts`]).
 //!   A machine the scaler launches boots into a fake agent the pool's boot time later,
-//!   and one the cloud stops running has its agent killed in the same step.
+//!   and one the cloud stops running has its agent killed in the same step. A server of
+//!   [`ServerSpec::ordered`] has a static machine provider and then one cloud for each of
+//!   its launching providers, first to last ([`Cloud::ordered`]), whose wrapper also writes
+//!   down, at each acquire, the registry's open hosts and how each earlier cloud stood
+//!   ([`AcquireSeen`]).
 //! - [`CellNode`]: the two kinds of node, as the kernel runs them.
 //! - [`work`]: one unit of client work ([`Work`]): a run that lasts a fixed time, what it
 //!   asks for (a whole host too, [`Work::whole_host`]), and when the client gives up on
@@ -110,7 +120,10 @@
 //!   (`tests/skew.rs`) runs agents of the previous release beside this one's and upgrades
 //!   them; the scale family (`tests/scale.rs`) bounds the work per job and per host; the
 //!   elastic family (`tests/elastic.rs`) runs pools whose machines the scaler launches on
-//!   demand and releases once idle, billed as EC2 and as Lambda bill; the store family
+//!   demand and releases once idle, billed as EC2 and as Lambda bill; the failover family
+//!   (`tests/failover.rs`) runs a static pool and two elastic clouds in priority order,
+//!   with capacity and quota refusals, lost answers, killed agents and a partition; the
+//!   store family
 //!   (`tests/store.rs`) runs the server's state in its store across a restart, a stop in a
 //!   burst of hellos, a second server on the store and a crash at the scaler's acquire,
 //!   over SQLite and, with the feature `postgres`, over Postgres.
@@ -169,8 +182,8 @@ pub use cell::{Cell, SecondServer, Setup, StoreRead};
 pub use cordon::{Cordon, Uncordon};
 pub use counters::{Counter, Counters};
 pub use elastic::{
-    AcquireAnswer, Cloud, CloudCall, CloudEvent, CloudFacts, ElasticPool, Machine, OfferSpec,
-    Payload, ReleaseAnswer, SeededEntropy,
+    AcquireAnswer, AcquireSeen, Cloud, CloudCall, CloudEvent, CloudFacts, EarlierSeen, ElasticPool,
+    Machine, OfferSpec, Payload, ReleaseAnswer, SeededEntropy,
 };
 pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};

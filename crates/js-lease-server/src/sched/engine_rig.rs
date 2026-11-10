@@ -63,7 +63,7 @@ pub(super) fn hello_of(host: &str, cpu_millis: u64, memory_bytes: u64) -> Hello 
 pub(super) struct Rig {
     pub(super) agents: Arc<Agents>,
     pub(super) clock: ManualClock,
-    placer: Option<Arc<SchedPlacer>>,
+    placer: Arc<SchedPlacer>,
     sessions: Vec<(String, u64, String)>,
     _dir: TestDir,
 }
@@ -84,15 +84,15 @@ pub(super) fn rig(name: &str, pool: &str, hosts: &[&str], extra: &[&str]) -> Rig
 /// [`Rig`] over `config`, in `dir`, on `clock`, with no host registered.
 pub(super) fn rig_of(config: crate::config::Config, dir: TestDir, clock: ManualClock) -> Rig {
     let shared = SharedClock::new(clock.clone());
-    let ((_, agents), placer) = assemble_placed(
-        config.hosts,
+    let (agents, placer) = assemble_placed(
+        config.agents,
         config.usage,
         &shared,
         &config.state_file,
         None,
     )
     .unwrap();
-    let agents = Arc::try_unwrap(agents.unwrap()).ok().unwrap();
+    let agents = Arc::try_unwrap(agents).ok().unwrap();
     let (_store, jobs) = tables();
     let agents = Arc::new(agents.with_jobs(Arc::new(jobs)));
     Rig {
@@ -107,7 +107,7 @@ pub(super) fn rig_of(config: crate::config::Config, dir: TestDir, clock: ManualC
 impl Rig {
     /// The placer the registry was given.
     pub(super) fn placer(&self) -> &SchedPlacer {
-        self.placer.as_deref().unwrap()
+        &self.placer
     }
 
     /// Says `hello`, which the registry admits; its session replaces any the host had.

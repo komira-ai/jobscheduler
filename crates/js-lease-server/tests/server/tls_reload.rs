@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use js_types::Timestamp;
 
 use crate::binary::launch;
-use crate::support::{Harness, LogCapture, Scratch, TOKEN, args_with, base_args, config, guard};
+use crate::support::{Harness, LogCapture, Scratch, TOKEN, base_args, config, guard};
 use crate::tls::{connector, tls_request};
 
 /// A self-signed certificate for 127.0.0.1 with this serial number and validity, and its
@@ -79,14 +79,15 @@ async fn server(name: &str) -> (Harness, Files, (String, String)) {
         key: scratch.path("test-only-key.pem"),
     };
     files.put(&scratch, &first);
-    let args = args_with(
-        &scratch,
-        &[
+    let mut args = crate::agents_support::agent_args(&scratch);
+    args.extend(
+        [
             "--tls-cert",
             files.cert.to_str().unwrap(),
             "--tls-key",
             files.key.to_str().unwrap(),
-        ],
+        ]
+        .map(Into::into),
     );
     let h = Harness::over(scratch, config(args).unwrap()).await;
     h.clock.set(Timestamp::from_millis(START_OF_2030_MS));
@@ -293,11 +294,23 @@ async fn a_server_without_tls_refuses_a_reload() {
     assert_eq!(err.flag(), "--tls-cert");
 }
 
-/// Asserts that the server's state survives a reload: the host list read before it is
-/// the same list, entry for entry, after it, over the renewed certificate.
+/// Asserts that the server's state survives a reload: the host list read before it, which
+/// holds a host that registered over the first certificate, is the same list, entry for
+/// entry, after it, over the renewed certificate.
 #[tokio::test]
 async fn the_host_list_survives_a_reload() {
     let (h, files, first) = server("tls_reload_state").await;
+    let hello = crate::agents_support::hello_body("burst-1").to_string();
+    let welcomed = tls_request(
+        h.addr(),
+        &connector(&first.0),
+        "POST",
+        "/v1/agent/hello",
+        Some(crate::agents_support::JOIN),
+        Some(hello.as_bytes()),
+    )
+    .await;
+    assert_eq!(welcomed.status, 200, "{}", welcomed.body);
     let before = tls_request(
         h.addr(),
         &connector(&first.0),
