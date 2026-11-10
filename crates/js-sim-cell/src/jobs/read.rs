@@ -4,7 +4,11 @@
 //! A read lists every job (one scan, in pages of 64 rows) and every live allocation (one scan), and
 //! reads one allocation more for each job whose state changed and each allocation that was
 //! live at the read before and no longer is (it was freed, or a new placement took its
-//! row): so a placement freed between two reads is still read freed. Only what differs from
+//! row): so a placement freed between two reads is still read freed. A new placement that
+//! took the row of an allocation the reads never showed freed (a whole-host job whose
+//! prepare failed and was placed again between two reads) reads that allocation freed at
+//! the same read, before the new one: the server books a job's next allocation only after
+//! it freed the one before, and the table keeps one row for a job. Only what differs from
 //! the read before is appended, and written into the trace as one line each (`job <id>
 //! <state>`, `allocation <job> <step> <host>`), never with an id the server generated.
 //!
@@ -25,7 +29,7 @@ use js_jobs::{
     AllocationRecord, AllocationStep, JobId, JobRecord, JobState, JobStore, StartFailure,
 };
 use js_lease_server::in_process::{InProcess, ServerIds};
-use js_state::{ResumeToken, Store};
+use js_state::{ResumeToken, Store, StoreTime};
 use js_types::sched::FarmTime;
 
 use super::{AllocationRead, AllocationRow, JobRead};
@@ -104,12 +108,21 @@ impl Reader {
             if self.rows.get(&row.job) == Some(&row) {
                 continue;
             }
-            let (job, step, host) = (&row.job, step_name(row.step), row.host.as_str());
-            lines.push(format!("allocation {job} {step} {host}"));
-            self.rows.insert(row.job.clone(), row.clone());
-            observations
-                .allocation_reads
-                .push(AllocationRead { row, at: now });
+            let replaced = self.rows.get(&row.job).filter(|before| {
+                (before.allocation != row.allocation) & (before.step != AllocationStep::Freed)
+            });
+            let freed = replaced.map(|before| AllocationRow {
+                step: AllocationStep::Freed,
+                ..before.clone()
+            });
+            for row in freed.into_iter().chain([row]) {
+                let (job, step, host) = (&row.job, step_name(row.step), row.host.as_str());
+                lines.push(format!("allocation {job} {step} {host}"));
+                self.rows.insert(row.job.clone(), row.clone());
+                observations
+                    .allocation_reads
+                    .push(AllocationRead { row, at: now });
+            }
         }
         self.wait = if lines.is_empty() {
             (self.wait * 2).clamp(READ_EVERY, QUIET_MAX)
@@ -140,14 +153,19 @@ fn all_jobs(tables: &Tables) -> Vec<JobRecord> {
 
 /// An allocation record as the cell observes it, its creation on the virtual clock.
 fn row_of(record: AllocationRecord) -> AllocationRow {
-    let created = record.created_at.as_duration().as_millis();
+    let virtual_at = |at: StoreTime| {
+        let millis = at.as_duration().as_millis();
+        virtual_time(u64::try_from(millis).unwrap_or(u64::MAX))
+    };
     AllocationRow {
         job: record.job,
         allocation: record.allocation_id,
         host: record.host,
         step: record.step,
-        created_at: virtual_time(u64::try_from(created).unwrap_or(u64::MAX)),
+        created_at: virtual_at(record.created_at),
         end_reason: record.end_reason,
+        freed_at: record.freed_at.map(virtual_at),
+        booked: record.booked,
     }
 }
 

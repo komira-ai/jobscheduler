@@ -6,11 +6,13 @@
 //! - the drain: [`DRAIN_HOSTS`] for [`DRAIN_ASK_AT`] plus [`DRAIN_SETTLE`], 960 s, make
 //!   768;
 //! - the restart of a held host's agent: [`HELD_HOSTS`] for [`HELD_RESTART_AT`] plus
-//!   [`HELD_SETTLE`], 960 s, make 384.
+//!   [`HELD_SETTLE`], 960 s, make 384;
+//! - the cancel while marked: one host for [`MARKED_AFTER_AT`] plus [`MARKED_SETTLE`], 640 s,
+//!   make 128.
 
 use std::time::Duration;
 
-use js_sim_cell::actions::{agents, replace_agents, submit_work};
+use js_sim_cell::actions::{agents, cancel_work, items, replace_agents, submit_work};
 use js_sim_cell::{Expect, HowEnded, ItemId, Scenario, ServerSpec, Shape, Work};
 
 /// A whole-node pool of `hosts` hosts.
@@ -67,8 +69,8 @@ const HELD_SETTLE: Duration = Duration::from_secs(900);
 /// host lost, holding no run. The hello ends the first job's run (the item ends lost or
 /// failed, which is not pinned); the waiting job is then placed on the restarted host and
 /// launches its run there (`launched-on`), and the other host's run is not touched (the
-/// other job succeeds). Red for a host booked to the waiting job while the restarted
-/// host's first job still holds it (`whole-host-is-exclusive`, `no-double-booking`), a
+/// other two jobs succeed, and all three were placed and released). Red for a host booked to
+/// the waiting job while the restarted host's first job still holds it (`whole-host-is-exclusive`, `no-double-booking`), a
 /// booking left behind, or the other host's run cut.
 pub fn held_job_restart() -> Scenario {
     let requests = HELD_HOSTS as u32;
@@ -80,7 +82,52 @@ pub fn held_job_restart() -> Scenario {
         .at(HELD_ASK_AT, submit_work(1, Work::whole_host(HELD_RUN)))
         .at(HELD_RESTART_AT, replace_agents(agents(0..1)))
         .expect(Expect::all_items_terminal())
+        .expect(Expect::terminal_count(2, HowEnded::Succeeded))
+        .expect(Expect::held_and_released(3))
         .expect(Expect::launched_on(&[0], HELD_RESTART_AT))
         .expect(Expect::every_host_serving())
         .settle_within(HELD_SETTLE)
+}
+
+/// The cancel while marked: one host held by an ordinary job's long run, a whole-host job
+/// that waits for it, and ordinary jobs behind both.
+const MARKED_BUSY: Duration = Duration::from_secs(300);
+const MARKED_ASK_AT: Duration = Duration::from_secs(10);
+const MARKED_LOOK_AT: Duration = Duration::from_secs(25);
+const MARKED_CANCEL_AT: Duration = Duration::from_secs(30);
+const MARKED_AFTER_AT: Duration = Duration::from_secs(40);
+const MARKED_SETTLE: Duration = Duration::from_secs(600);
+
+/// Proves that a whole-host job cancelled while the engine holds its host for it drops the
+/// mark and the host takes work again (design section 8, row 39, marked). One host runs an
+/// ordinary job for [`MARKED_BUSY`]; at [`MARKED_ASK_AT`] a whole-host job and an ordinary job
+/// are submitted, and the whole-host job waits for the host with the engine's mark on it
+/// (`marks_held(1)` at [`MARKED_LOOK_AT`]). The whole-host job is cancelled at
+/// [`MARKED_CANCEL_AT`]: the mark is gone at once (no mark at the end), the ordinary jobs
+/// behind it, the one waiting and one submitted at [`MARKED_AFTER_AT`], are placed on the
+/// host and launch there, and the first job's run is not cut. Under every invariant, and
+/// expecting the one cancel, the three runs and the host serving at the end. Red for a cancel
+/// that leaves the mark on the host (a mark at the end, and the ordinary jobs never placed), a
+/// cancel that cuts the first run, and a mark never made (none at the look).
+pub fn a_cancelled_marked() -> Scenario {
+    let ordinary = Work::run_for(MARKED_BUSY);
+    let short = Work::run_for(Duration::from_secs(10));
+    Scenario::new("a_cancelled_whole_host_job_drops_its_mark_and_the_host_serves_again")
+        .scratch(env!("CARGO_TARGET_TMPDIR"))
+        .server(pool(1))
+        .hosts("burst", 1)
+        .work(1, ordinary)
+        .at(MARKED_ASK_AT, submit_work(1, Work::whole_host(DRAIN_RUN)))
+        .at(MARKED_ASK_AT, submit_work(1, short.clone()))
+        .at(MARKED_CANCEL_AT, cancel_work(items(1..2)))
+        .at(MARKED_AFTER_AT, submit_work(1, short))
+        .expect_at(MARKED_LOOK_AT, Expect::marks_held(1))
+        .expect(Expect::all_items_terminal())
+        .expect(Expect::terminal_count(3, HowEnded::Succeeded))
+        .expect(Expect::terminal_count(1, HowEnded::Cancelled))
+        .expect(Expect::held_and_released(3))
+        .expect(Expect::marks_held(0))
+        .expect(Expect::launched_on(&[0], MARKED_CANCEL_AT))
+        .expect(Expect::every_host_serving())
+        .settle_within(MARKED_SETTLE)
 }

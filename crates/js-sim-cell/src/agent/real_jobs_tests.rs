@@ -75,6 +75,7 @@ fn rig(name: &str) -> Rig {
         counters: Counters::default(),
         ledger: Ledger::new(),
         prepare: Prepare::default(),
+        profile: crate::AgentProfile::default(),
     };
     Rig {
         jobs,

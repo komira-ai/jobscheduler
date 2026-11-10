@@ -114,4 +114,17 @@ mod tests {
         assert_eq!(agent_name(999), NodeId::new("h999"));
         assert!(agent_name(9) < agent_name(10));
     }
+
+    /// Catches: a cell of more than a thousand agents that gives two of them one name, or
+    /// code that takes the order of the names for the order of the indexes: `h1000` sorts
+    /// between `h100` and `h101`, so an agent is found by its index, never by its place in
+    /// a listing sorted by name.
+    #[test]
+    fn agent_names_stay_distinct_past_a_thousand_but_do_not_sort_by_index() {
+        let names: std::collections::BTreeSet<NodeId> = (0..2_000).map(agent_name).collect();
+        assert_eq!(names.len(), 2_000);
+        assert_eq!(agent_name(1_999), NodeId::new("h1999"));
+        assert!(agent_name(100) < agent_name(1_000));
+        assert!(agent_name(1_000) < agent_name(101));
+    }
 }

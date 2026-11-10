@@ -51,6 +51,8 @@ fn row(j: u64, a: u8, h: u64, step: AllocationStep) -> AllocationRow {
         step,
         created_at: ms(100),
         end_reason: None,
+        freed_at: None,
+        booked: js_jobs::Booked::WholeHost,
     }
 }
 

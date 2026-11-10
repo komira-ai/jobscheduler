@@ -28,7 +28,7 @@
 
 use std::collections::BTreeSet;
 
-use js_jobs::{AllocationId, AllocationStep, EndReason, JobId, JobState};
+use js_jobs::{AllocationId, AllocationStep, Booked, EndReason, JobId, JobState};
 use js_types::HostId;
 use js_types::sched::FarmTime;
 
@@ -66,6 +66,10 @@ pub struct AllocationRow {
     pub created_at: FarmTime,
     /// Why it was freed, once it is.
     pub end_reason: Option<EndReason>,
+    /// When the server freed it, on the cell's virtual clock; `None` until it is freed.
+    pub freed_at: Option<FarmTime>,
+    /// What it books on the host.
+    pub booked: Booked,
 }
 
 /// An allocation's row as one read of the server's table showed it, when it differed from
