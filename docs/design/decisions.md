@@ -1,8 +1,8 @@
-# Decisions D1 to D65
+# Decisions D1 to D66
 
 Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and D35 in full.
 Section numbers refer to design.md. Each decision has options and a recommendation. None is final until the owner answers, except where
-marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
+marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -319,3 +319,11 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   queue of D62; all five keys (`swap_window`, `swap_drain_grace`, `scale_down_window`, `scale_down_util`, `max_evictions`) are pool keys, absent means the pool
   never swaps or scales down by this rule (R3). The judgement is on a per-minute pool sample, which the design did not have; it is in
   memory and a restart restarts the windows (swaps come later, never sooner).
+- **D66. A job's file system is assembled generically; no node-local cache is named.** A job may name read-only layers (a host
+  directory or a digest-pinned image) stacked on its image, host directories mounted read-only, read-write or copy-on-write, and
+  host loopback ports it may reach; the host's operator bounds the paths by the mount roots, read as prefixes, the registries by
+  `--image-allow`, and the ports by `--host-port`. On Linux the agent mounts the overlays itself and removes them as their mounter;
+  on macOS read-only mounts are links, and how a copy-on-write mount is made is decided after the cache's macOS mount is measured.
+  Supersedes the tree inputs design
+  ([tree-inputs.md](tree-inputs.md)); its merged wire is retired additively. Details and the decisions under it (LR1 to LR15):
+  [job-rootfs.md](job-rootfs.md).
