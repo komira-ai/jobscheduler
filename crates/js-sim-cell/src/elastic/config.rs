@@ -197,6 +197,13 @@ pub(crate) struct Ordered<'a> {
 /// The name of the `static` machine provider of a server of [`crate::ServerSpec::ordered`].
 pub const STATIC_PROVIDER: &str = "registered";
 
+/// The class of the pool of a server of [`crate::ServerSpec::ordered`]: one of the
+/// server's own naming, which books the share each job asks for (a class the server does
+/// not ship), so a job that asks for part of a host is placed on registered hosts and
+/// launched machines alike. The `whole-node` class of a pool of [`text`] keeps no host for
+/// such work.
+pub const ORDERED_CLASS: &str = "shared-host";
+
 /// The name of the platform of a server of [`crate::ServerSpec::ordered`].
 pub const PLATFORM: &str = "cell";
 
@@ -208,7 +215,7 @@ pub const PLATFORM: &str = "cell";
 /// `provider_limits` table for each cloud: its `max_machines` (the cloud's
 /// `max_instances`), `quota_backoff` and `acquire_retry`.
 ///
-/// The pool is as [`text`]'s, with `max_instances` the static hosts and every cloud's
+/// The pool is as [`text`]'s but of class [`ORDERED_CLASS`], with `max_instances` the static hosts and every cloud's
 /// share together (at most 255, which the server refuses above), its spending caps those of
 /// so many machines of the dearest offer of any cloud, and the shared join token of
 /// `ordered.joins`, which the static hosts say hello with.
@@ -261,7 +268,7 @@ pub(crate) fn ordered_text(clouds: &[Cloud], files: &Files<'_>, ordered: &Ordere
          \n\
          [[pool]]\n\
          name = {pool}\n\
-         class = \"whole-node\"\n\
+         class = {class}\n\
          platforms = [{platform}]\n\
          max_instances = {max}\n\
          max_spend_per_hour = \"{hour}\"\n\
@@ -280,6 +287,7 @@ pub(crate) fn ordered_text(clouds: &[Cloud], files: &Files<'_>, ordered: &Ordere
         platform = quoted(PLATFORM),
         names = names.join(", "),
         pool = quoted(ordered.pool),
+        class = quoted(ORDERED_CLASS),
         hour = dollars(hour),
         day = dollars(day),
         idle = millis(
@@ -356,7 +364,7 @@ mod tests {
             "name = \"ec2\"\nkind = \"sim-cloud\"\ncloud = \"ec2\"\n",
             "name = \"lambda\"\nkind = \"sim-cloud\"\ncloud = \"lambda\"\n",
             "machine_providers = [\"registered\", \"ec2\", \"lambda\"]\n",
-            "platforms = [\"cell\"]\nmax_instances = 12\n",
+            "class = \"shared-host\"\nplatforms = [\"cell\"]\nmax_instances = 12\n",
             "join_token_file = \"/scratch/agent-tokens\"\n",
             "[pool.provider_limits.\"ec2\"]\nmax_machines = 3\nquota_backoff = \"3600000ms\"\nacquire_retry = \"60000ms\"\n",
             "[pool.provider_limits.\"lambda\"]\nmax_machines = 4\nquota_backoff = \"90000ms\"\nacquire_retry = \"30000ms\"\n",

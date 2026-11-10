@@ -64,9 +64,9 @@
 //! answer, to a scripted fault of the cloud, or to the text of its trace lines, moves a
 //! hash.
 //!
-//! And the failover family's headline, family `failover`: 60 registered hosts, an EC2-like
-//! provider of at most 70 machines and a Lambda-like one of at most 70, 400 jobs, ten
-//! agents killed and twenty cut off (`cell/failover.rs`, about 29,400 agent requests a
+//! And the failover family's headline, family `failover`: 6 registered hosts, an EC2-like
+//! provider of at most 7 machines and a Lambda-like one of at most 7, 40 jobs, one agent
+//! killed and two cut off (`cell/failover.rs`, about 3,000 agent requests a
 //! seed) over [`FAILOVER_SEEDS`] seed, so a change to the order in which the walk asks the
 //! providers, to how the cell names a later cloud's machines, or to a decision of the
 //! scaler over several providers, moves a hash.
@@ -303,7 +303,7 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
 /// whose items end alike, and for one seed of the headline over jobs
 /// (`cell/jobs_headline.rs`), run twice, whose items end alike, and for one seed of the
-/// failover headline (`cell/failover.rs`), run twice, whose 400 items end alike, and for
+/// failover headline (`cell/failover.rs`), run twice, whose 40 items end alike, and for
 /// one seed of the EC2-like elastic scenario
 /// (`cell/elastic.rs`), run twice, whose items end alike, and for one seed of the lost but
 /// landed acquire (`cell/elastic_faults.rs`), run twice, whose items end alike, and for one

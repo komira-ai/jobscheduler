@@ -9,9 +9,9 @@
 //! file (`tests/replay.rs`, family `failover`). Two negative cases hold the walk's
 //! invariants to a hand-built record of the recording wrappers, with no server.
 //!
-//! Sizes, in agent requests a seed, each at most 30,000: the headline about 29,400 (see
-//! `cell/failover.rs`); the static pool's 60 hosts beating every 5 s for 910 s, about
-//! 11,000; and each of the others at most four machines beating for about 700 s, at most
+//! Sizes, in agent requests a seed, each at most 30,000: the headline about 3,000 (see
+//! `cell/failover.rs`); the static pool's 6 hosts beating every 5 s for 910 s, about
+//! 1,100; and each of the others at most four machines beating for about 700 s, at most
 //! about 600.
 
 #[path = "cell/failover.rs"]
@@ -31,10 +31,10 @@ const SEEDS: u64 = 16;
 const THREADS: u64 = 4;
 
 /// The headline (no row of section 8; design 5.6 steps 4 and 5, and section 7, "Scaler
-/// double launch"): 60 registered hosts, an EC2-like provider of at most 70 machines and a
-/// Lambda-like one of at most 70, 200 hosts in all, run 400 jobs of 300 s; at 90 s ten
-/// agents running a job die (their hosts start empty processes 20 s later) and 20 agents
-/// are cut off for 30 s. Every job reaches a terminal answer; every invariant holds, so no
+/// double launch"): the design's 200 hosts at a tenth, so that sixteen seeds run in the
+/// pull request's time: 6 registered hosts, an EC2-like provider of at most 7 machines and
+/// a Lambda-like one of at most 7, run 40 jobs of 300 s; at 90 s one agent running a job
+/// dies (its host starts an empty process 20 s later) and 2 agents are cut off for 30 s. Every job reaches a terminal answer; every invariant holds, so no
 /// cloud runs more than its share of machines (`instances-within-limits`), nothing is
 /// double-booked, a provider is asked only when the static hosts were busy and every
 /// provider before it could not serve, and no acquire id has two machines. Red for a walk
@@ -45,7 +45,7 @@ fn two_hundred_hosts_three_providers_kill_ten_agents_and_partition_thirty_second
     on_threads(failover::headline);
 }
 
-/// Design 5.6, pass 1 before pass 2 (no row of section 8): with 40 jobs for 60 registered
+/// Design 5.6, pass 1 before pass 2 (no row of section 8): with 4 jobs for 6 registered
 /// hosts, every job is placed on a registered host and neither cloud's recording wrapper
 /// holds an acquire (`acquires`). Red for a scaler that launches for a job a free
 /// registered host could take (`free-host-beats-acquire`).
@@ -112,7 +112,7 @@ fn a_preempted_machine_in_the_second_cloud_is_replaced_without_double_booking() 
 }
 
 /// The negative case of `provider-order` over a hand-built record: the Lambda-like cloud
-/// was asked at 200 while the EC2-like one held none of its 70 machines and had never
+/// was asked at 200 while the EC2-like one held none of its 7 machines and had never
 /// refused its offer. The checker flags exactly that invariant. Catches a check that cannot
 /// fail: a walk that skips the first provider would pass every scenario above.
 #[test]

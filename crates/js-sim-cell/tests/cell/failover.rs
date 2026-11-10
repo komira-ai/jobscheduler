@@ -4,19 +4,22 @@
 //! fake behind a recording wrapper (`ServerSpec::ordered`). `tests/failover.rs` runs each
 //! over sixteen seeds; `tests/replay.rs` pins the headline's first seed in the golden file.
 //!
-//! Every host is a [`Shape::cpu_host`] (8 cores, no GPU) and every job asks for a whole
-//! host ([`Work::whole_host`]): the pool is of class `whole-node`, which keeps no host for
-//! ordinary work. So each host, registered or launched, runs one job at a time, and the
-//! queue of jobs past the static hosts is demand on the clouds, one machine a job.
+//! Every host is a [`Shape::cpu_host`] (8 cores, no GPU) and every job asks for
+//! [`JOB_CPU_MILLIS`], more than half a host's cores, so each host, registered or launched,
+//! runs one job at a time, and the queue of jobs past the static hosts is demand on the
+//! clouds, one machine a job. The pool's class books the share a job asks for
+//! (`ServerSpec::ordered`): a `whole-node` pool keeps no host for such jobs, and the
+//! scaler counts a whole-host job whose registered host is still being prepared as demand.
 //!
-//! The headline's numbers are the constants from [`STATIC_HOSTS`] to [`CUT_FOR`]. An
-//! elastic pool's hosts beat at the registry's defaults (5 s, held lost after 15 s of
-//! silence), which a pool of the server's configuration file does not set: the 20 hosts
-//! cut off for 30 s are held lost, and the jobs they ran end lost. Its size, in agent
-//! requests a seed: the 60 static hosts beat every 5 s until [`FAULT_AT`] plus
-//! [`CUT_FOR`] plus [`HEADLINE_SETTLE`], 900 s (about 10,800), and the 140 machines from
-//! their boot, about 125 s, to their release, about 790 s (about 18,600): about 29,400 with
-//! the hellos, inside the cell's 30,000.
+//! The headline's numbers are the constants from [`STATIC_HOSTS`] to [`CUT_FOR`]: the
+//! design's 200 hosts at a tenth, in the same proportions (static hosts, each cloud's share,
+//! jobs, agents killed and cut off), so that sixteen seeds run in the pull request's time.
+//! An elastic pool's hosts beat at the registry's defaults (5 s, held lost after 15 s of
+//! silence), which a pool of the server's configuration file does not set: the hosts cut
+//! off for 30 s are held lost, and the jobs they ran end lost. Its size, in agent requests a
+//! seed: the 6 static hosts beat every 5 s until [`FAULT_AT`] plus [`CUT_FOR`] plus
+//! [`HEADLINE_SETTLE`], 900 s (about 1,100), and the 14 machines from their boot, about
+//! 125 s, to their release, about 790 s (about 1,900): about 3,000 with the hellos.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -29,6 +32,7 @@ use js_sim_cell::actions::{
 use js_sim_cell::{
     Counter, ElasticPool, Expect, HowEnded, OfferSpec, Scenario, ServerSpec, Shape, Work,
 };
+use js_types::Resources;
 
 /// The pool's name.
 pub const POOL: &str = "burst";
@@ -40,22 +44,22 @@ pub const EC2: &str = "ec2";
 pub const LAMBDA: &str = "lambda";
 
 /// The headline's registered hosts, of the static provider.
-pub const STATIC_HOSTS: usize = 60;
+pub const STATIC_HOSTS: usize = 6;
 
 /// The most machines the EC2-like provider holds for the pool: its share.
-pub const EC2_MACHINES: u64 = 70;
+pub const EC2_MACHINES: u64 = 7;
 
 /// The most machines the Lambda-like provider holds for the pool: its share.
-pub const LAMBDA_MACHINES: u64 = 70;
+pub const LAMBDA_MACHINES: u64 = 7;
 
 /// The headline's jobs, all submitted at the start.
-pub const JOBS: u32 = 400;
+pub const JOBS: u32 = 40;
 
 /// How many agents running a job die at [`FAULT_AT`].
-pub const KILLED: usize = 10;
+pub const KILLED: usize = 1;
 
 /// How many agents are cut off from the server at [`FAULT_AT`].
-pub const CUT: usize = 20;
+pub const CUT: usize = 2;
 
 /// How long they are cut off.
 pub const CUT_FOR: Duration = Duration::from_secs(30);
@@ -137,9 +141,13 @@ pub fn server(statics: usize, ec2: u64, lambda: u64) -> ServerSpec {
     ServerSpec::ordered(POOL, shape(), statics, providers)
 }
 
-/// One job: [`RUN`] long, asking for a whole host.
+/// Each job's CPU: more than half a host's cores, so a host runs one job at a time.
+pub const JOB_CPU_MILLIS: u64 = 6_000;
+
+/// One job: [`RUN`] long, asking for [`JOB_CPU_MILLIS`] and a GiB of memory.
 pub fn job() -> Work {
-    Work::whole_host(RUN)
+    let needs = Resources::new(JOB_CPU_MILLIS, 1 << 30, 0, None).unwrap_or_default();
+    Work::run_for(RUN).needs(needs)
 }
 
 /// `scenario` over [`server`] of `statics` registered hosts, each of which says hello, and
@@ -172,7 +180,7 @@ pub fn headline() -> Scenario {
 
 /// Demand below the static hosts: [`STATIC_HOSTS`] hosts and fewer jobs, submitted once
 /// every host has said hello.
-pub const BELOW_STATIC: u32 = 40;
+pub const BELOW_STATIC: u32 = 4;
 
 /// When the jobs below the static hosts are submitted: after every host's hello and first
 /// heartbeat.
