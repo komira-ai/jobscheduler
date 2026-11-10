@@ -273,9 +273,10 @@ size_tolerance_percent = 10             # default 10; an integer from 0 to 50
 
 A pool written with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables: a machine provider made from its provider
 table, the `static` machine provider, and a `default` platform naming the two, `static` first. The loader's names start with `+`, which no
-name in the file may hold. This version keeps one fixed order of hosts, registered hosts first and then the elastic provider, so a
-platform that lists a launching machine provider before `static` is refused (`machine_providers: static must come first in this version
-(the ordered walk of design 5.6 is not built yet)`), and a pool's platforms must reach exactly one machine provider that launches.
+name in the file may hold. The job pass places a job on a free host of the first machine provider in the order the pool's `default`
+platform lists them, and on a host of a later provider only when no host of an earlier one can take it now. This version still refuses a
+platform that lists a launching machine provider before `static` (`machine_providers: static must come first in this version (a launching
+machine provider listed before it is not run yet)`), and a pool's platforms must reach exactly one machine provider that launches.
 
 **Parsed and checked; what acts on them.** `max_queue_wait`, `start_timeout`, `path_grace` (each a positive duration) and the
 `provider_limits` tables are read and checked at start. Admission of a lease request (design 5.6, step 2) reads the limits: an offer

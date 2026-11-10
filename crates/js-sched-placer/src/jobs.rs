@@ -23,7 +23,13 @@
 //!    records for it, so it is never offered again and its job is never placed twice. Booked
 //!    and releasing allocations both book, and both hold their ports until freed.
 //! 3. **Queues the jobs that need the whole host** ([`Engine::whole_jobs`], design section
-//!    5.4) and writes what the engine decides for them, step by step in its order: a mark
+//!    5.4), after telling the scheduler the machine provider of each open host
+//!    ([`OpenHost::rank`]), and writes what the engine decides for them, step by step in its
+//!    order. Over the hosts of every provider, a quiet host is granted at once, one of the
+//!    first provider in the Default platform's order when several are quiet; otherwise the
+//!    host with the cheapest tail is marked (drain cost: known tail before unknown, smaller
+//!    wait, fewer allocations), whichever provider it is of: provider order breaks only a tie
+//!    of drain cost, before the host id. The writes are: a mark
 //!    made or changed ([`js_jobs::JobStore::put_mark`]), a mark deleted
 //!    ([`js_jobs::JobStore::delete_mark`]), and a job committed on the quiet host it was
 //!    granted ([`js_jobs::JobStore::place_with`]: the job placed, the whole host booked, the
@@ -35,8 +41,13 @@
 //! 4. **Walks the queue** ([`Engine::walk_jobs`]) in the binding order of
 //!    [`js_sched::walk_in_order`], one placement round of the scheduler per job, over the
 //!    hosts the registry would let take a job now ([`open_to_jobs`]), each as an [`OpenHost`]:
-//!    the network ceiling its hello advertises and whether it reported that it runs host jobs,
-//!    read again on every pass. A host is capable of a job only if it can run it and its
+//!    the network ceiling its hello advertises, whether it reported that it runs host jobs and
+//!    the machine provider it is of, read again on every pass. Of the hosts that could take a
+//!    job now (capable, with room under the CPU slack and the memory percent), the job goes to
+//!    one of the first provider in the Default platform's order (pass 1 of design section 5.6),
+//!    and the scheduler's score chooses among that provider's hosts alone; a busy, draining,
+//!    tainted or too small host of an earlier provider never keeps it off a free one of a
+//!    later provider. A host is capable of a job only if it can run it and its
 //!    ceiling covers the job's network level and each host port the job declares
 //!    ([`js_sched::ceiling::within_ceiling`]); a host that advertised nothing reads as level
 //!    none and no port. A job with host isolation (it runs on the machine itself) is capable
@@ -95,7 +106,7 @@ use js_jobs::{
 use js_registry::{HostState, HostView, WholeNodeConfig};
 use js_sched::ceiling::within_ceiling;
 use js_sched::queue_status::{self, Outcome};
-use js_sched::{Event, Prediction, Request};
+use js_sched::{Event, Prediction, ProviderRank, Request};
 use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WorkKey};
 use js_types::{HostId, JobNetwork, QueueCode, QueueNote, Resources};
@@ -151,14 +162,19 @@ pub struct JobHold {
     placed: Placed,
 }
 
-/// A host a pass may place on: the network ceiling its hello advertises and whether it reported
-/// that it runs host jobs.
+/// A host a pass may place on: the network ceiling its hello advertises, whether it reported
+/// that it runs host jobs, and the machine provider it is of.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenHost {
     /// The most network the host's agent gives a job.
     pub ceiling: NetworkCeiling,
     /// Whether the host's hello reported `host-jobs`.
     pub host_jobs: bool,
+    /// The machine provider the host is of, and where the Default platform lists it (design
+    /// section 5.6, step 4): a job goes to a free host of the first provider in that order
+    /// that has one. `None`: of no provider the platform lists, ranked after every host that
+    /// is (the server offers no such host).
+    pub rank: Option<ProviderRank>,
 }
 
 /// A queued job, as a pass offers it to the engine.
@@ -177,6 +193,17 @@ struct Walker {
 }
 
 impl Engine {
+    /// Tells the scheduler the machine provider of each host of `open`
+    /// ([`OpenHost::rank`]), read again on every pass: the placements of the pass, and the
+    /// marks and quiet hosts of the jobs that need the whole host, follow it
+    /// ([`js_sched::Scheduler::set_provider_rank`]).
+    pub(super) fn rank_hosts(&mut self, open: &BTreeMap<HostId, OpenHost>) {
+        for (host, offer) in open {
+            let worker = map::worker(host);
+            self.sched.set_provider_rank(&worker, offer.rank.clone());
+        }
+    }
+
     /// Whether the engine holds a job allocation on `host`.
     pub fn holds_jobs_on(&self, host: &HostId) -> bool {
         self.jobs.values().any(|hold| hold.host == *host)
@@ -286,7 +313,8 @@ impl Engine {
     }
 
     /// One walk of `queued`, the queued jobs in queue order, over `open`, the hosts that may take a
-    /// job now with the network ceiling each advertises and whether it runs host jobs, at `now`:
+    /// job now with the network ceiling each advertises, whether it runs host jobs and the
+    /// machine provider it is of, at `now`:
     /// the placements it decides, each as the job, its host, what it books and what else the
     /// commit writes (the wall limit of a job placed on a host a whole-host job marks), in queue
     /// order. Each is held in the engine from here on, so it books its host for whatever is
@@ -345,6 +373,7 @@ impl Engine {
             };
             self.feed(now, heard);
         }
+        self.rank_hosts(open);
         // From here to the walk's end no worker's capabilities are written: what the hosts
         // match is held over the rounds.
         if hold {
@@ -570,8 +599,8 @@ impl JobStarts for NoStarts {
 /// The hosts a pass places on, as the server reads them from the registry.
 #[derive(Debug, Clone, Copy)]
 pub struct JobHosts<'a> {
-    /// The hosts that may take a job now, each with the network ceiling it advertises and
-    /// whether it runs host jobs.
+    /// The hosts that may take a job now, each with the network ceiling it advertises,
+    /// whether it runs host jobs and the machine provider it is of.
     pub open: &'a BTreeMap<HostId, OpenHost>,
     /// The hosts that said hello to this server.
     pub hello: &'a BTreeSet<HostId>,
@@ -581,7 +610,8 @@ pub struct JobHosts<'a> {
 
 impl SchedPlacer {
     /// One pass over the queued jobs of `jobs`, on `open`, the hosts that may take a job now,
-    /// each with the network ceiling it advertises and whether it runs host jobs:
+    /// each with the network ceiling it advertises, whether it runs host jobs and the machine
+    /// provider it is of:
     /// [`SchedPlacer::place_jobs_with`] for a pool with no whole-node settings and no host that
     /// said hello, so no job that needs the whole host is placed.
     ///
@@ -668,6 +698,7 @@ impl SchedPlacer {
         let steps = {
             let mut engine = self.engine();
             engine.sync_jobs(live);
+            engine.rank_hosts(hosts.open);
             engine.whole_jobs(&input, now)
         };
         let mut noted = Noted {
@@ -916,3 +947,7 @@ mod tests;
 #[cfg(test)]
 #[path = "jobs_matches_tests.rs"]
 mod matches_tests;
+
+#[cfg(test)]
+#[path = "jobs_rank_tests.rs"]
+mod rank_tests;

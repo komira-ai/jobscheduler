@@ -119,6 +119,7 @@ impl StateMachine for Scheduler {
                             phase: NodePhase::Serving,
                             switch_ends: FarmTime::default(),
                             ends_at: None,
+                            rank: None,
                         };
                         self.adopt(&worker, &mut fresh);
                         self.workers.insert(worker, fresh);

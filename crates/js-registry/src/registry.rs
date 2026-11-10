@@ -254,7 +254,9 @@ impl Registry {
         self.lock_at(self.shared.clock.now())
     }
 
-    pub(crate) fn pool_id(&self) -> ProviderId {
+    /// The name of the pool this registry serves: the provider the bindings of the machines
+    /// launched for it name.
+    pub fn pool_id(&self) -> ProviderId {
         self.shared.config.name().clone()
     }
 

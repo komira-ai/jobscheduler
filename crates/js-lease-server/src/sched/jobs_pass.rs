@@ -2,7 +2,10 @@
 //! [`Agents::place_jobs_after_beat`], which a heartbeat runs and which is skipped when nothing
 //! the pass depends on changed since the last one): it reads the hosts the
 //! registry would let take a job now and whose last job listing was clean, each with the
-//! network ceiling its hello advertises and whether it reported that it runs host jobs, the
+//! network ceiling its hello advertises, whether it reported that it runs host jobs and the
+//! machine provider of the Default platform its binding names, with its position in the
+//! platform's order ([`super::rank`]; a host of a provider the platform does not list is not
+//! offered), the
 //! hosts that said hello to this server, and the pool's whole-node settings, and hands them to
 //! the placer's pass
 //! ([`SchedPlacer::place_jobs_with`](super::place::SchedPlacer::place_jobs_with), whose
@@ -31,6 +34,7 @@ use js_types::HostId;
 use tracing::warn;
 
 use super::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics, open_to_jobs};
+use super::rank::rank;
 use crate::admit::reports_host_jobs;
 use crate::agents::Agents;
 use crate::metrics::PassSink;
@@ -131,7 +135,11 @@ impl Agents {
         // still running that job: its capacity is not counted until a listing is clean.
         let open = views.into_iter();
         let open = open.filter(|view| open_to_jobs(view, now) && self.listing_clean(&view.id));
-        let open = open.map(|view| {
+        // The machine provider of each host, from its binding alone; a host of a provider the
+        // Default platform does not list is no candidate here (it stays in the host table).
+        let bindings = self.registry.bindings();
+        let open = open.filter_map(|view| {
+            let ranked = rank(&self.providers, bindings.get(&view.id))?;
             // The ceiling and the host-jobs capability are read again on every pass, from the
             // hello the host last said; a host whose hello is not held (after a restart)
             // advertises no network and no host jobs.
@@ -139,8 +147,9 @@ impl Agents {
             let offer = OpenHost {
                 ceiling: capabilities.map(ceiling_of).unwrap_or_default(),
                 host_jobs: capabilities.is_some_and(reports_host_jobs),
+                rank: Some(ranked),
             };
-            (view.id, offer)
+            Some((view.id, offer))
         });
         let hosts = JobHosts {
             open: &open.collect(),

@@ -25,6 +25,7 @@ use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
+use crate::sched::rank;
 use crate::static_pool::StaticPoolSource;
 use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
 use crate::usage::UsageSink;
@@ -577,6 +578,7 @@ impl Config {
             mut warnings,
             unrunnable,
             logs,
+            resolved,
             ..
         } = file::load(path, &load)?;
         if let Some(refusal) = unrunnable {
@@ -602,6 +604,11 @@ impl Config {
                     "server.estimate_feed",
                 ));
                 let cpu_slack = server.agents.cpu_slack().unwrap_or_default();
+                // The order the pool's Default platform lists its machine providers in; a pool
+                // with no platform (a joined one) keeps the order of no configuration.
+                let providers = plan
+                    .as_ref()
+                    .and_then(|plan| rank::order_of(&resolved, &plan.id));
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
@@ -613,6 +620,7 @@ impl Config {
                     job_limits,
                     jobs: server.agents.job_store(server.job_store_windows()),
                     job_sources: JobSources::default(),
+                    providers,
                 });
                 (
                     Hosts::Layered {
@@ -884,6 +892,7 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
                     job_limits: JobLimits::default(),
                     jobs: listen::job_store(cli),
                     job_sources: JobSources::default(),
+                    providers: None,
                 }),
             })
         }

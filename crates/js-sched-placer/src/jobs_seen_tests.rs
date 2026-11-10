@@ -197,6 +197,7 @@ fn each_input_of_a_pass_brings_the_next_one_back() {
         OpenHost {
             ceiling,
             host_jobs: true,
+            rank: None,
         },
     );
     rig.ran(&offered, &[]);

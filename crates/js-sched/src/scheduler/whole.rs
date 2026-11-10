@@ -370,7 +370,9 @@ impl Scheduler {
     }
 
     /// The registered workers by drain cost, cheapest first: by the least tail, whether or
-    /// not whole-node settings are on. `placed` are this round's placements, not yet held.
+    /// not whole-node settings are on; among workers that cost the same, the one of the
+    /// earlier machine provider ([`Scheduler::set_provider_rank`]), then the first by name.
+    /// `placed` are this round's placements, not yet held.
     pub(super) fn drain_order(&self, placed: &[(OperationId, Placed)]) -> Vec<DrainCost> {
         // Every held lease belongs to an operation that holds it. Each entry is the end
         // bound of a lease and its estimated end.
@@ -401,6 +403,7 @@ impl Scheduler {
                     leases: w.leases,
                     end_bounds,
                     est_ends,
+                    provider_rank: w.provider_order(),
                 }
             })
             .collect();
@@ -440,6 +443,7 @@ impl Scheduler {
                 leases: 1,
                 end_bounds: vec![bound],
                 est_ends: vec![estimate],
+                provider_rank: 0,
             })
         };
         let held = self.held.iter().map(|(lease, held)| {

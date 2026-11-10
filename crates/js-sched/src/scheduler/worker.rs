@@ -11,6 +11,7 @@ use crate::admission::{Left, WorkerLoad};
 use crate::fence::LEASE_GRACE;
 use crate::input::{DaemonInstance, Request};
 use crate::load::Load;
+use crate::provider_rank::ProviderRank;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Worker {
@@ -53,6 +54,9 @@ pub(crate) struct Worker {
     pub(super) switch_ends: FarmTime,
     /// When the worker's host is taken back, if it is ([`crate::Event::HostEnd`]).
     pub(crate) ends_at: Option<FarmTime>,
+    /// The machine provider its host is of, as the caller told it
+    /// ([`crate::Scheduler::set_provider_rank`]); `None`: told none.
+    pub(crate) rank: Option<ProviderRank>,
 }
 
 impl Worker {

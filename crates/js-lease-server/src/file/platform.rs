@@ -15,10 +15,11 @@
 //! agentless `static` kind is not resolved: it is built as before, and goes away with that
 //! kind.
 //!
-//! Everything downstream reads [`Resolved`]. This version still runs a fixed order
-//! (registered hosts, then the elastic provider), so a platform whose
-//! machine providers put a launching one before `static` is refused, and a pool reaches
-//! exactly one launching machine provider.
+//! Everything downstream reads [`Resolved`]; the job pass places on the hosts of a pool's
+//! Default platform in the order its `machine_providers` list them
+//! (`crate::sched::rank::order_of`). This version still refuses a platform whose machine
+//! providers put a launching one before `static`, and a pool reaches exactly one launching
+//! machine provider.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -66,8 +67,7 @@ const HOSTLESS_POOL_KEYS: &[&str] = &["name", "platforms", "path_grace"];
 const DESCRIBES_HOSTS: &str = "describes hosts; the pool names only hostless platforms";
 
 /// Why a platform that lists a launching machine provider before `static` is refused.
-const STATIC_FIRST: &str =
-    "static must come first in this version (the ordered walk of design 5.6 is not built yet)";
+const STATIC_FIRST: &str = "static must come first in this version (a launching machine provider listed before it is not run yet)";
 
 /// Why a pool that reaches no launching machine provider, or more than one, is refused.
 const ONE_LAUNCHING: &str = "a pool's platforms reach exactly one machine provider that launches in this version; a pool of registered hosts alone is kind = \"joined\"";

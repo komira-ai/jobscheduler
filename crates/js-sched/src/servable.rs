@@ -36,6 +36,7 @@ use crate::cordon::Cordons;
 use crate::input::Request;
 use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
 use crate::probe::{ProbeHost, ProbeRefusal, admit_probe};
+use crate::provider_rank::of_first_provider;
 use crate::scheduler::Worker;
 use crate::unservable::Unservable;
 
@@ -287,6 +288,12 @@ impl Servable {
     /// equals is skipped: there it would own the host. [`Servable::roomy`] tells whether
     /// any worker is left.
     ///
+    /// Of the workers that pass all of that (and, for an action under load admission, the
+    /// load predicate), only those of the first machine provider in their platform's order
+    /// ([`crate::Scheduler::set_provider_rank`]) are ranked: the provider is the first key,
+    /// and the score or the load decides within it, its tie-break unchanged. A worker of an
+    /// earlier provider that has no room now never keeps the request off a later one's.
+    ///
     /// A worker in `avoid` (one the operation's earlier runs ended on as the farm's
     /// fault) is skipped while a worker placement may use outside it could run the
     /// request once its bookings end: the request waits for that one. Only when none
@@ -316,15 +323,18 @@ impl Servable {
             })
             .collect();
         let mut blocked = None;
+        // Pass 1 takes the first machine provider in order that has a worker that can take the
+        // request now, and ranks only that provider's workers: the provider is the first key,
+        // never a weight.
         let chosen = if by_load {
             let (admitted, why) = Self::admitted(adm, workers, &candidates, attempt, now);
             blocked = why;
+            let admitted = of_first_provider(workers, admitted, |passed| passed.name);
             Self::scored(adm, workers, &admitted, attempt, now)
         } else {
             // The first of the least loaded: `live` is in name order.
-            candidates
-                .iter()
-                .copied()
+            of_first_provider(workers, candidates, |name| *name)
+                .into_iter()
                 .min_by_key(|name| workers[*name].load())
         };
         let Some(name) = chosen.cloned() else {

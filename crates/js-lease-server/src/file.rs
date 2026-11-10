@@ -337,7 +337,7 @@ pub(crate) struct Loaded {
     /// The machine providers, platforms and pools, however each pool was written.
     pub(crate) resolved: Resolved,
     /// Why the server cannot start on the file although it is valid: it has more than one
-    /// pool that registers agents, which the fixed order of this version cannot run.
+    /// pool that registers agents, which this version cannot run.
     pub(crate) unrunnable: Option<StartupError>,
 }
 
