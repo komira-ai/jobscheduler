@@ -356,7 +356,11 @@ fn plain_pool_refuses(hello: &Hello) {
     let refused = registry
         .hello(hello, &Credential::of_token("t"))
         .unwrap_err();
-    assert_eq!(refused, js_registry::Refusal::ShapeNotAccepted);
+    assert_eq!(
+        refused,
+        js_registry::Refusal::ShapeNotAccepted(js_registry::ShapeFault::QuotaWithoutPoolDisk)
+    );
+    assert_eq!(refused.reason(), Some("quota-without-pool-disk"));
 }
 
 /// A run of a tenth of a CPU and a MiB, with no `disk_bytes`.

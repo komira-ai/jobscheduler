@@ -6,7 +6,7 @@ mod support;
 
 use js_agent_wire::{Taint, refusal};
 use js_caps::Breach;
-use js_registry::{Binding, PoolConfig, Refusal};
+use js_registry::{Binding, PoolConfig, Refusal, ShapeFault};
 use js_types::{ExecMode, Resources, Shape};
 use support::*;
 
@@ -128,7 +128,7 @@ fn the_contract_is_checked_before_the_shape() {
     let mut small = reporting("small", &[("runtime", "container")]);
     small.shape.cpu_millis = 100;
     let refused = fx.registry.hello(&small, &cred("t")).unwrap_err();
-    assert_eq!(refused, Refusal::ShapeNotAccepted);
+    assert_eq!(refused, Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
 }
 
 /// Asserts the compatibility of a pool that declares no mode: it admits an agent that
@@ -160,7 +160,11 @@ fn breaches_become_refusals() {
     assert_eq!(missing, Refusal::HostContract { field: "runtime" });
     let mismatch = Refusal::from(Breach::Mismatch { field: "exec" });
     assert_eq!(mismatch, Refusal::ExecutionMismatch { field: "exec" });
-    assert_eq!(Refusal::ShapeNotAccepted.field(), None);
+    assert_eq!(
+        Refusal::ShapeNotAccepted(ShapeFault::BelowFloor).field(),
+        None
+    );
+    assert_eq!(Refusal::HostContract { field: "runtime" }.reason(), None);
     assert_eq!(config(1).exec(), None);
     assert_eq!(
         config(1).with_exec(ExecMode::SandboxExec).exec(),

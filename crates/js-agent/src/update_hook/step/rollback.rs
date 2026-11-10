@@ -12,11 +12,21 @@
 //!    there is nothing to repair beyond the cordon. It is lifted if this update placed it, the
 //!    record is deleted, and the step ends `reversible: true`;
 //! 3. a first install that has moved the link (`link_moved`) has no previous release to
-//!    restore. The step touches nothing, keeps the record and fails with `no_previous_release`:
-//!    the record is what makes every later rollback say the same, and what lets the next order
-//!    of the same release go forward from where it stopped. It stops no agent: that agent may
-//!    hold a job, no cordon was placed to drain it under, and a stop inside a job's owed-checks
-//!    window taints the host for good;
+//!    restore: the step takes down the agent `cutover` started and ends in success, so the
+//!    updater records a first install that was rolled back, not one that failed after the
+//!    commit. A unit that is down is left so; one that is stopping is waited for. A unit that is
+//!    up, starting or waiting to restart (the agent was refused and exits, and the manager
+//!    starts it again) is stopped once the host can hold no work: the lease server knows no
+//!    such host (`unknown-host`), or does not take the hook's credential as the host's (one of
+//!    `cordon::CREDENTIAL_CODES`: an agent that was never welcomed holds no host credential,
+//!    and the hook then presents the join token), or it shows the host and the host holds no
+//!    lease under a cordon of this update's, kept as in item 5 and within the drain bound
+//!    (`drain_bound`, class environment, nothing stopped, after it). A server that does not
+//!    answer, or refuses for another reason, is waited for as in `read_host` and ends the step
+//!    `lease_unreachable` with nothing stopped. Then item 7. No mark is written for the stop:
+//!    a stop of a unit that is down is a no-op, so a rerun reads the unit and goes on. Neither
+//!    the step nor the agent disables the unit: hostkeeper enables the units it links, and its
+//!    removal of a failed first install takes them off the host;
 //! 4. otherwise the release link must be on the previous release (`link_failed`, class
 //!    environment, nothing done, if it is not): the updater moves it back before this step runs,
 //!    and the hook reads it and never writes it. The link cannot say which agent runs, so the
@@ -73,7 +83,8 @@
 //! kills the step. That is safe: the marks say how far it got, and the rerun goes on from
 //! there. A server that flaps (answers, fails, answers) starts a new outage wait at each
 //! failure, and a server that answers with an error the hook cannot tell from an outage (for
-//! instance a refused credential) is waited for like one, and ends as `lease_unreachable`.
+//! instance a refused credential, on an update; a first install reads one as item 3 says) is
+//! waited for like one, and ends as `lease_unreachable`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -88,6 +99,7 @@ use super::cutover::{
 };
 use super::prepare::{place, refuse_host, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
+use crate::cordon::CREDENTIAL_CODES;
 
 /// Runs `rollback`.
 pub fn rollback(env: &Env<'_>, params: &Params) -> Done {
@@ -124,15 +136,85 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         return finish(env, held, record);
     }
     let Some(previous) = record.update.previous_target.clone() else {
-        return Err(failure(
-            Reason::NoPreviousRelease,
-            "a first install has no previous release to restore: nothing was stopped or moved",
-        ));
+        retire(env, params, held, record)?;
+        return finish(env, held, record);
     };
     if !record.rb.hello_ok {
         restore(env, params, held, record, &previous)?;
     }
     finish(env, held, record)
+}
+
+/// A first install's rollback (item 3 of the module header): takes down the agent `cutover`
+/// started, once the host can hold no work. The unit is read first, so a unit that is down is
+/// not asked about.
+fn retire(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<(), Done> {
+    let unit = record.update.unit.clone();
+    let state = show(env, &unit, Reason::StopFailed)?;
+    match life(&state) {
+        Life::Down => return Ok(()),
+        Life::Stopping => return wait_down(env, params, held, record, &unit),
+        Life::Up | Life::Starting => {}
+    }
+    unloaded(env, params, held, record)?;
+    refuse_host(env)?;
+    env.ports.point();
+    env.ports
+        .units
+        .stop_no_block(&unit)
+        .map_err(|why| environment(Reason::StopFailed, format!("cannot stop {unit}: {why}")))?;
+    wait_down(env, params, held, record, &unit)
+}
+
+/// Whether a lease server's error says the host can be given no work: it knows no such host,
+/// or the credential the hook presents is not the host's.
+fn no_work(error: &LeaseError) -> bool {
+    match error {
+        LeaseError::UnknownHost => true,
+        LeaseError::Refused(code) => CREDENTIAL_CODES.contains(&code.as_str()),
+        LeaseError::Unreachable(_) => false,
+    }
+}
+
+/// Waits until the first install's host can hold no work (see [`no_work`]), or holds no lease
+/// under a cordon of this update's, for at most the drain bound. A server that does not answer
+/// (or refuses for another reason) is waited for as [`read_host`] waits, each outage bounded
+/// from its start; the answer that ends it is judged as any other.
+fn unloaded(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<(), Done> {
+    let bound_ms = params.drain_wait_secs.saturating_mul(1000);
+    let began = env.ports.clock.now_ms();
+    let mut outage = None;
+    loop {
+        refuse_host(env)?;
+        let host = match env.ports.lease.host() {
+            Ok(host) => host,
+            Err(why) if no_work(&why) => return Ok(()),
+            Err(why) => {
+                let now = env.ports.clock.now_ms();
+                let since = *outage.get_or_insert(now);
+                if now.saturating_sub(since) >= outage_bound_ms(params) {
+                    return Err(lease_failure(why));
+                }
+                env.ports.clock.pause(Duration::from_secs(POLL_SECS));
+                continue;
+            }
+        };
+        outage = None;
+        keep_out(env, params, held, record, &host)?;
+        if host.leases == 0 && !host.releasing {
+            return Ok(());
+        }
+        if env.ports.clock.now_ms().saturating_sub(began) >= bound_ms {
+            return Err(environment(
+                Reason::DrainBound,
+                format!(
+                    "the host still held {} lease(s) after {} s under the cordon: the agent is not stopped and the cordon is left to lapse",
+                    host.leases, params.drain_wait_secs
+                ),
+            ));
+        }
+        pause(env, held, record, params)?;
+    }
 }
 
 /// Everything from the unit's state to the previous agent's hello. The updater has moved the
@@ -212,15 +294,7 @@ fn set_hello_ok(record: &mut Record) {
 /// first act, so nothing is half-done. The bound is of this one wait, counted from this call:
 /// the step as a whole is not held to the declared timeout (see the module header).
 fn read_host(env: &Env<'_>, params: &Params) -> Result<HostReading, Done> {
-    // What is left of the declared bound for the other waits: the start, the hello and a margin.
-    let bound_ms = params
-        .settings
-        .timeouts
-        .rollback
-        .saturating_sub(START_WAIT_SECS)
-        .saturating_sub(ROLLBACK_HELLO_SECS)
-        .saturating_sub(ROLLBACK_MARGIN_SECS)
-        .saturating_mul(1000);
+    let bound_ms = outage_bound_ms(params);
     let began = env.ports.clock.now_ms();
     loop {
         match env.ports.lease.host() {
@@ -233,6 +307,19 @@ fn read_host(env: &Env<'_>, params: &Params) -> Result<HostReading, Done> {
         }
         env.ports.clock.pause(Duration::from_secs(POLL_SECS));
     }
+}
+
+/// The longest one wait for a lease server that does not answer may be: what the declared
+/// `rollback` bound leaves for the other waits, the start, the hello and a margin.
+fn outage_bound_ms(params: &Params) -> u64 {
+    params
+        .settings
+        .timeouts
+        .rollback
+        .saturating_sub(START_WAIT_SECS)
+        .saturating_sub(ROLLBACK_HELLO_SECS)
+        .saturating_sub(ROLLBACK_MARGIN_SECS)
+        .saturating_mul(1000)
 }
 
 /// Sets a mark of an act in the record, durably, before the act it names. The first of them is

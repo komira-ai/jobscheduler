@@ -882,7 +882,8 @@ fn a_first_install_has_no_rollback_marks_and_no_session_before_one() {
     assert_eq!(check(&record), Ok(()));
     // A first install never writes a stop, and the rollback marks need one: the rule that
     // `cutover` relaxed for `link_moved` is deliberately not relaxed for them, because the
-    // rollback of a first install makes no act.
+    // rollback of a first install writes none: it stops the unit without a mark, and a rerun
+    // reads the unit.
     for set in [
         (|rb: &mut Rollback| rb.drained = true) as fn(&mut Rollback),
         |rb| rb.link_restored = true,

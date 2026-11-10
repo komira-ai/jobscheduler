@@ -143,7 +143,8 @@ fn refused_hello_is_fatal_per_code() {
     let ran = linux.finish();
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(
-        ran.err.contains("status 403 (shape-not-accepted)"),
+        ran.err
+            .contains("status 403 (shape-not-accepted, reason below-floor)"),
         "{}",
         ran.err
     );

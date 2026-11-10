@@ -376,6 +376,8 @@ pub struct Spy<'a> {
     pub fail: RefCell<BTreeSet<&'static str>>,
     /// The operator cordons just before the next cordon call reaches the server.
     pub operator_races: Cell<bool>,
+    /// The code the server refuses a reading of the host with (`LeaseError::Refused`), while set.
+    pub host_refuses: Cell<Option<&'static str>>,
     /// What the staged agent prints to `--version`.
     pub version: RefCell<Result<String, String>>,
     /// The changes made to the unit and the link, in order.
@@ -437,6 +439,7 @@ impl<'a> Spy<'a> {
             on_pause: RefCell::new(None),
             fail: RefCell::new(BTreeSet::new()),
             operator_races: Cell::new(false),
+            host_refuses: Cell::new(None),
             version: RefCell::new(Ok(format!("js-agent {}\n", rig.params.target_version))),
             acts: RefCell::new(Vec::new()),
             stop_leaves: RefCell::new(None),
@@ -644,6 +647,9 @@ impl Lease for Spy<'_> {
 
     fn host(&self) -> Result<HostReading, LeaseError> {
         self.check("host")?;
+        if let Some(code) = self.host_refuses.get() {
+            return Err(LeaseError::Refused(code.to_owned()));
+        }
         self.world.host()
     }
 }

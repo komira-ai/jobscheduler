@@ -235,6 +235,7 @@ fn round_trip_of_every_message() {
         code: "host-live".into(),
         supported: Some(ProtocolRange { min: 1, max: 2 }),
         field: Some("gpu-toolkit".into()),
+        reason: Some("below-floor".into()),
     }));
     let mut bare = heartbeat();
     bare.taint = None;

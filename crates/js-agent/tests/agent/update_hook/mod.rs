@@ -37,6 +37,7 @@ mod steps_cutover_launchd;
 mod steps_prepare;
 mod steps_prepare_cordon;
 mod steps_rollback;
+mod steps_rollback_first;
 mod steps_rollback_guards;
 mod steps_unit;
 mod steps_verify;

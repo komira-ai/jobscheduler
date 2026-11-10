@@ -5,7 +5,7 @@
 mod support;
 
 use js_agent_wire::Hello;
-use js_registry::{PoolConfig, Refusal};
+use js_registry::{PoolConfig, Refusal, ShapeFault};
 use js_types::{ProviderId, Request, Shape};
 use support::*;
 
@@ -53,7 +53,11 @@ fn a_floor_that_lists_levels_admits_the_hosts_it_admitted_before() {
         ("bare", &[][..]),
     ] {
         let refused = fx.hello(&reporting(host, pairs), &cred("t"));
-        assert_eq!(refused.unwrap_err(), Refusal::ShapeNotAccepted, "{host}");
+        assert_eq!(
+            refused.unwrap_err(),
+            Refusal::ShapeNotAccepted(ShapeFault::BelowFloor),
+            "{host}"
+        );
     }
     assert_eq!(fx.registry.hosts().len(), 2);
 }

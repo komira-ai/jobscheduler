@@ -1,7 +1,7 @@
 //! The hook binary driven step by step as the harness drives it, for what the harness's checks
-//! do not express: a first install killed at every kill point (the harness's crash-resume
-//! requires a first-install rollback after `cutover` to succeed, and the hook's fails by design),
-//! the reason and the verdict of that rollback, a kill between a unit's start and its agent's
+//! do not express: a first install killed at every kill point of its success path (the harness
+//! reaches its rollback path first), the outcome and the verdict of a first install's rollback
+//! after a failed `verify`, a kill between a unit's start and its agent's
 //! hello, a fault that is cleared before the step runs again, and rollback killed at every kill
 //! point after a `prepare` or a `cutover` that was cut short.
 //!
@@ -242,33 +242,42 @@ fn a_first_install_killed_at_every_kill_point_resumes_to_the_uninterrupted_end()
     }
 }
 
-/// On a first install, a `rollback` after `cutover` fails exit 1 with `no_previous_release`,
-/// says it cannot be undone, changes nothing (it reaches no kill point), and says the same when
-/// run again; the updater then reports the update failed after the commit.
+/// On a first install, a `rollback` after a `verify` that failed stops the agent `cutover`
+/// started and exits 0: the unit is down, the record is gone, and a rerun succeeds and changes
+/// nothing. The updater reports the update as the failed `verify` made it (failed after the
+/// commit, a release matter), through the rollback's success rather than a rollback failure.
 #[test]
-fn a_first_install_rollback_after_cutover_refuses_by_name_changes_nothing_and_says_so_again() {
+fn a_first_install_rollback_after_a_failed_verify_stops_the_agent_and_succeeds() {
     let bed = Bed::first_install("hook-runs-first-rollback");
     bed.ok(Step::Prepare);
     let cutover = bed.ok(Step::Cutover);
-    let before = bed.state();
+    assert_eq!(bed.unit(), "active running");
     let mut ctx = Context::default();
     ctx.observe(Step::Cutover, cutover.report.as_ref().unwrap());
-    for _ in 0..2 {
-        let ran = bed.run(Step::Rollback, 0);
-        assert_eq!(ran.outcome(), Outcome::Failure, "{ran:?}");
-        assert_eq!(ran.points, 0);
-        let report = ran.report.unwrap();
-        assert_eq!(report.reason.as_deref(), Some("no_previous_release"));
-        assert!(!report.reversible);
-        same(&before, &bed.state(), "a refused rollback");
-        assert_eq!(
-            next(Step::Rollback, Outcome::Failure, &report, &ctx),
-            Next::Report(Verdict::Failed {
-                phase: hostkeeper_hook::Phase::AfterCommit,
-                class: hostkeeper_hook::Class::Release,
-            })
-        );
-    }
+    let Next::Rollback { then } = next(Step::Verify, Outcome::Failure, &Report::default(), &ctx)
+    else {
+        panic!("a failed verify is rolled back");
+    };
+    ctx.then = Some(then);
+    let ran = bed.run(Step::Rollback, 0);
+    assert_eq!(ran.outcome(), Outcome::Success, "{ran:?}");
+    let report = ran.report.unwrap();
+    assert_eq!(report.reason, None);
+    assert!(!report.reversible, "the link was moved");
+    assert_eq!(bed.unit(), "inactive dead");
+    let record = Path::new("record").join(js_agent::update_hook::RECORD_FILE);
+    assert!(!bed.state().contains_key(&record), "the record is deleted");
+    assert_eq!(
+        next(Step::Rollback, Outcome::Success, &report, &ctx),
+        Next::Report(Verdict::Failed {
+            phase: hostkeeper_hook::Phase::AfterCommit,
+            class: hostkeeper_hook::Class::Release,
+        })
+    );
+    let after = bed.state();
+    let again = bed.run(Step::Rollback, 0);
+    assert_eq!(again.outcome(), Outcome::Success, "{again:?}");
+    same(&after, &bed.state(), "a rollback run again");
 }
 
 /// The kill point of `cutover` that falls between the unit's start and the agent's hello: the
@@ -571,6 +580,51 @@ fn a_watchdog_in_its_callers_process_group_kills_only_the_binary() {
     assert_eq!(status.signal(), Some(9), "{status:?}");
     // This test still runs: its group was not signalled.
     assert!(bed.sandbox.root().exists());
+}
+
+/// A step whose caller is gone, and the caller's end of its standard error with it, is still
+/// ended by its watchdog: the message the watchdog writes fails, and the kill goes on. The stuck
+/// call announces itself, so the watchdog fires without a clock. The wait for the binary is
+/// bounded by a count of looks (it is a guard against a binary that never ends, not a measure
+/// of how long it takes). Catches a watchdog whose write to a closed pipe panics its thread and
+/// leaves the step parked for good, as a test process that died left its steps.
+#[test]
+fn a_watchdog_whose_caller_closed_its_standard_error_still_kills_the_step() {
+    use super::fakes::harness::Defect;
+    use std::os::unix::process::ExitStatusExt;
+    let bed = Bed::new(
+        "hook-runs-closed-stderr",
+        AgentHost::with_defect(Defect::Stall).on_stall(),
+    );
+    bed.ok(Step::Prepare);
+    bed.ok(Step::Cutover);
+    let mut child = Command::new(BIN)
+        .args(["update-hook", "verify", "--params"])
+        .arg(bed.sandbox.control().join("params.toml"))
+        .env_clear()
+        .envs(bed.host.env(&bed.sandbox))
+        .current_dir(bed.sandbox.root())
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    let mut status = None;
+    for _ in 0..1200 {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the step outlived its watchdog with no one reading its standard error");
+    };
+    assert_eq!(status.signal(), Some(9), "{status:?}");
 }
 
 /// On a host whose last job drained while `prepare` waited, `prepare` run again asks the lease
