@@ -198,10 +198,11 @@ pub(crate) struct Ordered<'a> {
 pub const STATIC_PROVIDER: &str = "registered";
 
 /// The class of the pool of a server of [`crate::ServerSpec::ordered`]: one of the
-/// server's own naming, which books the share each job asks for (a class the server does
-/// not ship), so a job that asks for part of a host is placed on registered hosts and
-/// launched machines alike. The `whole-node` class of a pool of [`text`] keeps no host for
-/// such work.
+/// cell's own naming, which the server does not ship and so reads as booking each job's
+/// share of a host rather than giving hosts whole. The `whole-node` class of a pool of
+/// [`text`] is dedicated to whole-host work and keeps no host for other jobs. Either way a
+/// pool of the configuration file books every host at its floor, 1 core and 1 GiB with
+/// the GPUs of the providers' offers, whatever the host's hello says.
 pub const ORDERED_CLASS: &str = "shared-host";
 
 /// The name of the platform of a server of [`crate::ServerSpec::ordered`].

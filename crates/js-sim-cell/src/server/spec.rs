@@ -191,7 +191,7 @@ impl ServerSpec {
         self.elastic.as_ref()
     }
 
-    /// A server whose one pool, `pool_name`, of class `shared-host` (which books the share each job asks for), places over an
+    /// A server whose one pool, `pool_name`, of class `shared-host` (which books each job's share of a host; the server books every host of it at 1 core and 1 GiB), places over an
     /// ordered list of machine providers (design 4.2 and 5.6): first a `static` one, the
     /// `hosts` hosts that register themselves with [`JOIN_TOKEN`] (the pool's shared join
     /// token), then one machine provider that launches for each of `providers`, first to

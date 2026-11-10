@@ -4,12 +4,12 @@
 //! fake behind a recording wrapper (`ServerSpec::ordered`). `tests/failover.rs` runs each
 //! over sixteen seeds; `tests/replay.rs` pins the headline's first seed in the golden file.
 //!
-//! Every host is a [`Shape::cpu_host`] (8 cores, no GPU) and every job asks for
-//! [`JOB_CPU_MILLIS`], more than half a host's cores, so each host, registered or launched,
-//! runs one job at a time, and the queue of jobs past the static hosts is demand on the
-//! clouds, one machine a job. The pool's class books the share a job asks for
-//! (`ServerSpec::ordered`): a `whole-node` pool keeps no host for such jobs, and the
-//! scaler counts a whole-host job whose registered host is still being prepared as demand.
+//! Every host is a [`Shape::cpu_host`] (8 cores, no GPU), but a pool of the server's
+//! configuration file books every host at its floor, 1 core and 1 GiB, whatever its hello
+//! says; every job asks for [`JOB_CPU_MILLIS`], that one core, so each host, registered or
+//! launched, runs one job at a time, and the queue of jobs past the static hosts is demand
+//! on the clouds, one machine a job. The pool's class is not `whole-node`, which keeps no
+//! host for such jobs (`ServerSpec::ordered`).
 //!
 //! The headline's numbers are the constants from [`STATIC_HOSTS`] to [`CUT_FOR`]: the
 //! design's 200 hosts at a tenth, in the same proportions (static hosts, each cloud's share,
@@ -141,12 +141,16 @@ pub fn server(statics: usize, ec2: u64, lambda: u64) -> ServerSpec {
     ServerSpec::ordered(POOL, shape(), statics, providers)
 }
 
-/// Each job's CPU: more than half a host's cores, so a host runs one job at a time.
-pub const JOB_CPU_MILLIS: u64 = 6_000;
+/// Each job's CPU: the one core the pool books for every host, so a host runs one job at a
+/// time.
+pub const JOB_CPU_MILLIS: u64 = 1_000;
 
-/// One job: [`RUN`] long, asking for [`JOB_CPU_MILLIS`] and a GiB of memory.
+/// Each job's memory: half the GiB the pool books for every host.
+pub const JOB_MEMORY_BYTES: u64 = 512 << 20;
+
+/// One job: [`RUN`] long, asking for [`JOB_CPU_MILLIS`] and [`JOB_MEMORY_BYTES`].
 pub fn job() -> Work {
-    let needs = Resources::new(JOB_CPU_MILLIS, 1 << 30, 0, None).unwrap_or_default();
+    let needs = Resources::new(JOB_CPU_MILLIS, JOB_MEMORY_BYTES, 0, None).unwrap_or_default();
     Work::run_for(RUN).needs(needs)
 }
 
