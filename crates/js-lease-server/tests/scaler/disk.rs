@@ -2,7 +2,7 @@
 //! books enough, and by a machine whose offer has it, and by nothing else. Time is an
 //! injected clock; nothing sleeps.
 //!
-//! In production only agent pools and static host files can book disk today, and the
+//! In production only agent pools can book disk today, and the
 //! registry refuses a request for disk in an elastic pool before the scaler sees it, so
 //! these tests pin the scaler's own rule (defence in depth) for a state not yet reachable.
 

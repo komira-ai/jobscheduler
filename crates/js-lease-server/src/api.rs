@@ -12,7 +12,6 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_registry::Registry;
-use js_types::HostCapacity;
 use serde::Serialize;
 
 use crate::admit::Admit;
@@ -33,14 +32,11 @@ use crate::wire::ApiError;
 /// The largest request body served.
 pub const BODY_LIMIT: usize = 64 * 1024;
 
-/// What every request handler and the tick loop share: the token, the hosts of the static
-/// pool, the health of the store paths, and the agent side when agents register hosts.
+/// What every request handler and the tick loop share: the token, the health of the store
+/// paths, and the agent side.
 pub(crate) struct Shared {
     token: Token,
-    /// The hosts the operator lists in the static pool's file (`--pool-config`), read once at
-    /// start: the host listing shows them beside the registered hosts.
-    static_hosts: Vec<HostCapacity>,
-    agents: Option<Arc<Agents>>,
+    agents: Arc<Agents>,
     /// The elastic pool's scaler, for the operator's reset of its failure brake.
     scaler: Option<Scaler>,
     /// What `/v1/pools` and `/status` read; `None` when the listen address is not a
@@ -62,10 +58,9 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn new(token: Token, agents: Option<Arc<Agents>>) -> Self {
+    pub(crate) fn new(token: Token, agents: Arc<Agents>) -> Self {
         Self {
             token,
-            static_hosts: Vec::new(),
             agents,
             scaler: None,
             status: None,
@@ -75,13 +70,6 @@ impl Shared {
             admit: Admit::default(),
             store: None,
         }
-    }
-
-    /// The same state listing `hosts`, the static pool's, beside the registered hosts.
-    #[must_use]
-    pub(crate) fn with_static_hosts(mut self, hosts: Vec<HostCapacity>) -> Self {
-        self.static_hosts = hosts;
-        self
     }
 
     /// The same state admitting jobs over `admit`'s launching providers as well as the
@@ -156,26 +144,19 @@ impl Shared {
         self.pools.as_ref()
     }
 
-    /// The hosts of the static pool, as the file listed them at start.
-    pub(crate) fn static_hosts(&self) -> &[HostCapacity] {
-        &self.static_hosts
+    /// The agent side.
+    pub(crate) fn agents(&self) -> &Arc<Agents> {
+        &self.agents
     }
 
-    /// The agent side; `None` without agent flags.
-    pub(crate) fn agents(&self) -> Option<&Arc<Agents>> {
-        self.agents.as_ref()
+    /// A handle on the agent registry.
+    pub(crate) fn registry(&self) -> Registry {
+        self.agents.registry.clone()
     }
 
-    /// A handle on the agent registry; `None` without agent flags.
-    pub(crate) fn registry(&self) -> Option<Registry> {
-        self.agents.as_ref().map(|agents| agents.registry.clone())
-    }
-
-    /// The usage side; `None` without agents or with `--usage-off`.
+    /// The usage side; `None` with `--usage-off`.
     pub(crate) fn usage(&self) -> Option<&Arc<Usage>> {
-        self.agents
-            .as_ref()
-            .and_then(|agents| agents.usage.as_ref())
+        self.agents.usage.as_ref()
     }
 
     /// The learned curves; `None` without a usage side or with a sink that learns none.
@@ -189,9 +170,9 @@ impl Shared {
             .map_or_else(UsageCounters::default, |usage| usage.counters())
     }
 
-    /// How many times the agent side could not read or write its files; 0 without agents.
+    /// How many times the agent side could not read or write its files.
     pub(crate) fn agent_errors(&self) -> u64 {
-        self.agents.as_ref().map_or(0, |agents| agents.errors())
+        self.agents.errors()
     }
 
     /// Whether the tick loop is running.
@@ -206,52 +187,39 @@ impl Shared {
 
     /// Whether the state store has said this process is no longer its writer.
     pub(crate) fn is_fenced(&self) -> bool {
-        self.agents
-            .as_ref()
-            .is_some_and(|agents| agents.fence.is_tripped())
+        self.agents.fence.is_tripped()
     }
 
     /// Completes once the state store has said this process is no longer its writer
-    /// ([`crate::fence`]); never without agents, which hold the only store.
+    /// ([`crate::fence`]); never without a store.
     pub(crate) async fn fenced(&self) {
-        match &self.agents {
-            Some(agents) => agents.fence.tripped().await,
-            None => std::future::pending().await,
-        }
+        self.agents.fence.tripped().await
     }
 
     /// One tick: runs the job pass, which ends the jobs that ran out of time, deletes those
     /// past their retention and settles the allocations of hosts read absent
-    /// ([`Agents::job_pass`]); then advances the agent registry (when the server has one) so
-    /// its marks and prepare deadlines act on this tick; then runs a pass over the queued jobs
+    /// ([`Agents::job_pass`]); then advances the agent registry so its marks and prepare deadlines act on this tick; then runs a pass over the queued jobs
     /// ([`Agents::place_jobs`]), after which the binding of each host a host job tainted is
     /// written ([`Agents::keep_taints`]): the order of design section 6.1. How the job pass
     /// went is recorded as one reading of the store's health ([`StoreHealth::record`]).
     pub(crate) async fn tick(&self) {
-        let pass = match &self.agents {
-            // The job pass reads and writes the job tables, so it runs on the pool for
-            // blocking calls; it holds no lock of the registry while it does.
-            Some(agents) => {
-                let passing = Arc::clone(agents);
-                crate::util::blocking(move || passing.job_pass()).await
-            }
-            None => None,
-        };
+        // The job pass reads and writes the job tables, so it runs on the pool for blocking
+        // calls; it holds no lock of the registry while it does.
+        let passing = Arc::clone(&self.agents);
+        let pass = crate::util::blocking(move || passing.job_pass()).await;
         self.store_health
             .iter()
             .for_each(|health| health.record(TickStore { pass }));
-        if let Some(agents) = &self.agents {
-            // The marks are brought up to this tick, so the next answer reads what the tick
-            // left.
-            agents.registry.advance();
-            agents.refresh().await;
-            // The tick is a pass over the queued jobs too, whatever else freed room; it reads
-            // and writes the job tables, so it runs on the pool for blocking calls.
-            let placing = Arc::clone(agents);
-            let tainted = crate::util::blocking(move || placing.place_jobs()).await;
-            // A host job the pass placed has tainted its host; the binding is written now.
-            agents.keep_taints(tainted).await;
-        }
+        let agents = &self.agents;
+        // The marks are brought up to this tick, so the next answer reads what the tick left.
+        agents.registry.advance();
+        agents.refresh().await;
+        // The tick is a pass over the queued jobs too, whatever else freed room; it reads and
+        // writes the job tables, so it runs on the pool for blocking calls.
+        let placing = Arc::clone(agents);
+        let tainted = crate::util::blocking(move || placing.place_jobs()).await;
+        // A host job the pass placed has tainted its host; the binding is written now.
+        agents.keep_taints(tainted).await;
     }
 }
 
@@ -272,15 +240,11 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
         .route("/status", get(status_page))
         .with_state(shared.clone());
     let app = open.merge(guarded);
-    let app = match &shared.agents {
-        Some(agents) => {
-            let app = app.merge(join_api::router(shared.clone(), agents.clone()));
-            match with_agents {
-                true => app.merge(agent_api::router(agents.clone())),
-                false => app,
-            }
-        }
-        None => app,
+    let agents = shared.agents.clone();
+    let app = app.merge(join_api::router(shared.clone(), agents.clone()));
+    let app = match with_agents {
+        true => app.merge(agent_api::router(agents)),
+        false => app,
     };
     let app = match &shared.scaler {
         Some(scaler) => app.merge(crate::brake_api::router(shared.clone(), scaler.clone())),
@@ -293,13 +257,9 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
 }
 
 /// The router of the agent routes alone, for the port `server.agent_listen` names. It
-/// serves nothing else: a host listing or operator route answers 404 here. Without agent
-/// registration it serves nothing at all.
+/// serves nothing else: a host listing or operator route answers 404 here.
 pub(crate) fn agent_router(shared: &Shared) -> Router {
-    match &shared.agents {
-        Some(agents) => agent_api::router(agents.clone()),
-        None => Router::new(),
-    }
+    agent_api::router(shared.agents.clone())
 }
 
 /// Refuses a request that lacks `Authorization: Bearer <token>`, with a 401 that says
@@ -404,8 +364,7 @@ fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
-/// Every host the server lists: the static pool's, and the registered ones with the state
-/// of their session.
+/// Every host the server lists: the registered ones, with the state of their session.
 async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
     json(StatusCode::OK, &listing(&shared))
 }

@@ -77,7 +77,6 @@ pub const CRATES: &[&str] = &[
     "js-mac-session",
     "js-oci",
     "js-platform",
-    "js-pool-static",
     "js-proto",
     "js-provider",
     "js-provider-ec2",

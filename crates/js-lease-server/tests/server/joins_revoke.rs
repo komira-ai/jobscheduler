@@ -41,7 +41,7 @@ async fn a_revoked_used_token_is_refused() {
 }
 
 async fn a_revoked_used_token_is_refused_in(kept: Kept) {
-    let h = start_agents_in("joins_revoke_used", false, kept).await;
+    let h = start_agents_in("joins_revoke_used", kept).await;
     let token = minted(&h, "i-1").await;
     let held = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
     assert_eq!(beat_with(&h, &token, &held).await.status, 200);
@@ -60,7 +60,7 @@ async fn a_revoked_used_token_is_refused_in(kept: Kept) {
     }
     assert_eq!(listed(&hosts(&h).await), ["burst-1"]);
 
-    let h = restarted(h, false).await;
+    let h = restarted(h).await;
     assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 401);
     let fresh = minted(&h, "i-1").await;
     assert_eq!(hello(&h, &fresh, "burst-2", "i-1").await.status, 200);
@@ -71,7 +71,7 @@ async fn a_revoked_used_token_is_refused_in(kept: Kept) {
 /// tokens, and one that drops every token.
 #[tokio::test]
 async fn a_revoked_unused_token_cannot_say_hello() {
-    let h = start_agents("joins_revoke_unused", false).await;
+    let h = start_agents("joins_revoke_unused").await;
     let gone = minted(&h, "i-1").await;
     let kept = minted(&h, "i-2").await;
     assert_eq!(revoke(&h, "i-1").await.status, 204);
@@ -85,7 +85,7 @@ async fn a_revoked_unused_token_cannot_say_hello() {
 /// of a pool join token, or anyone, revoke the credentials of other hosts.
 #[tokio::test]
 async fn revoking_needs_the_client_token() {
-    let h = start_agents("joins_revoke_auth", false).await;
+    let h = start_agents("joins_revoke_auth").await;
     let token = minted(&h, "i-1").await;
     let body = json!({ "provider": "lambdalabs", "instance_id": "i-1" })
         .to_string()
@@ -119,7 +119,7 @@ async fn revoking_needs_the_client_token() {
 /// catches a terminate that has to treat a retry specially.
 #[tokio::test]
 async fn revoking_twice_or_an_unknown_instance_is_204() {
-    let h = start_agents("joins_revoke_idempotent", false).await;
+    let h = start_agents("joins_revoke_idempotent").await;
     minted(&h, "i-1").await;
     assert_eq!(revoke(&h, "i-1").await.status, 204);
     let written = fs::read_to_string(joins_file(&h)).unwrap();
@@ -135,7 +135,7 @@ async fn revoking_twice_or_an_unknown_instance_is_204() {
 /// memory that a restart would give back.
 #[tokio::test]
 async fn a_revoke_the_disk_refuses_leaves_the_token() {
-    let h = start_agents("joins_revoke_unwritable", false).await;
+    let h = start_agents("joins_revoke_unwritable").await;
     let token = minted(&h, "i-1").await;
     let held = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
     let path = joins_file(&h);
@@ -153,7 +153,7 @@ async fn a_revoke_the_disk_refuses_leaves_the_token() {
 #[tokio::test]
 async fn the_revoke_log_and_reply_never_hold_the_token() {
     let logs = LogCapture::start();
-    let h = start_agents("joins_revoke_secret", false).await;
+    let h = start_agents("joins_revoke_secret").await;
     let token = minted(&h, "i-1").await;
     let reply = revoke(&h, "i-1").await;
     assert!(!reply.body.contains(&token), "{}", reply.body);
@@ -166,7 +166,7 @@ async fn the_revoke_log_and_reply_never_hold_the_token() {
 /// cache on the way that keeps the only answer that shows the token.
 #[tokio::test]
 async fn the_mint_answer_is_not_stored() {
-    let h = start_agents("joins_mint_no_store", false).await;
+    let h = start_agents("joins_mint_no_store").await;
     let body = json!({ "provider": "lambdalabs", "instance_id": "i-1" }).to_string();
     let head = format!(
         "POST {MINT} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}",

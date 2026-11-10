@@ -12,13 +12,13 @@ use crate::support::{Harness, Scratch};
 /// A server whose pool file is [`POOL`] (one GPU per host) with `exec` added.
 async fn start_with_exec(name: &str, exec: &str) -> Harness {
     let scratch = Scratch::new(name);
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     scratch.write(
         "agent-pool.toml",
         &format!("exec = \"{exec}\"\n{POOL}"),
         0o644,
     );
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// The hello of [`hello_body`] reporting these capabilities besides its own.
@@ -80,7 +80,7 @@ async fn a_container_pool_names_what_the_host_lacks() {
 /// `field` in any answer. It catches a server upgrade that refuses every deployed agent.
 #[tokio::test]
 async fn a_pool_without_exec_admits_old_and_new_agents() {
-    let h = start_agents("agents_contract_none", false).await;
+    let h = start_agents("agents_contract_none").await;
     let old = post(&h, "/v1/agent/hello", Some(JOIN), &hello_body("old")).await;
     assert!(old.json().get("field").is_none(), "{}", old.body);
     session(&old, "old");

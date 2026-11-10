@@ -18,7 +18,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::clock::SharedClock;
 use crate::error::StartupError;
-use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
+use crate::file::{self, ElasticPlan, Load, Loaded, Registering, UsageKeys};
 use crate::flags;
 use crate::job_expiry::JobLimits;
 use crate::job_store::JobSources;
@@ -26,7 +26,6 @@ use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
 use crate::sched::rank;
-use crate::static_pool::StaticPoolSource;
 use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
 use crate::usage::UsageSink;
 use crate::usage_setup::{UsageSetup, usage_setup};
@@ -108,9 +107,11 @@ pub struct Cli {
     /// about a lease file, which the server does not read.
     #[arg(long, value_enum, required_unless_present = "config")]
     pub boot: Option<BootMode>,
-    /// The TOML file listing the hosts to lease. Optional when agents register hosts
-    /// (`--agent-pool-config`); one of the two sources is required.
-    #[arg(long)]
+    /// Removed: the agentless hosts-file pool is no longer served. The flag is kept only so
+    /// that a start that gives it is refused naming it, with the migration: run `js-agent`
+    /// on each host and use `--agent-pool-config` (or a `[[pool]]` of `kind = "joined"` in
+    /// `--config`).
+    #[arg(long, hide = true)]
     pub pool_config: Option<PathBuf>,
     /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400). On the
     /// job service it is the token of the client named `default`.
@@ -436,7 +437,8 @@ pub struct Config {
     pub(crate) clients: LiveClients,
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
-    pub(crate) hosts: Hosts,
+    /// The registering side: the pool the hosts that run `js-agent` join, and its tokens.
+    pub(crate) agents: Box<AgentSetup>,
     pub(crate) usage: UsageSetup,
     pub(crate) monotonic: Arc<dyn Monotonic>,
     /// Where the scaler draws the random part of each acquire id, and so of each machine's
@@ -465,25 +467,15 @@ pub struct Config {
     pub(crate) store_unreachable_after: Duration,
 }
 
-/// Where the hosts come from: the operator's pool file alone, or that file (when given)
-/// beside the hosts agents register.
-pub(crate) enum Hosts {
-    /// `--pool-config` alone: the server builds exactly what it always has.
-    Static(StaticPoolSource),
-    /// Agent registration is on.
-    Layered {
-        /// The static pool, when `--pool-config` was given; it is tried first.
-        static_pool: Option<StaticPoolSource>,
-        /// The registering side.
-        agents: Box<AgentSetup>,
-    },
-}
-
 impl Config {
-    /// Checks `cli`: a listen address that is not loopback has
-    /// TLS flags, the token files are owner-only and hold tokens, the pool files are
-    /// valid, and at least one source of hosts is configured.
+    /// Checks `cli`: `--pool-config` is not given (it is refused with the migration), a
+    /// listen address that is not loopback has TLS flags, the token files are owner-only
+    /// and hold tokens, the pool files are valid, and agents register hosts
+    /// (`--agent-pool-config`, or a registering `[[pool]]` of `--config`).
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
+        if cli.pool_config.is_some() {
+            return Err(StartupError::new("--pool-config", flags::AGENTLESS_REMOVED));
+        }
         let given = flags::recorded(&cli)?;
         if let Some(path) = &cli.config {
             if let Some(flag) = given.first() {
@@ -505,7 +497,7 @@ impl Config {
         let token = read_token(token_file)?;
         let clients = LiveClients::new(tokens::from_flags(&token, &cli)?);
         let limits = Limits::from(&cli);
-        let hosts = hosts(&cli, &clients)?;
+        let agents = agents(&cli, &clients)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
         let keys = UsageKeys {
             db: cli.usage_db.clone(),
@@ -535,7 +527,7 @@ impl Config {
             clients,
             tls,
             limits,
-            hosts,
+            agents,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
             entropy: Arc::new(OsSessions),
@@ -574,7 +566,7 @@ impl Config {
             server,
             client_token,
             clients,
-            hosts,
+            registering,
             mut warnings,
             unrunnable,
             logs,
@@ -584,53 +576,39 @@ impl Config {
         if let Some(refusal) = unrunnable {
             return Err(refusal);
         }
-        let (hosts, elastic) = match hosts {
-            LoadedHosts::Static(source) => (Hosts::Static(source), None),
-            LoadedHosts::Registering {
-                static_pool,
-                registering,
-            } => {
-                let Registering {
-                    plan,
-                    pool,
-                    tokens,
-                    mint_provider,
-                    job_limits,
-                } = *registering;
-                let placed = Placement::given(server.agents.placement(), "server.placement")?;
-                warnings.extend(placed);
-                warnings.extend(estimate_feed::deprecated(
-                    server.agents.estimate_feed(),
-                    "server.estimate_feed",
-                ));
-                let cpu_slack = server.agents.cpu_slack().unwrap_or_default();
-                // The order the pool's Default platform lists its machine providers in; a pool
-                // with no platform (a joined one) keeps the order of no configuration.
-                let providers = plan
-                    .as_ref()
-                    .and_then(|plan| rank::order_of(&resolved, &plan.id));
-                let agents = Box::new(AgentSetup {
-                    tokens,
-                    pool,
-                    mint_provider,
-                    hello_limit: server.agents.hello_limit(),
-                    require_host_credential: server.agents.require_host_credential(),
-                    cpu_slack,
-                    max_lease_wall: server.max_lease_wall,
-                    job_limits,
-                    jobs: server.agents.job_store(server.job_store_windows()),
-                    job_sources: JobSources::default(),
-                    providers,
-                });
-                (
-                    Hosts::Layered {
-                        static_pool,
-                        agents,
-                    },
-                    plan,
-                )
-            }
-        };
+        let Registering {
+            plan,
+            pool,
+            tokens,
+            mint_provider,
+            job_limits,
+        } = *registering;
+        let placed = Placement::given(server.agents.placement(), "server.placement")?;
+        warnings.extend(placed);
+        warnings.extend(estimate_feed::deprecated(
+            server.agents.estimate_feed(),
+            "server.estimate_feed",
+        ));
+        let cpu_slack = server.agents.cpu_slack().unwrap_or_default();
+        // The order the pool's Default platform lists its machine providers in; a pool with
+        // no platform (a joined one) keeps the order of no configuration.
+        let providers = plan
+            .as_ref()
+            .and_then(|plan| rank::order_of(&resolved, &plan.id));
+        let agents = Box::new(AgentSetup {
+            tokens,
+            pool,
+            mint_provider,
+            hello_limit: server.agents.hello_limit(),
+            require_host_credential: server.agents.require_host_credential(),
+            cpu_slack,
+            max_lease_wall: server.max_lease_wall,
+            job_limits,
+            jobs: server.agents.job_store(server.job_store_windows()),
+            job_sources: JobSources::default(),
+            providers,
+        });
+        let elastic = plan;
         let alerts = alert_sink(server.alerts.as_ref(), files)?;
         let store = store::from_file(server.store.as_deref(), server.allow_sqlite_store, files)?;
         let alert_repeat = server
@@ -659,7 +637,7 @@ impl Config {
             clients,
             tls: server.tls,
             limits: server.limits,
-            hosts,
+            agents,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
             entropy: Arc::new(OsSessions),
@@ -754,19 +732,6 @@ impl Config {
         self.elastic.as_ref()
     }
 
-    /// The same configuration taking its static hosts from `capacity` instead of the
-    /// file `--pool-config` names.
-    pub fn with_static_pool(mut self, capacity: StaticPoolSource) -> Self {
-        self.hosts = match self.hosts {
-            Hosts::Static(_) => Hosts::Static(capacity),
-            Hosts::Layered { agents, .. } => Hosts::Layered {
-                static_pool: Some(capacity),
-                agents,
-            },
-        };
-        self
-    }
-
     /// The same configuration with other connection limits than the flags gave.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
@@ -803,13 +768,9 @@ impl Config {
     }
 
     /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
-    /// value given, or the engine's default, 1.1x, which is also the answer for a server
-    /// with no agent registration.
+    /// value given, or the engine's default, 1.1x.
     pub fn cpu_slack(&self) -> CpuSlack {
-        match &self.hosts {
-            Hosts::Layered { agents, .. } => agents.cpu_slack,
-            Hosts::Static(_) => CpuSlack::default(),
-        }
+        self.agents.cpu_slack
     }
 
     /// How long an ended job's record and result are kept after the job ends
@@ -857,17 +818,14 @@ fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> 
     value.ok_or_else(|| StartupError::new(flag, "required unless --config is given"))
 }
 
-/// The sources of hosts the flags name. At least one is required; the shared join token
-/// file needs the agent pool file, which alone turns registration on.
-fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
-    let static_pool = cli.pool_config.as_ref().map(StaticPoolSource::new);
+/// The registering side the flags name: `--agent-pool-config` is required (a server serves
+/// the hosts that run `js-agent` and register), and the shared join token file needs it.
+fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>, StartupError> {
     match (&cli.agent_token_file, &cli.agent_pool_config) {
-        (None, None) => static_pool.map(Hosts::Static).ok_or_else(|| {
-            StartupError::new(
-                "--pool-config",
-                "required unless agents register hosts (--agent-pool-config)",
-            )
-        }),
+        (None, None) => Err(StartupError::new(
+            "--agent-pool-config",
+            "required: a server serves the hosts that run js-agent and register",
+        )),
         (tokens, Some(pool)) => {
             let tokens = match tokens {
                 Some(path) => AgentTokens::open(path, clients)?,
@@ -876,25 +834,22 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
             let pool = agent_pool::read(pool)?;
             check_pool(&pool, "--agent-pool-config")?;
             let cpu_slack = cli.cpu_slack.unwrap_or_default();
-            Ok(Hosts::Layered {
-                static_pool,
-                agents: Box::new(AgentSetup {
-                    tokens,
-                    pool,
-                    mint_provider: None,
-                    hello_limit: HelloLimit {
-                        burst: cli.agent_hello_burst,
-                        interval: cli.agent_hello_interval,
-                    },
-                    require_host_credential: cli.require_host_credential,
-                    cpu_slack,
-                    max_lease_wall: None,
-                    job_limits: JobLimits::default(),
-                    jobs: listen::job_store(cli),
-                    job_sources: JobSources::default(),
-                    providers: None,
-                }),
-            })
+            Ok(Box::new(AgentSetup {
+                tokens,
+                pool,
+                mint_provider: None,
+                hello_limit: HelloLimit {
+                    burst: cli.agent_hello_burst,
+                    interval: cli.agent_hello_interval,
+                },
+                require_host_credential: cli.require_host_credential,
+                cpu_slack,
+                max_lease_wall: None,
+                job_limits: JobLimits::default(),
+                jobs: listen::job_store(cli),
+                job_sources: JobSources::default(),
+                providers: None,
+            }))
         }
         (Some(_), None) => Err(StartupError::new(
             "--agent-pool-config",

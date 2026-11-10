@@ -69,7 +69,7 @@ fn the_server_and_the_token_file_are_required() {
 /// an overflow) is a usage error, and that each unit (`s`, `m`, `h`, none) is accepted.
 #[test]
 fn durations_are_checked() {
-    let h = Harness::agents("flags_values");
+    let h = Harness::new("flags_values");
     for ttl in ["0", "soon", "5x", "99999999999999999999h"] {
         let got = h.js.go(&mint_words(ttl));
         assert_eq!(got.code, 2, "{ttl}: {}", got.err);
@@ -191,7 +191,7 @@ fn a_bad_token_file_is_refused() {
 /// links), with its trailing newline dropped, and that a read-only 0400 file is fine.
 #[test]
 fn a_linked_or_read_only_token_file_works() {
-    let h = Harness::agents("flags_token_ok");
+    let h = Harness::new("flags_token_ok");
     let target = h
         .scratch
         .write("token-target", &format!("{TOKEN}\n"), 0o400);
@@ -245,7 +245,7 @@ fn a_bad_ca_file_is_refused() {
 /// a revoke with `--server` and `--token-file` last is answered as one with them first.
 #[test]
 fn the_global_flags_may_follow_the_subcommand() {
-    let h = Harness::agents("flags_last");
+    let h = Harness::new("flags_last");
     let first = h.js.go(&REVOKE);
     let last = h.js.go_last(&REVOKE);
     assert_eq!(first.code, 0, "{}", first.err);

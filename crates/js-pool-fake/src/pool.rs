@@ -5,16 +5,16 @@ use js_types::{HostCapacity, MemoryHeadroom, MemoryPercent, ProviderId, Resource
 
 use crate::config::{self, ConfigError};
 
-/// A fixed list of hosts read from an operator's file. See the crate docs for what the
+/// A fixed list of hosts read from a test's file. See the crate docs for what the
 /// pool keeps of them.
 #[derive(Debug)]
-pub struct StaticPool {
+pub struct FakeHostPool {
     id: ProviderId,
     classes: Vec<ResourceClass>,
     book: HostBook,
 }
 
-impl StaticPool {
+impl FakeHostPool {
     /// A pool over configuration text, booking the share of each host's memory that the
     /// text's `memory_schedulable_percent` says (all of it when the key is left out).
     pub fn from_toml(id: ProviderId, source: &str) -> Result<Self, ConfigError> {
@@ -24,7 +24,7 @@ impl StaticPool {
     /// A pool over configuration text, booking `percent` of each host's memory when it
     /// is given, and else the share the text says. The percent is applied once, here, to
     /// the memory the file lists: each host is booked as the shape with its memory cut,
-    /// and a host's own claim has no part in it (a static host makes none).
+    /// and a host's own claim has no part in it (a listed host makes none).
     pub fn from_toml_with_percent(
         id: ProviderId,
         source: &str,
@@ -50,7 +50,7 @@ impl StaticPool {
     }
 
     /// A pool over the configuration file at `path`, as
-    /// [`from_toml_with_percent`](StaticPool::from_toml_with_percent) reads text.
+    /// [`from_toml_with_percent`](FakeHostPool::from_toml_with_percent) reads text.
     pub fn from_config_file_with_percent(
         id: ProviderId,
         path: &Path,
@@ -75,7 +75,7 @@ impl StaticPool {
     }
 
     /// The resource classes the pool serves: `gpu-host` unless
-    /// [`with_classes`](StaticPool::with_classes) named others.
+    /// [`with_classes`](FakeHostPool::with_classes) named others.
     pub fn classes(&self) -> Vec<ResourceClass> {
         self.classes.clone()
     }

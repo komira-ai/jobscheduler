@@ -25,9 +25,7 @@ const BODY_ROUTE: &str = "/v1/agent/join-tokens";
 /// A server with agent registration on (which serves [`BODY_ROUTE`]) under these limits.
 async fn limited_with_agents(name: &str, limits: Limits) -> Harness {
     let scratch = Scratch::new(name);
-    let config = config(agent_args(&scratch, true))
-        .unwrap()
-        .with_limits(limits);
+    let config = config(agent_args(&scratch)).unwrap().with_limits(limits);
     Harness::over(scratch, config).await
 }
 

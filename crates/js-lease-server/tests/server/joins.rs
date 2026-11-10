@@ -14,7 +14,7 @@ use crate::agents_support::{
     start_agents, start_agents_in,
 };
 use crate::support::{
-    Harness, Kept, LogCapture, Reply, TOKEN, config, kept_joins, replace, request, start,
+    Harness, Kept, LogCapture, Reply, config, kept_joins, replace, request, start,
 };
 
 fn secs(n: u64) -> Duration {
@@ -76,7 +76,7 @@ pub async fn beat_with(h: &Harness, token: &str, session: &Session) -> Reply {
 /// a wrong expiry.
 #[tokio::test]
 async fn a_minted_token_registers_a_host() {
-    let h = start_agents("joins_register", false).await;
+    let h = start_agents("joins_register").await;
     let reply = mint(&h, "i-1").await;
     assert_eq!(reply.status, 201, "{}", reply.body);
     let answer = reply.json();
@@ -99,7 +99,7 @@ async fn a_minted_token_registers_a_host() {
 /// token after its first use, and one that locks its own host out.
 #[tokio::test]
 async fn a_second_use_by_another_host_is_refused() {
-    let h = start_agents("joins_second_use", false).await;
+    let h = start_agents("joins_second_use").await;
     let token = minted(&h, "i-1").await;
     let first = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
     let second = hello(&h, &token, "burst-2", "i-1").await;
@@ -127,7 +127,7 @@ async fn a_second_use_by_another_host_is_refused() {
 /// It catches a token that never expires and an expiry that cuts off a registered host.
 #[tokio::test]
 async fn an_expired_token_is_refused() {
-    let h = start_agents("joins_expired", false).await;
+    let h = start_agents("joins_expired").await;
     let kept = minted_for(&h, "i-1", 10).await;
     let unused = minted_for(&h, "i-2", 10).await;
     let held = session(&hello(&h, &kept, "burst-1", "i-1").await, "burst-1");
@@ -146,7 +146,7 @@ async fn an_expired_token_is_refused() {
 /// burns.
 #[tokio::test]
 async fn a_wrong_instance_is_refused_and_the_token_stays_good() {
-    let h = start_agents("joins_instance", false).await;
+    let h = start_agents("joins_instance").await;
     let token = minted(&h, "i-1").await;
     let other = hello(&h, &token, "burst-1", "i-2").await;
     assert_eq!(
@@ -166,7 +166,7 @@ async fn a_wrong_instance_is_refused_and_the_token_stays_good() {
 /// hello.
 #[tokio::test]
 async fn an_unused_token_cannot_heartbeat() {
-    let h = start_agents("joins_unused_beat", false).await;
+    let h = start_agents("joins_unused_beat").await;
     let token = minted(&h, "i-1").await;
     let beat = Session {
         host: "burst-1".into(),
@@ -186,7 +186,7 @@ async fn an_unused_token_cannot_heartbeat() {
 #[tokio::test]
 async fn the_token_is_shown_once_and_stored_never() {
     let logs = LogCapture::start();
-    let h = start_agents("joins_secret", false).await;
+    let h = start_agents("joins_secret").await;
     let token = minted(&h, "i-1").await;
     let mut answers = vec![hello(&h, &token, "burst-1", "i-2").await];
     let welcome = hello(&h, &token, "burst-1", "i-1").await;
@@ -221,7 +221,7 @@ async fn the_token_is_shown_once_and_stored_never() {
 /// lets a holder of a pool join token, or anyone, make tokens.
 #[tokio::test]
 async fn minting_needs_the_client_token() {
-    let h = start_agents("joins_auth", false).await;
+    let h = start_agents("joins_auth").await;
     let body = json!({ "provider": "lambdalabs", "instance_id": "i-1" })
         .to_string()
         .into_bytes();
@@ -261,7 +261,7 @@ async fn minting_needs_the_client_token() {
 /// token that is handed out although a restart would forget it.
 #[tokio::test]
 async fn a_mint_the_disk_refuses_makes_no_token() {
-    let h = start_agents("joins_unwritable", false).await;
+    let h = start_agents("joins_unwritable").await;
     let mut joins = h.scratch.state().into_os_string();
     joins.push(".joins");
     fs::create_dir(&joins).unwrap();
@@ -271,23 +271,12 @@ async fn a_mint_the_disk_refuses_makes_no_token() {
     assert!(!reply.body.contains("token\":"), "{}", reply.body);
 }
 
-/// Asserts that the route exists only when agents register hosts, and that a client token
-/// is all it takes there. It catches a route that is open on a server with no agents.
-#[tokio::test]
-async fn there_is_no_mint_route_without_agents() {
-    let h = Harness::new("joins_no_agents").await;
-    let reply = mint(&h, "i-1").await;
-    assert_eq!(reply.status, 404, "{}", reply.body);
-    let plain = request(h.addr(), "POST", MINT, Some(TOKEN), Some(b"{}")).await;
-    assert_eq!(plain.status, 404);
-}
-
 /// Asserts that a second token for an instance replaces the first, which then
 /// authenticates nothing. It catches two live ways into one instance after a delivery
 /// that failed and was retried.
 #[tokio::test]
 async fn a_new_token_for_an_instance_replaces_the_unused_one() {
-    let h = start_agents("joins_replace", false).await;
+    let h = start_agents("joins_replace").await;
     let first = minted(&h, "i-1").await;
     let second = minted(&h, "i-1").await;
     assert_ne!(first, second);
@@ -309,14 +298,14 @@ async fn a_restart_keeps_an_unused_token_and_a_used_one() {
 }
 
 async fn a_restart_keeps_an_unused_token_and_a_used_one_in(kept: Kept) {
-    let first = start_agents_in("joins_restart", false, kept).await;
+    let first = start_agents_in("joins_restart", kept).await;
     let used = minted(&first, "i-1").await;
     let unused = minted(&first, "i-2").await;
     assert_eq!(hello(&first, &used, "burst-1", "i-1").await.status, 200);
     let kept_text = kept_joins(&first);
     assert_eq!(kept_text.matches("burst-1").count(), 1, "{kept_text}");
 
-    let h = restarted(first, false).await;
+    let h = restarted(first).await;
     let stolen = hello(&h, &used, "burst-2", "i-1").await;
     assert_eq!(
         (stolen.status, code(&stolen)),
@@ -338,7 +327,7 @@ async fn a_restart_keeps_an_unused_token_and_a_used_one_in(kept: Kept) {
 /// one step, which lets both register.
 #[tokio::test]
 async fn of_two_concurrent_uses_one_wins() {
-    let h = start_agents("joins_race", false).await;
+    let h = start_agents("joins_race").await;
     let token = minted(&h, "i-1").await;
     let (one, two) = tokio::join!(
         hello(&h, &token, "burst-1", "i-1"),
@@ -358,7 +347,7 @@ async fn of_two_concurrent_uses_one_wins() {
 /// without a way in.
 #[tokio::test]
 async fn a_hello_the_registry_refuses_does_not_spend_the_token() {
-    let h = start_agents("joins_rollback", false).await;
+    let h = start_agents("joins_rollback").await;
     assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 200);
     let token = minted(&h, "i-1").await;
     let refused = hello(&h, &token, "burst-1", "i-1").await;
@@ -377,7 +366,7 @@ async fn a_hello_the_registry_refuses_does_not_spend_the_token() {
 /// stays a way to register its host id for ever.
 #[tokio::test]
 async fn a_used_token_ends_after_a_day_of_silence() {
-    let h = start_agents("joins_credential_bound", false).await;
+    let h = start_agents("joins_credential_bound").await;
     let token = minted(&h, "i-1").await;
     let held = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
     h.clock.advance(secs(86_400));
@@ -404,7 +393,7 @@ async fn a_used_token_ends_after_a_day_of_silence() {
 /// renewed by use.
 #[tokio::test]
 async fn a_heartbeat_renews_the_credential() {
-    let h = start_agents("joins_credential_renewed", false).await;
+    let h = start_agents("joins_credential_renewed").await;
     let token = minted(&h, "i-1").await;
     let held = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
     h.clock.advance(secs(86_399));
@@ -421,10 +410,10 @@ async fn a_heartbeat_renews_the_credential() {
 /// process owns it.
 #[tokio::test]
 async fn a_second_server_over_the_same_state_is_refused() {
-    let h = start_agents("joins_second_server", false).await;
+    let h = start_agents("joins_second_server").await;
     let token = minted(&h, "i-1").await;
     assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 200);
-    let args = replace(agent_args(&h.scratch, false), "--boot", "resume");
+    let args = replace(agent_args(&h.scratch), "--boot", "resume");
     let (_, ticker) = channel_ticker();
     let clock = SharedClock::new(js_types::ManualClock::default());
     let started = start(config(args).unwrap(), clock, ticker).await;

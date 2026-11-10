@@ -9,20 +9,22 @@ use js_lease_server::{Config, SharedClock, StartupError, channel_ticker, start};
 use js_types::ManualClock;
 
 use crate::config_support::{PoolText, file, load, refusal, server};
-use crate::support::{Harness, Scratch, TOKEN, args_with, base_args, config, request};
+use crate::support::{Harness, Scratch, TOKEN, base_args, config, request};
 
 /// The content type of the Prometheus text format.
 const TEXT_FORMAT: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-/// A file of one static pool, with `extra` in `[server]`.
+/// A file of one joined pool, with `extra` in `[server]`.
 fn static_file(scratch: &Scratch, extra: &str) -> String {
-    let hosts = PoolText::static_pool(scratch, "hosts");
+    let hosts = PoolText::joined("hosts");
     file(&server(scratch, extra), &[&hosts])
 }
 
-/// The base flags with the metrics on `listen`.
+/// The agent flags (the shared join token among them) with the metrics on `listen`.
 fn metrics_args(scratch: &Scratch, listen: &str) -> Vec<OsString> {
-    args_with(scratch, &["--metrics-listen", listen])
+    let mut args = crate::agents_support::agent_args(scratch);
+    args.extend(["--metrics-listen", listen].map(OsString::from));
+    args
 }
 
 /// What the refusal of a start says: its flag and its message.
@@ -39,7 +41,7 @@ async fn started(config: Config) -> Result<js_lease_server::Running, StartupErro
 
 /// Asserts that the flag and the file key give the same address, that neither given is off,
 /// and that the key must be an address. Unlike the job service's, the metrics need no agent
-/// registration: a static pool serves them. It catches a key read and dropped, and metrics
+/// job service: a server without it serves them. It catches a key read and dropped, and metrics
 /// tied to the agent side.
 #[test]
 fn metrics_listen_flag_and_config_key_agree() {
@@ -123,7 +125,7 @@ async fn a_metrics_address_in_use_is_refused_naming_the_flag() {
 }
 
 /// Asserts a scrape over the listener of a running server: `GET /metrics` answers 200 with the
-/// text format's content type, a family of each kind, and the static pool's hosts, free; no
+/// text format's content type, a family of each kind, and a host that registered, free; no
 /// job family, since the job service is off; and not the client token. The lease port does
 /// not serve `/metrics`, even with the token, and the metrics port serves nothing else. Its
 /// listener stops with the server. It catches metrics served on the lease port, and a scrape
@@ -132,7 +134,8 @@ async fn a_metrics_address_in_use_is_refused_naming_the_flag() {
 async fn a_scrape_answers_200_in_the_text_format_on_its_own_port_only() {
     let scratch = Scratch::new("metrics_listen_scrape");
     let args = metrics_args(&scratch, "127.0.0.1:0");
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
+    crate::agents_support::join(&h, "burst-1").await;
     let addr = h.running.metrics_addr().unwrap();
     assert_ne!(addr, h.addr());
     let scraped = request(addr, "GET", "/metrics", None, None).await;
@@ -147,7 +150,7 @@ async fn a_scrape_answers_200_in_the_text_format_on_its_own_port_only() {
     for line in [
         "# TYPE js_job_placements_total counter\njs_job_placements_total 0\n",
         "# TYPE js_queue_wait_seconds histogram\n",
-        "js_host_cpu_booked_millicores{host=\"gpu-01\"} 0\n",
+        "js_host_cpu_booked_millicores{host=\"burst-1\"} 0\n",
         "# TYPE js_host_whole_mark gauge\n",
     ] {
         assert!(

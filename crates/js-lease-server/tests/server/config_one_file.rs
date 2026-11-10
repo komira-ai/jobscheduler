@@ -132,27 +132,10 @@ async fn require_host_credential_is_read_from_the_file() {
     assert!(asked.json()["host_credential"].is_string());
 }
 
-/// Asserts that the registration keys are refused naming `server.<key>` when no pool
-/// registers agents, as the flags are refused without `--agent-pool-config` (a static
-/// pool serves no agent), also when the value is the default, and that a bad value of
-/// each is refused naming the key. It catches a key that does nothing without saying so,
-/// and a value that is not checked.
+/// Asserts that a bad value of each registration key is refused naming the key. It catches
+/// a value that is not checked.
 #[test]
-fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
-    let needs = "needs an elastic pool, whose hosts register agents";
-    for (key, value) in [
-        ("agent_hello_burst", "60"),
-        ("agent_hello_interval", "\"1s\""),
-        ("require_host_credential", "false"),
-        ("placement", "\"js-sched\""),
-        ("estimate_feed", "false"),
-        ("cpu_slack", "1.1"),
-    ] {
-        let scratch = Scratch::new(&format!("one_file_needs_{key}"));
-        let stat = PoolText::static_pool(&scratch, "hosts");
-        let text = file(&server(&scratch, &format!("{key} = {value}")), &[&stat]);
-        assert_eq!(refusal(&scratch, &text), format!("server.{key}: {needs}"));
-    }
+fn the_registration_keys_need_a_valid_value() {
     for (line, said) in [
         (
             "agent_hello_burst = 0",
@@ -243,7 +226,6 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
     ));
     let moved = [
         ("--token-file", "set server.client_token_file"),
-        ("--pool-config", "add a [[pool]] with provider kind static"),
         (
             "--agent-pool-config",
             "add a [[pool]] with an elastic provider",
@@ -260,7 +242,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
 
 /// A valid file at `js.toml` of `scratch` and the command line that names it.
 fn with_file(scratch: &Scratch) -> Vec<OsString> {
-    let stat = PoolText::static_pool(scratch, "hosts");
+    let stat = PoolText::joined("hosts");
     let path = scratch.write("js.toml", &file(&server(scratch, ""), &[&stat]), 0o644);
     vec![
         "js-lease-server".into(),

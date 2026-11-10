@@ -13,10 +13,10 @@ use crate::config_support::{PoolText, clock, file, load, refusal, server};
 use crate::scaler_support::{account, cloud_kinds, records_path, text};
 use crate::support::{Harness, Scratch, T0};
 
-/// `lines` as the `[server]` keys of a file with one static pool, loaded.
+/// `lines` as the `[server]` keys of a file with one joined pool, loaded.
 fn loaded(name: &str, lines: &str) -> (Scratch, Result<Config, String>) {
     let scratch = Scratch::new(name);
-    let stat = PoolText::static_pool(&scratch, "hosts");
+    let stat = PoolText::joined("hosts");
     let text = file(&server(&scratch, lines), &[&stat]);
     let config = load(&scratch, &text).map_err(|err| err.to_string());
     (scratch, config)
@@ -45,7 +45,7 @@ fn the_alert_keys_are_read_and_refused_with_their_rules() {
     let good = scratch.write("hook-token", "PLANTED-HOOK-TOKEN\n", 0o600);
     let open = scratch.write("open-token", "PLANTED-HOOK-TOKEN\n", 0o644);
     let empty = scratch.write("empty-token", "\n", 0o600);
-    let stat = PoolText::static_pool(&scratch, "hosts");
+    let stat = PoolText::joined("hosts");
     let with = |lines: &str| file(&server(&scratch, lines), &[&stat]);
     let token = |path: &std::path::Path| {
         format!(

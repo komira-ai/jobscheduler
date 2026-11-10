@@ -129,8 +129,7 @@ impl InProcess {
     /// The job and allocation tables the job service and the agents' per-job heartbeats are
     /// served from, to read; `None` while the job service is off.
     pub fn jobs(&self) -> Option<&JobStore<Arc<dyn Store>, ServerIds>> {
-        let agents = self.shared.agents()?;
-        agents.jobs.as_deref()
+        self.shared.agents().jobs.as_deref()
     }
 
     /// One tick, its parts in this order and each run to its end: the elastic pool's checks
@@ -153,9 +152,9 @@ impl InProcess {
     }
 
     /// A handle on the agent registry (the same registry the routes and the tick use);
-    /// `None` without agent registration. As [`crate::Running::registry`].
+    /// always `Some`, as [`crate::Running::registry`].
     pub fn registry(&self) -> Option<Registry> {
-        self.shared.registry()
+        Some(self.shared.registry())
     }
 
     /// The scaler of the elastic pool of the configuration file; `None` without one. As
@@ -165,7 +164,7 @@ impl InProcess {
     }
 
     /// How many times the agent side could not read or write one of its files since the
-    /// server started; always 0 without agent registration. As
+    /// server started. As
     /// [`crate::Running::agent_errors`].
     pub fn agent_errors(&self) -> u64 {
         self.shared.agent_errors()

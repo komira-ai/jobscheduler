@@ -609,7 +609,6 @@ fn this_repositorys_shipped_crates() {
         "js-mdm-core",
         "js-host-step",
         "js-oci",
-        "js-pool-static",
         "js-provider",
         "js-registry",
         "js-types",
@@ -619,8 +618,9 @@ fn this_repositorys_shipped_crates() {
             "{member} ships"
         );
     }
-    // The tools and the conformance suites are not shipped: only tests link them.
-    for member in ["xtask", "js-coverage", "js-conformance"] {
+    // The tools, the conformance suites and the fake host pool are not shipped: only tests
+    // link them.
+    for member in ["xtask", "js-coverage", "js-conformance", "js-pool-fake"] {
         assert!(
             !shipped.contains(&format!("crates/{member}")),
             "{member} does not"

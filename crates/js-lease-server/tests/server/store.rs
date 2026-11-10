@@ -41,12 +41,9 @@ fn file_config(scratch: &Scratch, text: &str) -> Result<Config, StartupError> {
     Config::from_config_file(&path, &kinds(), &OwnerOnlyFiles, clock())
 }
 
-/// A file with a static pool and `extra` lines in `[server]`.
+/// A file with a joined pool and `extra` lines in `[server]`.
 fn static_file(scratch: &Scratch, extra: &str) -> String {
-    file(
-        &server(scratch, extra),
-        &[&PoolText::static_pool(scratch, "hosts")],
-    )
+    file(&server(scratch, extra), &[&PoolText::joined("hosts")])
 }
 
 /// Asserts that a `sqlite:` store is refused at start with exit status 2 and a message that
@@ -75,7 +72,7 @@ async fn sqlite_is_refused_unless_the_dev_flag_is_set() {
     );
 
     let gated = store_args(&scratch, &line, &["--allow-sqlite-store"]);
-    let h = Harness::with(scratch, gated, None).await;
+    let h = Harness::with(scratch, gated).await;
     let health = request(h.addr(), "GET", "/healthz", None, None).await;
     assert_eq!(health.status, 200);
     assert!(h.running.store().is_some(), "the server holds the store");
@@ -250,13 +247,13 @@ async fn a_store_with_an_elastic_pool_starts_and_writes_no_records_file() {
 #[tokio::test]
 async fn agent_registration_starts_over_a_store_and_writes_no_files() {
     let scratch = Scratch::new("store_agents");
-    let mut args = agent_args(&scratch, true);
+    let mut args = agent_args(&scratch);
     args.extend([
         "--store".into(),
         store_file(&scratch, &sqlite_line(&scratch)).into(),
     ]);
     args.push("--allow-sqlite-store".into());
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     assert!(h.running.store().is_some(), "the server holds the store");
     let health = request(h.addr(), "GET", "/healthz", None, None).await;
     assert_eq!(health.status, 200);
@@ -308,13 +305,15 @@ async fn a_sqlite_store_that_cannot_be_opened_is_refused() {
     assert!(free.is_ok(), "the refused start released the lock");
 }
 
-/// Asserts that a server started without a store setting, with no agent registration, holds
-/// no store and makes no file at all beside the state file's path: neither a lease file nor a
+/// Asserts that a server started without a store setting (and with usage off) holds no
+/// store and makes no file at all beside the state file's path: neither a lease file nor a
 /// lock. It catches a store or a lock file made, or the lock taken, without the setting, and
 /// a lease file made.
 #[tokio::test]
 async fn without_a_store_setting_nothing_changes() {
-    let h = Harness::new("store_none").await;
+    let scratch = Scratch::new("store_none");
+    let args = crate::support::args_with(&scratch, &["--usage-off"]);
+    let h = Harness::with(scratch, args).await;
     assert!(h.running.store().is_none());
     let health = request(h.addr(), "GET", "/healthz", None, None).await;
     assert_eq!(health.status, 200);
@@ -325,7 +324,7 @@ async fn without_a_store_setting_nothing_changes() {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect()
     };
-    let expected = ["pool.toml", "token"];
+    let expected = ["agent-pool.toml", "token"];
     let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
     assert_eq!(names(&h.scratch), expected);
     let Harness {

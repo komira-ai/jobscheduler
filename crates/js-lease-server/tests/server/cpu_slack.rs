@@ -28,11 +28,8 @@ arch = "x86_64"
 fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
     let mut args = base_args(scratch);
     let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
-    let pool = scratch.write("agent-pool.toml", POOL, 0o644);
-    let flags = [
-        ("--agent-token-file", tokens.into_os_string()),
-        ("--agent-pool-config", pool.into_os_string()),
-    ];
+    scratch.write("agent-pool.toml", POOL, 0o644);
+    let flags = [("--agent-token-file", tokens.into_os_string())];
     for (flag, value) in flags {
         args.push(flag.into());
         args.push(value);
@@ -84,7 +81,7 @@ fn cpu_slack_values_outside_the_range_are_refused() {
         assert!(said.contains("'--cpu-slack <CPU_SLACK>'"), "{bad}: {said}");
         assert!(said.contains(&out_of_range(bad)), "{bad}: {said}");
     }
-    let mut bare = base_args(&scratch);
+    let mut bare = crate::support::without_agent_pool(&scratch);
     bare.extend(["--cpu-slack", "1.1"].map(OsString::from));
     let said = parsed(bare).err().unwrap();
     assert_eq!(said, "--cpu-slack: requires --agent-pool-config");

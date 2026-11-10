@@ -60,7 +60,7 @@ struct RawHost {
     capabilities: BTreeMap<String, String>,
 }
 
-/// What a hosts file lists: the hosts, as the operator wrote them, and the share of their
+/// What a hosts file lists: the hosts, as the test wrote them, and the share of their
 /// memory the file books.
 pub(crate) struct Parsed {
     /// The hosts in file order, with the memory as written.

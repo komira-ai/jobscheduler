@@ -28,7 +28,7 @@ pub fn placing_args(scratch: &Scratch, kept: Kept) -> Vec<OsString> {
 pub async fn placing_server(name: &str, kept: Kept) -> Harness {
     let scratch = Scratch::new(&kept.named(name));
     let args = placing_args(&scratch, kept);
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// Stops `first` and starts a server over its scratch directory with `--boot resume`.
@@ -39,7 +39,7 @@ pub async fn restarted_placing(first: Harness) -> Harness {
     } = first;
     running.shutdown().await.unwrap();
     let args = replace(placing_args(&scratch, kept), "--boot", "resume");
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// The hello of a CPU host `host` of the pool that speaks the per-job messages: 8 cores and

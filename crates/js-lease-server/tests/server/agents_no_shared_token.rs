@@ -11,7 +11,7 @@ use crate::support::{Harness, Scratch, TOKEN};
 
 /// The flags of the agent tests without `--agent-token-file`.
 fn without_shared_token(scratch: &Scratch) -> Vec<OsString> {
-    let mut args = agent_args(scratch, false);
+    let mut args = agent_args(scratch);
     let at = args.iter().position(|arg| arg == "--agent-token-file");
     args.drain(at.unwrap()..at.unwrap() + 2);
     args
@@ -20,7 +20,7 @@ fn without_shared_token(scratch: &Scratch) -> Vec<OsString> {
 async fn start_without_shared_token(name: &str) -> Harness {
     let scratch = Scratch::new(name);
     let args = without_shared_token(&scratch);
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// Asserts the whole path of a pool with no shared token file: a hello with a token a

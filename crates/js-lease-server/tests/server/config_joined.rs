@@ -157,8 +157,7 @@ async fn the_shared_pool_token_still_admits_hosts() {
 
 /// Asserts that a joined pool counts as a pool that registers agents: beside another joined
 /// pool or an elastic pool the file is valid, and the server refuses to start on it, naming
-/// the later pool; and a joined pool beside a static pool is served. It catches two
-/// registries built from one file.
+/// the later pool. It catches two registries built from one file.
 #[test]
 fn two_registering_pools_are_refused() {
     let scratch = Scratch::new("joined_two");
@@ -174,8 +173,7 @@ fn two_registering_pools_are_refused() {
         refusal(&scratch, &file(&server, &[&joined(), &elastic])),
         message
     );
-    let hosts = PoolText::static_pool(&scratch, "hosts");
-    assert!(load(&scratch, &file(&server, &[&hosts, &joined()])).is_ok());
+    assert!(load(&scratch, &file(&server, &[&joined()])).is_ok());
 }
 
 /// Asserts that each key of a pool that launches is refused on a joined pool, naming the

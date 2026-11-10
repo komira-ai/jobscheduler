@@ -323,10 +323,10 @@ pub async fn start_over(
     Harness::over(scratch, config).await
 }
 
-/// A server with agents on (no static pool) and the fake as its sink.
+/// A server with agents on and the fake as its sink.
 pub async fn start_usage(name: &str, fake: &Arc<Fake>) -> Harness {
     let scratch = Scratch::new(name);
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     start_over(scratch, args, fake).await
 }
 

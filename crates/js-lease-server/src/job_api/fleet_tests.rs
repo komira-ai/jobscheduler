@@ -21,7 +21,6 @@ use js_scaler::Phase;
 use js_state::Store;
 use js_state::fake::{Fake, Flaw};
 use js_testkit::dir::TestDir;
-use js_types::HostCapacity;
 use js_types::{ManualClock, Timestamp};
 use js_types::{MemoryHeadroom, ProviderId};
 use js_types::{ResourceClass, Resources, Shape};
@@ -77,9 +76,8 @@ struct Server {
     dir: TestDir,
 }
 
-/// A server named `name` with the agent side when `agents` (a server without it holds only
-/// hosts no agent registered).
-fn server(name: &str, agents: bool) -> Server {
+/// A server named `name`, with its agent side.
+fn server(name: &str) -> Server {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fleet_calls");
     let dir = TestDir::under(root, name);
     let clock = ManualClock::new(Timestamp::from_millis(T0));
@@ -117,7 +115,7 @@ fn server(name: &str, agents: bool) -> Server {
         .with_jobs(jobs.clone())
         .with_placer(placer);
     let token = parse_token(&[b'c'; 40]).unwrap();
-    let shared = Arc::new(Shared::new(token, agents.then(|| Arc::new(side))));
+    let shared = Arc::new(Shared::new(token, Arc::new(side)));
     let usage = Arc::new(Fake::with_flaw(Arc::default(), Flaw::None));
     let usage_store: Arc<dyn Store> = usage.clone();
     let sink = Arc::new(NodeUsage::over(usage_store, 1 << 20, 0, no_names()).unwrap());
@@ -239,7 +237,7 @@ fn whole(host: &wire::Host, job: &str) -> wire::HostBooking {
 /// releasing allocation dropped, and bookings on the wrong host.
 #[tokio::test]
 async fn the_host_list_shows_booked_resources() {
-    let s = server("booked", true);
+    let s = server("booked");
     s.register("h2");
     s.register("h1");
     s.register("h3");
@@ -282,7 +280,7 @@ async fn the_host_list_shows_booked_resources() {
 /// nothing booked. It catches a failed read taken as no booking.
 #[tokio::test]
 async fn a_listing_that_cannot_read_the_job_tables_is_unavailable() {
-    let s = server("store-down", true);
+    let s = server("store-down");
     s.register("h1");
     let unavailable = (Code::Unavailable, STORE_UNAVAILABLE.to_owned());
     s.store.fail_read_after(0);
@@ -300,7 +298,7 @@ async fn a_listing_that_cannot_read_the_job_tables_is_unavailable() {
 /// shortens, or errors.
 #[tokio::test]
 async fn cordon_twice_is_cordon_once() {
-    let s = server("cordon-twice", true);
+    let s = server("cordon-twice");
     s.register("h1");
     let expires = Some(T0 + 600_000);
     let first = cordon(&s.api, "h1", Some(600)).await.unwrap();
@@ -335,7 +333,7 @@ async fn cordon_twice_is_cordon_once() {
 /// `invalid-cordon` and places nothing. It catches a second copy of the rules that drifts.
 #[tokio::test]
 async fn cordon_is_clamped_and_zero_is_refused() {
-    let s = server("cordon-clamp", true);
+    let s = server("cordon-clamp");
     s.register("h1");
     let cut = cordon(&s.api, "h1", Some(99_999)).await.unwrap();
     assert_eq!(cut.host.unwrap().cordon_expires_at_ms, Some(T0 + 3_600_000));
@@ -356,23 +354,18 @@ async fn cordon_is_clamped_and_zero_is_refused() {
 }
 
 /// Asserts that a cordon or an uncordon of a host the registry does not hold (one that never
-/// said hello, an id no host can have, or any host of a server without the agent side,
-/// whose hosts are all static) is `NOT_FOUND` `unknown-host` and writes nothing. It catches
-/// a static host given a cordon record, and an unknown host answered as cordoned.
+/// said hello, or an id no host can have) is `NOT_FOUND` `unknown-host` and writes nothing.
+/// It catches an unknown host answered as cordoned.
 #[tokio::test]
-async fn cordon_of_an_unknown_or_static_host_is_not_found() {
+async fn cordon_of_an_unknown_host_is_not_found() {
     let unknown = (Code::NotFound, UNKNOWN_HOST.to_owned());
-    let s = server("cordon-unknown", true);
+    let s = server("cordon-unknown");
     s.register("h1");
     for host in ["h9", "Not A Host!", ""] {
         assert_eq!(refused(cordon(&s.api, host, Some(60)).await), unknown);
         assert_eq!(refused(uncordon(&s.api, host).await), unknown);
     }
     assert_eq!(s.bindings_file(), None);
-    let statics = server("cordon-static", false);
-    assert_eq!(refused(cordon(&statics.api, "h1", Some(60)).await), unknown);
-    assert_eq!(refused(uncordon(&statics.api, "h1").await), unknown);
-    assert_eq!(statics.bindings_file(), None);
 }
 
 /// Asserts that a cordon placed by the call keeps a queued job off the host, and that once
@@ -380,9 +373,9 @@ async fn cordon_of_an_unknown_or_static_host_is_not_found() {
 /// registry's own cordon, the one placement reads, and not a copy of it.
 #[tokio::test]
 async fn a_cordoned_host_takes_no_job() {
-    let s = server("cordon-placement", true);
+    let s = server("cordon-placement");
     s.register("h1");
-    let agents = s.shared.agents().unwrap();
+    let agents = s.shared.agents();
     let id = JobId::parse("job-q").unwrap();
     let new = NewJob {
         id: Some(id.clone()),
@@ -411,7 +404,7 @@ async fn a_cordoned_host_takes_no_job() {
 /// and one rolled back.
 #[tokio::test]
 async fn cordon_unsaved_is_unavailable_but_holds() {
-    let s = server("cordon-unsaved", true);
+    let s = server("cordon-unsaved");
     s.register("h1");
     let blocker = s.dir.path().join("bindings.tmp");
     std::fs::create_dir(&blocker).unwrap();
@@ -476,7 +469,7 @@ fn snapshot(s: &Server) -> Snapshot {
 /// expires, books or counts anything.
 #[tokio::test]
 async fn reads_change_nothing() {
-    let s = server("reads", true);
+    let s = server("reads");
     s.register("h2");
     s.register("h1");
     placed(&s.jobs, "job-a", "h1", spec(), BOOKED);
@@ -515,10 +508,9 @@ fn api_over(
     JobApi::new(jobs, clock).with_fleet(Ctx::served(hosts, pools, history))
 }
 
-/// The hosts of a fake: listed from these static hosts and registry views, as the server
-/// lists them, and answering every cordon and uncordon with `answer`.
+/// The hosts of a fake: listed from these registry views, as the server lists them, and
+/// answering every cordon and uncordon with `answer`.
 struct FakeHosts {
-    capacity: Vec<HostCapacity>,
     views: Vec<HostView>,
     answer: Result<bool, Refused>,
 }
@@ -526,7 +518,6 @@ struct FakeHosts {
 impl FakeHosts {
     fn new() -> FakeHosts {
         FakeHosts {
-            capacity: Vec::new(),
             views: Vec::new(),
             answer: Ok(true),
         }
@@ -536,7 +527,7 @@ impl FakeHosts {
 #[tonic::async_trait]
 impl Hosts for FakeHosts {
     async fn hosts(&self) -> HostList {
-        HostList::of(self.capacity.clone(), self.views.clone())
+        HostList::of(self.views.clone())
     }
 
     async fn cordon(&self, _: &HostId, _: Duration) -> Result<bool, Refused> {
@@ -607,7 +598,7 @@ impl Service<Uri> for InMemory {
 #[tokio::test]
 async fn fleet_calls_need_the_service_token() {
     use js_proto::v1::job_service_client::JobServiceClient;
-    let s = server("auth", true);
+    let s = server("auth");
     s.register("h1");
     let token = parse_token(&[b'f'; 40]).unwrap();
     let token = crate::config::Clients::only(&token, "--token-file");
@@ -668,7 +659,7 @@ async fn fleet_calls_need_the_service_token() {
 /// queued keeps running without a store.
 #[tokio::test]
 async fn a_listing_that_meets_a_fenced_store_is_unavailable_and_trips_the_fence() {
-    let s = server("store-fenced", true);
+    let s = server("store-fenced");
     s.register("h1");
     s.store.fail_with(js_state::StoreError::Fenced);
     s.store.fail_read_after(0);

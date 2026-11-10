@@ -7,7 +7,7 @@ use std::time::Duration;
 use js_registry::PoolConfig;
 use js_types::ProviderId;
 
-use super::{Config, CpuSlack, Hosts};
+use super::{Config, CpuSlack};
 use crate::agent_tokens::AgentTokens;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{JobSources, JobStoreSetup, ServerIds};
@@ -47,19 +47,17 @@ impl Config {
     /// The same configuration with the job store (when the job service is on) stamping its
     /// rows with `clock` and minting its ids from `ids`, in place of the system's clock and
     /// random source: how a simulation makes its job and allocation ids, and the times it
-    /// stores, a function of its seed and its virtual clock. Without agent registration
-    /// there is no job store, and the configuration is unchanged.
+    /// stores, a function of its seed and its virtual clock. Without the job service there
+    /// is no job store, and the sources go unused.
     pub fn with_job_sources(
         mut self,
         clock: Arc<dyn js_state::Clock>,
         ids: Arc<dyn js_jobs::IdSource>,
     ) -> Self {
-        if let Hosts::Layered { agents, .. } = &mut self.hosts {
-            agents.job_sources = JobSources {
-                clock,
-                ids: ServerIds::new(ids),
-            };
-        }
+        self.agents.job_sources = JobSources {
+            clock,
+            ids: ServerIds::new(ids),
+        };
         self
     }
 }

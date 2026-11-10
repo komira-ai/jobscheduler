@@ -9,10 +9,10 @@ use serde_json::{Value, json};
 use crate::agents_support::{JOIN, Session, agent_args, hello_body, post, session};
 use crate::support::{Harness, Reply, Scratch, TOKEN, request};
 
-/// The base flags with agent registration on (the static pool kept) and the job service on
+/// The base flags with agent registration on and the job service on
 /// `listen`.
 pub fn job_args(scratch: &Scratch, listen: &str) -> Vec<OsString> {
-    let mut args = agent_args(scratch, true);
+    let mut args = agent_args(scratch);
     args.push("--job-listen".into());
     args.push(listen.into());
     args
@@ -22,7 +22,7 @@ pub fn job_args(scratch: &Scratch, listen: &str) -> Vec<OsString> {
 pub async fn job_server(name: &str) -> Harness {
     let scratch = Scratch::new(name);
     let args = job_args(&scratch, "127.0.0.1:0");
-    Harness::with(scratch, args, None).await
+    Harness::with(scratch, args).await
 }
 
 /// The body of a `SubmitJob` call, built up from a job id: 1 core and 1 GiB, no disk, no

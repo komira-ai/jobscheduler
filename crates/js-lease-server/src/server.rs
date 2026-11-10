@@ -8,7 +8,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_types::HostCapacity;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -94,7 +93,7 @@ async fn bind(
     bound.map_err(|err| StartupError::new(flag, err))
 }
 
-/// Starts a server: reads the static pool's hosts, puts the agent side together, binds the
+/// Starts a server: puts the agent side together, binds the
 /// listener and begins serving and ticking. The checks of
 /// an elastic pool run on a timer of `--tick`; see [`start_with_checks`].
 ///
@@ -273,13 +272,11 @@ pub(crate) struct Listeners {
 }
 
 /// What a start has built when its listeners are about to be bound: the agent side, the
-/// elastic pool and its scaler, and the hosts of the static pool, with the parts of the
-/// configuration that [`open`] reads.
+/// elastic pool and its scaler, with the parts of the configuration that [`open`] reads.
 pub(crate) struct Prepared {
-    agents: Option<Arc<Agents>>,
+    agents: Arc<Agents>,
     pool: Option<Pool>,
     scaler: Option<Scaler>,
-    static_hosts: Vec<HostCapacity>,
     tick: Duration,
     token: Token,
     warnings: Vec<String>,
@@ -304,7 +301,7 @@ pub(crate) struct Opened {
 
 /// The first half of a start, everything before a listener is bound: takes the store's
 /// writer lock and opens the store when the configuration names one, then puts the agent
-/// side together, reads the static pool's hosts and builds the elastic pool and its scaler
+/// side together and builds the elastic pool and its scaler
 /// (which marks the machines its records show as being released). Binds nothing and spawns
 /// nothing. No lease file is read: a lease file of an earlier release at the state file's
 /// path is left as it is.
@@ -331,7 +328,7 @@ pub(crate) fn prepare(
         clients,
         tls,
         limits,
-        hosts,
+        agents,
         usage,
         monotonic,
         entropy,
@@ -359,10 +356,10 @@ pub(crate) fn prepare(
     }
     let logs = crate::logs::from_config(&logs, clock);
     let kept = (state_file.as_path(), store.as_ref());
-    let (static_hosts, agents) = assemble_in(hosts, usage, clock, kept, logs)?;
+    let agents = assemble_in(agents, usage, clock, kept, logs)?;
     // Every launching provider of the elastic pool: admission asks each whether it could
     // ever serve a job, and the scaler's tick fetches each one's catalog. An elastic plan
-    // comes only with a pool whose hosts register (agents), so a server with a catalog to
+    // comes with a pool whose hosts register (agents), so a server with a catalog to
     // fetch always has a scaler.
     let providers = || elastic.iter().flat_map(|plan| plan.providers.iter());
     let launching = providers().map(|each| Launching {
@@ -387,10 +384,10 @@ pub(crate) fn prepare(
     });
     // Before anything is served: the scaler marks the machines its records show as being
     // released, so a host of theirs that says hello again is admitted already marked.
-    let scaler = match (&elastic, agents.clone()) {
-        (Some((pool, plan)), Some(agents)) => {
+    let scaler = match &elastic {
+        Some((pool, plan)) => {
             let parts = Parts {
-                agents,
+                agents: Arc::clone(&agents),
                 clock: clock.clone(),
                 state_file: &state_file,
                 store: store.as_ref(),
@@ -403,7 +400,7 @@ pub(crate) fn prepare(
             };
             Some(build(plan, parts)?)
         }
-        _ => None,
+        None => None,
     };
     // The store's alert goes to the same sink as the scaler's, through a dedupe of its own.
     let store_health = StoreHealth::new(clock.clone(), store_unreachable_after);
@@ -423,9 +420,7 @@ pub(crate) fn prepare(
     let metrics = metrics_listen.map(|at| (at, Arc::new(Recorder::default())));
     if let Some((_, recorder)) = &metrics {
         let meter = Meter::new(recorder.clone(), Arc::clone(&monotonic));
-        agents
-            .iter()
-            .for_each(|agents| agents.set_meter(meter.clone()));
+        agents.set_meter(meter.clone());
         scaler
             .iter()
             .for_each(|scaler| scaler.set_meter(meter.clone()));
@@ -434,7 +429,6 @@ pub(crate) fn prepare(
         agents,
         pool: elastic.map(|(pool, _)| pool),
         scaler,
-        static_hosts,
         tick,
         token,
         warnings,
@@ -467,7 +461,6 @@ pub(crate) fn open(prepared: Prepared, clock: &SharedClock) -> Result<Opened, St
         agents,
         pool,
         scaler,
-        static_hosts,
         tick,
         token,
         warnings,
@@ -477,7 +470,7 @@ pub(crate) fn open(prepared: Prepared, clock: &SharedClock) -> Result<Opened, St
         store,
         store_health,
     } = prepared;
-    let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
+    let logs = agents.logs.clone();
     if let Some(scaler) = &scaler {
         scaler.listening(Some(2 * tick));
     }
@@ -496,7 +489,6 @@ pub(crate) fn open(prepared: Prepared, clock: &SharedClock) -> Result<Opened, St
     let status = serves_status.then(|| Arc::clone(&pools));
     let shared = Arc::new(
         Shared::new(token, agents)
-            .with_static_hosts(static_hosts)
             .with_admit(admit)
             .with_status(status)
             .with_pools(pools)
@@ -708,10 +700,11 @@ impl Running {
     }
 
     /// A handle on the agent registry (the same registry the routes and the tick use),
-    /// for reading what it records, such as [`js_registry::Registry::request_record`];
-    /// `None` without agent flags.
+    /// for reading what it records, such as [`js_registry::Registry::request_record`].
+    /// Always `Some`: every server registers hosts. The `Option` is kept so that callers
+    /// built against the release that had agentless servers keep building.
     pub fn registry(&self) -> Option<js_registry::Registry> {
-        self.shared.registry()
+        Some(self.shared.registry())
     }
 
     /// The address the metrics are served on (`--metrics-listen`), with the port the system
@@ -743,8 +736,7 @@ impl Running {
     /// How many times the agent side could not read or write one of its files since the
     /// server started: the join token file that could not be read again at a tick, the
     /// file of bindings (or, with a store setting, the store) that could not be written, and
-    /// the credential times a tick could not commit to the store. Always 0 without agent
-    /// flags.
+    /// the credential times a tick could not commit to the store.
     pub fn agent_errors(&self) -> u64 {
         self.shared.agent_errors()
     }
@@ -752,7 +744,7 @@ impl Running {
     /// The curves learned from runs that ended cleanly, for admission to read as its
     /// `CurveSource`. A curve is kept under the profile name the caller supplied for the runs,
     /// not under the work key, and the server maps no work key to a profile name, so every
-    /// work key is charged flat. `None` without agent registration, with `--usage-off`, or with a sink that learns
+    /// work key is charged flat. `None` with `--usage-off` or with a sink that learns
     /// none.
     pub fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
         self.shared.usage_curves()
@@ -760,7 +752,7 @@ impl Running {
 
     /// What the usage side has counted since the server started: loads rejected, records
     /// dropped, runs learned or not and why, and the failures of the usage store, with the
-    /// sink's own counts. All zero without agent registration or with `--usage-off`.
+    /// sink's own counts. All zero with `--usage-off`.
     pub fn usage_counters(&self) -> UsageCounters {
         self.shared.usage_counters()
     }

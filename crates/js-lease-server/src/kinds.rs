@@ -18,12 +18,11 @@ use js_provider_ec2 as ec2;
 use js_provider_gce as gce;
 use js_provider_lambdalabs as lambda;
 use js_types::Clock as LeaseClock;
-use js_types::{AcceleratorNeed, ExecMode, MemoryPercent, Model, ResourceClass};
+use js_types::{AcceleratorNeed, ExecMode, Model, ResourceClass};
 
 use crate::clock::SharedClock;
 use crate::config::read_private_reason;
 use crate::file::Launch;
-use crate::static_pool::StaticPoolSource;
 
 /// A table that a constructor refused: the field at fault, relative to the provider table,
 /// and why. The reason holds nothing the table said, and no secret.
@@ -60,9 +59,6 @@ pub struct BuildCtx<'a> {
     pub pool: &'a str,
     /// The class the pool serves.
     pub class: &'a ResourceClass,
-    /// The pool's `memory_schedulable_percent`, when its table sets one: a kind that
-    /// lists hosts the operator describes books that share of their memory.
-    pub memory_percent: Option<MemoryPercent>,
     /// The server's clock.
     pub clock: SharedClock,
     /// How the constructor reads a secret file.
@@ -115,10 +111,9 @@ pub struct ElasticBuilt {
     pub idle_costs: bool,
 }
 
-/// What a constructor builds.
+/// What a constructor builds. The hosts a server lists are those that run `js-agent` and
+/// register, so a kind builds only hosts the scheduler launches.
 pub enum Built {
-    /// Hosts that exist already, listed by the operator.
-    Static(StaticPoolSource),
     /// Hosts the scheduler launches.
     Elastic(ElasticBuilt),
 }
@@ -170,11 +165,12 @@ pub struct Kinds {
 }
 
 impl Kinds {
-    /// The kinds compiled into the server: provider kinds `static`, `lambdalabs`, `ec2`
-    /// and `gce`, and platform kind `default`.
+    /// The kinds compiled into the server: provider kinds `lambdalabs`, `ec2` and `gce`,
+    /// and platform kind `default`. The provider kind `static` of the removed agentless
+    /// hosts-file pool is refused by the file reader with the migration; the machine
+    /// provider kind `static` (the hosts that register) is built into the file reader.
     pub fn standard() -> Self {
         Self::default()
-            .with("static", static_kind)
             .with("lambdalabs", lambdalabs_kind)
             .with("ec2", ec2_kind)
             .with("gce", gce_kind)
@@ -235,20 +231,6 @@ impl Kinds {
             }),
         }
     }
-}
-
-/// The `static` kind: `js_pool_static::kind::build` over the operator's hosts file.
-fn static_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
-    let path = js_pool_static::kind::build(table).map_err(|refused| KindError {
-        field: refused.field,
-        reason: refused.reason,
-    })?;
-    let source = StaticPoolSource::new(path);
-    let source = match ctx.memory_percent {
-        Some(percent) => source.with_memory_percent(percent),
-        None => source,
-    };
-    Ok(Built::Static(source))
 }
 
 /// The provider's clock over the server's: the milliseconds the server's clock reads.

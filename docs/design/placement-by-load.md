@@ -43,7 +43,7 @@ kbf-sched, a pure `pub use js_sched::*` re-export with no copy of `load.rs` or a
 What stays as it is, because it is a different admission scope and neither reads a measurement:
 - `js-registry` `Runs::admit` (the `/runs` interim API) sums the declared `limits.cpu_millis` and `memory_bytes` of a lease's live runs against the lease shape. It is a per-lease budget *inside* an already
   placed lease, not a host placer; it is unchanged by `--placement-load`.
-- `js-pool-static` books a whole host to one lease. It is unchanged.
+- `js-pool-static` (now `js-pool-fake`, a test fake) booked a whole host to one lease. It is unchanged.
 One host belongs to exactly one placer, so the two cannot disagree about it: a host the lease-table path books is never evaluated by the load predicate.
 
 **Relation to `--placement`.** Load placement is the default under `--placement sched`. With `--placement lease-table` it does not apply and the setting resolves to `off`; an explicit `--placement-load on` with `--placement lease-table` is refused at start-up (not ignored), and the flag golden of the lease-server lists it.

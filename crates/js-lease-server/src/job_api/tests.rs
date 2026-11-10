@@ -426,7 +426,7 @@ struct NoHosts;
 #[tonic::async_trait]
 impl fleet::Hosts for NoHosts {
     async fn hosts(&self) -> HostList {
-        HostList::of(Vec::new(), Vec::new())
+        HostList::of(Vec::new())
     }
 
     async fn cordon(&self, _: &HostId, _: Duration) -> Result<bool, fleet::Refused> {

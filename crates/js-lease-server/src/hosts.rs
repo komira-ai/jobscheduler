@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use js_agent_wire::Taint;
 use js_registry::{HostMark, HostState, HostView};
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostCapacity, HostId, MemoryHeadroom, Shape};
+use js_types::{HostId, MemoryHeadroom, Shape};
 
 use crate::api::Shared;
 use crate::sched::map::lease_text as sched_lease_text;
@@ -59,19 +59,16 @@ impl MemoryView {
     }
 }
 
-/// Where a host comes from, written `static` or `registered`.
+/// Where a host comes from, written `registered`: every host the server lists said hello.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Source {
-    /// The operator's pool file.
-    Static,
     /// A host that said hello.
     Registered,
 }
 
-/// One host. `source` says where it comes from: `static` for the operator's pool file,
-/// `registered` for a host that said hello. The remaining fields of a registered host
-/// are what the registry knows of its session. The id, the source, the state and the mark
+/// One host. `source` says where it comes from (`registered`: a host that said hello). The
+/// remaining fields are what the registry knows of its session. The id, the source, the state and the mark
 /// are held typed and written as text, so a reader other than the body reads them as they
 /// are.
 #[derive(Debug, Serialize)]
@@ -239,28 +236,6 @@ pub(crate) fn mark_text(mark: HostMark) -> &'static str {
 }
 
 impl HostEntry {
-    fn listed(host: HostCapacity) -> Self {
-        Self {
-            id: host.host,
-            source: Source::Static,
-            state: None,
-            lost: None,
-            phase: None,
-            shape: shape_view(&host.shape),
-            memory: MemoryView::of(host.memory),
-            capabilities: host.shape.capabilities().clone(),
-            labels: BTreeMap::new(),
-            agent_version: None,
-            releasing: None,
-            taint: None,
-            mark: None,
-            reserved_for: None,
-            drain_deadline_ms: None,
-            cordon: None,
-            load: None,
-        }
-    }
-
     fn registered(host: HostView) -> Self {
         Self {
             id: host.id,
@@ -287,28 +262,20 @@ impl HostEntry {
 }
 
 impl HostList {
-    /// Every host of the static pool and every registered host, in id order. The registered
-    /// hosts come from the registry's own view, which knows their session.
-    pub(crate) fn of(statics: Vec<HostCapacity>, registered: Vec<HostView>) -> Self {
-        let statics = statics.into_iter().map(HostEntry::listed);
-        let mut hosts: Vec<HostEntry> = statics
-            .chain(registered.into_iter().map(HostEntry::registered))
-            .collect();
+    /// Every registered host, in id order, from the registry's own view, which knows their
+    /// session.
+    pub(crate) fn of(registered: Vec<HostView>) -> Self {
+        let mut hosts: Vec<HostEntry> = registered.into_iter().map(HostEntry::registered).collect();
         hosts.sort_by(|a, b| a.id.cmp(&b.id));
         Self { hosts }
     }
 }
 
-/// Every host the server lists, the static pool's and the registered ones: what
-/// `GET /v1/hosts` and the job service's `ListHosts` both read. The static pool's hosts are
-/// those read from its file at start; the registered ones come from the registry, so a
-/// registered host shows its session. It books, cordons and counts nothing.
+/// Every host the server lists, the registered ones: what `GET /v1/hosts` and the job
+/// service's `ListHosts` both read. They come from the registry, so a host shows its
+/// session. It books, cordons and counts nothing.
 pub(crate) fn listing(shared: &Shared) -> HostList {
-    let statics = shared.static_hosts().to_vec();
-    let registered = shared
-        .agents()
-        .map_or_else(Vec::new, |agents| agents.registry.hosts());
-    HostList::of(statics, registered)
+    HostList::of(shared.agents().registry.hosts())
 }
 
 /// A host id as the body writes it: its text.
@@ -359,37 +326,26 @@ mod tests {
         }
     }
 
-    /// Asserts the whole `GET /v1/hosts` body for a static host and a registered host that is
-    /// reserved, has a drain deadline and is cordoned, by exact string equality: the keys,
-    /// their order, and the absence of any lease key. It catches a field added, renamed or
-    /// reordered in the hosts listing, and a lease field that comes back into it.
+    /// Asserts the whole `GET /v1/hosts` body for a registered host that is reserved, has a
+    /// drain deadline and is cordoned, by exact string equality: the keys, their order, and
+    /// the absence of any lease key. It catches a field added, renamed or reordered in the
+    /// hosts listing, and a lease field that comes back into it.
     #[test]
     fn the_hosts_body_is_pinned_byte_for_byte() {
         let mut reserved = view(Some(HostMark::Reserved));
         reserved.reserved_for = Some(js_types::RequestId::new("req-1").unwrap());
         reserved.drain_deadline = Some(js_types::Timestamp::from_millis(7000));
         reserved.cordon_until = Some(js_types::Timestamp::from_millis(9000));
-        let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
-        let listed = HostCapacity {
-            host: HostId::new("s").unwrap(),
-            shape: Shape::new(resources, BTreeMap::new()),
-            memory: MemoryHeadroom::full(1 << 20),
-            leased_to: None,
-            leases: Vec::new(),
-        };
-        let list = HostList::of(vec![listed], vec![reserved]);
+        let list = HostList::of(vec![reserved]);
         let shape = r#"{"cpu_millis":1000,"memory_bytes":1048576,"gpus":0}"#;
         let memory =
             r#"{"configured_bytes":1048576,"schedulable_percent":100,"bookable_bytes":1048576}"#;
         let registered = format!(
             r#"{{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","shape":{shape},"memory":{memory},"capabilities":{{}},"labels":{{}},"releasing":false,"mark":"reserved","reserved_for":"req-1","drain_deadline_ms":7000,"cordon":{{"expires_at_ms":9000}}}}"#
         );
-        let fixed = format!(
-            r#"{{"id":"s","source":"static","shape":{shape},"memory":{memory},"capabilities":{{}},"labels":{{}}}}"#
-        );
         assert_eq!(
             serde_json::to_string(&list).unwrap(),
-            format!(r#"{{"hosts":[{registered},{fixed}]}}"#)
+            format!(r#"{{"hosts":[{registered}]}}"#)
         );
     }
 
@@ -407,7 +363,7 @@ mod tests {
             (Some(HostMark::Releasing), Some("releasing")),
         ];
         for (mark, listed) in cases {
-            let list = HostList::of(Vec::new(), vec![view(mark)]);
+            let list = HostList::of(vec![view(mark)]);
             let body = serde_json::to_value(&list).unwrap();
             let host = &body["hosts"][0];
             assert_eq!(host["id"], "a");
@@ -428,7 +384,7 @@ mod tests {
             .unwrap()
             .with_disk_bytes(5 << 30);
         with_disk.shape = Shape::new(resources, BTreeMap::new());
-        let list = HostList::of(Vec::new(), vec![with_disk, view(None)]);
+        let list = HostList::of(vec![with_disk, view(None)]);
         let body = serde_json::to_value(&list).unwrap();
         let shapes: Vec<_> = body["hosts"]
             .as_array()
@@ -445,34 +401,22 @@ mod tests {
         assert_eq!(disk.and_then(|disk| disk.as_u64()), Some(5 << 30));
     }
 
-    /// The listing of a server with a static pool and a registry shows the static pool's hosts
-    /// as `static` and the registered hosts as `registered`, all in id order, and none of them
-    /// carries a lease. A server without agents shows the static hosts alone. It catches a
-    /// listing that leaves out either source or lists them in the order of their sources.
+    /// Asserts that the listing is the registry's hosts alone, in id order: hosts viewed `b`
+    /// then `a` are listed `a` then `b`, and a server whose registry has admitted no host
+    /// lists nothing. It catches a listing that keeps the order of the hellos, and one that
+    /// lists a host no agent registered.
     #[test]
-    fn the_listing_shows_the_static_hosts_and_the_registered_ones_in_id_order() {
-        use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
+    fn the_listing_is_the_registered_hosts_in_id_order() {
         use js_types::{ManualClock, ProviderId, Timestamp};
 
         use crate::clock::SharedClock;
         use crate::config::parse_token;
 
-        let pool = StaticPool::from_toml(ProviderId::new("static").unwrap(), EXAMPLE_CONFIG);
-        let statics = pool.unwrap().hosts();
-        let token = parse_token(&[b'q'; 40]).unwrap();
-        let alone = Shared::new(token, None).with_static_hosts(statics.clone());
-        let rows = |shared: &Shared| -> Vec<(String, Source)> {
-            let list = listing(shared);
-            list.hosts
-                .iter()
-                .map(|host| (host.id.to_string(), host.source))
-                .collect()
-        };
-        let fixed = vec![
-            ("gpu-01".to_owned(), Source::Static),
-            ("gpu-02".to_owned(), Source::Static),
-        ];
-        assert_eq!(rows(&alone), fixed);
+        let mut b = view(None);
+        b.id = HostId::new("b").unwrap();
+        let list = HostList::of(vec![b, view(None)]);
+        let ids: Vec<_> = list.hosts.iter().map(|host| host.id.to_string()).collect();
+        assert_eq!(ids, ["a", "b"]);
 
         let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(1_000)));
         let dir = js_testkit::dir::TestDir::under(
@@ -494,8 +438,7 @@ mod tests {
         );
         let agents = crate::agents::Agents::over(registry, &clock, dir.path());
         let token = parse_token(&[b'q'; 40]).unwrap();
-        let shared =
-            Shared::new(token, Some(std::sync::Arc::new(agents))).with_static_hosts(statics);
-        assert_eq!(rows(&shared), fixed);
+        let shared = Shared::new(token, std::sync::Arc::new(agents));
+        assert!(listing(&shared).hosts.is_empty());
     }
 }
