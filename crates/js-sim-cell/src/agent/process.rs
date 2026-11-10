@@ -466,6 +466,7 @@ impl Process {
             accepts_host_credential: false,
             identity: None,
         };
+        let hello = io.profile.shape(hello);
         // A wire type always encodes; were it not to, the empty body would be refused.
         let body = serde_json::to_string(&hello).unwrap_or_default();
         let id = io.call(Route::Hello, &spec.join_token, body);

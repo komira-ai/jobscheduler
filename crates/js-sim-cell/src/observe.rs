@@ -38,9 +38,11 @@ use js_jobs::{AllocationId, JobId};
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
 
+use crate::cordon::{Cordon, Uncordon};
 use crate::elastic::CloudFacts;
 use crate::jobs::{AllocationRead, JobBeat, JobRead, JobReply, ResultMade};
 use crate::ledger::{Acked, Completion};
+use crate::usage::UsageRow;
 
 /// One unit of work the client driver submits, numbered from zero in the order it
 /// submits them.
@@ -457,6 +459,15 @@ pub struct Observations {
     pub results_made: Vec<ResultMade>,
     /// The cloud of the server's elastic pool; `None` for a server without one.
     pub cloud: Option<CloudFacts>,
+    /// The rows of the usage history the cell read from the server's usage route when the
+    /// scenario settled, oldest end first; `None` when it read none.
+    pub usage: Option<Vec<UsageRow>>,
+    /// Each cordon the operator was answered 200 for, in the order made; only ever
+    /// appended.
+    pub cordons: Vec<Cordon>,
+    /// Each uncordon the operator was answered 200 for, in the order made; only ever
+    /// appended.
+    pub uncordons: Vec<Uncordon>,
 }
 
 impl Observations {

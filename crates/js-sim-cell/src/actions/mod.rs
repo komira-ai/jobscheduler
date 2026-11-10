@@ -12,7 +12,12 @@ use crate::cell::Cell;
 use crate::observe::ItemId;
 
 mod add_foreign_machine;
+mod agent_prepare_delay;
+mod agent_refuses_prepare;
+mod agent_silent_on_prepare;
+mod cancel_when_preparing;
 mod cancel_work;
+mod cordon_host;
 mod crash_at_next_acquire;
 mod drop_machine;
 mod join_agents;
@@ -31,12 +36,20 @@ mod script_provider;
 mod script_provider_forever;
 mod set_bus_faults;
 mod set_knobs;
+mod set_usage_fault;
 mod start_second_server;
 mod stop_server;
 mod submit_work;
+mod uncordon_host;
+mod upgrade_agents;
 
 pub use add_foreign_machine::{AddForeignMachine, add_foreign_machine};
+pub use agent_prepare_delay::{AgentPrepareDelay, agent_prepare_delay};
+pub use agent_refuses_prepare::{AgentRefusesPrepare, REFUSAL_REASONS, agent_refuses_prepare};
+pub use agent_silent_on_prepare::{AgentSilentOnPrepare, agent_silent_on_prepare};
+pub use cancel_when_preparing::{CancelWhenPreparing, cancel_when_preparing};
 pub use cancel_work::{CancelWork, cancel_work};
+pub use cordon_host::{CordonHost, cordon_host};
 pub use crash_at_next_acquire::{CrashAtNextAcquire, crash_at_next_acquire};
 pub use drop_machine::{DropMachine, drop_machine};
 pub use join_agents::{JoinAgents, join_agents};
@@ -55,9 +68,12 @@ pub use script_provider::{ScriptProvider, script_provider};
 pub use script_provider_forever::{ScriptProviderForever, script_provider_forever};
 pub use set_bus_faults::{SetBusFaults, set_bus_faults};
 pub use set_knobs::{SetKnobs, set_knobs};
+pub use set_usage_fault::{SetUsageFault, set_usage_fault};
 pub use start_second_server::{StartSecondServer, start_second_server};
 pub use stop_server::{StopServer, stop_server};
 pub use submit_work::{SubmitWork, submit_work};
+pub use uncordon_host::{UncordonHost, uncordon_host};
+pub use upgrade_agents::{UpgradeAgents, upgrade_agents};
 
 /// A change a scenario makes to the cell at a virtual time. The builder runs it once in
 /// each seed's cell, at the time it was scripted for.

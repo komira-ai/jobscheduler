@@ -61,6 +61,7 @@ fn fresh_io() -> Io {
         counters: Counters::default(),
         ledger: Ledger::new(),
         prepare: Prepare::default(),
+        profile: crate::AgentProfile::default(),
     }
 }
 
