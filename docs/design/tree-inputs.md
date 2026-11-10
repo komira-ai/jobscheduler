@@ -1,6 +1,11 @@
 # Tree inputs: a job's inputs read from tierstore's filesystem
 
-Status: **design for the owner's review; nothing here is built.** Written against `main` of this repository at
+**Superseded by [job-rootfs.md](job-rootfs.md) (D66).** Jobscheduler names no node-local cache: a job's inputs are
+layers, mounts and host ports that any provider can serve, and the wire this document added is retired as job-rootfs.md
+section 6 says. Kept as the record of the earlier design; nothing below is to be built.
+
+Status before it was superseded: **design for the owner's review.** Only build item 1 (section 9) was built, as
+komira-ai/jobscheduler#842. Written against `main` of this repository at
 `0c104a1d`, and against tierstore's design `docs/design/virtual-build-fs.md` as merged in komira-ai/tierstore#274
 (called "the tierstore design" below, its sections cited as "tierstore 6.7"). That design asks for this one in its
 section 6.7 and lists it as item 9 of its phase 1 plan (tierstore 12).
