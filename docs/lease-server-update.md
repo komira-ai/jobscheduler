@@ -30,7 +30,8 @@ lock (below).
 
 - **A server started with a store setting** (`--store` or `server.store`). The new process proves it
   started by taking the store's writer lock, which a server takes first thing at start, before it
-  reads anything or binds a listener; `verify` waits for a holder of the lock other than the one
+  reads anything or binds a listener (the readiness listener of `--ready-listen`, off unless given,
+  is bound before it); `verify` waits for a holder of the lock other than the one
   `prepare` saw. A server without a store setting takes no lock, and `verify` of its update fails
   `no_lock`. At this release a server that registers agents (`--agent-pool-config`, or an elastic
   pool) is refused a store setting, so the hook can update only a server that does not; updating

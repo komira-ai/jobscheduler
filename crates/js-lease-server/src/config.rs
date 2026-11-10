@@ -49,7 +49,9 @@ pub(crate) use feed_retention::{
     DEFAULT_JOB_FEED_RETENTION, JOB_FEED_RETENTION_MUST, parse_job_feed_retention,
 };
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
-pub(crate) use listen::{JobListen, MetricsListen, clear_text, not_private};
+pub(crate) use listen::{
+    JobListen, MetricsListen, ReadyListen, clear_text, not_loopback, not_private,
+};
 pub use placement::Placement;
 use placement::check_pool;
 pub(crate) use placement::{checked, placer, split};
@@ -96,6 +98,14 @@ pub struct Cli {
     /// refused.
     #[arg(long)]
     pub metrics_listen: Option<SocketAddr>,
+    /// Serves the readiness route (`GET /readyz`, plain HTTP, no token) here, on a loopback
+    /// address only, and waits for the store's writer lock when another process holds it
+    /// instead of refusing to start. The route answers 503 while the server waits for the
+    /// lock and while it starts, 200 while it runs, and 503 again from a stop until the
+    /// process exits. The address is bound before the lock is tried. Off unless given; an
+    /// address that is not a loopback one is refused.
+    #[arg(long)]
+    pub ready_listen: Option<SocketAddr>,
     /// The base path of the server's state files (`.agents`, `.joins`, `.scaler`, `.jobs`,
     /// and `usage.db` beside it). A lease file of an earlier release at this path is left
     /// as it is.
@@ -422,6 +432,12 @@ pub struct Config {
     pub(crate) job_listen: Option<JobListen>,
     /// Where the metrics are served (`--metrics-listen`, `server.metrics_listen`); off when `None`.
     pub(crate) metrics_listen: Option<MetricsListen>,
+    /// Where the readiness route is served (`--ready-listen`, `server.ready_listen`); off when
+    /// `None`.
+    pub(crate) ready_listen: Option<ReadyListen>,
+    /// The readiness listener [`Config::bind_ready`] bound, served in place of binding
+    /// `ready_listen` again.
+    pub(crate) ready_bound: Option<std::net::TcpListener>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
     /// Whether `/v1/pools` and `/status` are served: the listen address is a private one.
@@ -515,6 +531,8 @@ impl Config {
             agent_listen: None,
             job_listen: listen::job_listen(&cli),
             metrics_listen: listen::metrics_listen(&cli)?,
+            ready_listen: listen::ready_listen(&cli)?,
+            ready_bound: None,
             advertise_url: None,
             warnings,
             status,
@@ -625,6 +643,8 @@ impl Config {
             agent_listen: server.agent_listen,
             job_listen: server.agents.job_listen(),
             metrics_listen: server.metrics_listen,
+            ready_listen: server.ready_listen,
+            ready_bound: None,
             advertise_url: server.advertise_url,
             warnings,
             status,
@@ -683,6 +703,33 @@ impl Config {
     /// The address the metrics are served on, when the flag or the file gives one.
     pub fn metrics_listen(&self) -> Option<SocketAddr> {
         self.metrics_listen.map(|metrics| metrics.addr)
+    }
+
+    /// The address the readiness route is served on, when the flag or the file gives one.
+    pub fn ready_listen(&self) -> Option<SocketAddr> {
+        self.ready_listen.map(|ready| ready.addr)
+    }
+
+    /// Binds the readiness listener now, when the flag or the file gives an address, and
+    /// returns the address it holds (the port the system chose for port 0); `None` when
+    /// the readiness route is off. [`crate::start`] serves this listener instead of binding
+    /// the address itself, so a caller that must say where the route is before the start
+    /// returns (the start can wait for the store's writer lock for as long as another process
+    /// holds it) binds it first.
+    ///
+    /// # Errors
+    ///
+    /// A refusal naming `--ready-listen` or `server.ready_listen`: the address is in use or
+    /// cannot be bound.
+    pub fn bind_ready(&mut self) -> Result<Option<SocketAddr>, StartupError> {
+        let Some(ready) = self.ready_listen else {
+            return Ok(None);
+        };
+        let (listener, addr) = std::net::TcpListener::bind(ready.addr)
+            .and_then(|listener| listener.local_addr().map(|addr| (listener, addr)))
+            .map_err(|err| StartupError::new(ready.flag, err))?;
+        self.ready_bound = Some(listener);
+        Ok(Some(addr))
     }
 
     /// The URL agents are told to dial, when the file gives one.

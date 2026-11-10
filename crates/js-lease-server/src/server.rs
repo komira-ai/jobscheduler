@@ -20,7 +20,7 @@ use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
 use crate::clock::SharedClock;
 use crate::config::{
-    BootMode, Config, JobListen, Limits, LiveClients, MetricsListen, TlsFiles, Token,
+    BootMode, Config, JobListen, Limits, LiveClients, MetricsListen, ReadyListen, TlsFiles, Token,
 };
 use crate::error::StartupError;
 use crate::file::Launch;
@@ -29,6 +29,7 @@ use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
 use crate::metrics::{self, Meter, Recorder};
 use crate::pool::{Pool, Setup};
+use crate::ready::{self, Gate, Phase};
 use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
 use crate::store::{LockLost, LockWatch, ServerStore};
@@ -46,6 +47,10 @@ pub struct Running {
     agent: Option<Port>,
     job: Option<Port>,
     metrics: Option<Port>,
+    /// The readiness listener (`--ready-listen`), the last listener to close.
+    ready: Option<Port>,
+    /// The phase the readiness route answers.
+    gate: Gate,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
     slots: Arc<Slots>,
@@ -59,7 +64,8 @@ pub struct Running {
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
-/// the job service (`--job-listen`), or the metrics (`--metrics-listen`).
+/// the job service (`--job-listen`), the metrics (`--metrics-listen`), or the readiness route
+/// (`--ready-listen`).
 struct Port {
     addr: SocketAddr,
     stop: oneshot::Sender<()>,
@@ -93,6 +99,27 @@ async fn bind(
     bound.map_err(|err| StartupError::new(flag, err))
 }
 
+/// Serves the readiness route on `at` (or on `bound`, the listener the caller bound): plain
+/// HTTP, answering what `gate` says.
+async fn ready_port(
+    at: ReadyListen,
+    bound: Option<std::net::TcpListener>,
+    limits: Limits,
+    gate: Gate,
+) -> Result<Port, StartupError> {
+    let (listener, addr) = bind(at.addr, at.flag, bound).await?;
+    let (stop, stopped) = oneshot::channel::<()>();
+    let slots = Arc::new(Slots::new(limits.max_connections));
+    let app = ready::router(gate);
+    let serving = tokio::spawn(serve(listener, None, app, limits, slots, stopped));
+    info!(%addr, "serving the readiness route");
+    Ok(Port {
+        addr,
+        stop,
+        serving,
+    })
+}
+
 /// Starts a server: puts the agent side together, binds the
 /// listener and begins serving and ticking. The checks of
 /// an elastic pool run on a timer of `--tick`; see [`start_with_checks`].
@@ -108,6 +135,10 @@ pub async fn start<T: Ticker>(
     start_with_checks(config, clock, ticker, checks).await
 }
 
+/// How often a server that waits for the store's writer lock (`--ready-listen`) tries it
+/// again.
+const LOCK_RETRY: Duration = Duration::from_secs(1);
+
 /// [`start`] with the ticker of the pool checks given too. At each tick of `checks` the
 /// check loop of the elastic pool (if the configuration has one) asks the injected clock
 /// whether a pass is due, runs it if so, and finishes the tick when the pass is done, so a
@@ -119,9 +150,51 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     ticker: T,
     checks: C,
 ) -> Result<Running, StartupError> {
+    let retry = IntervalTicker::new(LOCK_RETRY);
+    start_waiting(config, clock, ticker, checks, retry).await
+}
+
+/// [`start_with_checks`] with the ticker of the retries of the writer lock given too. With
+/// `--ready-listen` (`server.ready_listen`) the readiness listener is bound first, before
+/// the store's writer lock; while another process holds the lock the start waits, logging
+/// once that it does and trying again at each tick of `retry`, and the tick is finished
+/// when the attempt it asked for is done, so a test steps the retries as it steps the
+/// server's tick. A lock that cannot be tried at all still refuses the start. Without
+/// `--ready-listen` the lock is tried once and a held lock refuses the start, and `retry`
+/// is dropped.
+pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
+    mut config: Config,
+    clock: SharedClock,
+    ticker: T,
+    checks: C,
+    retry: R,
+) -> Result<Running, StartupError> {
     let logs = config.logs().sink();
     let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
-    let (prepared, listeners) = prepare(config, &clock)?;
+    // The readiness listener answers before anything else is done, so a supervisor sees the
+    // server wait for the lock. It says so only when there is a lock to wait for.
+    let lock_watch = LockWatch::new();
+    let first = match config.store {
+        Some(_) => Phase::Waiting,
+        None => Phase::Starting,
+    };
+    let gate = Gate::new(lock_watch.clone(), first);
+    let ready = match config.ready_listen {
+        Some(at) => {
+            let bound = config.ready_bound.take();
+            Some(ready_port(at, bound, config.limits(), gate.clone()).await?)
+        }
+        None => None,
+    };
+    // The store's writer lock before anything else (design 6.7, step 1): before the store is
+    // read and before any listener but the readiness one.
+    let store = match (config.store.take(), &ready) {
+        (Some(setting), Some(_)) => Some(ServerStore::open_waiting(setting, retry).await?),
+        (Some(setting), None) => Some(ServerStore::open(setting)?),
+        (None, _) => None,
+    };
+    gate.set(Phase::Starting);
+    let (prepared, listeners) = prepare(config, store, &clock)?;
     let tls = listeners
         .tls
         .as_ref()
@@ -160,7 +233,6 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     let limits = listeners.limits;
     let split = agent_listener.is_some();
     // Every listener stops at its own stop or at the loss of the store's writer lock.
-    let lock_watch = LockWatch::new();
     let (stop, stopped) = oneshot::channel::<()>();
     let slots = Arc::new(Slots::new(limits.max_connections));
     let serving = serve(
@@ -237,11 +309,14 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     ));
     let ticking = Ticking(tokio::spawn(until_fenced(shared.clone(), ticking)));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
+    gate.set(Phase::Ready);
     Ok(Running {
         addr,
         agent,
         job,
         metrics,
+        ready,
+        gate,
         shared,
         stop,
         slots,
@@ -299,14 +374,15 @@ pub(crate) struct Opened {
     pub(crate) cached: Cached,
 }
 
-/// The first half of a start, everything before a listener is bound: takes the store's
-/// writer lock and opens the store when the configuration names one, then puts the agent
-/// side together and builds the elastic pool and its scaler
+/// The first half of a start, everything before a listener is bound: with the store the
+/// caller opened under its writer lock (`store`, `None` when the configuration names none),
+/// puts the agent side together and builds the elastic pool and its scaler
 /// (which marks the machines its records show as being released). Binds nothing and spawns
 /// nothing. No lease file is read: a lease file of an earlier release at the state file's
 /// path is left as it is.
 pub(crate) fn prepare(
     config: Config,
+    store: Option<ServerStore>,
     clock: &SharedClock,
 ) -> Result<(Prepared, Listeners), StartupError> {
     let Config {
@@ -336,14 +412,10 @@ pub(crate) fn prepare(
         alert_repeat,
         logs,
         max_job_wall,
-        store,
         store_unreachable_after,
         ..
     } = config;
-    // The store's writer lock before anything else (design 6.7, step 1): before the store is
-    // read and before any listener.
-    let store = store.map(ServerStore::open).transpose()?;
-    // Then, once, the files a server without the setting kept beside the state file: before
+    // Once, the files a server without the setting kept beside the state file: before
     // the store is read for them. A live pool not at its first start needs its records.
     let live = elastic
         .as_ref()
@@ -713,6 +785,12 @@ impl Running {
         self.metrics.as_ref().map(|metrics| metrics.addr)
     }
 
+    /// The address the readiness route is served on (`--ready-listen`), with the port the
+    /// system chose for port 0; `None` when the route is off, and no listener serves it.
+    pub fn ready_addr(&self) -> Option<SocketAddr> {
+        self.ready.as_ref().map(|ready| ready.addr)
+    }
+
     /// The scaler of the elastic pool of the configuration file; `None` without one. A test
     /// reads what it decided through [`Scaler::state`].
     pub fn scaler(&self) -> Option<&Scaler> {
@@ -785,7 +863,24 @@ impl Running {
     /// When the state store has said this process is no longer its writer, the last tick is
     /// not run (it would write the job tables of a server that no longer owns them) and the
     /// stop is an error that says so.
+    ///
+    /// The readiness route (`--ready-listen`) answers 503 `draining` from the start of the stop,
+    /// and its listener is closed last, after the last tick.
     pub async fn shutdown(mut self) -> io::Result<()> {
+        self.gate.drain();
+        if let Some(ready) = &self.ready {
+            info!(addr = %ready.addr, "draining: the readiness route answers 503 until the process exits");
+        }
+        let ready = self.ready.take();
+        let mut ended = self.stop_serving().await;
+        for closing in ready.into_iter().map(Port::stop) {
+            ended = ended.and(closing.await.map_err(io::Error::other));
+        }
+        ended
+    }
+
+    /// The stop of [`Running::shutdown`] but for the readiness listener.
+    async fn stop_serving(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
         let ports = [self.agent.take(), self.job.take(), self.metrics.take()];
         let others: Vec<JoinHandle<()>> = ports.into_iter().flatten().map(Port::stop).collect();
