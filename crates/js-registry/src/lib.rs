@@ -94,7 +94,7 @@ pub use js_whole::{
 };
 pub use load::{BadLease, node_load};
 pub use placer::Placer;
-pub use refusal::Refusal;
+pub use refusal::{Refusal, ShapeFault};
 pub use registry::{
     Busy, Cordoned, HeartbeatCheck, HostMark, HostState, HostView, NotHeld, OwnHost, Registry,
     Uncordoned,

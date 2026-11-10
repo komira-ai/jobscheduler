@@ -94,5 +94,8 @@ async fn a_pool_without_exec_admits_old_and_new_agents() {
     let mut small = hello_body("small");
     small["shape"]["cpu_millis"] = json!(1);
     let reply = post(&h, "/v1/agent/hello", Some(JOIN), &small).await;
-    assert_eq!(reply.json(), json!({ "error": "shape-not-accepted" }));
+    assert_eq!(
+        reply.json(),
+        json!({ "error": "shape-not-accepted", "reason": "below-floor" })
+    );
 }

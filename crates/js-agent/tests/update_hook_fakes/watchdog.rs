@@ -145,8 +145,12 @@ pub fn wait_announced(span: Duration) -> Window {
 /// Ends the step as the updater ends one past its timeout, with SIGKILL: its whole process
 /// group when it leads one (the harness starts it so), else only itself.
 pub fn kill_step(why: &str) -> ! {
+    use std::io::Write as _;
+
     use rustix::process::{Signal, getpgrp, getpid, kill_current_process_group, kill_process};
-    eprintln!("js-update-hook-fake: {why}: stopped");
+    // A failed write is ignored: when the harness is gone, so is its end of the pipe, and a
+    // print that panicked would end this thread alone and leave the step parked for good.
+    let _ = writeln!(std::io::stderr(), "js-update-hook-fake: {why}: stopped");
     if getpgrp() == getpid() {
         let _ = kill_current_process_group(Signal::KILL);
     } else {

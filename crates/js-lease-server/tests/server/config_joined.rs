@@ -319,7 +319,10 @@ async fn capabilities_decide_both_the_fit_and_the_admission() {
     body["capabilities"] = json!({ "os": "linux" });
     let refused = agent_call(&h, "/v1/agent/hello", &token, &body).await;
     assert_eq!(refused.status, 403, "{}", refused.body);
-    assert_eq!(refused.json()["error"], "shape-not-accepted");
+    assert_eq!(
+        refused.json(),
+        json!({ "error": "shape-not-accepted", "reason": "below-floor" })
+    );
 }
 
 /// Asserts that a bad `capabilities` table is refused naming it: a value that is not text,
