@@ -70,3 +70,54 @@ fn the_usage_crate_takes_plain_values_and_knows_no_wire_or_server() {
         assert!(!names("js-usage", module), "{module}");
     }
 }
+
+/// Every Rust source file under `crates/` (each crate's `src`, `tests` and anything else it
+/// holds), with its text.
+fn workspace_sources() -> Vec<(PathBuf, String)> {
+    let mut files = Vec::new();
+    let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("..")];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = fs::read_to_string(&path).unwrap();
+                files.push((path, text));
+            }
+        }
+    }
+    files
+}
+
+/// The names of the deleted layer of pools that `text` uses: the type, its source and the
+/// module path. Spelled in parts, so that this file names none of them.
+fn layered_names(text: &str) -> Vec<String> {
+    let names = [
+        format!("{}{}", "Layered", "Provider"),
+        format!("{}{}", "Layered", "Source"),
+        format!("{}{}", "layered", "::"),
+    ];
+    names
+        .into_iter()
+        .filter(|name| text.contains(name))
+        .collect()
+}
+
+/// Asserts that no crate names the layer of pools that walked a fixed order (static pool,
+/// then registered hosts), which the engine's walk of the Default platform's machine
+/// providers replaced: neither the type, nor its source, nor its module. The check finds each
+/// name in a text that uses it and none in one that does not. It catches the layer, or a use
+/// of it, coming back beside the walk.
+#[test]
+fn no_crate_names_the_deleted_layered_provider() {
+    let import = format!("use crate::{}::{}{};", "layered", "Layered", "Provider");
+    assert_eq!(layered_names(&import).len(), 2);
+    assert!(layered_names("let ranked = rank(&order, binding);").is_empty());
+    let named: Vec<String> = workspace_sources()
+        .into_iter()
+        .filter(|(_, text)| !layered_names(text).is_empty())
+        .map(|(path, _)| path.display().to_string())
+        .collect();
+    assert!(named.is_empty(), "{named:?}");
+}

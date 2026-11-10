@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
+use js_types::ProviderId;
 
 use super::{Config, CpuSlack, Hosts};
 use crate::agent_tokens::AgentTokens;
@@ -35,6 +36,11 @@ pub(crate) struct AgentSetup {
     /// The clock and id source the job store is opened on: the system's, unless
     /// [`crate::Config::with_job_sources`] gave others.
     pub(crate) job_sources: JobSources,
+    /// The machine providers of the pool's Default platform, first to last, as the bindings of
+    /// its hosts name them ([`crate::sched::rank::order_of`]); `None` when the configuration
+    /// names no platform for the pool, and the order is `static`, then the pool's launched
+    /// hosts ([`crate::sched::rank::static_then`]).
+    pub(crate) providers: Option<Vec<ProviderId>>,
 }
 
 impl Config {

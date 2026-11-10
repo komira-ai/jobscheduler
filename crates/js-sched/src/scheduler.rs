@@ -16,6 +16,7 @@ mod matches;
 pub(crate) mod memory;
 mod outage;
 mod phase;
+mod rank;
 mod recover;
 mod snapshot;
 mod state;

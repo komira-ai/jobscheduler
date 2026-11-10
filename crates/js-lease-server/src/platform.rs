@@ -3,8 +3,9 @@
 //!
 //! For `default` the job engine books each job's allocation on a host, so the platform
 //! answers only the three required calls of [`ContainerPlatform`]; the five calls of a job's
-//! life keep their default answer. The server still runs a fixed order,
-//! registered hosts and then the elastic provider; this type is what that order becomes.
+//! life keep their default answer. The job pass places on the hosts of the platform's machine
+//! providers in the order it lists them (`crate::sched::rank`); this type answers admission
+//! over the same providers.
 
 use std::sync::Arc;
 

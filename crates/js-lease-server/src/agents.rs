@@ -44,6 +44,7 @@ use crate::logs::{self, LogGrants};
 use crate::metrics::Meter;
 use crate::rate::HelloLimiter;
 use crate::sched::place::SchedPlacer;
+use crate::sched::rank::static_then;
 use crate::store::ServerStore;
 use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
@@ -112,6 +113,10 @@ pub(crate) struct Agents {
     /// The gate of the server's pass over the queued jobs ([`Agents::place_jobs`]): one pass
     /// at a time, from its read of the open hosts to its last taint.
     pub(crate) placing: Mutex<()>,
+    /// The machine providers of the pool's Default platform, first to last, as the bindings of
+    /// its hosts name them: the order the pass offers the hosts in
+    /// ([`crate::sched::rank`]).
+    pub(crate) providers: Vec<ProviderId>,
 }
 
 /// Why a cordon or its lift was not done, or not saved.
@@ -241,6 +246,7 @@ fn placed_in(
                 job_limits,
                 jobs,
                 job_sources,
+                providers,
             } = *agents;
             let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
             let joins = joins.requiring_credential(require_host_credential);
@@ -251,6 +257,7 @@ fn placed_in(
             let (pool, memory) = split(pool);
             let placer = placer(max_lease_wall, cpu_slack, memory, clock);
             let registry = Registry::new(pool, clock.clone(), placer.clone());
+            let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
             let usage = usage.build(clock, limits)?;
             // The one job store of the server, when the job service is on. It is opened
             // before the bindings are put back: a host a host job tainted whose binding lost
@@ -292,6 +299,7 @@ fn placed_in(
                 meter: OnceLock::new(),
                 fence: Fence::new(),
                 placing: Mutex::default(),
+                providers,
             };
             Ok(((listed, Some(Arc::new(agents))), Some(placer)))
         }
@@ -321,6 +329,7 @@ impl Agents {
             burst: 5,
             interval: std::time::Duration::from_secs(1),
         };
+        let providers = static_then(&registry.pool_id());
         Self {
             registry,
             tokens: AgentTokens::open(&tokens, &client).unwrap(),
@@ -343,6 +352,7 @@ impl Agents {
             meter: OnceLock::new(),
             fence: Fence::new(),
             placing: Mutex::default(),
+            providers,
         }
     }
 

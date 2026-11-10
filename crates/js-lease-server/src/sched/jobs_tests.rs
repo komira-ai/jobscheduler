@@ -70,6 +70,7 @@ pub(super) fn open_hosts(names: &[&str], host_jobs: bool) -> BTreeMap<HostId, Op
     let offer = OpenHost {
         ceiling: NetworkCeiling::default(),
         host_jobs,
+        rank: None,
     };
     names
         .iter()

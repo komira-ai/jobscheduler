@@ -283,11 +283,12 @@
 //! A pool with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables:
 //! a machine provider made from its provider table, the `static` machine provider, and a
 //! `default` platform naming the two, `static` first. Their names start with `+`, which no
-//! name in the file may hold. This version keeps the one fixed order of hosts, registered
-//! hosts first and then the elastic provider: a platform that lists a launching machine
-//! provider before `static` is refused, and a pool's platforms must reach exactly one
-//! machine provider that launches. `max_queue_wait`, `start_timeout` and `path_grace` (each
-//! a positive duration) and the `provider_limits` tables (for a launching machine provider
+//! name in the file may hold. The job pass places a job on a free host of the first machine
+//! provider in the order the pool lists its platforms and each platform its
+//! `machine_providers` (any order, a launching provider before `static` included), and only
+//! when none of an earlier provider can take it on one of a later provider; a pool's
+//! platforms must reach exactly one machine provider that launches. `max_queue_wait`, `start_timeout`
+//! and `path_grace` (each a positive duration) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
 //! below); `quota_backoff` and `acquire_retry` (1h and 60s by default) time pass 2's failover;
