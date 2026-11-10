@@ -3,7 +3,8 @@
 use super::*;
 
 /// Asserts each invariant's name and when it is checked (the five of a job, the five of an
-/// elastic pool's cloud, the two of the usage history and the one of a cordon too), and each
+/// elastic pool's cloud, the two of the usage history, the one of a cordon and the four of the
+/// walk over a pool's machine providers too), and each
 /// way an item ends' name, as the failure lines spell them. Catches a renamed invariant
 /// (a scenario's recorded failure would stop matching) and two answers spelled alike.
 #[test]
@@ -39,6 +40,10 @@ fn names_are_stable_and_distinct() {
             ("usage-row-per-ended-allocation", Checked::AtEnd),
             ("usage-totals-match-terminal-jobs", Checked::AtEnd),
             ("cordon-never-kills-running-job", Checked::EveryStep),
+            ("provider-order", Checked::EveryStep),
+            ("no-second-launch-for-one-acquire", Checked::EveryStep),
+            ("quota-pass-over-honoured", Checked::EveryStep),
+            ("free-host-beats-acquire", Checked::EveryStep),
         ]
     );
     let ends: Vec<&str> = HowEnded::ALL.iter().map(|h| h.name()).collect();

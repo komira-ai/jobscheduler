@@ -8,8 +8,11 @@
 //! hands the scaler the pool's [`Cloud`]: the fake behind a recording wrapper, which
 //! forwards every call and writes down each acquire, release and list with its arguments, its
 //! answer and the virtual time of its step ([`CloudCall`]). A kind is a plain function,
-//! so the node leaves the cloud in a thread-local slot just before the file is read and
-//! the kind takes it from there, on the same thread: that is the only read of the slot.
+//! so the node leaves its clouds in a thread-local slot just before the file is read and
+//! the kind takes one from there, on the same thread: that is the only read of the slot.
+//! A server of [`crate::ServerSpec::ordered`] has one cloud for each of its launching
+//! machine providers ([`Cloud::ordered`]), each table of the kind taking the cloud its key
+//! `cloud` names.
 //! The scaler draws its acquire ids, and so its machines' names, from the seed
 //! ([`SeededEntropy`], through `Config::with_entropy`).
 //!
@@ -32,7 +35,9 @@
 //! join ([`ElasticPool::joins`]): its bearer is that token, its host id that name, its
 //! hello names the instance `<pool>:<name>` that the token is bound to, and it announces
 //! the server's shape with the capabilities of the boot script's agent (a container
-//! runtime and the GPU toolkit). The node is named `m000`, `m001`, ... in launch order.
+//! runtime and the GPU toolkit). The node is named `m000`, `m001`, ... in its cloud's
+//! launch order, after the provider's name and a dash for a cloud of
+//! [`crate::ServerSpec::ordered`] (`lambda-m000`).
 //! A machine the fake preempts, drops or releases has its agent killed in the same step:
 //! its host is gone, not a fault.
 //!
@@ -57,7 +62,7 @@ pub use cloud::{Cloud, offer};
 pub use entropy::SeededEntropy;
 pub use facts::{CloudFacts, Machine};
 pub use payload::Payload;
-pub use record::{AcquireAnswer, CloudCall, CloudEvent, ReleaseAnswer};
+pub use record::{AcquireAnswer, AcquireSeen, CloudCall, CloudEvent, EarlierSeen, ReleaseAnswer};
 
 /// How long a host of an elastic pool stays quiet before the scaler drains and releases
 /// it, unless [`ElasticPool::idle`] says otherwise (the pool key `idle`).
@@ -69,6 +74,14 @@ pub const MIN_HOST_LIFETIME: Duration = Duration::from_secs(60);
 
 /// The age at which the scaler retires a machine (the pool key `max_age`).
 pub const MAX_AGE: Duration = Duration::from_secs(2 * 3_600);
+
+/// How long pass 2 passes over an instance type in a region after a `quota` refusal, unless
+/// [`ElasticPool::failover`] says otherwise: the server's default `quota_backoff`.
+pub const DEFAULT_QUOTA_BACKOFF: Duration = Duration::from_secs(3_600);
+
+/// How long a request every provider refused waits before the first is asked again, unless
+/// [`ElasticPool::failover`] says otherwise: the server's default `acquire_retry`.
+pub const DEFAULT_ACQUIRE_RETRY: Duration = Duration::from_secs(60);
 
 /// One offer of an elastic pool's cloud: its id, its zone and its price. Every offer is
 /// a machine of the server's shape ([`crate::Shape`]), of the `linux` and `x86_64` kind,
@@ -107,6 +120,8 @@ pub struct ElasticPool {
     idle: Duration,
     knobs: Knobs,
     joins: bool,
+    quota_backoff: Duration,
+    acquire_retry: Duration,
 }
 
 impl ElasticPool {
@@ -134,7 +149,20 @@ impl ElasticPool {
             idle: DEFAULT_IDLE,
             knobs: Knobs::default(),
             joins: true,
+            quota_backoff: DEFAULT_QUOTA_BACKOFF,
+            acquire_retry: DEFAULT_ACQUIRE_RETRY,
         }
+    }
+
+    /// This pool, as one machine provider of a server of [`crate::ServerSpec::ordered`],
+    /// with the `provider_limits` `quota_backoff` and `acquire_retry` of the server's pool on
+    /// it. A server of [`crate::ServerSpec::elastic_pool`] writes neither, and takes the
+    /// server's defaults ([`DEFAULT_QUOTA_BACKOFF`], [`DEFAULT_ACQUIRE_RETRY`]).
+    #[must_use]
+    pub fn failover(mut self, quota_backoff: Duration, acquire_retry: Duration) -> Self {
+        self.quota_backoff = quota_backoff;
+        self.acquire_retry = acquire_retry;
+        self
     }
 
     /// This pool, whose quiet hosts are drained and released after `idle`.
@@ -199,5 +227,17 @@ impl ElasticPool {
     #[must_use]
     pub fn joined(&self) -> bool {
         self.joins
+    }
+
+    /// How long an instance type in a region is passed over after a `quota` refusal.
+    #[must_use]
+    pub fn quota_backoff(&self) -> Duration {
+        self.quota_backoff
+    }
+
+    /// How long a request every provider refused waits before the first is asked again.
+    #[must_use]
+    pub fn acquire_retry(&self) -> Duration {
+        self.acquire_retry
     }
 }

@@ -505,14 +505,14 @@ impl Cell {
         self.agents
     }
 
-    /// Every agent's counts added together, and the elastic pool's cloud's
+    /// Every agent's counts added together, and those of each of the elastic pool's clouds
     /// ([`Cloud::counters`]).
     #[must_use]
     pub fn total_counters(&self) -> Counters {
         let agents = (0..self.agents).filter_map(|index| self.counters(index));
         let mut total = Counters::sum(agents);
-        let cloud = self.cloud().map(Cloud::counters);
-        cloud.iter().for_each(|counted| total.absorb(counted));
+        let clouds = self.clouds().iter().map(Cloud::counters);
+        clouds.for_each(|counted| total.absorb(&counted));
         total
     }
 

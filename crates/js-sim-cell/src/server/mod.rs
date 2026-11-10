@@ -50,6 +50,13 @@
 //! pool's brake has tripped (`Scaler::state`), the one read of the scaler's state the cell
 //! makes, and notes it with the cloud's calls.
 //!
+//! A server of [`ServerSpec::ordered`] reads its file the same way, over one [`Cloud`] for
+//! each of its pool's launching machine providers ([`Cloud::ordered`]), made at its start
+//! and kept across a restart: every clock is advanced, and the brake, which is the pool's,
+//! is noted with the calls of each cloud. After the server starts (and after each restart)
+//! the node hands every cloud the server's registry ([`Cloud::watch`]), whose open hosts
+//! the cloud's wrapper reads at each acquire.
+//!
 //! # A restart
 //!
 //! [`ServerNode::restart`] stops the server and starts it again over the same directory and
@@ -196,9 +203,12 @@ pub struct ServerNode {
     calls: BTreeMap<CallKey, u64>,
     /// The ids the job store mints, kept across a restart.
     ids: Arc<ScriptedIds>,
-    /// The elastic pool's cloud, for a server of [`ServerSpec::elastic_pool`], kept across
-    /// a restart.
-    cloud: Option<Cloud>,
+    /// The elastic pool's cloud, for a server of [`ServerSpec::elastic_pool`], or the cloud
+    /// of each launching machine provider, first to last, for a server of
+    /// [`ServerSpec::ordered`]; kept across a restart.
+    clouds: Vec<Cloud>,
+    /// The name of the server's pool, whose brake the node reads.
+    pool: String,
     /// What the scaler draws its acquire ids from, kept across a restart.
     entropy: Arc<dyn SessionSource>,
     /// The store the server keeps its state in, kept across a restart; dropped after the
@@ -258,14 +268,15 @@ impl ServerNode {
         now: FarmTime,
     ) -> Result<Self, StartupError> {
         let clock = ManualClock::new(wall_time(now));
-        let cloud = spec.elastic().map(|pool| Cloud::new(pool, spec.shape()));
+        let clouds = clouds_of(spec);
         let entropy: Arc<dyn SessionSource> = Arc::new(SeededEntropy::new(seed));
-        let config = configure(spec, dir.path(), &clock, cloud.as_ref(), &entropy, &store)?;
+        let config = configure(spec, dir.path(), &clock, &clouds, &entropy, &store)?;
         let tick = config.tick_period();
         let mut build = tokio::runtime::Builder::new_current_thread();
         let runtime = build.build().map_err(StartupError::because("runtime"))?;
         let ids = Arc::new(seeded(seed));
         let up = Up::start(config, &clock, &ids, &runtime)?;
+        watch(&clouds, &up);
         Ok(Self {
             up: Some(up),
             runtime,
@@ -274,7 +285,8 @@ impl ServerNode {
             out: Vec::new(),
             calls: BTreeMap::new(),
             ids,
-            cloud,
+            clouds,
+            pool: spec.pool().to_owned(),
             entropy,
             store,
             dir,
@@ -292,9 +304,11 @@ impl ServerNode {
     pub fn restart(&mut self, spec: &ServerSpec) -> Result<(), StartupError> {
         self.stop();
         let spec = spec.clone().resuming();
-        let (cloud, dir) = (self.cloud.as_ref(), self.dir.path());
-        let config = configure(&spec, dir, &self.clock, cloud, &self.entropy, &self.store)?;
-        self.up = Some(Up::start(config, &self.clock, &self.ids, &self.runtime)?);
+        let (clouds, dir) = (&self.clouds, self.dir.path());
+        let config = configure(&spec, dir, &self.clock, clouds, &self.entropy, &self.store)?;
+        let up = Up::start(config, &self.clock, &self.ids, &self.runtime)?;
+        watch(clouds, &up);
+        self.up = Some(up);
         Ok(())
     }
 
@@ -349,23 +363,31 @@ impl ServerNode {
         self.runtime.block_on(call(router, request))
     }
 
-    /// The elastic pool's cloud, for a server of [`ServerSpec::elastic_pool`].
+    /// The elastic pool's cloud, for a server of [`ServerSpec::elastic_pool`]; the first
+    /// launching machine provider's, for a server of [`ServerSpec::ordered`].
     #[must_use]
     pub fn cloud(&self) -> Option<&Cloud> {
-        self.cloud.as_ref()
+        self.clouds.first()
+    }
+
+    /// Every cloud of the server, first to last ([`ServerNode::cloud`] is the first): none
+    /// for a server without an elastic pool.
+    #[must_use]
+    pub fn clouds(&self) -> &[Cloud] {
+        &self.clouds
     }
 
     /// Asks the server's scaler to reset the brake of the elastic pool, as an operator
-    /// does, and notes the reset with the cloud's calls; the scaler applies it at its
+    /// does, and notes the reset with the calls of each cloud; the scaler applies it at its
     /// next tick. `false`, and nothing recorded, for a server that is down or has no
     /// elastic pool.
     pub fn reset_brake(&self) -> bool {
         let scaler = self.server().and_then(InProcess::scaler);
-        let (Some(cloud), Some(scaler)) = (&self.cloud, scaler) else {
+        let Some(scaler) = scaler.filter(|_| !self.clouds.is_empty()) else {
             return false;
         };
-        let reset = scaler.reset_brake(cloud.pool().name());
-        cloud.note_reset();
+        let reset = scaler.reset_brake(&self.pool);
+        self.clouds.iter().for_each(Cloud::note_reset);
         reset
     }
 
@@ -380,7 +402,7 @@ impl ServerNode {
     /// Sets the server's clock, and the cloud's, to virtual time `now`.
     fn set_clocks(&self, now: FarmTime) {
         self.clock.set(wall_time(now));
-        if let Some(cloud) = &self.cloud {
+        for cloud in &self.clouds {
             cloud.advance_to(now);
         }
     }
@@ -389,9 +411,11 @@ impl ServerNode {
     /// when that changed: read after every tick.
     fn read_brake(&self) {
         let scaler = self.server().and_then(InProcess::scaler);
-        if let (Some(cloud), Some(scaler)) = (&self.cloud, scaler) {
-            let tripped = scaler.state().records.tripped(cloud.pool().name());
-            cloud.note_brake(tripped);
+        if let Some(scaler) = scaler {
+            let tripped = scaler.state().records.tripped(&self.pool);
+            self.clouds
+                .iter()
+                .for_each(|cloud| cloud.note_brake(tripped));
         }
     }
 
@@ -513,7 +537,8 @@ impl StateMachine for ServerNode {
                     self.runtime.block_on(up.server.tick());
                 }
                 self.read_brake();
-                if self.cloud.as_ref().is_some_and(Cloud::take_crashed) {
+                let crashed = self.clouds.iter().filter(|cloud| cloud.take_crashed());
+                if crashed.count() > 0 {
                     self.stop();
                 }
                 self.arm();
@@ -532,20 +557,44 @@ impl ServerNode {
 }
 
 /// The configuration of the server `spec` describes, its files in `dir`, its state in
-/// `store`, on `clock`: over `cloud` and drawing the scaler's acquire ids from `entropy` for
-/// a node with an elastic pool's cloud, else from the spec's command line.
+/// `store`, on `clock`: over `clouds` and drawing the scaler's acquire ids from `entropy`
+/// for a node with an elastic pool, else from the spec's command line.
 fn configure(
     spec: &ServerSpec,
     dir: &std::path::Path,
     clock: &ManualClock,
-    cloud: Option<&Cloud>,
+    clouds: &[Cloud],
     entropy: &Arc<dyn SessionSource>,
     store: &StoreAt,
 ) -> Result<Config, StartupError> {
-    match cloud {
-        Some(cloud) => spec.elastic_config(dir, clock, cloud, entropy.clone(), store),
-        None => spec.config_over(dir, clock, store),
+    match clouds.is_empty() {
+        false => spec.elastic_config(dir, clock, clouds, entropy.clone(), store),
+        true => spec.config_over(dir, clock, store),
     }
+}
+
+/// The clouds of a server of `spec`: its elastic pool's, for [`ServerSpec::elastic_pool`];
+/// one for each machine provider, first to last, each knowing the ones before it, for
+/// [`ServerSpec::ordered`]; none otherwise.
+fn clouds_of(spec: &ServerSpec) -> Vec<Cloud> {
+    let mut clouds: Vec<Cloud> = spec
+        .elastic()
+        .map(|pool| Cloud::new(pool, spec.shape()))
+        .into_iter()
+        .collect();
+    for pool in spec.providers() {
+        let cloud = Cloud::ordered(pool, spec.shape(), &clouds);
+        clouds.push(cloud);
+    }
+    clouds
+}
+
+/// Hands each of `clouds` the registry of the server `up` runs.
+fn watch(clouds: &[Cloud], up: &Up) {
+    let registry = up.server.registry();
+    clouds
+        .iter()
+        .for_each(|cloud| cloud.watch(registry.clone()));
 }
 
 /// The answer of a server that is down: 503, with no body.

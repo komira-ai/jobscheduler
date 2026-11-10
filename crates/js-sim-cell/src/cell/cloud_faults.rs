@@ -11,7 +11,11 @@
 //!   unknown-hold=<ms>`, `-` for no limit;
 //! - `cloud foreign named <added>` or `cloud foreign unnamed <added>`;
 //! - `cloud never-join <pool> <never> <applied>`;
-//! - `cloud brake reset route <status>`, after the client call's own line.
+//! - `cloud brake reset route <status>`, after the client call's own line;
+//! - for one named cloud of a server of [`crate::ServerSpec::ordered`], `cloud <provider>
+//!   script <call> <step>,<step>...`, `cloud <provider> exhaust` and `cloud <provider>
+//!   quota-refuse <offer> <zone>` (`-` for no zone), each followed by `applied` or `none`
+//!   (no cloud of that name).
 //!
 //! None holds a payload, a token, a machine's name or an id the cloud generated. A cell
 //! without an elastic pool writes the line and changes nothing.
@@ -53,6 +57,47 @@ impl Cell {
             .for_each(|fake| fake.script_forever(call, step));
         let (call, step) = (call_name(call), step_name(step));
         self.record(format!("cloud script {call} forever {step}"));
+        self.check(Touched::nothing());
+    }
+
+    /// Queues `steps` for the calls of kind `call` of the cloud named `provider`
+    /// ([`Cell::cloud_named`]), as [`Cell::script_provider`] does for the first, and checks.
+    pub fn script_provider_by_name(&mut self, provider: &str, call: Call, steps: &[Step]) {
+        let fake = self.cloud_named(provider).map(|cloud| cloud.fake().clone());
+        let applied = applied(fake.as_ref());
+        fake.into_iter().for_each(|fake| fake.script(call, steps));
+        let named: Vec<&str> = steps.iter().map(|step| step_name(*step)).collect();
+        let (call, steps) = (call_name(call), named.join(","));
+        self.record(format!("cloud {provider} script {call} {steps} {applied}"));
+        self.check(Touched::nothing());
+    }
+
+    /// Makes every acquire of the cloud named `provider` refuse for `capacity`, whatever
+    /// its offer, for good or until its acquires are scripted to repeat another step
+    /// (`ElasticFake::script_forever`), and checks.
+    pub fn exhaust_provider(&mut self, provider: &str) {
+        let fake = self.cloud_named(provider).map(|cloud| cloud.fake().clone());
+        let applied = applied(fake.as_ref());
+        let capacity = Step::Refuse(RefusalCode::Capacity);
+        fake.into_iter()
+            .for_each(|fake| fake.script_forever(Call::Acquire, capacity));
+        self.record(format!("cloud {provider} exhaust {applied}"));
+        self.check(Touched::nothing());
+    }
+
+    /// Makes the cloud named `provider` refuse every acquire of offer `offer` in `zone`
+    /// for `quota` from now on ([`Cloud::quota_refuse`]): a zone is its own region, as the
+    /// server reads them. Checks.
+    pub fn quota_refuse(&mut self, provider: &str, offer: &str, zone: Option<&str>) {
+        let cloud = self.cloud_named(provider).cloned();
+        let applied = applied(cloud.as_ref());
+        cloud
+            .into_iter()
+            .for_each(|cloud| cloud.quota_refuse(offer, zone));
+        let zone = zone.unwrap_or("-");
+        self.record(format!(
+            "cloud {provider} quota-refuse {offer} {zone} {applied}"
+        ));
         self.check(Touched::nothing());
     }
 
@@ -98,7 +143,7 @@ impl Cell {
 
     /// Asks the server to reset the brake of pool `pool` as an operator does, through its
     /// route `POST /v1/pools/{pool}/brake/reset` with the client token, and notes the reset
-    /// with the cloud's calls when the server accepted it (202; the scaler applies it at
+    /// with the calls of each cloud when the server accepted it (202; the scaler applies it at
     /// its next tick), then checks: the answer's status (0 when no server answered).
     pub fn reset_brake_by_route(&mut self, pool: &str) -> u16 {
         let request = Request::builder()
@@ -112,11 +157,19 @@ impl Cell {
         let answer = self.client_call(request);
         let status = answer.map_or(0, |answer| answer.status().as_u16());
         if status == RESET_ACCEPTED {
-            self.cloud().into_iter().for_each(Cloud::note_reset);
+            self.clouds().iter().for_each(Cloud::note_reset);
         }
         self.record(format!("cloud brake reset route {status}"));
         self.check(Touched::nothing());
         status
+    }
+}
+
+/// How a trace line says whether a change to a named cloud found the cloud.
+fn applied<T>(cloud: Option<&T>) -> &'static str {
+    match cloud {
+        Some(_) => "applied",
+        None => "none",
     }
 }
 

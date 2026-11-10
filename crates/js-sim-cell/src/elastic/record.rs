@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use js_elastic::{Acquired, RefusalCode, Released};
+use js_types::HostId;
 use js_types::sched::FarmTime;
 
 /// One call the server made to the cloud, or one reading of the pool's brake, at the
@@ -94,6 +95,49 @@ impl AcquireAnswer {
             Acquired::Deferred { wait } => AcquireAnswer::Deferred(*wait),
         }
     }
+}
+
+/// What the recording wrapper saw of the world at the moment of one acquire, besides the
+/// call itself: read inside the server's input that made the call, so nothing else changed
+/// it in between. The walk's invariants read it ([`crate::Invariant::ProviderOrder`],
+/// [`crate::Invariant::FreeHostBeatsAcquire`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcquireSeen {
+    /// The virtual time of the step.
+    pub at: FarmTime,
+    /// The offer's id.
+    pub offer: String,
+    /// The offer's zone.
+    pub zone: Option<String>,
+    /// The acquire id the scaler chose.
+    pub acquire: String,
+    /// What the cloud answered.
+    pub answer: AcquireAnswer,
+    /// The hosts the server's registry held open to a new job at the call: live, serving,
+    /// heard since their hello, not tainted, cordoned, set aside or still releasing a run.
+    /// Whether one held a job then is read from the job tables, not here.
+    pub open_hosts: Vec<HostId>,
+    /// Each machine provider of the pool before this one, first to last, as its cloud stood
+    /// at the call.
+    pub earlier: Vec<EarlierSeen>,
+}
+
+/// One machine provider before the one asked, as [`AcquireSeen`] saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EarlierSeen {
+    /// Its name.
+    pub provider: String,
+    /// The machines of this scheduler its cloud held: those it shows (running, booting,
+    /// preempted or still terminating) and those of an acquire with no answer yet that
+    /// launched nothing it shows. At least what the scaler counts against its share.
+    pub held: u64,
+    /// Its share of the pool: its `max_instances`.
+    pub max: u64,
+    /// Its offers, by id and zone, whose latest answer was not a definite refusal: an offer
+    /// never asked, last launched, last unanswered or deferred, or refused for `quota` more
+    /// than its `quota_backoff` ago. An offer last refused for `capacity`, or for `quota`
+    /// within the backoff, is not here.
+    pub open: Vec<(String, Option<String>)>,
 }
 
 /// What the cloud answered a release.
