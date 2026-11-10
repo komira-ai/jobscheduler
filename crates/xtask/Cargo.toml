@@ -73,6 +73,8 @@ js-mac-session = { path = "../js-mac-session" }
 # the job service.
 protox.workspace = true
 rcgen.workspace = true
+# The YAML parser the workflow lint of the apt jobs (tests/apt_workflow) reads each workflow with.
+saphyr-parser.workspace = true
 
 [lints]
 workspace = true

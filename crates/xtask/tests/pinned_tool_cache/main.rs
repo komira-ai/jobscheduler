@@ -27,7 +27,7 @@ use lint::{Site, jobs, lint};
 use std::path::Path;
 
 /// Every pinned tool fetch of the repository: `<file>/<job>` and its `--cache` path.
-const EXPECTED: [(&str, &str, &str); 4] = [
+const EXPECTED: [(&str, &str, &str); 3] = [
     ("ci.yml", "deny", "$RUNNER_TEMP/pinned/cargo-deny.tar.gz"),
     (
         "ci.yml",
@@ -38,11 +38,6 @@ const EXPECTED: [(&str, &str, &str); 4] = [
         "ci.yml",
         "coverage",
         "$RUNNER_TEMP/pinned/cargo-nextest.tar.gz",
-    ),
-    (
-        "js-agent-deb.yml",
-        "build",
-        "$RUNNER_TEMP/pinned/nfpm.tar.gz",
     ),
 ];
 
@@ -76,7 +71,7 @@ fn read(file: &str) -> String {
 }
 
 /// Asserts that every workflow of the repository keeps the rule, and that its fetches are
-/// exactly the four pinned tools in `EXPECTED`.
+/// exactly the three pinned tools in `EXPECTED`.
 #[test]
 fn every_pinned_tool_fetch_of_the_repository_keeps_the_rule() {
     let mut sites = Vec::new();
@@ -424,8 +419,7 @@ fn a_download_outside_fetch_and_a_shared_cache_path_are_refused() {
 
 /// Asserts that the repository's own workflows are refused with one line changed: ci.yml's
 /// coverage job without the restore before cargo-nextest, with its llvm-cov key missing the
-/// pin, or saving cargo-deny's archive on every outcome; and js-agent-deb.yml fetching nfpm
-/// without the cache.
+/// pin, or saving cargo-deny's archive on every outcome.
 #[test]
 fn the_repository_workflows_with_one_line_changed_are_refused() {
     let ci = read("ci.yml");
@@ -449,6 +443,4 @@ fn the_repository_workflows_with_one_line_changed_are_refused() {
         "if: steps.deny-cache.outputs.cache-hit != 'true'",
         "if: always()",
     );
-    let deb = read("js-agent-deb.yml");
-    one(&deb, " --cache \"$RUNNER_TEMP/pinned/nfpm.tar.gz\"", "");
 }
