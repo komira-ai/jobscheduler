@@ -7,7 +7,7 @@
 //! archive), adds `packages.komira.ai` with the published keyring (a binary `.gpg`, referred to by
 //! a deb822 `Signed-By`) and the suite `testing`, installs `js-agent=<version>`, and then holds the
 //! installed system to what the package promises: dpkg lists the package at the version, the
-//! binary's `--version` says `js-agent <version>`, every file of the package ([`FILES`]) is there,
+//! binary's `--version` says `js-agent <version>`, every file of the package ([`files`]) is there,
 //! and no unit is enabled and no `js-agent` process runs.
 //!
 //! The programs (`apt-get`, `dpkg`, `dpkg-query`, `curl`, the installed binary) run behind
@@ -24,18 +24,13 @@ use super::{Error, is_plain_version};
 /// Where the package puts the binary (below the root).
 pub const BINARY: &str = "usr/bin/js-agent";
 
-/// The eight files of the package, below the root, as the package lists them (the same paths, in
-/// the same order, as the table of `release deb`).
-pub const FILES: [&str; 8] = [
-    BINARY,
-    "usr/lib/systemd/system/js-agent-crun.service",
-    "usr/lib/systemd/system/js-agent-crun-gpu.service",
-    "usr/lib/tmpfiles.d/js-agent-crun.conf",
-    "usr/lib/systemd/system/js-agent.service",
-    "usr/lib/tmpfiles.d/js-agent.conf",
-    "usr/share/js-agent/crun_host_setup.sh",
-    "usr/share/doc/js-agent/copyright",
-];
+/// The files of the package below the root: the paths of `release deb`'s table
+/// ([`crate::release::deb::FILES`]), in its order.
+pub fn files() -> impl Iterator<Item = &'static str> {
+    crate::release::deb::FILES
+        .iter()
+        .map(|file| file.path.trim_start_matches('/'))
+}
 
 /// The units of the package: the package enables none of them.
 pub const UNITS: [&str; 3] = [
@@ -209,7 +204,7 @@ fn installed_problems(r: &Apt, installed: &str) -> Vec<String> {
             r.version
         ));
     }
-    for rel in FILES {
+    for rel in files() {
         if !r.root.join(rel).is_file() {
             problems.push(format!("the package's file /{rel} is not installed"));
         }
@@ -335,7 +330,7 @@ pub fn check_apt(host: &dyn Host, r: &Apt) -> Result<Vec<String>, Error> {
         "check-apt: {PACKAGE} {} installed from the suite testing on {}; it says {said:?}; its {} files are there; no unit is enabled and nothing runs",
         r.version,
         r.arch,
-        FILES.len()
+        crate::release::deb::FILES.len()
     )])
 }
 

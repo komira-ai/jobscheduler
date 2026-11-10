@@ -63,7 +63,7 @@ impl Machine {
     }
 
     fn install(&self) {
-        for rel in FILES {
+        for rel in files() {
             if !self.omit.contains(&rel) {
                 self.put(rel, b"file");
             }
@@ -180,17 +180,16 @@ fn a_package_missing_any_of_its_eight_files_is_named() {
     // Catches: a package that installs without the files the units and the setup script need.
     let dir = scratch("apt-files");
     let mut machine = Machine::new(&dir);
-    machine.omit = FILES.to_vec();
+    machine.omit = files().collect();
     let Err(Error::Refused(problems)) = check_apt(&machine, &apt(&dir)) else {
         panic!("not refused");
     };
-    let want: Vec<String> = FILES
-        .iter()
+    let want: Vec<String> = files()
         .map(|rel| format!("the package's file /{rel} is not installed"))
         .collect();
     assert_eq!(problems, want);
     assert_eq!(
-        FILES,
+        files().collect::<Vec<_>>(),
         [
             "usr/bin/js-agent",
             "usr/lib/systemd/system/js-agent-crun.service",

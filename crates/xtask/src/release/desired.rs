@@ -55,8 +55,8 @@ pub const PUBLISH_JOB: &str = "publish";
 pub const SUMS: &str = "SHA256SUMS";
 
 /// The directory of the repository's pool that holds the package, as a `Packages` stanza's
-/// `Filename` names it.
-pub const POOL_DIR: &str = "pool/jobscheduler";
+/// `Filename` names it: the publisher's own.
+pub use crate::channels::apt::state::POOL_DIR;
 
 /// Why `release desired` set nothing.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]

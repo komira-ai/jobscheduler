@@ -207,6 +207,9 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "packaging/js-agent/deb/js-agent-crun.service",
         "packaging/js-agent/deb/js-agent-crun-gpu.service",
         "packaging/js-agent/deb/tmpfiles.conf",
+        "packaging/js-agent/js-agent.service",
+        "packaging/js-agent/tmpfiles.conf",
+        "packaging/js-agent/crun_host_setup.sh",
     ] {
         assert!(is_shipped(path, &shipped), "{path} ships");
     }
@@ -228,6 +231,7 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "coverage-baseline",
         "deny.toml",
         "packaging/js-agent/js-agent-crun.service",
+        "packaging/js-agent/tmpfiles-crun.conf",
         "packaging/js-agent/updater.d/js-agent.toml",
         "packaging/js-agent-macos/updater.toml",
         "packaging/js-agent/updater.d/other.toml",

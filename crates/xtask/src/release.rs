@@ -15,7 +15,7 @@
 //! `examples/`, markdown and `Cargo.lock`; so do the root `Cargo.toml`, `Cargo.lock`,
 //! `rust-toolchain.toml` and everything under `.cargo/`, the host updater's declarations
 //! ([`stage::DECLARATIONS`]), which the js-lease-server archives carry as they are, and the
-//! files of the js-agent .deb ([`DEB_DIRS`]), which `release deb` compiles in.
+//! files of the js-agent .deb ([`DEB_DIRS`], [`DEB_FILES`]), which `release deb` compiles in.
 //! Everything else does not: docs,
 //! markdown, `.github/`, and the crates no shipped binary depends on (`xtask`,
 //! `js-coverage`, `js-conformance`). A file in one of the excluded places that a shipped
@@ -339,12 +339,22 @@ fn is_archived(path: &str) -> bool {
         .iter()
         .any(|(_, source)| *source == path)
         || (DEB_DIRS.iter().any(|dir| path.starts_with(dir)) && !path.ends_with(".md"))
+        || DEB_FILES.contains(&path)
 }
 
 /// The directories of the files the js-agent .deb is made of (the units and the tmpfiles file):
 /// `release deb` compiles them in, so a change to one is a change of a release asset; the
 /// markdown beside them is not compiled in and does not ship.
 pub const DEB_DIRS: [&str; 1] = ["packaging/js-agent/deb/"];
+
+/// The files outside [`DEB_DIRS`] the js-agent .deb carries as they are (the unit of a host
+/// without hostkeeper, its tmpfiles file and the host setup script): `release deb` compiles
+/// them in too. `LICENSE` is left aside, as for the archives.
+pub const DEB_FILES: [&str; 3] = [
+    "packaging/js-agent/js-agent.service",
+    "packaging/js-agent/tmpfiles.conf",
+    "packaging/js-agent/crun_host_setup.sh",
+];
 
 /// The directory at the root whose files (`config.toml`: rustflags, linker, build settings)
 /// change how every binary is built.
