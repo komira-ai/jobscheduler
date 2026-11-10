@@ -87,6 +87,7 @@ fn welcome_and_hello_reply_wire_forms() {
         code: "unsupported-protocol".into(),
         supported: Some(ProtocolRange { min: 2, max: 3 }),
         field: None,
+        reason: None,
     });
     assert_eq!(
         serde_json::to_value(&refused).unwrap(),
@@ -100,6 +101,7 @@ fn welcome_and_hello_reply_wire_forms() {
         code: "host-live".into(),
         supported: None,
         field: None,
+        reason: None,
     });
     assert_eq!(
         serde_json::to_value(&bare).unwrap(),
@@ -109,14 +111,29 @@ fn welcome_and_hello_reply_wire_forms() {
         code: refusal::HOST_CONTRACT.into(),
         supported: None,
         field: Some("runtime".into()),
+        reason: None,
     });
     assert_eq!(
         serde_json::to_value(&named).unwrap(),
         json!({"type": "refused", "code": "host-contract", "field": "runtime"})
     );
-    // A refusal an older server sent has no `field`; it reads as none.
+    let shaped = HelloReply::Refused(Refused {
+        code: refusal::SHAPE_NOT_ACCEPTED.into(),
+        supported: None,
+        field: None,
+        reason: Some(refusal::SHAPE_QUOTA_WITHOUT_DISK.into()),
+    });
+    assert_eq!(
+        serde_json::to_value(&shaped).unwrap(),
+        json!({
+            "type": "refused",
+            "code": "shape-not-accepted",
+            "reason": "quota-without-pool-disk"
+        })
+    );
+    // A refusal an older server sent has no `field` or `reason`; it reads as none.
     let old: Refused = serde_json::from_value(json!({"code": "host-live"})).unwrap();
-    assert_eq!(old.field, None);
+    assert_eq!((old.field, old.reason), (None, None));
 }
 
 /// Asserts the exact JSON of a start command, tag included. It catches a changed

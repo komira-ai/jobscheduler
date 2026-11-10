@@ -297,7 +297,8 @@ fn hello_reply_frame() -> impl Strategy<Value = HelloReply> {
         "[a-z][a-z-]{0,30}".prop_map(|code| HelloReply::Refused(Refused {
             code,
             supported: None,
-            field: None
+            field: None,
+            reason: None
         })),
     ]
 }

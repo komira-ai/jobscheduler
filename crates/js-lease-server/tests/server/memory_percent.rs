@@ -211,7 +211,10 @@ async fn a_hello_must_meet_the_listed_memory_not_the_cut() {
     )
     .await;
     assert_eq!(short.status, 403, "{}", short.body);
-    assert_eq!(short.json(), json!({ "error": "shape-not-accepted" }));
+    assert_eq!(
+        short.json(),
+        json!({ "error": "shape-not-accepted", "reason": "below-floor" })
+    );
     let exact = post(
         &h,
         "/v1/agent/hello",

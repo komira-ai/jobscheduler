@@ -149,6 +149,7 @@ fn refused_hello_is_fatal_per_code() {
             code: code.to_owned(),
             supported: None,
             field: None,
+            reason: None,
         };
         assert_eq!(session.tick(), Step::Fatal(fatal), "{status} {code}");
         assert_eq!(paths(&sent), [HELLO_PATH], "{status} {code}");
@@ -167,6 +168,7 @@ fn refused_hello_is_fatal_per_code() {
             code: code.to_owned(),
             supported: None,
             field: None,
+            reason: None,
         };
         assert_eq!(session.tick(), Step::Fatal(fatal));
         assert_eq!(sent.borrow().len(), 2);
@@ -205,6 +207,55 @@ fn a_host_contract_refusal_carries_the_capability_at_fault() {
             None => assert!(!said.contains("capability at fault"), "{said}"),
         }
     }
+}
+
+/// Asserts that a `shape-not-accepted` refusal reaches the caller with the reason the
+/// server named, and prints it after the code; that a reason that is not a plain token is
+/// dropped (the code stays); and that a refusal from a server that sends none, as every
+/// older server, prints exactly as before. It catches an agent that throws the reason
+/// away, so an operator cannot tell which condition the pool refused the host for.
+#[test]
+fn a_shape_refusal_carries_the_reason_at_fault() {
+    let cases = [
+        (
+            json!("quota-without-pool-disk"),
+            Some("quota-without-pool-disk"),
+        ),
+        (json!("below-floor"), Some("below-floor")),
+        (json!("has a space"), None),
+        (json!(""), None),
+        (json!(7), None),
+    ];
+    for (sent, expected) in cases {
+        let body = json!({ "error": "shape-not-accepted", "reason": sent });
+        let (mut transport, _) = script(vec![reply(403, body)]);
+        let mut session = Session::new(hello("h1"), &mut transport, lowest());
+        let Step::Fatal(fatal) = session.tick() else {
+            panic!("a shape-not-accepted refusal must be fatal");
+        };
+        assert_eq!(fatal.code, "shape-not-accepted");
+        assert_eq!(fatal.reason.as_deref(), expected, "{sent}");
+        let want = match expected {
+            Some(reason) => format!(
+                "the server refused the hello with status 403 (shape-not-accepted, reason \
+                 {reason}); not retrying"
+            ),
+            None => "the server refused the hello with status 403 (shape-not-accepted); not \
+                     retrying"
+                .to_owned(),
+        };
+        assert_eq!(fatal.to_string(), want, "{sent}");
+    }
+    let (mut transport, _) = script(vec![refused(403, "shape-not-accepted")]);
+    let mut session = Session::new(hello("h1"), &mut transport, lowest());
+    let Step::Fatal(fatal) = session.tick() else {
+        panic!("a shape-not-accepted refusal must be fatal");
+    };
+    assert_eq!(fatal.reason, None);
+    assert_eq!(
+        fatal.to_string(),
+        "the server refused the hello with status 403 (shape-not-accepted); not retrying"
+    );
 }
 
 /// Asserts that an `unsupported-protocol` refusal reaches the caller with the majors the

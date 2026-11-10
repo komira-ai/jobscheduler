@@ -260,6 +260,27 @@ It must be a regular file, owned by root, mode 0600 or 0400. Place the file with
 section 3. The hook reads the path from the package's params, which is `/etc/js-agent/token`. hostkeeper retries on its own; there is nothing to restart. `hostkeeper admin
 status` and `releases status --service js-agent` (section 7) show where the install stands.
 
+### The server refuses the hello with shape-not-accepted
+
+The agent exits with status 2 and prints, for example,
+`the server refused the hello with status 403 (shape-not-accepted, reason quota-without-pool-disk); not retrying`.
+The server logs the same refusal with the host id, the code and the reason. The reason says which
+condition failed; fix the pool file (`--agent-pool-config` on the server) or the host's flags, then
+restart the one that changed.
+
+| reason | meaning | fix |
+|---|---|---|
+| `below-floor` | the shape, labels or capabilities the host reports do not meet the pool's `[shape]` and `[capabilities]`: less CPU, memory, disk or GPUs than the pool books, another GPU class, or a capability the pool names that the host lacks or reports with another value (including `scratch-quota`) | make the pool file match what the host reports, or give the node the resources and flags the pool names |
+| `quota-default-unfit` | the pool names `scratch-quota` and the host's `scratch-default-gib` is absent, zero, above the wire maximum, or more than the pool's `disk_bytes` | set the host's `--scratch-default-gib` (default 2) to at most the pool's `disk_bytes`, or raise `disk_bytes` |
+| `quota-without-pool-disk` | the host runs with `--scratch-quota`, and the pool books no disk (`disk_bytes` zero or absent) and does not name `scratch-quota` | see below |
+
+For `quota-without-pool-disk`, either make the pool match the host or run the host without
+`--scratch-quota`. To keep the quota, the pool file must name `scratch-quota = "project"` under
+`[capabilities]` and book `disk_bytes` under `[shape]` of at least the host's `scratch-default-gib`
+(2 GiB when the flag is not given) and at most the disk the host reports. A pool that names
+`scratch-quota` without `disk_bytes` is refused when the server loads the file. Otherwise remove
+`--scratch-quota` from the node's flags file and restart the agent.
+
 ## 9. The release trust entry
 
 hostkeeper installs only what a trusted workflow attested. The channel-sync that stages

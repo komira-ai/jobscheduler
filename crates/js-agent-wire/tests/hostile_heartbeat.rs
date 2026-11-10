@@ -328,6 +328,7 @@ fn refusal_and_hello_reply_are_checked() {
         code: code.into(),
         supported,
         field: None,
+        reason: None,
     };
     let code = refusal::INVALID_WELCOME;
     for bad in ["", "a b", "A\0"] {
@@ -366,6 +367,23 @@ fn refusal_and_hello_reply_are_checked() {
             .validate()
             .unwrap_err(),
         "field",
+        Rule::TooLong,
+        code,
+    );
+    let reasoned = |reason: &str| Refused {
+        reason: Some(reason.into()),
+        ..refused(refusal::SHAPE_NOT_ACCEPTED, None)
+    };
+    assert_eq!(
+        reasoned(refusal::SHAPE_QUOTA_WITHOUT_DISK).validate(),
+        Ok(())
+    );
+    for bad in ["", "a b", "A\0"] {
+        assert_eq!(reasoned(bad).validate().unwrap_err().code(), code);
+    }
+    expect(
+        reasoned(&long(MAX_CODE_LEN + 1)).validate().unwrap_err(),
+        "reason",
         Rule::TooLong,
         code,
     );

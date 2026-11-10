@@ -309,9 +309,10 @@ pub(super) fn agent_step(step: Step) -> js_agent::update_hook::Step {
 ///   flag on a rollback that succeeded);
 /// - a cordon placed by a `prepare` killed before the record confirmed it is taken for one that
 ///   may be an operator's and left to lapse (prepare.rs, `place`): the cordon is the fake
-///   server's `cordon.json`, and the record holds it as its own while [`OWNED_CORDON`] is there;
-/// - on a first install, a `rollback` after `cutover` fails `no_previous_release` rather than
-///   stop an agent that may hold a job (rollback.rs, item 3).
+///   server's `cordon.json`, and the record holds it as its own while [`OWNED_CORDON`] is there.
+///
+/// A first install's `rollback` after `cutover` takes no allowance: it stops the agent and
+/// succeeds (rollback.rs, item 3), as the harness requires of every rollback.
 pub(super) fn allowances() -> Allowances {
     Allowances {
         rollback_rerun_may_say_reversible: true,
@@ -319,7 +320,7 @@ pub(super) fn allowances() -> Allowances {
             paths: vec![PathBuf::from("cordon.json")],
             ownership: vec![PathBuf::from(OWNED_CORDON)],
         }),
-        first_install_rollback_may_fail: true,
+        first_install_rollback_may_fail: false,
     }
 }
 
@@ -776,9 +777,9 @@ fn every_last_line_and_exit_code_of_the_hook_is_the_harness_contract() {
 
 /// A first install through the updater's table: success, a `prepare` deferred because the join
 /// token file is not right (retried in `defer_retry_secs`, with the rollback of the table
-/// finding nothing to undo), and every fault the fake can make on a first install that leads to
-/// no rollback after the link moved, or to one that is itself made to fail. Each ends with the
-/// verdict the table gives it.
+/// finding nothing to undo), and every fault the fake can make on a first install, a failed
+/// `cutover` or `verify` rolled back with success among them. Each ends with the verdict the
+/// table gives it.
 #[test]
 fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
     use hostkeeper_hook::{Class, Phase, Verdict};
@@ -786,7 +787,7 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
         phase,
         class: Class::Release,
     };
-    let cases: [(&[(Step, Fault)], Verdict); 9] = [
+    let cases: [(&[(Step, Fault)], Verdict); 10] = [
         (
             &[],
             Verdict::Succeeded {
@@ -806,13 +807,17 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
         // The state directory cannot be looked at: `cleanup` fails after the commit, is retried,
         // and the update ends failed after the commit, with no rollback.
         (&[(Step::Cleanup, Fault::Fail)], failed(Phase::AfterCommit)),
-        (
-            &[(Step::Cutover, Fault::Fail), (Step::Rollback, Fault::Fail)],
-            failed(Phase::AfterCommit),
-        ),
+        // The rollback succeeds and reports what the failed step made of the update.
+        (&[(Step::Cutover, Fault::Fail)], failed(Phase::AfterCommit)),
+        (&[(Step::Verify, Fault::Fail)], failed(Phase::AfterCommit)),
+        // The agent is up and the lease server does not answer: nothing is stopped, and the
+        // rollback fails `lease_unreachable`, an environment matter.
         (
             &[(Step::Verify, Fault::Fail), (Step::Rollback, Fault::Fail)],
-            failed(Phase::AfterCommit),
+            Verdict::Failed {
+                phase: Phase::AfterCommit,
+                class: Class::Environment,
+            },
         ),
     ];
     for (n, (faults, verdict)) in cases.into_iter().enumerate() {
@@ -825,6 +830,26 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
         .unwrap_or_else(|| panic!("{faults:?}: the fake cannot make it"));
         assert_eq!(trace.verdict, verdict, "{faults:?}: {:?}", trace.steps);
     }
+    // A cutover that fails leaves the unit down: the rollback asks the lease server nothing,
+    // so a server that does not answer cannot fail it, and it succeeds where the fault asked
+    // for a failure.
+    let unfailed = run(
+        "hook-conf-first-down",
+        AgentHost::first_install(),
+        |harness| harness.scenario(&[(Step::Cutover, Fault::Fail), (Step::Rollback, Fault::Fail)]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            unfailed,
+            Violation::UnexpectedOutcome {
+                step: Step::Rollback,
+                wanted: hostkeeper_hook::Outcome::Failure,
+                got: hostkeeper_hook::Outcome::Success,
+            }
+        ),
+        "{unfailed}"
+    );
     // What a first install has no way to end with.
     let made = run(
         "hook-conf-first-none",
@@ -835,55 +860,43 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
     assert_eq!(made, None);
 }
 
-/// What the harness still refuses on a first install, and only that: its crash-resume and its
-/// sequences run a `rollback` after `cutover` and require it to succeed, and the hook's fails
-/// `no_previous_release` by design (rollback.rs, item 3). The first-install allowance covers
-/// the `rollback` of the run-twice check alone (hostkeeper_hook::conformance::Allowances). Catches a
-/// first install that fails anything else on the way, and tells when the harness extends the
-/// allowance: then these become the checks themselves. The harness's refusal carries no
-/// reason; conformance_runs.rs drives the same paths without it and asserts the reason, the
-/// unchanged state and the updater's verdict, and kills the first install at every kill point.
+/// On a first install the harness's crash-resume and its sequences run a `rollback` after
+/// `cutover` and after `verify` and require it to succeed, with no allowance: the hook's stops
+/// the agent and succeeds (rollback.rs, item 3), from every kill point. Catches a first-install
+/// rollback that fails, or that a kill leaves in another state than an uninterrupted one.
 #[test]
-fn on_a_first_install_the_harness_refuses_only_the_designed_rollback_after_cutover() {
-    let designed = |refused: Violation| {
-        assert!(
-            matches!(
-                refused,
-                Violation::UnexpectedOutcome {
-                    step: Step::Rollback,
-                    wanted: hostkeeper_hook::Outcome::Success,
-                    got: hostkeeper_hook::Outcome::Failure,
-                }
-            ),
-            "{refused}"
-        );
-    };
-    designed(
-        run(
-            "hook-conf-first-resume",
-            AgentHost::first_install(),
-            |harness| harness.crash_resume(),
-        )
-        .unwrap_err(),
-    );
+fn on_a_first_install_the_harness_accepts_the_rollback_after_cutover_and_verify() {
+    let points = run(
+        "hook-conf-first-resume",
+        AgentHost::first_install(),
+        |harness| harness.crash_resume(),
+    )
+    .unwrap();
+    assert!(points > 0, "the steps reached no kill point");
     for (n, step) in [Step::Cutover, Step::Verify].into_iter().enumerate() {
-        designed(
-            run(
-                &format!("hook-conf-first-rb-{n}"),
-                AgentHost::first_install(),
-                |harness| harness.scenario(&[(step, Fault::Fail)]),
-            )
-            .unwrap_err(),
+        let trace = run(
+            &format!("hook-conf-first-rb-{n}"),
+            AgentHost::first_install(),
+            |harness| harness.scenario(&[(step, Fault::Fail)]),
+        )
+        .unwrap()
+        .unwrap_or_else(|| panic!("{step}: the fake cannot make it"));
+        assert_eq!(
+            trace.steps.last(),
+            Some(&(Step::Rollback, hostkeeper_hook::Outcome::Success)),
+            "{step}: {:?}",
+            trace.steps
         );
     }
 }
 
-/// Undeclared, each of the three behaviours is refused by the check that finds it: the
-/// allowances are what lets them through, and nothing else is.
+/// Undeclared, each of the two behaviours is refused by the check that finds it: the
+/// allowances are what lets them through, and nothing else is. A first install's run-twice
+/// check needs the first one only, as an update's does.
 #[test]
-fn without_the_allowances_the_harness_refuses_exactly_the_three_designed_behaviours() {
+fn without_the_allowances_the_harness_refuses_exactly_the_two_designed_behaviours() {
     let strict =
-        |name: &str, fake: AgentHost, check: &dyn Fn(&mut Conformance<'_>) -> Violation| {
+        |name: &str, fake: AgentHost, check: &dyn Fn(&mut Conformance<'_>) -> Option<Violation>| {
             let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
             let hook = hook();
             let first_install = fake.first_install;
@@ -897,8 +910,9 @@ fn without_the_allowances_the_harness_refuses_exactly_the_three_designed_behavio
             check(&mut harness)
         };
     let c1 = strict("hook-conf-strict-c1", AgentHost::update(), &|h| {
-        h.idempotence().unwrap_err()
-    });
+        h.idempotence().err()
+    })
+    .unwrap();
     assert!(
         matches!(
             c1,
@@ -911,8 +925,9 @@ fn without_the_allowances_the_harness_refuses_exactly_the_three_designed_behavio
         "{c1}"
     );
     let c2 = strict("hook-conf-strict-c2", AgentHost::update(), &|h| {
-        h.crash_resume().unwrap_err()
-    });
+        h.crash_resume().err()
+    })
+    .unwrap();
     match &c2 {
         Violation::CrashResumeDiverges {
             step: Step::Prepare,
@@ -921,15 +936,19 @@ fn without_the_allowances_the_harness_refuses_exactly_the_three_designed_behavio
         } => assert_eq!(changes, &["added cordon.json"]),
         other => panic!("{other}"),
     }
+    // A first install's run-twice check meets the first of them only: its rollback, run again
+    // after it stopped the agent and deleted the record, says `reversible: true`.
     let c3 = strict("hook-conf-strict-c3", AgentHost::first_install(), &|h| {
-        h.idempotence().unwrap_err()
-    });
+        h.idempotence().err()
+    })
+    .unwrap();
     assert!(
         matches!(
             c3,
-            Violation::UnexpectedOutcome {
+            Violation::RerunReversibleChanged {
                 step: Step::Rollback,
-                ..
+                first: false,
+                second: true
             }
         ),
         "{c3}"

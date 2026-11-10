@@ -234,7 +234,10 @@ async fn exec_none_admits_hosts_without_the_contract_and_the_floor_still_holds()
     let other = hello("other", "nvidia-a100", &[]);
     let reply = call(agent, "POST", "/v1/agent/hello", JOIN, &other).await;
     assert_eq!(reply.status, 403, "{}", reply.body);
-    assert_eq!(reply.json(), json!({ "error": "shape-not-accepted" }));
+    assert_eq!(
+        reply.json(),
+        json!({ "error": "shape-not-accepted", "reason": "below-floor" })
+    );
 }
 
 /// Asserts that a pool with no join token file admits no host with a token that every

@@ -5,7 +5,7 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use js_agent_wire::refusal;
-use js_registry::{Placer, PoolConfig, Refusal};
+use js_registry::{Placer, PoolConfig, Refusal, ShapeFault};
 use js_types::{ExecMode, HostId, MemoryPercent, Shape};
 use support::*;
 
@@ -94,13 +94,13 @@ fn a_hello_is_held_to_the_unreduced_memory() {
     let mut short = hello("short");
     short.shape.memory_bytes = NINETY;
     let refused = fx.registry.hello(&short, &cred("t")).unwrap_err();
-    assert_eq!(refused, Refusal::ShapeNotAccepted);
+    assert_eq!(refused, Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
     assert_eq!(refused.code(), refusal::SHAPE_NOT_ACCEPTED);
     let mut under = hello("under");
     under.shape.memory_bytes = LISTED - 1;
     assert_eq!(
         fx.registry.hello(&under, &cred("t")).unwrap_err(),
-        Refusal::ShapeNotAccepted
+        Refusal::ShapeNotAccepted(ShapeFault::BelowFloor)
     );
     let mut exact = hello("exact");
     exact.shape.memory_bytes = LISTED;

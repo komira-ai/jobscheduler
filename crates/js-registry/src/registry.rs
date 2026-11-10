@@ -11,7 +11,7 @@ use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, Shape};
 use crate::config::{PoolConfig, quota_default};
 use crate::credential::{Binding, Credential};
 use crate::load;
-use crate::refusal::Refusal;
+use crate::refusal::{Refusal, ShapeFault};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
 
 mod beat;
@@ -359,7 +359,7 @@ impl Registry {
             .as_ref()
             .is_some_and(|claim| claim.satisfies(floor.resources(), floor.capabilities()));
         if !offers_floor {
-            return Err(Refusal::ShapeNotAccepted);
+            return Err(Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
         }
         // A pool that names `scratch-quota` books a default for every job without disk, so
         // a host must report one that counts and fits the pool's disk: otherwise its jobs
@@ -368,7 +368,7 @@ impl Registry {
         let default = quota_default(&hello.capabilities);
         let fits = default.is_some_and(|bytes| bytes <= floor.resources().disk_bytes());
         if [quota_pool, !fits].into_iter().all(|ok| ok) {
-            return Err(Refusal::ShapeNotAccepted);
+            return Err(Refusal::ShapeNotAccepted(ShapeFault::QuotaDefaultUnfit));
         }
         // A host that enforces a quota books a default for every job without disk, so a
         // pool that books no disk (and does not name `scratch-quota`) would count 0 for
@@ -379,7 +379,7 @@ impl Registry {
             .into_iter()
             .all(|ok| ok)
         {
-            return Err(Refusal::ShapeNotAccepted);
+            return Err(Refusal::ShapeNotAccepted(ShapeFault::QuotaWithoutPoolDisk));
         }
         let room = state.records.len() < config.max_machines();
         if ![prior_epoch.is_some(), room].into_iter().any(|ok| ok) {

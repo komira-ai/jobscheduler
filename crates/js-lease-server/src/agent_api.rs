@@ -253,7 +253,12 @@ async fn serve_hello(
         Ok(welcome) => welcome,
         Err(refusal) => {
             give_back(agents, fresh_use, &hello.host_id, &change).await;
-            warn!(code = refusal.code(), "agent hello refused");
+            warn!(
+                code = refusal.code(),
+                reason = refusal.reason(),
+                host = %hello.host_id,
+                "agent hello refused: {refusal}"
+            );
             return Err(Refused::of(&refusal));
         }
     };
@@ -648,6 +653,9 @@ pub(crate) struct Refused {
     /// The capability at fault, for the two refusals of the host contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     field: Option<&'static str>,
+    /// Which condition failed, for `shape-not-accepted`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
 impl Refused {
@@ -657,6 +665,7 @@ impl Refused {
             error,
             supported: None,
             field: None,
+            reason: None,
         }
     }
 
@@ -684,7 +693,7 @@ impl Refused {
             Refusal::UnknownPool
             | Refusal::HostBound
             | Refusal::HostListed
-            | Refusal::ShapeNotAccepted
+            | Refusal::ShapeNotAccepted(_)
             | Refusal::HostContract { .. }
             | Refusal::ExecutionMismatch { .. }
             | Refusal::PoolFull
@@ -696,6 +705,7 @@ impl Refused {
         Self {
             supported: unsupported.then_some(ProtocolRange::THIS),
             field: refusal.field(),
+            reason: refusal.reason(),
             ..Self::new(status, code)
         }
     }
@@ -716,6 +726,7 @@ impl IntoResponse for Refused {
 #[cfg(test)]
 mod tests {
     use js_agent_wire::Phase;
+    use js_registry::ShapeFault;
     use js_types::HostId;
     use serde_json::json;
 
@@ -779,7 +790,21 @@ mod tests {
             (Refusal::UnknownPool, 403, "unknown-pool"),
             (Refusal::HostBound, 403, "host-bound"),
             (Refusal::HostListed, 403, "host-listed"),
-            (Refusal::ShapeNotAccepted, 403, "shape-not-accepted"),
+            (
+                Refusal::ShapeNotAccepted(ShapeFault::BelowFloor),
+                403,
+                "shape-not-accepted",
+            ),
+            (
+                Refusal::ShapeNotAccepted(ShapeFault::QuotaDefaultUnfit),
+                403,
+                "shape-not-accepted",
+            ),
+            (
+                Refusal::ShapeNotAccepted(ShapeFault::QuotaWithoutPoolDisk),
+                403,
+                "shape-not-accepted",
+            ),
             (
                 Refusal::HostContract { field: "runtime" },
                 403,
@@ -801,7 +826,22 @@ mod tests {
             let says_majors = code == "unsupported-protocol";
             assert_eq!(answer.supported.is_some(), says_majors, "{code}");
             assert_eq!(answer.field, refusal.field(), "{code}");
+            assert_eq!(answer.reason, refusal.reason(), "{code}");
         }
+        let reasons = [
+            (ShapeFault::BelowFloor, "below-floor"),
+            (ShapeFault::QuotaDefaultUnfit, "quota-default-unfit"),
+            (ShapeFault::QuotaWithoutPoolDisk, "quota-without-pool-disk"),
+        ];
+        for (fault, reason) in reasons {
+            let answer = Refused::of(&Refusal::ShapeNotAccepted(fault));
+            assert_eq!(
+                serde_json::to_value(&answer).unwrap(),
+                json!({ "error": "shape-not-accepted", "reason": reason })
+            );
+        }
+        let plain = serde_json::to_value(Refused::of(&Refusal::HostLive)).unwrap();
+        assert_eq!(plain, json!({ "error": "host-live" }));
     }
 
     /// Every refusal of a one-time token has its status and code: 503 for the use that
