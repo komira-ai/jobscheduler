@@ -88,9 +88,10 @@ write jobs (the token is exchanged for the apt publish role), `id-token` write a
 The `artifacts` job of release.yml grants `contents: read` and the two writes of `attest`, since a
 called workflow's jobs can hold no more than the calling job grants; each job of artifacts.yml then
 asks for its own. No job
-that holds a write permission runs repository code, except that `gamma` runs the `xtask` binary
-that `deploy-tool` built in a job with no token: the build, whose scripts run code from the locked
-dependency set, never shares a job with the token service's address and key. The rules (SHA-pinned
+that holds a write permission or the signing key compiles code: `gamma` and the apt read, index and
+write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
+the build, whose scripts run code from the locked dependency set, never shares a job with the token
+service's address, the cloud role or the key. The rules (SHA-pinned
 actions, no permission at the top, `id-token` write in `attest`, the apt read and write jobs and
 `gamma` only, signing in artifacts.yml's `attest` only) are pinned by
 `crates/xtask/tests/release_workflow`, and the apt jobs by `crates/xtask/tests/apt_workflow`.
@@ -104,9 +105,10 @@ dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.r
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
 so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`,
 `packaging/js-lease-server/updater.d/js-lease-server.toml`, the host updater's declaration, which the
-Linux `js-lease-server` archives carry as they are, and the files under `packaging/js-agent/deb/`
-(markdown aside), which the Debian package of `js-agent` is made of (`release deb` compiles them
-in).
+Linux `js-lease-server` archives carry as they are, and the files the Debian package of `js-agent`
+is made of, which `release deb` compiles in: those under `packaging/js-agent/deb/` (markdown aside)
+and `packaging/js-agent/js-agent.service`, `packaging/js-agent/tmpfiles.conf` and
+`packaging/js-agent/crun_host_setup.sh` (`DEB_DIRS` and `DEB_FILES` in `crates/xtask/src/release.rs`).
 
 A file in one of the excluded places still ships when a shipped source compiles it in. `plan` reads
 the `include_str!`, `include_bytes!` and `include!` calls of every shipped `.rs` file (not those
@@ -217,7 +219,7 @@ with `--flags-file`) and its join token in `/etc/js-agent/token`, which an opera
 The `.deb` replaces the hostkeeper archive package of earlier releases (`js-agent-X.Y.Z-<platform>.tar.zst`
 and `js-agent-index.json`): hostkeeper installs native packages only. The pull-request check
 `.github/workflows/js-agent-deb.yml` builds the x86_64 package the same way on every pull request
-that changes the agent or its packaging, and publishes nothing.
+that changes a crate, the lock file, the toolchain or the packaging, and publishes nothing.
 
 ### The apt repository
 
@@ -239,9 +241,10 @@ of every other product of the repository as they are.
 No job holds both the signing key and the cloud role. A write that loses the race for the shared
 index to another product's release (an `If-Match` that fails) says so (`conflict=true`) and the next
 attempt reads, merges, signs and writes again: each suite has three attempts (`-2` and `-3` jobs);
-the third fails the run if it loses too. Each job first runs `channels gate` on its settings: with
-none of them set it does nothing and passes (a notice), with some of them set it fails naming the
-missing ones.
+the third fails the run if it loses too. Each read, index and write job first runs `channels gate`
+on its settings: with none of them set it does nothing and passes (a notice), with some of them set
+it fails naming the missing ones. With nothing written to `testing`, `check-apt` and the promotion to
+`stable` do not run.
 
 What the project owner sets (Settings, Environments; both restricted to `main`):
 

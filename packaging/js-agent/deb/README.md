@@ -17,6 +17,9 @@ update hook (`/usr/bin/js-agent update-hook`) for every update.
 | `js-agent-crun.service` | `/usr/lib/systemd/system/js-agent-crun.service` | the agent, run with crun; the one unit hostkeeper starts, stops and enables |
 | `js-agent-crun-gpu.service` | `/usr/lib/systemd/system/js-agent-crun-gpu.service` | the oneshot that writes the GPU drop-in; pulled in by the agent's unit |
 | `tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent-crun.conf` | the directories of the unit |
+| `../js-agent.service` | `/usr/lib/systemd/system/js-agent.service` | the agent run through Docker or Podman, for a host that installs the package by hand; hostkeeper does not start it |
+| `../tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent.conf` | the directories of that unit |
+| `../crun_host_setup.sh` | `/usr/share/js-agent/crun_host_setup.sh` | the host setup script, mode 0755 |
 | `LICENSE` | `/usr/share/doc/js-agent/copyright` | |
 
 The package has no `Depends`, no maintainer script and no conffile, and enables no unit: the
