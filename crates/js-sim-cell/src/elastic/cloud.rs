@@ -1,24 +1,32 @@
 //! One elastic pool's cloud in the cell: the elastic fake, on the cell's clock, behind a
 //! recording [`CapacityProvider`] that the server's scaler is handed.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use js_agent_wire::Phase;
 use js_elastic::PriceUnit;
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture,
     CheckResult, EventStream, Held, Hello, HostRef, Observed, Offer, ProviderCaps, ProviderError,
-    Released,
+    RefusalCode, Released,
 };
-use js_elastic_fake::{ElasticFake, FakeClock};
+use js_elastic_fake::{ElasticFake, FakeClock, PROVIDER_ID, Step};
+use js_registry::{HostState, HostView, Registry};
 use js_types::sched::FarmTime;
-use js_types::{ExecMode, Model, ProviderId, accelerator_of};
+use js_types::{ExecMode, HostId, Model, ProviderId, accelerator_of};
 
-use super::record::{AcquireAnswer, CloudCall, CloudEvent, ReleaseAnswer};
+use super::record::{
+    AcquireAnswer, AcquireSeen, CloudCall, CloudEvent, EarlierSeen, ReleaseAnswer,
+};
 use super::{ElasticPool, OfferSpec};
 use crate::counters::{Counter, Counters};
 use crate::server::{EPOCH_MS, Shape, virtual_time};
+
+/// An offer of a cloud by its id and zone.
+type OfferKey = (String, Option<String>);
 
 /// One elastic pool's cloud: the [`ElasticFake`] the server launches machines on, and the
 /// record of every call the server made to it ([`CloudCall`]). Clones share both.
@@ -38,11 +46,34 @@ use crate::server::{EPOCH_MS, Shape, virtual_time};
 /// answered with no answer, a deferral or a refusal, and each machine it preempted while it
 /// ran. Whether a booted machine says hello starts as its pool says
 /// ([`ElasticPool::joined`]) and can be switched while the cell runs ([`Cloud::joins`]).
+///
+/// A cloud of a server of [`crate::ServerSpec::ordered`] is one machine provider of the
+/// pool ([`Cloud::ordered`]): it is named, under the provider id of its name, and knows the
+/// clouds of the providers before it. At each acquire the wrapper also writes down what it
+/// sees then ([`AcquireSeen`]): the hosts the server's registry holds open to a job (once
+/// the server node has handed it the registry, [`Cloud::watch`]) and how each earlier
+/// cloud stands. [`Cloud::quota_refuse`] makes the fake refuse, for `quota`, every acquire
+/// of an offer in a zone from then on: the fake's own script takes a step for the next call
+/// whatever its offer, so the wrapper queues that step just before such an acquire, and the
+/// fake answers it.
 #[derive(Clone)]
 pub struct Cloud {
     pool: ElasticPool,
     shape: Shape,
     fake: ElasticFake,
+    /// The provider id of a named cloud ([`Cloud::ordered`]); `None` for the cloud of a
+    /// server of one elastic pool, which keeps the fake's own.
+    id: Option<ProviderId>,
+    /// Its place among the pool's launching providers, from 0.
+    rank: usize,
+    /// The clouds of the providers before it, first to last.
+    earlier: Vec<Cloud>,
+    /// The offers, by id and zone, every acquire of which the fake refuses for `quota`.
+    quota: Arc<Mutex<BTreeSet<OfferKey>>>,
+    /// The server's registry, once the server node has handed it over.
+    registry: Arc<Mutex<Option<Registry>>>,
+    /// What the wrapper saw at each acquire.
+    seen: Arc<Mutex<Vec<AcquireSeen>>>,
     record: Arc<Mutex<Vec<CloudCall>>>,
     /// Whether the next acquire crashes the server.
     armed: Arc<AtomicBool>,
@@ -67,12 +98,122 @@ impl Cloud {
             pool: pool.clone(),
             shape: shape.clone(),
             fake,
+            id: None,
+            rank: 0,
+            earlier: Vec::new(),
+            quota: Arc::default(),
+            registry: Arc::default(),
+            seen: Arc::default(),
             record: Arc::default(),
             armed: Arc::default(),
             crashed: Arc::default(),
             counters: Arc::default(),
             joins: Arc::new(AtomicBool::new(pool.joined())),
         }
+    }
+
+    /// The cloud of `pool`, as [`Cloud::new`], as the machine provider of `pool`'s name that
+    /// the pool asks after the providers of `earlier` (first to last): under the provider id
+    /// of that name, or the fake's own when the name is not an id (the server then refuses
+    /// the second of two such providers in one pool).
+    #[must_use]
+    pub fn ordered(pool: &ElasticPool, shape: &Shape, earlier: &[Cloud]) -> Self {
+        let id = ProviderId::new(pool.name()).unwrap_or(PROVIDER_ID);
+        Self {
+            id: Some(id),
+            rank: earlier.len(),
+            earlier: earlier.to_vec(),
+            ..Self::new(pool, shape)
+        }
+    }
+
+    /// The machine provider's name, for a cloud of [`Cloud::ordered`]; `None` for the
+    /// cloud of a server of one elastic pool.
+    #[must_use]
+    pub fn named(&self) -> Option<&str> {
+        self.id.is_some().then(|| self.pool.name())
+    }
+
+    /// Its place among the pool's launching providers, from 0.
+    #[must_use]
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// Makes the fake refuse every acquire of offer `offer` in `zone` for `quota` from now
+    /// on.
+    pub fn quota_refuse(&self, offer: &str, zone: Option<&str>) {
+        let key = (offer.to_owned(), zone.map(str::to_owned));
+        self.quotas().insert(key);
+    }
+
+    /// Hands the wrapper the server's registry (`None` for a server without one), whose
+    /// open hosts it reads at each acquire from now on.
+    pub(crate) fn watch(&self, registry: Option<Registry>) {
+        *self.registry.lock().unwrap_or_else(PoisonError::into_inner) = registry;
+    }
+
+    /// What the wrapper saw at each acquire after the first `skip`.
+    pub(crate) fn seen_after(&self, skip: usize) -> Vec<AcquireSeen> {
+        let seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.iter().skip(skip).cloned().collect()
+    }
+
+    fn quotas(&self) -> MutexGuard<'_, BTreeSet<OfferKey>> {
+        self.quota.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How this cloud stands for a later provider at an acquire made now: what it holds, its
+    /// share, and its offers whose latest answer was not a definite refusal.
+    fn standing(&self) -> EarlierSeen {
+        let truth = self.fake.truth();
+        let shown: BTreeSet<&str> = truth.iter().map(|held| held.acquire.as_str()).collect();
+        let calls = self.calls();
+        let mut last: BTreeMap<&str, &AcquireAnswer> = BTreeMap::new();
+        let mut words: BTreeMap<(&str, Option<&str>), (FarmTime, &AcquireAnswer)> = BTreeMap::new();
+        for call in &calls {
+            if let CloudEvent::Acquire {
+                offer,
+                zone,
+                acquire,
+                answer,
+            } = &call.event
+            {
+                last.insert(acquire.as_str(), answer);
+                words.insert((offer.as_str(), zone.as_deref()), (call.at, answer));
+            }
+        }
+        let waiting = last.iter().filter(|(acquire, answer)| {
+            let open = matches!(answer, AcquireAnswer::Unknown | AcquireAnswer::Deferred(_));
+            open & !shown.contains(*acquire)
+        });
+        let held = truth.len() + waiting.count();
+        let (now, backoff) = (self.now(), self.pool.quota_backoff());
+        let definite = |spec: &&OfferSpec| {
+            let word = words.get(&(spec.id.as_str(), spec.zone.as_deref()));
+            let ago = |at: &FarmTime| now.saturating_duration_since(*at);
+            word.is_some_and(|(at, answer)| refusal_holds(answer, ago(at), backoff))
+        };
+        let open = self.pool.offers().iter().filter(|spec| !definite(spec));
+        EarlierSeen {
+            provider: self.pool.name().to_owned(),
+            held: u64::try_from(held).unwrap_or(u64::MAX),
+            max: self.pool.max_instances(),
+            open: open
+                .map(|spec| (spec.id.clone(), spec.zone.clone()))
+                .collect(),
+        }
+    }
+
+    /// The hosts of the server's registry open to a new job now ([`open`]).
+    fn open_hosts(&self) -> Vec<HostId> {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let hosts = registry.as_ref().map(Registry::hosts).unwrap_or_default();
+        hosts.into_iter().filter(open).map(|host| host.id).collect()
     }
 
     /// What the cloud counted so far: [`Counter::AcquireLost`],
@@ -207,7 +348,7 @@ struct Recording(Cloud);
 
 impl CapacityProvider for Recording {
     fn id(&self) -> ProviderId {
-        self.0.fake.id()
+        self.0.id.clone().unwrap_or_else(|| self.0.fake.id())
     }
 
     fn can_launch(&self) -> bool {
@@ -239,15 +380,37 @@ impl CapacityProvider for Recording {
     }
 
     fn acquire(&self, request: &AcquireRequest) -> Acquired {
+        let (offer, zone) = (&request.offer.id, &request.offer.zone);
+        let refused = self.0.quotas().contains(&(offer.clone(), zone.clone()));
+        if refused {
+            self.0.fake.script_next(Step::Refuse(RefusalCode::Quota));
+        }
+        let open_hosts = self.0.open_hosts();
+        let earlier = self.0.earlier.iter().map(Cloud::standing).collect();
         let answer = self.0.fake.acquire(request);
         if let Some(counter) = counted(&answer) {
             self.0.counted().bump(counter);
         }
-        self.0.note(CloudEvent::Acquire {
-            offer: request.offer.id.clone(),
-            zone: request.offer.zone.clone(),
+        let recorded = AcquireAnswer::of(&answer);
+        let seen = AcquireSeen {
+            at: self.0.now(),
+            offer: offer.clone(),
+            zone: zone.clone(),
             acquire: request.acquire.as_str().to_owned(),
-            answer: AcquireAnswer::of(&answer),
+            answer: recorded.clone(),
+            open_hosts,
+            earlier,
+        };
+        self.0
+            .seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(seen);
+        self.0.note(CloudEvent::Acquire {
+            offer: offer.clone(),
+            zone: zone.clone(),
+            acquire: request.acquire.as_str().to_owned(),
+            answer: recorded,
         });
         let crash = self.0.armed.swap(false, Ordering::SeqCst);
         if crash {
@@ -299,6 +462,26 @@ impl CapacityProvider for Recording {
     fn events(&self) -> Option<EventStream> {
         None
     }
+}
+
+/// Whether `answer`, given `ago` before now, still rules its offer out for a later
+/// provider: a `capacity` refusal does until the offer is asked again, a `quota` one for
+/// `backoff`; nothing else does.
+fn refusal_holds(answer: &AcquireAnswer, ago: Duration, backoff: Duration) -> bool {
+    match answer {
+        AcquireAnswer::Refused(RefusalCode::Capacity) => true,
+        AcquireAnswer::Refused(RefusalCode::Quota) => ago < backoff,
+        _ => false,
+    }
+}
+
+/// Whether the registry holds `host` open to a new job: live, serving, heard since its
+/// hello, not tainted, cordoned or set aside, and not releasing a run of before.
+fn open(host: &HostView) -> bool {
+    let live = matches!(host.state, HostState::Live);
+    let serving = matches!(host.phase, Phase::Serving);
+    let clear = host.taint.is_none() & host.mark.is_none() & host.cordon_until.is_none();
+    live & serving & clear & host.heard_since_hello & !host.releasing
 }
 
 /// What the cloud counts of an acquire the fake answered `answer`: nothing for a machine.
@@ -428,6 +611,55 @@ mod tests {
             "the clock never goes back"
         );
         assert_eq!(cloud.calls_after(3).len(), 1);
+    }
+
+    /// Catches: an earlier provider read as unable to serve for an answer that is no
+    /// definite refusal (a machine, a lost answer, a deferral, a refusal for `shape` or
+    /// `denied`), a `capacity` refusal that lapses, and a `quota` refusal that holds past its
+    /// backoff or ends before it.
+    #[test]
+    fn only_capacity_and_a_fresh_quota_refusal_rule_an_offer_out() {
+        let backoff = Duration::from_secs(600);
+        let (fresh, stale) = (Duration::from_secs(599), Duration::from_secs(600));
+        let long = Duration::from_secs(86_400);
+        let refused = AcquireAnswer::Refused;
+        let cases = [
+            (refused(RefusalCode::Capacity), long, true),
+            (refused(RefusalCode::Quota), fresh, true),
+            (refused(RefusalCode::Quota), stale, false),
+            (refused(RefusalCode::Shape), Duration::ZERO, false),
+            (refused(RefusalCode::Denied), Duration::ZERO, false),
+            (AcquireAnswer::Unknown, Duration::ZERO, false),
+            (AcquireAnswer::Deferred(backoff), Duration::ZERO, false),
+            (
+                AcquireAnswer::Accepted {
+                    machine: "fake-0001".to_owned(),
+                },
+                Duration::ZERO,
+                false,
+            ),
+        ];
+        for (answer, ago, holds) in cases {
+            assert_eq!(refusal_holds(&answer, ago, backoff), holds, "{answer:?}");
+        }
+    }
+
+    /// Catches: a cloud of an ordered server that keeps the fake's provider id (the server
+    /// refuses two providers of one id in a pool), a name or a place lost, and a cloud of a
+    /// server of one elastic pool that is named or takes another id than the fake's.
+    #[test]
+    fn an_ordered_cloud_is_named_and_placed_after_the_clouds_before_it() {
+        let first = cloud();
+        assert_eq!((first.named(), first.rank()), (None, 0));
+        assert_eq!(first.provider().id(), PROVIDER_ID);
+        let pool = ElasticPool::lambda_like("lambda", Vec::new(), 1);
+        let second = Cloud::ordered(&pool, &Shape::gpu_host(), &[first]);
+        assert_eq!((second.named(), second.rank()), (Some("lambda"), 1));
+        assert_eq!(second.provider().id().as_str(), "lambda");
+        let odd = ElasticPool::lambda_like("Not An Id", Vec::new(), 1);
+        let odd = Cloud::ordered(&odd, &Shape::gpu_host(), &[]);
+        assert_eq!(odd.provider().id(), PROVIDER_ID);
+        assert!(odd.seen_after(0).is_empty());
     }
 
     /// Catches: an acquire answer counted as another (a lost answer as a refusal, a 429 as

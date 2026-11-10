@@ -457,8 +457,10 @@ pub struct Observations {
     pub job_replies: Vec<JobReply>,
     /// Every result a per-job agent made, oldest first; only ever appended.
     pub results_made: Vec<ResultMade>,
-    /// The cloud of the server's elastic pool; `None` for a server without one.
-    pub cloud: Option<CloudFacts>,
+    /// The clouds of the server's elastic pool, first to last: one for a server of
+    /// [`crate::ServerSpec::elastic_pool`], one for each launching machine provider of a
+    /// server of [`crate::ServerSpec::ordered`], none for a server without one.
+    pub clouds: Vec<CloudFacts>,
     /// The rows of the usage history the cell read from the server's usage route when the
     /// scenario settled, oldest end first; `None` when it read none.
     pub usage: Option<Vec<UsageRow>>,
@@ -614,11 +616,18 @@ impl Observations {
         self
     }
 
-    /// These observations with `cloud` as the elastic pool's cloud.
+    /// These observations with `cloud` as the elastic pool's next cloud, after the clouds
+    /// they have.
     #[must_use]
     pub fn with_cloud(mut self, cloud: CloudFacts) -> Self {
-        self.cloud = Some(cloud);
+        self.clouds.push(cloud);
         self
+    }
+
+    /// The elastic pool's first cloud; `None` for a server without one.
+    #[must_use]
+    pub fn cloud(&self) -> Option<&CloudFacts> {
+        self.clouds.first()
     }
 
     /// These observations with the server listing `host` as leaving the pool (drained or

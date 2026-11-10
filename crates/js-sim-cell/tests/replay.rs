@@ -64,6 +64,13 @@
 //! answer, to a scripted fault of the cloud, or to the text of its trace lines, moves a
 //! hash.
 //!
+//! And the failover family's headline, family `failover`: 6 registered hosts, an EC2-like
+//! provider of at most 7 machines and a Lambda-like one of at most 7, 40 jobs, one agent
+//! killed and two cut off (`cell/failover.rs`, about 3,000 agent requests a
+//! seed) over [`FAILOVER_SEEDS`] seed, so a change to the order in which the walk asks the
+//! providers, to how the cell names a later cloud's machines, or to a decision of the
+//! scaler over several providers, moves a hash.
+//!
 //! And one store scenario, family `store`: the restart over the store, over SQLite
 //! (`cell/store.rs`, nine hosts, about 600 agent requests a seed) over two seeds, so a
 //! change to what the server keeps in its store across a restart, to how the cell mints
@@ -82,6 +89,12 @@ mod elastic;
     reason = "the elastic fault scenarios are shared with tests/elastic_faults.rs, which runs the ones this binary does not pin"
 )]
 mod elastic_faults;
+#[path = "cell/failover.rs"]
+#[allow(
+    dead_code,
+    reason = "the failover scenarios are shared with tests/failover.rs, which runs the ones this binary does not pin"
+)]
+mod failover;
 #[path = "cell/jobs.rs"]
 mod jobs;
 #[path = "cell/jobs_headline.rs"]
@@ -207,6 +220,11 @@ const ELASTIC_FAMILY: &str = "elastic";
 const ELASTIC_FAULTS_SEEDS: u64 = 1;
 const ELASTIC_FAULTS_FAMILY: &str = "elastic_faults";
 
+/// How many seeds of the failover headline the golden file pins, and the family they are
+/// kept under.
+const FAILOVER_SEEDS: u64 = 1;
+const FAILOVER_FAMILY: &str = "failover";
+
 /// The jobs of the cell whose ids are compared: four hosts, eight jobs of [`JOB_RUN`].
 const JOB_HOSTS: usize = 4;
 const JOBS: usize = 8;
@@ -284,7 +302,9 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// whole-host scenario and one of the cancelled whole-host job, each run twice, and for
 /// one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
 /// whose items end alike, and for one seed of the headline over jobs
-/// (`cell/jobs_headline.rs`), run twice, whose items end alike, and for one seed of the EC2-like elastic scenario
+/// (`cell/jobs_headline.rs`), run twice, whose items end alike, and for one seed of the
+/// failover headline (`cell/failover.rs`), run twice, whose 40 items end alike, and for
+/// one seed of the EC2-like elastic scenario
 /// (`cell/elastic.rs`), run twice, whose items end alike, and for one seed of the lost but
 /// landed acquire (`cell/elastic_faults.rs`), run twice, whose items end alike, and for one
 /// seed of the restart over a SQLite store (`cell/store.rs`), run twice. Catches a handler path that reads a
@@ -343,6 +363,12 @@ fn a_seed_replays_to_the_same_trace_hash() {
     let again = headline().run_seeds(1).runs.remove(0);
     assert_eq!(once.hash, again.hash, "headline over jobs");
     assert_eq!(once.outcomes, again.outcomes);
+
+    let once = failover::headline().run_seeds(1).runs.remove(0);
+    let again = failover::headline().run_seeds(1).runs.remove(0);
+    assert_eq!(once.hash, again.hash, "failover headline");
+    assert_eq!(once.outcomes, again.outcomes);
+    assert_eq!(once.outcomes.len(), failover::JOBS as usize);
 
     let once = elastic::an_ec2_like_pool().run_seeds(1).runs.remove(0);
     let again = elastic::an_ec2_like_pool().run_seeds(1).runs.remove(0);
@@ -618,6 +644,29 @@ fn the_elastic_fault_scenario_matches_the_golden_file() {
     golden_of(ELASTIC_FAULTS_FAMILY).assert_matches(&elastic_faults_runs());
 }
 
+/// The hash of each pinned seed of the failover headline, which must pass.
+fn failover_runs() -> Vec<(String, TraceHash)> {
+    let passed = failover::headline().run_seeds(FAILOVER_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!(
+            "two_hundred_hosts_three_providers_kill_ten_agents_and_partition_thirty_seconds/seed-{}",
+            run.seed
+        );
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
+}
+
+/// Asserts that the hashes of the pinned seeds of the failover headline equal the golden
+/// file's (family `failover`). Catches any change to the order in which the walk asks a
+/// pool's providers, to how the cell names and boots the machines of a later cloud, or to
+/// the text of their trace lines, and a run over several clouds that differs between
+/// processes.
+#[test]
+fn the_failover_headline_matches_the_golden_file() {
+    golden_of(FAILOVER_FAMILY).assert_matches(&failover_runs());
+}
+
 /// The hash of each pinned seed of the fault scenario, which must pass.
 fn faults_runs() -> Vec<(String, TraceHash)> {
     let scenario =
@@ -703,6 +752,9 @@ fn regenerate_golden_hashes() {
         .unwrap();
     golden_of(ELASTIC_FAULTS_FAMILY)
         .regenerate(&elastic_faults_runs())
+        .unwrap();
+    golden_of(FAILOVER_FAMILY)
+        .regenerate(&failover_runs())
         .unwrap();
     golden_of(store::FAMILY).regenerate(&store_runs()).unwrap();
     golden_of(REAL_FAMILY).regenerate(&real_runs()).unwrap();

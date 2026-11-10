@@ -192,7 +192,7 @@ fn a_booted_machine_joins_with_the_token_in_its_launch_payload() {
     let host = HostId::new(&name).expect("a host id");
     let listed = cell.observations().server.hosts.get(&host);
     assert!(listed.is_some_and(|listed| !listed.lost), "the host joined");
-    let facts = cell.observations().cloud.clone().expect("cloud facts");
+    let facts = cell.observations().cloud().cloned().expect("cloud facts");
     let joined = facts.machines.values().map(|machine| machine.joined);
     assert_eq!(joined.collect::<Vec<_>>(), [true]);
 
@@ -354,7 +354,7 @@ fn a_foreign_machine_is_not_the_schedulers() {
         "the foreign machine and the scheduler's"
     );
     assert!(cell.machine(1).is_none());
-    let facts = cell.observations().cloud.clone().expect("cloud facts");
+    let facts = cell.observations().cloud().cloned().expect("cloud facts");
     assert_eq!(facts.machines.len(), 1);
     assert_eq!(facts.running.len(), 1);
     assert_eq!(cloud.fake().running().len(), 2);
@@ -375,7 +375,7 @@ fn an_operators_brake_reset_is_recorded_with_the_clouds_calls() {
         calls.last().map(|call| &call.event),
         Some(&CloudEvent::BrakeReset)
     );
-    let facts = cell.observations().cloud.clone().expect("cloud facts");
+    let facts = cell.observations().cloud().cloned().expect("cloud facts");
     assert_eq!(
         facts.calls.last().map(|call| &call.event),
         Some(&CloudEvent::BrakeReset)
@@ -387,7 +387,7 @@ fn an_operators_brake_reset_is_recorded_with_the_clouds_calls() {
     let mut plain = Cell::new(Setup::new(1), spec, dir, Faults::default()).expect("starts");
     assert!(!plain.reset_brake());
     assert!(plain.cloud().is_none());
-    assert!(plain.observations().cloud.is_none());
+    assert!(plain.observations().cloud().is_none());
 }
 
 /// Asserts what an elastic pool's spec holds (its billing, offers, limit, idle time,
@@ -518,7 +518,7 @@ fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
         );
     }
     assert_eq!(cloud.fake().launched(), 2);
-    let facts = cell.observations().cloud.clone().expect("cloud facts");
+    let facts = cell.observations().cloud().cloned().expect("cloud facts");
     let joined = facts.machines.values().filter(|machine| machine.joined);
     assert_eq!(joined.count(), 2, "both machines joined");
     assert!(cell.machine(1).is_some(), "the second machine booted");

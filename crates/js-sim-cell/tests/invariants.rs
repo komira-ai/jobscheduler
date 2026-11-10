@@ -35,6 +35,10 @@ mod jobs;
 mod names;
 #[path = "invariants/usage.rs"]
 mod usage;
+// The invariants of the walk over a pool's machine providers, a module of this test binary
+// too.
+#[path = "invariants/walk.rs"]
+mod walk;
 #[path = "invariants/whole_host.rs"]
 mod whole_host;
 
@@ -966,7 +970,8 @@ fn every_invariant_has_a_negative_case_in_the_table() {
         .iter()
         .chain(elastic::NEGATIVE_CASES)
         .chain(usage::NEGATIVE_CASES)
-        .chain(cordon::NEGATIVE_CASES);
+        .chain(cordon::NEGATIVE_CASES)
+        .chain(walk::NEGATIVE_CASES);
     let table = || jobs::table(NEGATIVE_CASES.iter().chain(others.clone()));
     for invariant in Invariant::ALL {
         let rows = table().filter(|(row, _)| *row == invariant);
