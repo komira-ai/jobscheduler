@@ -671,6 +671,12 @@ pub struct Refused {
     /// ignores it and reads the code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    /// For [`refusal::SHAPE_NOT_ACCEPTED`]: which condition failed (one of
+    /// [`refusal::SHAPE_BELOW_FLOOR`], [`refusal::SHAPE_QUOTA_DEFAULT`],
+    /// [`refusal::SHAPE_QUOTA_WITHOUT_DISK`]). A peer that predates the field ignores it
+    /// and reads the code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl Refused {
@@ -686,6 +692,10 @@ impl Refused {
         if let Some(field) = &self.field {
             let max = limits::MAX_CAPABILITY_KEY_LEN;
             check::token(at.field("field"), field, max, check::ident_byte)?;
+        }
+        if let Some(reason) = &self.reason {
+            let max = limits::MAX_CODE_LEN;
+            check::token(at.field("reason"), reason, max, check::ident_byte)?;
         }
         match &self.supported {
             Some(range) => range.check("supported", refusal::INVALID_WELCOME),

@@ -28,9 +28,10 @@ pub enum Refusal {
     /// The host id is reserved to another source of hosts (see [`crate::Registry::reserve`]).
     #[error("the host id belongs to another source of hosts")]
     HostListed,
-    /// The shape the host claims does not offer what the pool's shape promises.
-    #[error("the shape does not offer what the pool promises")]
-    ShapeNotAccepted,
+    /// The host's shape or scratch quota does not fit the pool; the [`ShapeFault`] says
+    /// which condition failed.
+    #[error("{0}")]
+    ShapeNotAccepted(ShapeFault),
     /// The pool declares an execution mode and the host lacks what that needs: no
     /// `runtime`, or no `gpu-toolkit` in a pool with GPUs. `field` names the capability.
     #[error("the host contract is not met: the capability {field} is missing")]
@@ -62,6 +63,50 @@ pub enum Refusal {
     SessionUnavailable,
 }
 
+/// Which condition made a hello `shape-not-accepted`. Each has a constant `reason` of
+/// [`js_agent_wire::refusal`] ([`ShapeFault::code`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeFault {
+    /// The shape the host claims does not offer what the pool's shape promises.
+    BelowFloor,
+    /// The pool names `scratch-quota` and the host's quota default is absent, does not
+    /// count, or is more than the pool's `disk_bytes`.
+    QuotaDefaultUnfit,
+    /// The host enforces a scratch quota while the pool books no disk and does not name
+    /// `scratch-quota`.
+    QuotaWithoutPoolDisk,
+}
+
+impl ShapeFault {
+    /// The constant reason that goes on the wire.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::BelowFloor => refusal::SHAPE_BELOW_FLOOR,
+            Self::QuotaDefaultUnfit => refusal::SHAPE_QUOTA_DEFAULT,
+            Self::QuotaWithoutPoolDisk => refusal::SHAPE_QUOTA_WITHOUT_DISK,
+        }
+    }
+}
+
+impl std::fmt::Display for ShapeFault {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::BelowFloor => "the shape does not offer what the pool promises",
+            Self::QuotaDefaultUnfit => {
+                "the pool names scratch-quota and the host's scratch default is absent, zero \
+                 or more than the pool's disk_bytes: set the host's scratch-default-gib within \
+                 the pool's disk_bytes, or change the pool's disk_bytes"
+            }
+            Self::QuotaWithoutPoolDisk => {
+                "the host enforces a scratch quota and the pool books no disk and does not \
+                 name scratch-quota: give the pool disk_bytes and scratch-quota, or run the \
+                 host without --scratch-quota"
+            }
+        };
+        out.write_str(text)
+    }
+}
+
 impl From<Breach> for Refusal {
     fn from(breach: Breach) -> Self {
         match breach {
@@ -81,6 +126,15 @@ impl Refusal {
         }
     }
 
+    /// The reason a `shape-not-accepted` refusal names ([`ShapeFault::code`]); `None` for the
+    /// rest.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::ShapeNotAccepted(fault) => Some(fault.code()),
+            _ => None,
+        }
+    }
+
     /// The constant code that goes on the wire.
     pub fn code(&self) -> &'static str {
         match self {
@@ -91,7 +145,7 @@ impl Refusal {
             Self::HostBound => refusal::HOST_BOUND,
             Self::HostLive => refusal::HOST_LIVE,
             Self::HostListed => refusal::HOST_LISTED,
-            Self::ShapeNotAccepted => refusal::SHAPE_NOT_ACCEPTED,
+            Self::ShapeNotAccepted(_) => refusal::SHAPE_NOT_ACCEPTED,
             Self::HostContract { .. } => refusal::HOST_CONTRACT,
             Self::ExecutionMismatch { .. } => refusal::EXECUTION_MISMATCH,
             Self::PoolFull => refusal::POOL_FULL,

@@ -4,7 +4,7 @@
 mod support;
 
 use js_agent_wire::Hello;
-use js_registry::{PoolConfig, Refusal};
+use js_registry::{PoolConfig, Refusal, ShapeFault};
 use js_types::{ExecMode, ProviderId, Request, Shape};
 use support::*;
 
@@ -94,12 +94,12 @@ fn a_job_requiring_disk_is_placed_by_the_promise_hosts_were_held_to() {
     let small = reporting("s", &[("disk-gib", "99")]);
     assert_eq!(
         fx.hello(&small, &cred("t")).unwrap_err(),
-        Refusal::ShapeNotAccepted
+        Refusal::ShapeNotAccepted(ShapeFault::BelowFloor)
     );
     let bare = reporting("b", &[]);
     assert_eq!(
         fx.hello(&bare, &cred("t")).unwrap_err(),
-        Refusal::ShapeNotAccepted
+        Refusal::ShapeNotAccepted(ShapeFault::BelowFloor)
     );
     let big = reporting("big", &[("disk-gib", "250")]);
     fx.hello(&big, &cred("t")).unwrap();

@@ -3,7 +3,7 @@
 mod support;
 
 use js_agent_wire::{Phase, refusal};
-use js_registry::{Binding, Credential, HostState, Refusal};
+use js_registry::{Binding, Credential, HostState, Refusal, ShapeFault};
 use support::*;
 
 /// Asserts that a host claiming less than the pool promises is refused with its own
@@ -21,8 +21,9 @@ fn wrong_shape_refused() {
     linux.capabilities = map(&[("os", "linux")]);
     for bad in [small, no_os, linux] {
         let refused = fx.registry.hello(&bad, &cred("t")).unwrap_err();
-        assert_eq!(refused, Refusal::ShapeNotAccepted);
+        assert_eq!(refused, Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
         assert_eq!(refused.code(), refusal::SHAPE_NOT_ACCEPTED);
+        assert_eq!(refused.reason(), Some(refusal::SHAPE_BELOW_FLOOR));
     }
     assert!(fx.registry.hosts().is_empty());
 }

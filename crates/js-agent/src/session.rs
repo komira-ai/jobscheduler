@@ -21,7 +21,8 @@
 //!   so the session ends with the status and the server's code ([`Fatal`]) and the
 //!   program exits 2. These are the refusals that name something only the operator can
 //!   change: the token (401), the pool (`unknown-pool`), the shape the pool accepts
-//!   (`shape-not-accepted`), the host contract of an execution mode (`host-contract`,
+//!   (`shape-not-accepted`; the refusal names the condition under `reason`, and the
+//!   agent prints it), the host contract of an execution mode (`host-contract`,
 //!   `execution-mismatch`; the refusal names the capability at fault), the credential the host id was admitted with (`host-bound`),
 //!   the pool's static host list (`host-listed`), and a message the server cannot read or
 //!   serve (`invalid-hello`, `invalid-heartbeat`, `unsupported-protocol`,
@@ -137,7 +138,7 @@ use std::time::Duration;
 use js_agent_wire::refusal;
 use js_agent_wire::{
     Heartbeat, HeartbeatReply, Hello, HostCredential, NodeLoad, Phase, ProtocolRange,
-    RefusalReason, Refused, ValidationError, Welcome,
+    RefusalReason, ValidationError, Welcome,
 };
 use js_caps::DISK_GIB;
 use serde_json::Value;
@@ -148,6 +149,7 @@ use crate::disk::DiskGauge;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
 use crate::logs::HostGrant;
+use crate::refused_body::{code_of, field_of, reason_of, supported_of};
 use crate::transport::{Answer, Transport};
 use crate::usage::Outbox;
 use crate::worker::{Delivery, Snapshot, Worker};
@@ -157,9 +159,6 @@ pub const HELLO_PATH: &str = "/v1/agent/hello";
 
 /// The route of the heartbeat.
 pub const HEARTBEAT_PATH: &str = "/v1/agent/heartbeat";
-
-/// The code shown when the server's refusal has none the agent can print.
-const UNREADABLE_CODE: &str = "unreadable";
 
 /// The secret of a session. It has no `Debug` and no `Display`, so no log line or panic
 /// message can print it.
@@ -187,6 +186,8 @@ pub struct Fatal {
     /// The capability at fault, when the server named one (`host-contract`,
     /// `execution-mismatch`).
     pub field: Option<String>,
+    /// Which condition failed, when the server named one (`shape-not-accepted`).
+    pub reason: Option<String>,
 }
 
 impl fmt::Display for Fatal {
@@ -200,9 +201,14 @@ impl fmt::Display for Fatal {
             .as_ref()
             .map(|field| format!("; the capability at fault is {field}"))
             .unwrap_or_default();
+        let reason = self
+            .reason
+            .as_ref()
+            .map(|reason| format!(", reason {reason}"))
+            .unwrap_or_default();
         write!(
             f,
-            "the server refused the {} with status {} ({}{majors}{field}); not retrying",
+            "the server refused the {} with status {} ({}{reason}{majors}{field}); not retrying",
             self.what, self.status, self.code
         )
     }
@@ -423,48 +429,6 @@ fn settle(outbox: &Outbox, sent: &Result<Answer, Reason>) {
         Verdict::Fatal => outbox.refused(),
         Verdict::Conflict | Verdict::Retry => outbox.failed(),
     }
-}
-
-/// The `error` code of a refusal body, held to the wire's rules for a code; the server's
-/// text is never repeated as it came.
-fn code_of(body: &Value) -> String {
-    let refused = Refused {
-        code: body
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        supported: None,
-        field: None,
-    };
-    match refused.validate() {
-        Ok(()) => refused.code,
-        Err(_) => UNREADABLE_CODE.to_owned(),
-    }
-}
-
-/// The majors a refusal body names under `supported` (the server sends them with
-/// `unsupported-protocol`), when they are a sane range and `code` is a plain code.
-fn supported_of(body: &Value, code: &str) -> Option<ProtocolRange> {
-    let supported = body
-        .get("supported")
-        .and_then(|range| serde_json::from_value::<ProtocolRange>(range.clone()).ok());
-    let refused = Refused {
-        code: code.to_owned(),
-        supported,
-        field: None,
-    };
-    refused.validate().ok().and(refused.supported)
-}
-
-/// The capability a refusal body names under `field`, when it is a plain token.
-fn field_of(body: &Value, code: &str) -> Option<String> {
-    let refused = Refused {
-        code: code.to_owned(),
-        supported: None,
-        field: body.get("field").and_then(Value::as_str).map(str::to_owned),
-    };
-    refused.validate().ok().and(refused.field)
 }
 
 /// The welcome in an answer body, checked.
@@ -972,6 +936,7 @@ impl<'a> Session<'a> {
                 status: answer.status,
                 supported: supported_of(&answer.body, &code),
                 field: field_of(&answer.body, &code),
+                reason: reason_of(&answer.body, &code),
                 code,
             }),
             _ => {

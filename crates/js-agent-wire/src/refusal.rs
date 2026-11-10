@@ -129,6 +129,15 @@ pub const INVALID_REPLY: &str = "invalid-reply";
 pub const UNKNOWN_POOL: &str = "unknown-pool";
 /// A hello whose shape does not offer what the pool's shape promises.
 pub const SHAPE_NOT_ACCEPTED: &str = "shape-not-accepted";
+/// The `reason` of a `shape-not-accepted` refusal when the host's claimed shape does not
+/// satisfy the pool's floor: resources, labels or capabilities.
+pub const SHAPE_BELOW_FLOOR: &str = "below-floor";
+/// The `reason` of a `shape-not-accepted` refusal when the pool names `scratch-quota` and
+/// the host's scratch quota default is absent, does not count, or exceeds the pool's disk.
+pub const SHAPE_QUOTA_DEFAULT: &str = "quota-default-unfit";
+/// The `reason` of a `shape-not-accepted` refusal when the host enforces a scratch quota
+/// and the pool books no disk and does not name `scratch-quota`.
+pub const SHAPE_QUOTA_WITHOUT_DISK: &str = "quota-without-pool-disk";
 /// A hello from a new host id while the pool already holds as many hosts as it allows.
 pub const POOL_FULL: &str = "pool-full";
 /// A hello for a host id that was first admitted with another credential.

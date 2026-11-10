@@ -262,28 +262,24 @@ fn tracker(prefix: &str, count: u32) -> Result<(), Error> {
     // SAFETY: `on_term` only calls write(2); the handler is installed once, here.
     unsafe { libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t) };
     write_line(std::io::stdout(), "ready")?;
-    loop {
-        let mut fds = [
-            libc::pollfd {
-                fd: 0,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: wake.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        // SAFETY: `fds` holds two valid pollfds for the length passed.
-        if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
-            // A signal (SIGTERM, whose handler has woken the pipe) interrupted the wait.
-            continue;
-        }
-        // Ready to read is the end of the pipe (the owner never writes to it) or the
-        // wake-up from the SIGTERM handler: either way the names go.
-        break;
-    }
+    let mut fds = [
+        libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // One wait, whatever it returns: ready to read is the end of the pipe (the owner never
+    // writes to it) or the wake-up from the SIGTERM handler, and an interrupted wait (EINTR)
+    // is SIGTERM's, the only signal with a handler here, which has woken the pipe. Either way
+    // the names go.
+    // SAFETY: `fds` holds two valid pollfds for the length passed.
+    unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
     drop(writer);
     unlink(prefix, count);
     Ok(())

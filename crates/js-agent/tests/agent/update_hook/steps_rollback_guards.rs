@@ -1,5 +1,5 @@
 //! `rollback` (host-updates design, 4.2): whose cordon it lifts, what it does on a first install
-//! (which has no previous release), that a taint or an owed check halts it before any act, and
+//! whose agent never came up (steps_rollback_first.rs has the rest of a first install), that a taint or an owed check halts it before any act, and
 //! what it does when the lease server does not answer.
 
 use js_agent::update_hook::{Class, Clock, Outcome, Reason};
@@ -128,32 +128,37 @@ fn a_cordon_that_lapsed_and_was_placed_again_by_someone_else_is_not_lifted() {
 
 // A first install has no previous release.
 
+/// A first install whose start failed has no agent up: the rollback has nothing to stop and no
+/// previous release to start, so it ends in success with no act and no cordon call, says the
+/// update cannot be undone (the link was moved), and deletes the record; the link stays where
+/// the updater left it. steps_rollback_first.rs has the paths with an agent up.
 #[test]
-fn a_first_install_whose_link_moved_is_irreversible_and_rollback_touches_nothing() {
+fn a_first_install_whose_start_failed_rolls_back_with_success_and_no_act() {
     let rig = first_prepared("hook-rollback-first-moved");
     let cutover = Spy::new(&rig);
     cutover.fail("start");
     assert_eq!(cutover.cutover(&rig).outcome, Outcome::Failure);
     rig.kill.disarm();
     assert!(rig.record().unwrap().link_moved);
-    let before = (rig.record_bytes(), end_state(&rig));
+    assert_eq!(unit_state(&rig), "inactive dead");
     let spy = Spy::new(&rig);
     let done = spy.rollback(&rig);
-    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
-    assert_eq!(done.report.reason, Some(Reason::NoPreviousRelease));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(done.report.reason, None);
     assert!(!done.report.reversible);
-    assert_eq!(done.report.class, Class::Release);
     assert_eq!(
         spy.act_names(),
         Vec::<String>::new(),
         "no stop, no link, no start"
     );
     assert_eq!(cordon_calls(&spy), 0);
-    assert_eq!((rig.record_bytes(), end_state(&rig)), before);
+    assert_eq!(rig.record(), None);
+    assert_eq!(unit_state(&rig), "inactive dead");
     assert_eq!(link_target(&rig), Some(staged(&rig)));
-    // The same answer every time: the record is what remembers it.
-    let again = Spy::new(&rig).rollback(&rig);
-    assert_eq!(again, done);
+    // A rerun finds no record and has nothing to do.
+    let again = Spy::new(&rig);
+    assert_eq!(again.rollback(&rig).outcome, Outcome::Success);
+    assert_eq!(again.act_names(), Vec::<String>::new());
 }
 
 #[test]

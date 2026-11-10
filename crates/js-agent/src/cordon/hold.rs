@@ -14,8 +14,10 @@ use crate::own_host::{HostReading, Lease, LeaseError};
 /// interval is.
 pub const IDLE_POLL: Duration = Duration::from_secs(5);
 
-/// Codes that mean the server did not accept the credential, as opposed to the request.
-const CREDENTIAL_CODES: [&str; 4] = [
+/// Codes that mean the server did not accept the credential, as opposed to the request. The
+/// update hook's first-install `rollback` reads them too: a host whose credential the server
+/// does not take as the host's is given no work.
+pub(crate) const CREDENTIAL_CODES: [&str; 4] = [
     "host-credential-required",
     "join-token-not-admitted",
     "join-token-expired",

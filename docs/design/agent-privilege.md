@@ -116,6 +116,10 @@ and a follow-up should make a listing whose entries cannot be examined a `watch-
 
 ### Duty 3. The per-run scratch quota
 
+The quota is optional (`--scratch-quota`), and the farm does not set it: its pools book no disk
+per job, and the tierstore on each node is the cache (jobscheduler-design.md, section 5.7). The
+duty below applies only to an agent run with the flag.
+
 Today the lifecycle applies an XFS project quota to the empty run directory before it is given to
 the job, reads the usage when it claims a slot, and takes the limits off after the tree is removed
 (`quota/mod.rs`). Measured on a loop-mounted prjquota XFS volume:
@@ -449,6 +453,6 @@ every test of `init_ns`, `watch`, `quota`, `egress` and `state_dir`.
 UNVERIFIED (left to the later PRs, P5/P10 and the canary host): an unpack of a real image under the
 root daemon; the farm's AppArmor policy (CI shows only that the distribution's profile admits `/usr/bin/crun` on the runner); the
 unit's `Delegate=` and `AmbientCapabilities=` (A); a `hidepid` process
-table; the egress set-up; the `--scratch-quota` flag on the farm's unit (whether the farm sets it is
-not known from this repository); the farm's kernel and AppArmor policy against any of the above
+table; the egress set-up; the `--scratch-quota` flag (the farm does not set it, so Duty 3 does not
+arise there); the farm's kernel and AppArmor policy against any of the above
 (hosted runners differ).

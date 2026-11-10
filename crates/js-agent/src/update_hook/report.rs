@@ -46,8 +46,9 @@ pub enum Reason {
     CordonUnconfirmed,
     /// `verify` waited out its bound and no new session of the target said hello.
     NoHello,
-    /// `rollback` of a first install that has begun its cutover: there is no previous release
-    /// to restore.
+    /// A first install has no previous release to restore. No step of this hook ends with it:
+    /// `rollback` of a first install stops the agent and succeeds. It stays in the vocabulary
+    /// that earlier releases reported, which only grows.
     NoPreviousRelease,
     /// A first install, and the join token file is not there as the agent needs it and the
     /// state root holds no host credential (exit 75).

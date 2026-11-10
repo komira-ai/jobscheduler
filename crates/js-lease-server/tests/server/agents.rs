@@ -267,7 +267,7 @@ async fn every_decoded_message_is_validated_before_use() {
 }
 
 /// Asserts each registry refusal on the wire with the status the API documents and
-/// nothing but the code in the body: unknown pool, shape not accepted and a full pool
+/// nothing but the code in the body: unknown pool, shape not accepted (with the reason, `below-floor` or `quota-without-pool-disk`) and a full pool
 /// (403), a hello while the host is live (409), and on the heartbeat an unknown host and
 /// a stale epoch (409), a missing and a wrong session (403). It catches a status that
 /// tells an agent to say hello when it should wait, and a code that is not the wire's.
@@ -279,15 +279,29 @@ async fn refusals_have_their_status_and_code() {
     elsewhere["pool"] = json!("other");
     let mut small = hello_body("burst-2");
     small["shape"]["cpu_millis"] = json!(1);
+    // The pool books no disk and does not name `scratch-quota`; a host that enforces one
+    // is refused for that, and says so under `reason`.
+    let mut quota = hello_body("burst-2");
+    quota["capabilities"]["scratch-quota"] = json!("project");
+    quota["capabilities"]["scratch-default-gib"] = json!("10");
     let hellos = [
-        (hello_body("burst-1"), 409, "host-live"),
-        (elsewhere, 403, "unknown-pool"),
-        (small, 403, "shape-not-accepted"),
+        (hello_body("burst-1"), 409, json!({ "error": "host-live" })),
+        (elsewhere, 403, json!({ "error": "unknown-pool" })),
+        (
+            small,
+            403,
+            json!({ "error": "shape-not-accepted", "reason": "below-floor" }),
+        ),
+        (
+            quota,
+            403,
+            json!({ "error": "shape-not-accepted", "reason": "quota-without-pool-disk" }),
+        ),
     ];
-    for (body, status, code) in hellos {
+    for (body, status, expected) in hellos {
         let reply = post(&h, "/v1/agent/hello", Some(JOIN), &body).await;
-        assert_eq!(reply.status, status, "{code}: {}", reply.body);
-        assert_eq!(reply.json(), json!({ "error": code }));
+        assert_eq!(reply.status, status, "{expected}: {}", reply.body);
+        assert_eq!(reply.json(), expected);
     }
     join(&h, "burst-2").await;
     let full = hello_with(&h, JOIN, "burst-3").await;

@@ -6,7 +6,7 @@ mod support;
 
 use js_agent_wire::Hello;
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
-use js_registry::{PoolConfig, Refusal};
+use js_registry::{PoolConfig, Refusal, ShapeFault};
 use js_types::{ProviderId, Resources, Shape};
 use support::*;
 
@@ -64,9 +64,11 @@ fn the_hello_floor_includes_disk() {
         fx.hello(&host_hello(disk, quota, Some("10"), &[]), &cred("t"))
     };
     let refused = join(pool(25 * GIB, true), 25 * GIB - 1).unwrap_err();
-    assert_eq!(refused, Refusal::ShapeNotAccepted);
+    let below = Refusal::ShapeNotAccepted(ShapeFault::BelowFloor);
+    assert_eq!(refused, below);
+    assert_eq!(refused.reason(), Some("below-floor"));
     let legacy = join(pool(25 * GIB, true), 0).unwrap_err();
-    assert_eq!(legacy, Refusal::ShapeNotAccepted);
+    assert_eq!(legacy, below);
     assert!(join(pool(25 * GIB, true), 25 * GIB).is_ok());
     assert!(join(pool(25 * GIB, true), 30 * GIB).is_ok());
     // A pool that books no disk and names no quota joins a host that reports none, and
@@ -78,10 +80,13 @@ fn the_hello_floor_includes_disk() {
             .hello(&host_hello(0, None, None, &[]), &cred("t"))
             .is_ok()
     );
+    let quota_no_disk = join(pool(0, false), 0).unwrap_err();
     assert_eq!(
-        join(pool(0, false), 0).unwrap_err(),
-        Refusal::ShapeNotAccepted
+        quota_no_disk,
+        Refusal::ShapeNotAccepted(ShapeFault::QuotaWithoutPoolDisk)
     );
+    assert_eq!(quota_no_disk.reason(), Some("quota-without-pool-disk"));
+    assert_eq!(quota_no_disk.code(), "shape-not-accepted");
     // A quota that reports no usable default books nothing on either side.
     let unusable = fixture_of(pool(0, false));
     let hello = host_hello(0, Some("project"), Some("0"), &[]);
@@ -107,7 +112,9 @@ fn checked_refuses_a_quota_pool_without_disk() {
 /// Asserts that a quota pool refuses, at hello, a host whose default cannot be booked:
 /// the default larger than the pool's disk (26 GiB in a 25 GiB pool, and 2^33 GiB, which
 /// `checked_mul` still counts), no default, zero, not a number, too large to count, or a
-/// quota that is not `project`; all `shape-not-accepted`. A default equal to the pool's
+/// quota that is not `project`; all `shape-not-accepted`, a quota that is not `project` for
+/// the reason `below-floor` (the pool's capabilities are part of its floor) and the rest for
+/// `quota-default-unfit`. A default equal to the pool's
 /// disk joins. It catches a host that joins and then fails every run without disk
 /// `no-capacity` forever, and a pool that books zero for runs without disk.
 #[test]
@@ -129,13 +136,52 @@ fn a_quota_pool_refuses_a_host_without_a_default_that_fits() {
         (None, None),
     ];
     for (quota, default) in refused {
-        let joined = join(quota, default);
+        // A quota other than `project` is a missing capability of the floor itself.
+        let fault = match quota {
+            Some("project") => ShapeFault::QuotaDefaultUnfit,
+            _ => ShapeFault::BelowFloor,
+        };
+        let refusal = join(quota, default).unwrap_err();
         assert_eq!(
-            joined.map(|_| ()),
-            Err(Refusal::ShapeNotAccepted),
+            refusal,
+            Refusal::ShapeNotAccepted(fault),
             "{quota:?} {default:?}"
         );
+        assert_eq!(refusal.reason(), Some(fault.code()));
     }
     assert!(join(Some("project"), Some("25")).is_ok());
     assert!(join(Some("project"), Some("1")).is_ok());
+}
+
+/// Asserts that each shape fault has its wire reason and a text that names the condition
+/// and what to change, and that the refusal's text is the fault's. It catches two faults
+/// sharing a reason, or a text that does not say what the operator must change.
+#[test]
+fn each_shape_fault_names_its_condition() {
+    let cases = [
+        (
+            ShapeFault::BelowFloor,
+            "below-floor",
+            "the shape does not offer what the pool promises",
+        ),
+        (
+            ShapeFault::QuotaDefaultUnfit,
+            "quota-default-unfit",
+            "the pool names scratch-quota and the host's scratch default is absent, zero or \
+             more than the pool's disk_bytes: set the host's scratch-default-gib within the \
+             pool's disk_bytes, or change the pool's disk_bytes",
+        ),
+        (
+            ShapeFault::QuotaWithoutPoolDisk,
+            "quota-without-pool-disk",
+            "the host enforces a scratch quota and the pool books no disk and does not name \
+             scratch-quota: give the pool disk_bytes and scratch-quota, or run the host \
+             without --scratch-quota",
+        ),
+    ];
+    for (fault, reason, text) in cases {
+        assert_eq!(fault.code(), reason);
+        assert_eq!(fault.to_string(), text);
+        assert_eq!(Refusal::ShapeNotAccepted(fault).to_string(), text);
+    }
 }

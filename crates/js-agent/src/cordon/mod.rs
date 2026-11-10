@@ -66,6 +66,7 @@ use crate::{
     exit, host_id, machine_id,
 };
 pub use args::{Args, parse_window};
+pub(crate) use hold::CREDENTIAL_CODES;
 pub use hold::{IDLE_POLL, Outcome, Plan, hold};
 
 /// The first argument that selects the verb.

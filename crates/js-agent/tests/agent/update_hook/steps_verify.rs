@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use js_agent::update_hook::{
-    Class, Clock, Done, Outcome, POLL_SECS, Reason, Units, VERIFY_MARGIN_SECS,
+    Class, Clock, Done, Lease, Outcome, POLL_SECS, Reason, Units, VERIFY_MARGIN_SECS,
 };
 use serde_json::Value;
 
@@ -517,6 +517,41 @@ fn a_first_install_accepts_a_live_session_of_the_target() {
     let done = spy.verify(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert!(rig.record().unwrap().verify_ok);
+    only_looked(&spy);
+}
+
+/// A first install whose agent the server refuses at its hello (403 `shape-not-accepted`, which
+/// the agent does not retry: it exits 2 and the manager starts it again) never says hello, and
+/// its unit goes into `auto-restart`. Verify ends `start_failed` at the first look that sees it,
+/// not at its bound: one poll after the unit was still `active`, and with the server never
+/// knowing the host. Catches a verify that waits out its bound for a hello that cannot come.
+#[test]
+fn a_first_install_whose_agent_is_refused_fails_verify_at_the_first_look_after_it_exits() {
+    let rig = Rig::first_install("hook-verify-first-refused");
+    assert_eq!(Spy::new(&rig).prepare(&rig).outcome, Outcome::Success);
+    rig.kill.disarm();
+    {
+        let spy = Spy::new(&rig);
+        *spy.start_leaves.borrow_mut() = Some(("active", "running"));
+        assert_eq!(spy.cutover(&rig).outcome, Outcome::Success);
+    }
+    rig.kill.disarm();
+    let spy = Spy::new(&rig);
+    let base = rig.world.ticks();
+    spy.on_pause(move |spy, ticks| {
+        if ticks == base + 1 {
+            spy.world.seed_unit(UNIT, "activating", "auto-restart");
+        }
+    });
+    let done = spy.verify(&rig);
+    release_failure(&done, Reason::StartFailed);
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some("js-agent-crun.service is activating (auto-restart) during verify")
+    );
+    assert_eq!(rig.world.ticks() - base, 1, "one poll, not the bound");
+    assert!(rig.world.host().is_err(), "the server never knew the host");
+    assert!(!rig.record().unwrap().verify_ok);
     only_looked(&spy);
 }
 
