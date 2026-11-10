@@ -582,6 +582,51 @@ fn a_watchdog_in_its_callers_process_group_kills_only_the_binary() {
     assert!(bed.sandbox.root().exists());
 }
 
+/// A step whose caller is gone, and the caller's end of its standard error with it, is still
+/// ended by its watchdog: the message the watchdog writes fails, and the kill goes on. The stuck
+/// call announces itself, so the watchdog fires without a clock. The wait for the binary is
+/// bounded by a count of looks (it is a guard against a binary that never ends, not a measure
+/// of how long it takes). Catches a watchdog whose write to a closed pipe panics its thread and
+/// leaves the step parked for good, as a test process that died left its steps.
+#[test]
+fn a_watchdog_whose_caller_closed_its_standard_error_still_kills_the_step() {
+    use super::fakes::harness::Defect;
+    use std::os::unix::process::ExitStatusExt;
+    let bed = Bed::new(
+        "hook-runs-closed-stderr",
+        AgentHost::with_defect(Defect::Stall).on_stall(),
+    );
+    bed.ok(Step::Prepare);
+    bed.ok(Step::Cutover);
+    let mut child = Command::new(BIN)
+        .args(["update-hook", "verify", "--params"])
+        .arg(bed.sandbox.control().join("params.toml"))
+        .env_clear()
+        .envs(bed.host.env(&bed.sandbox))
+        .current_dir(bed.sandbox.root())
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    let mut status = None;
+    for _ in 0..1200 {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the step outlived its watchdog with no one reading its standard error");
+    };
+    assert_eq!(status.signal(), Some(9), "{status:?}");
+}
+
 /// On a host whose last job drained while `prepare` waited, `prepare` run again asks the lease
 /// server for its cordon again, which moves the cordon's expiry later: the run-twice check reads
 /// that as a change. This pins it as it is, the cordon's expiry and the record's, nothing else,
