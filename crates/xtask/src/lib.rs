@@ -33,6 +33,9 @@
 //!   Each unit runs its binary through `count-run --count-file <path> -- <binary> <args>...`
 //!   ([`count_run`]), which writes the number of tests the binary ran; a target fails unless
 //!   that count is at least one.
+//! - `channels gate|assume|apt|check-apt ...` ([`channels`]): the release's .debs published to the apt
+//!   repository at `packages.komira.ai/apt` (suite `testing`, then `stable` once the install check
+//!   passed), and the check that the package installs from `testing` in a clean Ubuntu system.
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
 //!   payload and scripts, laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
@@ -80,6 +83,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+pub mod channels;
 pub mod count_run;
 pub mod crun_tests;
 pub mod deploy;
@@ -113,6 +117,10 @@ pub enum Error {
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
+    /// A channels verb (the apt repository, its install check) failed. A usage error of one is
+    /// [`Error::Usage`], through the conversion in [`channels`].
+    #[error(transparent)]
+    Channels(channels::Error),
     /// The macOS package could not be staged or checked.
     #[error(transparent)]
     MacPkg(#[from] macpkg::Error),
@@ -269,6 +277,12 @@ enum Verb {
     /// Write the build descriptions of the linux-x86_64 and linux-arm64 machine images, and the
     /// cloud-init seed that builds each one (no network: every archive is pinned).
     ImageRecipe(image::Args),
+    /// The apt repository the release is published to, and the check that it installs.
+    Channels {
+        /// Which verb.
+        #[command(subcommand)]
+        verb: channels::Verb,
+    },
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -384,6 +398,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
         Verb::GenReport(args) => Ok(report::run(&args)?),
         Verb::ImageRecipe(args) => Ok(image::run(&args)?),
+        Verb::Channels { verb } => Ok(channels::run(verb)?.join("\n")),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::StageMacos(args) => macpkg::stage(&args)?,
             PkgVerb::CheckMacos(args) => macpkg::check(&args)?,
