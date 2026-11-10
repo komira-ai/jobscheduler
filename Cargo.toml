@@ -39,6 +39,9 @@ hex = "0.4.3"
 # The object-store signer (js-logstore): HMAC-SHA256 of AWS Signature Version 4. Already in
 # Cargo.lock at this version through the Postgres client, so the lock gains no package.
 hmac = "0.13.0"
+# The package's `md5sums` file (xtask `release deb`). Already in Cargo.lock at this version through
+# the Postgres client, so the lock gains no package.
+md-5 = "0.11.0"
 # Bodies of the registry client (js-oci): the empty request body and the frame reader.
 http-body-util = { version = "0.1.5", default-features = false }
 # The lease server serves its listener with hyper directly (axum's own `serve` has no
