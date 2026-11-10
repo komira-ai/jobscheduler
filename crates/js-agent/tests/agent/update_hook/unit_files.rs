@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use js_agent::update_hook::{INSTALLED_MISSING, Manager, PlanError, UnitRestart, plan};
+use js_agent::update_hook::{INSTALLED_MISSING, Manager, PlanError, UnitRestart, agent_in, plan};
 use js_testkit::dir::TestDir;
 
 const UNIT: &str = "js-agent-crun.service";
@@ -334,4 +334,67 @@ fn a_plist_is_compared_as_bytes_and_named_by_its_file() {
             changed: vec!["js-agent.plist".to_owned()]
         })
     );
+}
+
+/// A release directory that holds `tree/` is a native package release: the systemd unit is
+/// `tree/usr/lib/systemd/system/<unit>`, the launchd job `tree/Library/LaunchDaemons/<unit>.plist`
+/// and the agent `tree/usr/bin/js-agent`; one without it is read as an archive release.
+///
+/// Catches a native release read at the archive paths, and an archive release read at the native
+/// ones.
+#[test]
+fn a_release_with_a_tree_is_read_in_the_native_layout_and_one_without_in_the_archive_layout() {
+    let releases = Releases::new("hook-unit-layouts");
+    let native = releases.staged();
+    fs::create_dir_all(native.join("tree")).unwrap();
+    let archive = releases.previous();
+    fs::create_dir_all(&archive).unwrap();
+    assert_eq!(
+        Manager::Systemd.path_in(&native, UNIT),
+        native.join("tree/usr/lib/systemd/system/js-agent-crun.service")
+    );
+    assert_eq!(
+        Manager::Launchd.path_in(&native, "js-agent"),
+        native.join("tree/Library/LaunchDaemons/js-agent.plist")
+    );
+    assert_eq!(
+        Manager::Systemd.path_in(&archive, UNIT),
+        archive.join("units/js-agent-crun.service")
+    );
+    assert_eq!(agent_in(&native), native.join("tree/usr/bin/js-agent"));
+    assert_eq!(agent_in(&archive), archive.join("bin/js-agent"));
+}
+
+/// A native staged release is compared with the archive release that runs now: the same
+/// assignments are no change, a different one is named, and a previous release with no unit is
+/// `(installed unit missing)`.
+///
+/// Catches a mixed pair compared in one layout, which finds no installed unit and restarts an
+/// agent whose unit did not change.
+#[test]
+fn a_native_staged_unit_is_compared_with_an_archive_previous_unit() {
+    let releases = Releases::new("hook-unit-mixed");
+    let unit = "[Service]\nExecStart=/usr/bin/js-agent\nDelegate=yes\n";
+    fs::create_dir_all(releases.staged().join("tree")).unwrap();
+    releases.put(&releases.staged(), Manager::Systemd, unit);
+    releases.put(&releases.previous(), Manager::Systemd, unit);
+    let planned = |releases: &Releases| {
+        plan(
+            Manager::Systemd,
+            UNIT,
+            &releases.staged(),
+            Some(&releases.previous()),
+        )
+        .unwrap()
+        .map(|restart| restart.changed)
+    };
+    assert_eq!(planned(&releases), None);
+    releases.put(
+        &releases.previous(),
+        Manager::Systemd,
+        "[Service]\nExecStart=/opt/js-agent/link/current/js-agent\nDelegate=yes\n",
+    );
+    assert_eq!(planned(&releases), changed(&["Service.ExecStart"]));
+    fs::remove_file(Manager::Systemd.path_in(&releases.previous(), UNIT)).unwrap();
+    assert_eq!(planned(&releases), changed(&[INSTALLED_MISSING]));
 }

@@ -532,3 +532,71 @@ fn an_update_does_not_look_at_the_token_file() {
         "prepare stops nothing"
     );
 }
+
+/// Gives the staged release of `rig` the native package layout: its unit moves from `units/` to
+/// `tree/usr/lib/systemd/system/` and its agent from `bin/` to `tree/usr/bin/`.
+fn make_staged_native(rig: &Rig) {
+    let staged = &rig.params.staged_release;
+    let archive_unit = rig.unit_file(staged);
+    let archive_agent = staged.join("bin/js-agent");
+    let tree = staged.join("tree");
+    fs::create_dir_all(tree.join("usr/bin")).unwrap();
+    fs::create_dir_all(tree.join("usr/lib/systemd/system")).unwrap();
+    fs::rename(&archive_unit, rig.unit_file(staged)).unwrap();
+    fs::rename(&archive_agent, tree.join("usr/bin/js-agent")).unwrap();
+}
+
+/// A staged release that holds `tree/` is read in the native layout: the version check runs
+/// `tree/usr/bin/js-agent` and its unit is `tree/usr/lib/systemd/system/<unit>`, compared with the
+/// archive release that runs now (the first native update of a host that ran the archive).
+///
+/// Catches a native release read at the archive paths, which finds no agent and no unit, and a
+/// comparison that does not read the previous release in its own layout.
+#[test]
+fn a_native_staged_release_is_read_from_its_tree_and_compared_with_an_archive_previous() {
+    let rig = Rig::new("hook-unit-native-staged");
+    // The archive unit is read before `tree/` exists, so the move below finds it.
+    make_staged_native(&rig);
+    let staged = rig.params.staged_release.clone();
+    assert_eq!(
+        rig.unit_file(&staged),
+        staged.join("tree/usr/lib/systemd/system").join(UNIT)
+    );
+    let spy = Spy::new(&rig);
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        spy.log()[0],
+        format!("run({}/tree/usr/bin/js-agent --version)", staged.display())
+    );
+    assert_eq!(rig.record().unwrap().unit_restart, None);
+
+    let rig = Rig::new("hook-unit-native-staged-changed");
+    make_staged_native(&rig);
+    rig.stage_changed_unit();
+    let done = Spy::new(&rig).prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        changed(rig.record().unwrap().unit_restart),
+        ["Service.DelegateSubgroup", "Service.ExecStart"]
+    );
+}
+
+/// A native staged release with no unit below `tree/` is refused as a release that carries no
+/// unit, though an archive-style `units/` directory is beside it.
+///
+/// Catches a native release that falls back to the archive paths for its unit.
+#[test]
+fn a_native_staged_release_without_its_unit_in_the_tree_is_refused() {
+    let rig = Rig::new("hook-unit-native-no-unit");
+    let staged = rig.params.staged_release.clone();
+    fs::create_dir_all(staged.join("tree/usr/bin")).unwrap();
+    fs::rename(
+        staged.join("bin/js-agent"),
+        staged.join("tree/usr/bin/js-agent"),
+    )
+    .unwrap();
+    let done = Spy::new(&rig).prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::BadArtifact));
+}

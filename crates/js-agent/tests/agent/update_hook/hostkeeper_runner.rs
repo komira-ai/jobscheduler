@@ -1,11 +1,16 @@
-//! A first install of the Linux package's own manifest (packaging/js-agent/hostkeeper), run as
-//! hostkeeper's daemon runs one: its manifest loader (`hostkeeper_config`) reads the manifest, its
-//! step runner (`hostkeeper_steps::StepRunner`) writes the params file and orders the steps, and
-//! its systemd launcher builds each step's `systemd-run` line and keeps what the hook printed. All
-//! of it is hostkeeper's code at the revision the workspace pins (v0.1.194). Only `systemd-run` is a stand-in ([`StandIn`]): it runs the command line the launcher
-//! gave it, with `js-update-hook-fake` (the hook's own steps over the fake ports,
-//! tests/bin/update_hook_fake.rs) in place of the release's `bin/js-agent`, and the hook's state
-//! directory where the fake keeps it (`--state-dir`).
+//! A first install of the Linux package (packaging/js-agent/deb) as a native entry, run as
+//! hostkeeper's daemon runs one: its step runner (`hostkeeper_steps::StepRunner`) writes the
+//! params file and orders the steps, and its systemd launcher builds each step's `systemd-run`
+//! line and keeps what the hook printed. All of it is hostkeeper's code at the revision the
+//! workspace pins (v0.1.194). The order's inputs are the hook's bounds and params of the native
+//! manifest that `cargo xtask release desired` writes into the targets ([`BOUNDS`] and
+//! [`DECLARED_PARAMS`]); the package's files are in the version directory below `tree/`, as the
+//! native installer keeps them, and the hook is the `/usr/bin/js-agent` of that tree (the pinned
+//! runner takes the hook as a path in the sealed tree; the daemon of a release that reads a
+//! native entry's `hook.command` resolves it there). Only `systemd-run` is a stand-in
+//! ([`StandIn`]): it runs the command line the launcher gave it, with `js-update-hook-fake` (the
+//! hook's own steps over the fake ports, tests/bin/update_hook_fake.rs) in place of the
+//! release's agent, and the hook's state directory where the fake keeps it (`--state-dir`).
 //!
 //! Nothing but the hook makes its state directory: hostkeeper treats `state_dir` as one more
 //! value of `[params]`, and neither the package nor the host setup lists it, so the first step
@@ -20,9 +25,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use hostkeeper_config::manifest::{Expected, HostkeeperVersion, Manifest};
-use hostkeeper_config::names::{ServiceName, Version};
-use hostkeeper_config::platform::Platform;
 use hostkeeper_hook::{Params, Verdict};
 use hostkeeper_steps::{
     BootId, BootIdError, Bounds, Captured, Clock, Program, RecordStore, Ring, Spawner, Staged,
@@ -38,20 +40,49 @@ use super::fakes::harness::OWNED_CORDON;
 /// The version the first install installs.
 const VERSION: &str = "0.1.208";
 
-/// The hostkeeper release that runs the update, which the manifest's `min_hostkeeper` is judged
-/// against.
-const HOSTKEEPER: &str = "0.1.194";
-
-/// The `min_hostkeeper` the release fills in (crates/xtask/src/release/hostkeeper_package.rs).
-const MIN_HOSTKEEPER: &str = "0.1.92";
-
-/// The digest of the release's tarball: the order's, which hostkeeper passes on as
+/// The digest of the release's package: the order's, which hostkeeper passes on as
 /// `updater.artifact_digest`.
 const TARBALL: &str = "4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566778899";
 
+/// The hook command of the native manifest, which the sealed tree holds below `tree/`.
+const HOOK: &str = "tree/usr/bin/js-agent";
+
+/// The bounds of the native manifest's `hook` (`timeoutSecs`, `verifyDeadlineSecs`,
+/// `cleanupRetries`), in seconds.
+const BOUNDS: Bounds = Bounds {
+    prepare_secs: 3900,
+    cutover_secs: 4320,
+    verify_secs: 615,
+    rollback_secs: 8220,
+    cleanup_secs: 120,
+    verify_deadline_secs: 9000,
+    promotion_ceiling_secs: u64::MAX,
+    cleanup_retries: 3,
+};
+
+/// The native manifest's `params`: every key of `js_agent::update_hook::params::KEYS`.
+const DECLARED_PARAMS: &str = r#"unit                  = "js-agent-crun.service"
+state_dir             = "/var/lib/js-agent-update"
+release_link          = "/var/lib/hostkeeper/packages/js-agent/current"
+flags_file            = "/etc/js-agent/flags"
+token_file            = "/etc/js-agent/token"
+state_root            = "/var/lib/js-agent/state"
+runtime               = "crun"
+cordon_lease_secs     = 300
+cordon_max_secs       = 17355
+drain_wait_secs       = 3600
+defer_retry_secs      = 300
+prepare_timeout_secs  = 3900
+cutover_timeout_secs  = 4320
+verify_timeout_secs   = 615
+rollback_timeout_secs = 8220
+cleanup_timeout_secs  = 120
+verify_deadline_secs  = 9000
+"#;
+
 /// The package's directory in the repository.
 fn package() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/js-agent/hostkeeper")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/js-agent/deb")
 }
 
 /// A clock that moves only when the runner waits.
@@ -173,53 +204,41 @@ impl Host {
         self.tmp.path()
     }
 
-    /// `/var/lib/hostkeeper/packages/js-agent/<VERSION>`: the package's files and the manifest
-    /// with its placeholders filled in, every entry closed to group and others as the unpacker
+    /// `/var/lib/hostkeeper/packages/js-agent/<VERSION>`: the package's files below `tree/`, as
+    /// the native installer keeps them, every entry closed to group and others as the unpacker
     /// leaves it.
     fn unpack(&self) -> PathBuf {
         let dir = self
             .root()
             .join("var/lib/hostkeeper/packages/js-agent")
             .join(VERSION);
-        for sub in ["bin", "units", "files"] {
-            fs::create_dir_all(dir.join(sub)).unwrap();
+        let tree = dir.join("tree");
+        for sub in ["usr/bin", "usr/lib/systemd/system", "usr/lib/tmpfiles.d"] {
+            fs::create_dir_all(tree.join(sub)).unwrap();
         }
-        let manifest = fs::read_to_string(package().join("manifest.toml.in"))
-            .unwrap()
-            .replace("@VERSION@", VERSION)
-            .replace("@PLATFORM@", "linux-x86_64")
-            .replace("@MIN_HOSTKEEPER@", MIN_HOSTKEEPER);
-        fs::write(dir.join("manifest.toml"), manifest).unwrap();
-        for sub in ["units", "files"] {
-            for entry in fs::read_dir(package().join(sub)).unwrap() {
-                let entry = entry.unwrap();
-                fs::copy(entry.path(), dir.join(sub).join(entry.file_name())).unwrap();
-            }
+        for (from, to) in [
+            (
+                "js-agent-crun.service",
+                "usr/lib/systemd/system/js-agent-crun.service",
+            ),
+            (
+                "js-agent-crun-gpu.service",
+                "usr/lib/systemd/system/js-agent-crun-gpu.service",
+            ),
+            ("tmpfiles.conf", "usr/lib/tmpfiles.d/js-agent-crun.conf"),
+        ] {
+            fs::copy(package().join(from), tree.join(to)).unwrap();
         }
         // Never run: the stand-in runs the fake in its place.
-        fs::write(dir.join("bin/js-agent"), "the release's agent\n").unwrap();
+        fs::write(dir.join(HOOK), "the release's agent\n").unwrap();
         close(self.root());
-        fs::set_permissions(dir.join("bin/js-agent"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(dir.join(HOOK), fs::Permissions::from_mode(0o755)).unwrap();
         dir
     }
 
-    /// The order the daemon gives its step runner for a first install of `dir`, from the
-    /// manifest as hostkeeper's loader reads it (hostkeeper-daemon `verbs::update::update_order`
-    /// and `declared_params`).
+    /// The order the daemon gives its step runner for a first install of `dir`: the native
+    /// manifest's hook bounds and params (hostkeeper-daemon `verbs::update::update_order`).
     fn order(&self, dir: &Path) -> UpdateOrder {
-        let expected = Expected {
-            name: ServiceName::new("js-agent").unwrap(),
-            version: Version::new(VERSION).unwrap(),
-            platform: Platform::LinuxX86_64,
-        };
-        let manifest = Manifest::load(
-            dir,
-            &expected,
-            &HostkeeperVersion::parse(HOSTKEEPER).unwrap(),
-        )
-        .expect("hostkeeper loads the manifest");
-        let hook = &manifest.hook;
-        let timeouts = &hook.timeout_secs;
         UpdateOrder {
             service: "js-agent".to_owned(),
             target_version: VERSION.to_owned(),
@@ -227,18 +246,9 @@ impl Host {
             artifact_digest: TARBALL.to_owned(),
             staged: Staged::seal(dir).unwrap(),
             previous: None,
-            hook_binary: PathBuf::from(&hook.command[0]),
-            bounds: Bounds {
-                prepare_secs: timeouts.prepare.map_or(0, |secs| secs.get()),
-                cutover_secs: timeouts.cutover.get(),
-                verify_secs: timeouts.verify.get(),
-                rollback_secs: timeouts.rollback.get(),
-                cleanup_secs: timeouts.cleanup.get(),
-                verify_deadline_secs: hook.verify_deadline_secs,
-                promotion_ceiling_secs: hook.promotion_ceiling_secs.map_or(u64::MAX, |s| s.get()),
-                cleanup_retries: hook.cleanup_retries,
-            },
-            declared_params: Params::parse_declared(&manifest.params.to_string()).unwrap(),
+            hook_binary: PathBuf::from(HOOK),
+            bounds: BOUNDS,
+            declared_params: Params::parse_declared(DECLARED_PARAMS).unwrap(),
             min_updater_protocol: None,
             order_try: Some(1),
             builtin_steps: false,
@@ -299,7 +309,7 @@ fn close(root: &Path) {
 }
 
 /// The params file hostkeeper writes for the first install of the package: the manifest's
-/// `[params]` as they are, and its reserved keys for a first install (no previous release or
+/// `params` as they are, and its reserved keys for a first install (no previous release or
 /// version).
 const FIRST_INSTALL_PARAMS: &str = r#"cleanup_timeout_secs = 120
 cordon_lease_secs = 300
@@ -362,7 +372,7 @@ fn a_first_install_through_hostkeepers_runner_makes_the_state_directory_and_succ
         .collect();
     let release = "<root>/var/lib/hostkeeper/packages/js-agent/0.1.208";
     let params = "<root>/var/lib/updater/state/js-agent/params.toml";
-    let binary = format!("{release}/bin/js-agent");
+    let binary = format!("{release}/{HOOK}");
     let step = |words: &[&str]| -> Vec<String> {
         std::iter::once(binary.as_str())
             .chain(words.iter().copied())

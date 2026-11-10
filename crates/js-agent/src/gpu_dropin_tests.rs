@@ -24,10 +24,10 @@ const PACKAGED_UNIT: &str = concat!(
     "/../../packaging/js-agent/js-agent-crun.service"
 );
 
-/// The unit hostkeeper's package links, whose `ExecStart` names the operator's flags file.
-const HOSTKEEPER_UNIT: &str = concat!(
+/// The unit the js-agent .deb installs, whose `ExecStart` names the operator's flags file.
+const DEB_UNIT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../packaging/js-agent/hostkeeper/units/js-agent-crun.service"
+    "/../../packaging/js-agent/deb/js-agent-crun.service"
 );
 
 /// The unit most tests extend.
@@ -764,14 +764,14 @@ fn exec_start_is_read_as_systemd_reads_it() {
     );
 }
 
-/// The unit hostkeeper links names only `--flags-file` and `--token-file`: the server and the
+/// The unit the .deb installs names only `--flags-file` and `--token-file`: the server and the
 /// pool are in the operator's flags file. The checks read the file as the agent does, and the
 /// drop-in keeps `--flags-file` as the unit has it, so the agent reads the file at its start.
 #[test]
-fn the_dropin_extends_the_hostkeeper_unit_whose_server_is_in_the_flags_file() {
-    let mut rig = Rig::new("dropin-hostkeeper", &["nvidia0", "nvidiactl"]);
+fn the_dropin_extends_the_deb_unit_whose_server_is_in_the_flags_file() {
+    let mut rig = Rig::new("dropin-deb", &["nvidia0", "nvidiactl"]);
     rig.flags = Some("--server=https://js.example.com:8443\n--pool=farm\n");
-    let unit = std::fs::read_to_string(HOSTKEEPER_UNIT).unwrap();
+    let unit = std::fs::read_to_string(DEB_UNIT).unwrap();
     std::fs::write(&rig.unit, &unit).unwrap();
     let ran = rig.run_with(&[], absent_smi);
     assert_eq!(ran.code, status(0), "{}", ran.err);
@@ -785,6 +785,39 @@ fn the_dropin_extends_the_hostkeeper_unit_whose_server_is_in_the_flags_file() {
     ));
     want.extend(rig.driver_flags());
     assert_eq!(words(&line), want);
+}
+
+/// The unit of a package is in `/usr/lib/systemd/system` and the operator's `systemctl edit`
+/// override is in `/etc/systemd/system/<unit>.d`, given as `--dropin-dir`: its `ExecStart` is the
+/// one the drop-in extends, and it wins over a drop-in of the same name in the unit's own
+/// directory.
+#[test]
+fn a_dropin_dir_beside_the_units_directory_is_read_and_wins() {
+    let rig = Rig::new("dropin-extra-dir", &["nvidia0"]);
+    let own = rig.dir.join("etc/js-agent-crun.service.d");
+    let extra = rig.dir.join("etc-override/js-agent-crun.service.d");
+    for dir in [&own, &extra] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(
+        own.join("override.conf"),
+        "[Service]\nExecStart=\nExecStart=/bogus --server https://p.example:7300\n",
+    )
+    .unwrap();
+    let operators = "/usr/bin/js-agent --server https://o.example:7300 --token-file /t --pool o";
+    std::fs::write(
+        extra.join("override.conf"),
+        format!("[Service]\nExecStart=\nExecStart={operators}\n"),
+    )
+    .unwrap();
+    let ran = rig.run_with(&["--dropin-dir", extra.to_str().unwrap()], absent_smi);
+    assert_eq!(ran.code, status(0), "{}", ran.err);
+    let text = std::fs::read_to_string(&rig.out).unwrap();
+    let line = exec_start([text.as_str()]).unwrap();
+    assert!(
+        line.starts_with(&format!("{operators} --gpu-device")),
+        "{line}"
+    );
 }
 
 /// A flags file the agent would refuse is refused here too, naming the unit and the file, and

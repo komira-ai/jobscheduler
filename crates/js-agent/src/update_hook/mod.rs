@@ -78,7 +78,7 @@ pub use record::{
 };
 pub use report::{Class, MAX_REASON_LEN, Reason, Report, is_reason_token};
 pub use settings::{Settings, Timeouts};
-pub use unit_files::{INSTALLED_MISSING, Manager, PlanError, plan};
+pub use unit_files::{INSTALLED_MISSING, Manager, PlanError, agent_in, plan};
 pub use validate::{
     CUTOVER_MARGIN_SECS, EXPIRY_SLACK_MS, Invalid, MAX_CHANGE_LEN, MAX_CHANGES, MAX_VERSION_LEN,
     PREPARE_MARGIN_SECS, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, START_WAIT_SECS,
