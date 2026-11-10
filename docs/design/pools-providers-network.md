@@ -268,6 +268,13 @@ agent reports in its hello, as capabilities declared in `crates/js-caps`:
   cannot be read (a warning says why), reports none, and a job that requires disk is not
   placed on it. Like the others, an operator cannot set it.
 
+The farm allocates no disk per job: its pools book no `disk_bytes` and name no `scratch-quota`,
+and its agents run without `--scratch-quota`. The tierstore on each node is the cache jobs share,
+so there is no per-job scratch bound to book. The registry keeps the two consistent: a pool that
+books no disk and does not name `scratch-quota` refuses a host that enforces a quota, with
+`shape-not-accepted` and the reason `quota-without-pool-disk`, since it would book nothing for
+runs the host books at its default. A pool that names `scratch-quota` must book disk.
+
 A pool declares `exec = "container"` (default) or `"sandbox-exec"`. The pool floor (4.5)
 requires `runtime` to equal the pool's `exec`, and for a pool with gpus, `gpu-toolkit`.
 Admission refuses with two new codes beside `SHAPE_NOT_ACCEPTED`

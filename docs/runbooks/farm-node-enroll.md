@@ -274,12 +274,13 @@ restart the one that changed.
 | `quota-default-unfit` | the pool names `scratch-quota` and the host's `scratch-default-gib` is absent, zero, above the wire maximum, or more than the pool's `disk_bytes` | set the host's `--scratch-default-gib` (default 2) to at most the pool's `disk_bytes`, or raise `disk_bytes` |
 | `quota-without-pool-disk` | the host runs with `--scratch-quota`, and the pool books no disk (`disk_bytes` zero or absent) and does not name `scratch-quota` | see below |
 
-For `quota-without-pool-disk`, either make the pool match the host or run the host without
-`--scratch-quota`. To keep the quota, the pool file must name `scratch-quota = "project"` under
-`[capabilities]` and book `disk_bytes` under `[shape]` of at least the host's `scratch-default-gib`
-(2 GiB when the flag is not given) and at most the disk the host reports. A pool that names
-`scratch-quota` without `disk_bytes` is refused when the server loads the file. Otherwise remove
-`--scratch-quota` from the node's flags file and restart the agent.
+For `quota-without-pool-disk` on a farm node, remove `--scratch-quota` from the node's flags file
+and restart the agent: the farm allocates no disk per job, so its pools book no disk and its nodes
+enforce no per-job quota. Only a pool that does book disk per job takes quota hosts: its file
+names `scratch-quota = "project"` under `[capabilities]` and books `disk_bytes` under `[shape]` of
+at least the host's `scratch-default-gib` (2 GiB when the flag is not given) and at most the disk
+the host reports. A pool that names `scratch-quota` without `disk_bytes` is refused when the
+server loads the file.
 
 ## 9. The release trust entry
 
