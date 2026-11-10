@@ -125,12 +125,14 @@ fn resolved(name: &str, tables: &str, pool: &str) -> Resolved {
     Config::resolve_file(&path, &kinds, &OwnerOnlyFiles, clock).unwrap()
 }
 
-/// Asserts that the order of a pool's Default platform is its `machine_providers` as the
-/// providers bindings name: a `static` machine provider as `static`, the launching one as the
-/// pool, whether the file declares the tables or names the provider on the pool; and that a
-/// pool the file does not resolve has no order of its own (it takes the default). It catches
-/// an order taken from anywhere but the platform, and a launching provider named by its table
-/// name, which no binding carries.
+/// Asserts that the order of a pool is its platforms' `machine_providers`, in the order the
+/// pool lists its platforms and each platform its providers, each once, as the providers
+/// bindings name: a `static` machine provider as `static`, the launching one as the pool,
+/// whether the file declares the tables or names the provider on the pool, and with the
+/// launching provider listed first; and that a pool the file does not resolve has no order of
+/// its own (it takes the default). It catches an order taken from anywhere but the platforms,
+/// one that drops a platform after the first, a provider listed twice, and a launching
+/// provider named by its table name, which no binding carries.
 #[test]
 fn the_order_is_the_default_platforms_machine_providers() {
     let tables = "[[machine_provider]]\nname = \"rack\"\nkind = \"static\"\n\n\
@@ -151,4 +153,26 @@ fn the_order_is_the_default_platforms_machine_providers() {
         );
         assert_eq!(order_of(resolved, &id("other")), None);
     }
+
+    // The launching provider listed first, and a pool over two platforms that both list
+    // `rack`: the platforms' order, then each platform's, each provider once.
+    let reversed = tables.replace("[\"rack\", \"cloud\"]", "[\"cloud\", \"rack\"]");
+    let reversed = resolved("order-reversed", &reversed, "platforms = [\"ours\"]");
+    let launched_first = Some(vec![id("gpu"), STATIC]);
+    assert_eq!(order_of(&reversed, &id("gpu")), launched_first);
+    let two = format!(
+        "{tables}\n[[platform]]\nname = \"racks\"\nkind = \"default\"\n\
+         machine_providers = [\"rack\"]\n"
+    );
+    let racks_first = resolved("order-two", &two, "platforms = [\"racks\", \"ours\"]");
+    assert_eq!(
+        order_of(&racks_first, &id("gpu")),
+        Some(vec![STATIC, id("gpu")])
+    );
+    let ours_first = resolved(
+        "order-two-again",
+        &two.replace("[\"rack\", \"cloud\"]", "[\"cloud\", \"rack\"]"),
+        "platforms = [\"ours\", \"racks\"]",
+    );
+    assert_eq!(order_of(&ours_first, &id("gpu")), launched_first);
 }

@@ -28,33 +28,34 @@ pub(crate) fn static_then(pool: &ProviderId) -> Vec<ProviderId> {
     vec![STATIC, pool.clone()]
 }
 
-/// The machine providers of the pool `pool`'s Default platform (the first of its platforms
-/// whose jobs run on hosts of ours), first to last, each as the provider a binding names: a
-/// `static` machine provider as [`STATIC`], one that launches as `pool`, the provider the
-/// scaler mints the pool's machines under. `None` when `resolved` has no such platform for the
+/// The machine providers of the pool `pool`, first to last: those of each of its platforms
+/// whose jobs run on hosts of ours, in the order the pool lists its platforms and each
+/// platform its `machine_providers`, each once, as the provider a binding names: a `static`
+/// machine provider as [`STATIC`], the one that launches as `pool`, the provider the scaler
+/// mints the pool's machines under. `None` when `resolved` holds no such platform for the
 /// pool: the order is then [`static_then`].
 pub(crate) fn order_of(resolved: &Resolved, pool: &ProviderId) -> Option<Vec<ProviderId>> {
-    let platform = resolved.pool(pool.as_str()).and_then(|named| {
-        named.platforms.iter().find_map(|id| {
-            let platform = resolved
-                .platforms
-                .iter()
-                .find(|platform| platform.id == *id);
-            platform.filter(|platform| platform.kind.has_hosts())
-        })
+    let named = resolved.pool(pool.as_str())?;
+    let platforms = named.platforms.iter().filter_map(|id| {
+        let mut declared = resolved.platforms.iter();
+        let platform = declared.find(|platform| platform.id == *id);
+        platform.filter(|platform| platform.kind.has_hosts())
     });
-    let order = |platform: &crate::file::ResolvedPlatform| {
-        let providers = platform.machine_providers.iter().filter_map(|name| {
-            let mut declared = resolved.machine_providers.iter();
-            declared.find(|provider| provider.name == *name)
-        });
-        let ranked = providers.map(|provider| match provider.launches() {
-            true => pool.clone(),
-            false => STATIC,
-        });
-        ranked.collect::<Vec<ProviderId>>()
-    };
-    platform.map(order)
+    let names = platforms.flat_map(|platform| platform.machine_providers.iter());
+    let providers = names.filter_map(|name| {
+        let mut declared = resolved.machine_providers.iter();
+        declared.find(|provider| provider.name == *name)
+    });
+    let mut order: Vec<ProviderId> = Vec::new();
+    for provider in providers.map(|provider| match provider.launches() {
+        true => pool.clone(),
+        false => STATIC,
+    }) {
+        if !order.contains(&provider) {
+            order.push(provider);
+        }
+    }
+    (!order.is_empty()).then_some(order)
 }
 
 /// The rank of a host whose binding is `binding` in the platform whose machine providers are
