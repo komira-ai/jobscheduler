@@ -37,14 +37,15 @@ pub struct DrainCost {
 }
 
 /// The hosts ordered by drain cost, smallest first: the host's tail (see [`tail`]) minus
-/// `now`, then the fewest leases, then the earlier machine provider
-/// ([`HostLoad::provider_rank`]), then the lowest host id. A host with an unknown tail
+/// `now`, then the fewest leases, then the lowest host id. A host with an unknown tail
 /// (a lease with neither an estimate nor a max-wall bound) ranks after every host with
-/// a known one; among those the order is the fewest leases, then the earlier provider, then
-/// the lowest host id. The provider never outranks a smaller tail or fewer leases: it
-/// only tells apart hosts that cost the same to drain.
+/// a known one; among those the order is the fewest leases, then the lowest host id.
 /// With no estimates given, a lease's end is its max-wall bound, so the order is that of
 /// the latest end bound.
+///
+/// Hosts of different machine providers that cost the same to drain are told apart by
+/// the earlier provider ([`HostLoad::provider_rank`]) before the host id; the provider
+/// never outranks a smaller tail or fewer leases.
 pub fn drain_cost(hosts: &[HostLoad], now: u64) -> Vec<DrainCost> {
     let mut out: Vec<DrainCost> = hosts
         .iter()
