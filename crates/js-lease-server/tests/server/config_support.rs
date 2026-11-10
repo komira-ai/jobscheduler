@@ -12,7 +12,6 @@ use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SharedClock,
     StartupError,
 };
-use js_pool_static::EXAMPLE_CONFIG;
 use js_types::{ExecMode, Model};
 use js_types::{ManualClock, Timestamp};
 
@@ -196,8 +195,20 @@ pub fn quoted(path: &Path) -> String {
     quote(&path.display().to_string())
 }
 
-/// A `[server]` table with the required keys, and `extra` lines after them.
+/// A `[server]` table with the required keys, and `extra` lines after them. Unless `extra`
+/// names `agent_listen`, the agent routes get a loopback port of their own
+/// (`agent_listen = "127.0.0.2:0"`), which a pool whose hosts register needs.
 pub fn server(scratch: &Scratch, extra: &str) -> String {
+    let agents = match extra.contains("agent_listen") {
+        true => "",
+        false => "agent_listen = \"127.0.0.2:0\"\n",
+    };
+    bare_server(scratch, &format!("{agents}{extra}"))
+}
+
+/// A `[server]` table with the required keys and `extra` lines after them, and nothing
+/// else: no `agent_listen` unless `extra` gives one.
+pub fn bare_server(scratch: &Scratch, extra: &str) -> String {
     let token = scratch.write("client-token", TOKEN, 0o600);
     format!(
         "[server]\nstate_file = {}\nboot = \"initialise\"\nclient_token_file = {}\nmax_lease_wall = \"2h\"\n{extra}\n",
@@ -219,18 +230,6 @@ pub fn server_with_agents(scratch: &Scratch) -> String {
 pub struct PoolText(Vec<(String, String)>);
 
 impl PoolText {
-    /// A static pool `name` over the shipped two-host file.
-    pub fn static_pool(scratch: &Scratch, name: &str) -> Self {
-        let hosts = scratch.write(&format!("hosts-{name}.toml"), EXAMPLE_CONFIG, 0o644);
-        Self(Vec::new())
-            .set("name", &quote(name))
-            .set("class", &quote("gpu-host"))
-            .set(
-                "provider",
-                &format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&hosts)),
-            )
-    }
-
     /// A pool `name` of hand-joined agents: six `x86_64` machines of 8 cores and 16 GiB
     /// (the scheduler describes a host by its `arch`), with no host contract.
     pub fn joined(name: &str) -> Self {

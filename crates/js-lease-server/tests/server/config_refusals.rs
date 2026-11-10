@@ -5,19 +5,21 @@ use std::os::unix::fs::PermissionsExt;
 
 use js_lease_server::{Config, Kinds, OwnerOnlyFiles};
 
-use crate::config_support::{PoolText, clock, file, load, oauth_file, quoted, refusal, server};
+use crate::config_support::{
+    PoolText, bare_server, clock, file, load, oauth_file, quoted, refusal, server,
+};
 use crate::support::Scratch;
 
-/// A static pool, to stand beside the table under test.
-fn hosts(scratch: &Scratch) -> PoolText {
-    PoolText::static_pool(scratch, "hosts")
+/// A joined pool, to stand beside the table under test.
+fn hosts() -> PoolText {
+    PoolText::joined("hosts")
 }
 
 /// The refusal of a file whose `[server]` table has `extra` after its required keys,
-/// beside a static pool.
+/// beside a joined pool.
 fn refused_server(name: &str, extra: &str) -> String {
     let scratch = Scratch::new(name);
-    let text = file(&server(&scratch, extra), &[&hosts(&scratch)]);
+    let text = file(&server(&scratch, extra), &[&hosts()]);
     refusal(&scratch, &text)
 }
 
@@ -52,7 +54,7 @@ fn a_missing_file_and_a_syntax_error() {
 #[test]
 fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
     let scratch = Scratch::new("config_unknown");
-    let pool = hosts(&scratch);
+    let pool = hosts();
     let text = format!(
         "{}\n[extra]\nx = 1\n",
         file(&server(&scratch, ""), &[&pool])
@@ -73,10 +75,11 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          job_retention, job_feed_retention, job_allocation_retention, job_listen, max_job_wall, \
          store, allow_sqlite_store, store_unreachable_after, metrics_listen"
     );
-    let text = file(&server(&scratch, ""), &[&pool.set("colour", "\"red\"")]);
+    let elastic = PoolText::elastic(&scratch).set("colour", "\"red\"");
+    let text = file(&server(&scratch, ""), &[&elastic]);
     assert_eq!(
         refusal(&scratch, &text),
-        "pool \"hosts\": colour: unknown field; known: name, class, exec, \
+        "pool \"gpu\": colour: unknown field; known: name, class, exec, \
          memory_schedulable_percent, max_instances, max_machines, max_spend_per_hour, max_spend_per_day, \
          idle, max_age, min_host_lifetime, boot_timeout, boot_fail_cooldown_max, \
          boot_fail_trip_after, boot_fail_reset_after, launch, live_until, agent, join_token_file, provider, \
@@ -90,7 +93,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
 #[test]
 fn the_server_table_is_checked_key_by_key() {
     let scratch = Scratch::new("config_server_table");
-    let pool = hosts(&scratch);
+    let pool = hosts();
     let no_server = refusal(&scratch, &pool.text());
     assert_eq!(no_server, "server: required: add a [server] table");
     assert_eq!(
@@ -177,7 +180,7 @@ fn the_server_table_is_checked_key_by_key() {
 #[test]
 fn the_client_token_file_is_a_secret_file() {
     let scratch = Scratch::new("config_client_token");
-    let text = file(&server(&scratch, ""), &[&hosts(&scratch)]);
+    let text = file(&server(&scratch, ""), &[&hosts()]);
     let path = scratch.path("client-token");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     let said = refusal(&scratch, &text);
@@ -197,7 +200,8 @@ fn the_client_token_file_is_a_secret_file() {
     );
 }
 
-/// Asserts that no pool at all is refused, and that `pool` as a value that is not an
+/// Asserts that no pool at all is refused naming `pool` and the pools that serve hosts, and
+/// that `pool` as a value that is not an
 /// array of tables is refused with the way to write it.
 #[test]
 fn a_file_needs_pools_written_as_tables() {
@@ -205,7 +209,7 @@ fn a_file_needs_pools_written_as_tables() {
     let bare = server(&scratch, "");
     assert_eq!(
         refusal(&scratch, &bare),
-        "pool: required: add at least one [[pool]] table"
+        "pool: required: add a [[pool]] whose hosts register agents (a joined or an elastic pool)"
     );
     for pools in ["pool = 7", "pool = [1]"] {
         assert_eq!(
@@ -240,7 +244,7 @@ fn tls_files_come_together_and_a_public_listener_needs_them() {
         format!("server.agent_listen: 10.1.2.3:7301 {clear}")
     );
     let with_tls = "listen = \"0.0.0.0:7300\"\ntls_cert = \"/c\"\ntls_key = \"/k\"";
-    let text = file(&server(&scratch, with_tls), &[&hosts(&scratch)]);
+    let text = file(&server(&scratch, with_tls), &[&hosts()]);
     let config = load(&scratch, &text).unwrap();
     assert_eq!(
         config.warnings(),
@@ -251,7 +255,7 @@ fn tls_files_come_together_and_a_public_listener_needs_them() {
     // The status pages are on `server.listen` alone, so the agent port's warning does
     // not mention them.
     let agent_wide = "agent_listen = \"0.0.0.0:7301\"\ntls_cert = \"/c\"\ntls_key = \"/k\"";
-    let text = file(&server(&scratch, agent_wide), &[&hosts(&scratch)]);
+    let text = file(&server(&scratch, agent_wide), &[&hosts()]);
     let config = load(&scratch, &text).unwrap();
     assert_eq!(
         config.warnings(),
@@ -261,15 +265,17 @@ fn tls_files_come_together_and_a_public_listener_needs_them() {
 
 /// Asserts that an elastic pool needs the agent routes on a port of their own, with the
 /// design's message: no `agent_listen`, and one equal to `listen`, are refused naming
-/// `server.agent_listen`; a static pool alone needs none.
+/// `server.agent_listen`, for an elastic pool and for a joined one.
 #[test]
 fn an_elastic_pool_needs_an_agent_port_of_its_own() {
     let scratch = Scratch::new("config_agent_port");
     let pool = PoolText::elastic(&scratch);
     let wanted =
         "server.agent_listen: required with an elastic pool; must differ from server.listen";
-    let none = file(&server(&scratch, ""), &[&pool]);
+    let none = file(&bare_server(&scratch, ""), &[&pool]);
     assert_eq!(refusal(&scratch, &none), wanted);
+    let joined = file(&bare_server(&scratch, ""), &[&hosts()]);
+    assert_eq!(refusal(&scratch, &joined), wanted);
     let same = "listen = \"127.0.0.1:7301\"\nagent_listen = \"127.0.0.1:7301\"";
     let text = file(&server(&scratch, same), &[&pool]);
     assert_eq!(refusal(&scratch, &text), wanted);
@@ -280,7 +286,7 @@ fn an_elastic_pool_needs_an_agent_port_of_its_own() {
 /// Asserts that `http://` off the loopback is refused for an elastic pool in each network
 /// mode, naming `server.advertise_url`, and that `https`, the loopback names (`localhost`,
 /// `127.0.0.1`, `[::1]`) and an address that does not parse as a URL are not refused by
-/// this check; a static pool alone may advertise `http://`. The agent refuses a plain
+/// this check; a joined pool is refused it as an elastic one is. The agent refuses a plain
 /// `http://` address that is not loopback, so a pool that passed start would bill for
 /// every launch it could not boot.
 #[test]
@@ -312,11 +318,6 @@ fn plain_http_is_refused_for_agents_off_the_loopback() {
         assert!(load(&scratch, &text).is_ok(), "{url}");
     }
     let plain = "advertise_url = \"http://js.example:7300\"";
-    assert!(
-        load(
-            &scratch,
-            &file(&server(&scratch, plain), &[&hosts(&scratch)])
-        )
-        .is_ok()
-    );
+    let text = file(&server(&scratch, plain), &[&hosts()]);
+    assert_eq!(refusal(&scratch, &text), wanted);
 }

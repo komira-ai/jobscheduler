@@ -52,7 +52,7 @@ async fn own(h: &Harness, host: &str, token: &str) -> Value {
 /// writes the files as well.
 #[tokio::test]
 async fn bindings_taints_and_cordons_survive_a_restart_from_the_store() {
-    let first = start_agents_in("hosts_store_bindings", false, Kept::Store).await;
+    let first = start_agents_in("hosts_store_bindings", Kept::Store).await;
     let tainted = session(&hello_with(&first, JOIN, "burst-1").await, "burst-1");
     let mut beat = tainted.beat();
     beat["taint"] = json!({ "reason": "residue", "check": "tmp" });
@@ -71,7 +71,7 @@ async fn bindings_taints_and_cordons_survive_a_restart_from_the_store() {
         "{kept}"
     );
 
-    let h = restarted(first, false).await;
+    let h = restarted(first).await;
     assert_eq!(Kept::of(&h), Kept::Store);
     let other = hello_with(&h, JOIN_B, "burst-1").await;
     assert_eq!((other.status, code(&other)), (403, "host-bound".to_owned()));
@@ -99,7 +99,7 @@ async fn bindings_taints_and_cordons_survive_a_restart_from_the_store() {
 /// revoke that comes back, and a store that keeps the secret instead of its digest.
 #[tokio::test]
 async fn join_token_digests_survive_a_restart() {
-    let first = start_agents_in("hosts_store_joins", false, Kept::Store).await;
+    let first = start_agents_in("hosts_store_joins", Kept::Store).await;
     let unused = minted(&first, "i-1").await;
     let used = minted(&first, "i-2").await;
     let revoked = minted(&first, "i-3").await;
@@ -107,7 +107,7 @@ async fn join_token_digests_survive_a_restart() {
     let body = json!({ "provider": "lambdalabs", "instance_id": "i-3" });
     assert_eq!(first.call("DELETE", MINT, Some(&body)).await.status, 204);
 
-    let h = restarted(first, false).await;
+    let h = restarted(first).await;
     let stored = format!("{}{}", kept_joins(&h), kept_bindings(&h));
     for token in [&unused, &used, &revoked] {
         assert!(!stored.contains(token.as_str()), "{stored}");
@@ -146,7 +146,7 @@ async fn a_stored_host_that_cannot_be_read_refuses_the_start() {
             let damaged = Txn::new().put(key, "{}", Cond::Any);
             store.txn(damaged).unwrap().unwrap();
         }
-        let args = Kept::Store.args(&scratch, agent_args(&scratch, false));
+        let args = Kept::Store.args(&scratch, agent_args(&scratch));
         let (_ticks, ticker) = channel_ticker();
         let started = start(config(args).unwrap(), clock(), ticker).await;
         let refused = started.err().unwrap();

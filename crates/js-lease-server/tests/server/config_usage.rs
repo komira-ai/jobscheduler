@@ -8,10 +8,10 @@ use std::path::Path;
 use crate::config_support::{PoolText, file, load, refusal, server};
 use crate::support::Scratch;
 
-/// `lines` as the `[server]` keys of a file with one static pool, loaded.
+/// `lines` as the `[server]` keys of a file with one joined pool, loaded.
 fn loaded(name: &str, lines: &str) -> (Scratch, Result<js_lease_server::Config, String>) {
     let scratch = Scratch::new(name);
-    let stat = PoolText::static_pool(&scratch, "hosts");
+    let stat = PoolText::joined("hosts");
     let text = file(&server(&scratch, lines), &[&stat]);
     let config = load(&scratch, &text).map_err(|err| err.to_string());
     (scratch, config)
@@ -93,7 +93,7 @@ fn the_usage_keys_are_refused_with_the_flags_rules() {
         ),
     ] {
         let scratch = Scratch::new("usage_file_refused");
-        let stat = PoolText::static_pool(&scratch, "hosts");
+        let stat = PoolText::joined("hosts");
         let text = file(&server(&scratch, &lines), &[&stat]);
         assert_eq!(refusal(&scratch, &text), said, "{lines}");
     }

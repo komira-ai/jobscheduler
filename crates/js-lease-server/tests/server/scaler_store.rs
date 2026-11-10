@@ -287,7 +287,7 @@ async fn import_with_no_files_still_sets_the_marker() {
     tracing::callsite::rebuild_interest_cache();
     let scratch = Scratch::new("scaler_store_fresh");
     let args = Kept::Store.args(&scratch, base_args(&scratch));
-    let h = Harness::with(scratch, args.clone(), None).await;
+    let h = Harness::with(scratch, args.clone()).await;
     let store = h.running.store().unwrap();
     let only = vec![(IMPORTED.to_owned(), br#"{"version":1}"#.to_vec())];
     assert_eq!(everything(&*store), only);
@@ -303,7 +303,7 @@ async fn import_with_no_files_still_sets_the_marker() {
         ".scaler.unremoved",
         r#"{"version":1,"hosts":["js-ghost"]}"#,
     );
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     let store = h.running.store().unwrap();
     assert_eq!(everything(&*store), only);
     for file in [agents, unremoved] {
@@ -331,7 +331,7 @@ async fn an_import_does_not_run_over_a_store_that_holds_state() {
     put_in_store(&scratch, UNREMOVED_KEY, held);
     write_beside(&scratch, ".agents", &agents_file("residue"));
     let args = Kept::Store.args(&scratch, base_args(&scratch));
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     let store = h.running.store().unwrap();
     let expected = vec![
         (UNREMOVED_KEY.to_owned(), held.as_bytes().to_vec()),

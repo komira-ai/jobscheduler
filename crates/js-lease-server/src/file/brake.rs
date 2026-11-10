@@ -48,16 +48,6 @@ impl Given {
         })
     }
 
-    /// The first key given, for a pool that cannot use any.
-    pub(super) fn first_given(&self) -> Option<&'static str> {
-        let given = [
-            ("boot_fail_cooldown_max", self.cooldown_max.is_some()),
-            ("boot_fail_trip_after", self.trip_after.is_some()),
-            ("boot_fail_reset_after", self.reset_after.is_some()),
-        ];
-        given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
-    }
-
     /// The plan: a ceiling of 2 hours unless the file says (from 10 minutes to 24 hours), a trip after
     /// 3 failures in a row unless it says (from 1 to 100), and 10 minutes of a host being
     /// heard unless it says (from 1 minute to 24 hours).

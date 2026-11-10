@@ -13,7 +13,6 @@ use js_types::HostId;
 use super::engine_rig::{GIB, Rig, T0, hello_of, pool, rig_of};
 use super::rank::STATIC;
 use super::wiring_tests::{config_of, scratch};
-use crate::config::Hosts;
 
 fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
@@ -35,9 +34,7 @@ fn launched(name: &str, provider: &str) -> js_agent_wire::Hello {
 fn two_providers(name: &str, order: Option<Vec<js_types::ProviderId>>) -> Rig {
     let dir = scratch(name);
     let mut config = config_of(dir.path(), &pool(3, 8_000, ""), &[]);
-    if let Hosts::Layered { agents, .. } = &mut config.hosts {
-        agents.providers = order;
-    }
+    config.agents.providers = order;
     let clock = js_types::ManualClock::new(js_types::Timestamp::from_millis(T0));
     let mut r = rig_of(config, dir, clock);
     r.hello(&hello_of("static-1", 16_000, 32 * GIB));

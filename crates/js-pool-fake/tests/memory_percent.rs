@@ -1,6 +1,6 @@
-//! The share of a static host's memory the pool books: `memory_schedulable_percent`.
+//! The share of a listed host's memory the fake pool books: `memory_schedulable_percent`.
 
-use js_pool_static::{ConfigError, StaticPool};
+use js_pool_fake::{ConfigError, FakeHostPool};
 use js_types::{MemoryPercent, ProviderId};
 
 const GIB: u64 = 1 << 30;
@@ -17,8 +17,8 @@ fn hosts(percent: &str) -> String {
     )
 }
 
-fn pool(text: &str) -> StaticPool {
-    StaticPool::from_toml(ProviderId::new("pool").unwrap(), text).unwrap()
+fn pool(text: &str) -> FakeHostPool {
+    FakeHostPool::from_toml(ProviderId::new("pool").unwrap(), text).unwrap()
 }
 
 /// The memory the one listed host books, as the listing shows it.
@@ -28,7 +28,7 @@ fn booked(text: &str) -> u64 {
 
 fn refused(text: &str) -> String {
     let id = ProviderId::new("pool").unwrap();
-    StaticPool::from_toml(id, text).unwrap_err().to_string()
+    FakeHostPool::from_toml(id, text).unwrap_err().to_string()
 }
 
 /// Asserts that at 90 a host listing 251 GiB books exactly floor(251 GiB x 90 / 100)
@@ -64,7 +64,7 @@ fn zero_and_above_a_hundred_are_refused() {
         assert!(said.contains("line 1"), "{bad}: {said}");
         assert!(said.contains("memory_schedulable_percent"), "{bad}: {said}");
     }
-    let err = StaticPool::from_toml(
+    let err = FakeHostPool::from_toml(
         ProviderId::new("pool").unwrap(),
         &hosts("memory_schedulable_percent = 0\n"),
     );
@@ -79,12 +79,12 @@ fn a_percent_passed_by_the_caller_replaces_the_files() {
     let text = hosts("memory_schedulable_percent = 50\n");
     let id = || ProviderId::new("pool").unwrap();
     let eighty = Some(MemoryPercent::new(80).unwrap());
-    let replaced = StaticPool::from_toml_with_percent(id(), &text, eighty).unwrap();
+    let replaced = FakeHostPool::from_toml_with_percent(id(), &text, eighty).unwrap();
     assert_eq!(
         replaced.hosts()[0].shape.resources().memory_bytes(),
         LISTED * 80 / 100
     );
-    let kept = StaticPool::from_toml_with_percent(id(), &text, None).unwrap();
+    let kept = FakeHostPool::from_toml_with_percent(id(), &text, None).unwrap();
     assert_eq!(kept.hosts()[0].shape.resources().memory_bytes(), LISTED / 2);
 }
 

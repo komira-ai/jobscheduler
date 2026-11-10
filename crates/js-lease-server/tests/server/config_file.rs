@@ -15,12 +15,10 @@ use crate::support::{Harness, Scratch, base_args};
 /// everything else as written.
 fn with_files(scratch: &Scratch, example: &str) -> String {
     let key = scratch.write("api-key", "key-material", 0o600);
-    let hosts = scratch.write("hosts.toml", js_pool_static::EXAMPLE_CONFIG, 0o644);
     let token = scratch.write("client-token", crate::support::TOKEN, 0o600);
     let oauth = oauth_file(scratch);
     example
         .replace("/run/credentials/js/lambda-key", &key.display().to_string())
-        .replace("/etc/jobscheduler/hosts.toml", &hosts.display().to_string())
         .replace(
             "/run/credentials/js/client-token",
             &token.display().to_string(),
@@ -55,8 +53,8 @@ fn the_pool_of_the_design_builds_in_plan() {
 }
 
 /// Asserts that the full file of section 4.2, read out of the design document, parses:
-/// the listeners and the advertised address as written, a static pool and an elastic
-/// pool beside it with every optional key (`exec`, `boot_timeout`, `launch`, regions
+/// the listeners and the advertised address as written, an elastic
+/// pool with every optional key (`exec`, `boot_timeout`, `launch`, regions
 /// and an ssh key in the provider table), and the warning for no wildcard. It catches
 /// the example drifting from the code, and a key the reader drops.
 #[test]
@@ -139,18 +137,18 @@ fn exec_can_be_opted_out_and_launch_can_be_live() {
     );
 }
 
-/// Asserts that a file with a static pool alone builds with no elastic pool, that a
-/// server table with nothing but its required keys gets the flags' defaults (loopback
-/// port 7300, a tick of five seconds), and that the file's tick is read. It catches a
-/// default that differs from the flag's.
+/// Asserts that a file with a joined pool alone builds with no elastic pool, that a
+/// server table with nothing but its required keys and the agent port gets the flags'
+/// defaults (loopback port 7300, a tick of five seconds), and that the file's tick is read.
+/// It catches a default that differs from the flag's.
 #[test]
-fn a_static_pool_alone_and_the_defaults_of_the_server_table() {
+fn a_joined_pool_alone_and_the_defaults_of_the_server_table() {
     let scratch = Scratch::new("config_static");
-    let pool = PoolText::static_pool(&scratch, "hosts");
+    let pool = PoolText::joined("hosts");
     let config = load(&scratch, &file(&server(&scratch, ""), &[&pool])).unwrap();
     assert!(config.elastic_pool().is_none());
     assert_eq!(config.listen().to_string(), "127.0.0.1:7300");
-    assert_eq!(config.agent_listen(), None);
+    assert_eq!(config.agent_listen().unwrap().to_string(), "127.0.0.2:0");
     assert_eq!(config.advertise_url(), None);
     assert_eq!(config.tick_period(), Duration::from_secs(5));
     let slow = server(&scratch, "tick = \"2m\"");
@@ -169,7 +167,7 @@ async fn every_key_of_the_server_table_is_read() {
                  max_connections = 7\nhandshake_timeout = \"3s\"\nheader_timeout = \"4s\"\n\
                  read_timeout = \"5s\"\nwrite_timeout = \"6s\"\nmax_requests = 9\n\
                  drain_timeout = \"7s\"\nadvertise_url = \"http://localhost:7300\"";
-    let pool = PoolText::static_pool(&scratch, "hosts");
+    let pool = PoolText::joined("hosts");
     let config = load(&scratch, &file(&server(&scratch, extra), &[&pool])).unwrap();
     assert_eq!(config.tick_period(), Duration::from_secs(3));
     assert_eq!(config.advertise_url(), Some("http://localhost:7300"));
@@ -185,7 +183,7 @@ async fn every_key_of_the_server_table_is_read() {
     };
     assert_eq!(config.limits(), wanted);
     let h = Harness::over(scratch, config).await;
-    assert_eq!(h.running.agent_addr(), None);
+    assert!(h.running.agent_addr().is_some());
     let reply = h.call("GET", "/v1/hosts", None).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
 }
@@ -201,7 +199,7 @@ fn the_config_flag_replaces_the_required_flags() {
     let args = ["js-lease-server", "--config", path.to_str().unwrap()];
     assert!(Cli::try_parse_from(args).is_ok());
     assert!(Cli::try_parse_from(["js-lease-server"]).is_err());
-    let pool = PoolText::static_pool(&scratch, "hosts");
+    let pool = PoolText::joined("hosts");
     scratch.write("js.toml", &file(&server(&scratch, ""), &[&pool]), 0o644);
     let config = Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap();
     assert_eq!(config.listen().to_string(), "127.0.0.1:7300");

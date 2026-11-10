@@ -28,7 +28,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler, and the store's `store:unreachable`, is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
 | `--client-token NAME=PATH` or `NAME:ROLE=PATH` (repeatable) | a `[[client]]` table with `name`, `token_file` and, optionally, `role` (`"client"`, the default, or `"operator"`): one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
-| `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
+| `--pool-config` | removed: refused at start with the migration of [Migrating an agentless pool](#migrating-an-agentless-pool); a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` is refused the same way |
 | `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
 
@@ -88,8 +88,7 @@ A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches not
 `server.agent_listen` is required as for an elastic pool. A file may declare any number of joined and elastic pools, each with its own
 `join_token_file`, but the server starts only on a file with at most one pool that registers agents: with more it refuses naming the
 second (`several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`, or `several pools register agents; ...`
-when they are not all elastic). At most one pool of the agentless `static` provider kind is served; that kind is deprecated, and a later
-version removes it.
+when they are not all elastic).
 
 ```toml
 [[pool]]
@@ -110,13 +109,12 @@ mints it, and the node's `--instance-file` holds `nodes:node-1`. The first hello
 `--agent-pool-config` file had and this kind lacks: the whole-node keys (`max_whole_node`, `drain_after`, ...).
 
 **Memory headroom.** One key, `memory_schedulable_percent`, a whole number from 1 to 100 (default 100), sets how much of the memory an
-operator configured the server books; there is no other memory knob. It is written in three places, each in its own format and read the
+operator configured the server books; there is no other memory knob. It is written in two places, each in its own format and read the
 same way (0, 101, a negative number or a word is refused at the check that reads it, naming the key):
 
 | where | what it cuts |
 |---|---|
-| a `[[pool]]` of the `--config` file | the hosts of a static pool (the pool's key replaces the hosts file's, once, never on top of it; it may be larger as well as smaller than the file's own value), and the floor memory (1 GiB) of an elastic pool |
-| the hosts file of a static pool (top level, before the first `[[host]]`; `--pool-config` or a `hosts_file`) | the `memory_bytes` of every host the file lists |
+| a `[[pool]]` of the `--config` file | the `shape` `memory_bytes` of a joined pool, and the floor memory (1 GiB) of an elastic pool |
 | the agent pool file (`--agent-pool-config`; top level, before `[shape]`) | the `[shape]` `memory_bytes` the pool books for each host |
 
 The server books `floor(memory x percent / 100)` bytes, computed once where the booked shape is built, and every booking path sees that
@@ -129,7 +127,7 @@ figure), and `GET /v1/pools` and `/status` show the same three for an elastic po
 The percent of an agent pool (the agent pool file, or a `[[pool]]` whose hosts register) is the placement
 engine's rule instead: the registry's book takes each host's whole `[shape]` memory, and the engine books no more than
 `floor(memory x percent / 100)` of it. What fits the pool is still judged at the cut, so a request above it is refused `no-fit`, and
-`GET /v1/hosts` shows `shape.memory_bytes` as the cut, beside `memory`. A static pool is not affected.
+`GET /v1/hosts` shows `shape.memory_bytes` as the cut, beside `memory`.
 
 ### The store
 
@@ -226,7 +224,7 @@ names no job, lease, run or token: its labels are a state, a failure code, a hos
 
 A pool may name container platforms in priority order instead of naming its provider (design `jobscheduler-design.md`, section 4.2).
 `[[machine_provider]]` tables declare where machines come from: `kind = "static"` is the hosts that run `js-agent` and register
-themselves (no key beside `name` and `kind`; it is not the agentless `static` provider kind of a pool's `provider`), and any other kind is
+themselves (no key beside `name` and `kind`; a pool's `provider` of kind `static` is refused), and any other kind is
 a provider kind compiled in, whose own keys follow (`lambdalabs`: `api_key_file` and the rest, as under `provider`). `ec2` and `gce` are
 built, with the keys of `js-provider-ec2` and `js-provider-gce`. `[[platform]]` tables declare platforms: only `kind = "default"` is built (`kubernetes`, `cloud_run` and `ecs` are
 refused as not built), with `machine_providers` listing declared machine providers first to last. Names follow the grammar of pool
@@ -310,6 +308,94 @@ zero refresh would ask the cloud at every tick, a zero cool-down is none, a zero
 ask at every tick. A limit
 names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
 refused.
+
+## Migrating an agentless pool
+
+The agentless pool, in which the server booked hosts from a list in a file and nothing ran on them, was removed. The server refuses it at
+start with exit status 2, and the message names the migration.
+
+### The old files
+
+The old file was a `[[pool]]` that named a hosts file:
+
+```toml
+[[pool]]
+name     = "gpu"
+class    = "gpu-host"
+provider = { kind = "static", hosts_file = "/etc/jobscheduler/hosts.toml" }
+```
+
+and the hosts file listed each host:
+
+```toml
+[[host]]
+id = "gpu-01"
+gpu_class = "nvidia-a100"
+
+[host.resources]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+```
+
+The replacement is one pool of `kind = "joined"`: the pool of hosts that run `js-agent` and register. It lists no hosts; a host is in the
+pool when its agent registers, up to `max_machines`, and every host books the pool's one shape. Install and start `js-agent` on each host that
+the hosts file listed, naming the pool `gpu` and the server's agent address, then move the server to one of the two routes below, remove
+the old pool and the hosts file, and restart the server. The two routes are not mixed: the `--config` file's pool is written in the file's
+`[[pool]]` format, and the `--agent-pool-config` file has a format of its own.
+
+### Route 1: a pool in the `--config` file
+
+A registering pool needs `agent_listen` in `[server]`, which the agentless pool did not (`listen` stays as it was). The pool is a `[[pool]]`
+with `kind = "joined"`; its shared token, if any, is `join_token_file` of the pool.
+
+```toml
+[server]
+# the keys the file already has, and the address the agents register on:
+agent_listen = "127.0.0.1:7443"
+```
+
+```toml
+[[pool]]
+kind         = "joined"
+name         = "gpu"
+class        = "whole-node"
+max_machines = 2
+shape        = { cpu_millis = 64000, memory_bytes = 549755813888, gpus = 8, gpu_class = "nvidia-a100" }
+capabilities = { os = "linux", arch = "x86_64" }          # optional
+join_token_file = "/run/credentials/js/join-token"        # optional shared pool token
+```
+
+### Route 2: the flags `--agent-pool-config` and `--agent-token-file`
+
+The agent pool file is one pool at its root, with the shape and the capabilities as tables of their own; it has no `[[pool]]` and no
+`kind`. The shared token is not in this file: it is the file that `--agent-token-file` names (optional: without it the pool admits only
+hosts whose one-time join token verifies). The pool file is what turns agent registration on.
+
+```toml
+name         = "gpu"
+class        = "gpu-host"
+max_machines = 2
+
+[shape]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+gpu_class = "nvidia-a100"
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+```
+
+The server is then started with `--agent-pool-config <that file> --agent-token-file <the token file>` beside its other flags; the agents register on
+the server's own `--listen` address.
+
+The flag `--pool-config` is refused the same way, with the same migration in its message, and beside `--config` it is refused as every flag is.
+The message never echoes the path. A server given neither `--agent-pool-config` nor a registering `[[pool]]` is refused at start
+naming `--agent-pool-config` (or `pool`, for the file): every server serves the hosts that run `js-agent` and register. The provider kind
+`static` of a `[[pool]]` is not the `static` machine provider of a `[[machine_provider]]`, which names the hosts that register and is
+read as before.
 
 ## Live logs: `[logs]`
 
@@ -478,11 +564,11 @@ A pool lists providers in order, and an entry may be a tier of equal providers (
 A pool specifies `max_machines` and no minimum: `min_machines` and `min` are refused with a message saying so (5.7, D38). `provider = "x"` is
 shorthand for a one-entry `providers`, except that an elastic `x` gets the `default` provider in front of it (5.8).
 
-**Test provider.** The operator-listed pool exists for tests and conformance and for the single-host stepping stone. A file that declares
-it is refused unless the scheduler runs with `--allow-test-providers`; no production example uses it. Its shape is:
+**Test provider.** The operator-listed pool was a design for tests and conformance and the single-host stepping stone; it is not built (the
+agentless pool was removed, and a file that declares a provider of kind `static` is refused). Its design shape was:
 
 ```toml
-[[provider]]                                # TESTS ONLY: hosts the operator lists (the merged --pool-config hosts)
+[[provider]]                                # TESTS ONLY: hosts the operator lists (not built; the agentless pool was removed)
 name = "listed"
 kind = "static"
 

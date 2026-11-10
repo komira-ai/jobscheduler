@@ -218,7 +218,7 @@ mod tests {
             "js-lease-server",
             "--state-file=a",
             "--boot=resume",
-            "--pool-config=b",
+            "--agent-pool-config=b",
             "--token-file=c",
         ])
         .unwrap();

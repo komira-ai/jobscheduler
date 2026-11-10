@@ -35,7 +35,7 @@ fn is_token(text: &str) -> bool {
 /// dropped or sent as a different unit, and a text and JSON form that disagree.
 #[test]
 fn a_mint_prints_the_token_alone_or_as_json() {
-    let server = Harness::agents("join_mint_stdout");
+    let server = Harness::new("join_mint_stdout");
     let got = server.js.go(&mint(&[]));
     assert_eq!(got.code, 0, "{}", got.err);
     assert!(is_token(got.out.strip_suffix('\n').unwrap()), "{}", got.out);
@@ -59,7 +59,7 @@ fn a_mint_prints_the_token_alone_or_as_json() {
 /// beside the path.
 #[test]
 fn a_mint_with_out_writes_a_private_file_and_prints_no_token() {
-    let server = Harness::agents("join_mint_out");
+    let server = Harness::new("join_mint_out");
     let path = server.scratch.path("minted");
     let shown = path.to_str().unwrap();
     let got = server.js.go(&mint(&["--out", shown]));
@@ -192,7 +192,7 @@ fn the_ttl_is_sent_only_when_given() {
 /// with its reason. It catches a ttl that wraps or is clamped silently.
 #[test]
 fn the_ttl_is_parsed_and_the_servers_limit_is_reported() {
-    let server = Harness::agents("join_ttl_limits");
+    let server = Harness::new("join_ttl_limits");
     for bad in ["0", "2d", "1.5h", "soon"] {
         let got = server.js.go(&mint(&["--ttl", bad]));
         assert_eq!(got.code, 2, "{bad}: {}", got.err);
@@ -213,7 +213,7 @@ fn the_ttl_is_parsed_and_the_servers_limit_is_reported() {
 /// commands, and nothing is written. It catches a request error told as a server failure.
 #[test]
 fn an_invalid_instance_is_the_contract_exit() {
-    let server = Harness::agents("join_invalid_instance");
+    let server = Harness::new("join_invalid_instance");
     let path = server.scratch.path("minted");
     let bad = [
         "join-token",
@@ -244,7 +244,7 @@ fn an_invalid_instance_is_the_contract_exit() {
 /// It catches a 401 told as success or as a contract error.
 #[test]
 fn a_bad_client_token_is_refused() {
-    let server = Harness::agents("join_bad_bearer");
+    let server = Harness::new("join_bad_bearer");
     let wrong = server.scratch.write(
         "wrong-token",
         "not-the-clients-token-0123456789abcdef",
@@ -264,14 +264,16 @@ fn a_bad_client_token_is_refused() {
     assert!(got.err.contains("refused the token (401)"), "{}", got.err);
 }
 
-/// Asserts that a server that admits no agents has no route, which both commands report
-/// as the refusal `join-tokens-unsupported` (exit 3). It catches a 404 told as an
-/// unexplained server error.
+/// Asserts that a server with no join-token route (the 404 of an unknown route, as a server
+/// of an older release answers) is reported by both commands as the refusal
+/// `join-tokens-unsupported` (exit 3). It catches a 404 told as an unexplained server error.
 #[test]
-fn a_server_without_agents_refuses_with_a_code() {
-    let server = Harness::new("join_unsupported");
+fn a_server_without_the_route_refuses_with_a_code() {
+    let scratch = Scratch::new("join_unsupported");
+    let (url, _) = recording(http("404 Not Found", r#"{"error":"not-found"}"#));
+    let js = against(&url, &scratch);
     for words in [mint(&[]), REVOKE.to_vec()] {
-        let got = server.js.go(&words);
+        let got = js.go(&words);
         assert_eq!(got.code, 3, "{}", got.err);
         assert_eq!(got.err, "js: refused: join-tokens-unsupported\n");
     }
@@ -352,7 +354,7 @@ fn a_revoke_sends_its_body_and_a_204_is_success() {
 /// a token, so a terminate that is retried needs no care.
 #[test]
 fn a_revoke_is_idempotent_on_a_real_server() {
-    let server = Harness::agents("join_revoke_real");
+    let server = Harness::new("join_revoke_real");
     assert_eq!(server.js.go(&mint(&[])).code, 0);
     for _ in 0..2 {
         let got = server.js.go(&REVOKE);

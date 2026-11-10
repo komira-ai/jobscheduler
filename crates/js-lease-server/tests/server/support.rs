@@ -8,10 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use js_lease_server::{
-    Cli, Config, Limits, Running, SharedClock, StartupError, StaticPoolSource, TickHandle, Ticker,
-    channel_ticker, start_with_checks,
+    Cli, Config, Limits, Running, SharedClock, StartupError, TickHandle, Ticker, channel_ticker,
+    start_with_checks,
 };
-use js_pool_static::EXAMPLE_CONFIG;
 use js_state::Store;
 use js_testkit::dir::TestDir;
 use js_types::{ManualClock, Timestamp};
@@ -19,6 +18,7 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::agents_support::POOL;
 use crate::store_support::{sqlite_line, store_file};
 
 /// The wall time every test clock starts at.
@@ -129,23 +129,37 @@ pub fn logged_with(needle: &str) -> Vec<String> {
         .collect()
 }
 
-/// The flags every test server gets: ephemeral loopback port, a first boot, the shipped
-/// two-host pool and an owner-only token file.
+/// The flags every test server gets: ephemeral loopback port, a first boot, an owner-only
+/// token file, and the pool the hosts that run `js-agent` register into ([`POOL`], in
+/// `agent-pool.toml`; a test may write another pool there before the server starts). No
+/// host has registered, so the server lists none until a hello.
 pub fn base_args(scratch: &Scratch) -> Vec<OsString> {
-    let pool = scratch.write("pool.toml", EXAMPLE_CONFIG, 0o644);
+    let pool = scratch.write("agent-pool.toml", POOL, 0o644);
     let token = scratch.write("token", TOKEN, 0o600);
     let mut args: Vec<OsString> = vec!["js-lease-server".into()];
     let flags = [
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", scratch.state().into_os_string()),
         ("--boot", "initialise".into()),
-        ("--pool-config", pool.into_os_string()),
         ("--token-file", token.into_os_string()),
+        ("--agent-pool-config", pool.into_os_string()),
     ];
     for (flag, value) in flags {
         args.push(flag.into());
         args.push(value);
     }
+    args
+}
+
+/// `base_args` without its `--agent-pool-config`: no source of hosts, which the server
+/// refuses; for the tests of that refusal and of the flags that need the pool file.
+pub fn without_agent_pool(scratch: &Scratch) -> Vec<OsString> {
+    let mut args = base_args(scratch);
+    let at = args
+        .iter()
+        .position(|arg| arg == "--agent-pool-config")
+        .unwrap();
+    args.drain(at..at + 2);
     args
 }
 
@@ -184,19 +198,12 @@ impl Harness {
     pub async fn new(name: &str) -> Self {
         let scratch = Scratch::new(name);
         let args = base_args(&scratch);
-        Self::with(scratch, args, None).await
+        Self::with(scratch, args).await
     }
 
-    /// A server on `args`, with its hosts from `source` when given.
-    pub async fn with(
-        scratch: Scratch,
-        args: Vec<OsString>,
-        source: Option<StaticPoolSource>,
-    ) -> Self {
-        let mut config = config(args).unwrap();
-        if let Some(source) = source {
-            config = config.with_static_pool(source);
-        }
+    /// A server on `args`.
+    pub async fn with(scratch: Scratch, args: Vec<OsString>) -> Self {
+        let config = config(args).unwrap();
         Self::over(scratch, config).await
     }
 

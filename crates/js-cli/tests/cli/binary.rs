@@ -3,23 +3,24 @@
 
 use std::process::{Command, Output};
 
-use crate::support::{Harness, REVOKE};
+use crate::support::{Harness, Js, REVOKE, Scratch, against, http, recording};
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_js");
 
-fn program(h: &Harness, words: &[&str]) -> Output {
+fn program(js: &Js, words: &[&str]) -> Output {
     Command::new(PROGRAM)
-        .args(["--server", &h.js.server])
+        .args(["--server", &js.server])
         .arg("--token-file")
-        .arg(&h.js.token_file)
+        .arg(&js.token_file)
         .args(words)
         .output()
         .unwrap()
 }
 
 /// Asserts that the program prints its usage on `--help` with status 0, revokes a join
-/// token on a server that admits agents with status 0 and its line on stdout, and exits 3
-/// with the refusal on stderr against a server that admits none. It catches an exit status
+/// token on the server of the test with status 0 and its line on stdout, and exits 3 with the
+/// refusal on stderr against a server that has no join-token route (the 404 of an unknown
+/// route, as a server of an older release answers). It catches an exit status
 /// that is not the process's own (a status the library returns but `main` drops).
 #[test]
 fn the_program_prints_help_and_revokes() {
@@ -31,16 +32,16 @@ fn the_program_prints_help_and_revokes() {
             .contains("Usage: js")
     );
 
-    let h = Harness::agents("binary_revoke");
-    let revoked = program(&h, &REVOKE);
+    let h = Harness::new("binary_revoke");
+    let revoked = program(&h.js, &REVOKE);
     assert_eq!(revoked.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(revoked.stdout).unwrap(),
         "join tokens for lambdalabs:i-1 revoked\n"
     );
 
-    let h = Harness::new("binary_refused");
-    let refused = program(&h, &REVOKE);
+    let (url, _) = recording(http("404 Not Found", r#"{"error":"not-found"}"#));
+    let refused = program(&against(&url, &Scratch::new("binary_refused")), &REVOKE);
     assert_eq!(refused.status.code(), Some(3));
     assert_eq!(refused.stdout, b"");
     assert_eq!(
@@ -67,7 +68,7 @@ fn the_program_refuses_the_removed_commands() {
         ],
         &["lease", "run", "--class", "gpu-host", "--", "true"],
     ] {
-        let got = program(&h, words);
+        let got = program(&h.js, words);
         assert_eq!(got.status.code(), Some(2), "{words:?}");
         assert_eq!(got.stdout, b"");
         assert!(

@@ -1,15 +1,15 @@
-//! What the static pool lists from its configuration, through its public interface.
+//! What the fake host pool lists from its configuration, through its public interface.
 
 use std::path::Path;
 
-use js_pool_static::{ConfigError, EXAMPLE_CONFIG, StaticPool};
+use js_pool_fake::{ConfigError, EXAMPLE_CONFIG, FakeHostPool};
 use js_types::{Admission, ClassId, HostId, ProviderId, ResourceClass};
 
-fn pool(config: &str) -> StaticPool {
-    StaticPool::from_toml(ProviderId::new("pool").unwrap(), config).unwrap()
+fn pool(config: &str) -> FakeHostPool {
+    FakeHostPool::from_toml(ProviderId::new("pool").unwrap(), config).unwrap()
 }
 
-fn example() -> StaticPool {
+fn example() -> FakeHostPool {
     pool(EXAMPLE_CONFIG)
 }
 
@@ -55,10 +55,10 @@ fn the_example_lists_its_hosts_free() {
 fn config_file_loads_and_missing_file_is_refused() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("example.toml");
     let id = ProviderId::new("pool").unwrap();
-    let loaded = StaticPool::from_config_file(id.clone(), &path).unwrap();
+    let loaded = FakeHostPool::from_config_file(id.clone(), &path).unwrap();
     assert_eq!(loaded.hosts().len(), 2);
     let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("absent.toml");
-    let err = StaticPool::from_config_file(id, &missing).unwrap_err();
+    let err = FakeHostPool::from_config_file(id, &missing).unwrap_err();
     assert!(matches!(err, ConfigError::Read { .. }));
     assert!(err.to_string().contains("absent.toml"));
 }

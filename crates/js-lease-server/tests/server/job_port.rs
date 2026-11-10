@@ -193,7 +193,7 @@ async fn the_listener_enforces_the_token_on_both_protocols() {
 /// server that was not asked for it.
 #[tokio::test]
 async fn job_listen_off_by_default_leaves_the_server_as_it_was() {
-    let h = start_agents("job_port_off", true).await;
+    let h = start_agents("job_port_off").await;
     assert_eq!(h.running.job_addr(), None);
     for path in ["/v1/jobs", GET_JOB] {
         assert_eq!(h.call("GET", path, None).await.status, 404, "{path}");
@@ -253,7 +253,7 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
     // A pool of CPU hosts: the scheduler starts no job on a host with GPUs.
     let pool = POOL.replace("gpus = 1\ngpu_class = \"nvidia-a100\"\n", "");
     scratch.write("agent-pool.toml", &pool, 0o644);
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     let mut hello = per_job_hello("host-1");
     hello["shape"] = json!({ "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 });
     let agent = job_agent(&h, &hello).await;
@@ -323,7 +323,7 @@ async fn the_job_port_speaks_tls_over_the_reloaded_pair() {
     args.push(cert_file.into_os_string());
     args.push("--tls-key".into());
     args.push(key_file.into_os_string());
-    let h = Harness::with(scratch, args, None).await;
+    let h = Harness::with(scratch, args).await;
     // A time inside the test certificates' validity, which a reload checks.
     h.clock.set(Timestamp::from_millis(1_893_456_000_000));
     let job = h.running.job_addr().unwrap();

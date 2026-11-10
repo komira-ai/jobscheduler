@@ -268,7 +268,7 @@ fn the_flags_decide_where_usage_lives_and_how_much_it_may_keep() {
 async fn with_usage_off_there_are_no_routes_and_nothing_is_recorded() {
     let fake = Arc::new(Fake::default());
     let scratch = Scratch::new("usage_off");
-    let mut args = agent_args(&scratch, false);
+    let mut args = agent_args(&scratch);
     args.push("--usage-off".into());
     let h = start_over(scratch, args, &fake).await;
     let me = join(&h, "burst-1").await;
@@ -505,14 +505,6 @@ async fn ids_keys_and_queries_are_read_strictly_and_never_echoed() {
     assert!(!text.contains("%2"), "{text}");
 }
 
-/// Asserts that without agent registration there is no usage side: the paths are unknown
-/// routes. It catches routes mounted over nothing.
-#[tokio::test]
-async fn without_agents_the_usage_routes_do_not_exist() {
-    let h = Harness::new("usage_static").await;
-    assert_eq!(get(&h, "/v1/usage/nodes/gpu-01").await.status, 404);
-}
-
 /// Asserts that a store that fails costs a 503 `usage-unavailable` on the read routes and
 /// a count each, and that a failing prune at a tick does not stop the server ticking. It
 /// catches a failure answered as an empty result (a quiet node and a broken store looking
@@ -597,7 +589,7 @@ async fn a_sink_that_panics_on_a_reading_costs_the_beat_nothing() {
 async fn the_started_server_keeps_a_usage_file_and_offers_curves() {
     let scratch = Scratch::new("usage_file");
     let db = scratch.path("usage.db");
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     let h = Harness::over(scratch, config(args).unwrap()).await;
     assert!(db.exists());
     assert!(h.running.usage_curves().is_some());
@@ -615,7 +607,7 @@ async fn the_started_server_keeps_a_usage_file_and_offers_curves() {
 #[tokio::test]
 async fn the_started_server_serves_the_rows_it_flushed_to_its_file() {
     let scratch = Scratch::new("usage_file_rows");
-    let args = agent_args(&scratch, false);
+    let args = agent_args(&scratch);
     let h = Harness::over(scratch, config(args).unwrap()).await;
     let me = join(&h, "burst-1").await;
     beat_load(&h, &me, load(1, 5_000_000, &[])).await;

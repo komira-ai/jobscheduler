@@ -75,13 +75,13 @@ impl Logs {
     }
 }
 
-/// The text of a file of `scratch` with a static pool and then `extra`.
+/// The text of a file of `scratch` with a joined pool and then `extra`.
 fn file_with(scratch: &Scratch, extra: &str) -> String {
-    let pool = PoolText::static_pool(scratch, "hosts");
+    let pool = PoolText::joined("hosts");
     format!("{}\n{extra}", file(&server(scratch, ""), &[&pool]))
 }
 
-/// A file of `scratch` with a static pool and then `extra`, loaded.
+/// A file of `scratch` with a joined pool and then `extra`, loaded.
 fn loaded(scratch: &Scratch, extra: &str) -> Result<Config, String> {
     load(scratch, &file_with(scratch, extra)).map_err(|err| err.to_string())
 }
@@ -681,7 +681,7 @@ fn the_start_log_line_names_the_sink() {
 
     let scratch = Scratch::new("logs_start_file");
     let logs = Logs::good(&scratch).text();
-    let pool = PoolText::static_pool(&scratch, "hosts");
+    let pool = PoolText::joined("hosts");
     let server = server(&scratch, "listen = \"127.0.0.1:0\"\ntick = \"1h\"");
     let text = format!("{}\n{logs}", file(&server, &[&pool]));
     let path = scratch.write("js.toml", &text, 0o644);

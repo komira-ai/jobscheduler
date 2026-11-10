@@ -15,7 +15,6 @@ use tokio::task::JoinHandle;
 
 use super::{FENCED, Running, start, stop_or_fence, tick_loop, until_fenced};
 use crate::agent_api::job_rig::{Rig, clocked_rig, spec};
-use crate::agents::Agents;
 use crate::api::Shared;
 use crate::clock::SharedClock;
 use crate::config::{Cli, Config, parse_token};
@@ -36,13 +35,8 @@ fn scratch(name: &str) -> TestDir {
 
 /// A server state over the rig's agent side (its job tables, store and clock).
 fn shared_over(rig: &Rig) -> Arc<Shared> {
-    shared_with(Some(Arc::clone(&rig.agents)))
-}
-
-/// [`shared_over`] holding `agents`, which may be none.
-fn shared_with(agents: Option<Arc<Agents>>) -> Arc<Shared> {
     let token = parse_token(&[b'c'; 40]).unwrap();
-    Arc::new(Shared::new(token, agents))
+    Arc::new(Shared::new(token, Arc::clone(&rig.agents)))
 }
 
 /// The tick loop of `shared` as the server runs it, on a task.
@@ -166,7 +160,7 @@ async fn started(name: &str) -> (Running, Arc<crate::job_store::ServerJobs>, Job
     let running = start(config, SharedClock::new(clock.clone()), ticker)
         .await
         .unwrap();
-    let jobs = Arc::clone(running.shared.agents().unwrap().jobs.as_ref().unwrap());
+    let jobs = Arc::clone(running.shared.agents().jobs.as_ref().unwrap());
     let id = JobId::parse("job-q").unwrap();
     let new = NewJob {
         id: Some(id.clone()),
@@ -192,7 +186,7 @@ async fn a_fenced_shutdown_runs_no_final_tick_and_is_an_error() {
 
     let (running, jobs, id, _dir) = started("fence_shutdown_fenced").await;
     let fenced = JobStoreError::Store(StoreError::Fenced);
-    assert!(running.shared.agents().unwrap().fence.note(&fenced));
+    assert!(running.shared.agents().fence.note(&fenced));
     running.fenced().await;
     let stopped = running.shutdown().await.unwrap_err();
     assert_eq!(stopped.to_string(), FENCED);
@@ -229,7 +223,7 @@ async fn a_fenced_server_stops_with_a_failure_exit_status() {
     assert_eq!(failed.to_string(), "signal");
 
     let fenced = JobStoreError::Store(StoreError::Fenced);
-    assert!(running.shared.agents().unwrap().fence.note(&fenced));
+    assert!(running.shared.agents().fence.note(&fenced));
     let never = std::future::pending::<std::io::Result<()>>();
     stop_or_fence(&running, never).await.unwrap();
     let failure = Failure::Runtime(running.shutdown().await.unwrap_err());
@@ -244,12 +238,13 @@ async fn a_fenced_server_stops_with_a_failure_exit_status() {
     );
 }
 
-/// Asserts that a server without the agent side (which holds the only state store) is never
-/// fenced: the wait for the fence is not ready, and it is not marked fenced. It catches a
-/// server with no store that stops as if it had lost one.
+/// Asserts that a server whose store has not said another process took over is not fenced:
+/// the wait for the fence is not ready, and it is not marked fenced. It catches a server
+/// that stops as if it had lost its store when it has not.
 #[tokio::test]
-async fn a_server_without_a_state_store_is_never_fenced() {
-    let shared = shared_with(None);
+async fn a_server_its_store_has_not_fenced_is_not_fenced() {
+    let rig = clocked_rig("fence_none", false, JobLimits::DEFAULT);
+    let shared = shared_over(&rig);
     let waited = tokio::select! {
         biased;
         () = shared.fenced() => false,

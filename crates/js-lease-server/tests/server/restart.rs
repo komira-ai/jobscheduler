@@ -14,7 +14,7 @@ use js_state::sqlite::{Options, SqliteStore};
 use js_state::{ManualClock as StoreClock, SystemClock};
 use serde_json::json;
 
-use crate::agents_support::{JOB_POOL, JOIN, Session, entry, hosts, listed};
+use crate::agents_support::{JOB_POOL, JOIN, Session, agent_args, entry, hosts, join, listed};
 use crate::jobs_support::{
     beat_with, commands, job_agent as shared_agent, job_of, one_start, running, submit_body,
 };
@@ -33,8 +33,9 @@ fn left_over() -> String {
 }
 
 /// Asserts that a lease file the previous release left at the state file's path is ignored
-/// under both values of `--boot`: the server starts, lists `gpu-01` and `gpu-02` with no
-/// lease (the leases the file holds are not seated), and after a tick and an orderly stop
+/// under both values of `--boot`: the server starts and lists no host of the file (`gpu-01`
+/// and `gpu-02`), a host that registers is listed with no lease (the leases the file holds
+/// are not seated), and after a tick and an orderly stop
 /// the file is byte for byte what it was (it is not read for its content, locked, rewritten
 /// or removed). A rollback to the previous release reads it as it was left. It catches a
 /// server that restores the file's bookings, that rewrites or deletes it at a tick or a
@@ -44,15 +45,15 @@ async fn a_lease_file_left_by_the_previous_release_is_ignored_and_left_as_it_was
     for boot in ["initialise", "resume"] {
         let scratch = Scratch::new(&format!("leftover_{boot}"));
         std::fs::write(scratch.state(), left_over()).unwrap();
-        let args = replace(base_args(&scratch), "--boot", boot);
-        let h = Harness::with(scratch, args, None).await;
+        let args = replace(agent_args(&scratch), "--boot", boot);
+        let h = Harness::with(scratch, args).await;
+        assert!(listed(&hosts(&h).await).is_empty(), "{boot}");
+        join(&h, "burst-1").await;
         let listing = hosts(&h).await;
-        assert_eq!(listed(&listing), ["gpu-01", "gpu-02"], "{boot}");
-        for id in ["gpu-01", "gpu-02"] {
-            let host = entry(&listing, id);
-            assert!(host.get("lease").is_none(), "{boot}: {host}");
-            assert!(host.get("leases").is_none(), "{boot}: {host}");
-        }
+        assert_eq!(listed(&listing), ["burst-1"], "{boot}");
+        let host = entry(&listing, "burst-1");
+        assert!(host.get("lease").is_none(), "{boot}: {host}");
+        assert!(host.get("leases").is_none(), "{boot}: {host}");
         h.clock.advance(Duration::from_secs(7201));
         h.ticks.step().await;
         let state = h.scratch.state();
@@ -73,23 +74,25 @@ async fn a_lease_file_that_cannot_be_read_does_not_refuse_a_start() {
     let scratch = Scratch::new("leftover_garbage");
     let garbage = b"\xff\xfe not toml at all = = =".as_slice();
     std::fs::write(scratch.state(), garbage).unwrap();
-    let args = replace(base_args(&scratch), "--boot", "resume");
-    let h = Harness::with(scratch, args, None).await;
-    assert_eq!(listed(&hosts(&h).await), ["gpu-01", "gpu-02"]);
+    let args = replace(agent_args(&scratch), "--boot", "resume");
+    let h = Harness::with(scratch, args).await;
+    join(&h, "burst-1").await;
+    assert_eq!(listed(&hosts(&h).await), ["burst-1"]);
     let state = h.scratch.state();
     h.running.shutdown().await.unwrap();
     assert_eq!(std::fs::read(state).unwrap(), garbage);
 }
 
-/// Asserts that `--boot resume` with no lease file at the state file's path starts, lists the
-/// pool file's hosts, and makes no lease file. It catches a server that asks for the file
+/// Asserts that `--boot resume` with no lease file at the state file's path starts, lists a
+/// host that registers, and makes no lease file. It catches a server that asks for the file
 /// `--boot resume` used to require, and one that makes it.
 #[tokio::test]
 async fn resume_without_a_lease_file_starts_and_makes_none() {
     let scratch = Scratch::new("resume_no_file");
-    let args = replace(base_args(&scratch), "--boot", "resume");
-    let h = Harness::with(scratch, args, None).await;
-    assert_eq!(listed(&hosts(&h).await), ["gpu-01", "gpu-02"]);
+    let args = replace(agent_args(&scratch), "--boot", "resume");
+    let h = Harness::with(scratch, args).await;
+    join(&h, "burst-1").await;
+    assert_eq!(listed(&hosts(&h).await), ["burst-1"]);
     let state = h.scratch.state();
     h.ticks.step().await;
     h.running.shutdown().await.unwrap();
@@ -105,10 +108,9 @@ const IMAGE: &str =
 fn job_args(scratch: &Scratch, boot: &str) -> Vec<OsString> {
     let mut args = replace(base_args(scratch), "--boot", boot);
     let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
-    let pool = scratch.write("agent-pool.toml", JOB_POOL, 0o644);
+    scratch.write("agent-pool.toml", JOB_POOL, 0o644);
     let flags = [
         ("--agent-token-file", tokens.into_os_string()),
-        ("--agent-pool-config", pool.into_os_string()),
         ("--job-listen", "127.0.0.1:0".into()),
     ];
     for (flag, value) in flags {

@@ -170,27 +170,6 @@ async fn the_lease_routes_answer_404() {
     }
 }
 
-/// Asserts that an agent port with no agent registration behind it serves nothing: every
-/// path is 404 there, and the other port serves as ever. It catches a listener that is
-/// bound and answers with a route of the other side.
-#[tokio::test]
-async fn an_agent_port_without_agents_serves_nothing() {
-    let scratch = Scratch::new("serve_no_agents");
-    let hosts = PoolText::static_pool(&scratch, "hosts");
-    let extra = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
-    let text = file(&server(&scratch, extra), &[&hosts]);
-    let config = load(&scratch, &text).unwrap();
-    let h = Harness::over(scratch, config).await;
-    let agent = h.running.agent_addr().unwrap();
-    for path in ["/healthz", "/v1/hosts", "/v1/agent/hello"] {
-        let reply = call(agent, "GET", path, TOKEN, &json!({})).await;
-        assert_eq!(reply.status, 404, "{path}");
-    }
-    let reply = h.call("GET", "/v1/hosts", None).await;
-    assert_eq!(reply.status, 200);
-    h.running.shutdown().await.unwrap();
-}
-
 /// Asserts what a pool requires of a host when its file says nothing about `exec`: the
 /// container contract. A host from before the contract (it reports no runtime) is refused
 /// `host-contract` naming `runtime`; one that reports the runtime, the mode and the
@@ -285,7 +264,7 @@ async fn a_wildcard_listener_starts_with_a_warning() {
         quoted(&cert),
         quoted(&key)
     );
-    let hosts = PoolText::static_pool(&scratch, "hosts");
+    let hosts = PoolText::joined("hosts");
     let config = load(&scratch, &file(&server(&scratch, &extra), &[&hosts])).unwrap();
     assert_eq!(
         config.warnings(),

@@ -35,8 +35,7 @@ pub enum RefusalCode {
     /// placed again.
     ExclusiveNotReady,
     /// A probe ([`Request::probe_host`]) the pool cannot place: it places no
-    /// probe at all (a static pool, whose hosts are never cordoned, or a registry with no
-    /// placer to judge one).
+    /// probe at all (a registry with no placer to judge one).
     ProbeUnsupported,
     /// A probe whose host the pool does not hold live.
     ProbeHostUnknown,

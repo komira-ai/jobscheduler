@@ -34,8 +34,8 @@ use crate::file_checks::{check_listeners, check_live};
 use crate::job_expiry::JobLimits;
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::OAuthClient;
-use crate::static_pool::StaticPoolSource;
 
+mod agentless;
 mod brake;
 mod budget;
 mod clients;
@@ -280,23 +280,14 @@ pub(crate) struct Registering {
     pub(crate) job_limits: JobLimits,
 }
 
-/// The pools of the file, as the sources of hosts they make.
-pub(crate) enum LoadedHosts {
-    /// Static pools only.
-    Static(StaticPoolSource),
-    /// An elastic pool that agents register into, beside a static pool when there is one.
-    Registering {
-        static_pool: Option<StaticPoolSource>,
-        registering: Box<Registering>,
-    },
-}
-
 /// A configuration file that passed every check that needs no network.
 pub(crate) struct Loaded {
     pub(crate) server: Server,
     pub(crate) client_token: Token,
     pub(crate) clients: LiveClients,
-    pub(crate) hosts: LoadedHosts,
+    /// The pool the hosts that run `js-agent` register into (the first, when the file has
+    /// several; see `unrunnable`).
+    pub(crate) registering: Box<Registering>,
     pub(crate) warnings: Vec<String>,
     /// Where live logs go: the `[logs]` table, or no sink.
     pub(crate) logs: LogsConfig,
@@ -354,7 +345,6 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let clients = LiveClients::new(clients::read(&mut root, &client_token, &server, ld)?);
     let logs = logs::read_logs(logs, ld.files)?;
     let mut resolved = platform::declared(machine_providers, platforms, ld.kinds)?;
-    let mut static_pool = None;
     let mut registering = Vec::new();
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
@@ -372,18 +362,11 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
             return Err(StartupError::at(format!("{pool}: name"), reason));
         }
         match read.pool {
-            Pool::Static(source) => {
-                if static_pool.replace(source).is_some() {
-                    let reason = "only one static pool is served in this version";
-                    return Err(StartupError::at(pool, reason));
-                }
-            }
             Pool::Elastic(elastic) => registering.push((checked(pool, &elastic)?, elastic)),
             Pool::Hostless => {}
         }
     }
     resolved.check_named()?;
-    let elastic = !registering.is_empty();
     // A joined pool has no plan, so only an elastic pool's launch settings are checked.
     for plan in registering
         .iter()
@@ -392,30 +375,19 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         check_live(&server, plan)?;
     }
     let unrunnable = unrunnable(&registering);
-    let registering = registering.into_iter().next().map(|(_, pool)| pool);
-    let hosts = match (static_pool, registering) {
-        (static_pool, Some(registering)) => LoadedHosts::Registering {
-            static_pool,
-            registering,
-        },
-        (Some(source), None) => LoadedHosts::Static(source),
-        (None, None) => {
-            let reason = "required: add at least one [[pool]] table";
-            return Err(StartupError::at("pool", reason));
-        }
+    let Some(registering) = registering.into_iter().next().map(|(_, pool)| pool) else {
+        let reason =
+            "required: add a [[pool]] whose hosts register agents (a joined or an elastic pool)";
+        return Err(StartupError::at("pool", reason));
     };
-    if let (false, Some(key)) = (elastic, server.agents.first_given()) {
-        let reason = "needs an elastic pool, whose hosts register agents";
-        return Err(StartupError::at(format!("server.{key}"), reason));
-    }
-    let mut warnings = check_listeners(&server, elastic)?;
+    let mut warnings = check_listeners(&server)?;
     let now = Millis::new(ld.clock.now().millis());
-    warnings.extend(budget::notes(&hosts, &budgets, now));
+    warnings.extend(budget::notes(&registering, &budgets, now));
     Ok(Loaded {
         server,
         client_token,
         clients,
-        hosts,
+        registering,
         warnings,
         logs,
         resolved,
@@ -449,7 +421,6 @@ struct Read {
 }
 
 enum Pool {
-    Static(StaticPoolSource),
     Elastic(Box<Registering>),
     /// A pool that names only hostless platforms: in [`Resolved`], and nothing to run.
     Hostless,
@@ -463,8 +434,6 @@ struct ElasticKeys {
     /// The name the cap was given by: `max_machines`, or `max_instances` (also when it was
     /// not given).
     cap_key: &'static str,
-    /// The first of the queue settings the file gave.
-    settings_given: Option<&'static str>,
     provider_limits: Option<toml::Table>,
     hour: Option<u64>,
     day: Option<u64>,
@@ -477,33 +446,6 @@ struct ElasticKeys {
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
     agent: Option<toml::Table>,
-}
-
-impl ElasticKeys {
-    /// The first key a static pool was given, in the order of the file's reference.
-    fn first_given(&self) -> Option<&'static str> {
-        let given = [
-            ("exec", self.exec.is_some()),
-            (self.cap_key, self.max_instances.is_some()),
-            ("max_spend_per_hour", self.hour.is_some()),
-            ("max_spend_per_day", self.day.is_some()),
-            ("idle", self.idle.is_some()),
-            ("max_age", self.max_age.is_some()),
-            ("min_host_lifetime", self.min_host_lifetime.is_some()),
-            ("live_until", self.live_until.is_some()),
-            ("boot_timeout", self.boot_timeout.is_some()),
-            ("join_token_file", self.join_token_file.is_some()),
-            ("network", self.network.is_some()),
-            ("agent", self.agent.is_some()),
-            ("provider_limits", self.provider_limits.is_some()),
-        ];
-        for (key, set) in given {
-            if set {
-                return Some(key);
-            }
-        }
-        self.settings_given.or_else(|| self.brake.first_given())
-    }
 }
 
 fn read_pool(
@@ -527,6 +469,10 @@ fn read_pool(
         Some(name) if ProviderId::new(name).is_ok() => format!("pool {name:?}: "),
         _ => format!("pool #{number}: "),
     };
+    if let Some(found) = agentless::agentless_keys(&table) {
+        let place = format!("{head}{found}");
+        return Err(StartupError::at(place, agentless::AGENTLESS_REMOVED));
+    }
     let mut s = Section::open(table, head);
     // The platforms first: a pool that names only hostless platforms has other keys.
     let reach = match s.names("platforms")? {
@@ -558,12 +504,11 @@ fn read_pool(
     let class = shipped_class(class);
     s.class_served(&class)?;
     let (cap_key, max_instances) = cap(&mut s)?;
-    let (settings, settings_given) = platform::settings(&mut s)?;
+    let settings = platform::settings(&mut s)?;
     let mut keys = ElasticKeys {
         exec: s.string("exec")?,
         max_instances,
         cap_key,
-        settings_given,
         provider_limits: s.table("provider_limits")?,
         hour: s.spend("max_spend_per_hour")?,
         day: s.spend("max_spend_per_day")?,
@@ -615,7 +560,6 @@ fn read_pool(
     let ctx = BuildCtx {
         pool: &name,
         class: &class,
-        memory_percent,
         clock: ld.clock.clone(),
         files: ld.files,
         scheduler,
@@ -628,27 +572,9 @@ fn read_pool(
             Ok(built) => built,
             Err(err) => return Err(p.fail(&err.field, &err.reason)),
         };
-        match built {
-            Built::Static(_) if reach.is_some() => {
-                let reason = "builds a pool of listed hosts, not a machine provider";
-                return Err(p.fail("kind", reason));
-            }
-            Built::Static(source) => {
-                if let Some(key) = keys.first_given() {
-                    return Err(s.fail(key, "only for an elastic pool"));
-                }
-                if launch == Launch::Live {
-                    let reason = "live needs an elastic provider; this kind launches nothing";
-                    return Err(s.fail("launch", reason));
-                }
-                let pool = Pool::Static(source);
-                return Ok(Read { name, pool });
-            }
-            Built::Elastic(built) => {
-                distinct(&builts, &built, &p)?;
-                builts.push((kind, built, p));
-            }
-        }
+        let Built::Elastic(built) = built;
+        distinct(&builts, &built, &p)?;
+        builts.push((kind, built, p));
     }
     let limits = keys.provider_limits.take();
     let elastic = Elastic {

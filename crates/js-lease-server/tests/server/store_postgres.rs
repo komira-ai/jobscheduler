@@ -93,7 +93,7 @@ fn losing_the_writer_lock_stops_the_server() {
     let scratch = Scratch::new("store_pg_lost");
     let args = replace(store_args(&scratch, &url, &[]), "--boot", "resume");
     let runtime = Runtime::new().unwrap();
-    let h = runtime.block_on(Harness::with(scratch, args, None));
+    let h = runtime.block_on(Harness::with(scratch, args));
     runtime.block_on(h.ticks.step());
     let before = revision(&url);
     end_the_holder(&url);
@@ -244,7 +244,7 @@ fn a_commit_after_another_process_took_the_lock_is_refused() {
     let scratch = Scratch::new("store_pg_fenced");
     let args = store_args(&scratch, &url, &[]);
     let runtime = Runtime::new().unwrap();
-    let h = runtime.block_on(Harness::with(scratch, args, None));
+    let h = runtime.block_on(Harness::with(scratch, args));
     let store = h.running.store().expect("the server has a store");
     let put = |key: &str| Txn::new().put(key, "v", Cond::Any);
     let committed = store.txn(put("before"));
@@ -273,7 +273,7 @@ fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
     let database = test_database();
     let url = database.url();
     let flags = |scratch: &Scratch| {
-        let mut args = agent_args(scratch, false);
+        let mut args = agent_args(scratch);
         args.extend(["--store".into(), store_file(scratch, &url).into_os_string()]);
         args
     };
@@ -281,7 +281,7 @@ fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
     let args = flags(&scratch);
     let runtime = Runtime::new().unwrap();
     let (h, token) = runtime.block_on(async {
-        let first = Harness::with(scratch, args, None).await;
+        let first = Harness::with(scratch, args).await;
         let me = session(&hello_with(&first, JOIN, "burst-1").await, "burst-1");
         let mut beat = me.beat();
         beat["taint"] = json!({ "reason": "residue" });
@@ -294,7 +294,7 @@ fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
         } = first;
         running.shutdown().await.unwrap();
         let resumed = replace(flags(&scratch), "--boot", "resume");
-        (Harness::with(scratch, resumed, None).await, token)
+        (Harness::with(scratch, resumed).await, token)
     });
     runtime.block_on(async {
         let other = hello_with(&h, JOIN_B, "burst-1").await;
@@ -350,13 +350,13 @@ fn the_files_are_imported_once_over_postgres() {
         .save(&hosts)
         .unwrap();
     let flags = |scratch: &Scratch| {
-        let mut args = agent_args(scratch, false);
+        let mut args = agent_args(scratch);
         args.extend(["--store".into(), store_file(scratch, &url).into_os_string()]);
         args
     };
     let args = flags(&scratch);
     let runtime = Runtime::new().unwrap();
-    let first = runtime.block_on(Harness::with(scratch, args, None));
+    let first = runtime.block_on(Harness::with(scratch, args));
     let store = first.running.store().expect("the server holds the store");
     let keys: Vec<String> = store
         .scan_prefix("")
@@ -390,7 +390,7 @@ fn the_files_are_imported_once_over_postgres() {
 
     fs::remove_file(&agents_path).unwrap();
     let resumed = replace(flags(&scratch), "--boot", "resume");
-    let h = runtime.block_on(Harness::with(scratch, resumed, None));
+    let h = runtime.block_on(Harness::with(scratch, resumed));
     assert_eq!(revision(&url), before, "the restart wrote nothing");
     let store = h.running.store().expect("the server holds the store");
     assert!(store.get("hosts/binding/burst-9").unwrap().is_some());

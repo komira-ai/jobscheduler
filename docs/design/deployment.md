@@ -46,7 +46,7 @@ All values are placeholders for the operator; no object names a host, an address
 | `Service` (external) | `LoadBalancer`, or the cluster's own L4 entry, passing TCP through | agents outside the cluster; **TLS is not terminated before the pod**, so a bearer token and a join token never cross in clear and the agent pins the server's certificate (5.8) |
 | TLS `Secret` | certificate and key, mounted as files; its subject names the address agents and clients use | `--tls-cert`, `--tls-key`; a change is a restart |
 | token `Secret` | the bearer token and the join tokens, mounted as files | `--token-file`, `--agent-token-file`; never in `env`, never in an argument (R4) |
-| `ConfigMap` | the pool file and the agent-pool file, mounted as files | `--pool-config`, `--agent-pool-config`; no reload in the first slice (D20), so a change is a restart |
+| `ConfigMap` | the agent-pool file, mounted as a file | `--agent-pool-config`; no reload in the first slice (D20), so a change is a restart |
 | `PodDisruptionBudget` | `minAvailable: 1` | see below |
 
 **The pod.** One container from an image built from the release's static binary (`docs/release.md`), pinned by digest, with every flag in
@@ -58,7 +58,6 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
        "--token-file", "/run/secrets/js/token",
        "--agent-token-file", "/run/secrets/js/join-tokens",
        "--agent-pool-config", "/etc/jobscheduler/agent-pool.toml",
-       "--pool-config", "/etc/jobscheduler/pool.toml",
        "--tls-cert", "/run/secrets/js/tls.crt", "--tls-key", "/run/secrets/js/tls.key"]
 ```
 

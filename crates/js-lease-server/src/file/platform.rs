@@ -12,8 +12,7 @@
 //! the table, the `static` machine provider, and a `default` platform that names the two,
 //! `static` first. The names the loader makes start with [`MADE`], which no name in the
 //! file may hold, so they cannot collide with the operator's. A pool whose provider is the
-//! agentless `static` kind is not resolved: it is built as before, and goes away with that
-//! kind.
+//! removed agentless `static` kind is refused before it is resolved (`file/agentless.rs`).
 //!
 //! Everything downstream reads [`Resolved`]; the job pass places on the hosts of a pool's
 //! machine providers in the order its platforms, and each platform's `machine_providers`,
@@ -157,8 +156,7 @@ pub struct ResolvedPool {
 }
 
 /// The machine providers, platforms and pools of a configuration file, whichever way each
-/// pool was written. A pool whose provider is the agentless `static` kind and a `joined`
-/// pool are not in it.
+/// pool was written. A `joined` pool is not in it.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Resolved {
@@ -488,7 +486,11 @@ fn machine_provider(
     if kind == STATIC {
         s.only(&["name", "kind"])?;
     } else if !kinds.has(&kind) {
-        let known = kinds.names().join(", ");
+        // `static`, the hosts that register, is built in here, not a kind of `kinds`.
+        let mut known = kinds.names();
+        known.push(STATIC);
+        known.sort_unstable();
+        let known = known.join(", ");
         let reason = format!("unknown machine provider kind {kind:?}; known: {known}");
         return Err(s.fail("kind", &reason));
     }
@@ -571,22 +573,10 @@ pub(super) fn hostless(
 }
 
 /// The settings of a pool with hosts, each a positive duration when given.
-pub(super) fn settings(
-    s: &mut Section,
-) -> Result<(PoolSettings, Option<&'static str>), StartupError> {
-    let given = [
-        ("max_queue_wait", s.duration("max_queue_wait")?),
-        ("start_timeout", s.duration("start_timeout")?),
-        ("path_grace", s.duration("path_grace")?),
-    ];
-    let first = given
-        .iter()
-        .find(|(_, value)| value.is_some())
-        .map(|(key, _)| *key);
-    let settings = PoolSettings {
-        max_queue_wait: given[0].1.unwrap_or(MAX_QUEUE_WAIT),
-        start_timeout: given[1].1.unwrap_or(START_TIMEOUT),
-        path_grace: given[2].1.unwrap_or(PATH_GRACE),
-    };
-    Ok((settings, first))
+pub(super) fn settings(s: &mut Section) -> Result<PoolSettings, StartupError> {
+    Ok(PoolSettings {
+        max_queue_wait: s.duration("max_queue_wait")?.unwrap_or(MAX_QUEUE_WAIT),
+        start_timeout: s.duration("start_timeout")?.unwrap_or(START_TIMEOUT),
+        path_grace: s.duration("path_grace")?.unwrap_or(PATH_GRACE),
+    })
 }

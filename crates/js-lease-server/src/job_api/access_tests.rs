@@ -105,7 +105,7 @@ struct AnyHost;
 #[tonic::async_trait]
 impl Hosts for AnyHost {
     async fn hosts(&self) -> HostList {
-        HostList::of(Vec::new(), vec![h1()])
+        HostList::of(vec![h1()])
     }
 
     async fn cordon(&self, _: &HostId, _: Duration) -> Result<bool, Refused> {
