@@ -386,13 +386,62 @@ fn totals_past_the_largest_count_compare_exactly() {
     );
 }
 
-/// Asserts that an allocation read freed with no free time is matched by a row ended at its
-/// creation, as the server names it (the end of a free is its creation when it has no
-/// other). Catches a check that cannot match such a row.
+/// Asserts that an allocation read freed with no free time (one the cell saw replaced by its
+/// job's next placement) is matched by the one row of its job and host that ended between
+/// its creation and the read, at either edge of that span. Catches a check that names such
+/// an allocation by its creation alone, which fails every job placed again after a failed
+/// prepare.
 #[test]
-fn a_freed_allocation_with_no_free_time_is_named_by_its_creation() {
-    let unstamped = alloc(0, 1, 0, (100, None), AllocationStep::Freed, share());
-    none(&end(&at_end(vec![unstamped], vec![row(0, 0, 100, 1_000)])));
+fn a_freed_allocation_with_no_free_time_is_matched_within_its_span() {
+    for ended in [100, 2_500, END] {
+        let unstamped = alloc(0, 1, 0, (100, None), AllocationStep::Freed, share());
+        none(&end(&at_end(
+            vec![unstamped],
+            vec![row(0, 0, ended, 1_000)],
+        )));
+    }
+}
+
+/// Asserts, by the whole message, that an allocation with no free time is flagged when no
+/// row of its job and host ended in its span (none at all, or one before its creation, which
+/// is excused as an earlier placement's), and when two did. Catches a span that reaches
+/// before the creation and a doubled row taken as one.
+#[test]
+fn a_freed_allocation_with_no_free_time_needs_exactly_one_row_in_its_span() {
+    let unstamped = || alloc(0, 1, 0, (100, None), AllocationStep::Freed, share());
+    let flagged_with = |count: usize| {
+        format!(
+            "usage-row-per-ended-allocation at 5000: job sim-job-0 freed on host host-0 between 100 and 5000 has {count} usage rows, not one"
+        )
+    };
+    let none_in_span = [vec![], vec![row(0, 0, 50, 1_000)]];
+    for rows in none_in_span {
+        assert_eq!(
+            lines(&end(&at_end(vec![unstamped()], rows))),
+            [flagged_with(0)]
+        );
+    }
+    let two = vec![row(0, 0, 900, 1_000), row(0, 0, 1_200, 1_000)];
+    assert_eq!(
+        lines(&end(&at_end(vec![unstamped()], two))),
+        [flagged_with(2)]
+    );
+}
+
+/// Asserts that a row an allocation with a known free time owns is not given to a later
+/// allocation of the same job and host with no free time, and that each of the two then
+/// owns its own row. Catches one row counted for both placements.
+#[test]
+fn a_row_owned_by_a_stamped_allocation_is_not_matched_again() {
+    let first = freed(0, 1, 0, 100, 900);
+    let second = alloc(0, 2, 0, (900, None), AllocationStep::Freed, share());
+    let shared = vec![row(0, 0, 900, 1_000)];
+    assert_eq!(
+        flagged(&end(&at_end(vec![first.clone(), second.clone()], shared))),
+        [Invariant::UsageRowPerEndedAllocation]
+    );
+    let both = vec![row(0, 0, 900, 1_000), row(0, 0, 1_500, 1_000)];
+    none(&end(&at_end(vec![first, second], both)));
 }
 
 /// Asserts that usage rows added one at a time are kept in the order read, the first making

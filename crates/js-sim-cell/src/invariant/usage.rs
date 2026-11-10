@@ -10,7 +10,11 @@
 //! row in the same transaction as the free, named by the job and the time of the free, so a
 //! row belongs to an ended allocation when it names the allocation's job and host and ends
 //! at the allocation's `freed_at`. A job can have several allocations (a failed whole-host
-//! prepare frees one and places the job again), each with its own row.
+//! prepare frees one and places the job again), each with its own row. The store keeps one
+//! allocation row per job, so an allocation the cell saw replaced by the job's next one is
+//! read freed with no `freed_at` (`crate::jobs::read`): it was freed at some time between its
+//! creation and that read, and its row is the one row of its job and host that ended in that
+//! span and that no allocation with a known free time owns.
 //!
 //! # `UsageRowPerEndedAllocation`
 //!
@@ -38,7 +42,7 @@ use js_types::HostId;
 use js_types::sched::FarmTime;
 
 use super::{Found, Invariant};
-use crate::jobs::AllocationRow;
+use crate::jobs::{AllocationRead, AllocationRow};
 use crate::observe::Observations;
 use crate::text;
 use crate::usage::{UsageRow, booked_totals};
@@ -77,20 +81,15 @@ impl Totals {
     }
 }
 
-/// The ended allocations the cell read: the last row of each that is `Freed`.
-fn ended_allocations(observations: &Observations) -> Vec<&AllocationRow> {
+/// The ended allocations the cell read: the last read of each whose row is `Freed`.
+fn ended_allocations(observations: &Observations) -> Vec<&AllocationRead> {
     let mut last = BTreeMap::new();
     for read in &observations.allocation_reads {
-        last.insert(read.row.allocation, &read.row);
+        last.insert(read.row.allocation, read);
     }
     last.into_values()
-        .filter(|row| row.step == AllocationStep::Freed)
+        .filter(|read| read.row.step == AllocationStep::Freed)
         .collect()
-}
-
-/// When the server freed `row`, the end its usage row is named by.
-fn ended_at(row: &AllocationRow) -> FarmTime {
-    row.freed_at.unwrap_or(row.created_at)
 }
 
 /// `UsageRowPerEndedAllocation` and `UsageTotalsMatchTerminalJobs` over `observations`.
@@ -100,13 +99,14 @@ pub(super) fn check(observations: &Observations, found: &mut Found) {
     };
     let ended = ended_allocations(observations);
     rows_per_allocation(observations, &ended, rows, found);
+    let ended: Vec<&AllocationRow> = ended.iter().map(|read| &read.row).collect();
     totals(&ended, rows, found);
 }
 
 /// `UsageRowPerEndedAllocation`.
 fn rows_per_allocation(
     observations: &Observations,
-    ended: &[&AllocationRow],
+    ended: &[&AllocationRead],
     rows: &[UsageRow],
     found: &mut Found,
 ) {
@@ -117,8 +117,12 @@ fn rows_per_allocation(
             .or_default() += 1;
     }
     let mut owned: BTreeSet<Key<'_>> = BTreeSet::new();
-    for allocation in ended {
-        let key = (&allocation.job, &allocation.host, ended_at(allocation));
+    let (stamped, unstamped): (Vec<&&AllocationRead>, Vec<&&AllocationRead>) =
+        ended.iter().partition(|read| read.row.freed_at.is_some());
+    for read in stamped {
+        let allocation = &read.row;
+        let at = allocation.freed_at.unwrap_or(allocation.created_at);
+        let key = (&allocation.job, &allocation.host, at);
         owned.insert(key);
         let count = named.get(&key).copied().unwrap_or_default();
         if count != 1 {
@@ -126,7 +130,28 @@ fn rows_per_allocation(
                 "job {} freed on host {} at {} has {count} usage rows, not one",
                 allocation.job,
                 text::host(&allocation.host),
-                time(key.2)
+                time(at)
+            );
+            found.flag(Invariant::UsageRowPerEndedAllocation, detail);
+        }
+    }
+    for read in unstamped {
+        let allocation = &read.row;
+        let span = allocation.created_at..=read.at;
+        let candidates: Vec<(&Key<'_>, &usize)> = named
+            .iter()
+            .filter(|(key, _)| (key.0 == &allocation.job) & (key.1 == &allocation.host))
+            .filter(|(key, _)| span.contains(&key.2) & !owned.contains(*key))
+            .collect();
+        let count: usize = candidates.iter().map(|(_, count)| **count).sum();
+        owned.extend(candidates.iter().map(|(key, _)| **key));
+        if count != 1 {
+            let detail = format!(
+                "job {} freed on host {} between {} and {} has {count} usage rows, not one",
+                allocation.job,
+                text::host(&allocation.host),
+                time(allocation.created_at),
+                time(read.at)
             );
             found.flag(Invariant::UsageRowPerEndedAllocation, detail);
         }
