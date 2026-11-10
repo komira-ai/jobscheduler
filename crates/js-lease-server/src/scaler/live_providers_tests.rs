@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex};
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Claim, Held,
-    HostRef, HostStatus, Instant, Observed, Offer, ProviderError, Released, Secret,
+    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Claim, Extra,
+    Held, HostRef, HostStatus, Instant, Observed, Offer, ProviderError, Released, Secret,
 };
 use js_scaler::{AcquirePlan, Millis};
 use js_types::ProviderId;
@@ -84,13 +84,18 @@ impl CapacityProvider for Owner {
         1 << 20
     }
 
-    /// Launches the machine `i-<id>`.
+    /// Launches the machine `i-<id>`, and reports `i-<id>-extra`, a second machine the
+    /// launch made, as left running.
     fn acquire(&self, _request: &AcquireRequest) -> Acquired {
         let id = format!("i-{}", self.id);
         self.note("acquire", &id);
+        let extra = Extra {
+            id: HostRef(format!("{id}-extra")),
+            released: Released::Unknown,
+        };
         Acquired::Accepted {
             held: self.held(&id),
-            extras: Vec::new(),
+            extras: vec![extra],
         }
     }
 
@@ -193,7 +198,10 @@ fn a_failed_list_of_any_provider_fails_the_whole() {
 }
 
 /// Asserts that a launch goes to the provider its plan names, `b` here, and that the machine
-/// it launched is then released through `b` alone, although `a` would take the release too; that the later provider's offers are
+/// it launched is then released through `b` alone, although `a` would take the release too,
+/// and the second machine the launch reported is read by id through `b` alone (which says it
+/// is gone, without `a` being asked) and named as
+/// `b`'s; that the later provider's offers are
 /// those of its catalog once fetched (none before), and the first provider's none of them
 /// (the first's come from the checks); and that the count of catalog fetches is both
 /// providers'. Catches a launch sent to the first provider whatever the plan says, a
@@ -237,5 +245,18 @@ async fn a_launch_goes_to_the_provider_its_plan_names() {
         live.release(&launched),
         Released::Terminating(HostStatus::Terminating)
     );
-    assert_eq!(taken(&calls), ["b:acquire:i-b", "b:release:i-b"]);
+    let extra = HostRef("i-b-extra".to_owned());
+    assert!(live.is_gone(&extra));
+    let later = live.listed_by();
+    let named: Vec<_> = later.into_iter().collect();
+    let b = ProviderId::known("b");
+    assert_eq!(
+        named,
+        [("i-b".to_owned(), b.clone()), ("i-b-extra".to_owned(), b)]
+    );
+    let calls = taken(&calls);
+    assert_eq!(
+        calls,
+        ["b:acquire:i-b", "b:release:i-b", "b:observe:i-b-extra"]
+    );
 }
