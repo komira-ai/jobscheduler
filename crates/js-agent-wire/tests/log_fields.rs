@@ -114,6 +114,7 @@ fn result_with(logs: Option<LogReport>) -> JobResult {
         detail: None,
         log_tail: None,
         logs,
+        input_failure: None,
     }
 }
 

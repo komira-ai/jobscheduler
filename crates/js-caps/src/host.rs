@@ -16,9 +16,10 @@
 //! | [`SCRATCH_DEFAULT_GIB`] | whole GiB | the quota it enforces on a run that names none |
 //! | [`BUNDLE`] | the held bundle manifest digests, `sha256:<hex>`, comma-separated | the agent has a bundle store and holds at least one bundle |
 //! | [`BUNDLE_ROOT`] | the absolute path of the bundle store | the agent has a bundle store |
+//! | [`TIERSTORE_TREES`] | [`FLAG_SET`] | the agent is configured for the node's `tierstore fs` and its control socket answered the agent's start-time probe |
 //!
-//! A job request may require [`EXEC`] (the same mode) and [`DISK_GIB`] (at least that
-//! much free disk); see [`crate::Request`].
+//! A job request may require [`EXEC`] (the same mode), [`DISK_GIB`] (at least that
+//! much free disk) and [`TIERSTORE_TREES`] (the same value); see [`crate::Request`].
 //!
 //! A pool that declares an execution mode makes a [`HostContract`] of it: `runtime` must
 //! equal the mode, and a pool with GPUs also needs `gpu-toolkit`. The check is
@@ -76,11 +77,18 @@ pub const BUNDLE_ROOT: &str = "bundle-root";
 /// request reads this key.
 pub const GPU_PASSTHROUGH: &str = "gpu-passthrough";
 
+/// The capability key of an agent that attaches a start's tree inputs
+/// (`js_agent_wire::InputRef::Tree`) from the node's `tierstore fs`. Its value is
+/// [`FLAG_SET`]. An agent without it does not run a start with a tree input, so a job
+/// with one is placed only on a host that reports this key, and its start is sent only
+/// there. A request compares it exactly.
+pub const TIERSTORE_TREES: &str = "tierstore-trees";
+
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 10] = [
+pub const DETECTED_KEYS: [&str; 11] = [
     RUNTIME,
     GPU_TOOLKIT,
     GPU_PASSTHROUGH,
@@ -91,6 +99,7 @@ pub const DETECTED_KEYS: [&str; 10] = [
     SCRATCH_DEFAULT_GIB,
     BUNDLE,
     BUNDLE_ROOT,
+    TIERSTORE_TREES,
 ];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.

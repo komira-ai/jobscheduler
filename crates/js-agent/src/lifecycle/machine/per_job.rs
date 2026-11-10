@@ -80,6 +80,7 @@ pub(super) fn job_result(result: &RunResult, logs: Option<LogReport>) -> JobResu
         detail: result.detail.clone(),
         log_tail: result.log_tail.clone(),
         logs,
+        input_failure: None,
     }
 }
 

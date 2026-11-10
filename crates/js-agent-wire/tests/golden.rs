@@ -9,8 +9,8 @@ use common::{heartbeat, hello, job, welcome};
 use js_agent_wire::refusal;
 use js_agent_wire::{
     Ack, Command, ExclusiveRefusal, Heartbeat, HeartbeatReply, HelloReply, InputRef, Isolation,
-    JobSpec, NetworkLevel, Outcome, OutputKind, OutputSpec, Placement, ProtocolRange,
-    RefusalReason, Refused, ResultAck, RunSpec, Taint,
+    JobResult, JobSpec, NetworkLevel, Outcome, OutputKind, OutputSpec, Placement, ProtocolRange,
+    RefusalReason, Refused, ResultAck, RunSpec, Taint, TreeUnavailable,
 };
 use js_types::{Arch, Os};
 use serde_json::{Value, json};
@@ -436,4 +436,83 @@ fn the_accelerator_wire_form() {
         serde_json::to_value(&value.shape).unwrap()["accelerator"],
         json!({"vendor": "apple", "model": "apple-m", "count": 1})
     );
+}
+
+/// Asserts the exact text of a tree input with every field set, and that the minimal one,
+/// a `digest` and a non-empty `dest` only, decodes with a read-only placement and a start
+/// that fails when the tree is unavailable, and is written back with those defaults
+/// spelled out. It catches a renamed `tree` tag or field, a lost `snake_case` on
+/// `job_stages`, and a default that would make a tree writable or let a job start without
+/// its tree when it did not ask to.
+#[test]
+fn tree_input_wire_form() {
+    let digest = format!("sha256:{HEX}");
+    let full = InputRef::Tree {
+        digest: digest.clone(),
+        dest: String::new(),
+        placement: Placement::Writable,
+        unavailable: TreeUnavailable::JobStages,
+    };
+    let text = serde_json::to_string(&full).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            r#"{{"type":"tree","digest":"{digest}","dest":"","placement":"writable","unavailable":"job_stages"}}"#
+        )
+    );
+    assert_eq!(serde_json::from_str::<InputRef>(&text).unwrap(), full);
+
+    let minimal = json!({"type": "tree", "digest": digest, "dest": "src"});
+    let read: InputRef = serde_json::from_value(minimal).unwrap();
+    let narrow = InputRef::Tree {
+        digest: digest.clone(),
+        dest: "src".into(),
+        placement: Placement::ReadOnly,
+        unavailable: TreeUnavailable::Fail,
+    };
+    assert_eq!(read, narrow);
+    assert_eq!(
+        serde_json::to_value(&narrow).unwrap(),
+        json!({
+            "type": "tree",
+            "digest": digest,
+            "dest": "src",
+            "placement": "read_only",
+            "unavailable": "fail"
+        })
+    );
+    assert_eq!(TreeUnavailable::default(), TreeUnavailable::Fail);
+}
+
+/// Asserts the exact JSON of a job result that carries an input failure beside the outcome,
+/// exit status and detail it keeps, and that a result without one has no such key. It
+/// catches a renamed `input_failure`, and one written as `null` when absent, which a server
+/// that reads the key would take for a failure.
+#[test]
+fn job_result_with_input_failure_wire_form() {
+    let failed = JobResult {
+        job_id: "job-1".into(),
+        allocation_id: "0123456789abcdef0123456789abcdef".into(),
+        outcome: Outcome::Succeeded,
+        exit_code: Some(0),
+        detail: None,
+        log_tail: None,
+        logs: None,
+        input_failure: Some(refusal::TREE_READ_FAILED.into()),
+    };
+    let wire = json!({
+        "job_id": "job-1",
+        "allocation_id": "0123456789abcdef0123456789abcdef",
+        "outcome": "succeeded",
+        "exit_code": 0,
+        "input_failure": "tree-read-failed"
+    });
+    assert_eq!(serde_json::to_value(&failed).unwrap(), wire);
+    assert_eq!(serde_json::from_value::<JobResult>(wire).unwrap(), failed);
+    let clean = JobResult {
+        input_failure: None,
+        ..failed
+    };
+    let text = serde_json::to_value(&clean).unwrap();
+    assert!(text.get("input_failure").is_none(), "{text}");
 }
