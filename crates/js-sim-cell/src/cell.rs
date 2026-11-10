@@ -56,7 +56,7 @@ use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 use js_types::{HostId, IdError, Resources};
 
-use crate::agent::{AgentKind, AgentNode, AgentSpec};
+use crate::agent::{AgentKind, AgentNode, AgentProfile, AgentSpec, Prepare};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::{Counter, Counters};
 use crate::elastic::Cloud;
@@ -69,9 +69,11 @@ use crate::node::{Applied, CellNode};
 use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Killed, Observations};
 use crate::server::{JOIN_TOKEN, ServerNode, ServerSpec};
 use crate::text;
+use crate::usage::UsageReadFault;
 use crate::work::Work;
 
 mod cloud_faults;
+mod cordon;
 mod elastic;
 mod store;
 
@@ -207,6 +209,8 @@ pub struct Cell {
     machines: elastic::Machines,
     /// The join tokens the cell minted, and what it saw of the server's store.
     kept: store::Kept,
+    /// The defect the cell applies to the usage rows it reads at the end.
+    usage_fault: UsageReadFault,
 }
 
 impl Cell {
@@ -270,6 +274,7 @@ impl Cell {
             tables: Reader::default(),
             machines: elastic::Machines::default(),
             kept: store::Kept::default(),
+            usage_fault: UsageReadFault::default(),
         };
         cell.set_faults(faults);
         Ok(cell)
@@ -288,6 +293,20 @@ impl Cell {
     /// Never for fewer than a thousand million agents: the name is a host id.
     pub fn add_agent(&mut self) -> Result<HostId, IdError> {
         self.add(AgentKind::Fake(None))
+    }
+
+    /// Adds the next agent, a correct fake that says hello as `profile` says.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cell::add_agent`].
+    pub fn add_agent_as(&mut self, profile: AgentProfile) -> Result<HostId, IdError> {
+        let host = self.add(AgentKind::Fake(None))?;
+        let last = self.agents - 1;
+        self.agent_mut(last)
+            .into_iter()
+            .for_each(|agent| agent.set_profile(profile));
+        Ok(host)
     }
 
     /// Adds the next agent, whose agent lacks `defect`.
@@ -413,6 +432,7 @@ impl Cell {
         let end = self.sim.now().saturating_add(within);
         self.run_until(end)?;
         self.reread(true);
+        self.read_usage();
         self.read_cloud();
         self.observations.at = self.sim.now();
         let at = self.observations.at;
@@ -529,6 +549,24 @@ impl Cell {
             self.faulted.killed.remove(&host);
             self.fault_changed();
         }
+    }
+
+    /// Makes agent `index` answer a prepare as `prepare` says, from its next heartbeat on
+    /// ([`AgentNode::set_prepare`]); an index that names no agent changes nothing.
+    pub fn set_prepare(&mut self, index: usize, prepare: Prepare) {
+        if let Some(agent) = self.agent_mut(index) {
+            agent.set_prepare(prepare);
+        }
+    }
+
+    /// Makes agent `index` an agent of the current release and starts a new process on its
+    /// host, as [`Cell::replace`] does: the upgrade of a host, which loses what its
+    /// process held.
+    pub fn upgrade(&mut self, index: usize) {
+        self.agent_mut(index)
+            .into_iter()
+            .for_each(|agent| agent.set_profile(AgentProfile::Current));
+        self.replace(index);
     }
 
     /// Starts a new process on agent `index`'s host, with empty state.

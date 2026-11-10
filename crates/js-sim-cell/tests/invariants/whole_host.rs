@@ -3,7 +3,8 @@
 //! reads (which host, which lease, which time, which source). Uses the helpers of the
 //! parent file.
 
-use js_sim_cell::{StartSeen, StopCommand, StopSeen};
+use js_jobs::{AllocationId, AllocationStep, EndReason, JobId, JobState};
+use js_sim_cell::{AllocationRow, JobReply, StartSeen, StopCommand, StopSeen};
 
 use super::*;
 
@@ -20,6 +21,14 @@ pub(crate) const NEGATIVE_CASES: &[NegativeCase] = &[
     (
         Invariant::MarkedHostsServeNoOrdinaryStart,
         ordinary_start_on_a_marked_host,
+    ),
+    (
+        Invariant::HeldMeansReady,
+        whole_host_job_started_before_ready,
+    ),
+    (
+        Invariant::DrainKillsNothing,
+        stop_of_a_job_on_a_draining_host,
     ),
 ];
 
@@ -327,4 +336,220 @@ fn whole_host_facts_are_read_once_at_the_step_that_appends_them() {
         .with_event(ItemId(0), ms(250), placed(0))
         .at(ms(300));
     none(&checker.step(&granted, &Touched::nothing().item(ItemId(0))));
+}
+
+// ---- The invariants over jobs. ----
+
+fn job(n: u64) -> JobId {
+    JobId::parse(&format!("sim-job-{n}")).expect("a job id")
+}
+
+fn allocation(n: u8) -> AllocationId {
+    AllocationId::from_bits([n; 16])
+}
+
+/// Allocation `a` of job `j` on host `h`, booked, committed at 100.
+fn booked_row(j: u64, a: u8, h: u64) -> AllocationRow {
+    AllocationRow {
+        job: job(j),
+        allocation: allocation(a),
+        host: host(h),
+        step: AllocationStep::Booked,
+        created_at: ms(100),
+        end_reason: None,
+        freed_at: None,
+        booked: js_jobs::Booked::WholeHost,
+    }
+}
+
+/// Allocation 1 of job 0 on host 0, freed for a failed prepare.
+fn failed_row() -> AllocationRow {
+    AllocationRow {
+        step: AllocationStep::Freed,
+        end_reason: Some(EndReason::FailedPrepare),
+        ..booked_row(0, 1, 0)
+    }
+}
+
+/// An answer host `h` read at `at` that carried a stop of each job of `stops`.
+fn stop_reply(h: u64, at: u64, stops: &[JobId]) -> JobReply {
+    JobReply {
+        host: host(h),
+        at: ms(at),
+        beat_at: ms(at - 50),
+        listed: stops.iter().cloned().collect(),
+        starts: Vec::new(),
+        stops: stops.iter().cloned().collect(),
+        acks: Vec::new(),
+    }
+}
+
+/// Whole-host item 0, whose job `sim-job-0` was read placed on host 0 under allocation 1 at
+/// 200 and starting at 300; host 0's agent reported ready for the allocation only at 400.
+pub fn whole_host_job_started_before_ready() -> Observations {
+    Observations::quiet()
+        .at(ms(500))
+        .with_item(ItemId(0), whole())
+        .with_allocation_read(booked_row(0, 1, 0), ms(200))
+        .with_job_read(job(0), JobState::Placed, ms(200))
+        .with_job_read(job(0), JobState::Starting, ms(300))
+        .with_ready(host(0), &allocation(1).to_string(), ms(400))
+}
+
+/// Job `sim-job-0` of item 0, running on host 0, which the listing sets aside for request
+/// `r1`, sent a stop at 400 that no client asked for.
+pub fn stop_of_a_job_on_a_draining_host() -> Observations {
+    Observations::quiet()
+        .at(ms(500))
+        .with_item(ItemId(0), share(1_000))
+        .with_reservation(host(0), "r1", None)
+        .with_job_reply(stop_reply(0, 400, &[job(0)]))
+}
+
+/// Asserts that a whole-host job read starting, or running, on an allocation before its
+/// host's agent reported ready for exactly that allocation is flagged as `HeldMeansReady`,
+/// with a line naming the job, the state, the allocation, the host and the time; that a
+/// report at the very time of the read is enough; that a report from another host, or for
+/// another allocation, is not; that a job read starting without any allocation read, a share
+/// job, a job no item asked for and a job read placed are not checked; that a job is judged
+/// once for each allocation it is read starting on (a second read, running, is not flagged
+/// again; a second allocation without a report is); and that a read is judged with the
+/// allocation the tables showed by then, not one read later. Catches a check that reads a
+/// report after the read, one that takes any report of the host or of the job, one that
+/// applies to jobs that did not ask for a whole host, and one that judges a read with the
+/// next placement.
+#[test]
+fn a_whole_host_job_started_before_its_ready_report_is_flagged() {
+    let allocation_1 = allocation(1).to_string();
+    let line = |state: &str, at: u64| {
+        format!(
+            "held-means-ready at 500: whole-host job sim-job-0 was read {state} on allocation \
+             {allocation_1} on host host-0 at {at} before the host's agent reported ready for \
+             that allocation"
+        )
+    };
+    assert_eq!(
+        lines(&step_all(&whole_host_job_started_before_ready())),
+        [line("starting", 300)]
+    );
+    let started = || {
+        Observations::quiet()
+            .at(ms(500))
+            .with_item(ItemId(0), whole())
+            .with_allocation_read(booked_row(0, 1, 0), ms(200))
+            .with_job_read(job(0), JobState::Starting, ms(300))
+    };
+    none(&step_all(&started().with_ready(
+        host(0),
+        &allocation_1,
+        ms(300),
+    )));
+    let elsewhere = started().with_ready(host(1), &allocation_1, ms(100));
+    assert_eq!(lines(&step_all(&elsewhere)), [line("starting", 300)]);
+    let other = started().with_ready(host(0), &allocation(2).to_string(), ms(100));
+    assert_eq!(lines(&step_all(&other)), [line("starting", 300)]);
+    let running = Observations::quiet()
+        .at(ms(500))
+        .with_item(ItemId(0), whole())
+        .with_allocation_read(booked_row(0, 1, 0), ms(200))
+        .with_job_read(job(0), JobState::Running, ms(300));
+    assert_eq!(lines(&step_all(&running)), [line("running", 300)]);
+
+    let placed_only = Observations::quiet()
+        .at(ms(500))
+        .with_item(ItemId(0), whole())
+        .with_allocation_read(booked_row(0, 1, 0), ms(200))
+        .with_job_read(job(0), JobState::Placed, ms(200));
+    none(&step_all(&placed_only));
+    let no_row = Observations::quiet()
+        .at(ms(500))
+        .with_item(ItemId(0), whole())
+        .with_job_read(job(0), JobState::Starting, ms(300));
+    none(&step_all(&no_row));
+    let mut share_job = whole_host_job_started_before_ready();
+    share_job.items.get_mut(&ItemId(0)).expect("item 0").ask = share(1_000);
+    none(&step_all(&share_job));
+    let mut no_item = whole_host_job_started_before_ready();
+    no_item.items.clear();
+    none(&step_all(&no_item));
+    let other_job = JobId::parse("other-job").expect("a job id");
+    let not_an_item = Observations::quiet()
+        .at(ms(500))
+        .with_item(ItemId(0), whole())
+        .with_allocation_read(booked_row(0, 1, 0), ms(200))
+        .with_job_read(other_job, JobState::Starting, ms(300));
+    none(&step_all(&not_an_item));
+
+    let mut checker = Checker::new();
+    let first = whole_host_job_started_before_ready();
+    assert_eq!(checker.step(&first, &Touched::nothing()).len(), 1);
+    let again = first.with_job_read(job(0), JobState::Running, ms(450));
+    none(&checker.step(&again, &Touched::nothing()));
+    let moved = again
+        .with_allocation_read(failed_row(), ms(455))
+        .with_allocation_read(booked_row(0, 2, 1), ms(460))
+        .with_job_read(job(0), JobState::Starting, ms(470));
+    let found = lines(&checker.step(&moved, &Touched::nothing()));
+    let second = "held-means-ready at 500: whole-host job sim-job-0 was read starting on \
+                  allocation 02020202020202020202020202020202 on host host-1 at 470 before the \
+                  host's agent reported ready for that allocation";
+    assert_eq!(found, [second]);
+
+    let next_placement = Observations::quiet()
+        .at(ms(500))
+        .with_item(ItemId(0), whole())
+        .with_allocation_read(booked_row(0, 1, 0), ms(200))
+        .with_job_read(job(0), JobState::Starting, ms(300))
+        .with_allocation_read(failed_row(), ms(340))
+        .with_allocation_read(booked_row(0, 2, 1), ms(350))
+        .with_ready(host(0), &allocation_1, ms(250));
+    none(&step_all(&next_placement));
+}
+
+/// Asserts that a stop of a job sent to a host the listing sets aside is flagged as
+/// `DrainKillsNothing` unless the job's client asked to cancel it first, with a line naming
+/// the host, the job and the time; that a cancel asked at the time of the answer or before
+/// is enough and one asked after is not; that an answer that carried no stop, a host the
+/// listing does not set aside and a host it does not list are not checked; that a job no
+/// item asked for is flagged; and that an answer is read once. Catches a drain that cuts a
+/// job unflagged, a check that excuses a kill by a later client request, one that flags the
+/// client's own cancel, and one that reads an answer at every step.
+#[test]
+fn a_stop_sent_to_a_draining_host_is_flagged_for_a_job() {
+    let line = |job: &str| {
+        format!(
+            "drain-kills-nothing at 500: host host-0, which the server sets aside, was sent a \
+             stop of job {job} at 400 that its client did not ask for"
+        )
+    };
+    let drained = stop_of_a_job_on_a_draining_host();
+    assert_eq!(lines(&step_all(&drained)), [line("sim-job-0")]);
+    none(&step_all(&drained.clone().with_cancel(ItemId(0), ms(400))));
+    let late = drained.clone().with_cancel(ItemId(0), ms(401));
+    assert_eq!(lines(&step_all(&late)), [line("sim-job-0")]);
+    let quiet = Observations::quiet()
+        .at(ms(500))
+        .with_reservation(host(0), "r1", None)
+        .with_job_reply(stop_reply(0, 400, &[]));
+    none(&step_all(&quiet));
+    let not_aside = Observations::quiet()
+        .at(ms(500))
+        .with_booking(host(0), lease(0))
+        .with_job_reply(stop_reply(0, 400, &[job(0)]));
+    none(&step_all(&not_aside));
+    let unlisted = Observations::quiet()
+        .at(ms(500))
+        .with_job_reply(stop_reply(0, 400, &[job(0)]));
+    none(&step_all(&unlisted));
+    let other_job = JobId::parse("other-job").expect("a job id");
+    let unknown = Observations::quiet()
+        .at(ms(500))
+        .with_reservation(host(0), "r1", None)
+        .with_cancel(ItemId(0), ms(100))
+        .with_job_reply(stop_reply(0, 400, &[other_job]));
+    assert_eq!(lines(&step_all(&unknown)), [line("other-job")]);
+
+    let mut checker = Checker::new();
+    assert_eq!(checker.step(&drained, &Touched::nothing()).len(), 1);
+    none(&checker.step(&drained, &Touched::nothing()));
 }

@@ -1,7 +1,8 @@
 //! What must always be true of the cell: the seven properties of "exactly once, nothing
 //! double-booked, nothing lost", the four of a whole host held, drained and served
 //! (`whole.rs`), the five of a job, its allocations and its result (`jobs.rs`), the five
-//! of an elastic pool's cloud (`elastic.rs`), and the [`Checker`] that tests them.
+//! of an elastic pool's cloud (`elastic.rs`), the two of the usage history (`usage.rs`), the one of
+//! a cordon (`cordon.rs`), and the [`Checker`] that tests them.
 //!
 //! The checker runs a step check ([`Checker::step`]) after every kernel step and every
 //! client call, and an end check ([`Checker::end`]) once, after the scenario has been
@@ -42,10 +43,13 @@ use crate::observe::{
 };
 use crate::text;
 
+mod cordon;
 mod elastic;
 mod jobs;
 mod results;
+mod usage;
 mod whole;
+mod whole_jobs;
 
 /// One property the cell must keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,14 +123,23 @@ pub enum Invariant {
     /// Step check. A whole-host item hears that its lease is placed on a host (the grant,
     /// [`ClientEvent::Placed`], after the lease was held) only after the agent of that
     /// host sent a ready report naming exactly that lease ([`Observations::ready`]): what
-    /// the agent sent, not what the server took.
+    /// the agent sent, not what the server took. A whole-host job, which the job front
+    /// hears no lease for, is read starting or running on an allocation only after the
+    /// agent of its host sent a ready report naming exactly that allocation, by the
+    /// server's job and allocation tables as the cell read them.
     HeldMeansReady,
     /// Step check. A drain never cuts work (design section 6.4): no run on a host the
     /// server's listing sets aside for a whole-host request is sent a stop or a cancel
     /// unless its own client asked for it first (it asked to cancel the item,
     /// [`Observations::cancels`], or sent the release of the item's lease), or the run's
     /// own wall limit had run out. Read over the stops and cancels that reached a
-    /// running run ([`Observations::stops`]).
+    /// running run ([`Observations::stops`]). A stop of a job, which the job front makes no
+    /// request for, sent to a host the listing sets aside ([`crate::ServerHost::set_aside`])
+    /// is one the job's client asked for by the time the answer was read
+    /// ([`Observations::cancels`]), or a violation ([`Observations::job_replies`]). The
+    /// cell's listing sets no host aside for a job (the engine's marks are in the job store,
+    /// not the registry's listing), so this job part too is held only over hand-built and
+    /// hand-edited histories.
     DrainKillsNothing,
     /// Step check. A host the server's listing sets aside for a whole-host request is sent
     /// no start of a lease of an item that did not ask for a whole host, unless the start
@@ -186,11 +199,27 @@ pub enum Invariant {
     /// agent runs no run and no job) and without a drain (the server's listing shows its
     /// host neither drained nor being released).
     LaunchedMachinesSettle,
+    /// End check. Every allocation the cell last read freed has exactly one row in the usage
+    /// history the server tells at the end (named by the job and the host and ending when
+    /// the allocation was freed), and no row names an allocation that has not ended
+    /// (`invariant/usage.rs`).
+    UsageRowPerEndedAllocation,
+    /// End check. For each job whose usage rows are as many as its ended allocations, the
+    /// rows add up to what the allocations booked: the number, the CPU, the memory and the
+    /// hosts (`invariant/usage.rs`).
+    UsageTotalsMatchTerminalJobs,
+    /// Step check. After the operator cordons a host (`POST /v1/hosts/{id}:cordon`), and
+    /// while the cordon holds, no allocation is created on it, no allocation that was
+    /// running there when it was set ends for a reason other than its job's own (an exit,
+    /// the wall limit, the memory limit, or a cancel the client asked for), and no agent
+    /// of the host reads a stop of such a job that the client did not ask for
+    /// (`invariant/cordon.rs`).
+    CordonNeverKillsRunningJob,
 }
 
 impl Invariant {
     /// Every invariant.
-    pub const ALL: [Invariant; 21] = [
+    pub const ALL: [Invariant; 24] = [
         Invariant::NoDoubleBooking,
         Invariant::AtMostOneLaunch,
         Invariant::OneTerminalAnswer,
@@ -212,6 +241,9 @@ impl Invariant {
         Invariant::NoAcquireWhilePlanOnly,
         Invariant::ThrottleHonoured,
         Invariant::LaunchedMachinesSettle,
+        Invariant::UsageRowPerEndedAllocation,
+        Invariant::UsageTotalsMatchTerminalJobs,
+        Invariant::CordonNeverKillsRunningJob,
     ];
 
     /// A stable kebab-case name, as a failure writes it.
@@ -239,6 +271,9 @@ impl Invariant {
             Invariant::NoAcquireWhilePlanOnly => "no-acquire-while-plan-only",
             Invariant::ThrottleHonoured => "throttle-honoured",
             Invariant::LaunchedMachinesSettle => "launched-machines-settle",
+            Invariant::UsageRowPerEndedAllocation => "usage-row-per-ended-allocation",
+            Invariant::UsageTotalsMatchTerminalJobs => "usage-totals-match-terminal-jobs",
+            Invariant::CordonNeverKillsRunningJob => "cordon-never-kills-running-job",
         }
     }
 
@@ -262,11 +297,14 @@ impl Invariant {
             | Invariant::InstancesWithinLimits
             | Invariant::OnlyOwnMachinesReleased
             | Invariant::NoAcquireWhilePlanOnly
-            | Invariant::ThrottleHonoured => Checked::EveryStep,
+            | Invariant::ThrottleHonoured
+            | Invariant::CordonNeverKillsRunningJob => Checked::EveryStep,
             Invariant::SettlesWhenQuiet
             | Invariant::BookingsMatchAgents
             | Invariant::NoResultLost
-            | Invariant::LaunchedMachinesSettle => Checked::AtEnd,
+            | Invariant::LaunchedMachinesSettle
+            | Invariant::UsageRowPerEndedAllocation
+            | Invariant::UsageTotalsMatchTerminalJobs => Checked::AtEnd,
         }
     }
 }
@@ -427,6 +465,8 @@ pub struct Checker {
     ordinary: BTreeSet<LeaseId>,
     /// What the job invariants have read.
     jobs: jobs::Indices,
+    /// What the whole-host invariants have read of the job tables and the agents' answers.
+    whole_jobs: whole_jobs::Indices,
     /// What the invariants of the elastic pool's cloud have read.
     cloud: elastic::Indices,
 }
@@ -473,7 +513,9 @@ impl Checker {
         self.read_starts(observations, &mut found);
         self.read_stops(observations, &mut found);
         self.jobs.step(observations, touched, &mut found);
+        self.whole_jobs.step(&self.ready, observations, &mut found);
         self.cloud.step(observations, &mut found);
+        cordon::check(observations, &mut found);
         found.list
     }
 
@@ -542,6 +584,7 @@ impl Checker {
         }
         results::check(observations, &mut found);
         elastic::settle(observations, &mut found);
+        usage::check(observations, &mut found);
         Ok(found.list)
     }
 

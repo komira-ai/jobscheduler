@@ -49,6 +49,7 @@ use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 
 use crate::actions::{Action, submit_work};
+use crate::agent::AgentProfile;
 use crate::agreement::{self, Outcome};
 use crate::cell::{Cell, Setup};
 use crate::counters::{Counter, Counters};
@@ -81,6 +82,8 @@ enum Kind {
     Fake(Option<Defect>),
     /// The real agent lifecycle.
     Real,
+    /// A correct fake that says hello as the profile says.
+    Profiled(AgentProfile),
 }
 
 /// Hosts of one kind the scenario adds, in order.
@@ -266,6 +269,15 @@ impl Scenario {
     #[must_use]
     pub fn hosts(self, pool: &str, count: usize) -> Self {
         self.add_hosts(pool, count, Kind::Fake(None))
+    }
+
+    /// This scenario, with `count` more hosts of `pool` with correct fake agents that say
+    /// hello as `profile` says. With [`AgentProfile::PreviousRelease`] beside
+    /// [`Scenario::hosts`] it has a fleet of both releases;
+    /// [`crate::actions::upgrade_agents`] turns one into the other.
+    #[must_use]
+    pub fn hosts_as(self, pool: &str, count: usize, profile: AgentProfile) -> Self {
+        self.add_hosts(pool, count, Kind::Profiled(profile))
     }
 
     /// This scenario, with `count` more hosts of `pool` whose fake agents lack `defect`.
@@ -540,6 +552,7 @@ impl Scenario {
                 Kind::Fake(Some(defect)) => cell.add_broken_agent(defect),
                 Kind::Fake(None) => cell.add_agent(),
                 Kind::Real => cell.add_real_agent(),
+                Kind::Profiled(profile) => cell.add_agent_as(profile),
             };
             added.map_err(StartupError::because("hosts"))?;
         }

@@ -16,7 +16,7 @@
 //!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
 //!   [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
-//!   step and once at the end, and the one-line [`Violation`] it reports. Twenty-one
+//!   step and once at the end, and the one-line [`Violation`] it reports. Twenty-four
 //!   properties: no host booked past what it holds, no lease on two hosts and no host
 //!   listed twice ([`Invariant::NoDoubleBooking`]); each run launched at most once
 //!   ([`Invariant::AtMostOneLaunch`]); one terminal answer per item
@@ -46,7 +46,12 @@
 //!   has tripped until it is reset ([`Invariant::NoAcquireWhilePlanOnly`]), no acquire
 //!   inside the throttle wait of a 429 ([`Invariant::ThrottleHonoured`]), and every
 //!   launched machine released, gone or preempted once quiet, none left running idle and
-//!   undrained ([`Invariant::LaunchedMachinesSettle`]).
+//!   undrained ([`Invariant::LaunchedMachinesSettle`]); the two of the usage history: one
+//!   usage row for each allocation freed and none for one that was not
+//!   ([`Invariant::UsageRowPerEndedAllocation`]), and each job's rows adding up to what its
+//!   freed allocations booked ([`Invariant::UsageTotalsMatchTerminalJobs`]); and the one of
+//!   a cordon: no placement on a cordoned host and no end of a job running there but its
+//!   own ([`Invariant::CordonNeverKillsRunningJob`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
 //! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
@@ -98,7 +103,12 @@
 //!   family (`tests/faults.rs`) runs agents that die and return or never return,
 //!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
 //!   restart of the server and a forgotten host, each over sixteen seeds; the whole-host
-//!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run whole-host jobs; the
+//!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`,
+//!   `tests/whole_host_prepare.rs`) run whole-host jobs, their prepare handshake included;
+//!   the usage and cordon families (`tests/usage.rs`, `tests/cordon.rs`) hold the usage
+//!   history to the freed allocations and a cordon to the jobs on its host; the skew family
+//!   (`tests/skew.rs`) runs agents of the previous release beside this one's and upgrades
+//!   them; the scale family (`tests/scale.rs`) bounds the work per job and per host; the
 //!   elastic family (`tests/elastic.rs`) runs pools whose machines the scaler launches on
 //!   demand and releases once idle, billed as EC2 and as Lambda bill; the store family
 //!   (`tests/store.rs`) runs the server's state in its store across a restart, a stop in a
@@ -133,12 +143,14 @@ pub mod agent;
 pub mod agreement;
 pub mod bus;
 pub mod cell;
+pub mod cordon;
 mod counters;
 pub mod elastic;
 pub mod front;
 pub mod invariant;
 pub mod jobs;
 mod ledger;
+mod load;
 mod node;
 pub mod observe;
 pub mod replay;
@@ -146,13 +158,15 @@ pub mod scenario;
 pub mod server;
 pub mod sweep;
 mod text;
+pub mod usage;
 pub mod work;
 
 pub use actions::Action;
-pub use agent::{AgentKind, AgentNode, AgentSpec, Prepare, SIM_RUN_IMAGE};
+pub use agent::{AgentKind, AgentNode, AgentProfile, AgentSpec, Prepare, SIM_RUN_IMAGE};
 pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differences};
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, SecondServer, Setup, StoreRead};
+pub use cordon::{Cordon, Uncordon};
 pub use counters::{Counter, Counters};
 pub use elastic::{
     AcquireAnswer, Cloud, CloudCall, CloudEvent, CloudFacts, ElasticPool, Machine, OfferSpec,
@@ -165,6 +179,7 @@ pub use jobs::{
     LostAnswer, ResultMade,
 };
 pub use ledger::{Acked, Completion, Ledger};
+pub use load::Load;
 pub use node::CellNode;
 pub use observe::{
     AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
@@ -174,4 +189,5 @@ pub use observe::{
 pub use replay::{Failure, FailureReport, drive, run};
 pub use scenario::{Call, Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
 pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, Store, WHOLE_CLASS};
+pub use usage::{UsageReadFault, UsageRow};
 pub use work::Work;
