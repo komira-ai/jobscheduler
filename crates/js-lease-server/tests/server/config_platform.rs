@@ -262,7 +262,7 @@ fn two_elastic_providers_in_one_server_parse() {
 }
 
 /// Asserts the exact refusal to start on a file with two elastic pools, naming the second:
-/// this version runs one pool that registers agents, through the fixed order. It catches a
+/// this version runs one pool that registers agents. It catches a
 /// server that starts and serves only one of the two.
 #[test]
 fn starting_several_elastic_pools_is_refused_until_the_walk_lands() {
@@ -823,26 +823,22 @@ fn max_instances_and_max_machines_are_the_same_cap() {
     );
 }
 
-/// Asserts that a platform listing a launching machine provider before `static`, and a
-/// pool whose platforms reach one before `static`, are refused: this version runs the
-/// fixed order of registered hosts first. And that a pool whose platforms reach no
-/// launching provider, or two, is refused. It catches a placement order that the file
-/// changes while the server still walks the fixed one.
+/// Asserts that a platform may list its machine providers in any order, a launching one
+/// before `static` included, and a pool its platforms in any order, each resolved as
+/// written (the job pass walks them in that order); and that a pool whose platforms reach no
+/// launching provider, or two, is refused. It catches an order the file asks for that is
+/// refused or reordered, and a pool with no launching provider, or two, that starts.
 #[test]
-fn static_must_precede_elastic_in_this_version() {
+fn any_machine_provider_order_resolves_as_written() {
     let scratch = Scratch::new("platform_order");
-    let first =
-        "static must come first in this version (the ordered walk of design 5.6 is not built yet)";
     let reversed = [
         rack(),
         lambda(&scratch, "lambda"),
         platform("ours", &["lambda", "rack"]),
     ];
     let text = doc(&scratch, &reversed, &[&on(&["ours"], &scratch)]);
-    assert_eq!(
-        refused(&scratch, &text),
-        format!("platform \"ours\": machine_providers: {first}")
-    );
+    let ours = resolved(&scratch, &text);
+    assert_eq!(ours.platforms[0].machine_providers, ["lambda", "rack"]);
     let split = [
         rack(),
         lambda(&scratch, "lambda"),
@@ -850,10 +846,8 @@ fn static_must_precede_elastic_in_this_version() {
         platform("ours", &["rack"]),
     ];
     let text = doc(&scratch, &split, &[&on(&["cloud", "ours"], &scratch)]);
-    assert_eq!(
-        refused(&scratch, &text),
-        format!("pool \"gpu\": platforms: {first}")
-    );
+    let pool = resolved(&scratch, &text).pools[0].platforms.clone();
+    assert_eq!(pool, [PlatformId::new("cloud"), PlatformId::new("ours")]);
     let one = "a pool's platforms reach exactly one machine provider that launches in this version; a pool of registered hosts alone is kind = \"joined\"";
     let text = doc(&scratch, &split, &[&on(&["ours"], &scratch)]);
     let cloud_unnamed = refused(&scratch, &text);

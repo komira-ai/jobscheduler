@@ -15,10 +15,10 @@
 //! agentless `static` kind is not resolved: it is built as before, and goes away with that
 //! kind.
 //!
-//! Everything downstream reads [`Resolved`]. This version still runs a fixed order
-//! (registered hosts, then the elastic provider), so a platform whose
-//! machine providers put a launching one before `static` is refused, and a pool reaches
-//! exactly one launching machine provider.
+//! Everything downstream reads [`Resolved`]; the job pass places on the hosts of a pool's
+//! machine providers in the order its platforms, and each platform's `machine_providers`,
+//! list them (`crate::sched::rank::order_of`), in any order. A pool reaches exactly one
+//! launching machine provider.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -64,10 +64,6 @@ const HOST_KEYS: &[&str] = &[
 const HOSTLESS_POOL_KEYS: &[&str] = &["name", "platforms", "path_grace"];
 
 const DESCRIBES_HOSTS: &str = "describes hosts; the pool names only hostless platforms";
-
-/// Why a platform that lists a launching machine provider before `static` is refused.
-const STATIC_FIRST: &str =
-    "static must come first in this version (the ordered walk of design 5.6 is not built yet)";
 
 /// Why a pool that reaches no launching machine provider, or more than one, is refused.
 const ONE_LAUNCHING: &str = "a pool's platforms reach exactly one machine provider that launches in this version; a pool of registered hosts alone is kind = \"joined\"";
@@ -313,14 +309,7 @@ impl Resolved {
                 }
             }
         }
-        let providers = reach
-            .providers
-            .iter()
-            .filter_map(|name| self.provider(name));
-        match static_first(providers) {
-            true => Ok(reach),
-            false => Err(s.fail("platforms", STATIC_FIRST)),
-        }
+        Ok(reach)
     }
 
     /// The one launching machine provider `reach` names, refused unless it is exactly one.
@@ -398,18 +387,6 @@ pub(super) struct Reach {
     pub(super) providers: Vec<String>,
     /// Whether any of the platforms has hosts.
     pub(super) hosts: bool,
-}
-
-/// Whether no launching provider comes before a `static` one.
-fn static_first<'a>(providers: impl Iterator<Item = &'a ResolvedMachineProvider>) -> bool {
-    let mut launched = false;
-    for provider in providers {
-        if launched & !provider.launches() {
-            return false;
-        }
-        launched |= provider.launches();
-    }
-    true
 }
 
 /// `items` joined by `, `, or `-` when there are none.
@@ -543,18 +520,11 @@ fn platform(
     let Some(names) = s.names("machine_providers")? else {
         return Err(s.fail("machine_providers", "required"));
     };
-    let mut providers = Vec::new();
     for named in &names {
-        match resolved.provider(named) {
-            Some(provider) => providers.push(provider),
-            None => {
-                let reason = format!("{named:?} is not a declared machine provider");
-                return Err(s.fail("machine_providers", &reason));
-            }
+        if resolved.provider(named).is_none() {
+            let reason = format!("{named:?} is not a declared machine provider");
+            return Err(s.fail("machine_providers", &reason));
         }
-    }
-    if !static_first(providers.into_iter()) {
-        return Err(s.fail("machine_providers", STATIC_FIRST));
     }
     Ok(ResolvedPlatform {
         id: PlatformId::new(name),

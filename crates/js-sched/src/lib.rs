@@ -109,6 +109,12 @@
 //!   refusal `no-capable-host`.
 //! - the binding order of a queue of jobs ([`walk_in_order`]): an entry that waits closes
 //!   to the entries behind it every host it could use.
+//! - the order of the machine providers of a platform, pass 1 of design 5.6
+//!   ([`Scheduler::set_provider_rank`], [`ProviderRank`]): of the workers that could take a
+//!   request now, those of the first provider in its platform's order, and the score or the
+//!   spread decides among them alone; a whole-machine request's quiet worker is one of the
+//!   first provider, and the provider breaks a tie of its mark's drain cost, before the
+//!   name. A worker told no provider ranks after every one that was.
 //! - the choice of the machine provider and offer to acquire from when nothing can serve a
 //!   job now ([`acquire::pick`], pass 2 of design 5.6): providers in order, the pool's
 //!   limits and each provider's share, then price, fewest accelerators, least spare,
@@ -140,6 +146,7 @@ mod headroom;
 mod input;
 mod load;
 mod probe;
+mod provider_rank;
 mod queue;
 pub mod queue_status;
 pub use load::{
@@ -148,6 +155,7 @@ pub use load::{
     least_loaded,
 };
 pub use probe::{ProbeHost, ProbeRefusal, admit_probe};
+pub use provider_rank::ProviderRank;
 pub use queue::walk_in_order;
 mod requeue;
 mod scheduler;

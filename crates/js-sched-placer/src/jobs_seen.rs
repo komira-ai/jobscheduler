@@ -15,7 +15,8 @@
 //!   gave up an allocation, and a host forgotten; a heartbeat with no reading that gives up
 //!   nothing is not counted;
 //! - the hosts it is offered ([`super::jobs::JobHosts`]): the hosts open to jobs, each with
-//!   its ceiling and whether it runs host jobs, the hosts that said hello, and the pool's
+//!   its ceiling, whether it runs host jobs and its machine provider (so a host whose provider
+//!   rank changed makes the next pass run), the hosts that said hello, and the pool's
 //!   whole-node settings. They are read from the registry before every pass, skipped or not,
 //!   so a host that went lost, came back, was tainted or cordoned, finished its last run or
 //!   listed a job it holds no allocation for is seen at once;

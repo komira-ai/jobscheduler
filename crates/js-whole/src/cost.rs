@@ -14,6 +14,10 @@ pub struct HostLoad {
     /// `end_bounds` and on the same clock; `None`, or an entry past the end of this list,
     /// is a lease with no estimate. An empty list is the case of no estimates at all.
     pub est_ends: Vec<Option<u64>>,
+    /// The position of the host's machine provider in the order its platform lists them, 0
+    /// first; one value for every host of one provider, and for every host of none. It orders
+    /// only hosts whose drain cost is otherwise equal, before the host id.
+    pub provider_rank: u32,
 }
 
 /// A host with its drain cost, in the order a reservation should try it.
@@ -28,6 +32,8 @@ pub struct DrainCost {
     /// The host's tail as an absolute time ([`tail`]); `None` when a lease on it has no
     /// estimate and no max-wall bound.
     pub tail_end: Option<u64>,
+    /// The position of the host's machine provider ([`HostLoad::provider_rank`]).
+    pub provider_rank: u32,
 }
 
 /// The hosts ordered by drain cost, smallest first: the host's tail (see [`tail`]) minus
@@ -36,6 +42,10 @@ pub struct DrainCost {
 /// a known one; among those the order is the fewest leases, then the lowest host id.
 /// With no estimates given, a lease's end is its max-wall bound, so the order is that of
 /// the latest end bound.
+///
+/// Hosts of different machine providers that cost the same to drain are told apart by
+/// the earlier provider ([`HostLoad::provider_rank`]) before the host id; the provider
+/// never outranks a smaller tail or fewer leases.
 pub fn drain_cost(hosts: &[HostLoad], now: u64) -> Vec<DrainCost> {
     let mut out: Vec<DrainCost> = hosts
         .iter()
@@ -46,11 +56,12 @@ pub fn drain_cost(hosts: &[HostLoad], now: u64) -> Vec<DrainCost> {
                 wait_ms: tail_end.unwrap_or(u64::MAX).saturating_sub(now),
                 leases: h.leases,
                 tail_end,
+                provider_rank: h.provider_rank,
             }
         })
         .collect();
     out.sort_by(|a, b| {
-        let key = |c: &DrainCost| (c.tail_end.is_none(), c.wait_ms, c.leases);
+        let key = |c: &DrainCost| (c.tail_end.is_none(), c.wait_ms, c.leases, c.provider_rank);
         (key(a), &a.id).cmp(&(key(b), &b.id))
     });
     out
@@ -117,6 +128,7 @@ mod tests {
             leases,
             end_bounds: ends.to_vec(),
             est_ends: Vec::new(),
+            provider_rank: 0,
         }
     }
 
@@ -189,6 +201,38 @@ mod tests {
         let mut reversed = hosts.clone();
         reversed.reverse();
         assert_eq!(ids(&drain_cost(&reversed, 0)), ["b", "c", "d", "e", "a"]);
+    }
+
+    /// Catches: the provider ranked ahead of the tail or the lease count (a later
+    /// provider's host with the shorter tail, or the fewer leases, would lose), or ignored
+    /// (equal hosts would fall to the host id alone).
+    #[test]
+    fn the_earlier_provider_breaks_a_tie_of_drain_cost_before_the_host_id() {
+        let ranked = |id: &str, leases: usize, ends: &[u64], rank: u32| HostLoad {
+            provider_rank: rank,
+            ..load(id, leases, ends)
+        };
+        // The later provider's host has the shorter tail: it is cheaper all the same.
+        let hosts = [ranked("a", 1, &[9_000], 0), ranked("z", 1, &[2_000], 1)];
+        assert_eq!(ids(&drain_cost(&hosts, 0)), ["z", "a"]);
+        // Fewer leases beat the earlier provider too.
+        let hosts = [ranked("a", 2, &[2_000], 0), ranked("z", 1, &[2_000], 1)];
+        assert_eq!(ids(&drain_cost(&hosts, 0)), ["z", "a"]);
+        // An equal drain cost goes to the earlier provider, whatever the ids.
+        let hosts = [ranked("a", 1, &[2_000], 1), ranked("z", 1, &[2_000], 0)];
+        let got = drain_cost(&hosts, 0);
+        assert_eq!(ids(&got), ["z", "a"]);
+        assert_eq!(got[0].provider_rank, 0);
+        // Quiet hosts tie on every cost: the earlier provider first, then the id.
+        let hosts = [
+            ranked("b", 0, &[], 1),
+            ranked("c", 0, &[], 0),
+            ranked("a", 0, &[], 1),
+        ];
+        assert_eq!(ids(&drain_cost(&hosts, 0)), ["c", "a", "b"]);
+        // An unknown tail stays after every known one, whatever its provider.
+        let hosts = [ranked("a", 1, &[NO_BOUND], 0), ranked("z", 1, &[2_000], 1)];
+        assert_eq!(ids(&drain_cost(&hosts, 0)), ["z", "a"]);
     }
 
     #[test]
@@ -292,6 +336,7 @@ mod tests {
             leases: bounds.len(),
             end_bounds: bounds.to_vec(),
             est_ends: ests.to_vec(),
+            provider_rank: 0,
         }
     }
 
