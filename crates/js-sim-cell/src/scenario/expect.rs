@@ -2,11 +2,12 @@
 //! seed after the end check ([`super::Scenario::expect`]) or at a virtual time
 //! ([`super::Scenario::expect_at`]).
 //!
-//! Every statement but [`Expect::answer`] and the last ten reads what the cell observed
-//! (`launched_on.rs` and `held_after_runs.rs` hold the two that need more than a count).
+//! Every statement but [`Expect::answer`] and the last thirteen reads what the cell observed
+//! (`launched_on.rs` and `held_after_runs.rs` hold the two that need more than a count;
+//! [`Expect::marks_held`] reads the server's job store when it is judged).
 //! [`Expect::answer`] reads an answer the client kept (`answer.rs`). The two from
 //! [`Expect::pool_tripped`] on read the elastic pool's cloud and its brake when they are
-//! judged (`cloud.rs`). The eight from [`Expect::jobs_read`] on read the server's job and
+//! judged (`cloud.rs`). The eleven from [`Expect::jobs_read`] on read the server's job and
 //! allocation tables as the cell read them, and the jobs the agents launched (`jobs.rs`).
 
 use std::time::Duration;
@@ -71,6 +72,7 @@ enum Seen {
     Launched(Vec<usize>, FarmTime),
     NotServing(Vec<usize>),
     HeldAfterRuns(ItemId),
+    Marks(usize),
 }
 
 impl Expect {
@@ -130,6 +132,15 @@ impl Expect {
     #[must_use]
     pub fn held_after_the_runs_on_its_host(item: ItemId) -> Self {
         Self(Wanted::Seen(Seen::HeldAfterRuns(item)))
+    }
+
+    /// The server's job store holds exactly `count` marks, read when this is judged: the
+    /// hosts the engine holds for a queued whole-host job while the work on them drains. A
+    /// mark is dropped with the job that holds it, so a scenario states with this that a
+    /// cancelled job's mark is gone, and that one was held before.
+    #[must_use]
+    pub fn marks_held(count: usize) -> Self {
+        Self(Wanted::Seen(Seen::Marks(count)))
     }
 
     /// The server's scaler reads the brake of elastic pool `pool` tripped (`true`: it
@@ -216,6 +227,33 @@ impl Expect {
         Self(Wanted::Job(JobFact::LaunchedOnce))
     }
 
+    /// No job was launched at all by the cell's launch ledger: how a scenario states that
+    /// a job cancelled while its host prepared never started a container.
+    #[must_use]
+    pub fn no_job_launched() -> Self {
+        Self(Wanted::Job(JobFact::NoLaunch))
+    }
+
+    /// Exactly `count` jobs were read under more than one allocation in the server's
+    /// allocation table: how a scenario states that a prepare that failed (a silent or
+    /// refusing host, or one whose ready report came too late) put the job back in the
+    /// queue, to be placed again, and that no other job was.
+    #[must_use]
+    pub fn jobs_placed_again(count: usize) -> Self {
+        Self(Wanted::Job(JobFact::PlacedAgain(count)))
+    }
+
+    /// No job was placed again on a host it already had an allocation on sooner than `span`
+    /// after that allocation was created, by the allocation table as the cell read it: how
+    /// a scenario states that a host whose prepare failed is left out of the job's next
+    /// placement for the back-off. A failed prepare takes at least the time to refuse
+    /// (one heartbeat), so `span` is a lower bound on the back-off a job may be placed
+    /// again after.
+    #[must_use]
+    pub fn kept_off_a_failed_host(span: Duration) -> Self {
+        Self(Wanted::Job(JobFact::KeptOff(span)))
+    }
+
     /// `None` when `cell` meets the statement; otherwise what it wanted and what it got,
     /// as `<statement>: wanted <w>, got <g>`.
     #[must_use]
@@ -299,6 +337,13 @@ fn observed(seen: &Seen, cell: &Cell) -> (String, String, String) {
                 list(&wanted, String::clone),
                 list(&not, String::clone),
             )
+        }
+        Seen::Marks(count) => {
+            let server = cell.server().and_then(ServerNode::server);
+            let jobs = server.and_then(|server| server.jobs());
+            let marks = jobs.and_then(|jobs| jobs.marks().ok());
+            let held = marks.map_or(0, |marks| marks.len());
+            ("job-marks".to_owned(), count.to_string(), held.to_string())
         }
         Seen::HeldAfterRuns(item) => {
             let [name, wanted, got] = held_after_runs::judged(observations, *item);

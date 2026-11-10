@@ -49,6 +49,7 @@ mod jobs;
 mod results;
 mod usage;
 mod whole;
+mod whole_jobs;
 
 /// One property the cell must keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -122,14 +123,20 @@ pub enum Invariant {
     /// Step check. A whole-host item hears that its lease is placed on a host (the grant,
     /// [`ClientEvent::Placed`], after the lease was held) only after the agent of that
     /// host sent a ready report naming exactly that lease ([`Observations::ready`]): what
-    /// the agent sent, not what the server took.
+    /// the agent sent, not what the server took. A whole-host job, which the job front
+    /// hears no lease for, is read starting or running on an allocation only after the
+    /// agent of its host sent a ready report naming exactly that allocation, by the
+    /// server's job and allocation tables as the cell read them.
     HeldMeansReady,
     /// Step check. A drain never cuts work (design section 6.4): no run on a host the
     /// server's listing sets aside for a whole-host request is sent a stop or a cancel
     /// unless its own client asked for it first (it asked to cancel the item,
     /// [`Observations::cancels`], or sent the release of the item's lease), or the run's
     /// own wall limit had run out. Read over the stops and cancels that reached a
-    /// running run ([`Observations::stops`]).
+    /// running run ([`Observations::stops`]). A stop of a job, which the job front makes no
+    /// request for, sent to a host the listing sets aside ([`crate::ServerHost::set_aside`])
+    /// is one the job's client asked for by the time the answer was read
+    /// ([`Observations::cancels`]), or a violation ([`Observations::job_replies`]).
     DrainKillsNothing,
     /// Step check. A host the server's listing sets aside for a whole-host request is sent
     /// no start of a lease of an item that did not ask for a whole host, unless the start
@@ -455,6 +462,8 @@ pub struct Checker {
     ordinary: BTreeSet<LeaseId>,
     /// What the job invariants have read.
     jobs: jobs::Indices,
+    /// What the whole-host invariants have read of the job tables and the agents' answers.
+    whole_jobs: whole_jobs::Indices,
     /// What the invariants of the elastic pool's cloud have read.
     cloud: elastic::Indices,
 }
@@ -501,6 +510,7 @@ impl Checker {
         self.read_starts(observations, &mut found);
         self.read_stops(observations, &mut found);
         self.jobs.step(observations, touched, &mut found);
+        self.whole_jobs.step(&self.ready, observations, &mut found);
         self.cloud.step(observations, &mut found);
         cordon::check(observations, &mut found);
         found.list

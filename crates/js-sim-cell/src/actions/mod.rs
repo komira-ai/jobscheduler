@@ -12,6 +12,10 @@ use crate::cell::Cell;
 use crate::observe::ItemId;
 
 mod add_foreign_machine;
+mod agent_prepare_delay;
+mod agent_refuses_prepare;
+mod agent_silent_on_prepare;
+mod cancel_when_preparing;
 mod cancel_work;
 mod cordon_host;
 mod crash_at_next_acquire;
@@ -39,6 +43,10 @@ mod submit_work;
 mod uncordon_host;
 
 pub use add_foreign_machine::{AddForeignMachine, add_foreign_machine};
+pub use agent_prepare_delay::{AgentPrepareDelay, agent_prepare_delay};
+pub use agent_refuses_prepare::{AgentRefusesPrepare, REFUSAL_REASONS, agent_refuses_prepare};
+pub use agent_silent_on_prepare::{AgentSilentOnPrepare, agent_silent_on_prepare};
+pub use cancel_when_preparing::{CancelWhenPreparing, cancel_when_preparing};
 pub use cancel_work::{CancelWork, cancel_work};
 pub use cordon_host::{CordonHost, cordon_host};
 pub use crash_at_next_acquire::{CrashAtNextAcquire, crash_at_next_acquire};

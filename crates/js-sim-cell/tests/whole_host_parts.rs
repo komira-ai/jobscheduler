@@ -12,8 +12,11 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
+use js_agent_wire::RefusalReason;
 use js_sim::Faults;
-use js_sim_cell::actions::submit_work;
+use js_sim_cell::actions::{
+    agent_refuses_prepare, agent_silent_on_prepare, agents, cancel_when_preparing, submit_work,
+};
 use js_sim_cell::server::{ARCH, ARCH_KEY, virtual_time};
 use js_sim_cell::{
     Cell, EPOCH_MS, Expect, HowEnded, ItemId, Scenario, ScenarioFailure, ServerSpec, Setup, Shape,
@@ -220,4 +223,112 @@ fn the_whole_host_expectations_are_met_and_fail_on_the_real_server() {
             other => panic!("not an unmet expectation: {other:?}"),
         }
     }
+}
+
+/// One host whose agent never answers its prepare and one whole-host job: the job is placed
+/// three times and then fails to start, with a pause between the tries that the server's
+/// deadline and back-off set (about 900 s).
+fn one_silent_host() -> Scenario {
+    Scenario::new("one_silent_host")
+        .scratch(env!("CARGO_TARGET_TMPDIR"))
+        .server(whole_pool(1))
+        .hosts("burst", 1)
+        .work(1, Work::whole_host(secs(10)))
+        .at(Duration::ZERO, agent_silent_on_prepare(agents(0..1)))
+        .settle_within(secs(3_000))
+}
+
+/// The detail of the failure `scenario` ends in over one seed, when it is an unmet
+/// expectation.
+fn unmet(scenario: Scenario) -> String {
+    match scenario.try_run_seeds(1) {
+        Err(ScenarioFailure::Unmet { detail, .. }) => detail,
+        other => panic!("not an unmet expectation: {other:?}"),
+    }
+}
+
+/// Asserts the expectations over a job's placements and launches on the real server, met
+/// and failing, each naming what it wanted and what it got. One silent host: its job is
+/// placed again (one job placed more than once, not none), is never placed again sooner
+/// than the deadline and back-off after the allocation before (900 s met, 2,000 s fails,
+/// naming the job, the host and when), and launches nothing; one job that does run is
+/// named by `no_job_launched`; no mark is held, and one is wanted and not found. Catches a statement met by any history (a vacuous one), one
+/// that counts a job once per allocation, and one that names another thing than it judges.
+#[test]
+fn the_prepare_expectations_are_met_and_fail_on_the_real_server() {
+    one_silent_host()
+        .expect(Expect::jobs_placed_again(1))
+        .expect(Expect::kept_off_a_failed_host(secs(900)))
+        .expect(Expect::no_job_launched())
+        .expect(Expect::marks_held(0))
+        .run_seeds(1);
+    assert_eq!(
+        unmet(one_silent_host().expect(Expect::marks_held(1))),
+        "job-marks: wanted 1, got 0"
+    );
+    assert_eq!(
+        unmet(one_silent_host().expect(Expect::jobs_placed_again(0))),
+        "jobs-placed-again: wanted 0, got 1"
+    );
+    let soon = unmet(one_silent_host().expect(Expect::kept_off_a_failed_host(secs(2_000))));
+    let named = "kept-off-a-failed-host(2000000 ms): wanted [], got [sim-job-0 on h000 after ";
+    assert!(soon.starts_with(named), "{soon}");
+    let ran = Scenario::new("a_job_that_runs")
+        .scratch(env!("CARGO_TARGET_TMPDIR"))
+        .server(whole_pool(1))
+        .hosts("burst", 1)
+        .work(1, Work::whole_host(secs(10)))
+        .settle_within(secs(300))
+        .expect(Expect::no_job_launched());
+    let launched = unmet(ran);
+    assert!(
+        launched.starts_with("no-job-launched: wanted [], got [sim-job-0/"),
+        "{launched}"
+    );
+}
+
+/// Asserts `cancel_when_preparing` where the job is never placed in the time it looks: one
+/// host, one whole-host job placed after about ten seconds, looked at for two seconds only;
+/// it cancels nothing, and the job succeeds. Looked at for two minutes it cancels the job
+/// once it is placed (`whole_host_prepare`). Catches an action that cancels whether or not
+/// the job is placed, and one that never stops looking.
+#[test]
+fn cancel_when_preparing_cancels_nothing_that_is_never_placed_in_time() {
+    Scenario::new("cancel_when_preparing_cancels_nothing_that_is_never_placed_in_time")
+        .scratch(env!("CARGO_TARGET_TMPDIR"))
+        .server(whole_pool(1))
+        .hosts("burst", 1)
+        .work(1, Work::whole_host(secs(10)))
+        .at(Duration::ZERO, cancel_when_preparing(ItemId(0), secs(2)))
+        .expect(Expect::terminal_count(1, HowEnded::Succeeded))
+        .settle_within(secs(300))
+        .run_seeds(1);
+}
+
+/// Asserts that a host that refuses as unsafe is not serving at the end: the server taints
+/// the host, so `Expect::every_host_serving` fails naming what it wanted and got, and
+/// `serving_but` for that host is met. One host refusing `host-unsafe` and one job the
+/// client gives up on. Catches a refusal that leaves the host in service, and an
+/// expectation that counts a tainted host as serving.
+#[test]
+fn a_host_that_refuses_as_unsafe_is_not_serving_at_the_end() {
+    let refused = |serving: Expect| {
+        Scenario::new("a_host_that_refuses_as_unsafe")
+            .scratch(env!("CARGO_TARGET_TMPDIR"))
+            .server(whole_pool(1))
+            .hosts("burst", 1)
+            .work(1, Work::whole_host(secs(10)).give_up_after(secs(120)))
+            .at(
+                Duration::ZERO,
+                agent_refuses_prepare(agents(0..1), RefusalReason::HostUnsafe),
+            )
+            .expect(Expect::terminal_count(1, HowEnded::GaveUp))
+            .expect(serving)
+            .settle_within(secs(300))
+    };
+    refused(Expect::serving_but(&[0])).run_seeds(1);
+    assert_eq!(
+        unmet(refused(Expect::every_host_serving())),
+        "every-host-serving: wanted 1, got 0"
+    );
 }

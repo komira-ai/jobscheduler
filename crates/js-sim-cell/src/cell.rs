@@ -56,7 +56,7 @@ use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 use js_types::{HostId, IdError, Resources};
 
-use crate::agent::{AgentKind, AgentNode, AgentSpec};
+use crate::agent::{AgentKind, AgentNode, AgentSpec, Prepare};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::{Counter, Counters};
 use crate::elastic::Cloud;
@@ -534,6 +534,14 @@ impl Cell {
             self.record(format!("gone {host}"));
             self.faulted.killed.remove(&host);
             self.fault_changed();
+        }
+    }
+
+    /// Makes agent `index` answer a prepare as `prepare` says, from its next heartbeat on
+    /// ([`AgentNode::set_prepare`]); an index that names no agent changes nothing.
+    pub fn set_prepare(&mut self, index: usize, prepare: Prepare) {
+        if let Some(agent) = self.agent_mut(index) {
+            agent.set_prepare(prepare);
         }
     }
 

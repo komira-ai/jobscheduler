@@ -4,7 +4,11 @@
 //! A read lists every job (one scan, in pages of 64 rows) and every live allocation (one scan), and
 //! reads one allocation more for each job whose state changed and each allocation that was
 //! live at the read before and no longer is (it was freed, or a new placement took its
-//! row): so a placement freed between two reads is still read freed. Only what differs from
+//! row): so a placement freed between two reads is still read freed. A new placement that
+//! took the row of an allocation the reads never showed freed (a whole-host job whose
+//! prepare failed and was placed again between two reads) reads that allocation freed at
+//! the same read, before the new one: the server books a job's next allocation only after
+//! it freed the one before, and the table keeps one row for a job. Only what differs from
 //! the read before is appended, and written into the trace as one line each (`job <id>
 //! <state>`, `allocation <job> <step> <host>`), never with an id the server generated.
 //!
@@ -104,12 +108,21 @@ impl Reader {
             if self.rows.get(&row.job) == Some(&row) {
                 continue;
             }
-            let (job, step, host) = (&row.job, step_name(row.step), row.host.as_str());
-            lines.push(format!("allocation {job} {step} {host}"));
-            self.rows.insert(row.job.clone(), row.clone());
-            observations
-                .allocation_reads
-                .push(AllocationRead { row, at: now });
+            let replaced = self.rows.get(&row.job).filter(|before| {
+                (before.allocation != row.allocation) & (before.step != AllocationStep::Freed)
+            });
+            let freed = replaced.map(|before| AllocationRow {
+                step: AllocationStep::Freed,
+                ..before.clone()
+            });
+            for row in freed.into_iter().chain([row]) {
+                let (job, step, host) = (&row.job, step_name(row.step), row.host.as_str());
+                lines.push(format!("allocation {job} {step} {host}"));
+                self.rows.insert(row.job.clone(), row.clone());
+                observations
+                    .allocation_reads
+                    .push(AllocationRead { row, at: now });
+            }
         }
         self.wait = if lines.is_empty() {
             (self.wait * 2).clamp(READ_EVERY, QUIET_MAX)

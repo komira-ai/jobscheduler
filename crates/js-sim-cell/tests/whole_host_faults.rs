@@ -1,8 +1,8 @@
 //! The whole-host fault family: the ways the whole-host path of jobs meets work in the way
 //! and failure, over the server's whole path (its job service, the queue, the placement and
 //! the marks of a host being drained, and agents that run the jobs): a drain behind busy
-//! hosts, a cancelled job, and a placed job whose agent restarts. Each runs over [`SEEDS`]
-//! seeds under every invariant of `Invariant::ALL`.
+//! hosts, a cancelled job (queued, and marked), and a placed job whose agent restarts. Each
+//! runs over [`SEEDS`] seeds under every invariant of `Invariant::ALL`.
 //!
 //! Each states only what the server does today and the design also promises: none pins
 //! the order the queue serves (design section 8, row 11) or anything section 8 marks Open.
@@ -40,4 +40,14 @@ fn a_cancelled_whole_host_request_drops_its_place_and_the_host_serves_again() {
 #[test]
 fn a_whole_host_job_whose_agent_restarts_after_it_is_placed() {
     whole_host_faults::held_job_restart().run_seeds(SEEDS);
+}
+
+/// A whole-host job cancelled while the engine holds its host for it, behind an ordinary
+/// job's run, drops the mark at once and the host takes ordinary jobs again, the run before
+/// it untouched (design section 8, row 39, marked). Catches a cancel that leaves the mark on
+/// the host (a mark left at the end, the jobs behind it never placed), a cancel that cuts
+/// the run the host is draining, and a mark that was never made.
+#[test]
+fn a_cancelled_whole_host_job_drops_its_mark_and_the_host_serves_again() {
+    whole_host_faults::a_cancelled_marked().run_seeds(SEEDS);
 }

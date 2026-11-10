@@ -1,4 +1,4 @@
-//! What a scenario may state about jobs ([`super::Expect::jobs_read`] and the seven after
+//! What a scenario may state about jobs ([`super::Expect::jobs_read`] and the ten after
 //! it): the server's job and allocation tables as the cell read them
 //! ([`Observations::job_reads`], [`Observations::allocation_reads`]) and the jobs the
 //! agents launched ([`Observations::ledger`]). Each reads what the cell saw, read by read,
@@ -11,9 +11,12 @@
 //! launched again under a second allocation counts twice.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use js_jobs::{AllocationId, AllocationStep, JobId, JobState};
-use js_sim::text::list;
+use js_sim::text::{list, time};
+use js_types::HostId;
+use js_types::sched::FarmTime;
 
 use crate::jobs::JOB_PREFIX;
 use crate::jobs::read::{state_name, step_name};
@@ -42,6 +45,13 @@ pub(super) enum JobFact {
     NoneLive,
     /// No job was launched more than once.
     LaunchedOnce,
+    /// No job was launched at all.
+    NoLaunch,
+    /// Exactly this many jobs were read under more than one allocation.
+    PlacedAgain(usize),
+    /// No job was placed again on a host it had an earlier allocation on, sooner than this
+    /// after that allocation was created.
+    KeptOff(Duration),
 }
 
 /// The statement, what it wanted and what it got, of `fact` over `observations`.
@@ -107,6 +117,34 @@ pub(super) fn judged(fact: &JobFact, observations: &Observations) -> [String; 3]
             let got = list(&live, String::clone);
             ["no-allocation-live".to_owned(), none, got]
         }
+        JobFact::PlacedAgain(count) => {
+            let placed = placements(observations);
+            let again = placed.values().filter(|mine| mine.len() > 1).count();
+            [
+                "jobs-placed-again".to_owned(),
+                count.to_string(),
+                again.to_string(),
+            ]
+        }
+        JobFact::KeptOff(span) => {
+            let soon = placed_again_too_soon(observations, *span);
+            let name = format!("kept-off-a-failed-host({} ms)", span.as_millis());
+            let none = list::<String>(&[], String::clone);
+            [name, none, list(&soon, String::clone)]
+        }
+        JobFact::NoLaunch => {
+            let launched: Vec<String> = observations
+                .ledger
+                .iter()
+                .map(|launch| launch.run.as_str().to_owned())
+                .collect();
+            let none = list::<String>(&[], String::clone);
+            [
+                "no-job-launched".to_owned(),
+                none,
+                list(&launched, String::clone),
+            ]
+        }
         JobFact::LaunchedOnce => {
             let mut launches: BTreeMap<&str, usize> = BTreeMap::new();
             let ledger = observations.ledger.iter();
@@ -125,6 +163,43 @@ pub(super) fn judged(fact: &JobFact, observations: &Observations) -> [String; 3]
             ]
         }
     }
+}
+
+/// Each job's allocations as the reads showed them, in the order they were first read: the
+/// host and creation time of each, once per allocation id.
+fn placements(
+    observations: &Observations,
+) -> BTreeMap<&JobId, Vec<(AllocationId, &HostId, FarmTime)>> {
+    let mut placed: BTreeMap<&JobId, Vec<(AllocationId, &HostId, FarmTime)>> = BTreeMap::new();
+    for read in &observations.allocation_reads {
+        let row = &read.row;
+        let mine = placed.entry(&row.job).or_default();
+        if !mine.iter().any(|(id, _, _)| *id == row.allocation) {
+            mine.push((row.allocation, &row.host, row.created_at));
+        }
+    }
+    placed
+}
+
+/// Each job placed again on the host of an earlier allocation of its own less than `span`
+/// after that allocation was created, as `<job> on <host> after <t> ms`.
+fn placed_again_too_soon(observations: &Observations, span: Duration) -> Vec<String> {
+    let mut soon = Vec::new();
+    for (job, mine) in placements(observations) {
+        for (at, (_, host, later)) in mine.iter().enumerate().skip(1) {
+            let earlier = mine[..at].iter().filter(|(_, other, _)| other == host);
+            for (_, _, first) in earlier {
+                if later.saturating_duration_since(*first) < span {
+                    soon.push(format!(
+                        "{job} on {} after {}",
+                        text::host(host),
+                        time(*later)
+                    ));
+                }
+            }
+        }
+    }
+    soon
 }
 
 /// The id of the job the job front submits for `item`.
@@ -271,6 +346,93 @@ mod tests {
         assert_eq!(
             got(&JobFact::LaunchedOnce, &twice),
             ("[sim-job-0 x2]".to_owned(), false)
+        );
+    }
+
+    /// Allocation `allocation` of job `n` on `host`, booked at `created` ms.
+    fn placed(n: u32, allocation: u8, host: &str, created: u64) -> AllocationRow {
+        AllocationRow {
+            host: HostId::new(host).expect("a host id"),
+            created_at: at(created),
+            ..row(n, allocation, AllocationStep::Booked)
+        }
+    }
+
+    /// Catches: a job counted once per read rather than once per allocation id, a job with
+    /// one allocation counted as placed again, a job of another item's allocations merged
+    /// with it, and a statement that names another number than it counts.
+    #[test]
+    fn a_job_placed_under_two_allocations_is_placed_again() {
+        let seen = Observations::quiet()
+            .with_allocation_read(placed(0, 1, "h000", 0), at(1))
+            .with_allocation_read(placed(0, 1, "h000", 0), at(2))
+            .with_allocation_read(placed(1, 2, "h001", 0), at(2))
+            .with_allocation_read(placed(0, 3, "h001", 600_000), at(700_000));
+        assert_eq!(
+            judged(&JobFact::PlacedAgain(1), &seen),
+            [
+                "jobs-placed-again".to_owned(),
+                "1".to_owned(),
+                "1".to_owned()
+            ]
+        );
+        assert_eq!(
+            got(&JobFact::PlacedAgain(2), &seen),
+            ("1".to_owned(), false)
+        );
+        let once = Observations::quiet()
+            .with_allocation_read(placed(0, 1, "h000", 0), at(1))
+            .with_allocation_read(placed(0, 1, "h000", 0), at(2));
+        assert_eq!(got(&JobFact::PlacedAgain(0), &once), ("0".to_owned(), true));
+    }
+
+    /// Catches: a job placed again on the host of an earlier allocation sooner than the span
+    /// after it was created not named (with the job, the host and when), one placed again
+    /// later, or on another host, named, and an allocation compared with one that came after
+    /// it rather than before.
+    #[test]
+    fn a_job_placed_again_on_a_failed_host_too_soon_is_named() {
+        let span = Duration::from_secs(900);
+        let kept = |seen: &Observations| judged(&JobFact::KeptOff(span), seen);
+        let soon = Observations::quiet()
+            .with_allocation_read(placed(0, 1, "h000", 5_000), at(6_000))
+            .with_allocation_read(placed(0, 2, "h001", 605_000), at(606_000))
+            .with_allocation_read(placed(0, 3, "h000", 610_000), at(611_000));
+        assert_eq!(
+            kept(&soon),
+            [
+                "kept-off-a-failed-host(900000 ms)".to_owned(),
+                "[]".to_owned(),
+                "[sim-job-0 on h000 after 610000]".to_owned(),
+            ]
+        );
+        let late = Observations::quiet()
+            .with_allocation_read(placed(0, 1, "h000", 5_000), at(6_000))
+            .with_allocation_read(placed(0, 2, "h000", 905_000), at(906_000));
+        assert_eq!(kept(&late)[2], "[]");
+        let elsewhere = Observations::quiet()
+            .with_allocation_read(placed(0, 1, "h000", 5_000), at(6_000))
+            .with_allocation_read(placed(0, 2, "h001", 6_000), at(7_000));
+        assert_eq!(kept(&elsewhere)[2], "[]");
+    }
+
+    /// Catches: a launch of any run not named, a statement met by a history that launched
+    /// something, and one that names nothing when the ledger is empty.
+    #[test]
+    fn a_launch_is_named_by_no_job_launched() {
+        let none = Observations::quiet();
+        assert_eq!(
+            judged(&JobFact::NoLaunch, &none),
+            [
+                "no-job-launched".to_owned(),
+                "[]".to_owned(),
+                "[]".to_owned()
+            ]
+        );
+        let ran = none.with_launch(RunId::new("sim-job-0/aa"), host(), at(1));
+        assert_eq!(
+            got(&JobFact::NoLaunch, &ran),
+            ("[sim-job-0/aa]".to_owned(), false)
         );
     }
 }
