@@ -859,6 +859,7 @@ pub(crate) fn result(
             truncated: false,
         }),
         logs: None,
+        input_failure: None,
     }
 }
 

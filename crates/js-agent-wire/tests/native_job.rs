@@ -9,7 +9,7 @@ use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
 use js_agent_wire::{
     Command, HeartbeatReply, InputRef, Isolation, JobSpec, NativeSpec, NetworkLevel, OutputKind,
-    OutputSpec, Placement, Rule,
+    OutputSpec, Placement, Rule, RunSpec, TreeUnavailable,
 };
 use serde_json::{Value, json};
 
@@ -180,18 +180,23 @@ fn unknown_fields_in_a_native_start_are_ignored() {
     assert!(again.get("extra").is_none());
 }
 
-/// A network level, input type, placement or output kind this version does not know makes
-/// that one start unreadable, and the commands beside it still arrive. It catches an
-/// unknown value being read as a default (which would widen what the job may do).
+/// A network level, input type, placement, output kind or tree `unavailable` value this
+/// version does not know makes that one start unreadable, and the commands beside it still
+/// arrive. It catches an unknown value being read as a default (which would widen what the
+/// job may do, or start it without a tree it did not agree to stage itself).
 #[test]
 fn an_unknown_confinement_value_reads_as_an_unknown_command() {
     let stop = json!({"type": "stop", "run_id": "r"});
     let start = serde_json::to_value(Command::Start(Box::new(spec()))).unwrap();
-    let edits: [fn(&mut Value); 4] = [
+    let edits: [fn(&mut Value); 5] = [
         |v| v["native"]["network"] = json!("bridge"),
         |v| v["native"]["inputs"][0]["type"] = json!("volume"),
         |v| v["native"]["inputs"][0]["placement"] = json!("shared"),
         |v| v["native"]["outputs"][0]["kind"] = json!("socket"),
+        |v| {
+            v["native"]["inputs"][0] =
+                json!({"type": "tree", "digest": STAGE, "dest": "src", "unavailable": "retry"})
+        },
     ];
     for edit in edits {
         let mut one = start.clone();
@@ -203,6 +208,21 @@ fn an_unknown_confinement_value_reads_as_an_unknown_command() {
             vec![Command::Unknown, Command::Stop { run_id: "r".into() }]
         );
     }
+    let mut known = start.clone();
+    known["native"]["inputs"][0] =
+        json!({"type": "tree", "digest": STAGE, "dest": "src", "unavailable": "job_stages"});
+    let reply: HeartbeatReply = serde_json::from_value(json!({"commands": [known]})).unwrap();
+    let [Command::Start(read)] = reply.commands.as_slice() else {
+        panic!("a known value must decode: {:?}", reply.commands);
+    };
+    let inputs = &read.native.as_ref().unwrap().inputs;
+    assert!(matches!(
+        &inputs[0],
+        InputRef::Tree {
+            unavailable: TreeUnavailable::JobStages,
+            ..
+        }
+    ));
 }
 
 /// Exactly one of the image and the native body: neither is an empty image, both is an
@@ -698,4 +718,160 @@ fn a_start_with_no_image_key_is_refused_not_skipped() {
         Rule::Empty,
         refusal::INVALID_IMAGE,
     );
+}
+
+/// A tree input at `dest`, named by `digest`.
+fn tree(digest: &str, dest: &str, placement: Placement) -> InputRef {
+    InputRef::Tree {
+        digest: digest.into(),
+        dest: dest.into(),
+        placement,
+        unavailable: TreeUnavailable::Fail,
+    }
+}
+
+/// A `run` body whose inputs are `inputs`.
+fn run_with(inputs: Vec<InputRef>) -> RunSpec {
+    RunSpec {
+        program: "/usr/bin/cc".into(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        cwd: String::new(),
+        inputs,
+        outputs: Vec::new(),
+        network: NetworkLevel::Off,
+    }
+}
+
+/// A tree's digest is `sha256:` and exactly 64 lower case hex digits, in a `run` body as in a
+/// native one, each refused `invalid-job` on the body's `inputs` as a bad stage id is. It
+/// catches a digest one digit short or long, in upper case, without its algorithm, or of
+/// another algorithm, any of which the agent would pass to `tierstore fs` as a tree name.
+#[test]
+fn a_tree_digest_is_sha256_and_64_lower_case_hex_digits() {
+    let short = &STAGE[..STAGE.len() - 1];
+    let long_id = format!("{STAGE}0");
+    let upper = format!("sha256:{}", STAGE["sha256:".len()..].to_uppercase());
+    let one_upper = format!("{}A", &STAGE[..STAGE.len() - 1]);
+    let bare = &STAGE["sha256:".len()..];
+    let sha512 = STAGE.replace("sha256", "sha512");
+    let code = refusal::INVALID_JOB;
+    for bad in [
+        short,
+        long_id.as_str(),
+        upper.as_str(),
+        one_upper.as_str(),
+        bare,
+        sha512.as_str(),
+        "",
+    ] {
+        let run = run_with(vec![tree(bad, "src", Placement::ReadOnly)]);
+        expect(
+            run.validate().unwrap_err(),
+            "run.inputs",
+            Rule::BadChars,
+            code,
+        );
+        let native = check(|n| n.inputs = vec![tree(bad, "src", Placement::ReadOnly)]);
+        expect(native, "native.inputs", Rule::BadChars, code);
+    }
+    assert_eq!(short.len() + 1, STAGE.len());
+    let good = run_with(vec![tree(STAGE, "src", Placement::ReadOnly)]);
+    assert_eq!(good.validate(), Ok(()));
+}
+
+/// Only a writable tree may be the exec root (an empty `dest`), and only one input may:
+/// a read-only tree, a stage or a mount there is refused as empty, and a second exec root
+/// as a duplicate. A read-only tree beside a writable exec root, and an output beside it,
+/// pass; a non-empty `dest` follows the rules of every input's. It catches a read-only exec
+/// root, which the container has nowhere to write beside, and two trees laid over one root.
+#[test]
+fn only_one_writable_tree_is_the_exec_root() {
+    let code = refusal::INVALID_JOB;
+    let field = "run.inputs";
+    let refused = |inputs: Vec<InputRef>| run_with(inputs).validate().unwrap_err();
+    let root = || tree(STAGE, "", Placement::Writable);
+    assert_eq!(run_with(vec![root()]).validate(), Ok(()));
+    let read_only = refused(vec![tree(STAGE, "", Placement::ReadOnly)]);
+    expect(read_only, field, Rule::Empty, code);
+    let stage = InputRef::Stage {
+        stage_id: STAGE.into(),
+        dest: String::new(),
+        placement: Placement::Writable,
+    };
+    expect(refused(vec![stage]), field, Rule::Empty, code);
+    let mount = InputRef::Mount {
+        root_name: "cache".into(),
+        rel: "sdk".into(),
+        dest: String::new(),
+    };
+    expect(refused(vec![mount]), field, Rule::Empty, code);
+    expect(refused(vec![root(), root()]), field, Rule::Duplicate, code);
+    let beside = vec![tree(STAGE, "a", Placement::ReadOnly), root()];
+    assert_eq!(run_with(beside.clone()).validate(), Ok(()));
+    let mut with_output = run_with(beside);
+    with_output.outputs = vec![OutputSpec {
+        path: "out".into(),
+        kind: OutputKind::File,
+    }];
+    assert_eq!(with_output.validate(), Ok(()));
+    let native = check(|n| n.inputs = vec![tree(STAGE, "", Placement::ReadOnly)]);
+    expect(native, "native.inputs", Rule::Empty, code);
+    for (bad, rule) in [
+        ("../x", Rule::Escapes),
+        ("a,b", Rule::BadChars),
+        (".", Rule::Empty),
+    ] {
+        let writable = refused(vec![tree(STAGE, bad, Placement::Writable)]);
+        expect(writable, field, rule, code);
+    }
+}
+
+/// Two trees may not share a `dest` or lie one below the other, compared without regard to
+/// case, as for every input; siblings that share a name prefix pass. It catches a second tree
+/// laid over the first.
+#[test]
+fn trees_do_not_overlap() {
+    let code = refusal::INVALID_JOB;
+    let at = |dests: &[&str]| {
+        let inputs = dests
+            .iter()
+            .map(|dest| tree(STAGE, dest, Placement::ReadOnly))
+            .collect();
+        run_with(inputs).validate()
+    };
+    expect(
+        at(&["a/b", "a"]).unwrap_err(),
+        "run.inputs",
+        Rule::Inconsistent,
+        code,
+    );
+    expect(
+        at(&["a", "A/b"]).unwrap_err(),
+        "run.inputs",
+        Rule::Inconsistent,
+        code,
+    );
+    expect(
+        at(&["a", "A"]).unwrap_err(),
+        "run.inputs",
+        Rule::Duplicate,
+        code,
+    );
+    assert_eq!(at(&["a", "ab", "b/a"]), Ok(()));
+}
+
+/// A body holds at most `MAX_INPUTS` inputs, trees counted with the others: 256 pass and 257
+/// are refused. It catches tree inputs left out of the bound.
+#[test]
+fn tree_inputs_are_counted() {
+    let trees = |n: usize| -> Vec<InputRef> {
+        (0..n)
+            .map(|i| tree(STAGE, &format!("d{i}"), Placement::ReadOnly))
+            .collect()
+    };
+    assert_eq!(MAX_INPUTS, 256);
+    assert_eq!(run_with(trees(MAX_INPUTS)).validate(), Ok(()));
+    let over = run_with(trees(MAX_INPUTS + 1)).validate().unwrap_err();
+    expect(over, "run.inputs", Rule::TooMany, refusal::INVALID_JOB);
 }

@@ -71,6 +71,15 @@ fn refusal_codes_snapshot() {
         refusal::INVALID_LOG_SINK,
         refusal::INVALID_LOG_CREDENTIAL,
         refusal::VM_UNAVAILABLE,
+        refusal::TREE_UNAVAILABLE,
+        refusal::TREE_INVALID,
+        refusal::TREE_READ_FAILED,
+        refusal::TREE_STALLED,
+        refusal::TREE_PLACEMENT_UNSUPPORTED,
+        refusal::TREE_UNSUPPORTED_HERE,
+        refusal::OUTPUTS_UNSUPPORTED_HERE,
+        refusal::TOO_MANY_INPUTS_HERE,
+        refusal::CWD_IN_TREE,
     ];
     assert_eq!(
         codes.join(" "),
@@ -82,7 +91,9 @@ fn refusal_codes_snapshot() {
          body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required quota-unavailable \
          network-above-ceiling port-above-ceiling ports-not-supported \
          platform-mismatch image-unsupported-here run-unsupported env-unsupported image-not-allowed \
-         invalid-log-sink invalid-log-credential vm-unavailable"
+         invalid-log-sink invalid-log-credential vm-unavailable \
+         tree-unavailable tree-invalid tree-read-failed tree-stalled tree-placement-unsupported \
+         tree-unsupported-here outputs-unsupported-here too-many-inputs-here cwd-in-tree"
     );
 }
 
