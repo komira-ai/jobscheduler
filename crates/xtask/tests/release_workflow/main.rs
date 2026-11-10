@@ -3,16 +3,14 @@
 //! build and sign the files), read from the files as text: actions pinned to commit SHAs, no
 //! permission at the top, hosted runners, a push to main as the only trigger that releases, a
 //! read-only wait for `ci`, `id-token: write` and `contents: write` only where they are meant,
-//! every attestation signed by artifacts.yml, and the gamma step's shape.
+//! every attestation signed by artifacts.yml, the apt jobs' permissions, and the gamma step's
+//! shape. The shape of each apt job is held by `tests/apt_workflow`.
 
 use std::path::Path;
 
-use xtask::release::Version;
-use xtask::release::hostkeeper_index::INDEX_FILE;
-use xtask::release::hostkeeper_package::{Platform, file_name};
-
+mod apt;
 mod artifacts;
-mod hostkeeper;
+mod debs;
 
 /// The text of `.github/workflows/<file>`.
 fn read_workflow(file: &str) -> String {
@@ -164,7 +162,11 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     );
     let push = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
     let jobs = jobs(&text);
-    for name in ["ci-passed", "plan", "publish", "deploy-tool", "gamma"] {
+    let mut gated: Vec<String> = ["ci-passed", "plan", "publish", "deploy-tool", "gamma"]
+        .map(str::to_owned)
+        .to_vec();
+    gated.extend(apt::apt_jobs(&text));
+    for name in &gated {
         let ifs: Vec<&String> = job(&jobs, name)
             .iter()
             .filter(|l| l.starts_with("    if:"))
@@ -310,26 +312,13 @@ fn holders(text: &str, permission: &str) -> Vec<String> {
         .collect()
 }
 
-/// Asserts that in release.yml `id-token: write` is held by `artifacts` (the call, whose grant
-/// is the most its jobs can hold) and `gamma`, and `attestations: write` by `artifacts` alone;
-/// and that in artifacts.yml both are held by `attest` and by no other job.
-#[test]
-fn only_attest_and_gamma_hold_id_token() {
-    let release = workflow();
-    assert_eq!(holders(&release, "id-token: write"), ["artifacts", "gamma"]);
-    assert_eq!(holders(&release, "attestations: write"), ["artifacts"]);
-    let artifacts = artifacts_workflow();
-    assert_eq!(holders(&artifacts, "id-token: write"), ["attest"]);
-    assert_eq!(holders(&artifacts, "attestations: write"), ["attest"]);
-    assert!(holders(&artifacts, "contents: write").is_empty());
-}
-
 /// Asserts the gamma step's shape: after `publish` and the tool's build, no more permission
 /// than `id-token: write`, no checkout and no build (the job that holds the token runs the
 /// built client, not the repository's code), the coordinator's address from a repository
-/// variable, the version from the plan's output, and the services js-server then js-agent.
+/// variable, the version from the plan's output, and the service js-server alone (js-agent's
+/// desired version is hostkeeper's, set by hostkeeper-desired.yml).
 #[test]
-fn gamma_is_off_by_variable_and_sets_the_server_before_the_agents() {
+fn gamma_is_off_by_variable_and_sets_the_lease_server_alone() {
     let text = workflow();
     let jobs = jobs(&text);
     let gamma = job(&jobs, "gamma").join("\n");
@@ -348,7 +337,9 @@ fn gamma_is_off_by_variable_and_sets_the_server_before_the_agents() {
     assert!(gamma.contains("COORDINATOR_URL: ${{ vars.JS_COORDINATOR_URL }}"));
     assert!(gamma.contains("COORDINATOR_CA: ${{ vars.JS_COORDINATOR_CA }}"));
     assert!(gamma.contains("VERSION: ${{ needs.plan.outputs.version }}"));
-    assert!(gamma.contains(r#"--version "$VERSION" --service js-server --service js-agent"#));
+    assert!(gamma.contains(r#"--version "$VERSION" --service js-server"#));
+    assert!(!gamma.contains("--service js-agent"), "{gamma}");
+    assert_eq!(gamma.matches("--service ").count(), 1, "{gamma}");
     assert!(gamma.contains("if: ${{ vars.TS_CLIENT_ID != '' && vars.JS_COORDINATOR_URL != '' }}"));
     // The build is in a job that holds nothing but a read of the repository.
     let tool = job(&jobs, "deploy-tool").join("\n");
@@ -489,10 +480,14 @@ struct Leg {
     target: String,
     runner: String,
     builds: Vec<String>,
+    /// The platform of the .deb the leg makes (`linux-x86_64`), empty for the Mac leg.
+    deb: String,
+    /// The architecture in that .deb's file name (`amd64`), empty for the Mac leg.
+    deb_arch: String,
 }
 
-/// The legs of the `build` job's matrix, in their order, read from its `- target:`, `runner:`
-/// and `builds:` lines.
+/// The legs of the `build` job's matrix, in their order, read from its `- target:`, `runner:`,
+/// `builds:`, `deb:` and `deb_arch:` lines.
 fn legs(build: &[String]) -> Vec<Leg> {
     let mut legs: Vec<Leg> = Vec::new();
     for line in build {
@@ -502,12 +497,18 @@ fn legs(build: &[String]) -> Vec<Leg> {
                 target: target.to_owned(),
                 runner: String::new(),
                 builds: Vec::new(),
+                deb: String::new(),
+                deb_arch: String::new(),
             });
         } else if let Some(leg) = legs.last_mut() {
             if let Some(runner) = line.strip_prefix("runner: ") {
                 runner.clone_into(&mut leg.runner);
             } else if let Some(builds) = line.strip_prefix("builds: ") {
                 leg.builds = builds.split_whitespace().map(str::to_owned).collect();
+            } else if let Some(deb) = line.strip_prefix("deb: ") {
+                deb.trim_matches('\'').clone_into(&mut leg.deb);
+            } else if let Some(arch) = line.strip_prefix("deb_arch: ") {
+                arch.trim_matches('\'').clone_into(&mut leg.deb_arch);
             }
         }
     }
@@ -593,12 +594,12 @@ fn expected_assets(sums: &[String]) -> Vec<String> {
 
 /// Asserts that `sums` expects exactly the fifteen archives (each of `js-lease-server`, `js`,
 /// `js-agent`, `js-bundle` and `js-mdm` for both Linux targets, `js`, `js-agent` and `js-bundle`
-/// and the two Mac host tools for darwin, which is also what the matrix builds), the three
-/// hostkeeper packages of js-agent (named as `hostkeeper_package::file_name` names them) and
-/// `js-agent-index.json`; and that the list is in `LC_ALL=C` order once `$VERSION` is a version,
-/// as `ls | LC_ALL=C sort` prints the files. Catches a missing or extra name (a build that stops
-/// making an asset must fail here, before attest) and an unsorted list, which would never equal
-/// the listing and would fail every real release.
+/// and the two Mac host tools for darwin, which is also what the matrix builds) and the two .debs
+/// of js-agent (`js-agent_<version>_amd64.deb` and `js-agent_<version>_arm64.deb`); and that the
+/// list is in `LC_ALL=C` order once `$VERSION` is a version, as `ls | LC_ALL=C sort` prints the
+/// files. Catches a missing or extra name (a build that stops making an asset must fail here,
+/// before attest) and an unsorted list, which would never equal the listing and would fail every
+/// real release.
 #[test]
 fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_is_sorted() {
     let text = artifacts_workflow();
@@ -620,13 +621,12 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
         wanted.push(format!("{bin}-$VERSION-aarch64-apple-darwin.tar.gz"));
     }
     let archives = wanted.clone();
-    // The packages, named by the verb's own function, and the index it writes.
-    let version: Version = "1.2.3".parse().expect("a version");
-    for platform in Platform::ALL {
-        wanted.push(file_name(version, platform).replace("1.2.3", "$VERSION"));
+    // The two .debs, whose names the shell spells with braces (`$VERSION_amd64` would be another
+    // variable).
+    for arch in ["amd64", "arm64"] {
+        wanted.push(format!("js-agent_${{VERSION}}_{arch}.deb"));
     }
-    wanted.push(INDEX_FILE.to_owned());
-    assert_eq!(expected.len(), 19, "{expected:?}");
+    assert_eq!(expected.len(), 17, "{expected:?}");
     let mut have = expected.clone();
     have.sort();
     wanted.sort();
@@ -649,7 +649,10 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
     for version in ["0.1.0", "1.2.3", "10.20.30"] {
         let listed: Vec<String> = expected
             .iter()
-            .map(|name| name.replace("$VERSION", version))
+            .map(|name| {
+                name.replace("${VERSION}", version)
+                    .replace("$VERSION", version)
+            })
             .collect();
         let mut sorted = listed.clone();
         sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
@@ -948,13 +951,13 @@ fn no_self_hosted_or_paid_runner_label_in(text: &str) {
             .find_map(|l| l.trim_start().strip_prefix("runs-on: "))
             .unwrap_or_else(|| panic!("{name} has no runs-on"));
         if runs_on == "${{ matrix.runner }}" {
-            let legs = legs(&lines);
-            assert!(!legs.is_empty(), "{name}");
-            for leg in legs {
-                assert!(
-                    HOSTED_RUNNERS.contains(&leg.runner.as_str()),
-                    "{name}: {leg:?}"
-                );
+            let runners: Vec<&str> = lines
+                .iter()
+                .filter_map(|l| l.trim_start().strip_prefix("runner: "))
+                .collect();
+            assert!(!runners.is_empty(), "{name}");
+            for runner in runners {
+                assert!(HOSTED_RUNNERS.contains(&runner), "{name}: {runner}");
             }
         } else {
             assert!(HOSTED_RUNNERS.contains(&runs_on), "{name}: {runs_on}");

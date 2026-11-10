@@ -203,13 +203,13 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         ".cargo/other",
         // The js-lease-server archives carry the host updater's declaration as it is.
         "packaging/js-lease-server/updater.d/js-lease-server.toml",
-        // The files the hostkeeper packages of js-agent are made of are compiled into xtask.
-        "packaging/js-agent/hostkeeper/manifest.toml.in",
-        "packaging/js-agent/hostkeeper/units/js-agent-crun.service",
-        "packaging/js-agent/hostkeeper/units/js-agent-crun-gpu.service",
-        "packaging/js-agent/hostkeeper/files/tmpfiles.conf",
-        "packaging/js-agent-macos/hostkeeper/manifest.toml.in",
-        "packaging/js-agent-macos/hostkeeper/units/js-agent.plist",
+        // The files the js-agent .deb is made of are compiled into xtask.
+        "packaging/js-agent/deb/js-agent-crun.service",
+        "packaging/js-agent/deb/js-agent-crun-gpu.service",
+        "packaging/js-agent/deb/tmpfiles.conf",
+        "packaging/js-agent/js-agent.service",
+        "packaging/js-agent/tmpfiles.conf",
+        "packaging/js-agent/crun_host_setup.sh",
     ] {
         assert!(is_shipped(path, &shipped), "{path} ships");
     }
@@ -231,16 +231,19 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "coverage-baseline",
         "deny.toml",
         "packaging/js-agent/js-agent-crun.service",
+        "packaging/js-agent/tmpfiles-crun.conf",
         "packaging/js-agent/updater.d/js-agent.toml",
         "packaging/js-agent-macos/updater.toml",
         "packaging/js-agent/updater.d/other.toml",
         "packaging/js-lease-server/updater.d/js-agent.toml",
         // Markdown beside the package files is not compiled in; a directory that only starts
         // like theirs is not theirs.
-        "packaging/js-agent/hostkeeper/README.md",
-        "packaging/js-agent-macos/hostkeeper/README.md",
-        "packaging/js-agent/hostkeeper-notes/manifest.toml.in",
-        "packaging/js-agent/hostkeeper",
+        "packaging/js-agent/deb/README.md",
+        "packaging/js-agent/deb-notes/tmpfiles.conf",
+        "packaging/js-agent/deb",
+        // The earlier hostkeeper archive package's directories no longer ship.
+        "packaging/js-agent/hostkeeper/manifest.toml.in",
+        "packaging/js-agent-macos/hostkeeper/units/js-agent.plist",
         "crates/js-cli/Cargo.lock",
     ] {
         assert!(!is_shipped(path, &shipped), "{path} does not ship");
@@ -644,6 +647,19 @@ fn an_io_error_names_the_file() {
         write(&missing.join("x"), ""),
         Err(Error::Io { .. })
     ));
+}
+
+/// The refusal of a binary that is not a build of the version names the binary and the version.
+#[test]
+fn a_binary_of_another_version_is_refused_by_name() {
+    let error = Error::VersionNotInBinary {
+        path: "target/release/js-agent".to_owned(),
+        version: "1.2.3".to_owned(),
+    };
+    assert_eq!(
+        error.to_string(),
+        "target/release/js-agent does not hold the version 1.2.3 and its runtimes line: it is not a build of that version"
+    );
 }
 
 /// Pins the crates `release plan` treats as shipped binaries by default: the lease server,

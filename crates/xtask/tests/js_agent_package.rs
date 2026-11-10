@@ -1,9 +1,10 @@
-//! The files of the js-agent package (`packaging/js-agent`) and the workflow that builds and
-//! attests it (`.github/workflows/js-agent-deb.yml`), read as they are in the repository:
-//! the unit restarts the agent after every exit with the flags the agent accepts, waits for the
-//! container engine, makes its directories and waits for its scratch disk, and sets no sandboxing
-//! the agent refuses; its directories are closed to everyone but root; the nfpm configuration
-//! lists the files the checker (`xtask::pkg`) accepts; and the workflow publishes nothing.
+//! The files of the js-agent package that the setup path installs (`packaging/js-agent`: the unit
+//! and the tmpfiles file) and the workflow that checks the .deb on a pull request
+//! (`.github/workflows/js-agent-deb.yml`), read as they are in the repository: the unit restarts
+//! the agent after every exit with the flags the agent accepts, waits for the container engine,
+//! makes its directories and waits for its scratch disk, and sets no sandboxing the agent refuses;
+//! its directories are closed to everyone but root; and the workflow builds the agent and the
+//! .deb, uploads the .deb and publishes, signs and attests nothing.
 //! Nothing here starts the unit: these are static checks of the files.
 
 use std::path::{Path, PathBuf};
@@ -11,7 +12,6 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use js_agent::Cli;
 use js_agent::lifecycle::DEFAULT_STOP_GRACE;
-use xtask::pkg::{FILES, Source};
 
 const UNIT: &str = "packaging/js-agent/js-agent.service";
 const WORKFLOW: &str = ".github/workflows/js-agent-deb.yml";
@@ -130,12 +130,7 @@ fn the_unit_restarts_the_agent_after_every_exit_and_not_in_a_tight_loop() {
 #[test]
 fn the_unit_runs_the_installed_binary_with_flags_the_agent_accepts() {
     let words = exec_words();
-    assert!(
-        FILES
-            .iter()
-            .any(|(path, _, _)| format!("/{path}") == words[0]),
-        "{words:?}"
-    );
+    assert_eq!(words[0], "/usr/bin/js-agent", "{words:?}");
     let cli = agent_cli();
     assert_eq!(cli.pool, "default");
     assert_eq!(
@@ -245,13 +240,9 @@ fn the_unit_starts_only_with_a_mount_at_the_scratch_root() {
 /// the scratch root: the unit runs the installed tmpfiles file before it starts the agent.
 #[test]
 fn the_unit_makes_its_directories_before_every_start() {
-    let (installed, _, _) = FILES
-        .iter()
-        .find(|(_, _, source)| matches!(source, Source::Tmpfiles))
-        .expect("the tmpfiles file");
     assert_eq!(
         unit_value("ExecStartPre"),
-        format!("+systemd-tmpfiles --create /{installed}")
+        "+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf"
     );
 }
 
@@ -352,67 +343,6 @@ fn the_directories_are_roots_mode_0700_and_never_cleaned() {
     }
 }
 
-/// The nfpm configuration installs exactly the files the checker accepts, with the modes it
-/// accepts, from the files the build makes or the repository has, and has no maintainer script
-/// or dependency of its own.
-#[test]
-fn the_nfpm_configuration_lists_the_files_of_the_checker() {
-    let text = read("packaging/js-agent/nfpm.yaml");
-    let lines = code(&text);
-    let target = workflow_target();
-    let mut listed = Vec::new();
-    let (mut src, mut dst) = (String::new(), String::new());
-    // An entry without its file_info adds no row to `listed`, so count the entries too.
-    let entries = lines.iter().filter(|l| l.starts_with("- src: ")).count();
-    assert_eq!(
-        entries,
-        FILES.len(),
-        "entries of nfpm.yaml, files of the checker"
-    );
-    for line in &lines {
-        if let Some(s) = line.strip_prefix("- src: ") {
-            src = s.to_owned();
-        }
-        if let Some(d) = line.strip_prefix("dst: ") {
-            dst = d.trim_start_matches('/').to_owned();
-        }
-        if let Some(m) = line.strip_prefix("mode: ") {
-            let mode = u32::from_str_radix(m, 8).expect("a mode");
-            listed.push((src.clone(), dst.clone(), mode));
-        }
-    }
-    let mut want: Vec<(String, String, u32)> = FILES
-        .iter()
-        .map(|(path, mode, source)| {
-            let src = match source {
-                Source::Binary => format!("target/{target}/release/js-agent"),
-                Source::Service => "packaging/js-agent/js-agent.service".to_owned(),
-                Source::Tmpfiles => "packaging/js-agent/tmpfiles.conf".to_owned(),
-                Source::HostSetup => "packaging/js-agent/crun_host_setup.sh".to_owned(),
-                Source::License => "LICENSE".to_owned(),
-            };
-            (src, (*path).to_owned(), *mode)
-        })
-        .collect();
-    want.sort();
-    listed.sort();
-    assert_eq!(listed, want);
-    for (src, _, _) in &listed {
-        assert!(src.contains(&target) || root().join(src).is_file(), "{src}");
-    }
-    for forbidden in [
-        "scripts:",
-        "depends:",
-        "preinstall",
-        "postinstall",
-        "type: dir",
-    ] {
-        assert!(!lines.iter().any(|l| l.contains(forbidden)), "{forbidden}");
-    }
-    assert!(lines.contains(&"version: ${VERSION}"));
-    assert!(lines.contains(&"compression: gzip"));
-}
-
 /// The jobs of a workflow: name and the lines of its block.
 fn jobs(text: &str) -> Vec<(String, Vec<String>)> {
     let mut jobs: Vec<(String, Vec<String>)> = Vec::new();
@@ -454,18 +384,6 @@ fn job(text: &str, name: &str) -> Vec<String> {
         .find(|(n, _)| n == name)
         .unwrap_or_else(|| panic!("job {name}"))
         .1
-}
-
-/// The `TARGET` the workflow builds for.
-fn workflow_target() -> String {
-    let text = read(WORKFLOW);
-    let env = block(&indented_code(&text), "env");
-    let target: Vec<&str> = env
-        .iter()
-        .filter_map(|l| l.trim().strip_prefix("TARGET: "))
-        .collect();
-    assert_eq!(target.len(), 1, "{target:?}");
-    target[0].to_owned()
 }
 
 /// A line of a workflow with its quotes dropped and its white space made single, so that
@@ -517,20 +435,37 @@ fn run_lines(text: &str) -> Vec<String> {
     found
 }
 
-/// The workflow builds, checks, uploads as a workflow artifact and attests, and does nothing
-/// else with the deb: no write scope on the repository, packages or releases, no action but
-/// these six pinned by commit (the actions cache only for nfpm's archive), and only these
-/// commands. The list of banned words is a tripwire, not
-/// the proof: the proof is the absence of a write scope (below) and the list of commands.
+/// The commands the workflow may run, each a prefix of a whole `run:` line.
+const ALLOWED_RUNS: [&str; 9] = [
+    "sudo apt-get update",
+    "sudo apt-get install --yes --no-install-recommends musl-tools",
+    "rustup toolchain install",
+    "rustup target add \"$TARGET\"",
+    "cargo xtask release stamp --to \"$VERSION\"",
+    "cargo build --locked --release --target \"$TARGET\" -p js-agent --bin js-agent",
+    "cargo xtask release deb --binary \"target/$TARGET/release/js-agent\" --version \"$VERSION\" --platform linux-x86_64 --out dist",
+    "dpkg-deb --info \"dist/js-agent_${VERSION}_amd64.deb\"",
+    "dpkg-deb --contents \"dist/js-agent_${VERSION}_amd64.deb\"",
+];
+
+/// The workflow builds the agent, packages it, shows the package and uploads it as a workflow
+/// artifact, and does nothing else with the .deb: no write scope on the repository, packages or
+/// releases, no signing or verification (the release does those in artifacts.yml), no action but
+/// these two pinned by commit, and only these commands. The list of banned words is a tripwire,
+/// not the proof: the proof is the absence of a write scope (below) and the list of commands.
 #[test]
-fn the_workflow_publishes_nothing() {
+fn the_workflow_publishes_signs_and_attests_nothing() {
     let text = read(WORKFLOW);
     let steps = code(&text);
     for line in &steps {
         for banned in [
             "contents: write",
             "packages: write",
+            "id-token",
+            "attestations",
+            "attest-build-provenance",
             "write-all",
+            "gh ",
             "gh release",
             "gh api",
             "cargo publish",
@@ -552,21 +487,14 @@ fn the_workflow_publishes_nothing() {
             "ghcr.io",
             "curl",
             "wget",
+            "nfpm",
         ] {
             assert!(!line.contains(banned), "{banned} in {line}");
         }
         if let Some(action) = line.trim_start_matches("- ").strip_prefix("uses: ") {
             let name = action.split('@').next().expect("a name");
             assert!(
-                [
-                    "actions/checkout",
-                    "actions/cache/restore",
-                    "actions/cache/save",
-                    "actions/upload-artifact",
-                    "actions/download-artifact",
-                    "actions/attest-build-provenance",
-                ]
-                .contains(&name),
+                ["actions/checkout", "actions/upload-artifact"].contains(&name),
                 "{name}"
             );
             let sha = action.split('@').nth(1).expect("a version");
@@ -579,32 +507,20 @@ fn the_workflow_publishes_nothing() {
     }
     assert!(text.contains("name: js-agent-deb"));
     // The commands are an allowlist, and none chains another or takes text from an expression.
-    let allowed = [
-        "sudo apt-get update",
-        "sudo apt-get install --yes --no-install-recommends musl-tools",
-        "rustup toolchain install",
-        "rustup target add \"$TARGET\"",
-        "cargo xtask release stamp --to \"$VERSION\"",
-        "cargo build --locked --release --target \"$TARGET\" -p js-agent --bin js-agent",
-        "cargo xtask fetch --url ",
-        "$RUNNER_TEMP/tools/nfpm package --config packaging/js-agent/nfpm.yaml --packager deb ",
-        "cargo xtask pkg check-deb --deb ",
-        "gh attestation verify ",
-    ];
     let runs = run_lines(&text);
-    assert_eq!(runs.len(), 10, "{runs:?}");
+    assert_eq!(runs.len(), ALLOWED_RUNS.len(), "{runs:?}");
     for run in &runs {
-        assert!(allowed.iter().any(|a| run.starts_with(a)), "{run}");
+        assert!(ALLOWED_RUNS.iter().any(|a| run.starts_with(a)), "{run}");
         for chain in ["&&", "||", ";", "|", "`", "$(", ">", "${{"] {
             assert!(!run.contains(chain), "{chain} in {run}");
         }
     }
 }
 
-/// No job and no top level but the attest job's holds a write scope, whatever its spelling, and
-/// the attest job's are exactly the two that attestation needs.
+/// No job and no top level holds a write scope, whatever its spelling, and `build` is the one
+/// job, with `contents: read` and no condition: a pull request builds and checks the .deb.
 #[test]
-fn only_the_attest_job_holds_a_write_scope_and_it_is_attestation() {
+fn no_job_holds_a_write_scope_and_build_is_the_only_job() {
     let text = read(WORKFLOW);
     let lines = indented_code(&text);
     assert_eq!(
@@ -615,70 +531,29 @@ fn only_the_attest_job_holds_a_write_scope_and_it_is_attestation() {
             .collect::<Vec<_>>(),
         ["permissions: {}"]
     );
-    let top: Vec<String> = lines
-        .iter()
-        .copied()
-        .take_while(|l| *l != "jobs:")
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(write_scopes(&top), Vec::<String>::new());
-    for name in ["build", "verify"] {
-        assert_eq!(
-            write_scopes(&job(&text, name)),
-            Vec::<String>::new(),
-            "{name}"
-        );
-    }
     assert_eq!(
-        write_scopes(&job(&text, "attest")),
-        ["attestations: write", "id-token: write"]
+        write_scopes(&text.lines().map(str::to_owned).collect::<Vec<_>>()),
+        Vec::<String>::new()
     );
-}
-
-/// The attestation is made and verified only by a manual run on main, by jobs that run no
-/// repository code: a pull request builds and checks the deb and attests nothing. The gate is
-/// the job's own `if:`, not a step's or a comment's.
-#[test]
-fn the_attest_and_verify_jobs_run_only_for_a_manual_run_on_main() {
-    let text = read(WORKFLOW);
     let names: Vec<String> = jobs(&text).into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["build", "attest", "verify"]);
-    let gate =
-        "if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}";
-    let job_ifs = |name: &str| -> Vec<String> {
-        let lines = job(&text, name);
-        lines
-            .into_iter()
-            .take_while(|l| l != "    steps:")
-            .filter(|l| l.starts_with("    if:"))
-            .collect()
-    };
-    for name in ["attest", "verify"] {
-        assert_eq!(job_ifs(name), [format!("    {gate}")], "{name}");
-        let body = job(&text, name).join("\n");
-        assert!(
-            !body.contains("actions/checkout") && !body.contains("cargo "),
-            "{name} runs no repository code"
-        );
-    }
-    assert_eq!(job_ifs("build"), Vec::<String>::new());
-    let build = job(&text, "build").join("\n");
+    assert_eq!(names, ["build"]);
+    let build = job(&text, "build");
+    assert!(!build.iter().any(|l| l.starts_with("    if:")), "{build:?}");
+    let build = build.join("\n");
     assert!(build.contains("permissions:\n      contents: read\n    steps:"));
-    assert!(build.contains("cargo xtask pkg check-deb"));
-    assert!(build.contains("nfpm package"));
-    // The musl release binary is built on a pull request too, and the deb checker is given it,
-    // so a binary that is not static is refused there.
+    // The musl release binary is built on a pull request, and the .deb is made from it: a binary
+    // that is not the one the release builds, or that does not print the version, is refused.
     assert!(build.contains("-p js-agent --bin js-agent"));
     assert!(build.contains("--binary \"target/$TARGET/release/js-agent\""));
-    assert!(build.contains("--sha256 \"$NFPM_SHA256_X86_64_LINUX\""));
+    assert!(build.contains("cargo xtask release stamp --to \"$VERSION\""));
 }
 
-/// What starts the workflow: a pull request that touches what the package, its checker or the
-/// agent are made of (any crate, the manifests, the toolchain), and a manual run. Not
-/// `pull_request_target`, `workflow_run`, a push or a schedule, which would give code from
-/// outside the repository the workflow's scopes.
+/// What starts the workflow: a pull request that touches what the package or the agent are made
+/// of (any crate, the manifests, the toolchain), and nothing else: not a manual run (the release
+/// builds and attests the .debs), `pull_request_target`, `workflow_run`, a push or a schedule,
+/// which would give code from outside the repository the workflow's scopes.
 #[test]
-fn the_workflow_starts_only_on_these_pull_requests_and_by_hand() {
+fn the_workflow_starts_only_on_these_pull_requests() {
     let text = read(WORKFLOW);
     let lines = indented_code(&text);
     let on = block(&lines, "on");
@@ -687,7 +562,7 @@ fn the_workflow_starts_only_on_these_pull_requests_and_by_hand() {
         .filter(|l| !l.starts_with("   "))
         .map(|l| l.trim())
         .collect();
-    assert_eq!(events, ["pull_request:", "workflow_dispatch:"]);
+    assert_eq!(events, ["pull_request:"]);
     let paths: Vec<&str> = on
         .iter()
         .filter_map(|l| l.trim().strip_prefix("- "))
@@ -705,24 +580,24 @@ fn the_workflow_starts_only_on_these_pull_requests_and_by_hand() {
             "'LICENSE'",
         ]
     );
-    // Two manual runs of different versions are not one group, which would drop a pending one.
+    // A newer push to the pull request replaces the run.
     let concurrency = block(&lines, "concurrency");
     assert!(
         concurrency
             .iter()
-            .any(|l| l.trim() == "group: js-agent-deb-${{ github.ref }}-${{ inputs.version }}"),
+            .any(|l| l.trim() == "group: js-agent-deb-${{ github.ref }}"),
         "{concurrency:?}"
     );
     assert!(
         concurrency
             .iter()
-            .any(|l| l.trim() == "cancel-in-progress: false")
+            .any(|l| l.trim() == "cancel-in-progress: true")
     );
 }
 
-/// Every checkout drops the token from the clone, and the deb that is uploaded and attested is
-/// the one `check-deb` read, by its exact name: no glob that a file of the same shape in the
-/// checkout or the download could match.
+/// Every checkout drops the token from the clone, and the .deb that is uploaded is the one
+/// `release deb` wrote and `dpkg-deb` showed, by its exact name: no glob that a file of the same
+/// shape in the checkout could match. The version is `0.0.0`, the target the x86_64 musl one.
 #[test]
 fn the_deb_is_named_exactly_and_the_checkout_keeps_no_credentials() {
     let text = read(WORKFLOW);
@@ -733,101 +608,24 @@ fn the_deb_is_named_exactly_and_the_checkout_keeps_no_credentials() {
         count("uses: actions/checkout"),
         count("persist-credentials: false")
     );
-    assert!(steps.contains(&"path: js-agent_${{ env.VERSION }}_amd64.deb"));
-    assert!(steps.contains(&"subject-path: dist/js-agent_${{ env.VERSION }}_amd64.deb"));
+    assert!(steps.contains(&"path: dist/js-agent_${{ env.VERSION }}_amd64.deb"));
     assert!(!steps.iter().any(|l| l.contains('*') && l.contains(".deb")));
-    let check = run_lines(&text)
-        .into_iter()
-        .find(|l| l.starts_with("cargo xtask pkg check-deb"))
-        .expect("the check");
+    let env = block(&indented_code(&text), "env");
+    assert!(env.iter().any(|l| l.trim() == "VERSION: 0.0.0"), "{env:?}");
     assert!(
-        check.contains("--deb \"js-agent_${VERSION}_amd64.deb\""),
-        "{check}"
+        env.iter()
+            .any(|l| l.trim() == "TARGET: x86_64-unknown-linux-musl"),
+        "{env:?}"
     );
-    assert!(check.contains("--license LICENSE"), "{check}");
-    assert!(check.contains("--packaging packaging/js-agent"), "{check}");
-}
-
-/// The verify step is the one piece a pull request cannot run (the job is skipped there), so
-/// its constraints are pinned as text: this repository, this workflow, main, this commit, and
-/// no self-hosted runner.
-#[test]
-fn the_verification_is_of_this_repository_workflow_ref_and_commit() {
-    let text = read(WORKFLOW);
-    let verify = run_lines(&text)
-        .into_iter()
-        .find(|l| l.starts_with("gh attestation verify"))
-        .expect("the verification");
-    for pinned in [
-        "--repo \"$REPO\"",
-        "--signer-workflow \"$REPO/.github/workflows/js-agent-deb.yml\"",
-        "--source-ref refs/heads/main",
-        "--source-digest \"$GITHUB_SHA\"",
-        "--deny-self-hosted-runners",
-    ] {
-        assert!(verify.contains(pinned), "{pinned} in {verify}");
+    let runs = run_lines(&text);
+    for name in ["info", "contents"] {
+        let command = format!("dpkg-deb --{name} \"dist/js-agent_${{VERSION}}_amd64.deb\"");
+        assert!(runs.contains(&command), "{command}");
     }
-}
-
-/// What the attestation covers is what the verify job checks: both jobs use the artifact the
-/// build job uploaded, the attested subject is the file downloaded to `dist`, and `REPO` of the
-/// verify step is this repository.
-#[test]
-fn the_attested_file_is_the_one_downloaded_and_verified() {
-    let text = read(WORKFLOW);
-    let lines: Vec<String> = text.lines().map(normal).collect();
-    let values = |key: &str| -> Vec<String> {
-        lines
-            .iter()
-            .filter_map(|l| l.strip_prefix(key).map(str::to_owned))
-            .collect()
-    };
-    // The `name:` and `path:` of the `with:` block that follows each artifact step.
-    let with_of = |action: &str| -> Vec<(String, String)> {
-        let uses = format!("- uses: actions/{action}-artifact@");
-        let mut found = Vec::new();
-        for (at, line) in lines.iter().enumerate() {
-            if line.starts_with(&uses) {
-                let block = &lines[at + 1..(at + 5).min(lines.len())];
-                let get = |key: &str| {
-                    block
-                        .iter()
-                        .find_map(|l| l.strip_prefix(key))
-                        .unwrap_or_default()
-                        .to_owned()
-                };
-                found.push((get("name: "), get("path: ")));
-            }
-        }
-        found
-    };
-    let uploads = with_of("upload");
-    let downloads = with_of("download");
-    // One upload and two downloads (attest, verify) share the one artifact name, and both
-    // downloads put the deb in dist, where the attested subject and the verified file are.
-    assert_eq!(uploads.len(), 1, "{uploads:?}");
-    assert_eq!(downloads.len(), 2, "{downloads:?}");
-    for (name, _) in uploads.iter().chain(&downloads) {
-        assert_eq!(name, "js-agent-deb");
-    }
-    for (_, path) in &downloads {
-        assert_eq!(path, "dist");
-    }
-    assert_eq!(
-        values("subject-path: "),
-        ["dist/js-agent_${{ env.VERSION }}_amd64.deb"]
-    );
-    assert_eq!(
-        values("REPO: "),
-        ["${{ github.repository }}"],
-        "REPO of the verify step"
-    );
-    let verify = run_lines(&text)
-        .into_iter()
-        .find(|l| l.starts_with("gh attestation verify"))
-        .expect("the verification");
-    assert!(
-        verify.contains("\"dist/js-agent_${VERSION}_amd64.deb\""),
-        "{verify}"
-    );
+    let made = runs
+        .iter()
+        .find(|l| l.starts_with("cargo xtask release deb"))
+        .expect("the package step");
+    assert!(made.contains("--platform linux-x86_64"), "{made}");
+    assert!(made.contains("--out dist"), "{made}");
 }

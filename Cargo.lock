@@ -74,6 +74,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -919,18 +925,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hostkeeper-placed"
-version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=cd015c39cc62c768f8c96d2771b9c077bf1a8270#cd015c39cc62c768f8c96d2771b9c077bf1a8270"
-dependencies = [
- "hostkeeper-config",
- "libc",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "hostkeeper-steps"
 version = "0.1.0"
 source = "git+https://github.com/komira-ai/hostkeeper?rev=cd015c39cc62c768f8c96d2771b9c077bf1a8270#cd015c39cc62c768f8c96d2771b9c077bf1a8270"
@@ -940,21 +934,6 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "sha2 0.11.1",
- "thiserror",
-]
-
-[[package]]
-name = "hostkeeper-unpack"
-version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=cd015c39cc62c768f8c96d2771b9c077bf1a8270#cd015c39cc62c768f8c96d2771b9c077bf1a8270"
-dependencies = [
- "hex",
- "hostkeeper-config",
- "hostkeeper-hook",
- "hostkeeper-steps",
- "rustix",
- "ruzstd",
  "sha2 0.11.1",
  "thiserror",
 ]
@@ -1114,7 +1093,6 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "hex",
- "hostkeeper-config",
  "hostkeeper-hook",
  "hostkeeper-steps",
  "js-agent-usage",
@@ -3009,6 +2987,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "saphyr-parser"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f54c7c96aa2abeb55dbdcda75287722d5e454f020aaa817895d4d62b9785073a"
+dependencies = [
+ "arraydeque",
+ "thiserror",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4055,9 +4043,6 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
- "hostkeeper-config",
- "hostkeeper-placed",
- "hostkeeper-unpack",
  "js-agent",
  "js-api-gateway",
  "js-cli",
@@ -4069,6 +4054,7 @@ dependencies = [
  "js-proto",
  "js-testkit",
  "js-update-hook",
+ "md-5",
  "proc-macro2",
  "prost",
  "prost-types",
@@ -4077,7 +4063,7 @@ dependencies = [
  "rustix",
  "rustls",
  "rustls-native-certs",
- "ruzstd",
+ "saphyr-parser",
  "serde",
  "serde_json",
  "sha2 0.11.1",

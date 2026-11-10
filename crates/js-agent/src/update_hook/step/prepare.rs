@@ -9,7 +9,8 @@
 //!    is `state_invalid` (1). The state directory is made, mode 0700, when it is not there:
 //!    hostkeeper makes none, so a first install finds none;
 //! 2. a taint or an `owed-*` record halts (76);
-//! 3. `<staged>/bin/js-agent --version` names the target version (1), and the staged release
+//! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
+//!    release, see [`agent_in`]) `--version` names the target version (1), and the staged release
 //!    carries the unit the hook manages (`bad_artifact` otherwise);
 //! 4. a first install needs a join token: the token file must be a regular file of the hook's
 //!    user, mode 0600 or 0400, unless the state root already holds a host credential;
@@ -30,16 +31,13 @@ use std::time::Duration;
 
 use crate::update_hook::{
     Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, PlanError, Reason, Record,
-    Report, UnitRestart, UpdateInfo, plan,
+    Report, UnitRestart, UpdateInfo, agent_in, plan,
 };
 
 use super::{Env, check, failure, lease_failure, open_state, save, success};
 
 /// The agent's name, the first word of its `--version`.
 const AGENT_NAME: &str = "js-agent";
-
-/// The agent's file in a release directory.
-const AGENT_BINARY: &str = "bin/js-agent";
 
 /// Runs `prepare` of the release in `params.staged_release`.
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
@@ -185,7 +183,7 @@ pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
 /// The staged agent runs and is the version the order names; if it lists its runtimes, the
 /// required one (`crun` for the Linux unit, `native` for the Mac one) is among them.
 fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
-    let binary = params.staged_release.join(AGENT_BINARY);
+    let binary = agent_in(&params.staged_release);
     let printed = env
         .runner
         .run(&binary.to_string_lossy(), &["--version"])

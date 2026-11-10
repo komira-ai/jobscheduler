@@ -10,16 +10,18 @@
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
 //!   is released and as which version, setting that version in the CI checkout before the build,
 //!   and laying down the files of each release archive (docs/release.md).
-//! - `release hostkeeper-package --binary <path> --target <triple> --version <version> --out
-//!   <dir>` and `release hostkeeper-index --dir <dir> --version <version>`
-//!   ([`release::hostkeeper_package`], [`release::hostkeeper_index`]): the hostkeeper package of
-//!   js-agent for one platform, the same bytes on every run, and the release index of the three
-//!   packages (packaging/js-agent/hostkeeper/README.md).
 //!
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
 //!   <dir>` ([`release::macos_leg`]): on a pull request, the release's macOS leg from that commit:
 //!   the release build of each binary, its archive directory, its minimum macOS and its
-//!   `--version`, then the hostkeeper package of js-agent; nothing is uploaded.
+//!   `--version`; nothing is uploaded.
+//! - `release deb --binary <path> --version <X.Y.Z> --platform linux-x86_64|linux-arm64 --out <dir>`
+//!   ([`release::deb`]): the js-agent Debian package of one Linux platform, byte for byte the same
+//!   for the same inputs.
+//! - `release desired --repo <owner/repo> --version <X.Y.Z> --after-run <id> --dir <dir> [--output <file>]`
+//!   ([`release::desired`]): the targets the hostkeeper set of js-agent is given for a release, or
+//!   `set=false`; refused unless the release's `.deb`s are in the stable apt index at the digests
+//!   of its `SHA256SUMS`.
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
@@ -38,9 +40,9 @@
 //!   Each unit runs its binary through `count-run --count-file <path> -- <binary> <args>...`
 //!   ([`count_run`]), which writes the number of tests the binary ran; a target fails unless
 //!   that count is at least one.
-//! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR --license F` ([`pkg`]):
-//!   refuses a js-agent deb that is not exactly the package `packaging/js-agent` describes, or
-//!   whose binary is not a static x86-64 Linux executable.
+//! - `channels gate|assume|apt|check-apt ...` ([`channels`]): the release's .debs published to the apt
+//!   repository at `packages.komira.ai/apt` (suite `testing`, then `stable` once the install check
+//!   passed), and the check that the package installs from `testing` in a clean Ubuntu system.
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
 //!   payload and scripts, laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
@@ -88,6 +90,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+pub mod channels;
 pub mod count_run;
 pub mod crun_tests;
 pub mod deploy;
@@ -98,7 +101,6 @@ pub mod image;
 pub mod job_surface;
 pub mod layering;
 pub mod macpkg;
-pub mod pkg;
 pub mod postgres_for_tests;
 pub mod release;
 pub mod report;
@@ -113,6 +115,9 @@ pub enum Error {
     /// A release verb failed.
     #[error(transparent)]
     Release(#[from] release::Error),
+    /// `release desired` set nothing, or could not tell.
+    #[error(transparent)]
+    Desired(release::desired::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
@@ -122,9 +127,10 @@ pub enum Error {
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
-    /// A package check failed.
+    /// A channels verb (the apt repository, its install check) failed. A usage error of one is
+    /// [`Error::Usage`], through the conversion in [`channels`].
     #[error(transparent)]
-    Pkg(#[from] pkg::Error),
+    Channels(channels::Error),
     /// The macOS package could not be staged or checked.
     #[error(transparent)]
     MacPkg(#[from] macpkg::Error),
@@ -281,6 +287,12 @@ enum Verb {
     /// Write the build descriptions of the linux-x86_64 and linux-arm64 machine images, and the
     /// cloud-init seed that builds each one (no network: every archive is pinned).
     ImageRecipe(image::Args),
+    /// The apt repository the release is published to, and the check that it installs.
+    Channels {
+        /// Which verb.
+        #[command(subcommand)]
+        verb: channels::Verb,
+    },
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -298,8 +310,6 @@ enum Verb {
 /// The `pkg` verbs.
 #[derive(Subcommand)]
 enum PkgVerb {
-    /// Refuse a deb that is not exactly the js-agent package.
-    CheckDeb(pkg::CheckArgs),
     /// Lay the macOS package's payload and scripts down, ready for `pkgbuild`.
     StageMacos(macpkg::StageArgs),
     /// Refuse a macOS package that is not exactly the js-agent package (a Mac only).
@@ -315,12 +325,12 @@ enum ReleaseVerb {
     Stamp(release::stamp::StampArgs),
     /// Lay down the files of one release archive.
     Stage(release::stage::StageArgs),
-    /// Write the hostkeeper package of one platform.
-    HostkeeperPackage(release::hostkeeper_package::PackageArgs),
-    /// Write the release index of the three hostkeeper packages.
-    HostkeeperIndex(release::hostkeeper_index::IndexArgs),
     /// Build, stage, check and package the darwin leg of a release.
     MacosLeg(release::macos_leg::LegArgs),
+    /// Build the Debian package of js-agent for one Linux platform.
+    Deb(release::deb::DebArgs),
+    /// What the hostkeeper set of js-agent is given for a release, or why it sets nothing.
+    Desired(release::desired::DesiredArgs),
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -402,8 +412,8 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
         Verb::GenReport(args) => Ok(report::run(&args)?),
         Verb::ImageRecipe(args) => Ok(image::run(&args)?),
+        Verb::Channels { verb } => Ok(channels::run(verb)?.join("\n")),
         Verb::Pkg { verb } => Ok(match verb {
-            PkgVerb::CheckDeb(args) => pkg::check(&args)?,
             PkgVerb::StageMacos(args) => macpkg::stage(&args)?,
             PkgVerb::CheckMacos(args) => macpkg::check(&args)?,
         }),
@@ -411,9 +421,12 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
-            ReleaseVerb::HostkeeperPackage(args) => release::hostkeeper_package::run(&args)?,
-            ReleaseVerb::HostkeeperIndex(args) => release::hostkeeper_index::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
+            ReleaseVerb::Deb(args) => release::deb::run(&args)?,
+            ReleaseVerb::Desired(args) => release::desired::run(&args).map_err(|e| match e {
+                release::desired::Error::Usage(why) => Error::Usage(why),
+                other => Error::Desired(other),
+            })?,
         }),
     }
 }

@@ -130,12 +130,11 @@ Known limits:
 ## Not done yet
 
 - The package is a workflow artifact for seven days, not a release asset: `artifacts.yml` (which
-  `release.yml` calls) lists the release's assets by name and attests `*.tar.gz`, `*.tar.zst` and
-  the index. It no longer carries an
-  update declaration, and nothing in it moves `link/current`: the agent is updated as a
-  hostkeeper package (`hostkeeper/`, a release asset), which runs its own launchd job.
+  `release.yml` calls) lists the release's assets by name and attests `*.tar.gz` and the
+  Linux `.deb` files. It carries no update declaration, and nothing in it moves `link/current`.
+  There is no native Mac package for hostkeeper yet, so a Mac's agent is not updated by hostkeeper.
 - The update hook (`js-agent update-hook`) runs its five steps on a Mac as hostkeeper's hook, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
-  `print`) and `runtime = "native"` in the `[params]` of `hostkeeper/manifest.toml.in`, over the lease server's own-host routes
+  `print`) and `runtime = "native"` in the `[params]` a Mac's hostkeeper entry would carry, over the lease server's own-host routes
   and the agent's state root, which the params name beside the release link (`state_root`,
   `token_file`; the server comes from the flags file). The
   port has run against a fake of `launchctl` only, never against a real launchd: what

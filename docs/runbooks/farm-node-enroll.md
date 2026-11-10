@@ -1,11 +1,13 @@
 # Putting js-agent on a farm node with hostkeeper
 
-js-agent ships as a hostkeeper package named `js-agent`, for `linux-x86_64`, `linux-arm64` and
-`macos-arm64`. hostkeeper installs it under `/var/lib/hostkeeper/packages/js-agent/<version>/`,
-points `/var/lib/hostkeeper/packages/js-agent/current` at it, links the unit into the system and
-runs the agent's update hook. This runbook takes one node from nothing to a registered host. The
-package files are described in `packaging/js-agent/hostkeeper/README.md` (Linux) and
-`packaging/js-agent-macos/hostkeeper/README.md` (macOS).
+js-agent ships as a Debian package, `js-agent`, for `amd64` (`linux-x86_64`) and `arm64`
+(`linux-arm64`), in the apt repository at `https://packages.komira.ai/apt` (suites `testing` and
+`stable`). hostkeeper's `apt` installer installs it from the `stable` suite, pinned by the
+package's SHA-256, and runs the agent's update hook (`/usr/bin/js-agent update-hook`) around the
+install. This runbook takes one Linux node from nothing to a registered host. The package's files
+are described in `packaging/js-agent/deb/README.md`. There is no native package for macOS yet
+(docs/release.md, "macOS"): a Mac runs the agent from the installer package
+(`packaging/js-agent-macos/README.md`) and is not updated by hostkeeper.
 
 A package is public and the same on every host, so it carries no secret and no host setting. You
 place three files on the node yourself: the join token, the flags file and the instance file.
@@ -19,10 +21,11 @@ Examples use `js.example.com`, `node-5` and `farm`. Replace them.
 - A node with hostkeeper installed and enrolled. hostkeeper's own documents cover that: read
   "Enrolling a node" in its operations documents, and its `ctl` reference. This runbook does not
   repeat them.
-- The release version. Take it from the release's `js-agent-index.json`. The version is plain
-  `X.Y.Z`, the same one `js-agent --version` prints after the program name.
+- The release version, plain `X.Y.Z` (the release's tag without the `v`), the same one
+  `js-agent --version` prints after the program name.
 - Root on the node.
-- The release trust entry in section 9, already on the hostkeeper side.
+- The node's repository entry of the stable suite, `komira-stable` (section 9), which
+  hostkeeper's coordinator pushes to every Linux host from its registry of repositories.
 
 ## 2. Mint a one-time join token
 
@@ -47,7 +50,7 @@ Carry the file to the node by a channel you trust.
 ## 3. Place the files on the node
 
 Do this as root, before you assign the service. Create `/etc/js-agent` first if it does not exist
-(on Linux the package's tmpfiles file makes it mode 0700 when the service is installed).
+(the package's tmpfiles file makes it mode 0700 when the agent's unit starts).
 
 The token, root:root with mode 0600:
 
@@ -97,22 +100,18 @@ chown root:root /etc/js-agent/flags
 chmod 644 /etc/js-agent/flags
 ```
 
-## 4. macOS only: remove the installer package's job
+## 4. A node that ran the archive package or the setup script's unit
 
-The installer package ran the agent as the job `com.komira.js-agent`. The hostkeeper package's job
-is `js-agent`. Remove the old job before hostkeeper links the new one, or two agents would run on
-the node.
+A node that ran the agent from hostkeeper's archive package (`hostkeeper-archive`, deleted from
+hostkeeper) moves to the `.deb` on the first order of the native entry: hostkeeper's `activate`
+takes away the units and files the archive version placed, then installs the `.deb`.
 
-```
-sudo launchctl bootout system/com.komira.js-agent
-sudo rm /Library/LaunchDaemons/com.komira.js-agent.plist
-```
-
-Move the `--server` and `--pool` of the old plist into `/etc/js-agent/flags`. Keep the token file
-where section 3 puts it. The installer package's helper job and its `/usr/local/js-agent` files are
-not touched.
-
-The new job keeps running only while `/etc/js-agent/token` exists, so place the token first.
+A node set up by the held setup script (`crun_host_setup.sh`) has its own copy of the unit in
+`/etc/systemd/system`, which would override the package's in `/usr/lib/systemd/system`. Remove
+`/etc/systemd/system/js-agent-crun.service`, `/etc/systemd/system/js-agent-crun-gpu.service`,
+`/etc/tmpfiles.d/js-agent-crun.conf` and any `/etc/systemd/system/js-agent-crun.service.d`
+override that sets `ExecStart=`, and move `--server` and `--pool` into `/etc/js-agent/flags`
+(section 3), before you assign the service.
 
 ## 5. Assign the service and set the version
 
@@ -132,43 +131,53 @@ hostkeeper ctl --endpoint https://hostkeeper.example.com:9443 --ca-file ./ca.pem
     --key-sha256 KEY_SHA256 --host-id node-5 --role farm --services js-agent
 ```
 
-Then set the desired version of `js-agent` from the release index:
+The desired version of `js-agent` is set by this repository's
+`.github/workflows/hostkeeper-desired.yml` after each release that reached the stable suite, once
+the repository variable `JS_AGENT_SETS_DESIRED` is `true` (docs/release.md, "Deploying through
+hostkeeper"). To set a version by hand, rollback included, run that workflow from main with the
+version ("Run workflow"): it checks that the stable suite lists the release's two `.deb`s with the
+digests of its `SHA256SUMS` and sends the release's targets.
+
+By hand with `ctl`, the request is the version and the targets that
+`cargo xtask release desired --repo komira-ai/jobscheduler --version X.Y.Z --after-run "" --dir DIR`
+prints (`targets=...`): one `apt` entry per Linux platform, naming the repository entry
+`komira-stable`, the Debian version `X.Y.Z`, the `.deb`'s SHA-256 and the manifest (the hook
+`/usr/bin/js-agent update-hook`, its bounds, the run unit `js-agent-crun.service` and the hook's
+params):
 
 ```
 hostkeeper ctl --endpoint https://hostkeeper.example.com:9443 --ca-file ./ca.pem \
-    --token-file ./operator-token releases set-desired --service js-agent \
-    --release-index "$(cat js-agent-index.json)" --release-index-digest SHA256_OF_INDEX
+    --token-file ./operator-token releases set-desired --service js-agent --request ./request.json
 ```
 
-- `--release-index` is the text of `js-agent-index.json`, byte for byte. `--release-index-digest`
-  is its SHA-256, 64 lower-case hex characters.
-- The version itself goes in the `desired` message, which `ctl` takes only through
-  `--request <file|->` (proto3 canonical JSON). See hostkeeper's `ctl` reference for
-  `releases set-desired`.
-- hostkeeper orders each node the package for its own platform from the index.
+where `request.json` is `{"desired": {"version": "X.Y.Z"}, "targets": TARGETS}`. hostkeeper orders
+each node the entry of its own platform.
 
 hostkeeper's own documents on assignments say when an install is ordered and what holds one back.
 
 ## 6. What happens next
 
 1. At its next heartbeat, hostkeeper orders the node to install `js-agent` at the desired
-   version. It unpacks the package, points `current` at it and runs the hook's `prepare`.
+   version. It downloads the `.deb` from the stable suite, checks it against the pin, extracts it
+   into the version's directory under `/var/lib/hostkeeper/packages/js-agent/` and runs the hook's
+   `prepare` from that copy (`tree/usr/bin/js-agent`).
 2. On a first install, `prepare` checks for the join token. It defers with the reason
    `join_token_missing` unless the token file is a regular file, owned by the user running the
    hook (root), with mode 0600 or 0400. hostkeeper retries the install. Fix the file and the next
    attempt goes on. A node whose state root already holds a usable `host-credential` is not
    deferred.
-3. When `prepare` passes, hostkeeper switches `current`, runs `cutover`, which starts the agent,
-   and then `verify`.
+3. When `prepare` passes, hostkeeper installs the `.deb` with `apt-get` (the package's
+   `/usr/bin/js-agent` and its units), holds it, switches `current`, runs `cutover`, which starts
+   the agent, and then `verify`.
 4. The agent says hello to the server with the token and the instance. The server registers the
    host and answers with a host credential. The agent stores it in its state root as the file
    `host-credential`, and sends it from then on. The one-time token is retired by the server and is
    spent.
-   - State root: `/var/lib/js-agent/state` on Linux, `/var/db/js-agent/state` on macOS.
+   - State root: `/var/lib/js-agent/state`.
 
-Keep `/etc/js-agent/token`. Do not delete it. The unit and the job still pass
+Keep `/etc/js-agent/token`. Do not delete it. The unit still passes
 `--token-file /etc/js-agent/token`, the agent reads that file again at every start, and a file
-that is given and missing stops it. On macOS the job runs only while the file exists.
+that is given and missing stops it.
 
 ## 7. Check it worked
 
@@ -177,18 +186,11 @@ The host is registered. `js` has no verb that lists hosts. Read the lease server
 you set `--host-id`), `source: registered` and `state: live` with a recent heartbeat.
 `docs/runbooks/first-live-launch.md` shows what to look for.
 
-The unit is active.
-
-On Linux:
+The unit is active, and the package is the release's:
 
 ```
 systemctl status js-agent-crun.service
-```
-
-On macOS:
-
-```
-sudo launchctl print system/js-agent
+dpkg-query --show js-agent
 ```
 
 hostkeeper's view of the node and of the service:
@@ -230,11 +232,11 @@ answers `join-tokens-unsupported`.
 ### The flags file is refused
 
 The agent exits with a usage failure and names the file. Read the unit's journal
-(`journalctl -u js-agent-crun` on Linux, `/Library/Logs/js-agent` on macOS). The messages:
+(`journalctl -u js-agent-crun`). The messages:
 
 | message | fix |
 |---|---|
-| `--flags-file: given more than once` | the unit or the job names `--flags-file` twice |
+| `--flags-file: given more than once` | the unit names `--flags-file` twice |
 | `--flags-file: needs a path` | `--flags-file` is the last word with no path |
 | `--flags-file PATH: cannot be read: ...` | the file is missing or unreadable |
 | `--flags-file PATH: not a regular file` | the path is a directory, a pipe or the like |
@@ -282,18 +284,13 @@ at least the host's `scratch-default-gib` (2 GiB when the flag is not given) and
 the host reports. A pool that names `scratch-quota` without `disk_bytes` is refused when the
 server loads the file.
 
-## 9. The release trust entry
+## 9. Trust: the repository's key and the pin
 
-hostkeeper installs only what a trusted workflow attested. The channel-sync that stages
-js-agent releases needs this entry for the service `js-agent`:
-
-| key | value |
-|---|---|
-| service | `js-agent` |
-| repository | `komira-ai/jobscheduler` |
-| workflow | `.github/workflows/artifacts.yml` |
-| refs | `refs/heads/main` |
-
-This is the same entry as in `packaging/js-agent/hostkeeper/README.md`, and the same workflow path
-hostkeeper's and tierstore's packages are trusted by. It lives on the hostkeeper side, not in this
-repository.
+hostkeeper installs the `.deb` only from a suite whose `InRelease` is signed by a key in the host's
+keyring for the repository entry, and only a file whose SHA-256 is the one the order pins (the
+digest the release's `SHA256SUMS` lists, which artifacts.yml attested before the release published
+it). The repository entry is hostkeeper's configuration: its coordinator's registry entry `komira`
+(`https://packages.komira.ai/apt`, suites `testing` and `stable`, component `main`) gives each Linux
+host `komira-testing` and `komira-stable`. The release's targets name `komira-stable`. No attestation
+is checked on the host: it is checked once, where the release publishes the package
+(docs/release.md).

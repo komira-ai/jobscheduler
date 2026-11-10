@@ -18,8 +18,8 @@ import { test } from 'node:test';
 import { listFiles } from '../tools/check-dist';
 import { buildReal, copyTree, damage, SITE } from './support';
 
-/** The hosts a page may name in a URL: the project's own, GitHub, the SVG namespace. */
-const PUBLIC_HOSTS = new Set(['jobscheduler.dev', 'kbf.dev', 'github.com', 'www.w3.org']);
+/** The hosts a page may name in a URL: the project's own, its apt repository, GitHub, the SVG namespace. */
+const PUBLIC_HOSTS = new Set(['jobscheduler.dev', 'kbf.dev', 'packages.komira.ai', 'github.com', 'www.w3.org']);
 /** Placeholders and loopback the install page uses as examples. */
 const EXAMPLE_HOSTS = new Set(['host', 'localhost', '127.0.0.1']);
 /** Addresses a page may print: loopback and the documentation ranges. */

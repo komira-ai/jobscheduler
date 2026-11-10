@@ -38,10 +38,10 @@ prost.workspace = true
 prost-types.workspace = true
 # The scratch directory and the guarded server child of `site-demo`.
 js-testkit = { path = "../js-testkit" }
+# The package's `md5sums` file (`release deb`).
+md-5.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
-# `release hostkeeper-package` compresses the packages hostkeeper unpacks.
-ruzstd.workspace = true
 # The runner user's uid and gid, and `uname -m`, for `crun-tests`.
 rustix = { workspace = true, features = ["process", "system"] }
 serde.workspace = true
@@ -75,11 +75,8 @@ js-mac-session = { path = "../js-mac-session" }
 # the job service.
 protox.workspace = true
 rcgen.workspace = true
-# hostkeeper's unpacker, manifest loader, release-index parser and placer: the js-agent packages
-# and their index are read with the code a host runs (tests/hostkeeper_package).
-hostkeeper-config.workspace = true
-hostkeeper-placed.workspace = true
-hostkeeper-unpack.workspace = true
+# The YAML parser the workflow lint of the apt jobs (tests/apt_workflow) reads each workflow with.
+saphyr-parser.workspace = true
 
 [lints]
 workspace = true

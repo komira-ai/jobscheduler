@@ -39,6 +39,9 @@ hex = "0.4.3"
 # The object-store signer (js-logstore): HMAC-SHA256 of AWS Signature Version 4. Already in
 # Cargo.lock at this version through the Postgres client, so the lock gains no package.
 hmac = "0.13.0"
+# The package's `md5sums` file (xtask `release deb`). Already in Cargo.lock at this version through
+# the Postgres client, so the lock gains no package.
+md-5 = "0.11.0"
 # Bodies of the registry client (js-oci): the empty request body and the frame reader.
 http-body-util = { version = "0.1.5", default-features = false }
 # The lease server serves its listener with hyper directly (axum's own `serve` has no
@@ -109,6 +112,8 @@ ruzstd = "0.9.1"
 rustix = { version = "1.1.5", default-features = false, features = ["std", "process"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
+# The YAML parser the workflow lint of the apt jobs (crates/xtask/tests/apt_workflow) reads each workflow with.
+saphyr-parser = "0.1.0"
 # macOS only (js-mac-session): the caller's code signature against a pinned requirement.
 security-framework = { version = "3.7.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -139,14 +144,9 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 # hook contract and its conformance harness (`hostkeeper-hook`, a dev-dependency of js-agent,
 # whose tests drive `js-agent update-hook` through the harness), the daemon's step runner
 # (`hostkeeper-steps`, a dev-dependency of js-agent, whose tests run a first install of the
-# package's manifest through it), and the readers a host runs on a package, with which xtask's
-# tests unpack, load and place the js-agent packages (`hostkeeper-unpack`, `hostkeeper-config`,
-# `hostkeeper-placed`; tests/hostkeeper_package).
-hostkeeper-config = { git = "https://github.com/komira-ai/hostkeeper", rev = "cd015c39cc62c768f8c96d2771b9c077bf1a8270" }
+# package as a native entry through it).
 hostkeeper-hook = { git = "https://github.com/komira-ai/hostkeeper", rev = "cd015c39cc62c768f8c96d2771b9c077bf1a8270" }
-hostkeeper-placed = { git = "https://github.com/komira-ai/hostkeeper", rev = "cd015c39cc62c768f8c96d2771b9c077bf1a8270" }
 hostkeeper-steps = { git = "https://github.com/komira-ai/hostkeeper", rev = "cd015c39cc62c768f8c96d2771b9c077bf1a8270" }
-hostkeeper-unpack = { git = "https://github.com/komira-ai/hostkeeper", rev = "cd015c39cc62c768f8c96d2771b9c077bf1a8270" }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 webpki-roots = { version = "1.0.11", default-features = false }
 # Reads the validity of the certificate a TLS reload brings (js-lease-server); in the lock

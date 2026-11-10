@@ -104,9 +104,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 tracing-subscriber.workspace = true
 # hostkeeper's hook contract and its conformance harness (tests/agent/update_hook/conformance.rs).
 hostkeeper-hook = { workspace = true, features = ["conformance"] }
-# hostkeeper's manifest loader and its daemon's step runner: a first install of the package's own
-# manifest, run as the daemon runs it (tests/agent/update_hook/hostkeeper_runner.rs).
-hostkeeper-config.workspace = true
+# hostkeeper's daemon's step runner: a first install of the package as a native entry, run as the
+# daemon runs it (tests/agent/update_hook/hostkeeper_runner.rs).
 hostkeeper-steps.workspace = true
 
 [lints]

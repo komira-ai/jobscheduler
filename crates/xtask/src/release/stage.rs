@@ -8,8 +8,8 @@
 //! a host updater's declaration ([`DECLARATIONS`]: `js-lease-server`) also holds it as
 //! `updater.d/<binary>.toml` ([`declaration_member`]), the name kbf's release unpacker takes it
 //! by, so the updater reads the rights of a release from the release itself. The Mac archives do
-//! not, and neither does the archive of `js-agent`: the agent is updated as a hostkeeper package
-//! (`release hostkeeper-package`), which carries what the update needs.
+//! not, and neither does the archive of `js-agent`: on Linux the agent is updated by hostkeeper from
+//! its .deb (`release deb`), which carries what the update needs.
 
 use std::path::{Path, PathBuf};
 

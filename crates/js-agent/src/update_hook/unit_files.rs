@@ -3,11 +3,21 @@
 //! on a new unit layout (systemd's `Slice`, `Delegate`, `DelegateSubgroup`, `ExecStart`...) and
 //! waits for the unit's cgroup to empty before it starts.
 //!
-//! A release directory holds its unit under `units/`: `units/<unit>` for a systemd unit and
-//! `units/<unit>.plist` for a launchd job ([`Manager::file_name`]). hostkeeper links the unit
-//! of the release that runs into the system's directory, so the previous release's file is the
-//! installed unit. A previous release that carries no unit (the agent was installed some other
-//! way before) counts as a change, named [`INSTALLED_MISSING`].
+//! A release directory is read in one of two layouts, told apart by `tree/`:
+//!
+//! - with a `tree/` directory it is a native package (a `.deb` installed by hostkeeper's apt
+//!   installer, which keeps the package's files there as they are laid out on the system): the
+//!   unit is `tree/usr/lib/systemd/system/<unit>` for a systemd unit and
+//!   `tree/Library/LaunchDaemons/<unit>.plist` for a launchd job, and the agent is
+//!   `tree/usr/bin/js-agent`;
+//! - without it, it is an archive release of the earlier format: the unit is `units/<unit>` or
+//!   `units/<unit>.plist` ([`Manager::file_name`]) and the agent is `bin/js-agent`.
+//!
+//! The layouts may differ between the previous release and the staged one: the first native
+//! update of a host that ran an archive release still compares the units, each read as its own
+//! layout says. The previous release's file is the installed unit. A previous release that
+//! carries no unit (the agent was installed some other way before) counts as a change, named
+//! [`INSTALLED_MISSING`].
 //!
 //! A systemd unit is compared as the list of its assignments: the `[Section]` and `Key=value`
 //! lines, with comments, blank lines and the spacing around a key and a value taken away and a
@@ -24,8 +34,38 @@ use super::record::UnitRestart;
 /// The name the plan gives to the change when the previous release carries no unit file.
 pub const INSTALLED_MISSING: &str = "(installed unit missing)";
 
-/// The directory of a release that holds its units.
+/// The directory of an archive release that holds its units.
 const UNITS_DIR: &str = "units";
+
+/// The directory of a native package release that holds the package's files.
+const TREE_DIR: &str = "tree";
+
+/// The agent's file in an archive release.
+const ARCHIVE_AGENT: &str = "bin/js-agent";
+
+/// The agent's file in a native package release.
+const NATIVE_AGENT: &str = "tree/usr/bin/js-agent";
+
+/// The directory of a native package release that holds a systemd unit.
+const NATIVE_SYSTEMD_DIR: &str = "tree/usr/lib/systemd/system";
+
+/// The directory of a native package release that holds a launchd job.
+const NATIVE_LAUNCHD_DIR: &str = "tree/Library/LaunchDaemons";
+
+/// Whether `release` is a native package release (it holds `tree/`).
+fn is_native(release: &Path) -> bool {
+    release.join(TREE_DIR).is_dir()
+}
+
+/// The agent's file in the release directory `release`, in the layout the directory has.
+#[must_use]
+pub fn agent_in(release: &Path) -> PathBuf {
+    release.join(if is_native(release) {
+        NATIVE_AGENT
+    } else {
+        ARCHIVE_AGENT
+    })
+}
 
 /// Which unit manager runs the agent, and so what the unit file is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +77,7 @@ pub enum Manager {
 }
 
 impl Manager {
-    /// The file of `unit` in a release's `units` directory.
+    /// The file name of `unit` in a release's unit directory.
     #[must_use]
     pub fn file_name(self, unit: &str) -> String {
         match self {
@@ -46,10 +86,16 @@ impl Manager {
         }
     }
 
-    /// The path of the unit file in the release directory `release`.
+    /// The path of the unit file in the release directory `release`, in the layout the
+    /// directory has (see the module header).
     #[must_use]
     pub fn path_in(self, release: &Path, unit: &str) -> PathBuf {
-        release.join(UNITS_DIR).join(self.file_name(unit))
+        let dir = match (is_native(release), self) {
+            (false, _) => UNITS_DIR,
+            (true, Manager::Systemd) => NATIVE_SYSTEMD_DIR,
+            (true, Manager::Launchd) => NATIVE_LAUNCHD_DIR,
+        };
+        release.join(dir).join(self.file_name(unit))
     }
 }
 

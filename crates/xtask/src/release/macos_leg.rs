@@ -6,18 +6,13 @@
 //! <triple> -p <package> --bin <bin>` in `--repo-dir`; the archive's directory as `release stage`
 //! lays it down (`<out>/stage-<bin>`); the binary's minimum macOS, read from `otool -l`, which
 //! must be there and not above `--min-macos`; and `<bin> --version`, whose first line must end
-//! with the workspace version. After the last, the hostkeeper package of `js-agent`
-//! ([`super::hostkeeper_package`]) is written to `--out`. The first failure ends the run.
+//! with the workspace version. The first failure ends the run.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::hostkeeper_package::{self, MIN_HOSTKEEPER, PackageArgs};
 use super::stage::{self, StageArgs};
 use super::{Error, Version, read, workspace_version};
-
-/// The binary the hostkeeper package is made of.
-const AGENT: &str = "js-agent";
 
 /// The arguments of `release macos-leg`.
 #[derive(clap::Args)]
@@ -25,13 +20,13 @@ pub struct LegArgs {
     /// The target to build for (`aarch64-apple-darwin`).
     #[arg(long)]
     pub target: String,
-    /// Space-separated `<package>:<bin>` pairs, built in this order; one is `js-agent`.
+    /// Space-separated `<package>:<bin>` pairs, built in this order.
     #[arg(long)]
     pub builds: String,
     /// The oldest macOS the binaries may need, `MAJOR.MINOR`: a higher `minos` fails.
     #[arg(long)]
     pub min_macos: String,
-    /// The directory the stage directories and the hostkeeper package are made in.
+    /// The directory the stage directories are made in.
     #[arg(long)]
     pub out: PathBuf,
     /// The checkout that is built; the workspace version is read from its `Cargo.toml`.
@@ -183,21 +178,17 @@ fn check(
 
 /// Runs `release macos-leg`: one line per check passed.
 ///
-/// The entries, the agent among them, the floor and the workspace version are judged before
+/// The entries, the floor and the workspace version are judged before
 /// anything is built.
 ///
 /// # Errors
-/// [`Error::BadBuild`], [`Error::NoAgentBuild`], [`Error::BadMacosVersion`], [`Error::Io`] or
+/// [`Error::BadBuild`], [`Error::BadMacosVersion`], [`Error::Io`] or
 /// [`Error::Manifest`] for the inputs; [`Error::Spawn`] and [`Error::BuildFailed`] for the
-/// build; whatever `release stage` and `release hostkeeper-package` fail with;
+/// build; whatever `release stage` fails with;
 /// [`Error::Failed`] and [`Error::Spawn`] for `otool` and the binary; [`Error::NoMinos`],
 /// [`Error::MinosTooHigh`], [`Error::WrongVersionLine`].
 pub fn run(a: &LegArgs) -> Result<String, Error> {
     let builds = parse_builds(&a.builds)?;
-    let agent = builds
-        .iter()
-        .find(|b| b.bin == AGENT)
-        .ok_or(Error::NoAgentBuild)?;
     let floor = dotted(&a.min_macos)?;
     let version = workspace_version(&read(&a.repo_dir.join("Cargo.toml"))?)?;
     let binary_of = |b: &Build<'_>| {
@@ -220,12 +211,5 @@ pub fn run(a: &LegArgs) -> Result<String, Error> {
         })?);
         lines.extend(check(a, b, &binary_of(b), &floor, version)?);
     }
-    lines.push(hostkeeper_package::run(&PackageArgs {
-        binary: binary_of(agent),
-        target: a.target.clone(),
-        version: version.to_string(),
-        min_hostkeeper: MIN_HOSTKEEPER.to_owned(),
-        out: a.out.clone(),
-    })?);
     Ok(lines.join("\n"))
 }
