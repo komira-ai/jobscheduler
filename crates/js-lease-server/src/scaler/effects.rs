@@ -3,7 +3,7 @@
 //! tick) are tested with a fake that records every call and the real thing is tested
 //! through a server.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_elastic::{
@@ -11,8 +11,9 @@ use js_elastic::{
 };
 use js_jobs::{AllocationRecord, JobId, JobRecord, JobStoreError};
 use js_registry::{Busy, HostView};
-use js_scaler::{AcquirePlan, Health, Records};
+use js_scaler::{AcquirePlan, Health, Millis, Records};
 use js_sched::queue_status::Outcome;
+use js_types::ProviderId;
 
 /// What the scaler reads of the job tables at a tick: the demand and the hosts in use.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -74,17 +75,31 @@ pub trait Effects: Send + Sync {
     /// the checks pass, and only from these offers.
     fn checks(&self) -> (Health, Vec<Offer>);
 
-    /// The machines the provider lists as ours.
+    /// The machines the pool's providers list as ours, every provider's.
     ///
     /// # Errors
     ///
     /// [`ProviderError`] when the list cannot be had whole; it is never read as empty.
     fn list(&self) -> Result<Vec<Held>, ProviderError>;
 
-    /// The acquire ids the provider holds an unresolved call for.
+    /// The provider that listed or launched each machine of a provider after the pool's
+    /// first, by the provider's id for the machine ([`js_scaler::PoolInput::listed_by`]), as
+    /// of the last [`Effects::list`]. None by default: the pool has one provider.
+    fn listed_by(&self) -> BTreeMap<String, ProviderId> {
+        BTreeMap::new()
+    }
+
+    /// The acquire ids the pool's providers hold an unresolved call for.
     fn unresolved(&self) -> Vec<AcquireId>;
 
-    /// How many fetches of the provider's catalog have completed in this process
+    /// The offers each of the pool's providers after the first may launch at `now`, by
+    /// provider ([`js_scaler::PoolInput::later_offers`]); the first's are those of
+    /// [`Effects::checks`]. None by default: the pool has one provider.
+    fn later_offers(&self, _now: Millis) -> BTreeMap<ProviderId, Vec<Offer>> {
+        BTreeMap::new()
+    }
+
+    /// How many fetches of the pool's providers' catalogs have completed in this process
     /// ([`crate::Catalogs::fetches`]). A count that moved since the last tick tells the
     /// scaler a catalog refresh completed, which ends the `acquire_retry` wait of a request
     /// every offer was refused for. Zero by default: no catalog is fetched.
@@ -114,7 +129,8 @@ pub trait Effects: Send + Sync {
     /// when it could not be made.
     fn mint(&self, host: &str, valid_for: Duration) -> Option<Secret>;
 
-    /// Launches the machine `plan` describes with the join token `token`.
+    /// Launches the machine `plan` describes with the join token `token`, through the
+    /// provider it names.
     fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired;
 
     /// Terminates the machine `id` and reads it back.

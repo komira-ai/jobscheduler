@@ -428,7 +428,7 @@ message naming pool and field:
 | `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
 | `launch = "live"` on a pool whose provider cannot be built | `pool "gpu": launch: ...` |
 | two pools with one name; a class that books part of a host (first slice) | `pool "b": name: also the name of an earlier pool` |
-| more than one registering pool: the file is valid, and the server does not start on it | `pool "b": several elastic pools are parsed; running them needs the ordered walk of design 5.6` |
+| more than one registering pool: the file is valid, and the server does not start on it | `pool "b": several elastic pools are parsed; this version runs one, as the server keeps one registry of agents` |
 | `exec` not `container` or `sandbox-exec`; `sandbox-exec` with an elastic kind that cannot launch macOS | `pool "mac": exec: ...` |
 | an elastic pool and no `server.agent_listen`; `agent_listen` equal to `listen` | `server.agent_listen: required with an elastic pool; must differ from server.listen` |
 | `advertise_url` that is `http://` and not loopback, whenever any elastic pool exists (the agent refuses it, `crates/js-agent/src/cli.rs`; a pool that passed start and then failed every boot would bill 15 minutes per launch with only "booting, no hello" to show) | `server.advertise_url: http:// is refused by agents; use https (or loopback)` |

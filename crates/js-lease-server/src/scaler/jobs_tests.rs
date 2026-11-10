@@ -300,6 +300,7 @@ fn record(name: &str, phase: Phase) -> Record {
         last_clean: None,
         seen_live: true,
         ends_at: None,
+        provider: None,
     }
 }
 

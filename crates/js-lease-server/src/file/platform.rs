@@ -17,8 +17,9 @@
 //!
 //! Everything downstream reads [`Resolved`]; the job pass places on the hosts of a pool's
 //! machine providers in the order its platforms, and each platform's `machine_providers`,
-//! list them (`crate::sched::rank::order_of`), in any order. A pool reaches exactly one
-//! launching machine provider.
+//! list them (`crate::sched::rank::order_of`), in any order. A pool reaches at least one
+//! launching machine provider, and may reach several: pass 2 asks them for a machine in the
+//! same order (design 5.6, step 5).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -65,8 +66,8 @@ const HOSTLESS_POOL_KEYS: &[&str] = &["name", "platforms", "path_grace"];
 
 const DESCRIBES_HOSTS: &str = "describes hosts; the pool names only hostless platforms";
 
-/// Why a pool that reaches no launching machine provider, or more than one, is refused.
-const ONE_LAUNCHING: &str = "a pool's platforms reach exactly one machine provider that launches in this version; a pool of registered hosts alone is kind = \"joined\"";
+/// Why a pool that reaches no launching machine provider is refused.
+const NO_LAUNCHING: &str = "a pool's platforms reach no machine provider that launches; a pool of registered hosts alone is kind = \"joined\"";
 
 const NAME_RULE: &str = "must be 1 to 63 characters of [a-z0-9._-]";
 
@@ -312,21 +313,30 @@ impl Resolved {
         Ok(reach)
     }
 
-    /// The one launching machine provider `reach` names, refused unless it is exactly one.
+    /// The launching machine providers `reach` names, in its order, refused when there are
+    /// none.
     pub(super) fn launching(
         &self,
         s: &Section,
         reach: &Reach,
-    ) -> Result<&ResolvedMachineProvider, StartupError> {
-        let mut launching = reach
+    ) -> Result<Vec<&ResolvedMachineProvider>, StartupError> {
+        let launching: Vec<&ResolvedMachineProvider> = reach
             .providers
             .iter()
             .filter_map(|name| self.provider(name))
-            .filter(|provider| provider.launches());
-        match (launching.next(), launching.next()) {
-            (Some(provider), None) => Ok(provider),
-            _ => Err(s.fail("platforms", ONE_LAUNCHING)),
+            .filter(|provider| provider.launches())
+            .collect();
+        match launching.is_empty() {
+            true => Err(s.fail("platforms", NO_LAUNCHING)),
+            false => Ok(launching),
         }
+    }
+
+    /// The names of the launching machine providers among `reach`, in its order.
+    pub(super) fn launching_names(&self, reach: &[String]) -> Vec<String> {
+        let providers = reach.iter().filter_map(|name| self.provider(name));
+        let launching = providers.filter(|provider| provider.launches());
+        launching.map(|provider| provider.name.clone()).collect()
     }
 
     /// The pool's `provider_limits` table, checked against what `reach` names.

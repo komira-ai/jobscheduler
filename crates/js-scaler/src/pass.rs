@@ -254,13 +254,14 @@ impl<'a> Pass<'a> {
         let record = &self.records.instances[i];
         if record.phase == Phase::Launching {
             let offer = record.offer.to_offer(record.price_cents_per_hour);
-            let settings = &pool.settings;
+            // The answer is charged to the provider the record was launched by.
+            let provider = pool.settings.provider_of(record.provider_id().as_ref());
             let refused = self.memory.answered(
                 &result.acquire,
-                (&settings.provider, &offer),
+                (&provider.provider, &offer),
                 &result.answer,
                 Instant::from_millis(self.now.as_millis()),
-                settings.quota_backoff,
+                provider.quota_backoff,
             );
             self.refusals.extend(refused);
         }
@@ -494,8 +495,8 @@ impl<'a> Pass<'a> {
         self.records.instances[i].gone_at = Some(self.now);
     }
 
-    /// A listed machine no record knows becomes an orphan: counted at its offer's
-    /// current price (or the whole hourly cap when the catalog has no price for it),
+    /// A listed machine no record knows becomes an orphan of the provider that listed it
+    /// ([`PoolInput::listed_by`]): counted at its offer's current price (or the whole hourly cap when the catalog has no price for it),
     /// reported and left alone. A record that is gone or was refused does not know it: a
     /// machine such a record described, listed running, is counted again as a new orphan
     /// and the old record keeps the time it was billed.
@@ -511,8 +512,11 @@ impl<'a> Pass<'a> {
             .all(|same| same)
         });
         if [!known, !is_dead(&held.status)].into_iter().all(|ok| ok) {
+            // The orphan is the provider's that listed it, and priced from that provider's
+            // offers; a pool of several providers names it on the record.
+            let provider = pool.listed_by.get(&held.id.0).unwrap_or(&settings.provider);
             let offer = pool
-                .offers
+                .offers_of(Some(provider))
                 .iter()
                 .filter(|each| each.id == held.offer)
                 .max_by_key(|each| each.zone == held.zone);
@@ -544,6 +548,7 @@ impl<'a> Pass<'a> {
                 last_clean: None,
                 seen_live: false,
                 ends_at: block::end_of(held),
+                provider: settings.several().then(|| provider.as_str().to_owned()),
             });
         }
     }
@@ -587,7 +592,8 @@ impl<'a> Pass<'a> {
     ///   mismatch is [`Pass::on_mismatch`].
     fn on_hello(&mut self, pool: &PoolInput, i: usize, host: &HostFacts) {
         let record = &self.records.instances[i];
-        let tolerance = pool.settings.size_tolerance_percent;
+        let provider = pool.settings.provider_of(record.provider_id().as_ref());
+        let tolerance = provider.size_tolerance_percent;
         let verdict = match (host.shape.as_ref(), record.offer.is_recorded()) {
             (None, _) => Verdict::Match,
             (Some(_), false) => {
@@ -620,11 +626,12 @@ impl<'a> Pass<'a> {
         // state machine, so the release always starts.
         self.start_release(i);
         let record = &self.records.instances[i];
+        let provider = settings.provider_of(record.provider_id().as_ref());
         let entry = OfferCooldown {
-            provider: settings.provider.as_str().to_owned(),
+            provider: provider.provider.as_str().to_owned(),
             offer: record.offer.id.clone(),
             zone: record.offer.zone.clone(),
-            until: self.now.plus(settings.offer_cooldown),
+            until: self.now.plus(provider.offer_cooldown),
             pool: record.pool.clone(),
             host: record.name.clone(),
             failed,

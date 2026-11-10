@@ -33,6 +33,7 @@ mod config_logs;
 mod config_one_file;
 mod config_platform;
 mod config_pool_refusals;
+mod config_providers;
 mod config_refusals;
 mod config_serve;
 mod config_support;

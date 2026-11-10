@@ -203,6 +203,7 @@ fn plan() -> (AcquirePlan, HostName) {
         acquire,
         attempt: 0,
         pool: "burst".to_owned(),
+        provider: js_scaler::UNNAMED_PROVIDER,
         offer: offer(),
         lifetime: None,
     };

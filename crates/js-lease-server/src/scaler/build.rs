@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_registry::{Registry, SessionSource, WholeNodeConfig};
-use js_scaler::{LaunchMode, Settings};
+use js_scaler::{LaunchMode, ProviderSettings, Settings};
 use js_types::ExecMode;
 
 use super::kept::{self, ScalerKeeper};
@@ -17,7 +17,7 @@ use crate::catalogs::Catalogs;
 use crate::checks::Health;
 use crate::clock::SharedClock;
 use crate::error::StartupError;
-use crate::file::{ElasticPlan, Launch};
+use crate::file::{ElasticPlan, Launch, LaunchingProvider};
 use crate::network::{DefaultMode, NetworkError, NetworkMode};
 use crate::store::ServerStore;
 
@@ -111,21 +111,41 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
     settings.max_lease_wall = plan.max_lease_wall;
     // A whole-node lease's wall time starts after the pool's prepare timeout.
     settings.prepare_timeout = Duration::from_millis(whole.prepare_timeout_ms);
-    // Pass 2 of placement (design 5.6, step 5) reads the pool's one launching provider:
-    // its id, its share of the pool and its `provider_limits`, as admission reads them.
-    settings.provider = plan.provider.id();
-    settings.provider_share = Some(plan.share);
+    // Pass 2 of placement (design 5.6, step 5) reads each launching provider of the pool, in
+    // its order: its id, its share of the pool and its `provider_limits`, as admission reads
+    // them, and the check of a machine's hello against its offer (design 5.6.1, step 6) how
+    // far below the offer its sizes may be and how long a mismatched offer cools down.
+    let mine = provider_settings(plan.lead());
+    settings.provider = mine.provider;
+    settings.provider_share = mine.share;
+    settings.allowed_instance_types = mine.allowed_instance_types;
+    settings.max_price_cents_per_hour = mine.max_price_cents_per_hour;
+    settings.quota_backoff = mine.quota_backoff;
+    settings.size_tolerance_percent = mine.size_tolerance_percent;
+    settings.offer_cooldown = mine.offer_cooldown;
+    let later = plan.providers.iter().skip(1);
+    settings.later = later.map(provider_settings).collect();
+    // A request every provider refused is asked again once the soonest of their
+    // `acquire_retry` has passed.
+    let retry = plan
+        .providers
+        .iter()
+        .map(|each| each.failover.acquire_retry);
+    settings.acquire_retry = retry.min().unwrap_or(settings.acquire_retry);
     settings
-        .allowed_instance_types
-        .clone_from(&plan.limits.allowed_instance_types);
-    settings.max_price_cents_per_hour = plan.limits.max_price_cents_per_hour;
-    settings.quota_backoff = plan.failover.quota_backoff;
-    settings.acquire_retry = plan.failover.acquire_retry;
-    // The check of a machine's hello against its offer (design 5.6.1, step 6): how far below
-    // the offer its sizes may be, and how long a mismatched offer cools down.
-    settings.size_tolerance_percent = plan.size_tolerance_percent;
-    settings.offer_cooldown = plan.offer_cooldown;
-    settings
+}
+
+/// What pass 2 reads of the launching provider `each`.
+fn provider_settings(each: &LaunchingProvider) -> ProviderSettings {
+    ProviderSettings {
+        share: Some(each.share),
+        allowed_instance_types: each.limits.allowed_instance_types.clone(),
+        max_price_cents_per_hour: each.limits.max_price_cents_per_hour,
+        quota_backoff: each.failover.quota_backoff,
+        size_tolerance_percent: each.size_tolerance_percent,
+        offer_cooldown: each.offer_cooldown,
+        ..ProviderSettings::new(each.provider.id(), &each.kind)
+    }
 }
 
 /// The scaler of `plan`, with the records of an earlier run read back, every machine they
@@ -169,18 +189,29 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
     parts.catalogs.hold(&records.offer_cooldowns());
     let mode = network_mode(parts.mode, plan)?;
     let url = parts.advertise_url.unwrap_or_default();
+    let providers: Vec<_> = plan
+        .providers
+        .iter()
+        .map(|each| Arc::clone(&each.provider))
+        .collect();
     let launcher = Launcher::new(
-        Arc::clone(&plan.provider),
+        Arc::clone(&plan.lead().provider),
         mode,
         plan.scheduler.clone(),
         url.to_owned(),
         plan.agent.clone(),
-    )
-    .with_catalogs(parts.catalogs);
+    );
+    let launcher = providers
+        .iter()
+        .skip(1)
+        .fold(launcher, |launcher, each| {
+            launcher.with_provider(Arc::clone(each))
+        })
+        .with_catalogs(parts.catalogs);
     let registry = parts.agents.registry.clone();
     let live = Live::new(
         (parts.agents, plan.id.clone(), plan.scheduler.clone()),
-        Arc::clone(&plan.provider),
+        providers,
         launcher,
         (kept, parts.health),
         plan.floor_demand.clone(),

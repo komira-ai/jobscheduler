@@ -154,7 +154,7 @@ impl Pool {
             max_instances: plan.max_instances,
             max_spend_per_hour_cents: plan.max_spend_per_hour_cents,
             health: Arc::new(Mutex::new(Health::default())),
-            provider: plan.provider.clone(),
+            provider: plan.lead().provider.clone(),
             floor: plan.floor.clone(),
             floor_demand: plan.floor_demand.clone(),
             memory: plan.memory,

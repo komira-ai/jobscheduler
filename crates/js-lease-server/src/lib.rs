@@ -226,8 +226,8 @@
 //! = ... }`. Any number of elastic and joined pools may be declared, each with its own
 //! `join_token_file`, but this version starts only on a file with at most one pool that
 //! registers agents (an elastic or a joined pool): with more it refuses to start, naming the
-//! second, `several elastic pools are parsed; running them needs the ordered walk of design
-//! 5.6` ([`Config::resolve_file`] still reads such a file). At most one pool whose
+//! second, `several elastic pools are parsed; this version runs one, as the server keeps one
+//! registry of agents` ([`Config::resolve_file`] still reads such a file). At most one pool whose
 //! provider is the agentless `static` kind is served. That kind is deprecated: the
 //! `static` machine provider below is a different thing (hosts that run `js-agent` and
 //! register themselves), and a later version removes the agentless kind.
@@ -287,7 +287,13 @@
 //! provider in the order the pool lists its platforms and each platform its
 //! `machine_providers` (any order, a launching provider before `static` included), and only
 //! when none of an earlier provider can take it on one of a later provider; a pool's
-//! platforms must reach exactly one machine provider that launches. `max_queue_wait`, `start_timeout`
+//! platforms reach at least one machine provider that launches, and may reach several: a
+//! launch is asked of the first that has a usable offer and room under its share, a
+//! `capacity` refusal falls through to its other offers and then to the next provider, and a
+//! request every provider refused waits the soonest `acquire_retry` of them (design 5.6,
+//! step 5). Two machine providers of one kind (one provider id) in one pool are refused.
+//! A pool's health is its first launching provider's checks, and the scaler reads that
+//! provider's notices; a later provider's offers are its cached catalog. `max_queue_wait`, `start_timeout`
 //! and `path_grace` (each a positive duration) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"

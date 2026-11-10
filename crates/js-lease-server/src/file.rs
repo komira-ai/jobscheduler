@@ -16,10 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_elastic::{Artifact, CapacityProvider, Demand, SchedulerId};
+use js_elastic::{Artifact, Demand, SchedulerId};
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_scaler::{Budgets, Millis};
-use js_sched::admission_ever::PoolLimits;
 use js_types::Clock;
 use js_types::{
     Admission, ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, ProviderId,
@@ -41,6 +40,7 @@ mod brake;
 mod budget;
 mod clients;
 mod joined;
+mod launching;
 mod lifetime;
 mod limits;
 mod logs;
@@ -52,7 +52,8 @@ mod server;
 
 pub use brake::BrakePlan;
 pub use joined::JoinedPool;
-use limits::Failover;
+pub(crate) use launching::LaunchingProvider;
+use launching::{distinct, least_floor};
 pub use limits::ProviderLimits;
 pub use logs::{AccessKey, LogsConfig, Minting, ObjectStoreLogs};
 use network::read_network;
@@ -167,7 +168,7 @@ impl NetworkPlan {
 pub struct ElasticPlan {
     /// The pool's name.
     pub name: String,
-    /// The provider kind the pool names, such as `lambdalabs`.
+    /// The provider kind of the pool's first launching provider, such as `lambdalabs`.
     pub kind: String,
     /// The least the pool's sizes bring, as far as the kind knows it offline.
     pub floor: Floor,
@@ -224,19 +225,10 @@ pub struct ElasticPlan {
     pub scheduler: SchedulerId,
     /// The pool's name as the registry knows it.
     pub(crate) id: ProviderId,
-    pub(crate) provider: Arc<dyn CapacityProvider>,
-    /// How many machines the provider may hold for the pool (its or the pool's `max_machines`).
-    pub(crate) share: u32,
-    /// The pool's `provider_limits` on the provider, as admission reads them.
-    pub(crate) limits: PoolLimits,
-    /// Pass 2's failover timing: its `provider_limits` `quota_backoff` and `acquire_retry`.
-    pub(crate) failover: Failover,
-    /// How long the provider's cached catalog is used: its `provider_limits` `catalog_refresh`.
-    pub(crate) catalog_refresh: Duration,
-    /// How long one of the provider's offers cools down: its `provider_limits` `offer_cooldown`.
-    pub(crate) offer_cooldown: Duration,
-    /// How far below its offer a hello may be: its `provider_limits` `size_tolerance_percent`.
-    pub(crate) size_tolerance_percent: u8,
+    /// The machine providers the pool launches with, in the order pass 2 walks them
+    /// (design 5.6, step 5): the one its `provider` table names, or each launching machine
+    /// provider its platforms reach, in the order they list them. Never empty.
+    pub(crate) providers: Vec<LaunchingProvider>,
 }
 
 impl ElasticPlan {
@@ -244,11 +236,6 @@ impl ElasticPlan {
     /// one thing that builds the mode from it (the credential in it cannot be copied).
     pub(crate) fn take_network(&mut self) -> NetworkPlan {
         std::mem::replace(&mut self.network, NetworkPlan::Default)
-    }
-
-    /// The provider the pool launches with.
-    pub fn provider(&self) -> &dyn CapacityProvider {
-        self.provider.as_ref()
     }
 }
 
@@ -291,27 +278,6 @@ pub(crate) struct Registering {
     /// The pool's `max_queue_wait` and `start_timeout`: an elastic pool's settings, and the
     /// defaults for a joined pool, which has no keys for them.
     pub(crate) job_limits: JobLimits,
-}
-
-impl Registering {
-    /// Gives the launching side the share, the limits admission reads, the catalog's refresh
-    /// and cool-down and the hello's size tolerance, from the pool's `provider_limits` (`limits`:
-    /// one launching provider's or none, a limit for any other is refused) and its `max_machines`.
-    fn admit(&mut self, limits: &BTreeMap<String, ProviderLimits>, max_machines: Option<u64>) {
-        let limit = limits.values().next().cloned().unwrap_or_default();
-        let share = limit.max_machines.or(max_machines).unwrap_or_default();
-        self.plan.iter_mut().for_each(|plan| {
-            plan.share = u32::try_from(share).unwrap_or(u32::MAX);
-            plan.limits = PoolLimits {
-                allowed_instance_types: limit.allowed_instance_types.clone(),
-                max_price_cents_per_hour: limit.max_price_cents_per_hour,
-            };
-            plan.failover = limit.failover();
-            plan.catalog_refresh = limit.catalog_refresh;
-            plan.offer_cooldown = limit.offer_cooldown;
-            plan.size_tolerance_percent = limit.size_tolerance_percent;
-        });
-    }
 }
 
 /// The pools of the file, as the sources of hosts they make.
@@ -471,12 +437,10 @@ fn unrunnable(registering: &[(String, Box<Registering>)]) -> Option<StartupError
 }
 
 /// Why a file with two elastic pools does not start.
-const SEVERAL_ELASTIC: &str =
-    "several elastic pools are parsed; running them needs the ordered walk of design 5.6";
+const SEVERAL_ELASTIC: &str = "several elastic pools are parsed; this version runs one, as the server keeps one registry of agents";
 
 /// Why a file with two pools that register agents, not both elastic, does not start.
-const SEVERAL_REGISTERING: &str =
-    "several pools register agents; running them needs the ordered walk of design 5.6";
+const SEVERAL_REGISTERING: &str = "several pools register agents; this version runs one, as the server keeps one registry of agents";
 
 /// A pool of the file, built.
 struct Read {
@@ -626,9 +590,9 @@ fn read_pool(
         (Launch::Live, Some(until)) if now >= until => Launch::Plan,
         (launch, _) => launch,
     };
-    // The provider table to build: the pool's own, or the one launching machine provider
-    // its platforms reach.
-    let (kind, p) = match (s.table("provider")?, &reach) {
+    // The provider tables to build: the pool's own, or each launching machine provider its
+    // platforms reach, in their order.
+    let tables = match (s.table("provider")?, &reach) {
         (Some(_), Some(_)) => {
             let reason = "and platforms both say where the pool's hosts come from; give one";
             return Err(s.fail("provider", reason));
@@ -636,82 +600,95 @@ fn read_pool(
         (None, None) => return Err(s.fail("provider", "required")),
         (Some(provider), None) => {
             let mut p = Section::open(provider, format!("pool {name:?}: provider."));
-            (p.required_string("kind")?, p)
+            vec![(p.required_string("kind")?, p)]
         }
         (None, Some(reach)) => {
             let launching = resolved.launching(&s, reach)?;
-            let head = format!("machine_provider {:?}: ", launching.name);
-            let p = Section::open(launching.table().clone(), head);
-            (launching.kind.clone(), p)
-        }
-    };
-    let built = {
-        let ctx = BuildCtx {
-            pool: &name,
-            class: &class,
-            memory_percent,
-            clock: ld.clock.clone(),
-            files: ld.files,
-            scheduler,
-            max_instances: keys.max_instances.unwrap_or_default(),
-            launch,
-        };
-        ld.kinds.build(&kind, &p.map, &ctx)
-    };
-    let built = match built {
-        Ok(built) => built,
-        Err(err) => return Err(p.fail(&err.field, &err.reason)),
-    };
-    let pool = match built {
-        Built::Static(_) if reach.is_some() => {
-            let reason = "builds a pool of listed hosts, not a machine provider";
-            return Err(p.fail("kind", reason));
-        }
-        Built::Static(source) => {
-            if let Some(key) = keys.first_given() {
-                return Err(s.fail(key, "only for an elastic pool"));
-            }
-            if launch == Launch::Live {
-                let reason = "live needs an elastic provider; this kind launches nothing";
-                return Err(s.fail("launch", reason));
-            }
-            Pool::Static(source)
-        }
-        Built::Elastic(built) => {
-            let limits = keys.provider_limits.take();
-            let elastic = Elastic {
-                s: &s,
-                name: &name,
-                id,
-                class,
-                memory_percent: memory_percent.unwrap_or_default(),
-                keys,
-                launch,
-                kind: &kind,
-                scheduler,
-                max_lease_wall,
-                budgets,
-                path_grace: settings.path_grace,
-            };
-            let mut registering = elastic.finish(built, client)?;
-            registering.job_limits = JobLimits::of(&settings);
-            let reach = match reach {
-                Some(reach) => reach,
-                None => resolved.shorthand(&name, &kind, &p.map),
-            };
-            let provider_limits =
-                resolved.limits(limits, &s.head, &reach.providers, max_instances)?;
-            registering.admit(&provider_limits, max_instances);
-            resolved.pools.push(ResolvedPool {
-                name: name.clone(),
-                platforms: reach.platforms,
-                max_machines: max_instances,
-                settings,
-                provider_limits,
+            let tables = launching.into_iter().map(|launching| {
+                let head = format!("machine_provider {:?}: ", launching.name);
+                let p = Section::open(launching.table().clone(), head);
+                (launching.kind.clone(), p)
             });
-            Pool::Elastic(Box::new(registering))
+            tables.collect()
         }
     };
+    let ctx = BuildCtx {
+        pool: &name,
+        class: &class,
+        memory_percent,
+        clock: ld.clock.clone(),
+        files: ld.files,
+        scheduler,
+        max_instances: keys.max_instances.unwrap_or_default(),
+        launch,
+    };
+    let mut builts = Vec::new();
+    for (kind, p) in tables {
+        let built = match ld.kinds.build(&kind, &p.map, &ctx) {
+            Ok(built) => built,
+            Err(err) => return Err(p.fail(&err.field, &err.reason)),
+        };
+        match built {
+            Built::Static(_) if reach.is_some() => {
+                let reason = "builds a pool of listed hosts, not a machine provider";
+                return Err(p.fail("kind", reason));
+            }
+            Built::Static(source) => {
+                if let Some(key) = keys.first_given() {
+                    return Err(s.fail(key, "only for an elastic pool"));
+                }
+                if launch == Launch::Live {
+                    let reason = "live needs an elastic provider; this kind launches nothing";
+                    return Err(s.fail("launch", reason));
+                }
+                let pool = Pool::Static(source);
+                return Ok(Read { name, pool });
+            }
+            Built::Elastic(built) => {
+                distinct(&builts, &built, &p)?;
+                builts.push((kind, built, p));
+            }
+        }
+    }
+    let limits = keys.provider_limits.take();
+    let elastic = Elastic {
+        s: &s,
+        name: &name,
+        id,
+        class,
+        memory_percent: memory_percent.unwrap_or_default(),
+        keys,
+        launch,
+        scheduler,
+        max_lease_wall,
+        budgets,
+        path_grace: settings.path_grace,
+    };
+    // A pool that names its provider directly has the one table it names.
+    let table = builts
+        .first()
+        .map(|(kind, _, p)| (kind.clone(), p.map.clone()));
+    let built = builts.into_iter().map(|(kind, built, _)| (kind, built));
+    let mut registering = elastic.finish(built.collect(), client)?;
+    registering.job_limits = JobLimits::of(&settings);
+    let reach = match (reach, table) {
+        (Some(reach), _) => reach,
+        (None, table) => {
+            let (kind, table) = table.unwrap_or_default();
+            resolved.shorthand(&name, &kind, &table)
+        }
+    };
+    let provider_limits = resolved.limits(limits, &s.head, &reach.providers, max_instances)?;
+    let names = resolved.launching_names(&reach.providers);
+    registering.admit(&names, &provider_limits, max_instances);
+    resolved.pools.push(ResolvedPool {
+        name: name.clone(),
+        platforms: reach.platforms,
+        max_machines: max_instances,
+        settings,
+        provider_limits,
+    });
+    let pool = Pool::Elastic(Box::new(registering));
     Ok(Read { name, pool })
 }
 
@@ -739,7 +716,6 @@ struct Elastic<'a> {
     memory_percent: MemoryPercent,
     keys: ElasticKeys,
     launch: Launch,
-    kind: &'a str,
     scheduler: &'a SchedulerId,
     max_lease_wall: Option<Duration>,
     budgets: &'a Budgets,
@@ -749,9 +725,11 @@ struct Elastic<'a> {
 }
 
 impl Elastic<'_> {
+    /// The registering pool of the providers `built`, each with its kind, in the order the
+    /// pool walks them; never empty.
     fn finish(
         self,
-        built: ElasticBuilt,
+        built: Vec<(String, ElasticBuilt)>,
         client: &LiveClients,
     ) -> Result<Registering, StartupError> {
         let Self {
@@ -762,12 +740,15 @@ impl Elastic<'_> {
             memory_percent,
             keys,
             launch,
-            kind,
             scheduler,
             max_lease_wall,
             budgets,
             path_grace,
         } = self;
+        // The pool's floor is the least every provider's hosts bring; its hosts cost money
+        // idle when any provider's do.
+        let floor = least_floor(built.iter().map(|(_, each)| &each.floor));
+        let idle_costs = built.iter().any(|(_, each)| each.idle_costs);
         let max_instances = require(s, keys.cap_key, keys.max_instances)?;
         if max_instances == 0 {
             return Err(s.fail(keys.cap_key, "must be at least 1"));
@@ -789,7 +770,7 @@ impl Elastic<'_> {
             min_host_lifetime: keys.min_host_lifetime,
         };
         let brake = keys.brake.check(s)?;
-        let accelerators = built.floor.gpus > 0 || built.idle_costs;
+        let accelerators = floor.gpus > 0 || idle_costs;
         let (max_age, min_host_lifetime) =
             lifetime::check(s, &given, (accelerators, boot_timeout, max_lease_wall))?;
         let exec = match keys.exec.as_deref().unwrap_or("container") {
@@ -799,12 +780,16 @@ impl Elastic<'_> {
                 Err(_) => return Err(s.fail("exec", "must be container, sandbox-exec or none")),
             },
         };
-        match exec {
-            Some(mode) if !built.exec.contains(&mode) => {
-                let reason = format!("{mode} hosts cannot be launched by provider kind {kind:?}");
-                return Err(s.fail("exec", &reason));
+        // Every provider must launch hosts of the pool's mode.
+        for (kind, each) in &built {
+            match exec {
+                Some(mode) if !each.exec.contains(&mode) => {
+                    let reason =
+                        format!("{mode} hosts cannot be launched by provider kind {kind:?}");
+                    return Err(s.fail("exec", &reason));
+                }
+                _ => {}
             }
-            _ => {}
         }
         let network = read_network(keys.network, format!("{}network.", s.head))?;
         let agent = match keys.agent {
@@ -829,16 +814,12 @@ impl Elastic<'_> {
             },
             None => AgentTokens::none(client),
         };
-        let gpu_class = built.floor.gpu_class.as_ref().map(ToString::to_string);
-        let resources = match Resources::new(
-            FLOOR_CPU_MILLIS,
-            FLOOR_MEMORY_BYTES,
-            built.floor.gpus,
-            gpu_class,
-        ) {
-            Ok(resources) => resources,
-            Err(err) => return Err(s.fail("provider", &err.to_string())),
-        };
+        let gpu_class = floor.gpu_class.as_ref().map(ToString::to_string);
+        let resources =
+            match Resources::new(FLOOR_CPU_MILLIS, FLOOR_MEMORY_BYTES, floor.gpus, gpu_class) {
+                Ok(resources) => resources,
+                Err(err) => return Err(s.fail("provider", &err.to_string())),
+            };
         let floor_demand = Demand {
             resources: resources.clone(),
             disk_bytes: None,
@@ -846,7 +827,7 @@ impl Elastic<'_> {
             arch: None,
             isa_level: None,
             exec,
-            accelerator: built.floor.need(),
+            accelerator: floor.need(),
             network: Default::default(),
             host_ports: Vec::new(),
         };
@@ -855,10 +836,21 @@ impl Elastic<'_> {
         // Offers may differ (in `arch` too): each machine is placed by its agent's hello.
         let at = (id.clone(), &class, shape, max);
         let pool = registry_pool(s, at, exec, memory_percent, path_grace)?.placing_by_hello();
+        let share = u32::try_from(max).unwrap_or(u32::MAX);
+        let providers: Vec<LaunchingProvider> = built
+            .into_iter()
+            .map(|(kind, each)| {
+                LaunchingProvider::new(String::new(), kind, Arc::from(each.provider), share)
+            })
+            .collect();
+        let kind = providers
+            .first()
+            .map(|lead| lead.kind.clone())
+            .unwrap_or_default();
         let plan = ElasticPlan {
             name: name.to_owned(),
-            kind: kind.to_owned(),
-            floor: built.floor,
+            kind,
+            floor,
             memory: pool.memory_headroom(),
             floor_demand,
             launch,
@@ -878,13 +870,7 @@ impl Elastic<'_> {
             agent,
             scheduler: scheduler.clone(),
             id,
-            provider: Arc::from(built.provider),
-            share: u32::try_from(max).unwrap_or(u32::MAX),
-            limits: PoolLimits::default(),
-            failover: ProviderLimits::default().failover(),
-            catalog_refresh: ProviderLimits::default().catalog_refresh,
-            offer_cooldown: ProviderLimits::default().offer_cooldown,
-            size_tolerance_percent: ProviderLimits::default().size_tolerance_percent,
+            providers,
         };
         Ok(Registering {
             plan: Some(plan),

@@ -36,13 +36,15 @@ pub struct Totals {
 }
 
 /// The totals the server holds: one for the whole server and one for each provider kind
-/// that has any. A launch must hold the server's and its pool's kind's.
+/// that has any. A launch must hold the server's and those of the kind of the provider it
+/// is made by.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Budgets {
     /// Over every pool, and every record, including one of a pool this server no longer
     /// has.
     pub server: Totals,
-    /// Over the pools of a [`Settings::kind`], by kind.
+    /// Over the pools that have a provider of a kind ([`Settings::kind`],
+    /// [`ProviderSettings::kind`](crate::ProviderSettings::kind)), by kind.
     pub kinds: BTreeMap<String, Totals>,
 }
 
@@ -77,9 +79,9 @@ fn within(total: Option<u64>, least: u64, spent: impl FnOnce() -> u64) -> bool {
     total.is_none_or(|total| spent().saturating_add(least) <= total)
 }
 
-/// Whether one more machine of `price` may be launched into the pool `settings`, once
-/// `records` and the `staged` launches of the step are counted, against the server's
-/// totals and those of the pool's kind. Both must hold.
+/// Whether one more machine of `price` may be launched into the pool `settings` by a
+/// provider of `kind`, once `records` and the `staged` launches of the step are counted,
+/// against the server's totals and those of `kind`. Both must hold.
 ///
 /// # Errors
 ///
@@ -88,23 +90,25 @@ fn within(total: Option<u64>, least: u64, spent: impl FnOnce() -> u64) -> bool {
 pub(crate) fn check(
     input: &Input,
     meta: &Records,
-    settings: &Settings,
+    (settings, kind): (&Settings, &str),
     now: Millis,
     (records, staged): (&[Record], &[Record]),
     price: u64,
 ) -> Result<(), Blocked> {
     let least = least_cost(settings, price);
-    let kind = input.budgets.kinds.get(&settings.kind).copied();
+    let totals = input.budgets.kinds.get(kind).copied();
     let scopes = [
         (input.budgets.server, None),
-        (kind.unwrap_or_default(), Some(&settings.kind)),
+        (totals.unwrap_or_default(), Some(kind)),
     ];
     for (totals, only) in scopes {
-        // A pool the input no longer has is of the kind the records remember for it; one they
-        // know no kind for is of every kind, which is the cautious side.
+        // A pool is of the kind of each of its providers, so the machines of a pool of
+        // several kinds count in each of their totals, which is the cautious side. A pool the
+        // input no longer has is of the kind the records remember for it; one they know no
+        // kind for is of every kind, cautious too.
         let member = |pool: &str| {
-            only.is_none_or(|kind| match input.kind_of(pool) {
-                Some(each) => each == kind,
+            only.is_none_or(|kind| match input.kinds_of(pool) {
+                Some(kinds) => kinds.iter().any(|each| each == kind),
                 None => meta.pool_kinds.get(pool).is_none_or(|each| each == kind),
             })
         };

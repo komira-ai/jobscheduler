@@ -47,7 +47,7 @@ fn the_pool_of_the_design_builds_in_plan() {
     assert_eq!(plan.idle, Some(Duration::from_secs(600)));
     assert_eq!(plan.boot_timeout, Duration::from_secs(900));
     assert_eq!(plan.exec, Some(ExecMode::Container));
-    assert_eq!(plan.provider().payload_limit(), 0);
+    assert_eq!(plan.providers().next().unwrap().payload_limit(), 0);
     match &plan.network {
         NetworkPlan::Tailscale { tag, .. } => assert_eq!(tag, "tag:js-agent"),
         other => panic!("{other:?}"),

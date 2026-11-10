@@ -104,9 +104,10 @@ pub struct Settings {
     /// `unknown_hold`, for the scaler's ticks, the drain and release round trips and the
     /// provider's clock.
     pub lifetime_margin: Duration,
-    /// The machine provider the pool launches with, as pass 2 of placement names it
+    /// The pool's first machine provider, as pass 2 of placement names it
     /// (`js_sched::acquire`). The server gives the provider's id; [`UNNAMED_PROVIDER`]
-    /// until it does. The scaler launches with the pool's one provider whatever the name.
+    /// until it does. This and the fields after it, to `offer_cooldown`, are the first
+    /// provider's; [`Settings::later`] holds the providers after it.
     pub provider: ProviderId,
     /// The provider's share of the pool: the most machines it may hold for the pool at
     /// once (its `provider_limits` `max_machines`, else the pool's). `None`: no share of
@@ -138,6 +139,52 @@ pub struct Settings {
     /// hello of a machine acquired for it did not match it (its `provider_limits`
     /// `offer_cooldown`). [`OFFER_COOLDOWN`] by default.
     pub offer_cooldown: Duration,
+    /// The pool's machine providers after the first, in the order pass 2 walks them
+    /// (design 5.6, step 5): a provider is asked for a launch only when every provider
+    /// before it has no usable offer, holds its share or refused every offer it had in the
+    /// request's attempt. Empty by default: the pool has one provider.
+    pub later: Vec<ProviderSettings>,
+}
+
+/// One machine provider of a pool after its first ([`Settings::later`]), with the
+/// `provider_limits` the pool gives it. Each field means what the field of the same name
+/// means for the first provider in [`Settings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSettings {
+    /// The provider, as pass 2 names it.
+    pub provider: ProviderId,
+    /// Its provider kind, such as `lambdalabs`: the key of the totals of its kind.
+    pub kind: String,
+    /// Its share of the pool. `None`: no share of its own.
+    pub share: Option<u32>,
+    /// The instance types it may launch for the pool. `None`: any.
+    pub allowed_instance_types: Option<Vec<String>>,
+    /// The highest price per hour, in cents, it may launch at for the pool. `None`: any.
+    pub max_price_cents_per_hour: Option<u64>,
+    /// How long one of its instance types is passed over after a `quota` refusal.
+    pub quota_backoff: Duration,
+    /// How far below its offer a hello may be, in percent.
+    pub size_tolerance_percent: u8,
+    /// How long one of its offers cools down after a hello that did not match it.
+    pub offer_cooldown: Duration,
+}
+
+impl ProviderSettings {
+    /// The provider `provider` of kind `kind` with no share, no limits and the defaults of
+    /// [`Settings::new`] for its timings and tolerance.
+    #[must_use]
+    pub fn new(provider: ProviderId, kind: &str) -> Self {
+        Self {
+            provider,
+            kind: kind.to_owned(),
+            share: None,
+            allowed_instance_types: None,
+            max_price_cents_per_hour: None,
+            quota_backoff: QUOTA_BACKOFF,
+            size_tolerance_percent: SIZE_TOLERANCE_PERCENT,
+            offer_cooldown: OFFER_COOLDOWN,
+        }
+    }
 }
 
 /// The default of [`Settings::provider`], for settings no server has named a provider in.
@@ -214,7 +261,44 @@ impl Settings {
             acquire_retry: ACQUIRE_RETRY,
             size_tolerance_percent: SIZE_TOLERANCE_PERCENT,
             offer_cooldown: OFFER_COOLDOWN,
+            later: Vec::new(),
         }
+    }
+
+    /// The pool's machine providers, first to last: the first from the fields of these
+    /// settings, then [`Settings::later`].
+    #[must_use]
+    pub fn providers(&self) -> Vec<ProviderSettings> {
+        let first = ProviderSettings {
+            provider: self.provider.clone(),
+            kind: self.kind.clone(),
+            share: self.provider_share,
+            allowed_instance_types: self.allowed_instance_types.clone(),
+            max_price_cents_per_hour: self.max_price_cents_per_hour,
+            quota_backoff: self.quota_backoff,
+            size_tolerance_percent: self.size_tolerance_percent,
+            offer_cooldown: self.offer_cooldown,
+        };
+        std::iter::once(first)
+            .chain(self.later.iter().cloned())
+            .collect()
+    }
+
+    /// The pool's machine provider `provider`, or its first when it has none of that id:
+    /// a record written before the pool had several providers names none, and is the
+    /// first's.
+    pub(crate) fn provider_of(&self, provider: Option<&ProviderId>) -> ProviderSettings {
+        let mut providers = self.providers();
+        let at = providers
+            .iter()
+            .position(|each| Some(&each.provider) == provider)
+            .unwrap_or(0);
+        providers.swap_remove(at)
+    }
+
+    /// Whether the pool has more than one machine provider, so that its records name theirs.
+    pub(crate) fn several(&self) -> bool {
+        !self.later.is_empty()
     }
 }
 
@@ -318,8 +402,8 @@ pub enum Blocked {
     /// of zero, so it is never launched. The catalog needs fixing; nothing else will unblock
     /// the request.
     Unpriced,
-    /// The pool holds `max_instances`, or its provider holds its share
-    /// ([`Settings::provider_share`]).
+    /// The pool holds `max_instances`, or every provider that could take the launch holds
+    /// its share ([`Settings::provider_share`], [`ProviderSettings::share`]).
     MaxInstances,
     /// One more machine would take the hourly spend over `max_spend_per_hour`.
     MaxSpend,

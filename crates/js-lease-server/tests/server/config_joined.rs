@@ -163,7 +163,7 @@ async fn the_shared_pool_token_still_admits_hosts() {
 fn two_registering_pools_are_refused() {
     let scratch = Scratch::new("joined_two");
     let server = server_with_agents(&scratch);
-    let message = "pool \"second\": several pools register agents; running them needs the ordered walk of design 5.6";
+    let message = "pool \"second\": several pools register agents; this version runs one, as the server keeps one registry of agents";
     let second = PoolText::joined("second");
     assert_eq!(
         refusal(&scratch, &file(&server, &[&joined(), &second])),
