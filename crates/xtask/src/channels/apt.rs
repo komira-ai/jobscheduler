@@ -19,8 +19,10 @@
 //!   ...` ([`promote`]): the entries of a release `testing` lists, merged into the index of
 //!   `stable`; reads no cloud and no key. The write that follows is `apt write --suite stable
 //!   --no-pool`.
-//! - `channels apt sign --dir <dir> --work <dir> --fingerprint <fpr> --key-file <f>
-//!   --passphrase-file <f>` ([`sign`]): `InRelease` and `Release.gpg`, verified. Jobs `testing-apt-index` and `stable-apt-index`: the key, no cloud role.
+//! - `channels apt sign --dir <dir> --work <dir> --fingerprint <fpr> (--key-file <f> |
+//!   --key-env <name>) (--passphrase-file <f> | --passphrase-env <name>)` ([`sign`]):
+//!   `InRelease` and `Release.gpg`, verified. Jobs `testing-apt-index` and `stable-apt-index`: the
+//!   key (by the two `--...-env` flags), no cloud role.
 //! - `channels apt write --bucket <b> --distribution-id <id> --hostname <h> --next <dir> --debs
 //!   <dir> --version <V>` ([`write`]): the packages into the pool with `If-None-Match`, the index
 //!   with `If-Match` on the ETags that were read (`--no-pool` instead of `--debs` and `--version`:
@@ -116,12 +118,26 @@ pub enum Verb {
         /// The signing subkey's fingerprint, or several separated by commas (a key rotation).
         #[arg(long)]
         fingerprint: String,
-        /// The armored private key; removed at the end.
-        #[arg(long)]
-        key_file: PathBuf,
-        /// The file holding the key's passphrase; removed at the end.
-        #[arg(long)]
-        passphrase_file: PathBuf,
+        /// The file holding the armored private key; removed at the end. Exactly one of this and
+        /// `--key-env`.
+        #[arg(long, conflicts_with = "key_env", required_unless_present = "key_env")]
+        key_file: Option<PathBuf>,
+        /// The environment variable that holds the armored private key: it is written to a file of
+        /// mode 0600 below `--work`, which is removed at the end.
+        #[arg(long, conflicts_with = "key_file")]
+        key_env: Option<String>,
+        /// The file holding the key's passphrase; removed at the end. Exactly one of this and
+        /// `--passphrase-env`.
+        #[arg(
+            long,
+            conflicts_with = "passphrase_env",
+            required_unless_present = "passphrase_env"
+        )]
+        passphrase_file: Option<PathBuf>,
+        /// The environment variable that holds the key's passphrase: it is written to a file of
+        /// mode 0600 below `--work`, which is removed at the end.
+        #[arg(long, conflicts_with = "passphrase_file")]
+        passphrase_env: Option<String>,
         /// The `gpg` program.
         #[arg(long, default_value = "gpg")]
         gpg: PathBuf,
@@ -242,20 +258,31 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
             work,
             fingerprint,
             key_file,
+            key_env,
             passphrase_file,
+            passphrase_env,
             gpg,
             output,
-        } => sign::sign(
-            &sign::RealGpg(gpg),
-            &sign::Request {
-                dir: &dir,
-                work: &work,
-                fingerprints: &fingerprint,
-                key_file: &key_file,
-                passphrase_file: &passphrase_file,
-            },
-            output.as_deref(),
-        ),
+        } => {
+            let key = sign::Source::choose("key", key_file.as_deref(), key_env.as_deref())?;
+            let passphrase = sign::Source::choose(
+                "passphrase",
+                passphrase_file.as_deref(),
+                passphrase_env.as_deref(),
+            )?;
+            sign::sign(
+                &sign::RealGpg(gpg),
+                &sign::Request {
+                    dir: &dir,
+                    work: &work,
+                    fingerprints: &fingerprint,
+                    key,
+                    passphrase,
+                },
+                &sign::process_env,
+                output.as_deref(),
+            )
+        }
         Verb::Promote {
             testing,
             stable,

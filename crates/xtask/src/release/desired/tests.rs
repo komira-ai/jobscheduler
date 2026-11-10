@@ -571,6 +571,20 @@ fn programs_that_fail_are_reported_with_their_reason() {
         why.starts_with("gh api repos/o/r/releases/tags/v1.2.3 did not print JSON: "),
         "{why}"
     );
+    args.gh = gh(
+        &dir,
+        &[(
+            "api repos/o/r/releases/tags/v1.2.3".to_owned(),
+            "printf '\\377'".to_owned(),
+        )],
+    );
+    let Err(Error::Release(super::super::Error::NotUtf8 { command })) = run(&args) else {
+        panic!("output that is not UTF-8 must fail");
+    };
+    assert!(
+        command.ends_with("api repos/o/r/releases/tags/v1.2.3"),
+        "{command}"
+    );
 
     let mut args = consistent(&dir);
     args.gh = gh(&dir, &release_cases(&dir, "not a sums file\n"));

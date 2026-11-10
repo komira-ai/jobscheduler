@@ -15,12 +15,12 @@ fn problems_of(text: &str) -> Vec<String> {
     }
 }
 
-const ROLE_STEP: &str = "        env:\n          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}\n        run: cargo xtask channels assume --role-arn \"$ROLE_ARN\" --session-name \"jobscheduler-testing-apt-write-$GITHUB_RUN_ID\" --region us-east-1 --env-file \"$GITHUB_ENV\"\n";
+const ROLE_STEP: &str = "        env:\n          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}\n        run: tool/xtask channels assume --role-arn \"$ROLE_ARN\" --session-name \"jobscheduler-testing-apt-write-$GITHUB_RUN_ID\" --region us-east-1 --env-file \"$GITHUB_ENV\"\n";
 
 /// The step that checks `dist` against SHA256SUMS, and the one that verifies each `.deb`.
 const SUMS_STEP: &str =
     "      - name: The files are exactly the assets of this run, and match SHA256SUMS\n";
-const VERIFY_STEP: &str = "      - name: Each .deb is the one artifacts.yml attested, from main at this commit (from its bundle)\n";
+const VERIFY_STEP: &str = "      - name: The amd64 .deb is the one artifacts.yml attested, from main at this commit (from its bundle)\n";
 
 #[test]
 fn the_apt_jobs_of_release_yml_pass_and_are_the_eighteen_the_design_names() {
@@ -73,8 +73,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     // needs and ifs
     (
         "testing-apt-read",
+        "needs: [plan, publish, deploy-tool]",
         "needs: [plan, publish]",
-        "needs: [plan]",
         "testing-apt-read: needs are not",
     ),
     (
@@ -147,9 +147,9 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "testing-apt-read",
-        "cargo xtask channels gate --label testing-apt-read ",
-        "cargo xtask channels gate --label apt ",
-        "the gate does not run `cargo xtask channels gate --label testing-apt-read ...`",
+        "tool/xtask channels gate --label testing-apt-read ",
+        "tool/xtask channels gate --label apt ",
+        "the gate does not run `tool/xtask channels gate --label testing-apt-read ...`",
     ),
     (
         "testing-apt-read",
@@ -221,20 +221,20 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "testing-apt-read",
         "      - name: Gate on the settings",
-        "      - run: cargo xtask channels assume --role-arn x\n      - name: Gate on the settings",
+        "      - run: tool/xtask channels assume --role-arn x\n      - name: Gate on the settings",
         "testing-apt-read: a step before the gate names channels assume",
     ),
     (
         "testing-apt-index",
         "      - name: Merge the .debs into the index",
-        "      - run: cargo xtask channels assume --role-arn x\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n      - name: Merge the .debs into the index",
-        "testing-apt-index: runs `cargo xtask channels assume...`, which only the apt jobs that read and write may",
+        "      - run: tool/xtask channels assume --role-arn x\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n      - name: Merge the .debs into the index",
+        "testing-apt-index: runs `xtask channels assume...`, which only the apt jobs that read and write may",
     ),
     (
         "testing-apt-write",
         ROLE_STEP,
         "        run: echo\n",
-        "testing-apt-write: it needs one step that assumes the role and one that runs `cargo xtask channels apt write...`",
+        "testing-apt-write: it needs one step that assumes the role and one that runs `tool/xtask channels apt write...`",
     ),
     (
         "testing-apt-write-3",
@@ -263,57 +263,75 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "testing-apt-index",
-        "gh attestation verify \"$deb\"",
-        "echo \"$deb\"",
-        "testing-apt-index: no step verifies each .deb from its bundle with gh attestation verify",
+        "gh attestation verify \"dist/js-agent_${VERSION}_amd64.deb\"",
+        "echo \"dist/js-agent_${VERSION}_amd64.deb\"",
+        "testing-apt-index: no step verifies the amd64 .deb from its bundle with `gh attestation verify \"dist/js-agent_${VERSION}_amd64.deb\"",
     ),
     (
         "testing-apt-write",
-        "gh attestation verify \"$deb\"",
-        "echo \"$deb\"",
-        "testing-apt-write: no step verifies each .deb from its bundle with gh attestation verify",
+        "gh attestation verify \"dist/js-agent_${VERSION}_arm64.deb\"",
+        "echo \"dist/js-agent_${VERSION}_arm64.deb\"",
+        "testing-apt-write: no step verifies the arm64 .deb from its bundle",
     ),
     (
         "stable-apt-index",
-        "gh attestation verify \"$deb\"",
-        "echo \"$deb\"",
-        "stable-apt-index: no step verifies each .deb from its bundle with gh attestation verify",
+        "gh attestation verify \"dist/js-agent_${VERSION}_amd64.deb\"",
+        "echo \"dist/js-agent_${VERSION}_amd64.deb\"",
+        "stable-apt-index: no step verifies the amd64 .deb from its bundle",
+    ),
+    (
+        "testing-apt-index-3",
+        "gh attestation verify \"dist/js-agent_${VERSION}_arm64.deb\"",
+        "echo \"dist/js-agent_${VERSION}_arm64.deb\"",
+        "testing-apt-index-3: no step verifies the arm64 .deb from its bundle",
     ),
     (
         "testing-apt-index-2",
-        " --bundle \"$deb.sigstore.json\"",
+        " --bundle \"dist/js-agent_${VERSION}_amd64.deb.sigstore.json\"",
         "",
-        "testing-apt-index-2: the verification of the .debs lacks gh attestation verify \"$deb\" --bundle",
+        "testing-apt-index-2: no step verifies the amd64 .deb from its bundle",
     ),
     (
         "testing-apt-write",
         " --source-digest \"$COMMIT\"",
         "",
-        "testing-apt-write: the verification of the .debs lacks --source-digest \"$COMMIT\"",
+        "testing-apt-write: the verification of the amd64 .deb lacks --source-digest \"$COMMIT\"",
     ),
     (
         "testing-apt-index",
         " --deny-self-hosted-runners",
         "",
-        "testing-apt-index: the verification of the .debs lacks --deny-self-hosted-runners",
+        "testing-apt-index: the verification of the amd64 .deb lacks --deny-self-hosted-runners",
     ),
     (
         "testing-apt-index",
         "--signer-workflow \"$REPO/.github/workflows/artifacts.yml\"",
         "--signer-workflow \"$REPO/.github/workflows/release.yml\"",
-        "testing-apt-index: the verification of the .debs lacks --signer-workflow \"$REPO/.github/workflows/artifacts.yml\"",
+        "testing-apt-index: the verification of the amd64 .deb lacks --signer-workflow \"$REPO/.github/workflows/artifacts.yml\"",
     ),
     (
         "testing-apt-write",
         "--source-ref refs/heads/main",
         "--source-ref refs/heads/other",
-        "testing-apt-write: the verification of the .debs lacks --source-ref refs/heads/main",
+        "testing-apt-write: the verification of the amd64 .deb lacks --source-ref refs/heads/main",
     ),
     (
         "testing-apt-index",
         "          REPO: ${{ github.repository }}\n",
         "          REPO: other/repo\n",
-        "testing-apt-index: the verification of the .debs does not read REPO from ${{ github.repository }}",
+        "testing-apt-index: the verification of the amd64 .deb does not read REPO from ${{ github.repository }}",
+    ),
+    (
+        "testing-apt-index",
+        "        run: gh attestation verify \"dist/js-agent_${VERSION}_amd64.deb\"",
+        "        run: for deb in ./*.deb; do gh attestation verify \"$deb\"",
+        "testing-apt-index: no step verifies the amd64 .deb from its bundle",
+    ),
+    (
+        "testing-apt-write",
+        "        run: gh attestation verify \"dist/js-agent_${VERSION}_amd64.deb\"",
+        "        run: |\n          set -e\n          gh attestation verify \"dist/js-agent_${VERSION}_amd64.deb\"",
+        "testing-apt-write: the step `The amd64 .deb is the one artifacts.yml attested",
     ),
     (
         "testing-apt-write",
@@ -360,9 +378,9 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "testing-apt-index",
-        "cargo xtask channels apt sign ",
+        "tool/xtask channels apt sign ",
         "echo ",
-        "testing-apt-index: it needs a step that merges (`cargo xtask channels apt index...`) and then one that signs",
+        "testing-apt-index: it needs a step that merges (`tool/xtask channels apt index...`) and then one that signs",
     ),
     (
         "testing-apt-index",
@@ -372,8 +390,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "testing-apt-index",
-        "          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}\n        run: |",
-        "        run: |",
+        "          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}\n        run: tool/xtask channels apt sign",
+        "        run: tool/xtask channels apt sign",
         "testing-apt-index: the signing step does not read secrets.APT_GPG_PASSPHRASE",
     ),
     (
@@ -410,39 +428,39 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "deploy-tool",
         "run: cargo build -p xtask --locked --release",
-        "run: cargo xtask channels assume --role-arn x",
-        "deploy-tool: runs `cargo xtask channels assume...`, which only the apt jobs that read and write may",
+        "run: tool/xtask channels assume --role-arn x",
+        "deploy-tool: runs `xtask channels assume...`, which only the apt jobs that read and write may",
     ),
     // the verbs and the suites
     (
         "testing-apt-read",
-        "cargo xtask channels apt read --suite testing --bucket",
-        "cargo xtask channels apt sign --bucket",
-        "testing-apt-read: runs `cargo xtask channels apt sign...`, which only the apt index jobs may",
+        "tool/xtask channels apt read --suite testing --bucket",
+        "tool/xtask channels apt sign --bucket",
+        "testing-apt-read: runs `xtask channels apt sign...`, which only the apt index jobs may",
     ),
     (
         "testing-apt-index",
-        "cargo xtask channels apt index --suite testing --current",
-        "cargo xtask channels apt write --suite testing --current",
-        "testing-apt-index: runs `cargo xtask channels apt write...`, which only the Write jobs of the apt repository may",
+        "tool/xtask channels apt index --suite testing --current",
+        "tool/xtask channels apt write --suite testing --current",
+        "testing-apt-index: runs `xtask channels apt write...`, which only the Write jobs of the apt repository may",
     ),
     (
         "testing-apt-index",
-        "cargo xtask channels apt index --suite testing --current",
-        "cargo xtask channels apt read --current",
-        "testing-apt-index: runs `cargo xtask channels apt read...`, which only the Read jobs of the apt repository may",
+        "tool/xtask channels apt index --suite testing --current",
+        "tool/xtask channels apt read --current",
+        "testing-apt-index: runs `xtask channels apt read...`, which only the Read jobs of the apt repository may",
     ),
     (
         "testing-apt-read",
         "channels apt read --suite testing --bucket",
         "channels apt read --suite stable --bucket",
-        "testing-apt-read: `cargo xtask channels apt read...` is not given `--suite testing`",
+        "testing-apt-read: `tool/xtask channels apt read...` is not given `--suite testing`",
     ),
     (
         "testing-apt-index",
         "channels apt index --suite testing --current",
         "channels apt index --current",
-        "testing-apt-index: `cargo xtask channels apt index...` is not given `--suite testing`",
+        "testing-apt-index: `tool/xtask channels apt index...` is not given `--suite testing`",
     ),
     (
         "testing-apt-index",
@@ -460,7 +478,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "testing-apt-write",
         "channels apt write --suite testing --bucket",
         "channels apt write --suite stable --bucket",
-        "testing-apt-write: `cargo xtask channels apt write...` is not given `--suite testing`",
+        "testing-apt-write: `tool/xtask channels apt write...` is not given `--suite testing`",
     ),
     (
         "testing-apt-write",
@@ -483,7 +501,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     // the promotion into stable
     (
         "stable-apt-index",
-        "needs: [plan, check-apt, stable-apt-read, testing-apt-index]",
+        "needs: [plan, check-apt, stable-apt-read, testing-apt-index, deploy-tool]",
         "needs: [plan, stable-apt-read, testing-apt-index]",
         "stable-apt-index: needs are not",
     ),
@@ -495,7 +513,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "stable-apt-read",
-        "needs: [plan, check-apt, testing-apt-read]",
+        "needs: [plan, check-apt, testing-apt-read, deploy-tool]",
         "needs: [plan, testing-apt-read]",
         "stable-apt-read: needs are not",
     ),
@@ -509,37 +527,37 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "stable-apt-read",
         "channels apt read --suite testing --bucket",
         "channels apt read --bucket",
-        "stable-apt-read: `cargo xtask channels apt read...` is not given `--suite testing`: the promotion reads both",
+        "stable-apt-read: no step runs `tool/xtask channels apt read...` with `--suite testing`: the promotion reads both",
     ),
     (
         "stable-apt-read",
         "channels apt read --suite stable --bucket",
         "channels apt read --suite testing --bucket",
-        "stable-apt-read: `cargo xtask channels apt read...` is not given `--suite stable`: the promotion reads both",
+        "stable-apt-read: no step runs `tool/xtask channels apt read...` with `--suite stable`: the promotion reads both",
     ),
     (
         "stable-apt-index",
         "--sums dist/SHA256SUMS ",
         "",
-        "stable-apt-index: `cargo xtask channels apt promote...` is not given --sums dist/SHA256SUMS",
+        "stable-apt-index: `tool/xtask channels apt promote...` is not given --sums dist/SHA256SUMS",
     ),
     (
         "stable-apt-index",
         "--testing \"$RUNNER_TEMP/apt-read/testing\" ",
         "--testing \"$RUNNER_TEMP/apt-read/stable\" ",
-        "stable-apt-index: `cargo xtask channels apt promote...` is not given --testing",
+        "stable-apt-index: `tool/xtask channels apt promote...` is not given --testing",
     ),
     (
         "stable-apt-index",
         "channels apt promote ",
         "channels apt index --suite stable ",
-        "stable-apt-index: runs `cargo xtask channels apt index...`, which only the Index jobs of the suite testing of the apt repository may",
+        "stable-apt-index: runs `xtask channels apt index...`, which only the Index jobs of the suite testing of the apt repository may",
     ),
     (
         "testing-apt-index",
         "channels apt index --suite testing ",
         "channels apt promote ",
-        "testing-apt-index: runs `cargo xtask channels apt promote...`, which only the Index jobs of the suite stable of the apt repository may",
+        "testing-apt-index: runs `xtask channels apt promote...`, which only the Index jobs of the suite stable of the apt repository may",
     ),
     (
         "stable-apt-index",
@@ -551,7 +569,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "stable-apt-write",
         "--suite stable --bucket",
         "--suite testing --bucket",
-        "stable-apt-write: `cargo xtask channels apt write...` is not given `--suite stable`",
+        "stable-apt-write: `tool/xtask channels apt write...` is not given `--suite stable`",
     ),
     (
         "stable-apt-write",
@@ -577,11 +595,123 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "",
         "stable-apt-write-3: `--last` must be passed by the last attempt's write and by no other",
     ),
+    // no build in a job that holds a token or the key
+    (
+        "testing-apt-read",
+        "      - name: Make the tool executable\n",
+        "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n      - name: Make the tool executable\n",
+        "testing-apt-read: checks out the repository; this job runs the tool deploy-tool built and compiles nothing",
+    ),
+    (
+        "testing-apt-index",
+        "      - name: Make the tool executable\n",
+        "      - run: rustup toolchain install\n      - name: Make the tool executable\n",
+        "testing-apt-index: the step `rustup toolchain install` runs cargo or rustup",
+    ),
+    (
+        "stable-apt-index-2",
+        "      - name: Make the tool executable\n",
+        "      - name: Compile xtask\n        run: cargo xtask --help\n      - name: Make the tool executable\n",
+        "stable-apt-index-2: the step `Compile xtask` runs cargo or rustup",
+    ),
+    (
+        "testing-apt-write",
+        "tool/xtask channels apt write --suite",
+        "cargo xtask channels apt write --suite",
+        "testing-apt-write: the step `Upload the .debs once each",
+    ),
+    (
+        "stable-apt-read",
+        "tool/xtask channels gate --label stable-apt-read ",
+        "cargo xtask channels gate --label stable-apt-read ",
+        "stable-apt-read: the gate does not run `tool/xtask channels gate --label stable-apt-read ...`",
+    ),
+    (
+        "testing-apt-write-2",
+        "run: tool/xtask channels assume",
+        "run: cargo xtask channels assume",
+        "testing-apt-write-2: it needs one step that assumes the role and one that runs",
+    ),
+    // the tool of deploy-tool
+    (
+        "testing-apt-write",
+        "needs: [plan, testing-apt-read, testing-apt-index, deploy-tool]",
+        "needs: [plan, testing-apt-read, testing-apt-index]",
+        "testing-apt-write: needs are not [\"deploy-tool\", \"plan\", \"testing-apt-index\", \"testing-apt-read\"]",
+    ),
+    (
+        "stable-apt-index-3",
+        "needs: [plan, stable-apt-read-3, deploy-tool]",
+        "needs: [plan, stable-apt-read-3]",
+        "stable-apt-index-3: needs are not",
+    ),
+    (
+        "testing-apt-index",
+        "          name: deploy-tool\n",
+        "          name: apt-current\n",
+        "testing-apt-index: the artifact deploy-tool is not downloaded into tool",
+    ),
+    (
+        "stable-apt-write-2",
+        "          name: deploy-tool\n          path: tool\n",
+        "          name: deploy-tool\n          path: elsewhere\n",
+        "stable-apt-write-2: the artifact deploy-tool is not downloaded into tool",
+    ),
+    (
+        "testing-apt-read-2",
+        "        run: chmod +x tool/xtask\n",
+        "        run: echo\n",
+        "testing-apt-read-2: no step makes the tool executable with `chmod +x tool/xtask`",
+    ),
+    // one command to a step
+    (
+        "stable-apt-read",
+        "        run: tool/xtask channels apt read --suite testing",
+        "        run: |\n          echo first\n          tool/xtask channels apt read --suite testing",
+        "stable-apt-read: the step `Read the index of testing (what is promoted), with the ETag of each object, from S3` runs more than one command; each step is one",
+    ),
+    (
+        "stable-apt-read",
+        "channels apt read --suite stable --bucket",
+        "channels apt read --suite stable --suite testing --bucket",
+        "stable-apt-read: `tool/xtask channels apt read...` is not given exactly one of `--suite testing` and `--suite stable`",
+    ),
+    (
+        "testing-apt-index",
+        "        run: tool/xtask channels apt sign ",
+        "        run: |\n          umask 077\n          tool/xtask channels apt sign ",
+        "testing-apt-index: the step `Sign Release with the signing subkey (InRelease and Release.gpg), then remove the key",
+    ),
+    // the key reaches the verb in the environment
+    (
+        "testing-apt-index",
+        " --key-env APT_GPG_PRIVATE_KEY --passphrase-env APT_GPG_PASSPHRASE",
+        " --key-file k --passphrase-file p",
+        "testing-apt-index: the signing step is not given --key-env APT_GPG_PRIVATE_KEY ",
+    ),
+    (
+        "stable-apt-index",
+        " --key-env APT_GPG_PRIVATE_KEY --passphrase-env APT_GPG_PASSPHRASE",
+        " --key-file k --passphrase-env APT_GPG_PASSPHRASE",
+        "stable-apt-index: the signing step passes --key-file; the secrets go by --key-env and --passphrase-env",
+    ),
+    (
+        "testing-apt-index-2",
+        " --passphrase-env APT_GPG_PASSPHRASE",
+        "",
+        "testing-apt-index-2: the signing step is not given --passphrase-env APT_GPG_PASSPHRASE ",
+    ),
+    (
+        "stable-apt-index-3",
+        " --passphrase-env APT_GPG_PASSPHRASE",
+        " --passphrase-file p",
+        "stable-apt-index-3: the signing step passes --passphrase-file",
+    ),
     (
         "publish",
         "          sha256sum --check --strict SHA256SUMS\n",
-        "          cargo xtask channels apt index --suite testing\n          sha256sum --check --strict SHA256SUMS\n",
-        "publish: runs `cargo xtask channels apt index...`, which only the Index jobs of the suite testing of the apt repository may",
+        "          tool/xtask channels apt index --suite testing\n          sha256sum --check --strict SHA256SUMS\n",
+        "publish: runs `xtask channels apt index...`, which only the Index jobs of the suite testing of the apt repository may",
     ),
 ];
 
@@ -617,14 +747,14 @@ fn a_job_that_is_missing_or_too_short_is_named() {
     let problems = apt_problems(&yaml::load(short).expect("parses"));
     assert!(
         problems.contains(
-            &"testing-apt-read: it needs one step that assumes the role and one that runs `cargo xtask channels apt read...`"
+            &"testing-apt-read: it needs one step that assumes the role and one that runs `tool/xtask channels apt read...`"
                 .to_owned()
         ),
         "{problems:?}"
     );
     assert!(
         problems.iter().any(|p| p.starts_with(
-            "testing-apt-index: it needs a step that merges (`cargo xtask channels apt index...`) and then one that signs"
+            "testing-apt-index: it needs a step that merges (`tool/xtask channels apt index...`) and then one that signs"
         )),
         "{problems:?}"
     );
@@ -698,7 +828,7 @@ fn the_role_is_assumed_before_the_index_is_read_and_before_it_is_written() {
     let back_to_the_action = in_job(
         &text,
         "testing-apt-write-2",
-        "        run: cargo xtask channels assume --role-arn \"$ROLE_ARN\" --session-name \"jobscheduler-testing-apt-write-2-$GITHUB_RUN_ID\" --region us-east-1 --env-file \"$GITHUB_ENV\"\n",
+        "        run: tool/xtask channels assume --role-arn \"$ROLE_ARN\" --session-name \"jobscheduler-testing-apt-write-2-$GITHUB_RUN_ID\" --region us-east-1 --env-file \"$GITHUB_ENV\"\n",
         "        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n",
     );
     assert!(
@@ -762,6 +892,27 @@ fn the_files_of_dist_are_checked_in_order_before_the_verb_runs() {
     assert!(
         problems_of(&late).contains(
             &"testing-apt-index: the verb runs before the .debs are verified from their bundles"
+                .to_owned()
+        ),
+        "{late}"
+    );
+}
+
+#[test]
+fn the_tool_is_downloaded_and_made_executable_before_the_gate_that_runs_it() {
+    // Catches: the gate (or any verb) running before the tool is downloaded and made executable,
+    // which the table of defects cannot name because every step is still there.
+    let text = text_of("release.yml");
+    let late = swapped_steps(
+        &text,
+        "testing-apt-read",
+        "      - name: Make the tool executable\n",
+        "      - name: Gate on the settings",
+        "      - name: Assume the apt publish role through OIDC\n",
+    );
+    assert!(
+        problems_of(&late).contains(
+            &"testing-apt-read: the tool is not downloaded and made executable (`chmod +x tool/xtask`), in that order, before the gate"
                 .to_owned()
         ),
         "{late}"

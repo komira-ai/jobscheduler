@@ -12,13 +12,19 @@
 //! - The index job (environment `apt-signing`) holds `contents: read` alone, assumes no role and
 //!   names no variable of the role; the key is read by its gate and its signing step alone, and
 //!   the signing step comes after the merge.
+//! - No apt job compiles anything: none checks out the repository or runs cargo or rustup, each
+//!   needs `deploy-tool` (the job that builds `xtask` with neither a token nor a secret),
+//!   downloads its artifact into `tool` and makes it executable before the gate, and runs every
+//!   verb as `tool/xtask channels ...`. Each step is one command.
 //! - Each job has the `needs` and the `if:` of the table (each requires a push to main and the
 //!   plan's release), its gate is the first step that is not setup and is given each setting as
 //!   `NAME=${VAR:+set}` and each earlier job's answer as `--require`, and every step after the
 //!   gate runs only when the gate said `enabled=true`.
 //! - The jobs that use `dist` (every index job and the testing write job) check it first:
-//!   `sha256sum --check --strict SHA256SUMS`, then each `.deb` against its bundle with the signer
-//!   of artifacts.yml, main and the commit; both come after the two downloads and before the verb.
+//!   `sha256sum --check --strict SHA256SUMS`, then the `.deb` of each architecture against its
+//!   bundle (a step each) with the signer of artifacts.yml, main and the commit; all come after
+//!   the two downloads and before the verb. The index job passes the key and the passphrase to
+//!   `apt sign` as `--key-env` and `--passphrase-env`.
 //! - The last attempt's write is the one that passes `--last` (it fails on a lost race instead of
 //!   asking for a fourth attempt).
 //! - The verbs of the apt channel are run by the jobs of their kind alone, and the promotion
@@ -90,6 +96,9 @@ pub const STABLE_INDEX_3_IF: &str = after_if!("needs.stable-apt-read-3.result ==
 pub const STABLE_WRITE_3_IF: &str = after_if!(
     "needs.stable-apt-read-3.result == 'success' && needs.stable-apt-index-3.result == 'success'"
 );
+
+/// The job that builds the `xtask` every apt job runs, with neither a token nor a secret.
+const TOOL_JOB: &str = "deploy-tool";
 
 /// The `if:` of every step after the gate.
 pub const GATE_IF: &str = "${{ steps.gate.outputs.enabled == 'true' }}";
@@ -327,22 +336,30 @@ const TOKEN_HOLDERS: [&str; 2] = ["artifacts", "gamma"];
 /// (`apt promote`).
 fn verb(kind: Kind, suite: &str) -> &'static str {
     match (kind, suite) {
-        (Kind::Read, _) => "cargo xtask channels apt read ",
-        (Kind::Index, "stable") => "cargo xtask channels apt promote ",
-        (Kind::Index, _) => "cargo xtask channels apt index ",
-        (Kind::Write, _) => "cargo xtask channels apt write ",
+        (Kind::Read, _) => "tool/xtask channels apt read ",
+        (Kind::Index, "stable") => "tool/xtask channels apt promote ",
+        (Kind::Index, _) => "tool/xtask channels apt index ",
+        (Kind::Write, _) => "tool/xtask channels apt write ",
     }
 }
 
-/// The verbs, with the kind and the suite of the only jobs that may run each.
+/// The verbs (as `xtask channels ...`, whether run from the tool or from a build), with the kind and
+/// the suite of the only jobs that may run each.
 const VERBS: [(&str, Kind, &str); 4] = [
-    ("cargo xtask channels apt read ", Kind::Read, ""),
-    ("cargo xtask channels apt index ", Kind::Index, "testing"),
-    ("cargo xtask channels apt promote ", Kind::Index, "stable"),
-    ("cargo xtask channels apt write ", Kind::Write, ""),
+    ("xtask channels apt read ", Kind::Read, ""),
+    ("xtask channels apt index ", Kind::Index, "testing"),
+    ("xtask channels apt promote ", Kind::Index, "stable"),
+    ("xtask channels apt write ", Kind::Write, ""),
 ];
 
-const SIGN: &str = "cargo xtask channels apt sign ";
+/// The signing verb as the index jobs run it.
+const SIGN: &str = "tool/xtask channels apt sign ";
+
+/// The signing verb as any job may name it.
+const SIGN_ANY: &str = "xtask channels apt sign ";
+
+/// The step that makes the downloaded tool executable.
+const CHMOD: &str = "chmod +x tool/xtask";
 
 /// Does a step of `node` run `needle`?
 fn runs(node: &Node, needle: &str) -> bool {
@@ -377,9 +394,9 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
                 "{name}: names APT_PUBLISH_ROLE_ARN, which only the apt jobs that read and write may"
             ));
         }
-        if !is_role_job(name) && runs(found, "cargo xtask channels assume") {
+        if !is_role_job(name) && runs(found, "xtask channels assume") {
             problems.push(format!(
-                "{name}: runs `cargo xtask channels assume...`, which only the apt jobs that read and write may"
+                "{name}: runs `xtask channels assume...`, which only the apt jobs that read and write may"
             ));
         }
         if !is_role_job(name) && !TOKEN_HOLDERS.contains(&name) && holds_token(found) {
@@ -411,10 +428,10 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
                 ));
             }
         }
-        if own.map(|j| j.kind) != Some(Kind::Index) && runs(found, SIGN) {
+        if own.map(|j| j.kind) != Some(Kind::Index) && runs(found, SIGN_ANY) {
             problems.push(format!(
                 "{name}: runs `{}...`, which only the apt index jobs may",
-                SIGN.trim_end()
+                SIGN_ANY.trim_end()
             ));
         }
     }
@@ -431,8 +448,11 @@ fn holds_token(job: &Node) -> bool {
 fn job_problems(want: &Job, job: &Node) -> Vec<String> {
     let name = want.name;
     let mut problems = Vec::new();
-    if names(entry(job, "needs")) != want.needs {
-        problems.push(format!("{name}: needs are not {:?}", want.needs));
+    let mut needs: Vec<&str> = want.needs.to_vec();
+    needs.push(TOOL_JOB);
+    needs.sort_unstable();
+    if names(entry(job, "needs")) != needs {
+        problems.push(format!("{name}: needs are not {needs:?}"));
     }
     if entry(job, "if").and_then(Node::as_str) != Some(want.condition) {
         problems.push(format!("{name}: `if` is not {}", want.condition));
@@ -458,6 +478,7 @@ fn job_problems(want: &Job, job: &Node) -> Vec<String> {
         problems.push(format!("{name}: no step has the id `gate`"));
         return problems;
     };
+    problems.extend(tool_problems(want, all, gate));
     problems.extend(suite_problems(want, all));
     problems.extend(gate_problems(want, &all[gate]));
     for step in &all[..gate] {
@@ -500,6 +521,60 @@ fn job_problems(want: &Job, job: &Node) -> Vec<String> {
     problems
 }
 
+/// The job runs the `xtask` that `deploy-tool` built and compiles nothing: it holds a token or the
+/// key, and a build would run the build scripts of the whole dependency closure in it. So no step
+/// checks out the repository or runs cargo or rustup, the artifact `deploy-tool` is downloaded into
+/// `tool` and made executable (one command) before the gate, which runs the tool, and each step is
+/// one command.
+fn tool_problems(want: &Job, all: &[Node], gate: usize) -> Vec<String> {
+    let name = want.name;
+    let mut problems = Vec::new();
+    for step in all {
+        let shown = match text(step, "name") {
+            "" => text(step, "uses").to_owned() + text(step, "run"),
+            named => named.to_owned(),
+        };
+        if text(step, "uses").starts_with("actions/checkout@") {
+            problems.push(format!(
+                "{name}: checks out the repository; this job runs the tool deploy-tool built and compiles nothing"
+            ));
+        }
+        let run = text(step, "run");
+        if run.contains("cargo ") || run.contains("rustup") {
+            problems.push(format!(
+                "{name}: the step `{shown}` runs cargo or rustup; this job runs the tool deploy-tool built and compiles nothing"
+            ));
+        }
+        if run.trim_end().contains('\n') {
+            problems.push(format!(
+                "{name}: the step `{shown}` runs more than one command; each step is one"
+            ));
+        }
+    }
+    let download = all.iter().position(|s| {
+        text(s, "uses").starts_with("actions/download-artifact@")
+            && at(s, &["with", "name"]) == Some(TOOL_JOB)
+            && at(s, &["with", "path"]) == Some("tool")
+    });
+    let chmod = all.iter().position(|s| text(s, "run") == CHMOD);
+    match (download, chmod) {
+        (Some(d), Some(c)) => {
+            if !(d < c && c < gate) {
+                problems.push(format!(
+                    "{name}: the tool is not downloaded and made executable (`{CHMOD}`), in that order, before the gate"
+                ));
+            }
+        }
+        (None, _) => problems.push(format!(
+            "{name}: the artifact {TOOL_JOB} is not downloaded into tool"
+        )),
+        (_, None) => problems.push(format!(
+            "{name}: no step makes the tool executable with `{CHMOD}`"
+        )),
+    }
+    problems
+}
+
 /// A job writes one suite and no other: every verb of the job is given `--suite <suite>` (the
 /// promotion's read job reads both suites, and its index job is given the two directories and the
 /// sums), the index is signed in the directory of that suite, a write of `testing` puts the
@@ -527,12 +602,11 @@ fn suite_problems(want: &Job, all: &[Node]) -> Vec<String> {
                 }
             }
             (Kind::Read, true) => {
-                for suite in ["testing", "stable"] {
-                    if !run.contains(&format!("{own}--suite {suite} ")) {
-                        problems.push(format!(
-                            "{name}: `{shown}...` is not given `--suite {suite}`: the promotion reads both"
-                        ));
-                    }
+                // One step per suite: both are read, each by a command of its own.
+                if run.matches("--suite ").count() != 1 {
+                    problems.push(format!(
+                        "{name}: `{shown}...` is not given exactly one of `--suite testing` and `--suite stable`"
+                    ));
                 }
             }
             _ => {
@@ -578,8 +652,19 @@ fn suite_problems(want: &Job, all: &[Node]) -> Vec<String> {
             ));
         }
     }
+    if want.kind == Kind::Read && stable {
+        for suite in ["testing", "stable"] {
+            let wanted = format!("{own}--suite {suite} ");
+            if !all.iter().any(|s| text(s, "run").contains(&wanted)) {
+                problems.push(format!(
+                    "{name}: no step runs `{}...` with `--suite {suite}`: the promotion reads both",
+                    own.trim_end()
+                ));
+            }
+        }
+    }
     let dir = format!("--dir \"$RUNNER_TEMP/apt-next/dists/{}\" ", want.suite);
-    for step in all.iter().filter(|s| text(s, "run").contains(SIGN)) {
+    for step in all.iter().filter(|s| text(s, "run").contains(SIGN_ANY)) {
         if !text(step, "run").contains(&dir) {
             problems.push(format!(
                 "{name}: the index is not signed in dists/{}, the suite the job writes",
@@ -595,7 +680,7 @@ pub fn gate_problems(want: &Job, gate: &Node) -> Vec<String> {
     let name = want.name;
     let run = text(gate, "run");
     let mut problems = Vec::new();
-    let start = format!("cargo xtask channels gate --label {name} ");
+    let start = format!("tool/xtask channels gate --label {name} ");
     if !run.starts_with(&start) {
         problems.push(format!("{name}: the gate does not run `{start}...`"));
     }
@@ -639,21 +724,27 @@ fn first(after: &[Node], wanted: impl Fn(&Node) -> bool) -> Option<usize> {
     after.iter().position(wanted)
 }
 
-/// The flags every `gh attestation verify` of a `.deb` is given: its bundle, and the signer, ref and
-/// commit artifacts.yml signed it at, from a hosted runner.
-const VERIFY_FLAGS: [&str; 7] = [
-    "gh attestation verify \"$deb\" --bundle \"$deb.sigstore.json\" ",
+/// The command that verifies the `.deb` of `arch` from its bundle, up to the flags: a command of its
+/// own for each architecture.
+fn verify_start(arch: &str) -> String {
+    format!(
+        "gh attestation verify \"dist/js-agent_${{VERSION}}_{arch}.deb\" --bundle \"dist/js-agent_${{VERSION}}_{arch}.deb.sigstore.json\" "
+    )
+}
+
+/// The flags every `gh attestation verify` of a `.deb` is given: the signer, ref and commit
+/// artifacts.yml signed it at, from a hosted runner.
+const VERIFY_FLAGS: [&str; 5] = [
     "--repo \"$REPO\" ",
     "--signer-workflow \"$REPO/.github/workflows/artifacts.yml\" ",
     "--source-ref refs/heads/main ",
     "--source-digest \"$COMMIT\" ",
     "--deny-self-hosted-runners",
-    "for deb in ./*.deb; do",
 ];
 
 /// The jobs that use `dist` hold it to the checks before the verb: the assets and the bundles are
-/// downloaded into `dist`, then `sha256sum --check --strict SHA256SUMS` runs there, then each `.deb`
-/// is verified from its bundle, and only then the verb runs.
+/// downloaded into `dist`, then `sha256sum --check --strict SHA256SUMS` runs there, then the `.deb`
+/// of each architecture is verified from its bundle (a step each), and only then the verb runs.
 fn dist_problems(want: &Job, after: &[Node]) -> Vec<String> {
     let name = want.name;
     let mut problems = Vec::new();
@@ -673,46 +764,65 @@ fn dist_problems(want: &Job, after: &[Node]) -> Vec<String> {
         text(s, "run") == "sha256sum --check --strict SHA256SUMS"
             && at(s, &["working-directory"]) == Some("dist")
     });
-    let verify = first(after, |s| text(s, "run").contains("gh attestation verify "));
+    let verifies: Vec<usize> = after
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| text(s, "run").contains("gh attestation verify "))
+        .map(|(i, _)| i)
+        .collect();
     let use_of = first(after, |s| {
         let run = text(s, "run");
         run.contains(verb(want.kind, want.suite)) || run.contains(SIGN)
     });
-    match (sums, verify) {
-        (Some(sums), Some(verify)) => {
-            if sums > verify {
+    for arch in ["amd64", "arm64"] {
+        let start = verify_start(arch);
+        let Some(at_step) = verifies
+            .iter()
+            .copied()
+            .find(|&i| text(&after[i], "run").starts_with(&start))
+        else {
+            problems.push(format!(
+                "{name}: no step verifies the {arch} .deb from its bundle with `{}...`",
+                start.trim_end()
+            ));
+            continue;
+        };
+        let run = text(&after[at_step], "run");
+        for flag in VERIFY_FLAGS {
+            if !run.contains(flag) {
+                problems.push(format!(
+                    "{name}: the verification of the {arch} .deb lacks {flag}"
+                ));
+            }
+        }
+        for (var, want) in [
+            ("GH_TOKEN", "${{ github.token }}"),
+            ("REPO", "${{ github.repository }}"),
+        ] {
+            if at(&after[at_step], &["env", var]) != Some(want) {
+                problems.push(format!(
+                    "{name}: the verification of the {arch} .deb does not read {var} from {want}"
+                ));
+            }
+        }
+    }
+    match (sums, verifies.first(), verifies.last()) {
+        (Some(sums), Some(&first_verify), Some(&last_verify)) => {
+            if sums > first_verify {
                 problems.push(format!(
                     "{name}: the .debs are verified before the files are checked against SHA256SUMS"
                 ));
             }
-            if use_of.is_some_and(|u| u < verify) {
+            if use_of.is_some_and(|u| u < last_verify) {
                 problems.push(format!(
                     "{name}: the verb runs before the .debs are verified from their bundles"
                 ));
             }
-            let run = text(&after[verify], "run");
-            for flag in VERIFY_FLAGS {
-                if !run.contains(flag) {
-                    problems.push(format!(
-                        "{name}: the verification of the .debs lacks {flag}"
-                    ));
-                }
-            }
-            for (var, want) in [
-                ("GH_TOKEN", "${{ github.token }}"),
-                ("REPO", "${{ github.repository }}"),
-            ] {
-                if at(&after[verify], &["env", var]) != Some(want) {
-                    problems.push(format!(
-                        "{name}: the verification of the .debs does not read {var} from {want}"
-                    ));
-                }
-            }
         }
-        (None, _) => problems.push(format!(
+        (None, _, _) => problems.push(format!(
             "{name}: no step checks dist with `sha256sum --check --strict SHA256SUMS`"
         )),
-        (_, None) => problems.push(format!(
+        (_, _, _) => problems.push(format!(
             "{name}: no step verifies each .deb from its bundle with gh attestation verify"
         )),
     }
@@ -727,7 +837,7 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
     let roles: Vec<usize> = after
         .iter()
         .enumerate()
-        .filter(|(_, s)| text(s, "run").contains("cargo xtask channels assume"))
+        .filter(|(_, s)| text(s, "run").contains("tool/xtask channels assume"))
         .map(|(i, _)| i)
         .collect();
     let verbs: Vec<usize> = after
@@ -736,8 +846,14 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
         .filter(|(_, s)| text(s, "run").contains(verb(want.kind, want.suite)))
         .map(|(i, _)| i)
         .collect();
+    // The promotion's read job reads two suites, one command (one step) each.
+    let verb_steps = if want.kind == Kind::Read && want.suite == "stable" {
+        2
+    } else {
+        1
+    };
     match (roles.as_slice(), verbs.as_slice()) {
-        ([role], [at_verb]) => {
+        ([role], [at_verb, ..]) if verbs.len() == verb_steps => {
             let given = entry(&after[*role], "env")
                 .and_then(|e| entry(e, "ROLE_ARN"))
                 .and_then(Node::as_str);
@@ -760,7 +876,7 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
             if role > at_verb {
                 problems.push(format!("{name}: the role is assumed after the verb runs"));
             }
-            let last = text(&after[*at_verb], "run").contains(" --last ");
+            let last = text(&after[verbs[verbs.len() - 1]], "run").contains(" --last ");
             if want.kind == Kind::Write && last != want.last {
                 problems.push(format!(
                     "{name}: `--last` must be passed by the last attempt's write and by no other"
@@ -801,6 +917,24 @@ fn index_problems(want: &Job, job: &Node, after: &[Node]) -> Vec<String> {
             for secret in ["secrets.APT_GPG_PRIVATE_KEY", "secrets.APT_GPG_PASSPHRASE"] {
                 if !mentions(&after[s], secret) {
                     problems.push(format!("{name}: the signing step does not read {secret}"));
+                }
+            }
+            // The secret material goes to the verb in the environment, as one command: the verb
+            // writes and removes the files itself.
+            let sign = text(&after[s], "run");
+            for flag in [
+                "--key-env APT_GPG_PRIVATE_KEY ",
+                "--passphrase-env APT_GPG_PASSPHRASE ",
+            ] {
+                if !sign.contains(flag) {
+                    problems.push(format!("{name}: the signing step is not given {flag}"));
+                }
+            }
+            for flag in ["--key-file", "--passphrase-file"] {
+                if sign.contains(flag) {
+                    problems.push(format!(
+                        "{name}: the signing step passes {flag}; the secrets go by --key-env and --passphrase-env"
+                    ));
                 }
             }
             for (i, step) in after.iter().enumerate() {

@@ -53,6 +53,8 @@ fn token_endpoint(status: &'static str, body: String) -> (String, mpsc::Receiver
 struct FakeAws {
     answer: Answer,
     calls: RefCell<Vec<Vec<String>>>,
+    /// The file the token was passed in, read when `aws` was run: its path, content and mode.
+    token_files: RefCell<Vec<(String, String, u32)>>,
 }
 
 impl FakeAws {
@@ -64,6 +66,7 @@ impl FakeAws {
                 stderr: stderr.to_owned(),
             },
             calls: RefCell::default(),
+            token_files: RefCell::default(),
         }
     }
 }
@@ -71,6 +74,20 @@ impl FakeAws {
 impl Aws for FakeAws {
     fn run(&self, args: &[String]) -> Result<Answer, Error> {
         self.calls.borrow_mut().push(args.to_vec());
+        for pair in args.windows(2) {
+            if let ("--web-identity-token", Some(path)) =
+                (pair[0].as_str(), pair[1].strip_prefix("file://"))
+            {
+                let mode = std::fs::metadata(path)
+                    .expect("the token file")
+                    .permissions();
+                self.token_files.borrow_mut().push((
+                    path.to_owned(),
+                    std::fs::read_to_string(path).expect("read the token file"),
+                    std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+                ));
+            }
+        }
         Ok(Answer {
             ok: self.answer.ok,
             stdout: self.answer.stdout.clone(),
@@ -143,6 +160,7 @@ fn run_with(
         session_name: "jobscheduler-release-42",
         region: "us-east-1",
         env_file: &env_file,
+        token_dir: &dir,
         https_only,
     };
     change(&mut request);
@@ -195,6 +213,7 @@ fn the_runner_token_is_exchanged_and_the_credentials_reach_the_env_file_exactly(
         "{request:?}"
     );
     let calls = run.aws.calls.borrow();
+    let token_path = format!("{}/assume-{}/token", run._dir.display(), std::process::id());
     assert_eq!(
         *calls,
         [[
@@ -205,7 +224,7 @@ fn the_runner_token_is_exchanged_and_the_credentials_reach_the_env_file_exactly(
             "--role-session-name",
             "jobscheduler-release-42",
             "--web-identity-token",
-            JWT,
+            &format!("file://{token_path}"),
             "--duration-seconds",
             "3600",
             "--query",
@@ -475,6 +494,7 @@ fn a_missing_oidc_offer_fails_before_anything_is_masked() {
             session_name: "jobscheduler-release-42",
             region: "us-east-1",
             env_file: &env_file,
+            token_dir: &dir,
             https_only: true,
         },
     );
@@ -509,6 +529,7 @@ fn a_log_that_cannot_be_written_fails_before_the_exchange() {
             session_name: "jobscheduler-release-42",
             region: "us-east-1",
             env_file: &env_file,
+            token_dir: &dir,
             https_only: false,
         },
     );
@@ -559,4 +580,151 @@ fn an_answer_cut_short_is_a_failed_token_request() {
     };
     assert!(why.starts_with("the OIDC token request failed: "), "{why}");
     assert!(run.aws.calls.borrow().is_empty());
+}
+
+/// Nothing of the token is left below the scratch directory of `run`.
+fn assert_no_token_left(run: &Run, name: &str) {
+    let dir = run._dir.join(format!("assume-{}", std::process::id()));
+    assert!(!dir.exists(), "{name}: {} is left", dir.display());
+}
+
+#[test]
+fn the_token_reaches_aws_in_a_private_file_and_never_as_an_argument() {
+    // Catches: the OIDC token on the command line of `aws`, where every process of the machine
+    // reads it in /proc/<pid>/cmdline, a token file anyone can read, and a token left on disk.
+    let (url, _) = token_endpoint("200 OK", format!(r#"{{"value":"{JWT}"}}"#));
+    let run = run_with(
+        "token-file",
+        &url,
+        false,
+        FakeAws::says(true, STS, ""),
+        |_| {},
+    );
+    run.result.as_ref().expect("assumed");
+    let calls = run.aws.calls.borrow();
+    assert!(calls[0].iter().all(|a| !a.contains(JWT)), "{:?}", calls[0]);
+    let token_path = format!("{}/assume-{}/token", run._dir.display(), std::process::id());
+    assert_eq!(
+        *run.aws.token_files.borrow(),
+        [(token_path, JWT.to_owned(), 0o600)]
+    );
+    assert_no_token_left(&run, "success");
+}
+
+#[test]
+fn the_token_directory_is_private_while_aws_runs() {
+    // Catches: a directory the other users of the machine can list or enter.
+    struct Looking(std::cell::Cell<Option<u32>>);
+    impl Aws for Looking {
+        fn run(&self, args: &[String]) -> Result<Answer, Error> {
+            let path = args
+                .iter()
+                .find_map(|a| a.strip_prefix("file://"))
+                .expect("a token file");
+            let dir = std::path::Path::new(path).parent().expect("its directory");
+            let mode = std::fs::metadata(dir).expect("directory").permissions();
+            self.0
+                .set(Some(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777));
+            Ok(Answer {
+                ok: false,
+                stdout: String::new(),
+                stderr: "refused".to_owned(),
+            })
+        }
+    }
+    let (url, _) = token_endpoint("200 OK", format!(r#"{{"value":"{JWT}"}}"#));
+    let dir = scratch("private-dir");
+    let env_file = dir.join("github-env");
+    let looking = Looking(std::cell::Cell::default());
+    let offer = || {
+        Ok(TokenService {
+            url: url.clone(),
+            key: BEARER.to_owned(),
+        })
+    };
+    let result = assume(
+        &looking,
+        &mut Log {
+            env_file: env_file.clone(),
+            writes: Vec::new(),
+        },
+        &offer,
+        &Request {
+            role_arn: ROLE,
+            session_name: "jobscheduler-release-42",
+            region: "us-east-1",
+            env_file: &env_file,
+            token_dir: &dir,
+            https_only: false,
+        },
+    );
+    assert_eq!(
+        result,
+        Err(Error::Failed(
+            "assuming the role failed: refused".to_owned()
+        ))
+    );
+    assert_eq!(looking.0.get(), Some(0o700));
+    assert!(!dir.join(format!("assume-{}", std::process::id())).exists());
+}
+
+#[test]
+fn the_token_file_is_removed_when_sts_refuses_and_when_its_answer_is_unusable() {
+    // Catches: a token left on the runner's disk because the exchange failed after it was
+    // written.
+    for (name, aws) in [
+        ("refused", FakeAws::says(false, "", "denied")),
+        ("unusable", FakeAws::says(true, "not json", "")),
+    ] {
+        let (url, _) = token_endpoint("200 OK", format!(r#"{{"value":"{JWT}"}}"#));
+        let run = run_with(name, &url, false, aws, |_| {});
+        assert!(run.result.is_err(), "{name}");
+        assert_eq!(run.aws.token_files.borrow().len(), 1, "{name}");
+        assert_no_token_left(&run, name);
+    }
+}
+
+#[test]
+fn a_token_directory_that_exists_is_refused_and_left_as_it_was() {
+    // Catches: a token written into a directory another user may have made, and the removal of
+    // what this verb did not make.
+    let (url, _) = token_endpoint("200 OK", format!(r#"{{"value":"{JWT}"}}"#));
+    let dir = scratch("token-dir-exists");
+    let taken = dir.join(format!("assume-{}", std::process::id()));
+    std::fs::create_dir(&taken).expect("taken");
+    std::fs::write(taken.join("other"), "not ours").expect("other");
+    let aws = FakeAws::says(true, STS, "");
+    let env_file = dir.join("github-env");
+    let offer = || {
+        Ok(TokenService {
+            url: url.clone(),
+            key: BEARER.to_owned(),
+        })
+    };
+    let result = assume(
+        &aws,
+        &mut Log {
+            env_file: env_file.clone(),
+            writes: Vec::new(),
+        },
+        &offer,
+        &Request {
+            role_arn: ROLE,
+            session_name: "jobscheduler-release-42",
+            region: "us-east-1",
+            env_file: &env_file,
+            token_dir: &dir,
+            https_only: false,
+        },
+    );
+    let Err(Error::Spawn { what, .. }) = result else {
+        panic!("{result:?}");
+    };
+    assert!(what.starts_with("write the token file "), "{what}");
+    assert!(!what.contains(JWT));
+    assert!(aws.calls.borrow().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(taken.join("other")).expect("still there"),
+        "not ours"
+    );
 }

@@ -125,8 +125,10 @@ fn each_apt_verb_is_dispatched_with_its_own_flags() {
         dir: nowhere("dists"),
         work: nowhere("work"),
         fingerprint: "0123456789ABCDEF0123456789ABCDEF01234567".to_owned(),
-        key_file: key.clone(),
-        passphrase_file: passphrase.clone(),
+        key_file: Some(key.clone()),
+        key_env: None,
+        passphrase_file: Some(passphrase.clone()),
+        passphrase_env: None,
         gpg: nowhere("no-gpg"),
         output: None,
     }));

@@ -66,7 +66,7 @@ fn the_packages_join_a_shared_index_and_every_other_entry_and_architecture_stays
     let debs = scratch("build-shared-debs");
     release_files(&debs, "1.2.3");
     let said = build(&request(&dir, &debs)).expect("build");
-    assert_eq!(said, ["apt-index: added 2, dropped 0, listed 4"]);
+    assert_eq!(said, ["apt index: added 2, dropped 0, listed 4"]);
     assert_eq!(
         packages(&dir, "amd64"),
         [
@@ -144,7 +144,7 @@ fn a_re_run_of_the_same_release_lists_it_once() {
         }
     }
     let said = build(&request(&dir, &debs)).expect("second");
-    assert_eq!(said, ["apt-index: added 0, dropped 0, listed 2"]);
+    assert_eq!(said, ["apt index: added 0, dropped 0, listed 2"]);
 }
 
 #[test]

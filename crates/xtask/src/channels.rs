@@ -221,6 +221,7 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
                 session_name: &session_name,
                 region: &region,
                 env_file: &env_file,
+                token_dir: &std::env::temp_dir(),
                 https_only: true,
             },
         ),

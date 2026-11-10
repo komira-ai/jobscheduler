@@ -1,4 +1,4 @@
-//! `channels gate`: whether a channel job has the settings it needs (design section 5.1).
+//! `channels gate`: whether a channel job has the settings it needs.
 //!
 //! | settings of the job | `enabled` | the job |
 //! |---|---|---|

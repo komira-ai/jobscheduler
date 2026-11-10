@@ -447,11 +447,13 @@ fn flags_out_of_their_form_are_refused() {
     // Catches: a bucket, distribution or host that is not what the settings hold.
     let repo = Repo::new("write-flags", "1.2.3");
     let before = repo.aws.calls.borrow().len();
-    let bad: [fn(&mut Request); 4] = [
+    let bad: [fn(&mut Request); 5] = [
         |r| r.bucket = "Bad Bucket",
         |r| r.distribution_id = "",
         |r| r.distribution_id = "lower",
         |r| r.hostname = "host name",
+        // A hyphen is a host name's own; the space after it is not.
+        |r| r.hostname = "packages-1 komira.ai",
     ];
     for change in bad {
         let mut r = repo.request(false);

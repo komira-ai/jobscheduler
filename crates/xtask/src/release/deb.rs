@@ -352,8 +352,21 @@ fn ar(members: &[(&str, &[u8])]) -> Vec<u8> {
 /// # Errors
 /// [`Error::Io`] if a tar or gzip stream cannot be finished.
 pub fn build(version: Version, platform: Platform, files: &[File]) -> Result<Vec<u8>, Error> {
+    build_with(version, platform, files, &tar_gz)
+}
+
+/// What makes a gzip-compressed tar of entries: [`tar_gz`], or a failing one in a test.
+type Archiver<'a> = dyn Fn(&[Entry]) -> Result<Vec<u8>, Error> + 'a;
+
+/// [`build`], with `archive` making each gzip-compressed tar (the control one, then the data one).
+fn build_with(
+    version: Version,
+    platform: Platform,
+    files: &[File],
+    archive: &Archiver<'_>,
+) -> Result<Vec<u8>, Error> {
     let text = |text: String| Some(text.into_bytes());
-    let control_tar = tar_gz(&[
+    let control_entries = [
         ("./".to_owned(), 0o755, None),
         (
             "./control".to_owned(),
@@ -361,8 +374,9 @@ pub fn build(version: Version, platform: Platform, files: &[File]) -> Result<Vec
             text(control(version, platform.architecture(), files)),
         ),
         ("./md5sums".to_owned(), 0o644, text(md5sums(files))),
-    ])?;
-    let data_tar = tar_gz(&data_entries(files))?;
+    ];
+    let control_tar = archive(&control_entries)?;
+    let data_tar = archive(&data_entries(files))?;
     Ok(ar(&[
         ("debian-binary", b"2.0\n"),
         ("control.tar.gz", &control_tar),

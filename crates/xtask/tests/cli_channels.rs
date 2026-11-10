@@ -266,6 +266,85 @@ fn a_failed_sign_removes_the_key_and_the_passphrase_it_was_given() {
 }
 
 #[test]
+fn a_failed_sign_by_environment_removes_the_files_it_made_and_never_prints_the_secrets() {
+    // Catches: a key written from the environment and left on the runner's disk when the signing
+    // fails, and a secret in the message.
+    let dir = scratch("sign-env-fails");
+    let work = dir.join("work");
+    let out = Command::new(XTASK)
+        .args(["channels", "apt", "sign", "--dir"])
+        .arg(dir.join("dists/testing"))
+        .arg("--work")
+        .arg(&work)
+        .args(["--fingerprint", "0123456789ABCDEF0123456789ABCDEF01234567"])
+        .args([
+            "--key-env",
+            "SIGN_TEST_KEY",
+            "--passphrase-env",
+            "SIGN_TEST_PASS",
+        ])
+        .env("SIGN_TEST_KEY", "key-text-of-the-test")
+        .env("SIGN_TEST_PASS", "passphrase-text-of-the-test")
+        .output()
+        .expect("run xtask");
+    assert_eq!(code(&out), Some(1), "{out:?}");
+    let said = text(&out.stderr);
+    assert!(
+        said.contains("dists/testing/Release does not exist"),
+        "{said}"
+    );
+    assert!(!said.contains("text-of-the-test"), "{said}");
+    assert!(!work.join("apt-key.asc").exists() && !work.join("apt-passphrase").exists());
+}
+
+#[test]
+fn a_sign_given_both_forms_of_a_secret_or_neither_is_a_usage_error() {
+    // Catches: two sources for one secret taken silently for one of them, and a sign with no key.
+    let dir = scratch("sign-forms");
+    let sign = |extra: &[&str]| {
+        let out = channels(
+            &[
+                &[
+                    "apt",
+                    "sign",
+                    "--dir",
+                    "d",
+                    "--work",
+                    "w",
+                    "--fingerprint",
+                    "f",
+                ][..],
+                extra,
+            ]
+            .concat(),
+        );
+        (code(&out), text(&out.stderr))
+    };
+    let (status, said) = sign(&["--key-file", "k", "--key-env", "K", "--passphrase-env", "P"]);
+    assert_eq!(status, Some(2), "{said}");
+    assert!(
+        said.contains("--key-file") && said.contains("--key-env"),
+        "{said}"
+    );
+    let (status, said) = sign(&["--key-env", "K"]);
+    assert_eq!(status, Some(2), "{said}");
+    assert!(said.contains("--passphrase-file"), "{said}");
+    let (status, said) = sign(&[
+        "--passphrase-env",
+        "P",
+        "--passphrase-file",
+        "p",
+        "--key-env",
+        "K",
+    ]);
+    assert_eq!(status, Some(2), "{said}");
+    let (status, said) = sign(&["--passphrase-file", "p"]);
+    assert_eq!(status, Some(2), "{said}");
+    assert!(said.contains("--key-file"), "{said}");
+    assert!(!dir.join("w").exists());
+}
+
+#[test]
 fn an_apt_read_with_no_aws_program_fails_naming_it_and_writes_nothing() {
     // Catches: a read that reports success with nothing on disk.
     let dir = scratch("read-no-aws");

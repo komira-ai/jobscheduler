@@ -7,7 +7,11 @@
 //!    platform, the second is a secret; they are the only environment this verb reads, through
 //!    [`TokenService::from_env`].
 //! 2. The token is asked for with the audience `sts.amazonaws.com` over HTTPS.
-//! 3. `aws sts assume-role-with-web-identity` exchanges it for the role's credentials.
+//! 3. `aws sts assume-role-with-web-identity` exchanges it for the role's credentials. The token
+//!    is never an argument (arguments are readable by every process of the machine, in
+//!    `/proc/<pid>/cmdline`): it is written to a file of mode 0600 in a private directory (0700)
+//!    made below [`Request::token_dir`], and passed as `--web-identity-token file://<path>`; the
+//!    file and the directory are removed when the exchange is over, whatever it came to.
 //! 4. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and the region are
 //!    appended to the env file (`GITHUB_ENV`), so the steps after this one carry them.
 //!
@@ -15,7 +19,8 @@
 //! and none is ever printed or put in an error.
 
 use std::io::Write;
-use std::path::Path;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -61,6 +66,9 @@ pub struct Request<'a> {
     pub region: &'a str,
     /// The file the `AWS_*` lines are appended to (`GITHUB_ENV`).
     pub env_file: &'a Path,
+    /// The directory below which the private directory of the token file is made (it must
+    /// exist; the directory of the token is named for the process and must not).
+    pub token_dir: &'a Path,
     /// Whether the token request must be HTTPS (it always is, bar the tests of the request on the
     /// loopback address).
     pub https_only: bool,
@@ -83,6 +91,54 @@ fn session_ok(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_+=,.@-".contains(&b))
+}
+
+/// The token in a file of its own, in a private directory; both are removed when this is dropped.
+struct TokenFile {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl TokenFile {
+    /// Writes `jwt` to `<parent>/assume-<pid>/token`: the directory is made with mode 0700 and
+    /// must not exist, the file with mode 0600 from its first byte.
+    fn write(parent: &Path, jwt: &str) -> Result<TokenFile, Error> {
+        let dir = parent.join(format!("assume-{}", std::process::id()));
+        let file = TokenFile {
+            path: dir.join("token"),
+            dir,
+        };
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&file.dir)
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&file.path)
+            })
+            .and_then(|mut f| f.write_all(jwt.as_bytes()))
+            .map_err(Error::spawn(format!(
+                "write the token file {}",
+                file.path.display()
+            )))?;
+        Ok(file)
+    }
+
+    /// The value of `--web-identity-token` that reads the token from the file.
+    fn argument(&self) -> String {
+        format!("file://{}", self.path.display())
+    }
+}
+
+impl Drop for TokenFile {
+    fn drop(&mut self) {
+        // The file is ours alone; a directory that was there before is left (not empty) or
+        // removed (empty), and a file that is gone already is no failure.
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(&self.dir);
+    }
 }
 
 /// Asks the runner for the token: the JWT.
@@ -175,6 +231,8 @@ pub fn assume(
     mask(log, &oidc.key)?;
     let jwt = request_token(&oidc, request.https_only)?;
     mask(log, &jwt)?;
+    let token = TokenFile::write(request.token_dir, &jwt)?;
+    let token_argument = token.argument();
     let answer = aws.run(
         &[
             "sts",
@@ -184,7 +242,7 @@ pub fn assume(
             "--role-session-name",
             request.session_name,
             "--web-identity-token",
-            &jwt,
+            &token_argument,
             "--duration-seconds",
             DURATION_SECONDS,
             "--query",
@@ -193,7 +251,9 @@ pub fn assume(
             "json",
         ]
         .map(str::to_owned),
-    )?;
+    );
+    drop(token);
+    let answer = answer?;
     if !answer.ok {
         // The refusal of STS names the role and the reason, never a credential; the token it
         // may quote is masked already.

@@ -507,3 +507,32 @@ fn a_sink_that_fails_is_an_error_naming_what_was_written() {
         ("the tar archive", "the sink is full")
     );
 }
+
+/// Catches a package written although one of its two archives could not be made: the failure
+/// of the control archive and of the data archive each comes back as the error, and no package.
+#[test]
+fn an_archive_that_cannot_be_made_fails_the_package() {
+    let binary = b"js-agent".to_vec();
+    let files = super::files(&binary);
+    for fail_at in [0, 1] {
+        let calls = std::cell::Cell::new(0);
+        let result = super::build_with(VERSION, Platform::LinuxX86_64, &files, &|entries| {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call == fail_at {
+                tar_gz_to(Full { room: 0 }, entries).map(|_| Vec::new())
+            } else {
+                super::tar_gz(entries)
+            }
+        });
+        let Err(Error::Io { path, why }) = result else {
+            panic!("archive {fail_at} failed and a package was made");
+        };
+        assert_eq!((path.as_str(), why.as_str()), ("./", "the sink is full"));
+        assert_eq!(
+            calls.get(),
+            fail_at + 1,
+            "nothing is made after the failure"
+        );
+    }
+}

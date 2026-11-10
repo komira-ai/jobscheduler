@@ -1,17 +1,22 @@
-//! `channels apt-sign --dir <dir> --work <dir> --fingerprint <fpr>[,<fpr>...] --key-file <file>
-//! --passphrase-file <file> [--gpg <program>] [--output <file>]`: `InRelease` (clear signed) and
-//! `Release.gpg` (detached) of `<dir>/Release`, verified.
+//! `channels apt sign --dir <dir> --work <dir> --fingerprint <fpr>[,<fpr>...]
+//! (--key-file <file> | --key-env <name>) (--passphrase-file <file> | --passphrase-env <name>)
+//! [--gpg <program>] [--output <file>]`: `InRelease` (clear signed) and `Release.gpg` (detached)
+//! of `<dir>/Release`, verified.
 //!
 //! The index is signed with the signing subkey of the archive key: the key spec is the subkey's
 //! fingerprint followed by `!`, which makes gpg use exactly that key and no other. Several
 //! fingerprints (a key rotation) give one signature per key, in both files. The passphrase is
 //! never an argument (arguments are readable by every process of the machine): it is a file, with
-//! the loopback pinentry. The key and passphrase files are written by the job from its secrets;
-//! they and the keyring in a private directory (0700) below `--work` are removed when the verb
-//! ends, whatever happened. A fingerprint that is not among the secret keys imported fails before
+//! the loopback pinentry. The key and the passphrase come as a file the job wrote
+//! (`--key-file`, `--passphrase-file`) or as the name of an environment variable that holds the
+//! secret material (`--key-env`, `--passphrase-env`), which the verb writes to a file of mode 0600
+//! below `--work` itself; a variable that is not set or is empty is refused. The files and the
+//! keyring in a private directory (0700) below `--work` are removed when the verb ends, whatever
+//! happened. A fingerprint that is not among the secret keys imported fails before
 //! anything is signed. `signed=true` is appended to `--output` when both files verify.
 
-use std::os::unix::fs::DirBuilderExt;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -44,7 +49,82 @@ impl Gpg for RealGpg {
     }
 }
 
-/// What `apt-sign` is asked.
+/// Where a piece of secret material comes from.
+#[derive(Clone, Copy)]
+pub enum Source<'a> {
+    /// A file the job wrote; removed at the end.
+    File(&'a Path),
+    /// The name of an environment variable that holds it; written to a file of mode 0600 below
+    /// `--work`, which is removed at the end.
+    Env(&'a str),
+}
+
+impl<'a> Source<'a> {
+    /// The source named by exactly one of the two flags `--<what>-file` and `--<what>-env`.
+    ///
+    /// # Errors
+    /// None or both of them are given.
+    pub fn choose(
+        what: &str,
+        file: Option<&'a Path>,
+        env: Option<&'a str>,
+    ) -> Result<Source<'a>, Error> {
+        match (file, env) {
+            (Some(file), None) => Ok(Source::File(file)),
+            (None, Some(name)) => Ok(Source::Env(name)),
+            _ => Err(Error::Usage(format!(
+                "give exactly one of --{what}-file and --{what}-env"
+            ))),
+        }
+    }
+
+    /// The file that holds the material: the given file, or `<work>/<name>`.
+    fn path(&self, work: &Path, name: &str) -> PathBuf {
+        match self {
+            Source::File(file) => file.to_path_buf(),
+            Source::Env(_) => work.join(name),
+        }
+    }
+
+    /// Writes the material of an environment variable to `path`, readable by this user alone
+    /// from the first byte; a file source is left as it is.
+    fn write(
+        &self,
+        path: &Path,
+        work: &Path,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(), Error> {
+        let Source::Env(name) = self else {
+            return Ok(());
+        };
+        let value = env(name)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| Error::Usage(format!("{name} is not set, or is empty")))?;
+        let made = std::fs::create_dir_all(work)
+            .and_then(|()| match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            })
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+            })
+            .and_then(|mut file| file.write_all(value.as_bytes()));
+        made.map_err(Error::spawn(format!("write {}", path.display())))
+    }
+}
+
+/// The value of the environment variable `name` of this process, when it is set to text. The
+/// secret material of a signing job comes this way and no other configuration does.
+#[must_use]
+pub fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// What `apt sign` is asked.
 pub struct Request<'a> {
     /// `dists/<suite>` of the new index.
     pub dir: &'a Path,
@@ -52,10 +132,18 @@ pub struct Request<'a> {
     pub work: &'a Path,
     /// The signing subkey's fingerprint, or several separated by commas.
     pub fingerprints: &'a str,
-    /// The armored private key; removed at the end.
-    pub key_file: &'a Path,
-    /// The file holding the key's passphrase; removed at the end.
-    pub passphrase_file: &'a Path,
+    /// The armored private key; its file is removed at the end.
+    pub key: Source<'a>,
+    /// The key's passphrase; its file is removed at the end.
+    pub passphrase: Source<'a>,
+}
+
+/// The files of the key and the passphrase: the given files, or the ones made below `--work`.
+fn secret_files(r: &Request) -> (PathBuf, PathBuf) {
+    (
+        r.key.path(r.work, "apt-key.asc"),
+        r.passphrase.path(r.work, "apt-passphrase"),
+    )
 }
 
 /// A fingerprint as hex digits (the spaces gpg prints between groups are tolerated), at least 16
@@ -95,6 +183,7 @@ fn gpg_steps(
     home: &Path,
     fingerprints: &[String],
     r: &Request,
+    (key_file, passphrase_file): &(PathBuf, PathBuf),
 ) -> Result<(), Error> {
     let text = |p: &Path| p.display().to_string();
     let home_arg = text(home);
@@ -118,7 +207,7 @@ fn gpg_steps(
     };
     run(
         "gpg could not import the key",
-        base(&["--import", &text(r.key_file)]),
+        base(&["--import", &text(key_file)]),
     )?;
     for fpr in fingerprints {
         run(
@@ -131,7 +220,7 @@ fn gpg_steps(
             "--pinentry-mode",
             "loopback",
             "--passphrase-file",
-            &text(r.passphrase_file),
+            &text(passphrase_file),
             "--digest-algo",
             "SHA512",
         ]);
@@ -169,19 +258,30 @@ pub(crate) fn private_dir(work: &Path, home: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().mode(0o700).create(home)
 }
 
-/// The `apt-sign` verb: the lines to print.
+/// The `apt sign` verb: the lines to print. `env` answers the environment variables the key and
+/// the passphrase may be named by.
 ///
 /// # Errors
-/// A fingerprint that is not one, a `Release` that is not there, a private directory that cannot
-/// be made, or a gpg step that fails.
-pub fn sign(gpg: &dyn Gpg, r: &Request, output: Option<&Path>) -> Result<Vec<String>, Error> {
-    let done = sign_files(gpg, r);
+/// A variable that is not set, a fingerprint that is not one, a `Release` that is not there, a
+/// private directory that cannot be made, or a gpg step that fails.
+pub fn sign(
+    gpg: &dyn Gpg,
+    r: &Request,
+    env: &dyn Fn(&str) -> Option<String>,
+    output: Option<&Path>,
+) -> Result<Vec<String>, Error> {
+    let files = secret_files(r);
+    let done = r
+        .key
+        .write(&files.0, r.work, env)
+        .and_then(|()| r.passphrase.write(&files.1, r.work, env))
+        .and_then(|()| sign_files(gpg, r, &files));
     // The key never outlives the verb, whatever the verb came to (a flag out of its form
     // included). A runner is discarded after its job all the same, so a file that is gone already
     // is not a failure.
     let _ = std::fs::remove_dir_all(r.work.join("gnupg"));
-    let _ = std::fs::remove_file(r.key_file);
-    let _ = std::fs::remove_file(r.passphrase_file);
+    let _ = std::fs::remove_file(&files.0);
+    let _ = std::fs::remove_file(&files.1);
     let fingerprints = done?;
     if let Some(output) = output {
         super::super::append_output(output, &["signed=true".to_owned()])?;
@@ -194,7 +294,11 @@ pub fn sign(gpg: &dyn Gpg, r: &Request, output: Option<&Path>) -> Result<Vec<Str
 }
 
 /// The signing itself: the fingerprints that signed.
-fn sign_files(gpg: &dyn Gpg, r: &Request) -> Result<Vec<String>, Error> {
+fn sign_files(
+    gpg: &dyn Gpg,
+    r: &Request,
+    files: &(PathBuf, PathBuf),
+) -> Result<Vec<String>, Error> {
     let fingerprints = split_fingerprints(r.fingerprints)?;
     let release = r.dir.join("Release");
     if !release.is_file() {
@@ -205,7 +309,7 @@ fn sign_files(gpg: &dyn Gpg, r: &Request) -> Result<Vec<String>, Error> {
     }
     let home = r.work.join("gnupg");
     private_dir(r.work, &home).map_err(Error::spawn(format!("create {}", home.display())))?;
-    gpg_steps(gpg, &home, &fingerprints, r)?;
+    gpg_steps(gpg, &home, &fingerprints, r, files)?;
     Ok(fingerprints)
 }
 

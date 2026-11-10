@@ -21,7 +21,7 @@ use crate::channels::Error;
 /// How many versions of a package and architecture the index keeps, by default.
 pub const KEEP: usize = 25;
 
-/// What `apt-index` is asked.
+/// What `apt index` is asked.
 pub struct Request<'a> {
     /// The suite of the repository.
     pub suite: Suite,
@@ -128,7 +128,7 @@ pub(super) fn write_index(
     write(&out.join(ETAGS_FILE), etags.as_bytes())
 }
 
-/// The `apt-index` verb: the lines to print.
+/// The `apt index` verb: the lines to print.
 ///
 /// # Errors
 /// No `etags.txt` in `current`, a package that is missing or that says other than its name says,
@@ -173,7 +173,7 @@ pub fn build(r: &Request) -> Result<Vec<String>, Error> {
     )?;
     write_index(r.out, r.suite, &info, &merged.stanzas, &archs, &etags)?;
     Ok(vec![format!(
-        "apt-index: added {}, dropped {}, listed {}",
+        "apt index: added {}, dropped {}, listed {}",
         merged.added,
         merged.dropped,
         merged.stanzas.len()
