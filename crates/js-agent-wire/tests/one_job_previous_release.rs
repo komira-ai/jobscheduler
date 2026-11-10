@@ -4,16 +4,29 @@
 //! made of them decodes a start in the new form, and a downgraded one, and does what that
 //! release did with it. The copy is a fixture: it must not follow later changes to
 //! `JobSpec`, because it stands for agents already deployed.
+//!
+//! The release before tree inputs, the same way: its starts with stage and mount inputs,
+//! frozen in `data/previous_release_input_starts.jsonl`, read the same here; and its
+//! `InputRef` (the frozen `PreviousInput` below, which that release still had) cannot read
+//! a tree input, so a start with one reads there as an unknown command beside the commands
+//! it can read.
+
+mod common;
 
 use std::collections::BTreeMap;
 
 use js_agent_wire::{
-    InputRef, JobSpec, NetworkLevel, OutputKind, OutputSpec, Placement, RunSpec, refusal,
+    Command, HeartbeatReply, InputRef, JobSpec, NetworkLevel, OutputKind, OutputSpec, Placement,
+    RunSpec, TreeUnavailable, refusal,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 const PREVIOUS: &str = include_str!("data/previous_release_starts.jsonl");
+
+/// Starts written by the release before tree inputs: a job start and a start in the one job
+/// definition, each with a `run` holding a stage and a mount input.
+const PREVIOUS_INPUTS: &str = include_str!("data/previous_release_input_starts.jsonl");
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -412,5 +425,191 @@ fn a_downgraded_start_reads_as_the_previous_release_read_its_own() {
         edit(&mut broken);
         let previous: PreviousJobSpec = serde_json::from_value(broken).unwrap();
         assert_eq!(previous_check(&previous), Err(code), "{why}");
+    }
+}
+
+/// The job start of the release before tree inputs, the fields a test here reads. Its `run`
+/// has the fields of the native body above, and its inputs are `PreviousInput`.
+#[derive(Debug, Deserialize)]
+struct PreviousJobStart {
+    job_id: String,
+    #[serde(default)]
+    run: Option<PreviousNative>,
+}
+
+/// The commands of that release a test here sends; any other tag reads as `Unknown`.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PreviousCommand {
+    Start(Box<PreviousJobSpec>),
+    JobStart(Box<PreviousJobStart>),
+    Stop {
+        run_id: String,
+    },
+    JobStop {
+        job_id: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+/// That release's `commands_or_unknown`: each command decoded on its own, and one that does
+/// not decode read as `Unknown`.
+fn previous_commands(reply: &Value) -> Vec<PreviousCommand> {
+    reply["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| PreviousCommand::deserialize(item).unwrap_or(PreviousCommand::Unknown))
+        .collect()
+}
+
+/// A run body with `input` beside a mount input.
+fn run_with(program: &str, input: InputRef) -> RunSpec {
+    RunSpec {
+        program: program.into(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        cwd: String::new(),
+        inputs: vec![
+            input,
+            InputRef::Mount {
+                root_name: "cache".into(),
+                rel: "sdk/14".into(),
+                dest: "sdk".into(),
+            },
+        ],
+        outputs: Vec::new(),
+        network: NetworkLevel::Off,
+    }
+}
+
+/// Asserts the B8 direction an agent not yet upgraded meets: the frozen `InputRef` of the
+/// release before tree inputs does not decode a tree input, so a job start whose `run` has
+/// one, and a native start whose body has one, each read there as an unknown command, while
+/// the stop, the job stop, and the job start and the start with a stage input beside them
+/// arrive whole; and this release reads all six, its two tree starts valid. Catches a tree input that an
+/// older agent could read as something else (a stage or a mount, or a start with the input
+/// dropped) and run without its tree, and a tree start that costs an older agent the other
+/// commands of its reply.
+#[test]
+fn a_tree_start_reads_as_unknown_to_the_previous_release() {
+    let tree = InputRef::Tree {
+        digest: format!("sha256:{HEX}"),
+        dest: "src".into(),
+        placement: Placement::ReadOnly,
+        unavailable: TreeUnavailable::JobStages,
+    };
+    let as_input = serde_json::to_value(&tree).unwrap();
+    assert!(serde_json::from_value::<PreviousInput>(as_input).is_err());
+
+    let image = format!("ubuntu:24.04@sha256:{HEX}");
+    let lines: Vec<&str> = PREVIOUS_INPUTS.lines().collect();
+    let Command::JobStart(staged) = serde_json::from_str(lines[0]).unwrap() else {
+        panic!("the first frozen start is a job start");
+    };
+    let mut tree_start = staged.clone();
+    tree_start.job_id = "job-2".into();
+    tree_start.image = image.clone();
+    tree_start.run = Some(run_with("/usr/bin/make", tree.clone()));
+    let mut native = common::job();
+    native.run_id = "run-3".into();
+    native.image = String::new();
+    native.args = Vec::new();
+    native.gpu_indices = Vec::new();
+    native.mounts = Vec::new();
+    native.isolation = js_agent_wire::Isolation::Contained;
+    native.native = Some(run_with("/usr/bin/clang", tree).into());
+    let commands = vec![
+        Command::JobStart(tree_start),
+        Command::JobStop {
+            job_id: "job-0".into(),
+        },
+        Command::JobStart(staged),
+        Command::Start(Box::new(native)),
+        Command::Stop {
+            run_id: "run-0".into(),
+        },
+        serde_json::from_str(lines[1]).unwrap(),
+    ];
+    for command in &commands {
+        assert_eq!(command.validate(), Ok(()), "{command:?}");
+    }
+    let reply = serde_json::to_value(HeartbeatReply {
+        commands: commands.clone(),
+        ..HeartbeatReply::default()
+    })
+    .unwrap();
+    let here: HeartbeatReply = serde_json::from_value(reply.clone()).unwrap();
+    assert_eq!(here.commands, commands);
+
+    let there = previous_commands(&reply);
+    assert_eq!(there.len(), 6);
+    assert!(matches!(there[0], PreviousCommand::Unknown));
+    assert!(matches!(&there[1], PreviousCommand::JobStop { job_id } if job_id == "job-0"));
+    let PreviousCommand::JobStart(start) = &there[2] else {
+        panic!("the job start beside the tree start is lost: {there:?}");
+    };
+    assert_eq!(start.job_id, "job-1");
+    let inputs = &start.run.as_ref().unwrap().inputs;
+    assert!(matches!(&inputs[0], PreviousInput::Stage { dest, .. } if dest == "src"));
+    assert!(matches!(there[3], PreviousCommand::Unknown));
+    assert!(matches!(&there[4], PreviousCommand::Stop { run_id } if run_id == "run-0"));
+    assert!(matches!(&there[5], PreviousCommand::Start(spec) if spec.run_id == "run-1"));
+}
+
+/// Asserts the other direction: the starts the release before tree inputs wrote, a job start
+/// and a start in the one job definition each with a stage and a mount input, decode here
+/// as the same stage and mount, validate, and are written back byte for byte; and the frozen
+/// `InputRef` of that release reads the same inputs from what this release writes. Catches
+/// a stage or mount input re-meant or re-spelled by the change that added trees, and a tree
+/// field (`unavailable`) leaking into the other inputs' text.
+#[test]
+fn a_previous_release_start_reads_the_same_on_this_release() {
+    let lines: Vec<&str> = PREVIOUS_INPUTS.lines().collect();
+    assert_eq!(lines.len(), 2);
+    let stage = InputRef::Stage {
+        stage_id: format!("sha256:{HEX}"),
+        dest: "src".into(),
+        placement: Placement::Writable,
+    };
+    let mount = InputRef::Mount {
+        root_name: "cache".into(),
+        rel: "sdk/14".into(),
+        dest: "sdk".into(),
+    };
+    let previous = || {
+        [
+            PreviousInput::Stage {
+                stage_id: format!("sha256:{HEX}"),
+                dest: "src".into(),
+                placement: PreviousPlacement::Writable,
+            },
+            PreviousInput::Mount {
+                root_name: "cache".into(),
+                rel: "sdk/14".into(),
+                dest: "sdk".into(),
+            },
+        ]
+    };
+    for line in &lines {
+        let command: Command = serde_json::from_str(line).unwrap();
+        assert_eq!(command.validate(), Ok(()), "{line}");
+        let run = match &command {
+            Command::JobStart(start) => start.run.as_ref(),
+            Command::Start(spec) => spec.run.as_ref(),
+            other => panic!("not a start: {other:?}"),
+        };
+        assert_eq!(
+            run.unwrap().inputs,
+            [stage.clone(), mount.clone()],
+            "{line}"
+        );
+        let written = serde_json::to_string(&command).unwrap();
+        assert_eq!(written, *line);
+        let wire: Value = serde_json::from_str(&written).unwrap();
+        let inputs: Vec<PreviousInput> =
+            serde_json::from_value(wire["run"]["inputs"].clone()).unwrap();
+        assert_eq!(inputs, previous(), "{line}");
     }
 }

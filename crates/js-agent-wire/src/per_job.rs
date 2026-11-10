@@ -298,12 +298,21 @@ pub struct JobResult {
         deserialize_with = "log_sink::lenient"
     )]
     pub logs: Option<LogReport>,
+    /// The code of the input failure, when a tree input ([`crate::InputRef::Tree`]) failed
+    /// while the job ran: [`refusal::TREE_READ_FAILED`], [`refusal::TREE_STALLED`] or
+    /// [`refusal::TREE_UNAVAILABLE`]. The failure is then the host's, whatever the outcome
+    /// and exit status, which are kept as they were. Absent otherwise, and left out of the
+    /// text. `detail` keeps its meaning beside it. A server from before the field ignores
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_failure: Option<String>,
 }
 
 impl JobResult {
-    /// Checks the ids, the detail, the log tail and that the exit status agrees with the
-    /// outcome, as [`crate::RunResult::validate`] does for a run. It does not look at
-    /// `logs`.
+    /// Checks the ids, the detail, the input failure, the log tail and that the exit
+    /// status agrees with the outcome, as [`crate::RunResult::validate`] does for a run. It
+    /// does not look at `logs`. The input failure is bounded as `detail` is; its code is not
+    /// checked against a list, so a code a later agent adds still reaches the server.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.check(At::new("jobs", refusal::INVALID_HEARTBEAT))
     }
@@ -320,6 +329,9 @@ impl JobResult {
         check::ident(at.field("jobs.result.allocation_id"), &self.allocation_id)?;
         let detail = at.field("jobs.result.detail");
         check::opt_text(detail, self.detail.as_ref(), limits::MAX_DETAIL_LEN)?;
+        let input_failure = at.field("jobs.result.input_failure");
+        let code = self.input_failure.as_ref();
+        check::opt_text(input_failure, code, limits::MAX_DETAIL_LEN)?;
         if let Some(tail) = &self.log_tail {
             let streams = [
                 (at.field("jobs.result.log_tail.stdout"), &tail.stdout),

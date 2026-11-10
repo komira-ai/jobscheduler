@@ -98,6 +98,42 @@ pub enum InputRef {
         /// Where it appears, as for [`InputRef::Stage`].
         dest: String,
     },
+    /// A tree that the node's `tierstore fs` serves, named by the digest of its root tree
+    /// manifest. Not a tree of [`InputRef::Stage`]'s namespace: the two digests name
+    /// different things.
+    Tree {
+        /// `sha256:` and 64 lower case hex digits: the SHA-256 of the root tree manifest's
+        /// bytes.
+        digest: String,
+        /// Where it appears: relative, below the exec root, as a mount's `rel`; empty for
+        /// the exec root itself, which only a [`Placement::Writable`] tree may be.
+        #[serde(default)]
+        dest: String,
+        /// Whether the job may change it. Absent means read-only.
+        #[serde(default)]
+        placement: Placement,
+        /// What the agent does when the tree cannot be attached for a reason that is not
+        /// the tree's own. Absent means the start fails.
+        #[serde(default)]
+        unavailable: TreeUnavailable,
+    },
+}
+
+/// What the agent does when a tree input ([`InputRef::Tree`]) cannot be attached because
+/// `tierstore fs` is down, does not answer in time, or refuses for a reason other than the
+/// tree itself. It has no catch-all variant, as [`Placement`] has none: an agent that reads
+/// a value it does not know fails the decode of that one start rather than guess what the
+/// job wanted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreeUnavailable {
+    /// The start fails with [`refusal::TREE_UNAVAILABLE`]. The default.
+    #[default]
+    Fail,
+    /// The job starts without the tree: its `dest` is an empty directory (the exec root,
+    /// for an empty `dest`), and the agent names it in the job's environment so the job
+    /// stages the inputs itself.
+    JobStages,
 }
 
 /// One path the agent collects when the job ends.

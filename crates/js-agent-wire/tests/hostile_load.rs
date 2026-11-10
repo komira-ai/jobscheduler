@@ -361,6 +361,7 @@ fn a_heartbeat_with_log_fields_stays_inside_the_totals_the_existing_test_fixes()
             detail: None,
             log_tail: None,
             logs,
+            input_failure: None,
         }),
     };
     let len = |beat: &Heartbeat| serde_json::to_string(beat).unwrap().len();

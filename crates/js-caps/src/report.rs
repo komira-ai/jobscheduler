@@ -6,7 +6,7 @@
 //! | `arch` (required, once) | the CPU's architecture: `x86_64` or `arm64`, and `aarch64`, which an agent built before `arm64` was the one spelling reports, read as `arm64` |
 //! | `cpu.features` (repeated) | the CPU's features; the ISA level follows from them |
 //! | `cpus`, `mem_gib`, `nvme_gib`, `gpu` (once each) | countable capacity |
-//! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind` (once each) | exact values |
+//! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind`, `exec`, `tierstore-trees` (once each) | exact values |
 //! | `gpu.cores`, `gpu.metal_family` (a Mac reports them) | not read: a request cannot name them yet |
 //! | `xcode` (repeated: one per installed build) | a set, matched by membership |
 //! | `vm.image` (repeated: one per image, `<name>@sha256:<64 hex>`) | a set of the `sha256:<hex>` digests, matched by membership |

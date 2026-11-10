@@ -316,6 +316,7 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
                 detail: None,
                 log_tail: None,
                 logs: None,
+                input_failure: None,
             }),
         }],
         retired_jobs: vec!["job-2".into()],
@@ -427,6 +428,7 @@ fn an_old_agent_ignores_log_sink() {
                     stdout_dropped: 0,
                     stderr_dropped: 0,
                 }),
+                input_failure: None,
             }),
         }],
         log_grant_state: Some(LogGrantState {
@@ -453,6 +455,55 @@ fn an_old_agent_ignores_log_sink() {
             result.exit_code
         ),
         ("build-42", "failed", Some(2))
+    );
+    let v0: previous::Heartbeat = serde_json::from_value(wire).unwrap();
+    assert_eq!(v0.held.len(), 1);
+}
+
+/// Asserts that a server from before `input_failure` reads a heartbeat whose job result
+/// carries one as it read the result without: the listing, the outcome and the exit status
+/// whole, the input failure skipped. Catches an input failure that an older server cannot
+/// skip, which would cost it the heartbeat and every result in it.
+#[test]
+fn an_old_server_ignores_input_failure() {
+    let beat = Heartbeat {
+        jobs: vec![HeldJob {
+            job_id: "build-43".into(),
+            state: HeldState::ExitedUnacked,
+            result: Some(JobResult {
+                job_id: "build-43".into(),
+                allocation_id: "0123456789abcdef0123456789abcdef".into(),
+                outcome: Outcome::Succeeded,
+                exit_code: Some(0),
+                detail: None,
+                log_tail: None,
+                logs: None,
+                input_failure: Some(js_agent_wire::refusal::TREE_STALLED.into()),
+            }),
+        }],
+        ..heartbeat()
+    };
+    assert_eq!(beat.validate(), Ok(()));
+    let wire = serde_json::to_value(&beat).unwrap();
+    assert_eq!(
+        wire["jobs"][0]["result"]["input_failure"],
+        json!("tree-stalled")
+    );
+    let old: previous::JobBeat = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(old.host_id, "mac-01");
+    let listing = &old.jobs[0];
+    assert_eq!(
+        (listing.job_id.as_str(), listing.state.as_str()),
+        ("build-43", "exited_unacked")
+    );
+    let result = listing.result.as_ref().unwrap();
+    assert_eq!(
+        (
+            result.job_id.as_str(),
+            result.outcome.as_str(),
+            result.exit_code
+        ),
+        ("build-43", "succeeded", Some(0))
     );
     let v0: previous::Heartbeat = serde_json::from_value(wire).unwrap();
     assert_eq!(v0.held.len(), 1);

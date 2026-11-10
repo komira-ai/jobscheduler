@@ -24,6 +24,7 @@ use crate::error::{Rule, ValidationError};
 use crate::limits;
 use crate::native::{
     BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputSpec,
+    Placement,
 };
 use crate::refusal;
 
@@ -198,14 +199,26 @@ impl From<RunSpec> for NativeSpec {
 /// Where an input appears.
 fn dest(input: &InputRef) -> &str {
     match input {
-        InputRef::Stage { dest, .. } | InputRef::Mount { dest, .. } => dest,
+        InputRef::Stage { dest, .. }
+        | InputRef::Mount { dest, .. }
+        | InputRef::Tree { dest, .. } => dest,
     }
 }
 
+/// A `dest` and the input's source. Only a writable tree may have an empty `dest`, the exec
+/// root itself; [`disjoint`] then refuses a second empty one as a duplicate.
 fn check_input(at: At, input: &InputRef) -> Result<(), ValidationError> {
-    rel_path(at, dest(input), false)?;
+    let exec_root = matches!(
+        input,
+        InputRef::Tree {
+            placement: Placement::Writable,
+            ..
+        }
+    );
+    rel_path(at, dest(input), exec_root)?;
     match input {
         InputRef::Stage { stage_id, .. } => stage_digest(at, stage_id),
+        InputRef::Tree { digest, .. } => stage_digest(at, digest),
         InputRef::Mount { root_name, rel, .. } => Mount {
             root_name: root_name.clone(),
             rel: rel.clone(),
@@ -253,7 +266,7 @@ fn rel_path(at: At, value: &str, allow_empty: bool) -> Result<(), ValidationErro
     Ok(())
 }
 
-/// `sha256:` and 64 lower case hex digits.
+/// `sha256:` and 64 lower case hex digits: a stage id, or a tree's digest.
 fn stage_digest(at: At, value: &str) -> Result<(), ValidationError> {
     let hex = value.strip_prefix("sha256:").unwrap_or("");
     let shaped = hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));

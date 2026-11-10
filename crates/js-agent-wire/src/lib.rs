@@ -195,7 +195,7 @@ pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
 pub use log_sink::{LogGrant, LogGrantState, LogReport, LogSink};
 pub use native::{
     BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputKind,
-    OutputSpec, Placement,
+    OutputSpec, Placement, TreeUnavailable,
 };
 pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
 pub use per_job::{

@@ -58,6 +58,7 @@ fn job_result() -> JobResult {
             truncated: false,
         }),
         logs: None,
+        input_failure: None,
     }
 }
 
@@ -538,6 +539,51 @@ fn a_job_result_is_held_to_the_rules_of_a_run_result() {
         ..job_result()
     };
     assert_eq!(killed.validate(), Ok(()));
+}
+
+/// Asserts that a result's input failure is held to the rules of its detail: present, it is
+/// not empty, at most `MAX_DETAIL_LEN` bytes (the bound passes), and has no control
+/// character; a code it does not list (a later agent's) passes, beside any outcome, the exit
+/// status kept. It catches an input failure that could fill a heartbeat or carry a forged
+/// log line, and a server that would refuse a result for a code it does not know yet.
+#[test]
+fn a_job_results_input_failure_is_bounded_as_its_detail() {
+    let fails = |code: String, rule: Rule| {
+        let err = broken(
+            &job_result(),
+            |r| r.input_failure = Some(code),
+            JobResult::validate,
+        );
+        expect(
+            err,
+            "jobs.result.input_failure",
+            rule,
+            refusal::INVALID_HEARTBEAT,
+        );
+    };
+    fails(String::new(), Rule::Empty);
+    fails(long(MAX_DETAIL_LEN + 1), Rule::TooLong);
+    fails("tree-read-failed\nforged".into(), Rule::BadChars);
+    for code in [
+        refusal::TREE_READ_FAILED.to_owned(),
+        refusal::TREE_STALLED.to_owned(),
+        refusal::TREE_UNAVAILABLE.to_owned(),
+        "tree-later".to_owned(),
+        long(MAX_DETAIL_LEN),
+    ] {
+        let succeeded = JobResult {
+            outcome: Outcome::Succeeded,
+            exit_code: Some(0),
+            input_failure: Some(code.clone()),
+            ..job_result()
+        };
+        assert_eq!(succeeded.validate(), Ok(()), "{code}");
+        let failed = JobResult {
+            input_failure: Some(code.clone()),
+            ..job_result()
+        };
+        assert_eq!(failed.validate(), Ok(()), "{code}");
+    }
 }
 
 /// Asserts that a reply refuses a second job start of one job id, and a job start that

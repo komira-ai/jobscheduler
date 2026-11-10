@@ -10,6 +10,7 @@
 //! | `cpus`, `mem_gib`, `nvme_gib`, `disk-gib`, `gpu` | countable: the node has at least the amount |
 //! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind` | exact |
 //! | `exec` | exact, and a mode name: `container` or `sandbox-exec` |
+//! | `tierstore-trees` | exact: a job with tree inputs asks for `true` |
 //! | `xcode` | membership: the node reports a set (one entry per installed Xcode build) and the request names one |
 //! | `vm.image` | membership on the digest: the request names `<name>@sha256:<64 hex>`, the node reports one entry in that form per image it holds, and only the `sha256:<hex>` parts are compared |
 //! | `ios.device` (`1`) with `ios.device.<attribute>` | one device: the node reports one `ios.device` entry per ready device, and **one** of them must satisfy every attribute (exact) |
@@ -99,13 +100,14 @@ impl fmt::Display for Consumable {
 }
 
 /// Keys compared as exact strings.
-const EXACT_KEYS: [&str; 6] = [
+const EXACT_KEYS: [&str; 7] = [
     "os",
     "os_image",
     "cpu.model",
     "page_size",
     "gpu.kind",
     crate::host::EXEC,
+    crate::host::TIERSTORE_TREES,
 ];
 
 /// Keys a node reports as a set and a request names one member of.

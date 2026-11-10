@@ -226,6 +226,24 @@ fn flag_cannot_claim_scratch_quota() {
     }
 }
 
+/// Asserts that an operator cannot give `tierstore-trees` with `--capability`: the agent
+/// ends with status 2 naming the key, and sends nothing. It catches a host that says it
+/// attaches tree inputs without a `tierstore fs` behind it, which a tree job would then be
+/// placed on and never start.
+#[test]
+fn flag_cannot_claim_tierstore_trees() {
+    let (ran, sent, _) = run_scripted(
+        &["--capability", "tierstore-trees=true"],
+        &linux_host(),
+        vec![welcome(1)],
+        1,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let said = "--capability: tierstore-trees is detected and cannot be set";
+    assert!(ran.err.contains(said), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
+}
+
 /// Asserts that an operator who gave as many capabilities as the wire allows, with
 /// `os` and `arch` among them, gets an agent that ends with status 2 saying the hello is
 /// not acceptable (the contract capabilities no longer fit), before the job half starts

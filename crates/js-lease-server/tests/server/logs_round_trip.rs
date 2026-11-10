@@ -390,6 +390,7 @@ impl Cell {
             detail: None,
             log_tail: None,
             logs: Some(report),
+            input_failure: None,
         };
         let ended = vec![HeldJob {
             job_id: job.start.job_id.clone(),
