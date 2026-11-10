@@ -254,13 +254,13 @@ fn a_run_of_fifty_hosts_and_five_hundred_jobs_stays_in_its_bounds() {
 }
 
 /// Covers the same bounds over two thousand hosts and twenty thousand jobs, run to
-/// completion on one seed. It is a nightly run: it takes about an hour of CPU, so it is
+/// completion on one seed. It is a nightly run: it takes about 100 minutes of CPU (release), so it is
 /// not in the pull request's set (`.github/workflows/sim-sweep.yml` runs it, by name).
 /// Catches: as [`a_run_of_fifty_hosts_and_five_hundred_jobs_stays_in_its_bounds`], at a size
 /// where a cost per host per job is what the run is made of, and an id script shorter than
 /// the placements.
 #[test]
-#[ignore = "an hour of CPU: runs nightly in .github/workflows/sim-sweep.yml (job scale)"]
+#[ignore = "100 minutes of CPU: runs nightly in .github/workflows/sim-sweep.yml (job scale)"]
 fn a_run_of_two_thousand_hosts_and_twenty_thousand_jobs_stays_in_its_bounds() {
     assert!(SCRIPT_LEN > FULL.jobs as usize);
     let seen = Rc::new(Flag::new(Load::default()));
