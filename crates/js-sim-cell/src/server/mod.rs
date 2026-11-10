@@ -363,15 +363,9 @@ impl ServerNode {
         self.runtime.block_on(call(router, request))
     }
 
-    /// The elastic pool's cloud, for a server of [`ServerSpec::elastic_pool`]; the first
-    /// launching machine provider's, for a server of [`ServerSpec::ordered`].
-    #[must_use]
-    pub fn cloud(&self) -> Option<&Cloud> {
-        self.clouds.first()
-    }
-
-    /// Every cloud of the server, first to last ([`ServerNode::cloud`] is the first): none
-    /// for a server without an elastic pool.
+    /// Every cloud of the server, first to last: the elastic pool's, for a server of
+    /// [`ServerSpec::elastic_pool`]; one for each launching machine provider, for a server
+    /// of [`ServerSpec::ordered`]; none for a server without an elastic pool.
     #[must_use]
     pub fn clouds(&self) -> &[Cloud] {
         &self.clouds
