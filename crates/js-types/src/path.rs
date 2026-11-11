@@ -75,8 +75,9 @@ pub enum PathFault {
 ///
 /// # Errors
 ///
-/// [`PathFault::Empty`], [`PathFault::TooLong`], [`PathFault::BadChars`] or
-/// [`PathFault::Escapes`], checked in that order.
+/// In the order checked: [`PathFault::Empty`] for the empty path, [`PathFault::TooLong`],
+/// [`PathFault::BadChars`], [`PathFault::Escapes`] for a leading `/` or a `..` part, then
+/// [`PathFault::Empty`] for an empty or `.` part.
 pub fn relative(value: &str, allow_empty: bool) -> Result<(), PathFault> {
     if value.is_empty() {
         return if allow_empty {
@@ -111,9 +112,9 @@ pub fn relative(value: &str, allow_empty: bool) -> Result<(), PathFault> {
 ///
 /// # Errors
 ///
-/// [`PathFault::Empty`], [`PathFault::TooLong`], [`PathFault::BadChars`] or
-/// [`PathFault::Escapes`], checked in that order, except that a `..` part
-/// ([`PathFault::Escapes`]) is found before an empty or `.` one ([`PathFault::Empty`]).
+/// In the order checked: [`PathFault::Empty`] for the empty path, [`PathFault::TooLong`],
+/// [`PathFault::BadChars`], [`PathFault::Escapes`] for no leading `/` or a `..` part, then
+/// [`PathFault::Empty`] for an empty or `.` part.
 pub fn absolute(value: &str) -> Result<(), PathFault> {
     if value.is_empty() {
         return Err(PathFault::Empty);
@@ -143,8 +144,10 @@ pub fn absolute(value: &str) -> Result<(), PathFault> {
 ///
 /// # Errors
 ///
-/// [`PathFault::Empty`], [`PathFault::TooLong`], [`PathFault::Escapes`] (it does not start
-/// with `/`, or has a `..` part), [`PathFault::BadChars`] or [`PathFault::RuntimePlace`].
+/// In the order checked: [`PathFault::Empty`] for the empty target,
+/// [`PathFault::TooLong`], [`PathFault::Escapes`] for no leading `/`; then the faults of
+/// [`relative`] for the rest, in its order (so a refused character is found before a `..`
+/// part, and `/` alone is [`PathFault::Empty`]); then [`PathFault::RuntimePlace`].
 pub fn target(value: &str) -> Result<(), PathFault> {
     if value.is_empty() {
         return Err(PathFault::Empty);

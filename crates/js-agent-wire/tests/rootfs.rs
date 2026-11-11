@@ -347,6 +347,7 @@ fn path_mounts_are_bounded_and_held_to_the_path_rules() {
         ("/work/../proc".to_owned(), Rule::Escapes),
         ("/work/a:b".to_owned(), Rule::BadChars),
         ("/work/a,b".to_owned(), Rule::BadChars),
+        ("/work/a\\b".to_owned(), Rule::BadChars),
         ("/work/caf\u{e9}".to_owned(), Rule::BadChars),
         (rooted(MAX_PATH_LEN + 1), Rule::TooLong),
         ("/WORK".to_owned(), Rule::Duplicate),

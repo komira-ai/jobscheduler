@@ -111,7 +111,8 @@ fn a_target_is_outside_the_runtime_places() {
 /// relative one and a `..` part, an empty part, `:`, `,`, `\` and non-ASCII refused, and the
 /// bound counted with the leading `/` (4096 bytes accepted, 4097 refused). It catches a
 /// target that could add a field to a mount option, two spellings of one target, and a
-/// bound off by the leading `/`.
+/// bound off by the leading `/`. It also pins the order of the faults the docs give: a
+/// refused character before a `..` part, and a `..` part before an empty one.
 #[test]
 fn a_target_is_an_absolute_ascii_path_in_normal_form() {
     assert_eq!(target(&rooted(MAX_PATH_LEN)), Ok(()));
@@ -125,6 +126,10 @@ fn a_target_is_an_absolute_ascii_path_in_normal_form() {
     for bad in ["/a:b", "/a,b", "/a\\b", "/caf\u{e9}", "/a\0b"] {
         assert_eq!(target(bad), Err(PathFault::BadChars), "{bad:?}");
     }
+    assert_eq!(target("/caf\u{e9}/.."), Err(PathFault::BadChars));
+    assert_eq!(target("/a/..//b"), Err(PathFault::Escapes));
+    assert_eq!(relative("a/../b//", false), Err(PathFault::Escapes));
+    assert_eq!(absolute("/a/..//b"), Err(PathFault::Escapes));
 }
 
 /// Asserts that `disjoint` refuses two equal paths (in any case) as a repeat and one below
