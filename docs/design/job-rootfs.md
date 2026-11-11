@@ -1,6 +1,6 @@
 # A job's file system: layers, mounts and host ports
 
-Status: **design for the owner's review; of its build items (section 11), item 2, the agent wire, is built.** It replaces `docs/design/tree-inputs.md` and its build
+Status: **design for the owner's review; of its build items (section 11), item 2, the agent wire, and item 6, host ports on `crun`, are built.** It replaces `docs/design/tree-inputs.md` and its build
 items: jobscheduler does not know that a node-local cache exists, let alone which one. What tree-inputs.md asked of
 jobscheduler is met here by things any container runtime offers (layers, mounts, and access to a host port or socket),
 and the pieces of its wire that already merged (komira-ai/jobscheduler#842) are retired additively (section 6).
@@ -701,8 +701,10 @@ its own:
   bytes are copied both ways (`tokio::io::copy_bidirectional`) on a runtime of its own (`js-ports`, two threads), so a
   busy upload cannot slow the lifecycle. A refused connection to the host closes the job's connection.
 - The job's program must not run before the listeners exist. Its init already waits for a route on a wired job
-  (`--wait-route`); it gains `--wait-listen PORT,...`, which waits until each job port is in state `LISTEN` in the job's
-  own `/proc/net/tcp`, under the same 30 s bound, so no connection is made to find out.
+  (`--wait-route`); it gains `--wait-listen SECONDS PORT,...` (the bundle gives 30), which waits until each job port
+  is in state `LISTEN` in the job's own `/proc/net/tcp`, under the same 30 s bound, so no connection is made to find
+  out. Each listener is bound with `IP_FREEBIND`, so a bind made before `crun` has brought the job's loopback up
+  still answers once it is.
 - It works at every network level, because it needs no interface and no firewall rule: the `input` refusal of the host
   stays whole. It is TCP over IPv4, as the forwards of `ports` are; a designed UDP port (2.4) is a UDP socket the agent
   holds the same way, relaying each datagram and its answer, with no listener to wait for.

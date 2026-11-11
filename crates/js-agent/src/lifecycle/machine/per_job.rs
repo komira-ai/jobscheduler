@@ -70,8 +70,13 @@ fn run_of(spec: &JobStartSpec) -> JobSpec {
 }
 
 /// The result of a job keyed by job id, as its listing carries it, with what the capture saw
-/// of its streams (`logs`) when the runtime uploaded them.
-pub(super) fn job_result(result: &RunResult, logs: Option<LogReport>) -> JobResult {
+/// of its streams (`logs`) when the runtime uploaded them, and the code of the host's input
+/// that failed (`input_failure`), when one did.
+pub(super) fn job_result(
+    result: &RunResult,
+    logs: Option<LogReport>,
+    input_failure: Option<String>,
+) -> JobResult {
     JobResult {
         job_id: result.run_id.clone(),
         allocation_id: result.lease_id.clone(),
@@ -80,7 +85,7 @@ pub(super) fn job_result(result: &RunResult, logs: Option<LogReport>) -> JobResu
         detail: result.detail.clone(),
         log_tail: result.log_tail.clone(),
         logs,
-        input_failure: None,
+        input_failure,
     }
 }
 
@@ -106,6 +111,7 @@ impl Lifecycle {
                 env: spec.env.clone().into_iter().collect(),
                 log_sink: sink.clone().ok().flatten(),
                 vm: spec.kind == StartKind::Vm,
+                host_ports: spec.host_ports.clone(),
             };
             self.admit_and_start((&run, Keyed::Job), &given, received, events);
             // The start always leaves its job last, running or refused.
@@ -171,7 +177,7 @@ impl Lifecycle {
                 result: job
                     .result
                     .as_ref()
-                    .map(|result| job_result(result, job.logs)),
+                    .map(|result| job_result(result, job.logs, job.input_failure.clone())),
             })
             .collect()
     }

@@ -151,6 +151,12 @@ pub struct ContainerSpec {
     /// GPUs a run booked. Empty for a container that is given none, whose bundle then has
     /// no device entry and no device rule.
     pub devices: Vec<DeviceNode>,
+    /// The ports of the container's loopback whose listeners, made by the daemon in the
+    /// container's network namespace, the init waits for before it starts the program
+    /// (`js-init --wait-listen`, for at most [`LISTEN_WAIT_SECS`](crate::oci::LISTEN_WAIT_SECS)):
+    /// the job's host ports. Empty for none, and the init does not wait. A host container
+    /// ([`Isolation::Host`]) has none.
+    pub listen_ports: Vec<u16>,
 }
 
 /// A character device of the host, given to a container at the same path, as the host's
@@ -278,6 +284,7 @@ pub(crate) mod tests {
                 },
             ],
             devices: Vec::new(),
+            listen_ports: Vec::new(),
         }
     }
 }

@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling};
+use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 
 use super::VmRuntime;
 use crate::lifecycle::{
@@ -112,6 +112,15 @@ impl Runtime for WithVms {
 
     fn network_ceiling(&self) -> NetworkCeiling {
         self.other.network_ceiling()
+    }
+
+    fn host_ports(&self) -> Vec<PortRange> {
+        self.other.host_ports()
+    }
+
+    /// The other runtime's: a VM is never adopted.
+    fn host_port_lost(&self, id: &RunHandle) -> Option<String> {
+        self.other.host_port_lost(id)
     }
 
     fn check_native_egress(&self, native: &NativeSpec) -> Result<(), RuntimeError> {

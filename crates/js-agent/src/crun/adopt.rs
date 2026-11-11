@@ -23,6 +23,12 @@
 //!   run would have no network, and it is removed. A run whose record is there has ended and
 //!   has no network left: its result is taken over whatever the egress.
 //!
+//! An adopted run that still stands is offered its host ports again, from the label the start
+//! recorded them in (one that is not a list of host ports fails the checks); if they cannot be
+//! (the job took one of its ports itself meanwhile, or `crun state` failed), it is adopted all
+//! the same and marked as one that lost them, which the lifecycle stops. A container whose
+//! state `crun` read and that names no usable pid is ending: nothing is offered.
+//!
 //! An adopted run stands as a run this process started, with the start time the sidecar
 //! recorded (wall clock), so the lifecycle reads how long it has run and holds it to the rest
 //! of its wall-time limit. The wall limit is enforced only while an agent runs: the time a
@@ -46,6 +52,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 
+use js_agent_wire::HostPort;
 use js_contain::cgroup::LeaseCgroup;
 use js_contain::oci::{
     ExitRecord, end_supervisor, exit_record_path, read_exit_record, recorded_supervisor,
@@ -312,7 +319,8 @@ impl CrunRuntime {
     /// # Errors
     /// The record cannot be read, or the run cannot stand (`standing`).
     fn adopted(&self, entry: &Entry, fields: &Fields<'_>) -> Result<Run, Reason> {
-        let mut run = self.run_of(entry, fields);
+        let host_ports = net::recorded_host_ports(&entry.labels).map_err(Reason::Inconsistent)?;
+        let mut run = self.run_of(entry, fields, host_ports);
         // The supervisor is looked at before the record: one that is gone has written its
         // record already, so a record not there then is one that never will be.
         let alive = fields.supervisor.id().alive();
@@ -334,9 +342,15 @@ impl CrunRuntime {
                     "its network wiring cannot be taken over".to_owned(),
                 ));
             }
-            None => self
-                .standing(&run, fields, alive)
-                .map_err(Reason::Inconsistent)?,
+            // One that still stands is offered its host ports again, or marked as one that
+            // lost them, which the lifecycle stops.
+            None => {
+                let (state, pid) = self
+                    .standing(&run, fields, alive)
+                    .map_err(Reason::Inconsistent)?;
+                run.net.offer_again(&self.host_ports.1, pid);
+                state
+            }
         };
         Ok(run)
     }
@@ -386,7 +400,7 @@ impl CrunRuntime {
     /// The run of the lease `entry` records, not started or ended: the container, the
     /// lease's directories and cgroup, and the labels, as a start by this process makes
     /// them. The OOM account starts at the parent's count now.
-    fn run_of(&self, entry: &Entry, fields: &Fields<'_>) -> Run {
+    fn run_of(&self, entry: &Entry, fields: &Fields<'_>, host_ports: Vec<HostPort>) -> Run {
         let lease = self.oci.lease_dirs(&entry.name);
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, &entry.name);
         Run {
@@ -398,8 +412,9 @@ impl CrunRuntime {
             cgroup,
             state: State::Created,
             // A run that may still run is adopted only by a runtime with no egress, which admits
-            // no job with a network; one that ended has no network to release.
-            net: net::Net::asked(JobNetwork::None, Vec::new()),
+            // no job with a network; one that ended has no network to release. Its host ports
+            // are offered again once it is known to stand (`adopted`).
+            net: net::Net::asked(JobNetwork::None, Vec::new(), host_ports),
             entry: entry.clone(),
             // Its uploader, if its lease holds a progress record, comes with the runtime's live
             // logs (`resume_uploads`); the sink came only in its start.
@@ -423,22 +438,30 @@ impl CrunRuntime {
     /// No init named is not a reason to refuse: `crun` deletes the container when the job
     /// exits and the supervisor drains the streams before it writes its record, and the
     /// container does not exist yet between the supervisor's ready word and `crun`'s create.
-    /// The handle gives the end once the record is written.
-    fn standing(&self, run: &Run, fields: &Fields<'_>, alive: bool) -> Result<State, String> {
+    /// The handle gives the end once the record is written. With the state, what `crun state`
+    /// said of the init's pid, which the run's host ports are offered again in.
+    fn standing(
+        &self,
+        run: &Run,
+        fields: &Fields<'_>,
+        alive: bool,
+    ) -> Result<(State, Result<u32, String>), String> {
         if !alive {
             return Err("the supervisor has ended and left no exit record".to_owned());
         }
-        if let Ok(pid) = self.oci.container_pid(&run.spec)
+        let pid = self.oci.container_pid(&run.spec);
+        if let Ok(pid) = pid
             && !in_cgroup(fields.cgroup, pid)
         {
             return Err("the container's init is not in the lease's cgroup".to_owned());
         }
-        Ok(State::Running {
+        let state = State::Running {
             run: self
                 .oci
                 .adopt_supervised(fields.lease_dir, fields.supervisor.id()),
             since_ms: fields.started_wall_ms,
-        })
+        };
+        Ok((state, pid))
     }
 
     /// Removes the leases of this agent's name that no sidecar records (a directory beside

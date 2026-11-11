@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use js_agent::lifecycle::{Prepared, RunHandle, Runtime, Status, label};
 use js_agent::vm::{VmRuntime, WithVms};
-use js_agent_wire::{LogReport, LogTail, NetworkLevel, refusal};
+use js_agent_wire::{LogReport, LogTail, NetworkLevel, PortRange, refusal};
 use js_vm_lease::fake::FakeDriver;
 use js_vm_lease::{ExecEnd, Step};
 
@@ -82,7 +82,8 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
 }
 
 /// Asserts that every question about the host is the other runtime's answer (the image
-/// fetch, the listing, the checks of a body, the network ceiling and egress, the lease
+/// fetch, the listing, the checks of a body, the network ceiling and egress, the host ports
+/// allowed and lost, the lease
 /// directory, the control groups, the GPUs), that the VM check is the VM runtime's, and that
 /// a reclaim does the other runtime's and then the VMs'. Catches a router that answers a
 /// host question with the VM runtime's default and so changes what the agent runs.
@@ -100,7 +101,7 @@ fn every_host_question_is_the_other_runtimes() {
     );
     assert_eq!(
         with.list_ids().unwrap(),
-        [RunHandle(leaked)],
+        [RunHandle(leaked.clone())],
         "the other runtime's containers, and no VM"
     );
     let body = native("/bin/true", &[]);
@@ -111,6 +112,11 @@ fn every_host_question_is_the_other_runtimes() {
     assert_eq!(with.supports_gpus(), alone.supports_gpus());
     assert_eq!(with.check_egress(), alone.check_egress());
     assert_eq!(with.network_ceiling(), alone.network_ceiling());
+    fake.set_host_ports(&[PortRange::new(5432, 5433).unwrap()]);
+    assert_eq!(with.host_ports(), [PortRange::new(5432, 5433).unwrap()]);
+    fake.lose_host_ports("left", "taken");
+    let lost = with.host_port_lost(&RunHandle(leaked.clone()));
+    assert_eq!(lost.as_deref(), Some("taken"));
     let mut open = native("/bin/true", &[]);
     open.network = NetworkLevel::Open;
     assert_eq!(

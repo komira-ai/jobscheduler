@@ -11,7 +11,7 @@ use js_agent::lifecycle::{
     CheckFinding, CheckHook, Clock, Exit, Finished, Found, NativeRefusal, Prepared, RunHandle,
     RunSpec, Runtime, RuntimeError, Status, Ticket, label,
 };
-use js_agent_wire::{LogReport, LogTail, NetworkCeiling};
+use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
 
 /// A clock that moves only when a test says so. Clones share one reading.
 #[derive(Clone, Default)]
@@ -99,6 +99,10 @@ struct State {
     ceiling: NetworkCeiling,
     /// How many times `network_ceiling` was asked.
     ceiling_asks: u32,
+    /// What `host_ports` answers; none by default, as the trait's default.
+    host_ports: Vec<PortRange>,
+    /// Why each run named here lost its host ports (`host_port_lost`), by run id.
+    lost: BTreeMap<String, String>,
 }
 
 /// Where a scripted pull stands.
@@ -205,6 +209,18 @@ impl FakeRuntime {
     /// The network ceiling the runtime answers (`Runtime::network_ceiling`).
     pub fn set_ceiling(&self, ceiling: NetworkCeiling) {
         self.state.borrow_mut().ceiling = ceiling;
+    }
+
+    /// The host ports the runtime allows (`Runtime::host_ports`).
+    pub fn set_host_ports(&self, allowed: &[PortRange]) {
+        self.state.borrow_mut().host_ports = allowed.to_vec();
+    }
+
+    /// Makes the container of `run_id` one whose host ports were lost for `why`
+    /// (`Runtime::host_port_lost`), as a runtime says of a run it adopted.
+    pub fn lose_host_ports(&self, run_id: &str, why: &str) {
+        let mut state = self.state.borrow_mut();
+        state.lost.insert(run_id.to_owned(), why.to_owned());
     }
 
     /// How many times the network ceiling was asked for.
@@ -420,6 +436,16 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
+    fn host_ports(&self) -> Vec<PortRange> {
+        self.state.borrow().host_ports.clone()
+    }
+
+    fn host_port_lost(&self, id: &RunHandle) -> Option<String> {
+        let state = self.state.borrow();
+        let run = &state.containers.get(&id.0)?.run_id;
+        state.lost.get(run).cloned()
+    }
+
     fn network_ceiling(&self) -> NetworkCeiling {
         let mut state = self.state.borrow_mut();
         state.ceiling_asks += 1;

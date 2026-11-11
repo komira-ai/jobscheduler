@@ -227,6 +227,9 @@ pub struct CrunPlan {
     /// Whether the runtime launches host jobs (`--allow-host-jobs`), set by
     /// [`Settings::with_host_jobs`].
     pub host_jobs: bool,
+    /// The ports of the host's loopback a job may reach (`--host-port`), set by
+    /// [`Settings::with_host_ports`].
+    pub host_ports: Vec<js_agent_wire::PortRange>,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -352,6 +355,7 @@ impl Settings {
                 logs: crate::logs::LogPlan::new(crate::logs::DEFAULT_FILE_CAP),
                 image_budget: None,
                 host_jobs: false,
+                host_ports: Vec::new(),
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -417,6 +421,16 @@ impl Settings {
         self.crun_mut()
             .into_iter()
             .for_each(|plan| plan.host_jobs = allowed);
+        self
+    }
+
+    /// These settings with `allowed` as the ports of the host's loopback a job of the crun
+    /// runtime may reach (`--host-port`); the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_host_ports(mut self, allowed: Vec<js_agent_wire::PortRange>) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.host_ports = allowed.clone());
         self
     }
 

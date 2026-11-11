@@ -14,7 +14,7 @@ use super::{Harness, Options, job, names, reply, reply_json};
 const IMAGE: &str = "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// A valid job start for `job_id`: one CPU, 1 GiB, a minute, no GPU.
-fn start(job_id: &str) -> JobStartSpec {
+pub(super) fn start(job_id: &str) -> JobStartSpec {
     JobStartSpec {
         job_id: job_id.to_owned(),
         allocation_id: format!("alloc-{job_id}"),
@@ -43,7 +43,7 @@ fn start(job_id: &str) -> JobStartSpec {
     }
 }
 
-fn job_start(spec: JobStartSpec) -> Command {
+pub(super) fn job_start(spec: JobStartSpec) -> Command {
     Command::JobStart(Box::new(spec))
 }
 
@@ -63,7 +63,7 @@ fn listed(h: &Harness) -> Vec<String> {
 }
 
 /// The listing of `job_id`, which must be there.
-fn listing(h: &Harness, job_id: &str) -> HeldJob {
+pub(super) fn listing(h: &Harness, job_id: &str) -> HeldJob {
     let jobs = h.life.held_jobs();
     let found = jobs.into_iter().find(|job| job.job_id == job_id);
     found.expect("the job is listed")

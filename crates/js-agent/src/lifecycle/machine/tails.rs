@@ -40,7 +40,13 @@ fn len_of<T: serde::Serialize>(value: &T) -> usize {
 fn result_len(job: &Job, result: &RunResult) -> usize {
     match job.keyed {
         Keyed::Run => len_of(result),
-        Keyed::Job => len_of(&per_job::job_result(result, job.logs)) + RESULT_KEY_LEN,
+        Keyed::Job => {
+            len_of(&per_job::job_result(
+                result,
+                job.logs,
+                job.input_failure.clone(),
+            )) + RESULT_KEY_LEN
+        }
     }
 }
 

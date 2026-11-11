@@ -518,6 +518,14 @@ pub struct Cli {
     /// `--egress allow-list` or `open`.
     #[arg(long, value_name = "PORT|LO-HI")]
     pub egress_forward_port: Vec<String>,
+    /// A port of the host's loopback a job may reach (`host_ports`), `PORT` or `LO-HI`, each
+    /// from 1 to 65535; repeatable, at most 16. A job reaches each host port it names at a port
+    /// of its own loopback, whatever its network level, through a listener the agent holds
+    /// in the job's network namespace; a job that names a host port not listed is refused
+    /// `input-not-allowed`, as is every job that names one when none is given. Needs
+    /// `--runtime crun`.
+    #[arg(long, value_name = "PORT|LO-HI")]
+    pub host_port: Vec<String>,
     /// The IPv4 network the jobs' addresses are taken from, one /30 each, `<addr>/16` to
     /// `<addr>/24`; by default `198.18.0.0/16`. Needs `--egress allow-list` or `open`.
     #[arg(long, value_name = "CIDR")]
@@ -717,6 +725,19 @@ impl Cli {
             ("--gpu-device", !self.gpu_devices.is_empty()),
             ("--gpu-mount", !self.gpu_mounts.is_empty()),
             ("--gpu-env", !self.gpu_env.is_empty()),
+        ]
+    }
+
+    /// The flags only the crun runtime takes (the GPU flags and `--host-port`), with whether
+    /// each was given: an agent that runs another refuses them all.
+    #[must_use]
+    pub fn crun_only_flags(&self) -> [(&'static str, bool); 4] {
+        let [device, mount, env] = self.gpu_flags();
+        [
+            device,
+            mount,
+            env,
+            ("--host-port", !self.host_port.is_empty()),
         ]
     }
 

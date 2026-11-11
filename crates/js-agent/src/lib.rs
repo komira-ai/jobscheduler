@@ -94,6 +94,7 @@
 //! | `--egress <none\|allow-list\|open>` | the most network a job's `crun` container may ask for (its `network`), the agent's ceiling, reported in the hello as the capability `egress`: `none` (the default) loopback only, no route, for every job; `allow-list` a job may ask for one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; `open` a job may also ask for any IPv4 address but the metadata range `169.254.0.0/16`, the host itself and another job (IPv6 and a spoofed source are refused as under `allow-list`); a start above the ceiling is refused `network-above-ceiling` before anything is made and is never run with less; the agent, as root, wires each container that asked for `allow-list` or `open` from outside after its start, while the container's init holds the job until its default route is there, keeps the firewall and checks it before every create (`egress-unchecked` when it changed), and takes the wiring down when the run ends or is removed; a `none` job is not wired and waits for nothing (docs/design/agent-egress.md); started once, after the claims of the scratch root and the host id, holding the host's egress (the abstract socket `@js-agent-egress`: one agent with `allow-list` or `open` per host, a second is refused), and a ceiling that cannot be set up ends the agent with status 2; only `--runtime crun` reads it, so another runtime is refused `allow-list` and `open` at start (its jobs get `none` only) |
 //! | `--egress-allow <ip:port>` | an endpoint an `allow-list` job may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; prefix 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one is required by `--egress allow-list`, none by `--egress open`; needs `--egress allow-list` or `open` |
 //! | `--egress-dns <ip>` | a resolver a job with a network may ask (UDP and TCP port 53) and the only nameserver of its `resolv.conf`; repeatable, at most 4; without one a job resolves no name; needs `--egress allow-list` or `open` |
+//! | `--host-port <port\|lo-hi>` | a port of the host's loopback a job may reach (`host_ports`), each from 1 to 65535; repeatable, at most 16; a job reaches each host port it names at a port of its own loopback (its job port), at every network level, through a listener the agent holds in the job's network namespace, and its program starts once each listens; a start that names a host port not listed (any, without the flag) is refused `input-not-allowed`; a run adopted after a restart whose listener cannot be made again is stopped, its result's `input_failure` saying `host-port-lost`; needs `--runtime crun` |
 //! | `--egress-forward-port <port\|lo-hi>` | a host port a job may declare (`ports`), each from 1 to 65535; repeatable, at most 16; a start that declares a port not listed is refused `port-above-ceiling`; each declared port of an admitted `allow-list` or `open` job is forwarded from the host's port to the job's (a `none` job that declares one is refused `ports-not-supported`); the hello reports them as `egress-ports`; needs `--egress allow-list` or `open` |
 //! | `--egress-pool <cidr>` | the IPv4 network the jobs' addresses come from, one /30 each, `/16` to `/24`; by default `198.18.0.0/16`; needs `--egress allow-list` or `open` |
 //! | `--egress-ip <path>`, `--egress-nft <path>`, `--egress-nsenter <path>` | the absolute paths of the `ip`, `nft` and `nsenter` programs the egress setup runs, by default `/usr/sbin/ip`, `/usr/sbin/nft` and `/usr/bin/nsenter`; need `--egress allow-list` or `open` |
@@ -288,6 +289,7 @@ pub mod flags_file;
 #[cfg(target_os = "linux")]
 mod gpu_dropin;
 mod host;
+pub mod host_ports;
 mod identity;
 #[cfg(target_os = "linux")]
 pub mod image;
@@ -486,6 +488,7 @@ fn runtime_flags(
                     Settings::for_crun(ready.crun, &ready.job_user, ready.job_ids, image_allow);
                 let settings = settings.with_log_file_cap(cli.log_file_cap);
                 let settings = settings.with_image_budget(budget);
+                let settings = settings.with_host_ports(ready.host_ports);
                 Ok(Some(settings.with_gpus(passthrough)))
             }
             #[cfg(not(target_os = "linux"))]
@@ -509,9 +512,8 @@ fn runtime_flags(
         _ if cli.crun_bin.is_some() => usage("--crun-bin: needs --runtime crun"),
         _ if cli.image_budget_gib.is_some() => usage("--image-budget-gib: needs --runtime crun"),
         _ if cli.job_user.is_some() => usage("--job-user: needs --runtime crun"),
-        // Only the crun runtime gives a job a GPU's nodes: the engines take theirs by index
-        // from the toolkit, and a Mac runs no container.
-        kind => match cli.gpu_flags().into_iter().find(|(_, given)| *given) {
+        // Only crun gives a job GPU nodes (the engines take theirs from the toolkit) or host ports.
+        kind => match cli.crun_only_flags().into_iter().find(|(_, given)| *given) {
             Some((flag, _)) => usage(&format!("{flag}: needs --runtime crun")),
             None if kind != Some(RuntimeKind::Docker) => Ok(None),
             None if !cli.allow_container_engine => usage(ENGINE_NEEDS_OPT_IN),

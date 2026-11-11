@@ -1,28 +1,36 @@
 //! The crun runtime's side of egress: the port it wires each container's network through
 //! ([`EgressPort`]: [`Egress`] on a node, a fake in a test), the start of that port from the
-//! agent's `--egress*` flags ([`start_egress`]), and the steps the runtime takes around a
-//! start.
+//! agent's `--egress*` flags ([`start_egress`]), the steps the runtime takes around a start,
+//! and the offer of a run's host ports ([`Forwarder`]) at every level, its own or an adopted
+//! run's, with the label that records them.
 //!
 //! The order is the one [`crate::egress`] fixes: [`EgressPort::check`] before every create
 //! (`Runtime::check_egress`, which the lifecycle calls and answers `egress-unchecked`), the
 //! create, `Oci::start_supervised`, `Oci::container_pid`, [`EgressPort::attach`] with the job's
-//! level and declared ports, and [`Wired::release`] once the run has ended or is removed. An
-//! agent in mode none has no port, and none of this runs: its containers have loopback only, as
+//! level and declared ports, the offer of the run's host ports, and [`Wired::release`] and the
+//! offer's close once the run has ended or is removed. An agent in mode none has no port, and
+//! none of the egress runs: its containers have loopback only, as
 //! before. Under a ceiling
 //! a `none` job is not attached either: its bundle has the loopback resolver and no route
 //! wait ([`create`]), and its container keeps loopback only.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::NetworkCeiling;
+use js_agent_wire::{HostPort, NetworkCeiling, PortProtocol};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::words::{crun_words, init_words};
 use js_contain::oci::{Oci, Supervised};
 use js_types::{JobNetwork, PortMap};
 
 use crate::egress::{Attachment, Config, Egress, EgressError, Mode, ROUTE_WAIT};
-use crate::lifecycle::RuntimeError;
+use crate::host_ports::{Forwarder, OfferError, Offered};
+use crate::lifecycle::{RuntimeError, label};
+
+// The container's init waits for its listeners as long as for its route, and the runtime asks
+// for the pid that long.
+const _: () = assert!(ROUTE_WAIT.as_secs() == js_contain::oci::LISTEN_WAIT_SECS);
 
 /// How long the runtime pauses between two asks for a started container's pid.
 const PID_PAUSE: Duration = Duration::from_millis(10);
@@ -138,45 +146,142 @@ pub(super) async fn create(
     }
 }
 
-/// A run's network: the level its job was admitted at, the ports it declared, and its wiring
-/// from its start until it is released.
+/// A run's network: the level its job was admitted at, the ports it declared and its host
+/// ports, its wiring from its start until it is released, and the offer of its host ports
+/// (or why they could not be offered again after a restart).
 pub(super) struct Net {
     level: JobNetwork,
     ports: Vec<PortMap>,
+    host_ports: Vec<HostPort>,
     wired: Option<Box<dyn Wired>>,
+    offered: Option<Offered>,
+    lost: Option<String>,
 }
 
 impl Net {
-    /// The network of a run admitted at `level` with the declared `ports`, not wired yet.
-    pub(super) fn asked(level: JobNetwork, ports: Vec<PortMap>) -> Self {
+    /// The network of a run admitted at `level` with the declared `ports` and the
+    /// `host_ports` it reaches, not wired or offered yet.
+    pub(super) fn asked(level: JobNetwork, ports: Vec<PortMap>, host_ports: Vec<HostPort>) -> Self {
         Self {
             level,
             ports,
+            host_ports,
             wired: None,
+            offered: None,
+            lost: None,
         }
     }
 
     /// Wires the started container of `spec`, which `running` runs, by `egress` ([`attach`]),
-    /// and keeps the wiring.
+    /// and offers it its host ports by `forwarder`, at every level; keeps both. The
+    /// container's pid is asked for once, and only when there is something to do.
     ///
     /// # Errors
     ///
-    /// As [`attach`].
+    /// As [`attach`], or the host ports could not be offered.
     pub(super) fn attach(
         &mut self,
-        egress: Option<&dyn EgressPort>,
+        (egress, forwarder): (Option<&dyn EgressPort>, &Forwarder),
         oci: &Oci,
         started: (&ContainerSpec, &Supervised),
         now_ms: fn() -> u64,
     ) -> Result<(), RuntimeError> {
-        self.wired = attach(egress, oci, started, (self.level, &self.ports), now_ms)?;
+        // `stage` refused a wired run with no egress before anything was made (`port_for`).
+        let egress = egress.filter(|_| !self.level.is_none());
+        if egress.is_none() && self.host_ports.is_empty() {
+            return Ok(());
+        }
+        let failed =
+            |why: String| RuntimeError::new(format!("wire the container's network: {why}"));
+        let pid = pid_of(oci, started.0, started.1, now_ms).map_err(failed)?;
+        self.wired = attach(egress, (&started.0.name, pid), (self.level, &self.ports))?;
+        self.offered = offer(forwarder, pid, &self.host_ports)
+            .map_err(|why| RuntimeError::new(format!("offer the host ports: {why}")))?;
         Ok(())
     }
 
-    /// Takes the wiring of the container `name` down ([`release`]).
+    /// Offers the run, adopted from an earlier process, its host ports again, in the
+    /// network namespace of `pid` (its container's first process, as `crun state` named it): a
+    /// run that cannot be offered them is marked lost ([`Net::lost`]), `crun state` failing
+    /// among the reasons. A container whose state `crun` read and that names no usable pid is
+    /// ending (its sidecar says it ran, so it was made), and nothing is offered.
+    pub(super) fn offer_again(&mut self, forwarder: &Forwarder, pid: Result<u32, String>) {
+        let pid = match pid {
+            _ if self.host_ports.is_empty() => return,
+            Err(why) if answered(&why) => return,
+            Err(why) => Err(format!("find the container's pid: {why}")),
+            Ok(pid) => offer(forwarder, pid, &self.host_ports).map_err(|why| why.to_string()),
+        };
+        match pid {
+            Ok(offered) => self.offered = offered,
+            Err(why) => self.lost = Some(why),
+        }
+    }
+
+    /// Why the run's host ports could not be offered again after a restart; `None` when they
+    /// were, or it has none.
+    pub(super) fn lost(&self) -> Option<String> {
+        self.lost.clone()
+    }
+
+    /// Takes the wiring of the container `name` down ([`release`]) and closes its host
+    /// ports.
     pub(super) fn release(&mut self, name: &str) {
         release(name, &mut self.wired);
+        self.offered = None;
     }
+}
+
+/// The offer of `host_ports` to the container whose first process is `pid`; none when there
+/// are none.
+fn offer(
+    forwarder: &Forwarder,
+    pid: u32,
+    host_ports: &[HostPort],
+) -> Result<Option<Offered>, OfferError> {
+    match host_ports.is_empty() {
+        true => Ok(None),
+        false => forwarder.offer(pid, host_ports).map(Some),
+    }
+}
+
+/// The value of the label [`label::HOST_PORTS`] for `host_ports`; none when there are none.
+pub(super) fn host_ports_label(host_ports: &[HostPort]) -> Option<String> {
+    let each = host_ports.iter().map(|port| match port.job_port() {
+        job if job == port.host_port => port.host_port.to_string(),
+        job => format!("{}:{job}", port.host_port),
+    });
+    let text: Vec<String> = each.collect();
+    (!text.is_empty()).then(|| text.join(","))
+}
+
+/// The host ports the label [`label::HOST_PORTS`] of `labels` records: none without it.
+///
+/// # Errors
+///
+/// The label is there and is not what [`host_ports_label`] writes.
+pub(super) fn recorded_host_ports(
+    labels: &BTreeMap<String, String>,
+) -> Result<Vec<HostPort>, String> {
+    let Some(text) = labels.get(label::HOST_PORTS) else {
+        return Ok(Vec::new());
+    };
+    let number = |text: &str| text.parse::<u16>().ok().filter(|port| *port != 0);
+    let port = |entry: &str| {
+        let (host, job) = entry.split_once(':').unwrap_or((entry, entry));
+        Some(HostPort {
+            host_port: number(host)?,
+            container_port: Some(number(job)?),
+            protocol: PortProtocol::Tcp,
+        })
+    };
+    let ports: Option<Vec<HostPort>> = text.split(',').map(port).collect();
+    ports.ok_or_else(|| {
+        format!(
+            "the label {} is not a list of host ports",
+            label::HOST_PORTS
+        )
+    })
 }
 
 /// The port a run admitted at `level` is wired through: none for a `none` run, `egress` for a
@@ -210,40 +315,37 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
     }
 }
 
-/// The wiring of the started container of `spec`, which `running` runs, by `egress`, for a
-/// job admitted at `level` that declared `ports`; none for a `none` job, which is not wired
-/// (and whose pid is not asked for). A wired level with no egress never gets here: the
-/// runtime refused it before it made the container ([`port_for`]). The container's pid is
-/// asked for until `crun` names one (right after `Oci::start_supervised` the container may not
-/// be made yet), and the asks end without one when `crun state` answers with no usable pid (or
-/// names one too late), when `crun run` has ended, or when [`ROUTE_WAIT`] (a wired ceiling's
-/// `Config::route_wait`) has passed on `now_ms`: the container's init gives up its wait for the
-/// route then.
+/// The wiring of the container `name`, whose first process is `pid`, by `egress`, for a job
+/// admitted at `level` that declared `ports`; none without an egress, which is how a `none`
+/// job comes (a wired level with no egress never gets here: the runtime refused it before it
+/// made the container, [`port_for`]).
+///
+/// The pid is asked for ([`pid_of`]) until `crun` names one (right after
+/// `Oci::start_supervised` the container may not be made yet), and the asks end without one
+/// when `crun state` answers with no usable pid (or names one too late), when `crun run` has
+/// ended, or when [`ROUTE_WAIT`] (a wired ceiling's `Config::route_wait`, and the init's wait
+/// for its listeners) has passed on `now_ms`: the container's init gives up its wait then.
 ///
 /// # Errors
 ///
-/// No pid, or the wiring failed; nothing of the wiring is left.
-/// The container's init holds the job until the route, which never came: the caller removes
-/// the container.
+/// The wiring failed; nothing of it is left. The container's init holds the job until the
+/// route, which never came: the caller removes the container.
 pub(super) fn attach(
     egress: Option<&dyn EgressPort>,
-    oci: &Oci,
-    (spec, running): (&ContainerSpec, &Supervised),
+    (name, pid): (&str, u32),
     (level, ports): (JobNetwork, &[PortMap]),
-    now_ms: fn() -> u64,
 ) -> Result<Option<Box<dyn Wired>>, RuntimeError> {
-    let failed = |why: String| RuntimeError::new(format!("wire the container's network: {why}"));
-    // `stage` refused a wired run with no egress before anything was made (`port_for`).
-    let Some(egress) = egress.filter(|_| !level.is_none()) else {
+    let Some(egress) = egress else {
         return Ok(None);
     };
-    let pid = pid_of(oci, spec, running, now_ms).map_err(failed)?;
-    let wired = egress.attach(&spec.name, pid, level, ports);
-    wired.map(Some).map_err(|why| failed(why.to_string()))
+    let wired = egress.attach(name, pid, level, ports);
+    wired
+        .map(Some)
+        .map_err(|why| RuntimeError::new(format!("wire the container's network: {why}")))
 }
 
 /// The host pid of the first process of the container of `spec`; see [`attach`].
-fn pid_of(
+pub(super) fn pid_of(
     oci: &Oci,
     spec: &ContainerSpec,
     running: &Supervised,

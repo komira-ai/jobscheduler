@@ -520,6 +520,60 @@ fn egress_allow_list_is_refused_without_the_crun_runtime() {
     }
 }
 
+/// Proves `--host-port` is refused at start, naming `--runtime crun`, on an agent whose
+/// runtime is the default, the container engine or none, so no job that names a host port is
+/// run without it; and that with `--runtime crun` an entry that is not a port or a range
+/// (0, 65536, a reversed range) and a seventeenth entry are refused naming the flag before
+/// the host is checked. Catches a host-port list accepted by a runtime that offers no host
+/// port, and a wrong entry found only when a job names it.
+#[test]
+fn host_ports_are_a_flag_of_the_crun_runtime() {
+    let host = linux_host();
+    let docker = [
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
+        "--container-bin",
+        "/bin/sh",
+    ];
+    for runtime in [&[][..], &docker[..], &["--runtime", "none"][..]] {
+        let mut given = vec!["--host-port", "5432"];
+        given.extend(runtime);
+        let said = refused(&given, &host);
+        assert!(
+            said.contains("--host-port: needs --runtime crun"),
+            "{runtime:?}: {said}"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for wrong in ["0", "65536", "90-80"] {
+            let said = refused(
+                &[
+                    "--runtime",
+                    "crun",
+                    "--host-port",
+                    "80",
+                    "--host-port",
+                    wrong,
+                ],
+                &host,
+            );
+            let want = format!(
+                "--host-port: not <PORT> or <LO-HI>, each from 1 to 65535, LO not above HI: \"{wrong}\""
+            );
+            assert!(said.contains(&want), "{wrong}: {said}");
+        }
+        let mut many = vec!["--runtime".to_owned(), "crun".to_owned()];
+        for port in 1..=17 {
+            many.extend(["--host-port".to_owned(), port.to_string()]);
+        }
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let said = refused(&many, &host);
+        assert!(said.contains("--host-port: at most 16 entries"), "{said}");
+    }
+}
+
 /// What the agent prints for `--container-network`, which was removed.
 const NO_NETWORK: &str = "--container-network: removed. A job run through the container \
     engine now always has network none. For networking give --runtime crun with --egress, and \
