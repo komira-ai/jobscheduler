@@ -741,8 +741,9 @@ fn the_condition_reader_reads_equality_suffix_and_or() {
     }
 }
 
-/// Asserts that the "Install musl tools" step installs `musl-tools` and that its condition is
-/// true for both musl targets and false for the Mac target, evaluated for each, and that on the
+/// Asserts that the "Install musl tools" step installs the pinned `musl-tools` packages the
+/// steps before it restored or fetched, and that its condition and theirs are true for both
+/// musl targets and false for the Mac target, evaluated for each, and that on the
 /// arm64 leg only a link gives that package's `musl-gcc` the name the cc crate looks for there,
 /// `aarch64-linux-musl-gcc`, with no compiler set through the environment. Catches an arm64 leg
 /// that builds without `musl-tools` or without a C compiler the cc crate finds (ring needs one
@@ -753,26 +754,32 @@ fn the_musl_tools_are_installed_for_both_musl_legs() {
     let jobs = jobs(&text);
     let build = job(&jobs, "build");
     let install = step(build, "Install musl tools");
-    let condition = install
-        .iter()
-        .find_map(|l| l.trim_start().strip_prefix("if: "))
-        .expect("the step's condition");
     assert!(
         install
             .iter()
-            .any(|l| l.trim() == "sudo apt-get install --yes --no-install-recommends musl-tools"),
+            .any(|l| l.trim() == "run: sudo dpkg --install \"$RUNNER_TEMP\"/debs/musl-tools/*.deb"),
         "{install:?}"
     );
-    for (target, installs) in [
-        ("x86_64-unknown-linux-musl", true),
-        ("aarch64-unknown-linux-musl", true),
-        ("aarch64-apple-darwin", false),
+    for name in [
+        "Restore the musl-tools packages",
+        "Fetch the pinned musl-tools packages",
+        "Install musl tools",
     ] {
-        assert_eq!(
-            target_condition(condition, target),
-            installs,
-            "{target}: {condition}"
-        );
+        let condition = step(build, name)
+            .iter()
+            .find_map(|l| l.trim_start().strip_prefix("if: "))
+            .expect("the step's condition");
+        for (target, installs) in [
+            ("x86_64-unknown-linux-musl", true),
+            ("aarch64-unknown-linux-musl", true),
+            ("aarch64-apple-darwin", false),
+        ] {
+            assert_eq!(
+                target_condition(condition, target),
+                installs,
+                "{name}, {target}: {condition}"
+            );
+        }
     }
     let link = step(build, "Name musl-gcc as the arm64 musl compiler");
     let link_condition = link

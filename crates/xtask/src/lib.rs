@@ -5,6 +5,10 @@
 //!   [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over HTTPS (or taken from the
 //!   file the actions cache restored at `--cache`) and refused unless its SHA-256 matches,
 //!   before anything is unpacked or written.
+//! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
+//!   `dpkg`, pinned by version and SHA-256 in a file of `.github/debs/`: the files the actions
+//!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
+//!   mirrors in turn, in bounded rounds, and refused unless its SHA-256 matches.
 //!
 //! - `release plan --head <sha>`, `release stamp --to <version>` and `release stage --bin <name>
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
@@ -93,6 +97,7 @@ use clap::{Parser, Subcommand};
 pub mod channels;
 pub mod count_run;
 pub mod crun_tests;
+pub mod debs;
 pub mod deploy;
 pub mod determinism;
 pub mod doc_refs;
@@ -127,6 +132,9 @@ pub enum Error {
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
+    /// The debs verb failed.
+    #[error(transparent)]
+    Debs(#[from] debs::Error),
     /// A channels verb (the apt repository, its install check) failed. A usage error of one is
     /// [`Error::Usage`], through the conversion in [`channels`].
     #[error(transparent)]
@@ -196,6 +204,16 @@ enum Verb {
         /// used in place of the download; when it does not, the checked download is kept there.
         #[arg(long)]
         cache: Option<PathBuf>,
+    },
+    /// Make a directory hold exactly the pinned Debian packages of this host's architecture,
+    /// each checked against its SHA-256: those already there, the rest downloaded.
+    Debs {
+        /// The pins file (`.github/debs/<set>.toml`).
+        #[arg(long)]
+        pins: PathBuf,
+        /// The directory the actions cache restores and saves; created when missing.
+        #[arg(long)]
+        dir: PathBuf,
     },
     /// Set the release's version for services on the update coordinator and wait for them.
     Deploy(deploy::Args),
@@ -355,6 +373,16 @@ fn run(cli: Cli) -> Result<String, Error> {
                 &out,
                 cache.as_deref(),
                 &roots,
+            )?)
+        }
+        Verb::Debs { pins, dir } => {
+            let roots = fetch::host_roots();
+            Ok(debs::run(
+                &pins,
+                debs::Arch::host()?,
+                &dir,
+                &debs::https(&roots),
+                &std::thread::sleep,
             )?)
         }
         Verb::Deploy(args) => Ok(deploy::run(&args)?),

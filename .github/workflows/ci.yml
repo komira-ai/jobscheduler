@@ -16,6 +16,13 @@
 # pull request alone), and only after fetch passed. crates/xtask/tests/pinned_tool_cache
 # holds every workflow to this.
 #
+# No job runs apt-get, so none needs the Ubuntu archive: the packages the container, privilege
+# and egress jobs use (crun, uidmap, busybox-static, Podman, the XFS and network tools) come
+# with the ubuntu-24.04 runner image, and a `dpkg-query --show` step fails, naming the package,
+# if an image lacks one. A package an image lacks is pinned in .github/debs and installed with
+# `cargo xtask debs`, as the musl jobs of the other workflows install musl-tools; the same
+# test holds every workflow to that.
+#
 # The `lint` job also builds and tests the jobscheduler.dev website (site/): TypeScript
 # compiled by tsc, a build program that prerenders the pages, and node:test tests over the
 # built tree (golden output, links, the Content-Security-Policy rules, the pinned theme, a
@@ -399,11 +406,11 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - name: Install Podman from the distribution
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends podman
-          podman --version
+      # The runner image (ubuntu-24.04) carries the distribution's Podman: no apt, so no step needs the
+      # Ubuntu archive. dpkg-query fails, naming the package, if an image lacks one.
+      - name: Podman of the runner image
+        run: dpkg-query --show podman
+      - run: podman --version
       # One line per file, for a user name no account has: ids 300000 to 365535, above every
       # id of the runner's passwd and group files and of its own ranges.
       - name: Prepare the subordinate id range
@@ -461,11 +468,13 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      # The runner image (ubuntu-24.04) carries these packages: no apt, so no step needs the
+      # Ubuntu archive. dpkg-query fails, naming the package, if an image lacks one.
+      - name: The runner image's XFS tools, nftables, crun, uidmap, busybox and AppArmor
+        run: dpkg-query --show xfsprogs nftables crun uidmap busybox-static apparmor
       - name: Make and mount a project-quota XFS volume on a loop device
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xfsprogs nftables
           truncate -s 512M "$RUNNER_TEMP/js-priv-xfs.img"
           sudo mkfs.xfs -q "$RUNNER_TEMP/js-priv-xfs.img"
           sudo mkdir -p "$JS_PRIV_XFS_ROOT"
@@ -473,10 +482,9 @@ jobs:
           findmnt "$JS_PRIV_XFS_ROOT"
       # Option B, against a real crun: a root daemon starts every container as a dedicated
       # job user. The user has a subordinate id range (made here if useradd did not).
-      - name: Install crun, uidmap and busybox and make the job user
+      - name: Make the job user
         run: |
           set -euo pipefail
-          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor
           sudo useradd --create-home --shell /usr/sbin/nologin js-job
           grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
           grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid
@@ -571,8 +579,9 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: sudo apt-get update
-      - run: sudo apt-get install -y --no-install-recommends crun uidmap
+      # The runner image (ubuntu-24.04) carries these packages: no apt, so no step needs the
+      # Ubuntu archive. dpkg-query fails, naming the package, if an image lacks one.
+      - run: dpkg-query --show crun uidmap
       - run: cargo xtask crun-tests
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
@@ -602,8 +611,9 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: sudo apt-get update
-      - run: sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor
+      # The runner image (ubuntu-24.04) carries these packages: no apt, so no step needs the
+      # Ubuntu archive. dpkg-query fails, naming the package, if an image lacks one.
+      - run: dpkg-query --show crun uidmap busybox-static apparmor
       - run: sudo useradd --create-home --shell /usr/sbin/nologin js-job
       - run: cargo xtask crun-tests --job-user js-job
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -642,11 +652,13 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - name: Install crun, uidmap, busybox and the network tools, and make the job user
+      # The runner image (ubuntu-24.04) carries these packages: no apt, so no step needs the
+      # Ubuntu archive. dpkg-query fails, naming the package, if an image lacks one.
+      - name: The runner image's crun, uidmap, busybox, AppArmor and network tools
+        run: dpkg-query --show crun uidmap busybox-static apparmor nftables iproute2 util-linux
+      - name: Make the job user
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends crun uidmap busybox-static apparmor nftables iproute2 util-linux
           sudo useradd --create-home --shell /usr/sbin/nologin js-job
           grep -q '^js-job:' /etc/subuid || echo 'js-job:300000:65536' | sudo tee -a /etc/subuid
           grep -q '^js-job:' /etc/subgid || echo 'js-job:300000:65536' | sudo tee -a /etc/subgid

@@ -226,9 +226,18 @@ pub fn tls_config(roots: &[CertificateDer<'static>]) -> ureq::tls::TlsConfig {
 
 /// The body of `url`, over HTTPS only, trusting `roots`.
 pub fn download(url: &str, roots: &[CertificateDer<'static>]) -> Result<Vec<u8>, Error> {
+    download_within(url, roots, DOWNLOAD_TIMEOUT)
+}
+
+/// [`download`], given up after `timeout` (redirects included).
+pub fn download_within(
+    url: &str,
+    roots: &[CertificateDer<'static>],
+    timeout: Duration,
+) -> Result<Vec<u8>, Error> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .https_only(true)
-        .timeout_global(Some(DOWNLOAD_TIMEOUT))
+        .timeout_global(Some(timeout))
         .tls_config(tls_config(roots))
         .build()
         .into();
@@ -334,7 +343,7 @@ pub fn part_path(out: &Path) -> PathBuf {
 
 /// Writes `data` to `out` (mode `mode`) through [`part_path`], removing the part file
 /// when a step fails.
-fn write_file(out: &Path, data: &[u8], mode: u32) -> std::io::Result<()> {
+pub(crate) fn write_file(out: &Path, data: &[u8], mode: u32) -> std::io::Result<()> {
     out.parent().map_or(Ok(()), std::fs::create_dir_all)?;
     let part = part_path(out);
     let written = std::fs::write(&part, data)
