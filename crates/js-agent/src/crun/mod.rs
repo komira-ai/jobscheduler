@@ -199,13 +199,13 @@ mod dirs;
 mod fault;
 pub mod fs;
 mod gpu;
-mod layered;
 mod ledger;
 #[cfg(test)]
 mod ledger_tests;
 mod make;
 mod net;
 mod pull;
+mod rootfs;
 mod settings;
 mod spec;
 #[cfg(test)]
@@ -308,7 +308,7 @@ struct Run {
     /// Its live logs: the sink, then the uploader and the report.
     logs: RunLogs,
     /// What its file system cloned, for the check after it ends; none without host paths.
-    fs: Option<layered::RunFs>,
+    fs: Option<rootfs::RunFs>,
 }
 
 /// A container runtime over `crun`.
@@ -641,7 +641,7 @@ impl CrunRuntime {
                 },
                 entry,
                 logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
-                fs: assembled.map(|made| layered::RunFs::new(made.sources)),
+                fs: assembled.map(|made| rootfs::RunFs::new(made.sources)),
             },
         );
         Ok(name)

@@ -21,6 +21,8 @@ mod crun_host_ports;
 mod crun_logs;
 #[cfg(target_os = "linux")]
 mod crun_machine;
+#[cfg(target_os = "linux")]
+mod crun_roots;
 mod drain;
 mod e2e;
 mod ends;
