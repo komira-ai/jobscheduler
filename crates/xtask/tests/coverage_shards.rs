@@ -50,11 +50,11 @@ fn check(workflow: &str) -> Vec<String> {
             .collect(),
         _ => return vec!["coverage-shard has no `shard: [...]` matrix".to_owned()],
     };
-    if value(shard, "SHARDS") != Some("${{ strategy.job-total }}") {
-        errors.push("SHARDS is not the matrix's size (strategy.job-total)".to_owned());
-    }
-    if !shard.contains(r#"--partition "slice:$SHARD/$SHARDS""#) {
-        errors.push("the shard's run is not partitioned slice:$SHARD/$SHARDS".to_owned());
+    if !shard.contains(r#"--partition "slice:${{ matrix.shard }}/${{ strategy.job-total }}""#) {
+        errors.push(
+            "the shard's run is not partitioned slice:<matrix.shard>/<strategy.job-total>"
+                .to_owned(),
+        );
     }
     if !shard.contains("name: coverage-profile-${{ matrix.shard }}\n") {
         errors.push("the shard does not upload coverage-profile-<shard>".to_owned());
@@ -151,14 +151,14 @@ fn each_broken_link_between_the_jobs_is_refused() {
         );
     };
     one(
-        "SHARDS: ${{ strategy.job-total }}",
-        "SHARDS: 3",
-        "SHARDS is not the matrix's size (strategy.job-total)",
+        "/${{ strategy.job-total }}\"",
+        "/3\"",
+        "the shard's run is not partitioned slice:<matrix.shard>/<strategy.job-total>",
     );
     one(
-        r#" --partition "slice:$SHARD/$SHARDS""#,
+        r#" --partition "slice:${{ matrix.shard }}/${{ strategy.job-total }}""#,
         "",
-        "the shard's run is not partitioned slice:$SHARD/$SHARDS",
+        "the shard's run is not partitioned slice:<matrix.shard>/<strategy.job-total>",
     );
     one(
         "name: coverage-profile-${{ matrix.shard }}\n",
