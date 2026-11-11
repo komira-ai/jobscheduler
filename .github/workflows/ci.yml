@@ -2,10 +2,11 @@
 # SHAs, and no permission beyond reading the repository.
 #
 # The Cargo cache (registry, git checkouts and target) is keyed on the runner, the job,
-# Cargo.lock and rust-toolchain.toml. Every job restores it; only a push to main saves
-# it, and only when the exact key missed, so a pull request never writes the Cargo cache.
+# Cargo.lock and rust-toolchain.toml. Every job but the two coverage jobs restores it (they
+# build from nothing; see `coverage-shard`); only a push to main saves it, and only when
+# the exact key missed, so a pull request never writes the Cargo cache.
 #
-# The release tools the `deny` and `coverage` jobs install (cargo-deny, cargo-llvm-cov,
+# The release tools the `deny`, `coverage-shard` and `coverage` jobs install (cargo-deny, cargo-llvm-cov,
 # cargo-nextest) are pinned by version and SHA-256, and each has a cache entry of its own,
 # keyed by both. The step before `cargo xtask fetch` restores it; fetch uses the restored
 # archive when there is one and downloads it from GitHub only when there is not, checks
@@ -715,23 +716,40 @@ jobs:
   # Line and branch coverage per crate, and the ratchet in `coverage-baseline`
   # (crates/js-coverage): a crate may miss no more lines or branches than its line in
   # that file records, and the file starts at 0 for every crate. Branch coverage
-  # (`--branch`, rustc's `-Zcoverage-options=branch`) is unstable, so this job alone
-  # builds with a pinned nightly; every other job stays on the toolchain in
+  # (`--branch`, rustc's `-Zcoverage-options=branch`) is unstable, so these jobs alone
+  # build with a pinned nightly; every other job stays on the toolchain in
   # rust-toolchain.toml. The nightly may warn where stable does not, so `-D warnings` is
   # off here (clippy enforces it). cargo-llvm-cov and cargo-nextest are release
   # binaries, each checked against its SHA-256 before use.
   #
   # The tests run under cargo-nextest (`cargo llvm-cov nextest`): every test in a process
-  # of its own, as many at once as the runner has CPUs, whatever binary each is in.
-  # `cargo test` runs one test binary after another, so a binary whose few tests are long
-  # (the simulator scenarios of js-sim-cell, unoptimised and instrumented here) kept most
-  # of the runner idle while it ran; the tests and the lines and branches they cover are
-  # the same either way.
-  coverage:
+  # of its own, as many at once as the runner has CPUs, whatever binary each is in. They
+  # are more work than one four-CPU runner does in the hour (most of it js-sim-cell's
+  # simulator scenarios, unoptimised and instrumented), so `coverage-shard` runs them in
+  # three parts on three runners, and `coverage` reads what the three parts measured.
+  #
+  # Each shard builds the instrumented test binaries and runs its slice of the tests
+  # (nextest's `--partition slice:<k>/<n>`: the k-th of every n tests in nextest's order,
+  # over all binaries), so every test runs in exactly one shard. Every test process
+  # writes a raw profile (`*.profraw`); a shard's raw profiles come to gigabytes, so the
+  # shard merges them with llvm-profdata into one indexed profile and uploads only that.
+  # .config/nextest.toml starts js-sim-cell's tests first, so the longest tests do not
+  # start last.
+  #
+  # Nothing here uses the Cargo cache: these builds start from nothing (about six
+  # minutes), which is as fast as restoring a seven-gigabyte cache of instrumented
+  # binaries, and such a cache, saved, pushed the other jobs' caches out of the
+  # repository's ten gigabytes.
+  coverage-shard:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
+    strategy:
+      # Every shard runs to the end, so one failing test does not hide the others'.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       postgres:
         image: postgres@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545
@@ -744,6 +762,95 @@ jobs:
     env:
       RUSTFLAGS: ""
       KBF_TEST_POSTGRES_URL: postgres://postgres:js-ci-throwaway@127.0.0.1:5432/postgres
+      COVERAGE_TOOLCHAIN: nightly-2026-10-01
+      LLVM_COV_VERSION: 0.9.1
+      LLVM_COV_SHA256: b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
+      NEXTEST_VERSION: 0.9.146
+      NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
+      # xtask builds with the coverage nightly, the one toolchain this job installs.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: llvm-cov-cache
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-llvm-cov.tar.gz
+          key: pinned-cargo-llvm-cov-${{ env.LLVM_COV_VERSION }}-${{ env.LLVM_COV_SHA256 }}
+      - name: Install cargo-llvm-cov (pinned version and checksum)
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v$LLVM_COV_VERSION/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$LLVM_COV_SHA256" --cache "$RUNNER_TEMP/pinned/cargo-llvm-cov.tar.gz" --out "$HOME/.cargo/bin/cargo-llvm-cov" --extract tar.gz --member cargo-llvm-cov
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.llvm-cov-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-llvm-cov.tar.gz
+          key: ${{ steps.llvm-cov-cache.outputs.cache-primary-key }}
+      - run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --version
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: nextest-cache
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
+          key: pinned-cargo-nextest-${{ env.NEXTEST_VERSION }}-${{ env.NEXTEST_SHA256 }}
+      - name: Install cargo-nextest (pinned version and checksum)
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$NEXTEST_SHA256" --cache "$RUNNER_TEMP/pinned/cargo-nextest.tar.gz" --out "$HOME/.cargo/bin/cargo-nextest" --extract tar.gz --member cargo-nextest
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.nextest-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
+          key: ${{ steps.nextest-cache.outputs.cache-primary-key }}
+      - run: cargo "+$COVERAGE_TOOLCHAIN" nextest --version
+      # `--cargo-profile coverage` (Cargo.toml; nextest's own `--profile` is another
+      # thing): unoptimised code, whatever the `test` profile optimises for the test
+      # job; its output is under target/llvm-cov-target/coverage.
+      # The coverage profile must stay unoptimised: it inherits `dev`, so a
+      # `[profile.dev.package.*]` override in Cargo.toml would leak into it and inline
+      # away lines the report then counts as missed (crates/xtask/tests/profile_overrides.rs
+      # fails on any package override outside `test`).
+      # LLVM_PROFILE_FILE_NAME (cargo-llvm-cov's, relative to its target directory) puts
+      # every raw profile in a directory of its own, with the shard in its name; the
+      # process id (%p) keeps one process's file apart from another's.
+      - name: Run this shard's tests under coverage
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+          LLVM_PROFILE_FILE_NAME: profiles/jobscheduler-shard-${{ matrix.shard }}-%p-%4m.profraw
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --no-fail-fast --cargo-profile coverage --branch --no-report --partition "slice:$SHARD/$SHARDS"
+      # One indexed profile from every raw one in that directory, merged as `llvm-cov
+      # report` merges them (`-sparse`). llvm-profdata reads the directory's files, so no
+      # list of thousands of names goes on the command line. The profile keeps the
+      # `.profraw` name so that `coverage` can hand it to `cargo llvm-cov report` beside
+      # its own raw profiles: llvm-profdata, which merges them there, reads raw and indexed
+      # profiles alike, by their content. It is written even when a test failed, so the
+      # report still shows what ran.
+      - name: Merge this shard's profiles into one
+        if: ${{ !cancelled() }}
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: '"$(rustc "+$COVERAGE_TOOLCHAIN" --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata" merge -sparse target/llvm-cov-target/profiles -o "target/jobscheduler-shard-$SHARD.profraw"'
+      # Kept a day: `coverage`, later in this run, is its only reader.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage-profile-${{ matrix.shard }}
+          path: target/jobscheduler-shard-${{ matrix.shard }}.profraw
+          if-no-files-found: error
+          retention-days: 1
+
+  # The report and the ratchet over all three shards. It runs when a shard failed too
+  # (a failing test fails its shard, not its profile), so the lcov is written and
+  # uploaded whatever the tests did. It builds the same instrumented binaries the shards
+  # ran (the same source, toolchain, flags and path, so the same coverage records), puts
+  # the shards' profiles beside them, and reports as one run of every test would.
+  # A shard whose profile is missing fails its download step by name.
+  coverage:
+    needs: coverage-shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: ""
       COVERAGE_TOOLCHAIN: nightly-2026-10-01
       LLVM_COV_VERSION: 0.9.1
       LLVM_COV_SHA256: b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
@@ -784,50 +891,31 @@ jobs:
           path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
           key: ${{ steps.nextest-cache.outputs.cache-primary-key }}
       - run: cargo "+$COVERAGE_TOOLCHAIN" nextest --version
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cargo-cache
+      # The shards' build command, running no test (`none()`): the same binaries, built
+      # the same way, so the shards' profiles match them function for function.
+      - name: Build the instrumented test binaries the shards ran
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --cargo-profile coverage --branch --no-report --filterset 'none()' --no-tests=pass
+      # One step per shard of `coverage-shard`'s matrix (crates/xtask/tests/coverage_shards.rs
+      # holds the two to each other), each into the directory `llvm-cov report` reads
+      # profiles from.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+          name: coverage-profile-1
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-2
+          path: target/llvm-cov-target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile-3
+          path: target/llvm-cov-target
+      - run: mkdir -p target/coverage
       # `-skip-functions` leaves the per-function records (FN, FNDA) out of the lcov
       # export. With branch coverage on, llvm-cov's lcov exporter can segfault while
       # writing them for async service methods. Lines and branches, all the ratchet
       # reads, are unaffected.
-      # The restored cache may come from another branch (the newest entry by prefix),
-      # and its instrumented test binaries stay in target/llvm-cov-target even where
-      # this branch has no such crate: cargo-llvm-cov reads every binary there, so the
-      # lcov file then names sources this tree lacks and the ratchet refuses it.
-      # Delete the workspace crates' build output (crates/*/ and xtask are the only
-      # workspace members; their directories there are named like the crates, with a
-      # hash below) and the loose test binaries; cargo rebuilds what this tree has and
-      # the dependencies stay cached.
-      - name: Drop test binaries left by another branch
-        run: |
-          root=target/llvm-cov-target/coverage
-          for d in "$root"/build/js-* "$root"/build/xtask; do
-            [ -e "$d" ] && find "$d" -mindepth 1 -maxdepth 1 -exec rm -r {} +
-          done
-          if [ -d "$root/deps" ]; then
-            find "$root/deps" -maxdepth 1 -type f ! -name '*.*' -delete
-          fi
-      - run: mkdir -p target/coverage
-      # `--cargo-profile coverage` (Cargo.toml; nextest's own `--profile` is another
-      # thing): unoptimised code, whatever the `test` profile optimises for the test
-      # job; its output is under target/llvm-cov-target/coverage.
-      # The coverage profile must stay unoptimised: it inherits `dev`, so a
-      # `[profile.dev.package.*]` override in Cargo.toml would leak into it and inline
-      # away lines the report then counts as missed (crates/xtask/tests/profile_overrides.rs
-      # fails on any package override outside `test`).
-      # The tests and the report are two steps, so the lcov is written (and uploaded
-      # below) even when a test fails.
-      - name: Run the workspace tests under coverage
-        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --no-fail-fast --cargo-profile coverage --branch --no-report
       - name: Write the lcov report
-        if: ${{ !cancelled() }}
         env:
           LLVM_COV_FLAGS: -skip-functions
         run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --branch --lcov --output-path target/coverage/lcov.info
@@ -867,11 +955,3 @@ jobs:
             target/coverage/coverage-baseline.measured
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
