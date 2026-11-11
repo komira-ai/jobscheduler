@@ -109,7 +109,9 @@ rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"
 # The pure-Rust zstd codec (js-bundle: layers are zstd-compressed tars; the decoder is
 # the only code that parses an untrusted compressed stream, so it has no C to link).
 ruzstd = "0.9.1"
-rustix = { version = "1.1.5", default-features = false, features = ["std", "process"] }
+# 1.1.6 at least: the xattr size queries (`getxattr_query`, `flistxattr_query`) are new in it,
+# and from it a zero-length buffer no longer asks the size (the call reports 0 bytes).
+rustix = { version = "1.1.6", default-features = false, features = ["std", "process"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
 # The YAML parser the workflow lint of the apt jobs (crates/xtask/tests/apt_workflow) reads each workflow with.
