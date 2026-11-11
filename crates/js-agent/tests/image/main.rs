@@ -7,6 +7,7 @@
 #![cfg(target_os = "linux")]
 
 mod config;
+mod loopback;
 mod private;
 mod pull;
 mod source;

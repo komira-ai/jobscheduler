@@ -20,7 +20,7 @@ use js_agent_wire::{
 use super::Lifecycle;
 use super::RETIRED_CAP;
 use super::job::{Given, Keyed};
-use crate::lifecycle::{Event, code};
+use crate::lifecycle::{Event, JobFs, code};
 use crate::logs::Sink;
 
 /// The most retired job ids a heartbeat lists in `retired_jobs`. Each is at most
@@ -112,6 +112,10 @@ impl Lifecycle {
                 log_sink: sink.clone().ok().flatten(),
                 vm: spec.kind == StartKind::Vm,
                 host_ports: spec.host_ports.clone(),
+                fs: JobFs {
+                    layers: spec.layers.clone(),
+                    mounts: spec.mounts.clone(),
+                },
             };
             self.admit_and_start((&run, Keyed::Job), &given, received, events);
             // The start always leaves its job last, running or refused.

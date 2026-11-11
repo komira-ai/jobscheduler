@@ -5,6 +5,7 @@
 //! `/proc/self/cgroup` stand in for the machine; nothing waits.
 
 use js_agent::integrity::{FakeHost, Integrity, code};
+use js_agent::lifecycle::CheckHook as _;
 
 use super::{JOB_UID, after, beside, process, started};
 
@@ -218,5 +219,61 @@ fn the_runners_own_processes_are_noise_and_nothing_wider() {
         let (host, mut checks) = host_and_checks();
         host.start_process(process(320, ppid, JOB_UID, 920, cgroup));
         assert!(after(&mut checks, "r1").is_err(), "{what}");
+    }
+}
+
+/// The check after `run_id`, with the runtime mounting the file systems of other held jobs
+/// below `held`.
+fn holding(
+    checks: &mut Integrity,
+    run_id: &str,
+    held: &[&str],
+) -> Result<(), js_agent::lifecycle::CheckFinding> {
+    let held: Vec<std::path::PathBuf> = held.iter().map(std::path::PathBuf::from).collect();
+    checks.run(&js_agent::lifecycle::Finished {
+        run_id,
+        live: &[],
+        slot: None,
+        live_slots: &[],
+        held_mounts: &held,
+    })
+}
+
+/// Asserts that a mount whose point lies below the directory where the runtime mounts the
+/// file system of another job the agent holds (`<mounts>/<lease>`, a job that has no
+/// container yet among them) is not the finished job's, and is kept out of the baseline, so
+/// that one left there once that job is no longer held is a `new-mount`; and that a mount at
+/// that directory itself, below a directory whose name only begins like it, or anywhere
+/// else, is a `new-mount`. Catches a waiting job's clones and overlays taken for its
+/// neighbour's leftovers, and a held lease that excuses a mount of any name it prefixes.
+#[test]
+fn a_mount_below_a_held_jobs_mounts_is_its_and_no_other_jobs() {
+    let mount = |point: &str| js_agent::integrity::Mount {
+        root: "/".to_owned(),
+        point: point.to_owned(),
+        fstype: "overlay".to_owned(),
+        source: "overlay".to_owned(),
+    };
+    let held = format!("/run/js-agent/mounts/{}", leaf("run-4-1"));
+    let (host, mut checks) = host_and_checks();
+    host.mount(mount(&format!("{held}/src/0")));
+    host.mount(mount(&format!("{held}/rootfs")));
+    assert!(holding(&mut checks, "run-4-2", &[&held]).is_ok());
+    // No longer held, its leftover is found by the next check: it never joined the baseline.
+    let found = holding(&mut checks, "run-4-3", &[]).unwrap_err();
+    assert_eq!(found.code(), code::NEW_MOUNT);
+    assert!(
+        found.detail().contains(&format!("{held}/rootfs")),
+        "{found:?}"
+    );
+    for point in [
+        held.clone(),
+        format!("{held}2/src/0"),
+        "/mnt/elsewhere".to_owned(),
+    ] {
+        let (host, mut checks) = host_and_checks();
+        host.mount(mount(&point));
+        let found = holding(&mut checks, "run-4-2", &[&held]).unwrap_err();
+        assert_eq!(found.code(), code::NEW_MOUNT, "{point}");
     }
 }

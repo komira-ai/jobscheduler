@@ -10,11 +10,13 @@ use std::sync::Arc;
 use js_contain::OciConfig;
 use js_contain::container::ACTION_ID;
 use js_contain::delegate::{self, PROC_SELF_CGROUP};
+use js_contain::job_fs::MountCalls;
 use js_contain::oci::RESOLV_CONF;
 use js_contain::subids::IdFiles;
 use js_oci::{Client, Policy};
 
 use super::adopt::report_lines;
+use super::fs::{FsSettings, MOUNTS_DIR, PathCalls};
 use super::{
     CgroupSettings, CrunError, CrunRuntime, CrunSettings, GpuSettings, Hooks, HostPorts,
     config_dir, port_of, read_node,
@@ -140,6 +142,36 @@ impl IdSources {
     }
 }
 
+/// Where a runtime opened from a plan mounts what its runs' file systems are made of, and
+/// with what: [`MOUNTS_DIR`] and the kernel's calls on a node.
+#[derive(Clone)]
+pub struct MountSeam {
+    /// The directory of the runs' mounts.
+    pub dir: PathBuf,
+    /// The mounts' system calls.
+    pub calls: Arc<dyn MountCalls + Send + Sync>,
+    /// The calls that read a host path.
+    pub paths: Arc<dyn PathCalls>,
+}
+
+impl Default for MountSeam {
+    fn default() -> Self {
+        Self {
+            dir: PathBuf::from(MOUNTS_DIR),
+            calls: Arc::new(js_contain::job_fs::Kernel),
+            paths: Arc::new(super::fs::Kernel),
+        }
+    }
+}
+
+impl std::fmt::Debug for MountSeam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MountSeam")
+            .field("dir", &self.dir)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What the runtime reads from the machine, which a test replaces.
 #[derive(Debug, Clone)]
 pub struct Seams {
@@ -154,6 +186,8 @@ pub struct Seams {
     /// The binary each container's supervisor runs (`__supervise-run`): this program, unless a
     /// test runs the agent inside a binary that does not answer the helper modes.
     pub daemon: PathBuf,
+    /// Where the runs' mounts are made, and with what.
+    pub mounts: MountSeam,
 }
 
 impl Default for Seams {
@@ -164,6 +198,7 @@ impl Default for Seams {
             host: CrunHost::system,
             ids: IdSources::system(),
             daemon: OciConfig::default().daemon,
+            mounts: MountSeam::default(),
         }
     }
 }
@@ -229,6 +264,14 @@ pub fn open(
             allowed: plan.host_ports.clone(),
             ..HostPorts::default()
         },
+        // Only where the kernel has the system calls a job's layers and mounts need.
+        fs: plan.layered.then(|| FsSettings {
+            dir: seams.mounts.dir.clone(),
+            roots: plan.mount_roots.clone(),
+            calls: Arc::clone(&seams.mounts.calls),
+            paths: Arc::clone(&seams.mounts.paths),
+            image_allow: plan.image_allow.clone(),
+        }),
     };
     let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?
         .with_live_logs(plan.logs.live());

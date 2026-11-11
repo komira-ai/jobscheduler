@@ -5,7 +5,7 @@
 
 use std::os::fd::AsFd as _;
 
-use super::kernel::{checked, mount_attr, mount_setattr, overlay_flags};
+use super::kernel::{checked, mount_attr, mount_setattr, overlay_flags, probe};
 use super::*;
 
 /// A scratch directory for one test.
@@ -117,4 +117,24 @@ fn an_overlay_is_nosuid_and_nodev_and_noexec_when_asked() {
         overlay_flags(true),
         MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC
     );
+}
+
+/// Catches a probe that changes something, names a call wrongly, or reads an answer of a
+/// kernel that has the calls as their absence: on this kernel (5.12 or later) none of the
+/// four is `ENOSYS`, the two opens succeed, and the two calls on an empty path are refused.
+#[test]
+fn the_probe_finds_each_call_and_changes_nothing() {
+    let answers = probe();
+    let names: Vec<&str> = answers.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        names,
+        ["openat2", "open_tree", "move_mount", "mount_setattr"]
+    );
+    let [openat2, open_tree, move_mount, mount_setattr] = answers;
+    openat2.1.expect("openat2 opens /");
+    open_tree.1.expect("open_tree opens /");
+    for (name, answer) in [move_mount, mount_setattr] {
+        let why = answer.expect_err(name);
+        assert_ne!(why.raw_os_error(), Some(libc::ENOSYS), "{name}");
+    }
 }

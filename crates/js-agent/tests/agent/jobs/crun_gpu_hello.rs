@@ -124,7 +124,12 @@ fn host_of(fixture: &Fixture) -> Host {
 /// Runs a crun agent with `extra`, on a host of its own named `name`, until the server
 /// refuses its hello; returns what it printed and the hello it sent (`null` for none).
 fn crun_hello(name: &str, extra: &[&str]) -> (Ran, Value) {
-    let (ran, sent, _) = crun_run(name, extra, vec![refused(403, "host-bound")], 1);
+    crun_hello_on(name, extra, |_| {})
+}
+
+/// [`crun_hello`], on a host whose start check `adjust` changes.
+fn crun_hello_on(name: &str, extra: &[&str], adjust: fn(&mut CrunHost)) -> (Ran, Value) {
+    let (ran, sent, _) = crun_run_on(name, extra, vec![refused(403, "host-bound")], adjust);
     let hello = sent
         .borrow()
         .first()
@@ -140,6 +145,26 @@ fn crun_run(
     extra: &[&str],
     replies: Vec<crate::support::Reply>,
     stop_at: usize,
+) -> (Ran, crate::support::Sent, Arc<GpuHost>) {
+    run_crun(name, extra, (replies, stop_at), |_| {})
+}
+
+/// [`crun_run`] stopped at the first wait, on a host whose start check `adjust` changes.
+fn crun_run_on(
+    name: &str,
+    extra: &[&str],
+    replies: Vec<crate::support::Reply>,
+    adjust: fn(&mut CrunHost),
+) -> (Ran, crate::support::Sent, Arc<GpuHost>) {
+    run_crun(name, extra, (replies, 1), adjust)
+}
+
+/// [`crun_run`], on a host whose start check `adjust` changes.
+fn run_crun(
+    name: &str,
+    extra: &[&str],
+    (replies, stop_at): (Vec<crate::support::Reply>, usize),
+    adjust: fn(&mut CrunHost),
 ) -> (Ran, crate::support::Sent, Arc<GpuHost>) {
     let (uid, gid) = (
         rustix::process::getuid().as_raw(),
@@ -174,9 +199,11 @@ fn crun_run(
         stop_at,
         budget: WakeBudget::new(),
     };
+    let mut crun = fixture.host.clone();
+    adjust(&mut crun);
     let gpu_host = Arc::new(GpuHost {
         fake: FakeMachine::new(),
-        crun: fixture.host.clone(),
+        crun,
         host_jobs: Mutex::new(Vec::new()),
     });
     let machine: Arc<dyn Machine> = gpu_host.clone();
@@ -240,6 +267,61 @@ fn the_hello_reports_host_jobs_only_with_allow_host_jobs() {
     let caps = &hello["capabilities"];
     assert_eq!(caps["runtime"], "container", "{hello}");
     assert!(caps.get("host-jobs").is_none(), "{hello}");
+}
+
+/// The answers of a kernel that has none of the system calls of a job's layers and mounts.
+fn no_calls() -> [(&'static str, std::io::Result<()>); 4] {
+    let missing = || Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    [
+        ("openat2", missing()),
+        ("open_tree", missing()),
+        ("move_mount", missing()),
+        ("mount_setattr", missing()),
+    ]
+}
+
+/// Proves a crun agent reports `layered-rootfs=true` where the kernel has every system call
+/// a job's layers and mounts need, taking `--mount-root` and `--mount-root-ro`; that one on a
+/// kernel without them reports none and warns naming each; and that
+/// `--capability layered-rootfs=true` is refused naming the flag before a hello is sent.
+/// Catches an agent placed jobs with layers it cannot give (an older kernel would refuse
+/// each), and a capability an operator could set by hand.
+#[test]
+fn the_hello_reports_layered_rootfs_only_where_the_kernel_has_its_calls() {
+    // Roots of their own: a root may not hold the state root or the scratch root.
+    let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "hello-layered-roots");
+    let roots = dir.path().display().to_string();
+    let given = [
+        "--mount-root",
+        &format!("data={roots}"),
+        "--mount-root-ro",
+        &format!("tools={roots}"),
+    ];
+    let (ran, hello) = crun_hello("hello-layered", &given);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let caps = &hello["capabilities"];
+    assert_eq!(caps["layered-rootfs"], "true", "{hello} {}", ran.err);
+    assert!(!ran.err.contains("the kernel has no"), "{}", ran.err);
+
+    let (ran, hello) = crun_hello_on("hello-layered-old", &[], |host| {
+        host.kernel_calls = no_calls
+    });
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        hello["capabilities"].get("layered-rootfs").is_none(),
+        "{hello}"
+    );
+    let warned = "js-agent: warning: the kernel has no openat2, open_tree, move_mount, \
+                  mount_setattr: no job is given layers or mounts, and the hello does not \
+                  report layered-rootfs";
+    assert!(ran.err.contains(warned), "{}", ran.err);
+
+    let claimed = ["--capability", "layered-rootfs=true"];
+    let (ran, hello) = crun_hello("hello-layered-claimed", &claimed);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let said = "--capability: layered-rootfs is detected and cannot be set";
+    assert!(ran.err.contains(said), "{}", ran.err);
+    assert_eq!(hello, Value::Null);
 }
 
 /// A heartbeat reply that starts the job `j1` with `isolation = host`.

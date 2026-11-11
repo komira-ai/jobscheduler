@@ -1,5 +1,5 @@
 //! The stop after a silence of the server (`--silence-stop`): when the agent has heard
-//! nothing for the bound, every job it holds that runs, or waits for its image, is
+//! nothing for the bound, every job it holds that runs, or waits to start, is
 //! stopped as a `Stop` stops it (the stop grace, then the kill; a native run's helper
 //! kills at once), its fence is retired, and its result says `killed` with the detail
 //! [`detail::SILENCE_STOP`](crate::lifecycle::detail::SILENCE_STOP). The silence counts
@@ -40,7 +40,7 @@ impl Lifecycle {
     }
 
     /// At every step, before the jobs are watched: when the server has been silent for the
-    /// bound, every job that runs or waits for its image is asked to stop for the silence
+    /// bound, every job that runs or waits to start is asked to stop for the silence
     /// (a cause already set stays), once for this silence, its fence is retired, and a
     /// finding says so. The stop itself is made when the same step then watches the job, as
     /// for a `Stop`.
