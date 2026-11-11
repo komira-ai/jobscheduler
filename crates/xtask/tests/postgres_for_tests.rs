@@ -4,9 +4,10 @@
 //! started.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use js_testkit::spawn::install_script;
 
 /// A scratch directory of its own for each test, holding the stand-ins in `bin/`.
 struct Rig {
@@ -34,15 +35,14 @@ impl Rig {
         fs::create_dir_all(dir.join("bin")).unwrap();
         for (program, status) in ["initdb", "pg_ctl", "pg_isready"].iter().zip(statuses) {
             let path = dir.join("bin").join(program);
-            fs::write(
+            install_script(
                 &path,
-                format!(
+                &format!(
                     "#!/bin/sh\n{{ echo '== {program}'; printf '%s\\n' \"$@\"; }} >> \"{}\"\nexit {status}\n",
                     dir.join("calls").display()
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+                "755",
+            );
         }
         Rig {
             dir,

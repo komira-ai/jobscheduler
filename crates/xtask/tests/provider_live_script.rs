@@ -7,9 +7,10 @@
 //! `cargo` is never started.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use js_testkit::spawn::install_script;
 
 /// A plan hash of the right form.
 const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -53,15 +54,14 @@ impl Rig {
         let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("bin")).unwrap();
         let cargo = dir.join("bin/cargo");
-        fs::write(
+        install_script(
             &cargo,
             "#!/bin/sh\n\
              printf '%s\\n' \"$@\" > \"$FAKE_LOG\"\n\
              printf '%s\\n' \"${GOOGLE_APPLICATION_CREDENTIALS-unset}\" > \"$FAKE_LOG.env\"\n\
              exit \"${FAKE_STATUS:-0}\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+            "755",
+        );
         Rig {
             dir,
             _scratch: scratch,

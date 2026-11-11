@@ -60,6 +60,8 @@ toml.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+# The named pipe the stand-in test copies from (tests/stand_in_busy.rs).
+rustix = { workspace = true, features = ["fs"] }
 # The server addresses the client refuses (tests/js_agent_package.rs). js-agent, which the tests
 # also read, is a dependency above.
 js-client = { path = "../js-client" }
