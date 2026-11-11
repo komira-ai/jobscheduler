@@ -176,6 +176,7 @@ impl ContainerHost {
             shared: Vec::new(),
             mounts: Vec::new(),
             devices: Vec::new(),
+            mounted_root: None,
         }
     }
 

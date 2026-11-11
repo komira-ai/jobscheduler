@@ -117,6 +117,11 @@ pub struct ContainerSpec {
     pub image_digest: String,
     /// The lease's scratch directory.
     pub dir: PathBuf,
+    /// The job's root, when the caller mounted it (an overlay of the job's layers over the
+    /// image's tree, with a writable upper layer: [`crate::job_fs`]): the container's root,
+    /// writable where its modes let the job write. `None`: the image's tree in the store,
+    /// read-only, which `image_digest` names.
+    pub mounted_root: Option<PathBuf>,
     /// The lease cgroup, relative to the cgroup mount.
     pub cgroup_parent: String,
     /// Whether the container is a job's own sandbox or shares the host
@@ -124,8 +129,9 @@ pub struct ContainerSpec {
     pub isolation: Isolation,
     /// Where the input root appears inside the container: an absolute path. The
     /// overlay is mounted there, the shared trees and the working directory are under it.
-    /// For a host container, the host directory the job starts in (no overlay, no input
-    /// root).
+    /// A host mount whose target is the exec root (a copy-on-write mount the caller made)
+    /// takes the place of that overlay, which is then not mounted. For a host container,
+    /// the host directory the job starts in (no overlay, no input root).
     pub exec_root: String,
     /// The input root on the host: the overlay's read-only lower layer.
     pub input_root: PathBuf,
@@ -144,8 +150,9 @@ pub struct ContainerSpec {
     /// Host directories mounted read-only inside the exec root (shared trees).
     pub shared: Vec<SharedMount>,
     /// Host directories bound at absolute places in the container, after the exec root
-    /// and the shared trees: the run's scratch directory, the `--mount-root` mounts, the
-    /// run's files.
+    /// and the shared trees, in order (a mount below another comes after it): the run's
+    /// scratch directory, the job's mounts, the run's files. One whose target is the exec
+    /// root is bound first, in the place of the exec root's overlay.
     pub mounts: Vec<HostMount>,
     /// The host's character devices the container is given, each at its own path: the
     /// GPUs a run booked. Empty for a container that is given none, whose bundle then has
@@ -186,6 +193,9 @@ pub struct HostMount {
     /// that is not recursive (`bind`) shows only the directory's own file system, so no
     /// mount below it, whatever its flags, reaches the job.
     pub recursive: bool,
+    /// Whether no file in it may be run or mapped executable (`noexec`). Every host mount
+    /// is `nosuid` and `nodev` whatever this says.
+    pub no_exec: bool,
 }
 
 /// A host directory mounted read-only inside the exec root.
@@ -240,6 +250,7 @@ pub(crate) mod tests {
             image: format!("docker.io/library/busybox@sha256:{}", "a".repeat(64)),
             image_digest: format!("sha256:{}", "a".repeat(64)),
             dir: PathBuf::from("/scratch/lease-1-2"),
+            mounted_root: None,
             cgroup_parent: "/js.slice/actions/lease-1-2".to_owned(),
             isolation: Isolation::Contained,
             input_root: PathBuf::from("/scratch/lease-1-2/root"),
@@ -263,18 +274,21 @@ pub(crate) mod tests {
                     source: PathBuf::from("/scratch/lease-1-2/job"),
                     read_only: false,
                     recursive: true,
+                    no_exec: false,
                 },
                 HostMount {
                     target: "/workspace".to_owned(),
                     source: PathBuf::from("/srv/mount-root"),
                     read_only: false,
                     recursive: true,
+                    no_exec: false,
                 },
                 HostMount {
                     target: "/run/js-files".to_owned(),
                     source: PathBuf::from("/run/js-agent/files/1-2"),
                     read_only: true,
                     recursive: true,
+                    no_exec: false,
                 },
             ],
             devices: Vec::new(),

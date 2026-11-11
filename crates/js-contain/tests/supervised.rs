@@ -126,9 +126,11 @@ impl Node {
                 source: PathBuf::from("/srv/host-mount"),
                 read_only,
                 recursive: true,
+                no_exec: false,
             })
             .to_vec(),
             devices: Vec::new(),
+            mounted_root: None,
         }
     }
 }

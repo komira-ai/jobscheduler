@@ -309,6 +309,7 @@ impl Cell {
             source: dir,
             read_only: false,
             recursive: true,
+            no_exec: false,
         }
     }
 
@@ -350,6 +351,7 @@ impl Cell {
             shared: Vec::new(),
             mounts: shape.mounts,
             devices: Vec::new(),
+            mounted_root: None,
         };
         Lease {
             spec,

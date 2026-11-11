@@ -176,6 +176,7 @@ fn a_run_becomes_the_container_it_asked_for() {
         source: PathBuf::from(source),
         read_only,
         recursive: true,
+        no_exec: false,
     };
     assert_eq!(
         spec.mounts,

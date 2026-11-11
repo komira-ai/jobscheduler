@@ -197,6 +197,7 @@ fn a_host_container_with_a_mount_a_tree_or_a_device_is_refused() {
         source: PathBuf::from("/srv/mount-root"),
         read_only: true,
         recursive: true,
+        no_exec: false,
     });
     let mut shared = host();
     shared.shared.push(SharedMount {
