@@ -1,7 +1,7 @@
 # The egress spike: real rootless `crun` containers on a hosted ubuntu-24.04 runner trying
 # five ways to give a job a network that reaches a few endpoints while its build command has
 # none (crates/js-contain/tests/egress_spike). The tests are `#[ignore]`d in the other jobs;
-# this one installs what they need and runs them as the runner user, which uses passwordless
+# this one checks that the runner image has what they need and runs them as the runner user, which uses passwordless
 # `sudo` only where a test plays the privileged helper or sets a host sysctl. Each test
 # prints `RESULT` lines; the job summary lists them.
 name: egress-spike
@@ -48,10 +48,10 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - name: Install the container runtime and network tools from the distribution
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends crun passt nftables uidmap iproute2 util-linux apparmor
+      # The runner image (ubuntu-24.04) carries these packages: no apt, so no step needs the
+      # Ubuntu archive. dpkg-query fails, naming the package, if an image lacks one.
+      - name: The runner image's container runtime and network tools
+        run: dpkg-query --show crun passt nftables uidmap iproute2 util-linux apparmor
       # Newuidmap needs a subordinate range for the runner user; the live-podman job adds a
       # range the same way. Ids 300000 to 365535 are above every id the runner's files use.
       - name: Give the runner user a subordinate id range

@@ -12,12 +12,12 @@ pub(crate) struct Step {
 }
 
 impl Step {
-    fn get(&self, key: &str) -> Option<&str> {
+    pub(crate) fn get(&self, key: &str) -> Option<&str> {
         self.keys.get(key).map(String::as_str)
     }
 
     /// The action this step uses, without a trailing comment.
-    fn uses(&self) -> Option<&str> {
+    pub(crate) fn uses(&self) -> Option<&str> {
         self.get("uses")
             .map(|u| u.split(" #").next().unwrap_or(u).trim())
     }
@@ -137,7 +137,7 @@ fn steps(lines: &[&str], at: usize) -> (Vec<Step>, usize) {
 }
 
 /// The words of a one-line shell command, with double quotes removed.
-fn words(run: &str) -> Vec<String> {
+pub(crate) fn words(run: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quoted = false;
@@ -216,7 +216,7 @@ fn one_variable(text: &str) -> Option<String> {
 }
 
 /// An action pinned by commit: `<name>@<40 hex digits>`.
-fn pinned(uses: Option<&str>, name: &str) -> bool {
+pub(crate) fn pinned(uses: Option<&str>, name: &str) -> bool {
     uses.and_then(|u| u.strip_prefix(name))
         .and_then(|u| u.strip_prefix('@'))
         .is_some_and(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))

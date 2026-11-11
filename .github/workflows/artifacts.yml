@@ -92,11 +92,30 @@ jobs:
         with:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
+      - run: rustup toolchain install
+      # musl-tools on both Linux legs, pinned by version and SHA-256 for each architecture in
+      # .github/debs/musl-tools.toml: restored from the actions cache, or fetched from the
+      # pinned mirrors when the cache missed, checked either way, and installed with dpkg. No
+      # apt-get, so an outage of the Ubuntu archive does not stop a leg whose cache hit.
+      - name: Restore the musl-tools packages
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: musl-debs
+        with:
+          path: ${{ runner.temp }}/debs/musl-tools
+          key: debs-musl-tools-${{ runner.arch }}-${{ hashFiles('.github/debs/musl-tools.toml') }}
+      - name: Fetch the pinned musl-tools packages
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
+        run: cargo xtask debs --pins .github/debs/musl-tools.toml --dir "$RUNNER_TEMP/debs/musl-tools"
+      - name: Save the musl-tools packages
+        if: ${{ endsWith(matrix.target, '-linux-musl') && steps.musl-debs.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/debs/musl-tools
+          key: ${{ steps.musl-debs.outputs.cache-primary-key }}
       - name: Install musl tools
         if: ${{ endsWith(matrix.target, '-linux-musl') }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends musl-tools
+        run: sudo dpkg --install "$RUNNER_TEMP"/debs/musl-tools/*.deb
       # ring's C code for arm64 musl. On the arm64 runner the host (aarch64 glibc) and the target
       # differ, so the cc crate looks for the compiler `aarch64-linux-musl-gcc`; musl-tools installs
       # it as `musl-gcc` only (for x86_64 the cc crate falls back to `musl-gcc` by itself). The
@@ -109,7 +128,6 @@ jobs:
       - name: Install GNU tar
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
         run: command -v gtar > /dev/null || brew install gnu-tar
-      - run: rustup toolchain install
       - run: rustup target add "$TARGET"
       # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so
       # the binaries print it; the repository keeps its own version.
