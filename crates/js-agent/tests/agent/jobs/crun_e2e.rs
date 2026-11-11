@@ -210,9 +210,9 @@ pub(super) fn seams() -> Seams {
             tool_path: node.tools.clone().into_os_string(),
             check_search: false,
         },
-        // The agent runs inside this test binary, which does not answer the helper modes: each
-        // container's supervisor is the agent's own binary.
+        // This test binary answers no helper mode: each supervisor is the agent's binary.
         daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
+        mounts: super::unmounted::seam(&node.dir),
     }
 }
 

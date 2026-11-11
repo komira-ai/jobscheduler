@@ -15,16 +15,21 @@ impl Cli {
         ]
     }
 
-    /// The flags only the crun runtime takes (the GPU flags and `--host-port`), with whether
-    /// each was given: an agent that runs another refuses them all.
+    /// The flags only the crun runtime takes (the GPU flags, `--host-port` and
+    /// `--image-allow-loopback`), with whether each was given: an agent that runs another
+    /// refuses them all.
     #[must_use]
-    pub fn crun_only_flags(&self) -> [(&'static str, bool); 4] {
+    pub fn crun_only_flags(&self) -> [(&'static str, bool); 5] {
         let [device, mount, env] = self.gpu_flags();
         [
             device,
             mount,
             env,
             ("--host-port", !self.host_port.is_empty()),
+            (
+                "--image-allow-loopback",
+                !self.image_allow_loopback.is_empty(),
+            ),
         ]
     }
 

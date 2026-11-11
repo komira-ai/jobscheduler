@@ -23,7 +23,7 @@
 //! |---|---|---|
 //! | `process-as-job-user` | a process that was not there at the baseline whose host uid is in the range the jobs' user namespaces are mapped onto (`--container-subuid`: 65536 uids, so any process of any job's user, root included), outside the containers of the agent's other jobs and not of the uid of a slot whose job is still running; one of the finished job's own slot's uid is named as that slot's leftover | residue |
 //! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs: what a child that outlived its parent looks like | residue |
-//! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers | residue |
+//! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers and those below the directory where the runtime mounts another held job's file system | residue |
 //! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
 //! | `kernel-module-changed` | a module in `/proc/modules` that was not there at the baseline, or one that was and is gone (an unload is a finding too: a job holds no capability to change modules, and a host where an operator unloads modules while jobs run cannot be called clean) | residue |
 //! | `watch-dir-changed` | the names, sizes, modification or status change times, inodes, owners or modes of the entries of a `--watch-dir` differ | residue |
@@ -170,6 +170,13 @@
 //! accept that such a host is tainted. This is stated from how the engines work, not from
 //! a measurement on a host.
 //!
+//! The `crun` runtime mounts what a job's file system is made of (its layers, the clones of
+//! its host paths) below a directory of the job's own, `<mounts>/<lease>`, before the job
+//! has a container, and unmounts it after the container is gone.
+//! [`Finished::held_mounts`] lists those directories of the agent's other jobs; a mount
+//! whose point lies below one is not counted against the finished job. The finished job's
+//! own are gone by its check, so one left there is a finding.
+//!
 //! A container user that is the agent's own user (`--container-user` for an agent that
 //! does not run as root) makes every process of the agent's user that is not in the
 //! baseline, and not in the host's own control groups, a finding: a child of the agent
@@ -186,7 +193,7 @@ mod proc;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli_runtime::{IdRange, JobUsers};
 use crate::lifecycle::{CheckFinding, CheckHook, Finished};
@@ -369,10 +376,20 @@ impl Snapshot {
         self.mounts.retain(|mount| {
             !(is_live(job, &mount.root)
                 || is_live(job, &mount.point)
-                || is_live(job, &mount.source))
+                || is_live(job, &mount.source)
+                || under_held(job, &mount.point))
         });
         self
     }
+}
+
+/// Whether the mount point `point` lies below a directory where the runtime mounts the file
+/// system of another job the agent holds ([`Finished::held_mounts`]), by whole components.
+fn under_held(job: &Finished<'_>, point: &str) -> bool {
+    let point = Path::new(point);
+    job.held_mounts
+        .iter()
+        .any(|dir| point != dir && point.starts_with(dir))
 }
 
 /// Whether `text` (a control group path, the lines of `/proc/<pid>/cgroup`, or a mount's
@@ -694,6 +711,7 @@ impl Integrity {
                 !(mine(&mount.root)
                     || mine(&mount.point)
                     || mine(&mount.source)
+                    || under_held(job, &mount.point)
                     || hosts_own_mount(mount))
             });
         let moved = now

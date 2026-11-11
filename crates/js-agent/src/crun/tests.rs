@@ -509,12 +509,12 @@ fn a_directory_is_made_new_with_the_open_mode() {
     use std::os::unix::fs::PermissionsExt as _;
     let base = scratch_dir("make-dir");
     let fresh = base.join("fresh");
-    super::make_dir(&fresh).expect("made new");
+    super::dirs::make_dir(&fresh).expect("made new");
     let mode = fs::metadata(&fresh).expect("metadata").permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
-    let why = super::make_dir(&fresh).expect_err("there already");
+    let why = super::dirs::make_dir(&fresh).expect_err("there already");
     assert_eq!(why.kind(), std::io::ErrorKind::AlreadyExists);
-    let why = super::make_dir(&base.join("no/such/parent")).expect_err("no parent");
+    let why = super::dirs::make_dir(&base.join("no/such/parent")).expect_err("no parent");
     assert_eq!(why.kind(), std::io::ErrorKind::NotFound);
     let _ = fs::remove_dir_all(&base);
 }
@@ -539,12 +539,12 @@ fn a_lease_directory_is_taken_only_when_it_is_there_empty_and_in_the_runs_projec
     }
     fs::set_permissions(&lease, fs::Permissions::from_mode(0o711)).expect("mode");
     let same = |_: &File| Ok(Some(7_u32));
-    super::take_dir(&lease, &run, &same).expect("taken");
+    super::dirs::take_dir(&lease, &run, &same).expect("taken");
     let mode = fs::metadata(&lease).expect("metadata").permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
 
     let kind = |dir: &Path, project: &dyn Fn(&File) -> Result<Option<u32>>| {
-        super::take_dir(dir, &run, project)
+        super::dirs::take_dir(dir, &run, project)
             .expect_err("refused")
             .kind()
     };
@@ -553,13 +553,21 @@ fn a_lease_directory_is_taken_only_when_it_is_there_empty_and_in_the_runs_projec
     fs::create_dir(&full).expect("full");
     fs::write(full.join("file"), b"x").expect("a file in it");
     assert_eq!(kind(&full, &same), ErrorKind::InvalidInput);
+    // What a run's assembly put there before the container, and only that, is taken.
+    let assembled = base.join("assembled");
+    for entry in ["", "rootfs-upper", "rootfs-work", "cow"] {
+        fs::create_dir(assembled.join(entry)).expect("an assembled layer");
+    }
+    super::dirs::take_dir(&assembled, &run, &same).expect("the assembly's layers");
+    fs::create_dir(assembled.join("stray")).expect("a stray");
+    assert_eq!(kind(&assembled, &same), ErrorKind::InvalidInput);
     let file = base.join("file");
     fs::write(&file, b"x").expect("a file");
     let link = base.join("link");
     symlink(&lease, &link).expect("a link");
     for refused in [&file, &link] {
         assert!(
-            super::take_dir(refused, &run, &same).is_err(),
+            super::dirs::take_dir(refused, &run, &same).is_err(),
             "{refused:?}"
         );
     }
@@ -578,7 +586,7 @@ fn a_lease_directory_is_taken_only_when_it_is_there_empty_and_in_the_runs_projec
     assert_eq!(kind(&lease, &one_side), ErrorKind::PermissionDenied);
     // No project ids on either side: the same state.
     let none = |_: &File| Ok(None::<u32>);
-    super::take_dir(&lease, &run, &none).expect("no project ids anywhere");
+    super::dirs::take_dir(&lease, &run, &none).expect("no project ids anywhere");
     // A project that cannot be read, of either directory, or of both.
     let broken_lease = |fd: &File| {
         if leased(fd) {

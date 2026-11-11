@@ -331,6 +331,7 @@ impl Node {
             image_budget: None,
             host_jobs: false,
             host_ports: HostPorts::default(),
+            fs: None,
         }
     }
 

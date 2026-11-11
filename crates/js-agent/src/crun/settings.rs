@@ -9,6 +9,7 @@ use std::time::Duration;
 use js_agent_wire::PortRange;
 use js_contain::oci::{OciConfig, OciError};
 
+use super::fs::{FsError, FsSettings};
 use super::{
     CALL_LIMIT, EgressPort, GpuSettings, KILL_WAIT, LedgerError, PULL_LIMIT, hand_over_no_follow,
 };
@@ -55,6 +56,9 @@ pub struct CrunSettings {
     pub host_jobs: bool,
     /// The host ports a job may reach, and what makes their listeners.
     pub host_ports: HostPorts,
+    /// What a job's layers and mounts are made with; none for a runtime that gives none (on
+    /// a kernel without the system calls they need), which refuses a start that asks for them.
+    pub fs: Option<FsSettings>,
 }
 
 /// The host ports of a [`CrunRuntime`]: which a job may name (`--host-port`), and what makes
@@ -159,4 +163,7 @@ pub enum CrunError {
     /// The directory of the leases' labels could not be made or listed.
     #[error("the directory of the leases' labels {0}")]
     Ledger(#[from] LedgerError),
+    /// What a job's layers and mounts are made with could not be set up.
+    #[error(transparent)]
+    Fs(#[from] FsError),
 }

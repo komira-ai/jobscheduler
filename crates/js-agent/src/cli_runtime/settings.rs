@@ -230,6 +230,13 @@ pub struct CrunPlan {
     /// The ports of the host's loopback a job may reach (`--host-port`), set by
     /// [`Settings::with_host_ports`].
     pub host_ports: Vec<js_agent_wire::PortRange>,
+    /// The roots a job's host paths may lie beneath (`--mount-root`, `--mount-root-ro`),
+    /// set by [`Settings::with_mount_roots`].
+    pub mount_roots: crate::lifecycle::MountRoots,
+    /// Whether the kernel has the system calls a job's layers and mounts need, set by
+    /// [`Settings::with_layered`]: without them none is given and `layered-rootfs` is not
+    /// reported.
+    pub layered: bool,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -356,6 +363,8 @@ impl Settings {
                 image_budget: None,
                 host_jobs: false,
                 host_ports: Vec::new(),
+                mount_roots: crate::lifecycle::MountRoots::default(),
+                layered: false,
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -431,6 +440,26 @@ impl Settings {
         self.crun_mut()
             .into_iter()
             .for_each(|plan| plan.host_ports = allowed.clone());
+        self
+    }
+
+    /// These settings with the roots a job's host paths may lie beneath, when they are the
+    /// `crun` runtime's; the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_mount_roots(mut self, roots: &crate::lifecycle::MountRoots) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.mount_roots = roots.clone());
+        self
+    }
+
+    /// These settings saying whether the kernel has what a job's layers and mounts need,
+    /// when they are the `crun` runtime's; the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_layered(mut self, layered: bool) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.layered = layered);
         self
     }
 
