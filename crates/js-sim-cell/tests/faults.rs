@@ -68,9 +68,10 @@ const DIE_SECOND_AT: Duration = Duration::from_secs(135);
 const DIE_SECOND_RUNS: u32 = 100;
 const DIE_SETTLE: Duration = Duration::from_secs(1_300);
 /// The 200-host scenario is the family's largest by far, so its seeds, the family's
-/// [`SEEDS`], run on this many threads, a quarter each.
+/// [`SEEDS`], run as this many tests, a quarter each, which a test runner can run at once
+/// or on different machines.
 const DIE_SEEDS: u64 = SEEDS;
-const DIE_THREADS: u64 = 4;
+const DIE_PARTS: u64 = 4;
 
 /// Agents killed for good: five of fifty hosts, at the server's default heartbeat.
 const GOOD_HOSTS: usize = 50;
@@ -213,28 +214,42 @@ fn should_fail(scenario: &Scenario, invariant: Invariant) {
 /// again or keeps it unbookable (`launched-on`), one that keeps the dead process's runs
 /// booked after the new process listed none (`settles-when-quiet`), and one that runs a
 /// dead process's run again on the new one (`at-most-one-launch`).
-#[test]
-fn ten_of_two_hundred_agents_die_mid_run() {
-    let parts: Vec<_> = (0..DIE_THREADS)
-        .map(|part| {
-            let seeds = part * DIE_SEEDS / DIE_THREADS..(part + 1) * DIE_SEEDS / DIE_THREADS;
-            std::thread::spawn(move || {
-                let ran = agents_that_die().try_run_seed_range(seeds);
-                ran.map(|_| ()).map_err(|failure| failure.to_string())
-            })
-        })
-        .collect();
-    for part in parts {
-        match part.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(failure)) => panic!("{failure}"),
-            Err(panicked) => std::panic::resume_unwind(panicked),
-        }
+///
+/// The scenario has no witness, so each part's seeds are judged on their own, as one run
+/// of all sixteen would judge them; the four tests below together run every seed once.
+fn ten_of_two_hundred_agents_die_mid_run(part: u64) {
+    let seeds = part * DIE_SEEDS / DIE_PARTS..(part + 1) * DIE_SEEDS / DIE_PARTS;
+    if let Err(failure) = agents_that_die().try_run_seed_range(seeds) {
+        panic!("{failure}");
     }
 }
 
-/// The scenario of [`ten_of_two_hundred_agents_die_mid_run`], built on each of the
-/// threads that run its seeds.
+/// [`ten_of_two_hundred_agents_die_mid_run`] over seeds 0 to 3.
+#[test]
+fn ten_of_two_hundred_agents_die_mid_run_seeds_0_to_3() {
+    ten_of_two_hundred_agents_die_mid_run(0);
+}
+
+/// [`ten_of_two_hundred_agents_die_mid_run`] over seeds 4 to 7.
+#[test]
+fn ten_of_two_hundred_agents_die_mid_run_seeds_4_to_7() {
+    ten_of_two_hundred_agents_die_mid_run(1);
+}
+
+/// [`ten_of_two_hundred_agents_die_mid_run`] over seeds 8 to 11.
+#[test]
+fn ten_of_two_hundred_agents_die_mid_run_seeds_8_to_11() {
+    ten_of_two_hundred_agents_die_mid_run(2);
+}
+
+/// [`ten_of_two_hundred_agents_die_mid_run`] over seeds 12 to 15.
+#[test]
+fn ten_of_two_hundred_agents_die_mid_run_seeds_12_to_15() {
+    ten_of_two_hundred_agents_die_mid_run(3);
+}
+
+/// The scenario of [`ten_of_two_hundred_agents_die_mid_run`], built by each of the
+/// tests that run its seeds.
 fn agents_that_die() -> Scenario {
     let dead = || Agents::Listed(DIE_AGENTS.to_vec());
     let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), DIE_HOSTS)

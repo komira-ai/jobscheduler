@@ -1,0 +1,11 @@
+# cargo-nextest's configuration. Only CI's coverage jobs run the tests under nextest
+# (`cargo llvm-cov nextest`, .github/workflows/ci.yml); every other job runs `cargo test`,
+# which does not read this file.
+
+# js-sim-cell's simulator scenarios are most of the coverage run's time, and the longest
+# of its tests take far longer than any other crate's. Run them before the rest, so that
+# what is left at the end of a shard is short tests and not one long scenario started
+# last. Which tests run, and what they assert, does not change; only their order does.
+[[profile.default.overrides]]
+filter = 'package(js-sim-cell)'
+priority = 10

@@ -30,6 +30,9 @@
 //!   ([`release::image_digest`]): the manifest digest of the release's linux-x86_64 image of
 //!   js-lease-server, held to `SHA256SUMS`, and the release's addresses of the image and its bundle:
 //!   what the control plane's deploy of `js-server` is given.
+//! - `merge-profiles --dir <dir> --out <file> [--rustc <program>]` ([`merge_profiles`]): one
+//!   indexed coverage profile from the raw ones a coverage shard wrote at the top of `--dir`,
+//!   merged by the toolchain's llvm-profdata from a list file.
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
@@ -110,6 +113,7 @@ pub mod image;
 pub mod job_surface;
 pub mod layering;
 pub mod macpkg;
+pub mod merge_profiles;
 pub mod postgres_for_tests;
 pub mod release;
 pub mod report;
@@ -161,6 +165,9 @@ pub enum Error {
     /// The Postgres server for the tests could not be started.
     #[error(transparent)]
     PostgresForTests(#[from] postgres_for_tests::Error),
+    /// A coverage shard's raw profiles could not be merged.
+    #[error("merge-profiles: {0}")]
+    MergeProfiles(#[from] merge_profiles::Error),
     /// The real-crun tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
@@ -303,6 +310,9 @@ enum Verb {
     /// Start a Postgres server for the tests that need one, from an installed Postgres's
     /// programs, and append its URL (`KBF_TEST_POSTGRES_URL`) to the workflow's environment file.
     PostgresForTests(postgres_for_tests::Args),
+    /// Merge the raw coverage profiles at the top of a directory into one indexed profile,
+    /// with the toolchain's llvm-profdata.
+    MergeProfiles(merge_profiles::Args),
     /// Render the job commands of js and the job client's methods from the job service's
     /// descriptor set, or with `--check` fail when the checked-in files differ.
     GenJobSurface(job_surface::Args),
@@ -449,6 +459,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         }
         Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
         Verb::PostgresForTests(args) => Ok(postgres_for_tests::run(&args)?),
+        Verb::MergeProfiles(args) => Ok(merge_profiles::run(&args)?),
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
         Verb::GenReport(args) => Ok(report::run(&args)?),
         Verb::ImageRecipe(args) => Ok(image::run(&args)?),
