@@ -37,6 +37,7 @@ pub mod desired;
 pub mod include;
 pub mod macos_leg;
 pub mod plan;
+pub mod server_deploy;
 pub mod server_image;
 pub mod stage;
 pub mod stamp;

@@ -46,7 +46,7 @@ pub mod manifest;
 pub mod repo;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The job of `release.yml` that publishes a release.
 pub const PUBLISH_JOB: &str = "publish";
@@ -113,7 +113,7 @@ pub struct DesiredArgs {
 }
 
 /// Runs `program args`: its stdout, when it succeeded and printed UTF-8.
-fn capture(program: &str, args: &[String]) -> Result<String, super::Error> {
+pub(crate) fn capture(program: &str, args: &[String]) -> Result<String, super::Error> {
     let command = format!("{program} {}", args.join(" "));
     let out = Command::new(program)
         .args(args)
@@ -133,24 +133,24 @@ fn capture(program: &str, args: &[String]) -> Result<String, super::Error> {
 }
 
 /// The arguments as owned strings.
-fn strings(args: &[&str]) -> Vec<String> {
+pub(crate) fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| (*a).to_owned()).collect()
 }
 
 /// What `gh api <path>` answered, as JSON.
-fn api(gh: &str, path: &str) -> Result<Value, Error> {
+pub(crate) fn api(gh: &str, path: &str) -> Result<Value, Error> {
     let text = capture(gh, &strings(&["api", path]))?;
     serde_json::from_str(&text)
         .map_err(|e| Error::Failed(format!("gh api {path} did not print JSON: {e}")))
 }
 
 /// The elements of the array `value`, none for anything else.
-fn array(value: &Value) -> &[Value] {
+pub(crate) fn array(value: &Value) -> &[Value] {
     value.as_array().map_or(&[], Vec::as_slice)
 }
 
 /// Whether the job [`PUBLISH_JOB`] of the run `run` of `repo` succeeded.
-fn published(gh: &str, repo: &str, run: &str) -> Result<bool, Error> {
+pub(crate) fn published(gh: &str, repo: &str, run: &str) -> Result<bool, Error> {
     let path = format!("repos/{repo}/actions/runs/{run}/jobs?per_page=100&filter=latest");
     let found = api(gh, &path)?;
     let jobs = array(&found["jobs"]);
@@ -168,7 +168,7 @@ fn published(gh: &str, repo: &str, run: &str) -> Result<bool, Error> {
 }
 
 /// The highest version among the published releases of `repo` (their tags `vX.Y.Z`).
-fn newest(gh: &str, repo: &str) -> Result<Version, Error> {
+pub(crate) fn newest(gh: &str, repo: &str) -> Result<Version, Error> {
     let found = api(gh, &format!("repos/{repo}/releases?per_page=100"))?;
     latest(
         array(&found)
@@ -181,8 +181,13 @@ fn newest(gh: &str, repo: &str) -> Result<Version, Error> {
 
 /// The version the request names: `--version`, or the newest release when the run of
 /// `--after-run` published one; `None` when it published none.
-fn chosen(args: &DesiredArgs) -> Result<Option<Version>, Error> {
-    match (args.version.as_str(), args.after_run.as_str()) {
+pub(crate) fn chosen(
+    gh: &str,
+    repo: &str,
+    version: &str,
+    after_run: &str,
+) -> Result<Option<Version>, Error> {
+    match (version, after_run) {
         (version, "") if !version.is_empty() => Version::from_str(version)
             .map(Some)
             .map_err(|_| {
@@ -196,8 +201,8 @@ fn chosen(args: &DesiredArgs) -> Result<Option<Version>, Error> {
                     "--after-run {run:?} is not the id of a workflow run"
                 )));
             }
-            if published(&args.gh, &args.repo, run)? {
-                newest(&args.gh, &args.repo).map(Some)
+            if published(gh, repo, run)? {
+                newest(gh, repo).map(Some)
             } else {
                 Ok(None)
             }
@@ -209,7 +214,7 @@ fn chosen(args: &DesiredArgs) -> Result<Option<Version>, Error> {
 }
 
 /// The names of the assets of the published release `tag` of `repo`.
-fn assets(gh: &str, repo: &str, tag: &str) -> Result<Vec<String>, Error> {
+pub(crate) fn assets(gh: &str, repo: &str, tag: &str) -> Result<Vec<String>, Error> {
     let found = api(gh, &format!("repos/{repo}/releases/tags/{tag}"))?;
     if found["draft"] == true || found["prerelease"] == true {
         return Err(Error::Failed(format!(
@@ -223,7 +228,7 @@ fn assets(gh: &str, repo: &str, tag: &str) -> Result<Vec<String>, Error> {
 }
 
 /// Appends `lines` to the file `path`, making it if needed.
-fn append_output(path: &Path, lines: &[String]) -> Result<(), Error> {
+pub(crate) fn append_output(path: &Path, lines: &[String]) -> Result<(), Error> {
     let mut text = lines.join("\n");
     text.push('\n');
     std::fs::OpenOptions::new()
@@ -322,7 +327,7 @@ pub fn run(args: &DesiredArgs) -> Result<String, Error> {
             args.apt_url
         )));
     }
-    let Some(version) = chosen(args)? else {
+    let Some(version) = chosen(&args.gh, &args.repo, &args.version, &args.after_run)? else {
         let lines = [
             format!(
                 "run {} of {} did not publish a release ({PUBLISH_JOB} did not succeed): nothing is set",

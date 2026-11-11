@@ -1,0 +1,138 @@
+# Deploys a published release of js-lease-server as the service `js-server` of a control plane,
+# through the control plane's deploy service (docker-swarm-updater): it is handed the digest of the
+# release's amd64 image and the release URLs of the image tar and its Sigstore bundle, downloads
+# and verifies them itself, and rolls the Swarm service to that image. The call waits for the
+# outcome (30 minutes at most) and fails when the service did not converge on the image or was
+# rolled back. Two ways in:
+#
+# - `workflow_run`: the completion of a run of `release.yml` on main of this repository. Only a run
+#   that succeeded is acted on, and of those only one whose job `publish` succeeded: then the
+#   newest published release is deployed (release runs are one at a time, so it is the release
+#   that run published, or a newer one whose run comes next). Most release runs publish nothing,
+#   and then nothing is deployed.
+# - `workflow_dispatch`, from main ("Run workflow"), with one input, the released version `X.Y.Z`
+#   (its tag without the v). The deploy service refuses a release older than the one the service
+#   runs, so a rollback by hand to an older release is refused there; roll back through the
+#   control plane instead.
+#
+# It is OFF until the repository variable JS_SERVER_DEPLOYS is `true`, exactly: unset, or anything
+# else, both jobs are skipped (their job-level `if:`), whichever way it started. Its other
+# settings are repository variables too; none is a secret:
+#  - CP_DEPLOY_ENDPOINT              the control plane's deploy front, https://<host>[:<port>];
+#  - CP_DEPLOY_AUDIENCE              the audience the front's proxy accepts the job's OIDC token
+#                                    for;
+#  - CP_DEPLOY_TAILNET_CLIENT_ID     the client ID of the tailnet's workload identity for this
+#                                    repository; empty: the runner does not join the tailnet;
+#  - CP_DEPLOY_TAILNET_AUDIENCE      the audience of that workload identity;
+#  - CP_DEPLOY_TAILNET_TAGS          the tags the join gives the runner's node, comma-separated,
+#                                    the ones that identity issues (such as `tag:ci`).
+# The environment `controlplane` of this repository must exist, with deployment branches limited
+# to main. It has no required reviewer and no wait timer: the deploy follows a release without a
+# person's approval, by the operator's decision.
+#
+# What protects a deploy:
+#  - the environment: only main may deploy into it, and the OIDC token the job gets carries it;
+#  - the claims of that token, which the control plane's proxy and the deploy service both check:
+#    this repository and its id, the called workflow at the commit pinned below (its
+#    `job_workflow_ref`), the ref refs/heads/main, the environment `controlplane` and a
+#    GitHub-hosted runner. A job of any other repository, workflow, commit, branch or runner is
+#    refused there;
+#  - the image: the deploy service verifies the attestation `artifacts.yml` made for the tar on
+#    main of this repository before it imports anything, and deploys the digest named here;
+#  - Swarm: the service is updated one task at a time with a health check, and rolls back by
+#    itself when the new task is not healthy.
+# Moving the pin of the called workflow moves its `job_workflow_ref`, so the allow-list of the
+# receiving side moves with it: the pin is a reviewed change.
+#
+# The platform is x86_64 only: the image deployed is js-lease-server's linux/amd64 image.
+#
+# Two jobs:
+#  - check   holds no token that writes. `cargo xtask release server-deploy` (crates/xtask,
+#            src/release/server_deploy.rs) decides the release (`--version` by hand, `--after-run`
+#            after a run of release.yml; one of the two is empty), hands on `deploy=false` when
+#            that run published none, and otherwise reads the release's amd64 image tar, requires
+#            its bundle beside it and exactly one linux/amd64 manifest in it, and hands on the
+#            version, the manifest's digest and the two URLs.
+#  - deploy  needs check, and is the deploy service's reusable workflow, pinned below.
+#
+# One run at a time of each way in, never cancelled: the runs after a release share the group
+# `js-server-deploy-release`, where a newer waiting run replaces an older one (each derives the
+# newest release itself, so nothing is lost), and the runs by hand share
+# `js-server-deploy-dispatch`, so that a deploy by hand waiting for its turn is never replaced by
+# the completion of a release run.
+#
+# The workflow lint (crates/xtask/tests/apt_workflow, server_deploy.rs) holds this file to what is
+# said here.
+name: js-server-deploy
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "A released version of js-lease-server, X.Y.Z (the tag without the v); not older than the running one"
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: js-server-deploy-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: ${{ github.ref == 'refs/heads/main' && vars.JS_SERVER_DEPLOYS == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      deploy: ${{ steps.release.outputs.deploy }}
+      version: ${{ steps.release.outputs.version }}
+      image-digest: ${{ steps.release.outputs.image-digest }}
+      image-url: ${{ steps.release.outputs.image-url }}
+      bundle-url: ${{ steps.release.outputs.bundle-url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      # The input and the run id are read as environment variables of the step, never spliced into
+      # a script. One of the two is empty: the input on a workflow_run, the run id on a dispatch.
+      - name: The release to deploy, refused unless its image and bundle are in order
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: cargo xtask release server-deploy --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --dir "$RUNNER_TEMP/server-deploy" --output "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [check]
+    if: ${{ github.ref == 'refs/heads/main' && vars.JS_SERVER_DEPLOYS == 'true' && needs.check.outputs.deploy == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    # The deploy service's reusable workflow (komira-ai/docker-swarm-updater, deploy.yml), pinned
+    # to the commit whose `job_workflow_ref` the control plane's proxy and updater allow.
+    uses: komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6
+    with:
+      service: js-server
+      version: ${{ needs.check.outputs.version }}
+      image-digest: ${{ needs.check.outputs.image-digest }}
+      image-url: ${{ needs.check.outputs.image-url }}
+      bundle-url: ${{ needs.check.outputs.bundle-url }}
+      endpoint: ${{ vars.CP_DEPLOY_ENDPOINT }}
+      audience: ${{ vars.CP_DEPLOY_AUDIENCE }}
+      environment: controlplane
+      wait-minutes: 30
+      tailscale-oauth-client-id: ${{ vars.CP_DEPLOY_TAILNET_CLIENT_ID }}
+      tailscale-audience: ${{ vars.CP_DEPLOY_TAILNET_AUDIENCE }}
+      tailscale-tags: ${{ vars.CP_DEPLOY_TAILNET_TAGS }}

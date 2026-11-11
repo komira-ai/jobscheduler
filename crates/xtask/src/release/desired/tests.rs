@@ -24,19 +24,19 @@ const OTHER: &str = "33333333333333333333333333333333333333333333333333333333333
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Waits for the turn of one test (a failed test does not stop the others).
-fn serial() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A scratch directory of its own for one test.
-fn scratch(name: &str) -> TestDir {
+pub(crate) fn scratch(name: &str) -> TestDir {
     TestDir::under(std::env::temp_dir(), name)
 }
 
 /// Writes the executable `name` of `dir`, a shell script with `body`.
-fn script(dir: &TestDir, name: &str, body: &str) -> String {
+pub(crate) fn script(dir: &TestDir, name: &str, body: &str) -> String {
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}")).expect("script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
@@ -44,13 +44,13 @@ fn script(dir: &TestDir, name: &str, body: &str) -> String {
 }
 
 /// Shell that prints `text` as it is.
-fn say(text: &str) -> String {
+pub(crate) fn say(text: &str) -> String {
     format!("cat <<'EOF'\n{text}\nEOF\n")
 }
 
 /// A stand-in `gh` that logs its command line to `gh.log` and runs the shell of the case whose
 /// arguments are exactly `$*`, and fails (status 9) on any other call.
-fn gh(dir: &TestDir, cases: &[(String, String)]) -> String {
+pub(crate) fn gh(dir: &TestDir, cases: &[(String, String)]) -> String {
     let mut body = format!(
         "echo \"$*\" >> '{}'\ncase \"$*\" in\n",
         dir.join("gh.log").display()
@@ -92,7 +92,7 @@ fn curl(dir: &TestDir, amd64: &Index<'_>, arm64: &Index<'_>) -> String {
 }
 
 /// The text of a log (empty when the program was never run).
-fn log(dir: &TestDir, name: &str) -> String {
+pub(crate) fn log(dir: &TestDir, name: &str) -> String {
     std::fs::read_to_string(dir.join(name)).unwrap_or_default()
 }
 
@@ -105,7 +105,7 @@ fn packages(filename: &str, sha256: &str) -> String {
 }
 
 /// The release JSON of a published release holding `assets`.
-fn release(assets: &[&str]) -> String {
+pub(crate) fn release(assets: &[&str]) -> String {
     let assets: Vec<String> = assets
         .iter()
         .map(|a| format!("{{\"name\":\"{a}\"}}"))
