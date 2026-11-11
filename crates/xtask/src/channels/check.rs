@@ -8,7 +8,9 @@
 //! a deb822 `Signed-By`) and the suite `testing`, installs `js-agent=<version>`, and then holds the
 //! installed system to what the package promises: dpkg lists the package at the version, the
 //! binary's `--version` says `js-agent <version>`, every file of the package ([`files`]) is there,
-//! and no unit is enabled and no `js-agent` process runs.
+//! the package's postinst made the job user ([`JOB_USER`]) so that the agent's own start check
+//! (`js_agent::crun_host::check`) finds nothing missing about the account, the account is a
+//! system one with no home and no login, and no unit is enabled and no `js-agent` process runs.
 //!
 //! The programs (`apt-get`, `dpkg`, `dpkg-query`, `curl`, the installed binary) run behind
 //! [`Host`], so a test answers in place of them; `--root` is where the checked system is (`/`),
@@ -16,6 +18,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[cfg(target_os = "linux")]
+use js_agent::crun_host::{self, CrunHost, Piece, Request};
 
 use super::apt::state::PACKAGE;
 use super::aws::Answer;
@@ -38,6 +43,18 @@ pub const UNITS: [&str; 3] = [
     "js-agent-crun-gpu.service",
     "js-agent.service",
 ];
+
+/// The job user: the account `js-agent-crun.service` runs every `crun` as (`--job-user`), which
+/// the package's postinst makes from its `sysusers.d` file.
+pub const JOB_USER: &str = "jsjob";
+
+/// The home and the shell of the job user: none and no login.
+pub const JOB_USER_HOME: &str = "/nonexistent";
+/// See [`JOB_USER_HOME`].
+pub const JOB_USER_SHELL: &str = "/usr/sbin/nologin";
+
+/// The highest uid of a system account (`SYS_UID_MAX` of Debian's and Ubuntu's `login.defs`).
+pub const SYS_UID_MAX: u32 = 999;
 
 /// Where the keyring is put (below the root) and the name the source file refers to it by.
 pub const KEYRING: &str = "usr/share/keyrings/komira-archive-keyring.gpg";
@@ -195,6 +212,105 @@ fn running(root: &Path) -> Vec<String> {
     found
 }
 
+/// A runner that runs no program: the job user's part of the start check runs none, and the
+/// pieces that do (`crun --version`) are not the job user's.
+#[cfg(target_os = "linux")]
+struct NoPrograms;
+
+#[cfg(target_os = "linux")]
+impl js_agent::CommandRunner for NoPrograms {
+    fn run(&self, program: &str, _args: &[&str]) -> Result<String, String> {
+        Err(format!("{program}: not run by check-apt"))
+    }
+
+    fn run_in(
+        &self,
+        program: &str,
+        args: &[&str],
+        _env: &[(&str, &str)],
+    ) -> Result<String, String> {
+        self.run(program, args)
+    }
+}
+
+/// The agent's start check of `--runtime crun` against the system below `root` (every file it
+/// reads is below `root`), as the packaged unit asks it (`--job-user jsjob`, the distribution's
+/// crun, the unit's state and scratch roots): what it finds missing about the job user, one
+/// problem each. The other pieces (crun, the subordinate ranges, the roots, cgroups, AppArmor)
+/// are the host's, which the package does not provide, and are not judged here.
+///
+/// Linux only, as the start check is (`check-apt` runs in a Linux container; xtask also builds
+/// on macOS, where there is no such check to run).
+#[cfg(target_os = "linux")]
+fn job_user_refusals(root: &Path) -> Vec<String> {
+    let below = |path: &str| root.join(path.trim_start_matches('/'));
+    let mut host = CrunHost::system();
+    host.ids.passwd = below("/etc/passwd");
+    host.ids.subuid = below("/etc/subuid");
+    host.ids.subgid = below("/etc/subgid");
+    host.apparmor_userns = below(&host.apparmor_userns.to_string_lossy());
+    host.apparmor_profiles = below(&host.apparmor_profiles.to_string_lossy());
+    host.cgroup_mount = below(&host.cgroup_mount.to_string_lossy());
+    host.self_cgroup = below(&host.self_cgroup.to_string_lossy());
+    host.id_tool_dirs = host
+        .id_tool_dirs
+        .iter()
+        .map(|dir| below(&dir.to_string_lossy()))
+        .collect();
+    let crun = below(crun_host::DISTRO_CRUN);
+    let state_root = below("/var/lib/js-agent/state");
+    let scratch_root = below("/var/lib/js-agent/scratch/runs");
+    let request = Request {
+        crun: &crun,
+        job_user: JOB_USER,
+        state_root: &state_root,
+        scratch_root: &scratch_root,
+    };
+    crun_host::check(&request, &host, &NoPrograms)
+        .missing
+        .iter()
+        .filter(|missing| missing.piece == Piece::JobUser)
+        .map(|missing| format!("the agent's start check refuses the host: {missing}"))
+        .collect()
+}
+
+/// The job user's line of the passwd-format `passwd`, held to what the package's `sysusers.d`
+/// file makes: a system uid, the home [`JOB_USER_HOME`] and the shell [`JOB_USER_SHELL`]. No
+/// line is no problem here: [`job_user_refusals`] names it.
+fn job_user_account_problems(passwd: &str) -> Vec<String> {
+    let Some(fields) = passwd
+        .lines()
+        .map(|line| line.split(':').collect::<Vec<_>>())
+        .find(|fields| fields.first() == Some(&JOB_USER))
+    else {
+        return Vec::new();
+    };
+    let mut problems = Vec::new();
+    let field = |at: usize| fields.get(at).copied().unwrap_or_default();
+    if !field(2)
+        .parse::<u32>()
+        .is_ok_and(|uid| (1..=SYS_UID_MAX).contains(&uid))
+    {
+        problems.push(format!(
+            "the job user {JOB_USER} has uid {:?}, not a system uid (1 to {SYS_UID_MAX})",
+            field(2)
+        ));
+    }
+    if field(5) != JOB_USER_HOME {
+        problems.push(format!(
+            "the job user {JOB_USER} has the home {:?}, not {JOB_USER_HOME:?}",
+            field(5)
+        ));
+    }
+    if field(6) != JOB_USER_SHELL {
+        problems.push(format!(
+            "the job user {JOB_USER} has the shell {:?}, not {JOB_USER_SHELL:?}",
+            field(6)
+        ));
+    }
+    problems
+}
+
 /// The checks of an installed system, as problems.
 fn installed_problems(r: &Apt, installed: &str) -> Vec<String> {
     let mut problems = Vec::new();
@@ -209,6 +325,10 @@ fn installed_problems(r: &Apt, installed: &str) -> Vec<String> {
             problems.push(format!("the package's file /{rel} is not installed"));
         }
     }
+    #[cfg(target_os = "linux")]
+    problems.extend(job_user_refusals(r.root));
+    let passwd = std::fs::read_to_string(r.root.join("etc/passwd")).unwrap_or_default();
+    problems.extend(job_user_account_problems(&passwd));
     for link in enabled_links(r.root) {
         problems.push(format!(
             "a unit is enabled: {} exists, and the package enables nothing",
@@ -327,7 +447,7 @@ pub fn check_apt(host: &dyn Host, r: &Apt) -> Result<Vec<String>, Error> {
         return Err(Error::Refused(problems));
     }
     Ok(vec![format!(
-        "check-apt: {PACKAGE} {} installed from the suite testing on {}; it says {said:?}; its {} files are there; no unit is enabled and nothing runs",
+        "check-apt: {PACKAGE} {} installed from the suite testing on {}; it says {said:?}; its {} files are there; the agent's start check accepts the job user {JOB_USER}; no unit is enabled and nothing runs",
         r.version,
         r.arch,
         crate::release::deb::FILES.len()

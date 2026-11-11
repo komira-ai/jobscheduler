@@ -16,7 +16,9 @@
 # name `--runtime docker --allow-container-engine`, the opt-in to the engine fallback.
 #
 # The agent stays root and runs every `crun` as the job user (`--job-user`), a system account
-# with a subuid and subgid range of 65536 ids or more that the setup script makes. At start the
+# that the package's postinst makes from its sysusers file (/usr/lib/sysusers.d/js-agent.conf),
+# with a subuid and subgid range of 65536 ids or more that the host provides (the setup script
+# makes one; see "What the host provides" in packaging/js-agent/deb/README.md). At start the
 # agent checks the host (crun and its version, newuidmap and newgidmap, the job user's ranges,
 # the roots' modes, the cgroup controllers, the AppArmor profile for /usr/bin/crun) and exits 2
 # naming each piece that is missing; `journalctl -u js-agent-crun` shows the list. The program

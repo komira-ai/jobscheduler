@@ -15,6 +15,7 @@ const DEB: &str = "packaging/js-agent/deb";
 const UNIT: &str = "packaging/js-agent/deb/js-agent-crun.service";
 const GPU_UNIT: &str = "packaging/js-agent/deb/js-agent-crun-gpu.service";
 const TMPFILES: &str = "packaging/js-agent/deb/tmpfiles.conf";
+const SYSUSERS: &str = "packaging/js-agent/deb/sysusers.conf";
 const FARM_UNIT: &str = "packaging/js-agent/js-agent-crun.service";
 const FARM_GPU_UNIT: &str = "packaging/js-agent/js-agent-crun-gpu.service";
 const FARM_TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
@@ -129,6 +130,8 @@ fn the_deb_directory_holds_the_packaged_files_and_the_readme() {
             "README.md",
             "js-agent-crun-gpu.service",
             "js-agent-crun.service",
+            "postinst",
+            "sysusers.conf",
             "tmpfiles.conf"
         ]
     );
@@ -186,7 +189,7 @@ fn the_unit_expands_with_a_flags_file_to_a_command_line_the_agent_parses() {
 /// token written into the package.
 #[test]
 fn no_file_of_the_package_sets_the_environment_or_holds_token_text() {
-    for path in [UNIT, GPU_UNIT, TMPFILES] {
+    for path in [UNIT, GPU_UNIT, TMPFILES, SYSUSERS] {
         let body = read(path);
         for line in body.lines().map(str::trim) {
             assert!(
@@ -304,4 +307,32 @@ fn the_unit_is_enabled_by_multi_user_and_its_stop_covers_the_drain() {
         .expect("seconds");
     assert!(stop > flag("--drain-wait") + flag("--stop-grace"));
     assert!(CUTOVER_SECS > stop);
+}
+
+/// The package's `sysusers.d` file makes exactly one account: the user the unit names with
+/// `--job-user`, with an id systemd-sysusers picks from the system range (`-`), the home and the
+/// shell `channels check-apt` holds the installed account to, and nothing else (no group or
+/// membership line, no subordinate range).
+///
+/// Catches a unit and a sysusers file that name different users (the agent would refuse the
+/// host: "job user: no user ... in /etc/passwd"), a pinned uid that could clash with a host's
+/// accounts, and an account given a home or a login shell.
+#[test]
+fn the_sysusers_file_makes_the_job_user_the_unit_names_as_a_system_account() {
+    use xtask::channels::check::{JOB_USER, JOB_USER_HOME, JOB_USER_SHELL};
+    let unit = read(UNIT);
+    let exec = unit_value(&unit, "[Service]", "ExecStart");
+    let words: Vec<&str> = exec.split_whitespace().collect();
+    let at = words
+        .iter()
+        .position(|word| *word == "--job-user")
+        .expect("--job-user");
+    assert_eq!(words[at + 1], JOB_USER);
+    let lines = code(&read(SYSUSERS));
+    assert_eq!(
+        lines,
+        [format!(
+            "u {JOB_USER} - \"jobscheduler job user\" {JOB_USER_HOME} {JOB_USER_SHELL}"
+        )]
+    );
 }

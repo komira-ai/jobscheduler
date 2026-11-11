@@ -17,13 +17,40 @@ update hook (`/usr/bin/js-agent update-hook`) for every update.
 | `js-agent-crun.service` | `/usr/lib/systemd/system/js-agent-crun.service` | the agent, run with crun; the one unit hostkeeper starts, stops and enables |
 | `js-agent-crun-gpu.service` | `/usr/lib/systemd/system/js-agent-crun-gpu.service` | the oneshot that writes the GPU drop-in; pulled in by the agent's unit |
 | `tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent-crun.conf` | the directories of the unit |
+| `sysusers.conf` | `/usr/lib/sysusers.d/js-agent.conf` | the job user `jsjob` the unit names with `--job-user`, which the postinst makes |
 | `../js-agent.service` | `/usr/lib/systemd/system/js-agent.service` | the agent run through Docker or Podman, for a host that installs the package by hand; hostkeeper does not start it |
 | `../tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent.conf` | the directories of that unit |
 | `../crun_host_setup.sh` | `/usr/share/js-agent/crun_host_setup.sh` | the host setup script, mode 0755 |
 | `LICENSE` | `/usr/share/doc/js-agent/copyright` | |
 
-The package has no `Depends`, no maintainer script and no conffile, and enables no unit: the
+The package has one maintainer script, `postinst`, which runs `systemd-sysusers js-agent.conf` at
+`configure`: it makes the job user `jsjob` (a system account with a group of the same name, a uid
+and gid from the system range, home `/nonexistent`, shell `/usr/sbin/nologin`) and keeps an
+account of that name that exists already, as one the setup script or an operator made. Its one
+`Depends`, `systemd | systemd-standalone-sysusers`, is what provides `systemd-sysusers`; every
+host that runs the package's units has `systemd`, so it adds nothing to install there. Removing
+or purging the package leaves the account. The package has no conffile and enables no unit: the
 install changes nothing a running agent reads until hostkeeper restarts the unit.
+
+## What the host provides
+
+The agent's start check of `--runtime crun` (`js-agent-crun.service` exits 2 and
+`journalctl -u js-agent-crun` lists each missing piece) needs more than the package carries. The
+package makes the job user; the rest is the host's, and is placed before hostkeeper starts the
+unit, by `crun_host_setup.sh` (`docs/runbooks/crun-host-setup.md`), by the machine image, or by
+hand:
+
+| piece the check names | what the host needs | why the package does not provide it |
+|---|---|---|
+| `crun`, `crun version` | the distribution's `crun` package, 1.14 or newer, at `/usr/bin/crun` | not a `Depends`: hostkeeper's install must find nothing to install but the package, and the program must be the distribution's file, which its AppArmor profile attaches to |
+| `newuidmap`, `newgidmap` | the `uidmap` package | not a `Depends`, as for `crun` |
+| `subuid range`, `subgid range` | a range of 65536 ids or more for `jsjob` in `/etc/subuid` and in `/etc/subgid`, overlapping no other range, uid or gid of the host: a line `jsjob:<first id>:65536` in each, which names the user and so can be placed before the package makes the account (after it, `usermod --add-subuids` and `--add-subgids` write the same lines) | the free block is the host's to choose: the setup script picks the first free one from 200000 |
+| `apparmor profile` | where `kernel.apparmor_restrict_unprivileged_userns` is 1, the distribution's profile for `/usr/bin/crun` loaded (`apparmor`) | the profile is the distribution's |
+| `scratch root`, `path permissions` | the scratch filesystem mounted at `/var/lib/js-agent/scratch` (the unit starts only on a mount point there), with project quotas (`prjquota`) | the disk is the host's |
+| `cgroup v2 delegation` | cgroup v2 and systemd 254 or newer | the unit asks for it (`Delegate=yes`, `DelegateSubgroup=supervisor`) |
+
+The state root and the other directories are the package's tmpfiles file's, made at each start of
+the unit.
 
 `js-agent-crun.service` is `packaging/js-agent/js-agent-crun.service`, the unit of the setup script
 (`crun_host_setup.sh`), with one difference of substance: the server and pool are not in the unit

@@ -8,10 +8,12 @@
 //! The package holds [`FILES`], every one owned by `root:root`: what hostkeeper's native apt
 //! installer puts on a host, and what a host without hostkeeper places by hand.
 //!
-//! The package has no `Depends` (hostkeeper's `apt-get install --simulate` must find nothing to
-//! install but the package; the binary is static musl), no maintainer scripts and no conffiles,
-//! and it enables nothing: the host's operator (or hostkeeper, from the hook manifest of the
-//! release's targets) starts a unit.
+//! The package depends on [`DEPENDS`] alone (the binary is static musl): the program its
+//! [`POSTINST`] runs, which every host that runs the package's units already has, so
+//! hostkeeper's `apt-get install --simulate` still finds nothing to install there but the
+//! package. The postinst makes the job user of the package's `sysusers.d` file and nothing else;
+//! the package has no other maintainer script and no conffiles, and it enables nothing: the
+//! host's operator (or hostkeeper, from the hook manifest of the release's targets) starts a unit.
 //!
 //! The binary is never run. It must hold [`version_marker`], the text its `--version` is made
 //! of, so a package never names a version its program does not report.
@@ -52,9 +54,19 @@ pub const SYNOPSIS: &str = "job scheduler agent: runs the jobs a lease server le
 pub const DESCRIPTION: [&str; 4] = [
     "js-agent joins a js-lease-server pool and runs the jobs it is leased in containers.",
     "",
-    "The package installs the program, the systemd units of a host that runs jobs with crun and",
-    "the host setup script. It starts and enables nothing: place the host's files, then start a unit.",
+    "The package installs the program, the systemd units of a host that runs jobs with crun, their",
+    "job user and the host setup script. It starts and enables nothing: place the host's files, then start a unit.",
 ];
+
+/// The `Depends` field: what provides `systemd-sysusers`, which [`POSTINST`] runs. `systemd`
+/// first, the package a host that runs the units has; Debian's `dh_installsysusers` names the
+/// same alternatives.
+pub const DEPENDS: &str = "systemd | systemd-standalone-sysusers";
+
+/// The `postinst` maintainer script (`packaging/js-agent/deb/postinst`): it runs
+/// `systemd-sysusers` on the package's `sysusers.d` file, so the job user that
+/// `js-agent-crun.service` names (`--job-user jsjob`) exists once the package is configured.
+pub const POSTINST: &str = include_str!("../../../../packaging/js-agent/deb/postinst");
 
 /// One file of the package.
 #[derive(Clone, Copy, Debug)]
@@ -69,7 +81,7 @@ pub struct PackagedFile {
 
 /// The files of the package; `release deb` writes them and `channels check-apt` looks for them
 /// under its root.
-pub const FILES: [PackagedFile; 8] = [
+pub const FILES: [PackagedFile; 9] = [
     PackagedFile {
         path: "/usr/bin/js-agent",
         mode: 0o755,
@@ -94,6 +106,13 @@ pub const FILES: [PackagedFile; 8] = [
         mode: 0o644,
         text: Some(include_str!(
             "../../../../packaging/js-agent/deb/tmpfiles.conf"
+        )),
+    },
+    PackagedFile {
+        path: "/usr/lib/sysusers.d/js-agent.conf",
+        mode: 0o644,
+        text: Some(include_str!(
+            "../../../../packaging/js-agent/deb/sysusers.conf"
         )),
     },
     PackagedFile {
@@ -222,7 +241,7 @@ pub fn control(version: Version, architecture: &str, files: &[File]) -> String {
     let bytes: usize = files.iter().map(|(_, _, content)| content.len()).sum();
     let mut text = format!(
         "Package: {NAME}\nVersion: {version}\nArchitecture: {architecture}\n\
-         Maintainer: {MAINTAINER}\nInstalled-Size: {}\n\
+         Maintainer: {MAINTAINER}\nInstalled-Size: {}\nDepends: {DEPENDS}\n\
          Section: admin\nPriority: optional\nHomepage: {HOMEPAGE}\nDescription: {SYNOPSIS}\n",
         bytes.div_ceil(1024),
     );
@@ -374,6 +393,7 @@ fn build_with(
             text(control(version, platform.architecture(), files)),
         ),
         ("./md5sums".to_owned(), 0o644, text(md5sums(files))),
+        ("./postinst".to_owned(), 0o755, text(POSTINST.to_owned())),
     ];
     let control_tar = archive(&control_entries)?;
     let data_tar = archive(&data_entries(files))?;

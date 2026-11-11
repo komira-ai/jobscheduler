@@ -1,0 +1,15 @@
+#!/bin/sh
+# The postinst of the js-agent .deb: makes the job user from the package's sysusers.d file
+# (/usr/lib/sysusers.d/js-agent.conf, the user jsjob), which js-agent-crun.service names with
+# --job-user. systemd-sysusers keeps an account that exists already, so a reinstall, an upgrade
+# and a host whose account was made by hand change nothing. The package's Depends brings
+# systemd-sysusers. Nothing is started or enabled.
+set -e
+
+case "$1" in
+configure | abort-upgrade | abort-deconfigure | abort-remove)
+	systemd-sysusers ${DPKG_ROOT:+--root="$DPKG_ROOT"} js-agent.conf
+	;;
+esac
+
+exit 0

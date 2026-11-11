@@ -5,6 +5,13 @@ use js_testkit::dir::TestDir;
 
 const SAYS: &str = "js-agent 1.2.3\nruntimes: docker crun\n";
 const URL: &str = "https://packages.komira.ai/apt";
+/// The line `systemd-sysusers` writes to `/etc/passwd` for the package's `sysusers.d` file, uid
+/// and gid as it picks them from the system range.
+const SYSUSERS_LINE: &str =
+    "jsjob:x:998:998:jobscheduler job user:/nonexistent:/usr/sbin/nologin\n";
+/// The rest of a clean image's `/etc/passwd`.
+const BASE_PASSWD: &str =
+    "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n";
 
 fn scratch(name: &str) -> TestDir {
     TestDir::under(std::env::temp_dir(), &format!("xtask-check-{name}"))
@@ -26,6 +33,9 @@ struct Machine {
     running: bool,
     /// A command line (joined) containing this text is refused.
     refuse: Option<&'static str>,
+    /// The lines the install adds to `etc/passwd` (the postinst's job user); `None` leaves no
+    /// `etc/passwd` at all.
+    passwd: Option<&'static str>,
 }
 
 impl Machine {
@@ -41,6 +51,7 @@ impl Machine {
             enable: Vec::new(),
             running: false,
             refuse: None,
+            passwd: Some(SYSUSERS_LINE),
         }
     }
 
@@ -75,6 +86,9 @@ impl Machine {
             self.put("proc/42/comm", b"js-agent\n");
         }
         self.put("proc/43/comm", b"bash\n");
+        if let Some(lines) = self.passwd {
+            self.put("etc/passwd", format!("{BASE_PASSWD}{lines}").as_bytes());
+        }
     }
 }
 
@@ -176,7 +190,7 @@ fn a_clean_install_from_testing_is_checked_and_adds_the_repository_the_way_a_use
 }
 
 #[test]
-fn a_package_missing_any_of_its_eight_files_is_named() {
+fn a_package_missing_any_of_its_nine_files_is_named() {
     // Catches: a package that installs without the files the units and the setup script need.
     let dir = scratch("apt-files");
     let mut machine = Machine::new(&dir);
@@ -195,6 +209,7 @@ fn a_package_missing_any_of_its_eight_files_is_named() {
             "usr/lib/systemd/system/js-agent-crun.service",
             "usr/lib/systemd/system/js-agent-crun-gpu.service",
             "usr/lib/tmpfiles.d/js-agent-crun.conf",
+            "usr/lib/sysusers.d/js-agent.conf",
             "usr/lib/systemd/system/js-agent.service",
             "usr/lib/tmpfiles.d/js-agent.conf",
             "usr/share/js-agent/crun_host_setup.sh",
@@ -372,5 +387,170 @@ fn the_image_is_updated_and_upgraded_before_certificates_and_curl_are_installed(
             "apt-get update",
             "apt-get install -y --no-install-recommends js-agent=1.2.3",
         ]
+    );
+}
+
+/// The problems `check-apt` finds when the install leaves `passwd` (the job user's lines) in
+/// `etc/passwd`, and the root it ran on.
+fn passwd_problems(name: &str, passwd: Option<&'static str>) -> (Vec<String>, TestDir) {
+    let dir = scratch(name);
+    let mut machine = Machine::new(&dir);
+    machine.passwd = passwd;
+    let problems = match check_apt(&machine, &apt(&dir)) {
+        Ok(_) => Vec::new(),
+        Err(Error::Refused(problems)) => problems,
+        Err(e) => panic!("{name}: {e}"),
+    };
+    (problems, dir)
+}
+
+/// The agent's refusal of a host with no `jsjob` in the root's `etc/passwd`, as check-apt words it.
+#[cfg(target_os = "linux")]
+fn no_user(dir: &Path) -> String {
+    format!(
+        "the agent's start check refuses the host: job user: no user \"jsjob\" in {}/etc/passwd (fix: create the account (`useradd --system --no-create-home --shell /usr/sbin/nologin jsjob`))",
+        dir.display()
+    )
+}
+
+// The agent's start check is Linux only (js_agent::crun_host), so the tests of its refusals run
+// on Linux; check-apt itself runs in a Linux container.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_install_whose_postinst_made_no_job_user_is_refused_with_the_agents_own_words() {
+    // Catches: a package that installs without making jsjob (no sysusers.d file, no postinst, a
+    // postinst that does not run systemd-sysusers): the agent would exit 2 at its first start,
+    // "job user: no user "jsjob" in /etc/passwd". Also an /etc/passwd that is not there at all,
+    // and a jsjob line whose ids do not parse, which the agent reads as no user.
+    let (problems, dir) = passwd_problems("user-none", Some(""));
+    assert_eq!(problems, [no_user(&dir)]);
+
+    let (problems, dir) = passwd_problems("user-no-passwd", None);
+    assert_eq!(
+        problems,
+        [format!(
+            "the agent's start check refuses the host: job user: {}/etc/passwd: No such file or directory (os error 2) (fix: create the account (`useradd --system --no-create-home --shell /usr/sbin/nologin jsjob`))",
+            dir.display()
+        )]
+    );
+
+    // Another account's name that starts with jsjob is not the job user.
+    let (problems, dir) = passwd_problems(
+        "user-prefix",
+        Some("jsjobs:x:998:998::/nonexistent:/usr/sbin/nologin\n"),
+    );
+    assert_eq!(problems, [no_user(&dir)]);
+
+    let (problems, dir) = passwd_problems(
+        "user-uid-text",
+        Some("jsjob:x:abc:998::/nonexistent:/usr/sbin/nologin\n"),
+    );
+    assert_eq!(
+        problems,
+        [
+            no_user(&dir),
+            "the job user jsjob has uid \"abc\", not a system uid (1 to 999)".to_owned(),
+        ]
+    );
+
+    let (problems, dir) = passwd_problems("user-short", Some("jsjob:x\n"));
+    assert_eq!(
+        problems,
+        [
+            no_user(&dir),
+            "the job user jsjob has uid \"\", not a system uid (1 to 999)".to_owned(),
+            "the job user jsjob has the home \"\", not \"/nonexistent\"".to_owned(),
+            "the job user jsjob has the shell \"\", not \"/usr/sbin/nologin\"".to_owned(),
+        ]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_job_user_with_root_ids_is_refused_by_the_agents_check_and_as_no_system_uid() {
+    // Catches: a sysusers line that pins uid or gid 0, with which every crun would run as root.
+    let (problems, _dir) = passwd_problems(
+        "user-root",
+        Some("jsjob:x:0:0:jobscheduler job user:/nonexistent:/usr/sbin/nologin\n"),
+    );
+    assert_eq!(
+        problems,
+        [
+            "the agent's start check refuses the host: job user: \"jsjob\" has uid 0 and gid 0: a job never runs as root (fix: name a user with a uid and a gid above 0)",
+            "the job user jsjob has uid \"0\", not a system uid (1 to 999)",
+        ]
+    );
+    let (problems, _dir) = passwd_problems(
+        "user-root-gid",
+        Some("jsjob:x:998:0:jobscheduler job user:/nonexistent:/usr/sbin/nologin\n"),
+    );
+    assert_eq!(
+        problems,
+        [
+            "the agent's start check refuses the host: job user: \"jsjob\" has uid 998 and gid 0: a job never runs as root (fix: name a user with a uid and a gid above 0)"
+        ]
+    );
+}
+
+#[test]
+fn a_job_user_that_is_not_a_system_account_without_home_and_login_is_named() {
+    // Catches: a sysusers line (or a hand-made account the postinst kept) that gives the job
+    // user a regular uid, a home or a login shell; the agent's check accepts those, the package
+    // promises none of them. Each field is named on its own, and the uid is judged at both ends
+    // of the system range.
+    let (problems, _dir) = passwd_problems(
+        "user-regular",
+        Some("jsjob:x:1000:1000::/home/jsjob:/bin/bash\n"),
+    );
+    assert_eq!(
+        problems,
+        [
+            "the job user jsjob has uid \"1000\", not a system uid (1 to 999)",
+            "the job user jsjob has the home \"/home/jsjob\", not \"/nonexistent\"",
+            "the job user jsjob has the shell \"/bin/bash\", not \"/usr/sbin/nologin\"",
+        ]
+    );
+    for (name, line) in [
+        (
+            "user-uid-1",
+            "jsjob:x:1:1::/nonexistent:/usr/sbin/nologin\n",
+        ),
+        (
+            "user-uid-999",
+            "jsjob:x:999:999::/nonexistent:/usr/sbin/nologin\n",
+        ),
+    ] {
+        let (problems, _dir) = passwd_problems(name, Some(line));
+        assert_eq!(problems, Vec::<String>::new(), "{name}");
+    }
+}
+
+#[test]
+fn the_check_says_the_job_user_was_accepted() {
+    // Catches: a pass line that claims less than the check did, or more.
+    let dir = scratch("user-ok");
+    let machine = Machine::new(&dir);
+    let said = check_apt(&machine, &apt(&dir)).expect("checked");
+    assert_eq!(
+        said,
+        [
+            "check-apt: js-agent 1.2.3 installed from the suite testing on amd64; it says \"js-agent 1.2.3\"; its 9 files are there; the agent's start check accepts the job user jsjob; no unit is enabled and nothing runs"
+        ]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_start_check_of_check_apt_runs_no_program() {
+    // Catches: a runner that starts a program on the checked machine, which the job user's part
+    // of the agent's check never needs: either way of running is refused, naming the program.
+    use js_agent::CommandRunner as _;
+    assert_eq!(
+        NoPrograms.run("/usr/bin/crun", &["--version"]),
+        Err("/usr/bin/crun: not run by check-apt".to_owned())
+    );
+    assert_eq!(
+        NoPrograms.run_in("/usr/bin/crun", &["--version"], &[("PATH", "/usr/bin")]),
+        Err("/usr/bin/crun: not run by check-apt".to_owned())
     );
 }
