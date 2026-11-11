@@ -114,10 +114,9 @@ default on decode. An unknown value of `Outcome`, `Ack`, `HeldState` or `Command
 enums do not, each on purpose: an unknown `Phase` reads as `Quarantined` (it takes no work; test `unknown_phase_reads_quarantined`);
 an unknown exclusive-refusal code reads as `RefusalReason::SetupFailed` (`refusal_codes_round_trip_and_unknown_reads_setup_failed`);
 and an unknown `Isolation`, `os` or `arch`, and an unknown value of the run and native bodies' `NetworkLevel`, `Placement`,
-`OutputKind`, `TreeUnavailable` or `InputRef` type (`crates/js-agent-wire/src/native.rs`, none of which has a catch-all variant;
-`docs/design/tree-inputs.md` 2.2 says why `InputRef::Tree` and `TreeUnavailable` add none), and of a job start's `Layer` type,
-`MountSource` type, `MountMode`, `Propagation` or `PortProtocol` (`crates/js-agent-wire/src/rootfs.rs`, none of which has one
-either), fails the decode of
+`OutputKind`, `TreeUnavailable` or `InputRef` type (`crates/js-agent-wire/src/native.rs`, none of which has a catch-all variant),
+and of a job start's `Layer` type, `MountSource` type, `MountMode`, `Propagation` or `PortProtocol`
+(`crates/js-agent-wire/src/rootfs.rs`, none of which has one either), fails the decode of
 that one start, which then reads as `Command::Unknown` while the commands beside it arrive
 (`unknown_isolation_is_typed_error_not_contained` and `unknown_enum_values_leave_known_entries_intact` in `tests/decode.rs`,
 `an_unknown_confinement_value_reads_as_an_unknown_command` in `tests/native_job.rs`, `an_unknown_platform_reads_as_an_unknown_command`

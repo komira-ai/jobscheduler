@@ -181,42 +181,35 @@ pub const INVALID_LOG_SINK: &str = "invalid-log-sink";
 /// the credential and acts on the rest of the reply.
 pub const INVALID_LOG_CREDENTIAL: &str = "invalid-log-credential";
 
-/// A tree input ([`crate::InputRef::Tree`]) the node's `tierstore fs` could not attach for
-/// a reason that is not the tree's own: it is down, does not answer in time, refuses for
-/// the host's state (no space, an upstream error), or answers with a path that is not the
-/// tree's. As the detail of a `failed_to_start` result, retriable on another host or later;
-/// a start whose tree asked [`crate::TreeUnavailable::JobStages`] starts without it instead,
-/// except for a path that is not the tree's. As a result's `input_failure`
-/// ([`crate::JobResult::input_failure`]): a job that did not succeed while its tree's
-/// detach went unanswered.
+/// Retired, as [`crate::InputRef::Tree`] is: no agent sends it. It named a tree input the
+/// host could not attach for a reason that was not the tree's own, as the detail of a
+/// `failed_to_start` result or as a result's `input_failure`.
 pub const TREE_UNAVAILABLE: &str = "tree-unavailable";
-/// As the detail of a `failed_to_start` result: a tree input that `tierstore fs` refuses
-/// for the tree itself (an entry name or kind, or a manifest version, it does not support,
-/// a tree too large, a manifest whose bytes do not hash to its digest). The submitter's
-/// fault: not retriable, and never started without the tree.
+/// Retired, as [`crate::InputRef::Tree`] is: no agent sends it. As the detail of a
+/// `failed_to_start` result, it named a tree input refused for the tree itself.
 pub const TREE_INVALID: &str = "tree-invalid";
-/// As a result's `input_failure`: a read of a tree input failed while the job ran (a fill
-/// failed, or `tierstore fs` aborted). The job's outcome and exit status are kept.
+/// Retired, as [`crate::InputRef::Tree`] is: no agent sends it. As a result's
+/// `input_failure`, it named a failed read of a tree input while the job ran.
 pub const TREE_READ_FAILED: &str = "tree-read-failed";
-/// As a result's `input_failure`: the job passed its wall limit, and reading its tree
-/// inputs stalled it for over a tenth of that limit.
+/// Retired, as [`crate::InputRef::Tree`] is: no agent sends it. As a result's
+/// `input_failure`, it named a job past its wall limit that reading its tree inputs had
+/// stalled.
 pub const TREE_STALLED: &str = "tree-stalled";
-/// As the detail of a `failed_to_start` result: a start with a writable tree input at a
-/// `dest` other than the exec root, on an agent that places a writable tree only at the
-/// exec root.
+/// Retired, as [`crate::InputRef::Tree`] is: no agent sends it. As the detail of a
+/// `failed_to_start` result, it named a writable tree input at a `dest` other than the exec
+/// root.
 pub const TREE_PLACEMENT_UNSUPPORTED: &str = "tree-placement-unsupported";
-/// As the detail of a `failed_to_start` result: a start with a tree input on an agent that
-/// does not report the capability `tierstore-trees` (`js_caps::TIERSTORE_TREES`).
+/// Retired, as [`crate::InputRef::Tree`] is: no agent sends it. As the detail of a
+/// `failed_to_start` result, it named a tree input on an agent that attaches none.
 pub const TREE_UNSUPPORTED_HERE: &str = "tree-unsupported-here";
 /// As the detail of a `failed_to_start` result: a `run` with an output, on an agent that
 /// collects no outputs of a `run`.
 pub const OUTPUTS_UNSUPPORTED_HERE: &str = "outputs-unsupported-here";
 /// As the detail of a `failed_to_start` result: a start whose read-only paths (its files
-/// directory, its mount inputs and its tree links) are more than the agent's sandbox
-/// profile can list.
+/// directory and its inputs) are more than the agent's sandbox profile can list.
 pub const TOO_MANY_INPUTS_HERE: &str = "too-many-inputs-here";
 /// As the detail of a `failed_to_start` result: a start whose working directory is at or
-/// below a tree input's `dest`, on an agent that places a tree as a link out of the run
+/// below an input's `dest`, on an agent that places that input as a link out of the run
 /// directory.
 pub const CWD_IN_TREE: &str = "cwd-in-tree";
 

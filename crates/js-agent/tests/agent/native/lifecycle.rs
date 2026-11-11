@@ -338,9 +338,9 @@ fn a_native_job_start_with_env_is_answered_for_its_image_not_its_env() {
 
 /// Asserts the starts this runtime refuses before it makes anything, each with the code
 /// the server reads: a program outside the tool roots (`invalid-program`), a `stage` input
-/// it keeps no tree for (`native-unsupported`), a mount input whose path is not below the
-/// root (`invalid-mount`). (A working directory that leaves `exec/` is refused by the wire
-/// before it gets here, `invalid-job`.) Nothing is made: the helper sees no user, the scratch directory is not made and the
+/// it keeps no tree for and a retired `tree` input (`native-unsupported`), a mount input
+/// whose path is not below the root (`invalid-mount`). (A working directory that leaves
+/// `exec/` is refused by the wire before it gets here, `invalid-job`.) Nothing is made: the helper sees no user, the scratch directory is not made and the
 /// booking is intact. It catches a refused start that still costs a user, and a job whose
 /// inputs are dropped without a word. (Outputs and run files are served:
 /// `native/outputs.rs` and `native/files.rs`.)
@@ -359,6 +359,15 @@ fn a_start_the_runtime_cannot_serve_is_refused_and_makes_nothing() {
                 stage_id: format!("sha256:{}", "a".repeat(64)),
                 dest: "in".to_owned(),
                 placement: Default::default(),
+            }),
+        ),
+        (
+            "native-unsupported",
+            with_input(InputRef::Tree {
+                digest: format!("sha256:{}", "a".repeat(64)),
+                dest: "in".to_owned(),
+                placement: Default::default(),
+                unavailable: Default::default(),
             }),
         ),
         (
@@ -647,17 +656,26 @@ fn an_image_reference_whose_entrypoint_is_missing_makes_no_user() {
 /// why before its bundle is fetched, though the registry would serve it and the image is
 /// allowed: an image with no `run` (`image-unsupported-here`, a bundle has no command of its
 /// own), and a `run` with a `stage` input (`native-unsupported`: this agent keeps no stage
-/// trees). The registry sees no request and no user is made. It catches an image start that
+/// trees) or a retired `tree` input (`native-unsupported`). The registry sees no request and
+/// no user is made. It catches an image start that
 /// begins a download for a job that can never run, and one answered with the wrong code.
 #[test]
 fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched() {
-    let table: [SpecCase; 2] = [
+    let table: [SpecCase; 3] = [
         ("image-unsupported-here", |spec| spec.run = None),
         ("native-unsupported", |spec| {
             spec.run.as_mut().unwrap().inputs.push(InputRef::Stage {
                 stage_id: format!("sha256:{}", "a".repeat(64)),
                 dest: "in".to_owned(),
                 placement: Default::default(),
+            });
+        }),
+        ("native-unsupported", |spec| {
+            spec.run.as_mut().unwrap().inputs.push(InputRef::Tree {
+                digest: format!("sha256:{}", "a".repeat(64)),
+                dest: String::new(),
+                placement: js_agent_wire::Placement::Writable,
+                unavailable: Default::default(),
             });
         }),
     ];
