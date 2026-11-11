@@ -35,6 +35,8 @@ mod quota_start;
 mod session;
 mod silence;
 mod system;
+#[cfg(target_os = "linux")]
+mod unmounted;
 mod usage;
 mod worker;
 

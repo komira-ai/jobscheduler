@@ -71,7 +71,7 @@ pub(super) enum Phase {
     Assembling(PathBuf),
 }
 
-/// What a start that waits for its image keeps to finish starting.
+/// What a start that waits (for its images, or its file system) keeps to finish starting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Waiting {
     pub(super) spec: JobSpec,
@@ -376,8 +376,9 @@ impl Job {
     }
 
     /// Ends a job that was stopped before its container was made: killed, and silent (no
-    /// result) when it was cancelled. Nothing was created, so the cleanup that follows
-    /// only gives the slot back.
+    /// result) when it was cancelled. No container was made: the cleanup that follows
+    /// discards what the runtime prepared of its file system, removes the directories made
+    /// for its assembly, if any, and gives the slot back.
     pub(super) fn end_unstarted(&mut self, events: &mut Vec<Event>) {
         if !self.silent {
             let detail = cause_detail(self.cause);
@@ -389,7 +390,7 @@ impl Job {
         self.stage = Stage::Scratch;
     }
 
-    /// Where the job is, as a heartbeat lists it: starting while it waits for its image,
+    /// Where the job is, as a heartbeat lists it: starting while it waits to start,
     /// running while its container runs, and exited from then on.
     pub(super) fn held_state(&self) -> HeldState {
         match self.stage {
@@ -399,7 +400,7 @@ impl Job {
         }
     }
 
-    /// Asks a running job, or one still waiting for its image, to stop; a job past its
+    /// Asks a running job, or one still waiting to start, to stop; a job past its
     /// exit has nothing to stop.
     pub(super) fn request_stop(&mut self, silent: bool) {
         self.request_stop_for(Cause::Stopped, silent);
@@ -414,7 +415,7 @@ impl Job {
         self.note(code::HOST_PORT_LOST, why, events);
     }
 
-    /// Asks a running job, or one still waiting for its image, to stop for `cause` (a cause
+    /// Asks a running job, or one still waiting to start, to stop for `cause` (a cause
     /// already set stays); a job past its exit has nothing to stop. Whether it was running
     /// or waiting.
     pub(super) fn request_stop_for(&mut self, cause: Cause, silent: bool) -> bool {

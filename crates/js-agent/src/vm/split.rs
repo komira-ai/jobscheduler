@@ -164,6 +164,11 @@ impl Runtime for WithVms {
         self.other.input_failure(id)
     }
 
+    /// The other runtime's: a VM's end is never held.
+    fn ends_held(&self, id: &RunHandle) -> bool {
+        self.other.ends_held(id)
+    }
+
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         self.owner(id).cgroup(id)
     }

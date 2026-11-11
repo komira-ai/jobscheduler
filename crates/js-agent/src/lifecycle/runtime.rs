@@ -697,6 +697,14 @@ pub trait Runtime {
         None
     }
 
+    /// Whether the run `id`, which [`Runtime::poll`] answers as running, has in fact ended and
+    /// is held while the runtime checks its inputs ([`Runtime::input_failure`]): it is not
+    /// stopped, and its wall-time limit does not end it. False from a runtime that holds no
+    /// end.
+    fn ends_held(&self, _id: &RunHandle) -> bool {
+        false
+    }
+
     /// Whether the network a native job would get is limited as the agent was told. Called
     /// before every native start, and only for a native start (a container start has
     /// [`Runtime::check_egress`]); a start whose check fails is refused (`egress-unchecked`)
@@ -804,6 +812,7 @@ mod tests {
         assert_eq!(bare.discard_fs("r1"), Ok(()));
         assert_eq!(bare.mounts_of("r1"), None);
         assert_eq!(bare.input_failure(&id), None);
+        assert!(!bare.ends_held(&id));
     }
 
     /// Catches the host paths of a start counted in another order than the runtime's sources

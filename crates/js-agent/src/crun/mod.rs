@@ -921,6 +921,10 @@ impl Runtime for CrunRuntime {
         self.unreadable(&id.0)
     }
 
+    fn ends_held(&self, id: &RunHandle) -> bool {
+        self.held(&id.0)
+    }
+
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
         if !self.leases_beside {
             return None;

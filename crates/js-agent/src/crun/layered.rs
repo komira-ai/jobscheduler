@@ -11,11 +11,13 @@ use js_agent_wire::{Layer, limits, refusal};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::Oci;
 use js_contain::oci::image::published_root;
+use tokio::runtime::Runtime as TokioRuntime;
 
 use super::CrunRuntime;
 use super::fs::pool::{Pending, Poll};
 use super::fs::{Assembled, Fs, Owners};
 use super::ledger::{Failed, Reason, Removed, SweepReport};
+use super::pull::Images;
 use super::spec::pinned;
 use crate::cli_runtime::container_name;
 use crate::lifecycle::{Exit, FsPrepared, JobFs, RuntimeError, Status};
@@ -54,17 +56,19 @@ impl RunFs {
     }
 }
 
-/// Pins `image` under the name `pin` in the store `oci` (whose directory is `store`) and
-/// gives its tree there, which stays until the pin is removed. An image the store no longer
-/// holds (evicted since it was fetched) fails: its fetch is not made again here.
-fn pin_tree((oci, store): (&Oci, &Path), image: &str, pin: &str) -> Result<PathBuf, String> {
+/// The image store a lease's images are pinned in and made sure of: the backend, the
+/// directory of its store, the images within their budget, and the runtime of the calls.
+type Store<'a> = (&'a Oci, &'a Path, &'a Images, &'a TokioRuntime);
+
+/// Pins `image` under the name `pin`, makes sure it is in the store (fetched again if it was
+/// evicted since the prefetcher had it), holds it against the budget's eviction under the
+/// same name, and gives its tree, which stays until the pin is removed.
+fn pin_tree((oci, dir, images, rt): Store<'_>, image: &str, pin: &str) -> Result<PathBuf, String> {
     let pinned = pinned(image)?;
     oci.pin_image(&pinned, pin).map_err(|why| why.to_string())?;
-    let tree = published_root(store, &pinned.digest);
-    match tree.is_dir() {
-        true => Ok(tree),
-        false => Err(format!("the image {image} is no longer in the store")),
-    }
+    images.lease(pin, &pinned.digest);
+    rt.block_on(images.ensure(&pinned))?;
+    Ok(published_root(dir, &pinned.digest))
 }
 
 /// The failure of a call for the run `run_id` on a runtime that gives it no file system.
@@ -123,7 +127,15 @@ impl CrunRuntime {
             job: self.oci.container_ids(),
             user: self.oci.job_ids(),
         };
-        let Self { fs, oci, store, .. } = self;
+        let Self {
+            fs,
+            oci,
+            store,
+            images,
+            rt,
+            ..
+        } = self;
+        let at: Store<'_> = (oci, store, images, rt);
         let Some(fs) = fs.as_mut() else {
             return Ok(());
         };
@@ -133,12 +145,12 @@ impl CrunRuntime {
         let (name, image, layers) = (name.to_owned(), image.to_owned(), layers.to_vec());
         let image = match image.is_empty() {
             true => None,
-            false => Some(pin_tree((oci, store), &image, &name)?),
+            false => Some(pin_tree(at, &image, &name)?),
         };
         let mut trees = Vec::new();
         for (k, layer) in layers.iter().enumerate() {
             if let Layer::Image { image } = layer {
-                trees.push(pin_tree((oci, store), image, &layer_pin(&name, k))?);
+                trees.push(pin_tree(at, image, &layer_pin(&name, k))?);
             }
         }
         let lease = oci.lease_dirs(&name).dir;
@@ -148,11 +160,13 @@ impl CrunRuntime {
     /// [`Runtime::discard_fs`](crate::lifecycle::Runtime::discard_fs): unmounts what was
     /// assembled for a run that was never made (or whose removal unmounted it already), and
     /// removes the pins its assembly took.
+    /// A runtime that gives no layers, and a run id no lease is named by, have nothing to
+    /// discard.
     pub(super) fn discard(&mut self, run_id: &str) -> Result<(), RuntimeError> {
-        if self.fs.is_none() {
+        let name = container_name(&self.host_id, run_id);
+        let (Some(fs), Ok(name)) = (self.fs.as_mut(), name) else {
             return Ok(());
-        }
-        let (name, fs) = self.fs_of(run_id)?;
+        };
         fs.discard(run_id, &name).map_err(RuntimeError::new)?;
         self.unpin_all(&name).map_err(RuntimeError::new)
     }
@@ -163,8 +177,12 @@ impl CrunRuntime {
     pub(super) fn unpin_all(&self, name: &str) -> Result<(), String> {
         let pins = std::iter::once(name.to_owned())
             .chain((0..limits::MAX_LAYERS).map(|k| layer_pin(name, k)));
-        let unpinned: Result<Vec<()>, _> = pins.map(|pin| self.oci.unpin_image(&pin)).collect();
-        self.images.release(name);
+        let unpinned: Result<Vec<()>, _> = pins
+            .map(|pin| {
+                self.images.release(&pin);
+                self.oci.unpin_image(&pin)
+            })
+            .collect();
         unpinned.map(drop).map_err(|why| why.to_string())
     }
 
@@ -253,6 +271,14 @@ impl CrunRuntime {
                 }
             },
         }
+    }
+
+    /// [`Runtime::ends_held`](crate::lifecycle::Runtime::ends_held): the run's end has been
+    /// read, and its sources are being checked.
+    pub(super) fn held(&self, name: &str) -> bool {
+        self.runs
+            .get(name)
+            .is_some_and(|run| matches!(run.state, super::State::Ended(..)))
     }
 
     /// [`Runtime::input_failure`](crate::lifecycle::Runtime::input_failure): `input-unreadable`

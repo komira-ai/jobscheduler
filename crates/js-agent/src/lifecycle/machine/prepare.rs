@@ -165,7 +165,10 @@ impl Lifecycle {
             }
             Next::Dirs => match self.make_dirs(&spec.run_id, (slot, booked), events) {
                 Ok(scratch) => {
-                    // Its images and host paths are here: it waits for its assembly now.
+                    // Its images and host paths are here: its assembly is asked for at once,
+                    // so a start that is ending is never asked to assemble, and it waits.
+                    // An answer it gives at once is asked again at the next step.
+                    let _ = self.runtime.assemble_fs(&spec.run_id, now);
                     let waiting = Waiting {
                         spec,
                         given,

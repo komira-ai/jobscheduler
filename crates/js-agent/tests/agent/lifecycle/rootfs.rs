@@ -284,12 +284,9 @@ fn a_start_waits_for_its_lookups_its_images_and_its_assembly() {
         h.dir.path("scratch/.lease-fake-j1").is_dir(),
         "the lease's too"
     );
-    assert!(
-        logged(&h, "assemble j1").is_empty(),
-        "asked at the next step"
-    );
+    assert_eq!(logged(&h, "assemble j1"), ["assemble j1"], "asked at once");
     h.life.step();
-    assert_eq!(logged(&h, "assemble j1"), ["assemble j1"]);
+    assert_eq!(logged(&h, "assemble j1").len(), 2);
     assert_eq!(listing(&h, "j1").state, HeldState::Starting);
     assert_eq!(h.fake.created().len(), 1, "j2 alone");
     h.fake.assembly_answers("j1", FsPrepared::Ready);
@@ -511,5 +508,31 @@ fn the_checks_know_the_mounts_of_the_other_held_jobs() {
             "mounts held beside second: {}",
             mounts.join("waits").display()
         )]
+    );
+}
+
+/// Asserts that a job whose end the runtime holds while it checks its inputs is neither
+/// stopped nor timed out when its wall-time limit passes meanwhile, and that its result is
+/// its own exit once the end is released. Catches a job that failed by itself reported
+/// `timed_out`, or killed, because its check outlasted its limit.
+#[test]
+fn a_held_end_is_not_stopped_or_timed_out() {
+    let mut h = harness("rootfs-held-end");
+    h.apply(vec![job_start(layered(&h, "j1"))]);
+    h.life.step();
+    h.life.step();
+    assert_eq!(listing(&h, "j1").state, HeldState::Running);
+    h.fake.hold_end("j1", true);
+    h.fake.exit("j1", 4);
+    h.clock.advance(120_000);
+    h.life.step();
+    assert!(h.fake.stops().is_empty(), "no stop of a held end");
+    assert_eq!(listing(&h, "j1").state, HeldState::Running);
+    h.fake.hold_end("j1", false);
+    h.life.step();
+    let result = listing(&h, "j1").result.expect("a result");
+    assert_eq!(
+        (result.outcome, result.exit_code),
+        (Outcome::Failed, Some(4))
     );
 }

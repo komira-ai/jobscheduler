@@ -343,7 +343,7 @@ impl Fs {
             .collect::<Option<Vec<Lower>>>()
             .ok_or_else(|| format!("run {run_id}: an image layer has no tree"))?;
         let dir = self.dir.join(&prep.name);
-        list::make_dir(&dir).map_err(|why| format!("make {}: {why}", dir.display()))?;
+        list::make_searchable(&dir).map_err(|why| format!("make {}: {why}", dir.display()))?;
         let plan = Plan {
             dir,
             lease,

@@ -52,7 +52,7 @@
 //!   `--silence-stop`, see [`DEFAULT_SILENCE_STOP`] for the bound). Contact is a welcome or
 //!   a heartbeat reply the session accepted, stamped on the lifecycle's clock by the
 //!   session ([`Contact`]); a reply the worker had no room for counts. Once the server has
-//!   not been heard for the bound, every job that runs or waits for its image is stopped as
+//!   not been heard for the bound, every job that runs or waits to start is stopped as
 //!   a `Stop` stops it (the stop grace, then the kill; a native run is killed at once), its
 //!   fence is retired and its result is `killed` with the detail `silence-stop`. It is done
 //!   once for each silence; a contact ends the silence, and starts that follow are judged

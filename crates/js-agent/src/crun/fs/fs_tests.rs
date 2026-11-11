@@ -207,7 +207,11 @@ fn each_host_path_is_opened_beneath_its_root_on_the_pool() {
         ("file-sub", file_sub, "file: Not a directory (os error 20)"),
     ] {
         let answer = resolved(&mut fs_, run, &job(vec![mount]));
-        assert_eq!(answer, refused(refusal::INPUT_UNAVAILABLE, why.to_owned()), "{run}");
+        assert_eq!(
+            answer,
+            refused(refusal::INPUT_UNAVAILABLE, why.to_owned()),
+            "{run}"
+        );
     }
     fs::set_permissions(data.join("locked"), fs::Permissions::from_mode(0o755)).expect("chmod");
     let inside = job(vec![mount(&data.join("inside"), "/i", MountMode::ReadOnly)]);
@@ -223,7 +227,10 @@ fn a_path_swapped_after_its_lookup_is_cloned_as_it_was_opened() {
     let (mut fs_, calls) = open(&dir, Paths::default());
     let data = dir.path().join("data");
     let start = job(vec![mount(&data.join("tree"), "/t", MountMode::ReadOnly)]);
-    assert_eq!(fs_.resolve(("r", "lease"), "", &start, 0), FsPrepared::Pending);
+    assert_eq!(
+        fs_.resolve(("r", "lease"), "", &start, 0),
+        FsPrepared::Pending
+    );
     until(|| (fs_.resolve(("r", "lease"), "", &start, 0) == FsPrepared::Ready).then_some(()));
     fs::rename(data.join("tree"), data.join("moved")).expect("moved away");
     symlink("/etc", data.join("tree")).expect("a link in its place");

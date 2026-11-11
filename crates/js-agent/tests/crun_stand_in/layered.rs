@@ -423,8 +423,8 @@ fn an_assembly_whose_run_is_never_made_is_discarded_or_swept() {
 /// Proves a runtime opened with no file system settings (a kernel without the system calls)
 /// gives no layers, refuses every call of a job's file system, discards and checks nothing,
 /// and mounts nothing; and that a layer's image outside the allowed registries, or not a
-/// pinned reference, is refused at admission, and one evicted from the store fails the
-/// assembly. Catches a job given half a root where the kernel cannot make one, and an image
+/// pinned reference, is refused at admission, and one evicted from the store that cannot be
+/// fetched again fails the assembly; a run id no lease is named by has nothing to discard. Catches a job given half a root where the kernel cannot make one, and an image
 /// pulled from a registry the operator did not allow.
 #[test]
 fn a_runtime_refuses_what_it_cannot_give() {
@@ -434,6 +434,7 @@ fn a_runtime_refuses_what_it_cannot_give() {
     let fs = job_fs(&node);
     let refused = |answer: FsPrepared| matches!(answer, FsPrepared::Failed(_));
     assert!(refused(plain.resolve_fs("r1", "", &fs, 5000)));
+    assert!(!plain.ends_held(&RunHandle("r1".to_owned())));
     assert!(refused(plain.assemble_fs("r1", 5000)));
     assert_eq!(plain.discard_fs("r1"), Ok(()));
     assert_eq!(plain.mounts_of("r1"), None);
@@ -462,18 +463,14 @@ fn a_runtime_refuses_what_it_cannot_give() {
         refused(runtime.resolve_fs("../r", "", &fs, 5000)),
         "not a run id"
     );
+    assert_eq!(runtime.discard_fs("../r"), Ok(()), "no lease is named so");
     let evicted = format!("registry.example/job@sha256:{}", "cd".repeat(32));
     let mut fs = job_fs(&node);
     fs.layers[1] = Layer::Image { image: evicted };
     let spec = node.spec("l8-0");
     let answer = prepare(&mut runtime, &spec, &fs);
-    let FsPrepared::Failed(why) = answer else {
-        panic!("failed: {answer:?}");
-    };
-    assert!(
-        why.to_string().ends_with("is no longer in the store"),
-        "{why}"
-    );
+    // Pinned, and fetched again from a source that has nothing: the assembly fails.
+    assert!(refused(answer), "evicted and not fetched");
     let mut bad = job_fs(&node);
     bad.layers[1] = Layer::Image {
         image: "registry.example/job:1".to_owned(),
@@ -542,6 +539,7 @@ fn a_check_held_or_lost_is_waited_for_or_counted_as_unanswered() {
         "the check is asked"
     );
     assert_eq!(status(&mut runtime, &id), Status::Running, "and waited for");
+    assert!(runtime.ends_held(&id), "its end is held");
     // Each source waits for a word: let them all go.
     drop(go);
     let ended = settled_status(&mut runtime, &id);

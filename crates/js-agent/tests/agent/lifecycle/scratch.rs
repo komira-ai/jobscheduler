@@ -293,5 +293,8 @@ fn the_start_sweep_never_reaches_the_directory_of_mounts() {
     fs::write(bound.join("data"), "the host's").unwrap();
     assert_eq!(h.config.scratch.sweep([]), 1);
     assert!(!lease.exists());
-    assert_eq!(fs::read_to_string(bound.join("data")).unwrap(), "the host's");
+    assert_eq!(
+        fs::read_to_string(bound.join("data")).unwrap(),
+        "the host's"
+    );
 }

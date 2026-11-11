@@ -103,6 +103,8 @@ struct State {
     host_ports: Vec<PortRange>,
     /// Why each run named here lost its host ports (`host_port_lost`), by run id.
     lost: BTreeMap<String, String>,
+    /// The runs whose end the runtime holds once they exit ([`FakeRuntime::hold_end`]).
+    held_ends: Vec<String>,
     /// What a job's file system answers (see [`FakeRuntime::give_layers`]); none: the
     /// runtime gives no layers, as the trait's default, and says nothing of them.
     fs: Option<FsScript>,
@@ -166,6 +168,16 @@ impl FakeRuntime {
         std::cell::RefMut::map(self.state.borrow_mut(), |state| {
             state.fs.as_mut().expect("give_layers first")
         })
+    }
+
+    /// Once `run_id` exits (or now, if `held` is false, no more) the runtime holds its end:
+    /// `poll` answers running and `ends_held` says so.
+    pub fn hold_end(&self, run_id: &str, held: bool) {
+        let mut state = self.state.borrow_mut();
+        state.held_ends.retain(|run| run != run_id);
+        if held {
+            state.held_ends.push(run_id.to_owned());
+        }
     }
 
     /// `resolve_fs` answers `answer` for `run_id` from now on.
@@ -648,8 +660,15 @@ impl Runtime for FakeRuntime {
         let state = self.state.borrow();
         Ok(match state.containers.get(&id.0) {
             None => Status::Gone,
+            Some(c) if state.held_ends.contains(&c.run_id) => Status::Running,
             Some(c) => c.exit.map_or(Status::Running, Status::Exited),
         })
+    }
+
+    fn ends_held(&self, id: &RunHandle) -> bool {
+        let state = self.state.borrow();
+        let ended = state.containers.get(&id.0).filter(|c| c.exit.is_some());
+        ended.is_some_and(|c| state.held_ends.contains(&c.run_id))
     }
 
     fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {

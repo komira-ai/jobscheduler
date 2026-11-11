@@ -27,6 +27,21 @@ pub(super) fn make_dir(dir: &Path) -> io::Result<()> {
         .create(dir)
 }
 
+/// Makes the directory `dir` (and any missing directory above it), and sets it and its
+/// parent to mode `0711` whatever the umask: the job user's `crun` must search down to the
+/// clones it binds.
+///
+/// # Errors
+/// A directory could not be made or its mode set.
+pub(super) fn make_searchable(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    make_dir(dir)?;
+    dir.parent()
+        .into_iter()
+        .chain([dir])
+        .try_for_each(|each| std::fs::set_permissions(each, std::fs::Permissions::from_mode(0o711)))
+}
+
 /// Adds `point` to the list of the run whose directory of mounts is `dir`, and makes the
 /// directory `point`; the line is on disk before the call returns, so before the mount is
 /// made.
@@ -41,7 +56,7 @@ pub(super) fn note(dir: &Path, point: &Path) -> io::Result<()> {
         .open(dir.join(LIST))?;
     writeln!(list, "{}", point.display())?;
     list.sync_data()?;
-    make_dir(point)
+    make_searchable(point)
 }
 
 /// The points the list of `dir` names, in the order they were added; none when there is

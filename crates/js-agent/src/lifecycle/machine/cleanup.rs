@@ -32,7 +32,9 @@ impl Lifecycle {
         // say is no reason to let the job run past its limit. A container that is gone has
         // nothing to stop, and the job ends as if it had exited.
         let mut seen = runtime.poll(&id);
-        if !matches!(seen, Ok(Status::Exited(_))) {
+        // A run whose end is held while the runtime checks its inputs has ended by itself:
+        // neither its limit nor a stop is its end.
+        if !matches!(seen, Ok(Status::Exited(_))) && !runtime.ends_held(&id) {
             if job.cause.is_none() && now >= job.deadline_ms {
                 job.cause = Some(Cause::TimedOut);
             }
@@ -106,7 +108,7 @@ impl Lifecycle {
     /// container, the scratch directory, the checks, then the slot. A step that fails
     /// ends the pass with the slot still booked.
     pub(super) fn clean(&mut self, index: usize, events: &mut Vec<Event>) {
-        // A run waiting for its image has nothing to clean (and its stage holds the start).
+        // A run that waits to start is cleaned once it ends (its stage holds the start).
         if matches!(self.jobs[index].stage, Stage::Preparing(_)) {
             return;
         }
