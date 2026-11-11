@@ -7,9 +7,10 @@
 //! that keeps the checks already there. Nothing reaches GitHub: the real `gh` is never started.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use js_testkit::spawn::install_script;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,7 +57,7 @@ impl Rig {
         let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("bin")).unwrap();
         let gh = dir.join("bin/gh");
-        fs::write(
+        install_script(
             &gh,
             "#!/bin/sh\n\
              printf '%s\\n' \"$@\" -- >> \"$FAKE_LOG\"\n\
@@ -70,9 +71,8 @@ impl Rig {
              error) echo 'gh: Server Error (HTTP 500)' >&2; exit 1 ;;\n\
              *) printf '%s' \"$FAKE_CONTEXTS\" ;;\n\
              esac\n",
-        )
-        .unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+            "755",
+        );
         Rig {
             dir,
             _scratch: scratch,

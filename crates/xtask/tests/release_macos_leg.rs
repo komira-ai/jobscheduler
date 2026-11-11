@@ -6,11 +6,11 @@
 //! and the real `cargo` and `otool` are never started.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
 use js_testkit::dir::TestDir;
+use js_testkit::spawn::install_script;
 
 const TARGET: &str = "aarch64-apple-darwin";
 const VERSION: &str = "1.2.3";
@@ -78,8 +78,7 @@ impl Rig {
 
     fn script(&self, name: &str, text: &str) -> PathBuf {
         let path = self.path(name);
-        fs::write(&path, format!("#!/bin/sh\n{text}")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        install_script(&path, &format!("#!/bin/sh\n{text}"), "755");
         path
     }
 

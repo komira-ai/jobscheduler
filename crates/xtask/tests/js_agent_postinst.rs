@@ -11,7 +11,7 @@ mod crun_host;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crun_host::{SHIM, esc, profile_env, real, repo, rule};
+use crun_host::{SHIM, esc, install_program, profile_env, real, repo, rule};
 use xtask::channels::check::job_user_refusals;
 
 const POSTINST: &str = "packaging/js-agent/deb/postinst";
@@ -60,7 +60,7 @@ impl Rig {
         let shim = scratch.join("shim");
         std::fs::create_dir_all(root.join("etc")).expect("etc");
         std::fs::create_dir_all(&shim).expect("shim");
-        std::fs::copy(SHIM, shim.join("systemd-sysusers")).expect("the stand-in");
+        install_program(Path::new(SHIM), &shim.join("systemd-sysusers"));
         let rig = Rig {
             root,
             shim,

@@ -7,9 +7,22 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use js_testkit::spawn::install_copy;
 use sha2::{Digest, Sha256};
 
 pub const SHIM: &str = env!("CARGO_BIN_EXE_host-shim");
+
+/// Puts a copy of the program `from` at `to`, mode 0755, written by a process that has ended
+/// ([`install_copy`]), so that it is never busy when the code under test executes it.
+///
+/// A copy written in this process (`std::fs::copy`) has a descriptor open for writing on it
+/// while it is written. A child that another test thread forks in that window keeps a copy of
+/// the descriptor until its own `exec`, and an `exec` of the program before then fails with
+/// `ETXTBSY` ("Text file busy"). Closing, or renaming the file into place, does not help: the
+/// child's copy is of the open file, not of its name.
+pub fn install_program(from: &Path, to: &Path) {
+    install_copy(from, to, "755");
+}
 pub const SCRIPT: &str = "packaging/js-agent/crun_host_setup.sh";
 pub const UNIT: &str = "packaging/js-agent/js-agent-crun.service";
 pub const TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
@@ -146,7 +159,7 @@ impl Rig {
             std::fs::create_dir_all(sub).expect("directory");
         }
         for name in GUARDED {
-            std::fs::copy(SHIM, shim.join(name)).expect("a stand-in");
+            install_program(Path::new(SHIM), &shim.join(name));
         }
         for name in TOOLS {
             symlink(real(name), tools.join(name)).expect("a tool");
@@ -170,7 +183,7 @@ impl Rig {
         std::fs::create_dir_all(rig.path("var/lib")).expect("directory");
         rig.write("etc/tmpfiles.d/.keep", "");
         std::fs::create_dir_all(rig.path("usr/bin")).expect("directory");
-        std::fs::copy(SHIM, rig.path("usr/bin/js-agent")).expect("the agent's stand-in");
+        install_program(Path::new(SHIM), &rig.path("usr/bin/js-agent"));
         rig.write(&format!("etc/systemd/system/{MOUNT}"), &mount_unit("loop"));
         rig.write(
             "mount-options",
@@ -568,7 +581,7 @@ impl Rig {
     pub fn install_crun(&self) {
         self.write("dpkg/crun", "install ok installed");
         self.write("dpkg/uidmap", "install ok installed");
-        std::fs::copy(SHIM, self.path("usr/bin/crun")).expect("the crun stand-in");
+        install_program(Path::new(SHIM), &self.path("usr/bin/crun"));
     }
 
     /// Runs an apply (with the files of this repository) and expects it refused: exit 2, the
