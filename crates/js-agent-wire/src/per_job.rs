@@ -298,12 +298,10 @@ pub struct JobResult {
         deserialize_with = "log_sink::lenient"
     )]
     pub logs: Option<LogReport>,
-    /// The code of the input failure, when a tree input ([`crate::InputRef::Tree`]) failed
-    /// while the job ran: [`refusal::TREE_READ_FAILED`], [`refusal::TREE_STALLED`] or
-    /// [`refusal::TREE_UNAVAILABLE`]. The failure is then the host's, whatever the outcome
-    /// and exit status, which are kept as they were. Absent otherwise, and left out of the
-    /// text. `detail` keeps its meaning beside it. A server from before the field ignores
-    /// it.
+    /// The code of an input the host provides that failed while the job ran. The failure is
+    /// then the host's, whatever the outcome and exit status, which are kept as they were.
+    /// Absent otherwise, and left out of the text; no agent of this release sets it. `detail`
+    /// keeps its meaning beside it. A server from before the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_failure: Option<String>,
 }

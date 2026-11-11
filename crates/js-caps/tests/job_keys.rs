@@ -110,3 +110,33 @@ fn exec_is_matched_against_the_reported_mode() {
 fn a_report_with_a_bad_disk_is_refused() {
     assert!(node(&[("disk-gib", "lots")]).is_err());
 }
+
+/// Asserts that the detected keys are exactly these ten, and that a request may name only
+/// `disk-gib` and `exec` of them: each of the other eight is refused as an unknown key,
+/// naming it. It catches a detected key added without the agent detecting it, and a host
+/// property a request could ask for though no agent reports it, so that a job naming it
+/// could be placed nowhere.
+#[test]
+fn a_request_names_no_detected_key_but_disk_and_exec() {
+    let detected = [
+        "runtime",
+        "gpu-toolkit",
+        "gpu-passthrough",
+        "exec",
+        "disk-gib",
+        "run-files",
+        "scratch-quota",
+        "scratch-default-gib",
+        "bundle",
+        "bundle-root",
+    ];
+    assert_eq!(DETECTED_KEYS.as_slice(), detected.as_slice());
+    for key in DETECTED_KEYS
+        .iter()
+        .filter(|key| ![DISK_GIB, EXEC].contains(key))
+    {
+        let refused = req(&[(key, "true")]);
+        assert_eq!(refused, Err(RequestError::UnknownKey((*key).to_owned())));
+    }
+    assert!(req(&[(DISK_GIB, "1"), (EXEC, "container")]).is_ok());
+}
