@@ -33,8 +33,18 @@ use lint::{Site, jobs, lint};
 use std::path::Path;
 
 /// Every pinned tool fetch of the repository: `<file>/<job>` and its `--cache` path.
-const EXPECTED: [(&str, &str, &str); 3] = [
+const EXPECTED: [(&str, &str, &str); 5] = [
     ("ci.yml", "deny", "$RUNNER_TEMP/pinned/cargo-deny.tar.gz"),
+    (
+        "ci.yml",
+        "coverage-shard",
+        "$RUNNER_TEMP/pinned/cargo-llvm-cov.tar.gz",
+    ),
+    (
+        "ci.yml",
+        "coverage-shard",
+        "$RUNNER_TEMP/pinned/cargo-nextest.tar.gz",
+    ),
     (
         "ci.yml",
         "coverage",
@@ -77,7 +87,7 @@ fn read(file: &str) -> String {
 }
 
 /// Asserts that every workflow of the repository keeps the rule, and that its fetches are
-/// exactly the three pinned tools in `EXPECTED`.
+/// exactly the fetches in `EXPECTED` (each job, each tool).
 #[test]
 fn every_pinned_tool_fetch_of_the_repository_keeps_the_rule() {
     let mut sites = Vec::new();
@@ -423,30 +433,41 @@ fn a_download_outside_fetch_and_a_shared_cache_path_are_refused() {
     );
 }
 
-/// Asserts that the repository's own workflows are refused with one line changed: ci.yml's
-/// coverage job without the restore before cargo-nextest, with its llvm-cov key missing the
-/// pin, or saving cargo-deny's archive on every outcome.
+/// Asserts that the repository's own workflows are refused with one line changed: either
+/// coverage job of ci.yml (`coverage-shard`, `coverage`) without the restore before
+/// cargo-nextest or with its llvm-cov key missing the pin, or the deny job saving
+/// cargo-deny's archive on every outcome. A line that occurs in several jobs is changed in
+/// each of them in turn, and each change alone is refused.
 #[test]
 fn the_repository_workflows_with_one_line_changed_are_refused() {
     let ci = read("ci.yml");
-    let one = |text: &str, from: &str, to: &str| {
-        assert_eq!(text.matches(from).count(), 1, "{from}");
-        let changed = text.replacen(from, to, 1);
-        assert!(lint("ci.yml", &changed).is_err(), "{from} -> {to}");
+    let each = |text: &str, from: &str, to: &str, sites: usize| {
+        let at: Vec<usize> = text.match_indices(from).map(|(i, _)| i).collect();
+        assert_eq!(at.len(), sites, "{from}");
+        for i in at {
+            let changed = format!("{}{to}{}", &text[..i], &text[i + from.len()..]);
+            assert!(
+                lint("ci.yml", &changed).is_err(),
+                "{from} -> {to} at byte {i}"
+            );
+        }
     };
-    one(
+    each(
         &ci,
         "        id: nextest-cache\n",
         "        id: nextest-cache\n        if: false\n",
+        2,
     );
-    one(
+    each(
         &ci,
         "key: pinned-cargo-llvm-cov-${{ env.LLVM_COV_VERSION }}-${{ env.LLVM_COV_SHA256 }}",
         "key: pinned-cargo-llvm-cov-${{ env.LLVM_COV_VERSION }}",
+        2,
     );
-    one(
+    each(
         &ci,
         "if: steps.deny-cache.outputs.cache-hit != 'true'",
         "if: always()",
+        1,
     );
 }
