@@ -632,7 +632,7 @@ updater's v0.1.3); a newer commit is refused by the updater until its allow-list
 
 `cp-deploy-digest` comes first. It holds no permission and compiles nothing: it downloads the files
 `publish` uploaded (the run's `release-assets` and `bundles` artifacts, the same bytes) and the
-`xtask` that `deploy-tool` built, and runs `cargo xtask release image-digest --dist dist --repo
+`xtask` that `deploy-tool` built, and runs that `xtask release image-digest --dist dist --repo
 <owner/repo> --version X.Y.Z` (`crates/xtask/src/release/image_digest.rs`). That refuses the image
 unless `SHA256SUMS` lists it exactly once with its SHA-256 and its bundle is there, then reads the
 one manifest the image's `index.json` names, checks that the manifest's blob hashes to that digest,
@@ -653,12 +653,14 @@ and outputs `digest=sha256:<hex>` and the release's download addresses of the im
 
 The signer inputs keep the called workflow's defaults: this repository, `.github/workflows/artifacts.yml`
 and `refs/heads/main`, which is the signer of every attestation of the release. The called job runs in
-this repository's environment `controlplane` (deployments from `main` only, no required reviewer),
-joins the updater's Tailscale network when `CP_DEPLOY_TAILSCALE_CLIENT_ID` is set, and asks GitHub for
-a fresh OIDC token for each request. The updater checks the token's claims (this repository, its
-`release` workflow on `refs/heads/main`, the environment and the pinned deploy workflow) and the
-image's bundle against the signer, then updates the service by digest. The job passes when the deploy
+this repository's environment `controlplane`, joins the updater's Tailscale network when
+`CP_DEPLOY_TAILSCALE_CLIENT_ID` is set, and asks GitHub for a fresh OIDC token for each request.
+docker-swarm-updater (its `docs/design.md`) checks the token's claims and the image's bundle against
+the signer, then updates the service by digest; nothing in this repository enforces that side. The job passes when the deploy
 is reported converged and fails otherwise, or when 60 minutes pass first (the deploy then goes on).
+
+The project owner sets up the environment `controlplane` with deployments from `main` only and no
+required reviewer; this repository does not check that it is so.
 
 **It is off by default.** With the repository variable `CP_DEPLOY_ENDPOINT` empty or unset both jobs
 are skipped and the release ends as it did without them. Repository variables (Settings, Secrets and

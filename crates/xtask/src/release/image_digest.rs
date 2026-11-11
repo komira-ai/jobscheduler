@@ -36,10 +36,10 @@ use super::{Version, io_error};
 mod tests;
 
 /// The image deployed: the control plane runs on linux-x86_64.
-pub const TARGET: Target = Target::X86_64;
+const TARGET: Target = Target::X86_64;
 
 /// The release asset that lists the SHA-256 of every other.
-pub const SUMS: &str = "SHA256SUMS";
+const SUMS: &str = "SHA256SUMS";
 
 /// Why `release image-digest` gave no digest.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -125,7 +125,7 @@ fn is_hex64(text: &str) -> bool {
 /// # Errors
 /// [`Error::Sums`] for a line that is not of that form; [`Error::NotListedOnce`] when no line or
 /// more than one names `name`.
-pub fn listed_digest(sums: &str, name: &str) -> Result<String, Error> {
+fn listed_digest(sums: &str, name: &str) -> Result<String, Error> {
     let mut found = Vec::new();
     for (at, line) in sums.lines().enumerate() {
         let parsed = line
@@ -173,7 +173,7 @@ fn members(bytes: &[u8]) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
 /// The reason, when the bytes are not a tar, have no readable `index.json`, name no manifest or
 /// more than one, name one by anything but `sha256:<64 hex>`, or lack its blob or hold a blob
 /// that does not hash to it.
-pub fn manifest_digest(bytes: &[u8]) -> Result<String, String> {
+fn manifest_digest(bytes: &[u8]) -> Result<String, String> {
     let files = members(bytes).map_err(|e| format!("not a tar: {e}"))?;
     let index = files
         .get("index.json")

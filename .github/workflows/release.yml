@@ -493,12 +493,13 @@ jobs:
   # cp-deploy  calls the reusable workflow deploy.yml of komira-ai/docker-swarm-updater, pinned by
   #          the full commit the updater's allow-list names, with `id-token: write` alone: the
   #          called workflow asks GitHub for an OIDC token for every request and runs in this
-  #          repository's environment `controlplane` (main only, no required reviewer). It sends
+  #          repository's environment `controlplane` (docs/release.md says how the project owner
+  #          sets it up). It sends
   #          the service `js-server`, the release version, that digest and those addresses, and
   #          joins the updater's Tailscale network with the CP_DEPLOY_TAILSCALE_* variables; the
-  #          signer is the default, this repository's artifacts.yml on refs/heads/main. The
-  #          updater checks the token's claims and the bundle against that signer, then updates
-  #          the service by digest. The job ends once the deploy is reported converged and fails
+  #          signer is the default, this repository's artifacts.yml on refs/heads/main, which
+  #          the updater holds the image's bundle to before it updates the service by digest. The
+  #          job ends once the deploy is reported converged and fails
   #          otherwise, after waiting up to 60 minutes. The release stays published whatever it
   #          says, and "Re-run failed jobs" repeats it.
   cp-deploy-digest:
