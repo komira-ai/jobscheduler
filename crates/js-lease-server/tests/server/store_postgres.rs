@@ -22,8 +22,9 @@ use serde_json::json;
 use tokio::runtime::Runtime;
 
 use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, post, session};
-use crate::binary::launch;
+use crate::binary::{address_in, launch, spawn};
 use crate::joins::{code, hello, minted};
+use crate::ready_listen::{WAITING, with_ready};
 use crate::store_support::{
     LIMIT, assert_unquoted, end_the_holder, holder, launch_ticking, revision, run_to_end,
     store_args, store_file, taken_address, unflushed, with_userinfo,
@@ -79,6 +80,83 @@ fn a_second_process_cannot_take_the_writer_lock() {
     assert_eq!(health.status, 200, "the first server serves on");
     kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();
     assert!(child.0.wait().unwrap().success());
+}
+
+/// Asserts that a second server with the readiness route on, beside a first that holds the
+/// Postgres store's writer lock, waits instead of exiting: the route answers 503 with the
+/// waiting body, the store's revision is unchanged and the first server still holds the
+/// lock; once the first stops, the second takes the lock (another backend holds it), prints
+/// the address it listens on and its route answers 200 `ready`. It catches a wait on Postgres
+/// that takes the lock and the store before the holder lets go, or never retries.
+#[test]
+fn a_second_process_with_a_route_waits_for_the_writer_lock() {
+    let database = test_database();
+    let url = database.url();
+    let first = Scratch::new("store_pg_wait_first");
+    let (mut holder_child, _) = launch(&store_args(&first, &url, &[]), Stdio::null());
+    let holding = holder(&url).expect("the first server holds the writer lock");
+    let before = revision(&url);
+
+    let second = Scratch::new("store_pg_wait_second");
+    let args = with_ready(store_args(&second, &url, &[]), "127.0.0.1:0");
+    let (mut waiting, lines) = spawn(&args, Stdio::null());
+    let ready = address_in(&lines.next(), "ready on ");
+    let runtime = Runtime::new().unwrap();
+    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
+    assert_eq!((reply.status, reply.body.as_str()), (503, WAITING));
+    assert_eq!(revision(&url), before, "the second server wrote nothing");
+    assert_eq!(
+        holder(&url),
+        Some(holding),
+        "the first server still holds it"
+    );
+
+    kill_process(Pid::from_child(&holder_child.0), Signal::TERM).unwrap();
+    assert!(holder_child.0.wait().unwrap().success());
+    let listen = address_in(&lines.next(), "listening on ");
+    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
+    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
+    let health = runtime.block_on(request(listen, "GET", "/healthz", None, None));
+    assert_eq!(health.status, 200);
+    let now = holder(&url).expect("the second server holds the writer lock");
+    assert_ne!(now, holding, "another backend holds it");
+    kill_process(Pid::from_child(&waiting.0), Signal::TERM).unwrap();
+    assert!(waiting.0.wait().unwrap().success());
+}
+
+/// Asserts that the route of a server whose writer lock is lost answers 503 `draining`
+/// from the tick that found the loss, before any stop, and that the stop then answers the
+/// loss. It catches a route that stays ready for a server that serves nothing more.
+#[test]
+fn a_lost_writer_lock_makes_the_route_say_draining() {
+    let database = test_database();
+    let url = database.url();
+    let scratch = Scratch::new("store_pg_lost_route");
+    let args = with_ready(
+        replace(store_args(&scratch, &url, &[]), "--boot", "resume"),
+        "127.0.0.1:0",
+    );
+    let mut config = crate::support::config(args).unwrap();
+    let ready = config.bind_ready().unwrap().unwrap();
+    let runtime = Runtime::new().unwrap();
+    let h = runtime.block_on(Harness::over(scratch, config));
+    runtime.block_on(h.ticks.step());
+    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
+    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
+    end_the_holder(&url);
+
+    let lost: LockLost = runtime.block_on(async {
+        h.ticks.step().await;
+        h.running.lock_lost().await
+    });
+    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
+    assert_eq!((reply.status, reply.body.as_str()), (503, "draining"));
+    let Harness { running, .. } = h;
+    let stopped = runtime.block_on(running.shutdown());
+    assert_eq!(
+        stopped.err().map(|err| err.to_string()),
+        Some(lost.to_string())
+    );
 }
 
 /// Asserts that when the session holding the writer lock is ended from another connection,

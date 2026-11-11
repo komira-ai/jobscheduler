@@ -43,11 +43,12 @@
 # committed.
 #
 # The assets, built and signed by artifacts.yml, which the `artifacts` job calls: the archives of
-# the binaries (`*.tar.gz`); and the Debian package of js-agent for amd64 and arm64
-# (`js-agent_<version>_<arch>.deb`) with the bundle of its own provenance beside it
-# (`<package>.deb.sigstore.json`). SHA256SUMS lists all of them but the bundles. This file attests
-# nothing: every attestation is signed by artifacts.yml, the one signer farm hosts trust (see the
-# top of that file).
+# the binaries (`*.tar.gz`); the Debian package of js-agent for amd64 and arm64
+# (`js-agent_<version>_<arch>.deb`); and the container image of js-lease-server for each of the
+# two Linux targets (`js-lease-server-<version>-<target>.oci.tar`), each package and image with
+# the bundle of its own provenance beside it (`<file>.sigstore.json`). SHA256SUMS lists all of them
+# but the bundles. This file attests nothing: every attestation is signed by artifacts.yml, the
+# one signer farm hosts trust (see the top of that file).
 #
 # Order: ci-passed, plan, artifacts (build, sums, attest, verify), publish, then the apt
 # repository and gamma. The tag is made first of those: `publish` makes a draft release, uploads
@@ -262,7 +263,7 @@ jobs:
         with:
           name: release-assets
           path: dist
-      # The bundle of each .deb's provenance, `<package>.sigstore.json`, made by
+      # The bundle of each .deb's and each image's provenance, `<file>.sigstore.json`, made by
       # artifacts.yml's `attest` and checked by its `verify`. SHA256SUMS does not list them.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -279,8 +280,9 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum --check --strict SHA256SUMS
-          # Every .deb has its bundle beside it: the apt jobs verify each package from it.
-          for package in ./*.deb; do
+          # Every .deb and every image has its bundle beside it: the apt jobs verify each package
+          # from it, and a deployer verifies an image from it.
+          for package in ./*.deb ./*.oci.tar; do
             if [ ! -f "$package.sigstore.json" ]; then
               echo "::error::$package has no bundle ($package.sigstore.json); nothing is released"
               exit 1
@@ -301,7 +303,7 @@ jobs:
           # A draft for this version at this commit (tag_name and target_commitish).
           new_draft() {
             gh api "$api/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="jobscheduler $VERSION" \
-              -f body="js-lease-server, js, js-agent, js-bundle, js-mdm and the Mac host tools $VERSION, and the js-agent .deb packages for amd64 and arm64 with the bundle of each one's provenance. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
+              -f body="js-lease-server, js, js-agent, js-bundle, js-mdm and the Mac host tools $VERSION, the js-agent .deb packages for amd64 and arm64, and the js-lease-server container images (.oci.tar) for amd64 and arm64, with the bundle of each one's provenance. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
               -F draft=true -F generate_release_notes=true --jq .id
           }
           # `plan` found no tag for this version: one that exists now was made since, and
@@ -325,8 +327,8 @@ jobs:
           target="$(gh api "$api/releases/$id" --jq .target_commitish)"
           # A file the release has must be this run's, byte for byte, or the files of two
           # builds would be mixed. A file whose upload did not finish is not compared, and
-          # neither is a bundle: each signing makes new bytes for the same package, which is
-          # compared itself, so an earlier run's bundle of an equal package is kept.
+          # neither is a bundle: each signing makes new bytes for the same file, which is
+          # compared itself, so an earlier run's bundle of an equal file is kept.
           replace=""
           differing=""
           if [ "$draft" = true ] && [ "$target" != "$COMMIT" ]; then
@@ -364,7 +366,7 @@ jobs:
           fi
           # Add the files the release lacks.
           present="$(gh api "$api/releases/$id" --jq '.assets[] | select(.state == "uploaded") | .name')"
-          for file in ./*.tar.gz ./*.deb ./*.deb.sigstore.json SHA256SUMS; do
+          for file in ./*.tar.gz ./*.deb ./*.deb.sigstore.json ./*.oci.tar ./*.oci.tar.sigstore.json SHA256SUMS; do
             name="${file#./}"
             if grep -Fxq -- "$name" <<< "$present"; then
               echo "$name is on the release already: kept"
