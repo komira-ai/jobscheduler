@@ -12,6 +12,11 @@
 //!   forking (the limit is the lease cgroup's `pids.max` or the job's `RLIMIT_NPROC`, and
 //!   both jobs run as the same ids).
 //! - `isolation`: a lease cannot see a sibling lease's directory.
+//! - `job_fs`: a job's own file system, mounted on the host with `js_contain::job_fs`: a root
+//!   of layers that keeps its writes, read-only, read-write and copy-on-write mounts, their
+//!   `no_exec`, `nosuid` and `nodev`, a read-only mount read-only all the way down, private
+//!   propagation, a sub-path, the unmounts, the removal that does not cross a mount, and the
+//!   private mount directory.
 //! - `gc`: collecting the image store removes what the helper owns and keeps what is named.
 //! - `pull`: an image pulled through the real unpack helper is published owned by the
 //!   helper's id, in a store other accounts cannot list or write.
@@ -38,5 +43,6 @@ mod cell;
 mod gc;
 mod inside;
 mod isolation;
+mod job_fs;
 mod limits;
 mod pull;

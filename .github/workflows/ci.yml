@@ -556,7 +556,9 @@ jobs:
   # capabilities, the seccomp filter, the read-only root, `/tmp`, the network namespace, the
   # OOM group and the exec-root overlay's options; that an out-of-memory kill is the lease's
   # own, that a kill leaves no process or cgroup, and that one job at its process limit does
-  # not stop another from forking. The AppArmor restriction on user namespaces stays at the
+  # not stop another from forking; and a job's own file system as the agent mounts it on the
+  # host (a root of layers, read-only, read-write and copy-on-write mounts and their options,
+  # the unmounts and the removal of the lease). The AppArmor restriction on user namespaces stays at the
   # runner's default (on): the distribution's `/usr/bin/crun` profile lets the job user's
   # `crun` make one. A hosted runner's kernel and AppArmor policy are not a node's, so a
   # node's own canary stays the gate. The jobs stand alone: a failure here blocks no other.

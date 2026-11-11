@@ -22,20 +22,27 @@
 //!   tars to a root, and giving directories to the job's ids; and the supervise mode
 //!   ([`oci::supervise`]) that runs one container to its end beside the daemon and records
 //!   how it ended. The embedding process calls [`modes::dispatch`] first in `main`.
+//! - [`job_fs`]: the mounts a root daemon makes on the host for a job's file system: host
+//!   paths opened beneath the directories they are allowed under, cloned into private
+//!   mounts, the overlays of a root of layers and of a copy-on-write mount, and their
+//!   unmounts.
 //! - [`running`]: one `crun run`, on a thread of its own.
 //! - [`keeper`]: the handle of the process that kills a lease's cgroup if the daemon dies.
-//! - [`remove`]: removing a scratch directory without recursion and without following
-//!   a symlink; [`walk`] holds the descriptor-relative steps it is made of.
+//! - [`remove`]: removing a scratch directory without recursion, without following a
+//!   symlink and without crossing into another mount; [`walk`] holds the
+//!   descriptor-relative steps it is made of.
 //!
-//! These modules were written in the container driver of the first service that used this
-//! repository and moved here unchanged apart from the types they named of that service
-//! (see each module's header).
+//! All but [`job_fs`] were written in the container driver of the first service that used
+//! this repository and moved here unchanged apart from the types they named of that service
+//! (see each module's header); [`job_fs`] was written here, and [`remove`] has since learnt
+//! not to cross into another mount.
 
 pub mod cgroup;
 pub mod cgroup_usage;
 pub mod container;
 pub mod delegate;
 pub mod give;
+pub mod job_fs;
 pub mod keeper;
 pub mod modes;
 pub mod numa;

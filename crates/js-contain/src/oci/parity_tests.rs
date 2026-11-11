@@ -220,6 +220,7 @@ fn host_mount_targets_must_be_normalized_absolute_paths() {
             source: PathBuf::from("/srv/x"),
             read_only: false,
             recursive: true,
+            no_exec: false,
         }];
         let why = config_with(&spec).expect_err(bad).to_string();
         assert!(why.starts_with("mount target "), "{bad}: {why}");
@@ -440,6 +441,7 @@ fn a_mount_that_is_not_recursive_is_a_plain_bind() {
         source: PathBuf::from("/opt/driver"),
         read_only: true,
         recursive: false,
+        no_exec: false,
     });
     let config = config_with(&spec).expect("config");
     assert_eq!(

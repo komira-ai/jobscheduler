@@ -73,6 +73,7 @@ pub(super) fn container_spec(
         source: source.to_owned(),
         read_only,
         recursive: true,
+        no_exec: false,
     };
     let mut mounts = vec![bind(SCRATCH_TARGET, &run.scratch, false)];
     mounts.extend(
@@ -107,6 +108,7 @@ pub(super) fn container_spec(
         mounts,
         // A run's GPUs are given after the image's config ([`super::gpu::Wiring::apply`]).
         devices: Vec::new(),
+        mounted_root: None,
         // The job's init waits for the listener of each of its host ports.
         listen_ports: run.host_ports.iter().map(HostPort::job_port).collect(),
     }
@@ -174,6 +176,7 @@ pub(super) fn adopted_spec(
         shared: Vec::new(),
         mounts: Vec::new(),
         devices: Vec::new(),
+        mounted_root: None,
         listen_ports: Vec::new(),
     }
 }

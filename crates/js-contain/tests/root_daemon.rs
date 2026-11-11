@@ -253,6 +253,7 @@ async fn run_container(label: &str, runtime: &Path) -> Run {
         shared: Vec::new(),
         mounts: Vec::new(),
         devices: Vec::new(),
+        mounted_root: None,
         listen_ports: Vec::new(),
     };
     oci.create(&spec).await.unwrap();

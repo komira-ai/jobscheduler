@@ -17,7 +17,7 @@ use oci_spec::runtime::{
 
 use super::devices;
 use super::hardening::{MASKED_PATHS, READONLY_PATHS, SeccompError, seccomp};
-use crate::container::{ACTION_ID, ContainerSpec, Isolation};
+use crate::container::{ACTION_ID, ContainerSpec, HostMount, Isolation};
 use crate::subids::DaemonIds;
 
 /// The OCI version the file declares (what `crun spec` writes).
@@ -158,9 +158,10 @@ fn tmp(destination: &str, size_mib: u64) -> Mount {
 }
 
 /// The mounts of a job: the standard ones of `crun spec --rootless`, the `hosts`, `hostname` and `resolv.conf` files,
-/// the exec-root overlay, the shared trees read-only inside it, `/tmp`, [`WRITABLE`], and
-/// the host mounts last (each a bind, recursive unless the mount says not, `nosuid` and
-/// `nodev`, read-only or read-write as asked).
+/// the exec-root overlay (or the host mount at the exec root in its place), the shared
+/// trees read-only inside it, `/tmp`, [`WRITABLE`], and the host mounts last (each a bind,
+/// recursive unless the mount says not, `nosuid` and `nodev`, read-only or read-write as
+/// asked, `noexec` when asked).
 fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
     let shm = format!("size={}m", spec.limits.shm_mib);
     let open = ["rbind", "ro", "nosuid", "noexec", "nodev"];
@@ -204,20 +205,27 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
         bind(&spec.dir.join("etc/hostname"), "/etc/hostname", &open),
         bind(&spec.dir.join("etc/resolv.conf"), "/etc/resolv.conf", &open),
     ];
-    let overlay = format!(
-        "lowerdir={},upperdir={},workdir={},{OVERLAY_OPTIONS}",
-        spec.input_root.display(),
-        spec.upper.display(),
-        spec.overlay_work.display(),
-    );
-    mounts.push(built(
-        MountBuilder::default()
-            .destination(&spec.exec_root)
-            .typ("overlay")
-            .source("overlay")
-            .options(vec![overlay, "nosuid".to_owned(), "nodev".to_owned()])
-            .build(),
-    ));
+    // A host mount at the exec root (a copy-on-write mount of the caller's) takes the
+    // overlay's place; the other host mounts come last, in order.
+    let at_exec_root = spec.mounts.iter().position(|m| m.target == spec.exec_root);
+    if let Some(at) = at_exec_root {
+        mounts.push(host_bind(&spec.mounts[at]));
+    } else {
+        let overlay = format!(
+            "lowerdir={},upperdir={},workdir={},{OVERLAY_OPTIONS}",
+            spec.input_root.display(),
+            spec.upper.display(),
+            spec.overlay_work.display(),
+        );
+        mounts.push(built(
+            MountBuilder::default()
+                .destination(&spec.exec_root)
+                .typ("overlay")
+                .source("overlay")
+                .options(vec![overlay, "nosuid".to_owned(), "nodev".to_owned()])
+                .build(),
+        ));
+    }
     // After the overlay, which they are mounted inside: each read-only, with the flags
     // a child user namespace cannot relax.
     for shared in &spec.shared {
@@ -237,16 +245,25 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
             &["rbind", "rw", "nosuid", "nodev"],
         ));
     }
-    for host in &spec.mounts {
-        let access = if host.read_only { "ro" } else { "rw" };
-        let kind = if host.recursive { "rbind" } else { "bind" };
-        mounts.push(bind(
-            &host.source,
-            &host.target,
-            &[kind, access, "nosuid", "nodev"],
-        ));
-    }
+    let others = spec.mounts.iter().enumerate();
+    mounts.extend(
+        others
+            .filter(|(index, _)| Some(*index) != at_exec_root)
+            .map(|(_, host)| host_bind(host)),
+    );
     mounts
+}
+
+/// The bind of a host mount: recursive unless it says not, read-only or read-write as it
+/// says, `nosuid` and `nodev`, and `noexec` when it asks.
+fn host_bind(host: &HostMount) -> Mount {
+    let access = if host.read_only { "ro" } else { "rw" };
+    let kind = if host.recursive { "rbind" } else { "bind" };
+    let mut options = vec![kind, access, "nosuid", "nodev"];
+    if host.no_exec {
+        options.push("noexec");
+    }
+    bind(&host.source, &host.target, &options)
 }
 
 /// The container's `process.args`: the init, then `--` and the job's own argv. The
@@ -319,11 +336,12 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | no capability                            | the five `process.capabilities` sets, empty; the seccomp filter resolved for none |
 /// | no new privileges                        | `process.noNewPrivileges` true                     |
 /// | `/dev/shm` size, `/tmp` size, no programs in `/tmp` | the tmpfs `size=`; `/tmp` also `noexec`  |
-/// | the run's scratch, `--mount-root`, files | `spec.mounts`: recursive binds, `nosuid`, `nodev`  |
+/// | the run's scratch, the job's mounts, files | `spec.mounts`: recursive binds, `nosuid`, `nodev`, `noexec` when asked |
 /// | the booked GPUs' nodes, no other device  | `linux.devices`; `resources.devices` denies all, allows each node (only with devices) |
 /// | the kernel's default OOM score           | `process.oomScoreAdj`                              |
 /// | hostname `localhost`                     | `hostname`                                         |
-/// | the input root, writes in `upper`        | an `overlay` mount at `exec_root`                  |
+/// | the input root, writes in `upper`        | an `overlay` mount at `exec_root`, or the host mount there |
+/// | a root of layers the caller mounted      | `root.path` that root, not read-only               |
 ///
 /// No memory or CPU limit is set here: the lease cgroup carries them
 /// ([`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard)).
@@ -415,10 +433,12 @@ pub(crate) fn action_config(
         linux = linux.devices(devices::nodes(spec));
     }
     let linux = built(linux.build());
+    // A root the caller mounted is the job's to write where its modes allow; the image's
+    // tree is shared by every lease of the image, and read-only.
     let root = built(
         RootBuilder::default()
-            .path(placement.rootfs)
-            .readonly(true)
+            .path(spec.mounted_root.as_deref().unwrap_or(placement.rootfs))
+            .readonly(spec.mounted_root.is_none())
             .build(),
     );
     Ok(built(

@@ -472,6 +472,7 @@ fn mount(text: &str) -> Result<HostMount, MountProblem> {
         source: resolved,
         read_only: true,
         recursive: false,
+        no_exec: false,
     })
 }
 

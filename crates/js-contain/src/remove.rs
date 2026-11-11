@@ -18,6 +18,12 @@
 //! An entry that is gone by the time the walk reaches it (`ENOENT` from the unlink, the
 //! open of a listed subdirectory or the rmdir) was removed by someone else: it is
 //! already removed, and the walk goes on. The root itself is not such an entry.
+//!
+//! The walk never crosses into another mount: a directory whose mount id (`statx`,
+//! `STATX_MNT_ID`) is not the tree root's is not entered, and the removal fails. A device
+//! number would not tell a bind of a directory of the same file system from the directory
+//! itself, and a mount left in a lease directory (a clone of a host directory a job could
+//! write) must stop the removal, never be walked into.
 
 use std::ffi::{OsStr, OsString};
 use std::os::fd::OwnedFd;
@@ -27,7 +33,7 @@ use std::path::Path;
 use rustix::fs::{AtFlags, CWD, Dir, Mode};
 use rustix::io::Errno;
 
-use crate::walk::{DIRECTORY, Identity, back_to_parent, identity};
+use crate::walk::{DIRECTORY, Identity, back_to_parent, identity, mount_id_at};
 
 /// A directory being emptied.
 struct Frame {
@@ -60,17 +66,24 @@ enum Step {
 /// during the walk (same filesystem only) is gone from it too, so the walk succeeds
 /// while that entry lives on where it was moved: the tree is removed, not every byte
 /// that was once in it.
+///
+/// A subdirectory on another mount than `dir`'s (a mount point below it) is not entered:
+/// the removal fails with [`std::io::ErrorKind::ResourceBusy`], naming it, and leaves it and
+/// what is below it. So does a kernel that does not report mount ids (Linux 5.8).
 pub fn remove_tree(dir: &Path) -> std::io::Result<()> {
-    remove_tree_with(dir, &mut |_, _, _| {})
+    remove_tree_with(dir, &mut |_, _, _| {}, &|fd| mount_id_at(fd, Path::new("")))
 }
 
 /// [`remove_tree`], calling `before(step, directory, name)` just before each step of
-/// the walk so a test can change the tree at that exact point.
+/// the walk so a test can change the tree at that exact point, and reading the mount id of
+/// a directory open as `fd` with `mount_of(fd)`.
 fn remove_tree_with(
     dir: &Path,
     before: &mut dyn FnMut(Step, &OwnedFd, &OsStr),
+    mount_of: &dyn Fn(&OwnedFd) -> std::io::Result<u64>,
 ) -> std::io::Result<()> {
     let mut here = rustix::fs::openat(CWD, dir, DIRECTORY, Mode::empty())?;
+    let mount = mount_of(&here)?;
     let mut stack = vec![Frame {
         name: OsString::new(),
         id: identity(&here)?,
@@ -88,6 +101,15 @@ fn remove_tree_with(
                 }
                 other => other?,
             };
+            if mount_of(&child)? != mount {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ResourceBusy,
+                    format!(
+                        "{} is another mount: the removal does not cross into it",
+                        Path::new(&name).display()
+                    ),
+                ));
+            }
             let frame = Frame {
                 name,
                 id: identity(&child)?,
@@ -155,6 +177,19 @@ fn unlink_all_but_directories(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A hook that changes nothing.
+    fn no_hook(_: Step, _: &OwnedFd, _: &OsStr) {}
+
+    /// A mount id that cannot be read, as on a kernel that does not report them.
+    fn unsupported(_: &OwnedFd) -> std::io::Result<u64> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
+    /// The mount id of the directory open as `fd`, as [`remove_tree`] reads it.
+    fn real_mount(fd: &OwnedFd) -> std::io::Result<u64> {
+        mount_id_at(fd, Path::new(""))
+    }
 
     /// A fresh scratch directory for one unit test, beside the test binary.
     fn scratch(name: &str) -> crate::test_dir::TestDir {
@@ -247,7 +282,7 @@ mod tests {
                 take(fd, name, false);
             }
         };
-        remove_tree_with(&top, &mut before).expect("removed");
+        remove_tree_with(&top, &mut before, &real_mount).expect("removed");
         assert!(std::fs::symlink_metadata(&top).is_err(), "the tree is left");
     }
 
@@ -264,7 +299,7 @@ mod tests {
                 take(fd, name, true);
             }
         };
-        remove_tree_with(&top, &mut before).expect("removed");
+        remove_tree_with(&top, &mut before, &real_mount).expect("removed");
         assert!(std::fs::symlink_metadata(&top).is_err(), "the tree is left");
     }
 
@@ -281,7 +316,7 @@ mod tests {
                 take(fd, name, true);
             }
         };
-        remove_tree_with(&top, &mut before).expect("removed");
+        remove_tree_with(&top, &mut before, &real_mount).expect("removed");
         assert!(std::fs::symlink_metadata(&top).is_err(), "the tree is left");
     }
 
@@ -301,7 +336,7 @@ mod tests {
                 std::fs::remove_dir(&sub).expect("remove sub");
             }
         };
-        remove_tree_with(&top, &mut before).expect("removed");
+        remove_tree_with(&top, &mut before, &real_mount).expect("removed");
         assert!(std::fs::symlink_metadata(&top).is_err(), "the tree is left");
     }
 
@@ -318,7 +353,7 @@ mod tests {
                 std::fs::write(&late, b"f").expect("write");
             }
         };
-        let why = remove_tree_with(&top, &mut before).expect_err("sub is not empty");
+        let why = remove_tree_with(&top, &mut before, &real_mount).expect_err("sub is not empty");
         assert_eq!(why.kind(), std::io::ErrorKind::DirectoryNotEmpty, "{why}");
         assert!(late.exists());
     }
@@ -351,9 +386,65 @@ mod tests {
                 rustix::fs::symlinkat(&target, fd, name).expect("symlink");
             }
         };
-        remove_tree_with(&top, &mut before).expect_err("a symlink is not a directory");
+        remove_tree_with(&top, &mut before, &real_mount).expect_err("a symlink is not a directory");
         assert!(outside.join("f").exists(), "the target was followed");
         assert!(top.join("swapped").is_symlink());
         assert!(!top.join("link").exists(), "the listed symlink is unlinked");
+    }
+
+    /// Catches a walk that crosses into another mount below the tree (a clone of a host
+    /// directory left mounted in a lease directory, or a bind of a directory of the same
+    /// file system, which has the same device number): the directory whose mount id differs
+    /// from the root's is not entered, the removal fails `ResourceBusy` naming it, and what
+    /// is in it stays. Mounts are faked by the mount id each directory is said to have; the
+    /// root suite crosses a real bind.
+    #[test]
+    fn a_directory_on_another_mount_is_not_entered() {
+        let dir = scratch("other-mount");
+        let top = dir.join("top");
+        std::fs::create_dir_all(top.join("mounted/deeper")).expect("mkdir");
+        std::fs::write(top.join("mounted/kept"), b"k").expect("write");
+        std::fs::write(top.join("plain"), b"p").expect("write");
+        let mounted = identity(
+            &rustix::fs::openat(CWD, top.join("mounted"), DIRECTORY, Mode::empty()).expect("open"),
+        )
+        .expect("identity");
+        let mount_of = |fd: &OwnedFd| identity(fd).map(|id| if id == mounted { 2 } else { 1 });
+        let why = remove_tree_with(&top, &mut no_hook, &mount_of).expect_err("crossed");
+        assert_eq!(why.kind(), std::io::ErrorKind::ResourceBusy, "{why}");
+        assert_eq!(
+            why.to_string(),
+            "mounted is another mount: the removal does not cross into it"
+        );
+        assert!(
+            top.join("mounted/kept").exists(),
+            "the walk went into the mount"
+        );
+        assert!(
+            top.join("mounted/deeper").exists(),
+            "the walk went into the mount"
+        );
+    }
+
+    /// Catches a removal that goes on when the mount id cannot be read: a tree whose root's
+    /// mount id cannot be read, and one with a subdirectory whose cannot, are not removed.
+    #[test]
+    fn a_mount_id_that_cannot_be_read_stops_the_removal() {
+        let dir = scratch("no-mount-id");
+        let top = dir.join("top");
+        std::fs::create_dir_all(top.join("sub")).expect("mkdir");
+        std::fs::write(top.join("sub/f"), b"f").expect("write");
+        let why = remove_tree_with(&top, &mut no_hook, &unsupported).expect_err("root");
+        assert_eq!(why.kind(), std::io::ErrorKind::Unsupported);
+        let root =
+            identity(&rustix::fs::openat(CWD, &top, DIRECTORY, Mode::empty()).expect("open"))
+                .expect("identity");
+        let only_root = |fd: &OwnedFd| match identity(fd) {
+            Ok(id) if id == root => Ok(1),
+            _ => unsupported(fd),
+        };
+        let why = remove_tree_with(&top, &mut no_hook, &only_root).expect_err("sub");
+        assert_eq!(why.kind(), std::io::ErrorKind::Unsupported);
+        assert!(top.join("sub/f").exists());
     }
 }

@@ -415,6 +415,7 @@ fn good_mounts_are_read_only_binds_of_the_resolved_source() {
         source: source.clone(),
         read_only: true,
         recursive: false,
+        no_exec: false,
     };
     let want: Vec<HostMount> = targets.iter().map(|target| bind(target)).collect();
     assert_eq!(passthrough.mounts, want);
@@ -516,8 +517,10 @@ fn container() -> ContainerSpec {
             source: PathBuf::from("/scratch/r1"),
             read_only: false,
             recursive: true,
+            no_exec: false,
         }],
         devices: Vec::new(),
+        mounted_root: None,
         listen_ports: Vec::new(),
     }
 }
@@ -608,6 +611,7 @@ fn a_run_is_given_its_nodes_as_they_are_now_and_the_operators_variables() {
             source,
             read_only: true,
             recursive: false,
+            no_exec: false,
         }]
     );
     let var = |name: &str, value: &str| (name.to_owned(), value.to_owned());
@@ -682,6 +686,7 @@ fn mounts_at(targets: &[&str]) -> Wiring {
                 source: PathBuf::from("/opt/driver"),
                 read_only: true,
                 recursive: false,
+                no_exec: false,
             })
             .collect(),
         ..Wiring::default()

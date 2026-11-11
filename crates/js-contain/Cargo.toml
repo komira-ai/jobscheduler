@@ -24,10 +24,13 @@ test = false
 async-trait.workspace = true
 flate2.workspace = true
 js-types = { path = "../js-types" }
+# `mount_setattr(2)`, which rustix does not wrap (src/job_fs/kernel.rs); the egress spike
+# tests (tests/egress_spike) also call unshare, ioctl and open through it.
+libc.workspace = true
 nix = { workspace = true, features = ["sched", "signal"] }
 oci-spec.workspace = true
 runc.workspace = true
-rustix = { workspace = true, features = ["fs", "process", "thread"] }
+rustix = { workspace = true, features = ["fs", "mount", "process", "thread"] }
 serde_json.workspace = true
 tar.workspace = true
 thiserror.workspace = true
@@ -40,9 +43,6 @@ js-oci = { path = "../js-oci" }
 # Programs the tests make for the backend to start (`install_copy`, `install_script`).
 js-testkit = { path = "../js-testkit" }
 hex.workspace = true
-# The egress spike tests (tests/egress_spike): unshare, ioctl and open for the probe that runs
-# inside the container.
-libc.workspace = true
 sha2.workspace = true
 # gettid, for the test that finds the child of its own thread.
 rustix = { workspace = true, features = ["thread"] }
