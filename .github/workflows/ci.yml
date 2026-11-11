@@ -799,6 +799,11 @@ jobs:
           path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
           key: ${{ steps.nextest-cache.outputs.cache-primary-key }}
       - run: cargo "+$COVERAGE_TOOLCHAIN" nextest --version
+      # Every package Cargo.lock names, for every platform, before any test runs: tests
+      # such as xtask's spawn_sites run `cargo tree --target all --offline`, which reads
+      # them from the registry. The build fetches only what this platform needs, and with
+      # the tests split over shards no earlier test in the same job fetches the rest.
+      - run: cargo "+$COVERAGE_TOOLCHAIN" fetch --locked
       # `--cargo-profile coverage` (Cargo.toml; nextest's own `--profile` is another
       # thing): unoptimised code, whatever the `test` profile optimises for the test
       # job; its output is under target/llvm-cov-target/coverage.
