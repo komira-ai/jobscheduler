@@ -388,9 +388,12 @@ fn refused(rig: &Rig, done: &Done, before: Option<Vec<u8>>, spy: &Spy<'_>) {
 fn a_record_that_is_not_this_updates_or_breaks_a_rule_is_refused_as_state_invalid() {
     type Plant = fn(&Rig);
     let cases: [(&str, Plant); 6] = [
-        ("another-target", |rig| {
+        // Of another target past its stop: one that never took the host is superseded (see
+        // steps_prepare_supersede.rs).
+        ("another-target-past-its-stop", |rig| {
             let mut record = rig.fresh_record();
             record.update.target = "1.5.0".to_owned();
+            record.stop_begun = true;
             rig.put_record(&record);
         }),
         ("undeclared-unit", |rig| {

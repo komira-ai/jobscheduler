@@ -15,8 +15,9 @@
 //! happened, try later) and 76 halt (no version can repair this). hostkeeper's daemon logs only
 //! the reason of that line, and the hook's standard error, which it keeps as the hook's log; so
 //! a step that does not succeed also writes one line there, its step, how it ended, its reason
-//! and its detail (`js-agent update-hook: prepare failed: state_invalid: ...`), and a command
-//! line or params file that is refused writes why. The verb is answered before
+//! and its detail (`js-agent update-hook: prepare failed: state_invalid: ...`), a success with a
+//! detail writes its step and that detail (`js-agent update-hook: prepare succeeded: ...`), and
+//! a command line or params file that is refused writes why. The verb is answered before
 //! the agent's flags are parsed and before any signal handler is installed: a hook is a
 //! short-lived root process of the updater, not an agent.
 //!
@@ -174,11 +175,17 @@ fn step_of(args: &[OsString], host: &Host<'_>) -> Result<(Step, Done), Refusal> 
     Ok((invocation.step, (host.step)(&invocation, &params)))
 }
 
-/// Writes to `err` how `step` ended and why, unless it succeeded: the reason and the detail of
-/// its last line, in the same words.
+/// Writes to `err` how `step` ended and why: the reason and the detail of its last line, in the
+/// same words. A success says nothing unless its last line has a detail (a record set aside, a
+/// unit that changes), and then says the detail.
 fn tell(err: &mut dyn Write, step: Step, done: &Done) {
     let ending = match done.outcome {
-        Outcome::Success => return,
+        Outcome::Success => {
+            if let Some(detail) = &done.report.detail {
+                let _ = writeln!(err, "js-agent update-hook: {step} succeeded: {detail}");
+            }
+            return;
+        }
         Outcome::Failure => "failed",
         Outcome::Deferred => "deferred",
         Outcome::Halt => "halted",
