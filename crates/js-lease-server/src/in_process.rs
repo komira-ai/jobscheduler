@@ -48,6 +48,7 @@ use crate::job_api;
 pub use crate::job_store::ServerIds;
 use crate::scaler::Scaler;
 use crate::server::{Opened, open, prepare};
+use crate::store::ServerStore;
 
 /// A server built in process, with no listener and no task of its own.
 ///
@@ -77,9 +78,10 @@ impl InProcess {
     /// Builds the server `config` describes, on `clock`: the agent side, and the elastic pool
     /// with its scaler and checks when the configuration has one. Each failure to start names the flag at fault, as
     /// [`crate::start_with_checks`] does, except that no listen address can fail.
-    pub fn start(config: Config, clock: SharedClock) -> Result<Self, StartupError> {
+    pub fn start(mut config: Config, clock: SharedClock) -> Result<Self, StartupError> {
         let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
-        let (prepared, listeners) = prepare(config, &clock)?;
+        let store = config.store.take().map(ServerStore::open).transpose()?;
+        let (prepared, listeners) = prepare(config, store, &clock)?;
         let Opened {
             shared,
             scaler,

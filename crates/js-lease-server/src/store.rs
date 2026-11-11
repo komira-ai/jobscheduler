@@ -2,9 +2,13 @@
 //! writer lock, and the loss of that lock.
 //!
 //! The server takes the store's writer lock ([`WriterLock::acquire`]) first thing at start:
-//! before it reads anything from the store, and before it binds a listener. The lock is tried once: when another process
-//! holds it the start is refused with one line naming the lock, and nothing else is done.
-//! The server then holds the lock for its life.
+//! before it reads anything from the store, and before it binds a listener (the readiness
+//! listener of `--ready-listen` excepted, which is bound before the lock so that it can say
+//! the server waits for it). The lock is tried once: when another process holds it the start
+//! is refused with one line naming the lock, and nothing else is done. With `--ready-listen`
+//! the server instead tries again at each tick of its retry ticker for as long as the lock
+//! is held ([`ServerStore::open_waiting`]); a failure to try the lock at all is refused
+//! either way. The server then holds the lock for its life.
 //!
 //! - **Postgres**: the lock is a session-level advisory lock on a connection of its own.
 //!   Every tick asks that session first ([`ServerStore::check`]); when the session is gone,
@@ -33,13 +37,14 @@ use std::sync::Arc;
 
 use js_state::postgres::PostgresStore;
 use js_state::sqlite::{Options, SqliteStore};
-use js_state::{Store, StoreError, SystemClock, WriterLock, WriterTarget};
+use js_state::{LockRefused, Store, StoreError, SystemClock, WriterLock, WriterTarget};
 use tokio::sync::{Mutex, oneshot, watch};
 use tracing::{error, info};
 
 use crate::config::{StoreNames, StoreSetting};
 use crate::error::StartupError;
-use crate::util::or_pending;
+use crate::ticker::{Tick, Ticker};
+use crate::util::{blocking, or_pending};
 
 mod import;
 
@@ -63,8 +68,48 @@ impl ServerStore {
     /// A refusal naming the setting: another process holds the lock, the lock could not be
     /// tried, or the store could not be opened. None repeats the connection URL.
     pub(crate) fn open(setting: StoreSetting) -> Result<Self, StartupError> {
+        let lock = WriterLock::acquire(&setting.target)
+            .map_err(|refused| setting.names.refuse(refused))?;
+        Self::open_locked(setting, lock)
+    }
+
+    /// [`ServerStore::open`] for a server that waits: while another process holds the
+    /// writer lock, logs once that the server waits and tries again at each tick of
+    /// `retry`, finishing the tick when the attempt it asked for is done. The tries and the
+    /// open run off the runtime's threads.
+    ///
+    /// # Errors
+    ///
+    /// As [`ServerStore::open`], except that a lock another process holds is waited for, not
+    /// refused.
+    pub(crate) async fn open_waiting<R: Ticker>(
+        setting: StoreSetting,
+        mut retry: R,
+    ) -> Result<Self, StartupError> {
+        let mut asked: Option<Tick> = None;
+        let mut waiting = false;
+        let lock = loop {
+            let target = setting.target.clone();
+            let tried = blocking(move || WriterLock::acquire(&target)).await;
+            asked.take().into_iter().for_each(Tick::finish);
+            match tried {
+                Ok(lock) => break lock,
+                Err(LockRefused::Held) => {
+                    if !waiting {
+                        info!("waiting for the store's writer lock");
+                        waiting = true;
+                    }
+                    asked = Some(retry.next().await);
+                }
+                Err(refused) => return Err(setting.names.refuse(refused)),
+            }
+        };
+        blocking(move || Self::open_locked(setting, lock)).await
+    }
+
+    /// Opens the store of `setting` under `lock`, which was taken on its target.
+    fn open_locked(setting: StoreSetting, lock: WriterLock) -> Result<Self, StartupError> {
         let StoreSetting { target, names } = setting;
-        let lock = WriterLock::acquire(&target).map_err(|refused| names.refuse(refused))?;
         let refused = |err: String| names.refuse(format!("the store could not be opened: {err}"));
         let (store, lock): (Arc<dyn Store>, _) = match target {
             WriterTarget::Postgres(config) => {
