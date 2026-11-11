@@ -22,6 +22,9 @@
 //!   ([`release::desired`]): the targets the hostkeeper set of js-agent is given for a release, or
 //!   `set=false`; refused unless the release's `.deb`s are in the stable apt index at the digests
 //!   of its `SHA256SUMS`.
+//! - `release server-deploy --repo <owner/repo> --version <X.Y.Z> --after-run <id> --dir <dir> [--output <file>]`
+//!   ([`release::server_deploy`]): the amd64 image of js-lease-server a release deploys as the
+//!   service `js-server` (its digest and the URLs of the image and its bundle), or `deploy=false`.
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
@@ -115,7 +118,7 @@ pub enum Error {
     /// A release verb failed.
     #[error(transparent)]
     Release(#[from] release::Error),
-    /// `release desired` set nothing, or could not tell.
+    /// `release desired` set nothing, or `release server-deploy` deployed nothing, or could not tell.
     #[error(transparent)]
     Desired(release::desired::Error),
     /// The deploy verb failed.
@@ -331,6 +334,8 @@ enum ReleaseVerb {
     Deb(release::deb::DebArgs),
     /// Build the OCI image tar of js-lease-server for one Linux target.
     Image(release::server_image::ImageArgs),
+    /// The image js-server is deployed with for a release, or why nothing is deployed.
+    ServerDeploy(release::server_deploy::ServerDeployArgs),
     /// What the hostkeeper set of js-agent is given for a release, or why it sets nothing.
     Desired(release::desired::DesiredArgs),
 }
@@ -426,6 +431,12 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,
             ReleaseVerb::Image(args) => release::server_image::run(&args)?,
+            ReleaseVerb::ServerDeploy(args) => {
+                release::server_deploy::run(&args).map_err(|e| match e {
+                    release::desired::Error::Usage(why) => Error::Usage(why),
+                    other => Error::Desired(other),
+                })?
+            }
             ReleaseVerb::Desired(args) => release::desired::run(&args).map_err(|e| match e {
                 release::desired::Error::Usage(why) => Error::Usage(why),
                 other => Error::Desired(other),

@@ -80,7 +80,9 @@ that passes `ci` and ships code. Nothing runs on a timer.
 
 After the run, `.github/workflows/hostkeeper-desired.yml` (off until its variable is set) sets the
 release as hostkeeper's desired version of `js-agent` ([Deploying through
-hostkeeper](#deploying-through-hostkeeper)).
+hostkeeper](#deploying-through-hostkeeper)). `.github/workflows/js-server-deploy.yml` (off until its
+variable is set) deploys the release's amd64 image as the service `js-server` of a control plane ([Deploying the image to a
+control plane](#deploying-the-image-to-a-control-plane)).
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums,
 verify, the apt index jobs and `check-apt` (plus `attestations: read` for verify), `id-token` and
@@ -96,7 +98,8 @@ the build, whose scripts run code from the locked dependency set, never shares a
 service's address, the cloud role or the key. The rules (SHA-pinned
 actions, no permission at the top, `id-token` write in `attest`, the apt read and write jobs and
 `gamma` only, signing in artifacts.yml's `attest` only) are pinned by
-`crates/xtask/tests/release_workflow`, and the apt jobs by `crates/xtask/tests/apt_workflow`.
+`crates/xtask/tests/release_workflow`, and the apt jobs, `hostkeeper-desired.yml` and `js-server-deploy.yml` by
+`crates/xtask/tests/apt_workflow`.
 
 ## What is released
 
@@ -460,6 +463,60 @@ services = ["js-agent"]
 the pin (a reviewed change of the `uses:` line, `hostkeeper_version` and `hostkeeper_commit`
 together) moves the entry. The coordinator's rollout file needs a `[[service]]` entry for
 `js-agent`, and each host the `komira-stable` repository entry.
+
+### Deploying the image to a control plane
+
+`.github/workflows/js-server-deploy.yml` deploys the release's js-lease-server image
+([The js-lease-server image](#the-js-lease-server-image)) as the service `js-server` of a control
+plane, through the reusable workflow `deploy.yml` of the control plane's deploy service
+(`komira-ai/docker-swarm-updater`), pinned at a commit. It starts after every run of `release` on
+`main` that succeeded (it acts when that run's `publish` succeeded, on the newest published
+release), or by hand from `main` with a version `X.Y.Z`. The deploy service refuses a release older
+than the one the service runs, so a rollback by hand to an older release is refused there. The
+workflow is independent of `gamma` and of `hostkeeper-desired.yml`: it deploys the amd64 image
+only, to a Swarm service.
+
+Its `check` job holds no token that writes. `cargo xtask release server-deploy`
+(`crates/xtask/src/release/server_deploy.rs`) chooses the release as `release desired` does (the
+same code), and writes `deploy=false` when the run published none. Otherwise it requires the
+release to be published and to hold `js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar` and
+`<that>.sigstore.json`, downloads the tar alone, reads its `index.json`, requires exactly one
+manifest, of platform `linux/amd64`, with a digest of `sha256:` and 64 lowercase hex digits, and
+hands on `deploy=true`, `version`, `image-digest`, `image-url` and `bundle-url` (the release
+downloads of the tar and the bundle). Every problem is reported, one line each, and any refuses.
+The `deploy` job calls the deploy service's workflow with those, the service `js-server`, the
+environment `controlplane` and a wait of 30 minutes; the call fails when the service did not
+converge on the digest or was rolled back.
+
+**It is off by default.** Until the repository variable `JS_SERVER_DEPLOYS` is `true`, exactly, both
+jobs are skipped. Its other settings are repository variables, none of them secret:
+
+| Variable | Meaning |
+|---|---|
+| `JS_SERVER_DEPLOYS` | `true` turns the workflow on |
+| `CP_DEPLOY_ENDPOINT` | the control plane's deploy front, `https://<host>[:<port>]` |
+| `CP_DEPLOY_AUDIENCE` | the audience the front's proxy accepts the job's OIDC token for |
+| `CP_DEPLOY_TAILNET_CLIENT_ID` | the client ID of the tailnet's workload identity for this repository; empty: the runner does not join the tailnet |
+| `CP_DEPLOY_TAILNET_AUDIENCE` | the audience of that workload identity |
+| `CP_DEPLOY_TAILNET_TAGS` | the tags the join gives the runner's node, comma-separated |
+
+The environment `controlplane` must exist in the repository, with deployment branches limited to
+`main`; it has no required reviewer and no wait timer, by the operator's decision, so a release that
+publishes is deployed without an approval.
+
+**What protects a deploy.** The environment admits only `main`. The control plane's proxy and its
+updater both check the job's OIDC token: this repository and its id, the called workflow at its
+pinned commit (`job_workflow_ref`), `refs/heads/main`, the environment `controlplane` and a
+GitHub-hosted runner. The updater verifies the attestation `artifacts.yml` made for the tar on
+`main` before it imports the image, and deploys the digest given. Swarm updates one task at a time
+behind a health check and rolls back by itself when the new task is not healthy. Moving the pin of
+the called workflow moves its `job_workflow_ref`, so the allow-list on the receiving side moves with
+it, and the pin is a reviewed change.
+
+Pinned by `crates/xtask/tests/apt_workflow` (`server_deploy.rs`, the same lint and defect-table
+form as `hostkeeper-desired.yml`: the triggers, no permission at the top, the variable gate on both
+jobs, the check without `id-token` or a write, the pin a full commit, the environment, the inputs),
+and the verb by its own tests (each branch and each refusal above).
 
 ### macOS
 
