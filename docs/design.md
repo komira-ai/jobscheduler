@@ -972,7 +972,7 @@ D66 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   D49 caps (`max_whole_node`, `max_draining`, per consumer, a floor for ordinary work). D50 elastic providers acquire before draining.
   D51 host jobs only in a whole-node lease. D52 the lease clock starts at the token. D53 measurement is the consumer's. D54 typed readiness refusals, own cap. D55 reservations persist. Text in [design/whole-node.md](design/whole-node.md).
 - D56 to D61 hosts that run many jobs, spot hosts, price and capacity data, several clouds (D56 amends D7). D62 to D65 the swap at the machine cap (launch the biggest, drain the smallest to finish its jobs within a grace; evictions charge no budget) and scale-down. Text in [design/hosts.md](design/hosts.md).
-- D66 a job's file system is assembled generically: layers, mounts and host loopback ports, bounded by the host's mount roots, `--image-allow` and `--host-port`; supersedes the tree inputs design. Text in [design/job-rootfs.md](design/job-rootfs.md).
+- D66 a job's file system is assembled generically: layers, mounts of a source with named options, and host loopback ports (host sockets designed), each a kind Docker, the OCI runtime or Kubernetes has, bounded by the host's mount roots, `--image-allow` and `--host-port`; supersedes the tree inputs design. Text in [design/job-rootfs.md](design/job-rootfs.md).
 
 ## 16. Risks
 
