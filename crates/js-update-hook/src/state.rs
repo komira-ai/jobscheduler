@@ -27,8 +27,10 @@
 //!
 //! A save writes a temporary file in the directory, syncs it, renames it over the record and
 //! syncs the directory, so the record is the old one or the new one and never a part of
-//! either. A record whose schema is newer than [`Document::SCHEMA`] is read-only: it is not
-//! loaded, and it is not overwritten.
+//! either. [`Held::set_aside`] renames the record to another name in the directory, never over
+//! a file that is there, so that a step can keep a record it will not use. A record whose
+//! schema is newer than [`Document::SCHEMA`] is read-only: it is not loaded, and it is not
+//! overwritten or moved.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -39,8 +41,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
-    AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fsync, mkdirat, openat, renameat,
-    statat, unlinkat,
+    AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, flock, fsync, mkdirat, openat,
+    renameat, renameat_with, statat, unlinkat,
 };
 use rustix::io::Errno;
 use serde::de::DeserializeOwned;
@@ -541,6 +543,41 @@ impl<D: Document> Held<D> {
         fsync(&self.fd)
             .map_err(io::Error::from)
             .map_err(at(&self.dir))
+    }
+
+    /// Moves the record aside to `name` in the state directory, never over a file that is
+    /// there, and syncs the directory: the step then finds no record, and the one it moved is
+    /// kept for a person to read. Refuses to move a record [`Held::load`] refuses, as a save
+    /// does. Returns the path the record now has.
+    ///
+    /// # Errors
+    /// What [`Held::load`] says of the record that is there, or [`StateError::Io`]: there is
+    /// no record, `name` is not a plain file name other than the record's, the temporary
+    /// file's and the lock's, or a file of that name is there already.
+    pub fn set_aside(&self, name: &str) -> Result<PathBuf, StateError<D>> {
+        self.load()?;
+        let target = self.dir.join(name);
+        let plain = Path::new(name).file_name() == Some(OsStr::new(name))
+            && ![RECORD_FILE, TEMP_FILE, LOCK_FILE].contains(&name);
+        if !plain {
+            return Err(at(&target)(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a plain file name of its own",
+            )));
+        }
+        renameat_with(
+            &self.fd,
+            RECORD_FILE,
+            &self.fd,
+            name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(io::Error::from)
+        .map_err(at(&target))?;
+        fsync(&self.fd)
+            .map_err(io::Error::from)
+            .map_err(at(&self.dir))?;
+        Ok(target)
     }
 
     /// Deletes the record, and a temporary file a killed save left, and syncs the directory.

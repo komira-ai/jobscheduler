@@ -225,10 +225,12 @@ fn a_taint_is_checked_before_the_version_and_after_the_record() {
     assert_eq!(spy.log(), Vec::<String>::new());
 
     // The record is validated first: a record that is not this update's is refused as such.
+    // (Of this target, with another digest: one of another target that never took the host is
+    // superseded, see steps_prepare_supersede.rs.)
     let rig = Rig::new("hook-prepare-record-first");
     rig.taint();
     let mut other = rig.fresh_record();
-    other.update.target = "1.5.0".to_owned();
+    other.update.artifact_digest = format!("sha256:{}", "f".repeat(64));
     rig.put_record(&other);
     let spy = Spy::new(&rig);
     let done = spy.prepare(&rig);
