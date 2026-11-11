@@ -30,6 +30,7 @@ pub mod quota;
 mod quota_health;
 mod reach;
 mod results;
+mod rootfs;
 mod rules;
 mod running;
 mod scratch;
@@ -225,7 +226,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
 }
 
 /// Checks that pass, except for the runs of `findings`, and note when they ran.
-fn hook(
+pub(super) fn hook(
     log: &Log,
     fake: &FakeRuntime,
     scratch_root: &std::path::Path,

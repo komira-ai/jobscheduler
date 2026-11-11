@@ -23,8 +23,8 @@ use std::time::Duration;
 use clap::Parser as _;
 use js_agent::cli_runtime::Settings;
 use js_agent::crun::{
-    CgroupSettings, CgroupSource, Hooks, HostClaim, IdSources, Seams, oci_config, prepare_store,
-    require_trusted_ancestors,
+    CgroupSettings, CgroupSource, Hooks, HostClaim, IdSources, MountSeam, Seams, oci_config,
+    prepare_store, require_trusted_ancestors,
 };
 use js_agent::crun_host::{CrunHost, start};
 use js_agent::lifecycle::{DirLayout, Local};
@@ -105,6 +105,42 @@ case "$cmd" in
   state) echo '{"pid":1}';;
 esac
 "#;
+
+/// The mounts' calls of a node whose runtime mounts nothing: the directory of the runs'
+/// mounts is a mount of its own already, and private; no other call is made.
+#[derive(Debug)]
+pub(super) struct Unmounted;
+
+impl js_contain::job_fs::MountCalls for Unmounted {
+    fn clone_tree(&self, _: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os::fd::OwnedFd> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn set_attributes(
+        &self,
+        _: std::os::fd::BorrowedFd<'_>,
+        _: js_contain::job_fs::Attributes,
+    ) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn attach(&self, _: std::os::fd::BorrowedFd<'_>, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn mount_overlay(&self, _: &Path, _: bool, _: &str) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn detach(&self, _: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+    }
+    fn is_mount_point(&self, _: &Path) -> std::io::Result<bool> {
+        Ok(true)
+    }
+    fn bind_onto_itself(&self, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn make_private(&self, _: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// The node: stand-in files of a host that passes the start check, a store with one image,
 /// cgroup directories, and the stand-in.
@@ -213,6 +249,12 @@ pub(super) fn seams() -> Seams {
         // The agent runs inside this test binary, which does not answer the helper modes: each
         // container's supervisor is the agent's own binary.
         daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
+        // The directory of the runs' mounts is the node's, a private mount already.
+        mounts: MountSeam {
+            dir: node.dir.join("mounts"),
+            calls: Arc::new(Unmounted),
+            ..MountSeam::default()
+        },
     }
 }
 

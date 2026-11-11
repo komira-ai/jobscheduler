@@ -539,6 +539,7 @@ fn the_checks_keep_the_range_the_runtime_opened_with() {
         live: &[],
         slot: None,
         live_slots: &[],
+        held_mounts: &[],
     };
     assert!(js_agent::lifecycle::CheckHook::run(&mut checks, &clean).is_ok());
     edited.start_process(leftover(731, 231_072 + 5));

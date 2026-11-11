@@ -152,7 +152,8 @@ fn a_vm_job_runs_in_a_vm_beside_an_action_job() {
 /// Asserts that a VM start that asks for what a VM does not give is refused before anything
 /// is made, each with its own code: a `run` body, run files, a GPU, network above `none`, a
 /// declared port, a host port (`input-not-allowed`, though the agent's other runtime allows
-/// every host port). Catches a VM start run with less than it asked for.
+/// every host port), a layer or a mount (`rootfs-unsupported-here`, though the agent's other
+/// runtime gives them). Catches a VM start run with less than it asked for.
 #[test]
 fn a_vm_start_that_asks_for_what_a_vm_lacks_is_refused() {
     let cases = [
@@ -178,12 +179,22 @@ fn a_vm_start_that_asks_for_what_a_vm_lacks_is_refused() {
             json!({ "host_ports": [{ "host_port": 5432 }] }),
             refusal::INPUT_NOT_ALLOWED,
         ),
+        // A VM gets no layer and no mount, whatever the agent's runtime gives.
+        (
+            json!({ "layers": [{ "type": "host_path", "path": "/data/l" }] }),
+            refusal::ROOTFS_UNSUPPORTED_HERE,
+        ),
+        (
+            json!({ "mounts": [{ "source": { "type": "host_path", "path": "/data/m" }, "target": "/work/m" }] }),
+            refusal::ROOTFS_UNSUPPORTED_HERE,
+        ),
     ];
     for (n, (extra, code)) in cases.into_iter().enumerate() {
         let dir = Scratch::new(&format!("vm-life-lacks{n}"));
         let driver = Arc::new(FakeDriver::new());
         let (mut life, fake) = life(&dir, Some(&driver));
         fake.set_host_ports(&[PortRange::new(1, u16::MAX).unwrap()]);
+        fake.give_layers();
         let events = life.apply(&reply(vec![start_of("job-vm", &extra)]));
         assert_eq!(refused(&events, "job-vm").0, code, "{extra}");
         assert!(driver.calls().is_empty(), "{extra}");

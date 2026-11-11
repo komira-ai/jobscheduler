@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, Exit, Finished, Found, NativeRefusal, Prepared, RunHandle,
-    RunSpec, Runtime, RuntimeError, Status, Ticket, label,
+    CheckFinding, CheckHook, Clock, Exit, Finished, Found, FsPrepared, JobFs, NativeRefusal,
+    Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, label,
 };
 use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
 
@@ -103,6 +103,24 @@ struct State {
     host_ports: Vec<PortRange>,
     /// Why each run named here lost its host ports (`host_port_lost`), by run id.
     lost: BTreeMap<String, String>,
+    /// What a job's file system answers (see [`FakeRuntime::give_layers`]); none: the
+    /// runtime gives no layers, as the trait's default, and says nothing of them.
+    fs: Option<FsScript>,
+}
+
+/// What the fake answers of a job's file system.
+#[derive(Default)]
+struct FsScript {
+    /// What `resolve_fs` answers for a run; ready when not named.
+    resolved: BTreeMap<String, FsPrepared>,
+    /// What `assemble_fs` answers for a run; ready when not named.
+    assembled: BTreeMap<String, FsPrepared>,
+    /// The images of a layer `check_layer_image` refuses.
+    refused_images: Vec<String>,
+    /// The runs whose sources did not answer after they ended (`input_failure`).
+    unreadable: Vec<String>,
+    /// The directory the runs' mounts are under (`mounts_of`).
+    mounts: Option<PathBuf>,
 }
 
 /// Where a scripted pull stands.
@@ -135,6 +153,44 @@ impl FakeRuntime {
             log: Rc::clone(log),
             clock: clock.clone(),
         }
+    }
+
+    /// From now on the runtime gives a job layers and mounts (`layered_rootfs`), binds no
+    /// mount of a named root, prepares each run's file system as the test scripts it
+    /// (ready by default), and logs each call of it.
+    pub fn give_layers(&self) {
+        self.state.borrow_mut().fs = Some(FsScript::default());
+    }
+
+    fn script(&self) -> std::cell::RefMut<'_, FsScript> {
+        std::cell::RefMut::map(self.state.borrow_mut(), |state| {
+            state.fs.as_mut().expect("give_layers first")
+        })
+    }
+
+    /// `resolve_fs` answers `answer` for `run_id` from now on.
+    pub fn resolve_answers(&self, run_id: &str, answer: FsPrepared) {
+        self.script().resolved.insert(run_id.to_owned(), answer);
+    }
+
+    /// `assemble_fs` answers `answer` for `run_id` from now on.
+    pub fn assembly_answers(&self, run_id: &str, answer: FsPrepared) {
+        self.script().assembled.insert(run_id.to_owned(), answer);
+    }
+
+    /// `check_layer_image` refuses `image`.
+    pub fn refuse_layer_image(&self, image: &str) {
+        self.script().refused_images.push(image.to_owned());
+    }
+
+    /// The sources of `run_id` do not answer once it has ended.
+    pub fn sources_gone(&self, run_id: &str) {
+        self.script().unreadable.push(run_id.to_owned());
+    }
+
+    /// The runs' mounts are under `dir` (`mounts_of`).
+    pub fn mount_in(&self, dir: &Path) {
+        self.script().mounts = Some(dir.to_owned());
     }
 
     /// The same runtime, which cannot use a GPU: `supports_gpus` is false.
@@ -436,6 +492,65 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
+    fn layered_rootfs(&self) -> bool {
+        self.state.borrow().fs.is_some()
+    }
+
+    fn check_layer_image(&self, image: &str) -> Result<(), String> {
+        let state = self.state.borrow();
+        let refused = state
+            .fs
+            .as_ref()
+            .map(|fs| fs.refused_images.iter().any(|it| it == image));
+        match refused.unwrap_or_default() {
+            true => Err(format!("{image} is on no registry entry")),
+            false => Ok(()),
+        }
+    }
+
+    fn binds_named_mounts(&self) -> bool {
+        self.state.borrow().fs.is_none()
+    }
+
+    fn resolve_fs(&mut self, run_id: &str, image: &str, fs: &JobFs, _now_ms: u64) -> FsPrepared {
+        self.log.borrow_mut().push(format!(
+            "resolve {run_id} ({} layers, {} mounts, image {image:?})",
+            fs.layers.len(),
+            fs.mounts.len()
+        ));
+        let answer = self.script().resolved.get(run_id).cloned();
+        answer.unwrap_or(FsPrepared::Ready)
+    }
+
+    fn assemble_fs(&mut self, run_id: &str, _now_ms: u64) -> FsPrepared {
+        self.log.borrow_mut().push(format!("assemble {run_id}"));
+        let answer = self.script().assembled.get(run_id).cloned();
+        answer.unwrap_or(FsPrepared::Ready)
+    }
+
+    fn discard_fs(&mut self, run_id: &str) -> Result<(), RuntimeError> {
+        if self.state.borrow().fs.is_none() {
+            return Ok(());
+        }
+        self.log.borrow_mut().push(format!("discard {run_id}"));
+        match self.fails("discard") {
+            true => Err(err("discard")),
+            false => Ok(()),
+        }
+    }
+
+    fn mounts_of(&self, run_id: &str) -> Option<PathBuf> {
+        let state = self.state.borrow();
+        Some(state.fs.as_ref()?.mounts.as_ref()?.join(run_id))
+    }
+
+    fn input_failure(&self, id: &RunHandle) -> Option<String> {
+        let state = self.state.borrow();
+        let run = &state.containers.get(&id.0)?.run_id;
+        let gone = state.fs.as_ref()?.unreadable.contains(run);
+        gone.then(|| js_agent_wire::refusal::INPUT_UNREADABLE.to_owned())
+    }
+
     fn host_ports(&self) -> Vec<PortRange> {
         self.state.borrow().host_ports.clone()
     }
@@ -697,6 +812,16 @@ impl CheckHook for ScriptedChecks {
             self.log
                 .borrow_mut()
                 .push(format!("live beside {run_id}: {}", live.join(",")));
+        }
+        if !job.held_mounts.is_empty() {
+            let held: Vec<String> = job
+                .held_mounts
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect();
+            self.log
+                .borrow_mut()
+                .push(format!("mounts held beside {run_id}: {}", held.join(",")));
         }
         self.findings
             .get(run_id)

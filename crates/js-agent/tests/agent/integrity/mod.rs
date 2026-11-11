@@ -34,6 +34,7 @@ pub fn after(checks: &mut Integrity, run_id: &str) -> Result<(), CheckFinding> {
         live: &[],
         slot: None,
         live_slots: &[],
+        held_mounts: &[],
     })
 }
 
@@ -50,6 +51,7 @@ pub fn after_slot(
         live: &[],
         slot: Some(slot),
         live_slots,
+        held_mounts: &[],
     })
 }
 
@@ -61,6 +63,7 @@ pub fn beside(checks: &mut Integrity, run_id: &str, live: &[&str]) -> Result<(),
         live: &live,
         slot: None,
         live_slots: &[],
+        held_mounts: &[],
     })
 }
 

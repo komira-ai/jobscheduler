@@ -5,7 +5,7 @@ use std::io;
 use std::os::fd::{AsRawFd as _, BorrowedFd, OwnedFd};
 use std::path::Path;
 
-use rustix::fs::CWD;
+use rustix::fs::{CWD, Mode, OFlags, ResolveFlags};
 use rustix::mount::{
     MountFlags, MountPropagationFlags, MoveMountFlags, OpenTreeFlags, UnmountFlags,
 };
@@ -65,6 +65,37 @@ impl MountCalls for Kernel {
         let flags = MountPropagationFlags::PRIVATE | MountPropagationFlags::REC;
         rustix::mount::mount_change(dir, flags).map_err(io::Error::from)
     }
+}
+
+/// The system calls of a job's file system, each made once with arguments that change
+/// nothing, and the kernel's answer: `openat2` and `open_tree` open `/` for its name
+/// alone (the descriptor is closed at once), and `move_mount` and `mount_setattr` name an
+/// empty path without `AT_EMPTY_PATH`, which every kernel that has them refuses
+/// (`ENOENT`, or `EPERM` without the privilege to mount). A kernel that lacks a call
+/// answers it `ENOSYS`; any other answer says the call is there.
+pub fn probe() -> [(&'static str, io::Result<()>); 4] {
+    let path = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let attr = mount_attr(Attributes::default());
+    [
+        (
+            "openat2",
+            rustix::fs::openat2(CWD, "/", path, Mode::empty(), ResolveFlags::empty())
+                .map(drop)
+                .map_err(io::Error::from),
+        ),
+        (
+            "open_tree",
+            rustix::mount::open_tree(CWD, "/", OpenTreeFlags::OPEN_TREE_CLOEXEC)
+                .map(drop)
+                .map_err(io::Error::from),
+        ),
+        (
+            "move_mount",
+            rustix::mount::move_mount(CWD, "", CWD, "", MoveMountFlags::empty())
+                .map_err(io::Error::from),
+        ),
+        ("mount_setattr", mount_setattr(CWD, 0, &attr)),
+    ]
 }
 
 /// The flags of an overlay's mount.

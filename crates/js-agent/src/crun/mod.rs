@@ -31,8 +31,9 @@
 //!   a removal), and a job user able to write it could end the lease from the host side.
 //! - the run's scratch directory, given to the job's host id and bound at `/scratch`; the
 //!   run's mounts, and its files at `/run/js-files` read-only, are bound after it;
-//! - a bundle of the image's unpacked root (read-only), an overlay of an empty input root
-//!   at `/work`, where the job starts, the image config's program with the run's arguments
+//! - a bundle of the image's unpacked root (read-only; the assembled root, writable, for a
+//!   start with layers), an overlay of an empty input root at `/work` (unless a mount takes
+//!   its place), where the job starts, the image config's program with the run's arguments
 //!   after the entrypoint, and its environment with the job's ([`RunSpec::env`]) over it.
 //!
 //! `crun run` is run by a *supervisor*, a process of its own (the agent's binary in its
@@ -166,9 +167,26 @@
 //! host run that names a mount, run files or a GPU is refused, as is every host run of a
 //! runtime opened without host jobs.
 //!
+//! # Layers and mounts
+//!
+//! A runtime opened with [`CrunSettings::fs`] (where the kernel has `openat2`, `open_tree`,
+//! `move_mount` and `mount_setattr`) gives a job start its layers and mounts of host paths
+//! (`docs/design/job-rootfs.md`, the module `fs`): while the start waits, each host path is
+//! opened beneath its `--mount-root` on the `js-paths` pool ([`Runtime::resolve_fs`]); then
+//! the images are pinned for the lease (an image layer as `<lease>.l<k>`) and the assembly
+//! clones the paths and mounts the layered root and the copy-on-write mounts at
+//! `/run/js-agent/mounts/<lease>`, listing each mount before it is made
+//! ([`Runtime::assemble_fs`]). The container is made over the assembled root, writable, with
+//! the clones bound where the start named them. Every end of the run (its removal, a failed
+//! make, the sweep of an earlier process's leases, a run never made) unmounts from that list,
+//! deepest first, before the lease directory, which holds the writable layers, is removed,
+//! and removes the pins. A job that did not succeed is held as running until each of its
+//! sources has answered a check ([`Runtime::input_failure`]). A run start's mount of a named
+//! root is refused: no path is bound by its text.
+//!
 //! # Not here
 //!
-//! No read-back of the container's mounts.
+//! No read-back of the container's mounts: none is bound by a path a job could change.
 
 mod adopt;
 #[cfg(test)]
@@ -179,10 +197,13 @@ mod budget_tests;
 mod claim;
 mod dirs;
 mod fault;
+pub mod fs;
 mod gpu;
+mod layered;
 mod ledger;
 #[cfg(test)]
 mod ledger_tests;
+mod make;
 mod net;
 mod pull;
 mod settings;
@@ -192,7 +213,7 @@ mod tests;
 mod wire;
 
 pub use dirs::hand_over_no_follow;
-use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, project_of, take_dir};
+use dirs::{cgroup_dir, legacy_lease, make_helper_cgroup};
 use fault::Fault;
 pub(crate) use net::port_of;
 pub use net::{EgressPort, Wired, start_egress};
@@ -205,8 +226,8 @@ pub use gpu::{
 };
 
 pub use wire::{
-    CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS, Seams, WireError, oci_config,
-    open as open_for_plan,
+    CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, MountSeam, PULL_THREADS, Seams, WireError,
+    oci_config, open as open_for_plan,
 };
 
 use std::collections::BTreeMap;
@@ -217,26 +238,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
-use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
+use js_contain::cgroup::{LeaseCgroup, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{GcReport, LeaseDirs, Oci, Owner, Supervised, stderr_path, stdout_path};
+use js_contain::oci::{GcReport, LeaseDirs, Oci, Supervised, stderr_path, stdout_path};
 use js_types::JobNetwork;
-use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
 use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
-use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::{
-    Body, Exit, FilesRoot, Found, Prefetcher, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
-    Status, Ticket, check_run_env, label,
+    Body, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, RunHandle, RunSpec,
+    Runtime, RuntimeError, Status, Ticket, check_run_env, label,
 };
 use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger, Supervisor};
 pub use ledger::{Failed, LedgerError, Left, Reason, Removed, SweepReport};
 use pull::Images;
-use spec::{concluded, container_spec, ctr_of, host_spec, job_env, log_tail_of, pinned};
+use spec::{concluded, ctr_of, log_tail_of, pinned};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -288,6 +307,8 @@ struct Run {
     entry: Entry,
     /// Its live logs: the sink, then the uploader and the report.
     logs: RunLogs,
+    /// What its file system cloned, for the check after it ends; none without host paths.
+    fs: Option<layered::RunFs>,
 }
 
 /// A container runtime over `crun`.
@@ -319,6 +340,8 @@ pub struct CrunRuntime {
     swept: SweepReport,
     /// Live logs, when the runtime uploads them ([`CrunRuntime::with_live_logs`]).
     logs: Option<LiveLogs>,
+    /// What jobs' layers and mounts are made with; none for a runtime that gives none.
+    fs: Option<fs::Fs>,
 }
 
 impl std::fmt::Debug for CrunRuntime {
@@ -421,6 +444,7 @@ impl CrunRuntime {
             ledger,
             swept: SweepReport::default(),
             logs: None,
+            fs: settings.fs.map(fs::Fs::open).transpose()?,
         };
         // No container of this process exists yet: the runs of an earlier process of this
         // agent that still stand are adopted, and the rest of its leases are removed.
@@ -551,7 +575,17 @@ impl CrunRuntime {
         let Body::Container { image: given, args } = &spec.body else {
             return Err(Fault::Native);
         };
-        let image = pinned(given).map_err(Fault::Image)?;
+        // What the run's assembly made of its layers and mounts: the run's removal unmounts
+        // it, or, for a run that is not made, the lifecycle's discard (`Runtime::discard_fs`).
+        let assembled = self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id));
+        // A root of layers alone has no image.
+        let image = match given.is_empty() {
+            true => PinnedImage {
+                reference: String::new(),
+                digest: String::new(),
+            },
+            false => pinned(given).map_err(Fault::Image)?,
+        };
         let name = container_name(&self.host_id, &spec.run_id)
             .map_err(|_| Fault::Name(spec.run_id.clone()))?;
         if self.runs.contains_key(&name) {
@@ -572,17 +606,22 @@ impl CrunRuntime {
         self.ledger
             .record(&entry)
             .map_err(|why| Fault::step("record the lease's labels", &why))?;
-        let (container, lease, cgroup) =
-            match self.make_recorded(spec, (given, &image), args, &name, gpu) {
-                Ok(made) => made,
-                Err(fault) => {
-                    // What the failed step left; none of it is a container. The sidecar goes with
-                    // it (the pin last), or stays for the next start when some of it cannot be
-                    // removed.
-                    let _ = self.ledger.discard(&entry, |entry| self.tear_down(entry));
-                    return Err(fault);
-                }
-            };
+        let (container, lease, cgroup) = match self.make_recorded(
+            spec,
+            (given, &image),
+            (args, assembled.as_ref()),
+            &name,
+            gpu,
+        ) {
+            Ok(made) => made,
+            Err(fault) => {
+                // What the failed step left; none of it is a container. The sidecar goes with
+                // it (the pin last), or stays for the next start when some of it cannot be
+                // removed.
+                let _ = self.ledger.discard(&entry, |entry| self.tear_down(entry));
+                return Err(fault);
+            }
+        };
         self.runs.insert(
             name.clone(),
             Run {
@@ -602,116 +641,10 @@ impl CrunRuntime {
                 },
                 entry,
                 logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
+                fs: assembled.map(|made| layered::RunFs::new(made.sources)),
             },
         );
         Ok(name)
-    }
-
-    /// The pinned image (`given`, parsed as `image`), the container spec with `args` and what
-    /// its GPUs give it, and the resources of the lease `name`, whose sidecar is recorded.
-    fn make_recorded(
-        &self,
-        spec: &RunSpec,
-        (given, image): (&str, &PinnedImage),
-        args: &[String],
-        name: &str,
-        gpu: gpu::Wiring,
-    ) -> Result<(ContainerSpec, LeaseDirs, LeaseCgroup), Fault> {
-        // Before the image is made sure of: from then on no agent on the store removes it
-        // until the lease is torn down.
-        self.oci.pin_image(image, name)?;
-        self.images.lease(name, &image.digest);
-        let ensure = || self.rt.block_on(self.images.ensure(image));
-        ensure().map_err(Fault::Image)?;
-        if !config_path(&self.configs, &image.digest).exists() {
-            // An image an earlier daemon (or a source that keeps no configs) unpacked has
-            // no config to run it by: it is fetched again, and the source keeps the config
-            // this time. The prefetcher is told, as it is for any image taken out. A run of
-            // another agent on the image pins it, and the removal is refused.
-            self.oci.unpin_image(name)?;
-            self.rt.block_on(self.oci.remove_image(image))?;
-            self.pulls.forget(given);
-            self.oci.pin_image(image, name)?;
-            ensure().map_err(Fault::Image)?;
-        }
-        let rootfs = js_contain::oci::image::published_root(&self.store, &image.digest);
-        gpu.check_targets(&rootfs).map_err(Fault::Gpu)?;
-        let config = ImageConfig::kept(&self.configs, &image.digest)?;
-        let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
-        let lease = self.oci.lease_dirs(name);
-        let mut container = match spec.isolation {
-            js_agent_wire::Isolation::Contained => {
-                container_spec(name, spec, image, &lease, cgroup.name())
-            }
-            js_agent_wire::Isolation::Host => host_spec(name, spec, image, &lease, cgroup.name()),
-        };
-        config.apply(args, &mut container)?;
-        job_env(&mut container, &spec.env);
-        gpu.apply(&mut container);
-        self.make_resources(spec, &container, &lease, &cgroup)?;
-        Ok((container, lease, cgroup))
-    }
-
-    /// The directories, hand-overs, cgroup and bundle of one lease.
-    ///
-    /// A host lease ([`Isolation::Host`](js_contain::Isolation::Host)) is the agent's own:
-    /// only its directory is made (no overlay, home or input root), and it, the run's scratch
-    /// directory and the cgroup's files are given to the agent itself, not to the job user or
-    /// the job's ids; its bundle adds the host-lease marker, so `crun` runs as the agent for
-    /// it ([`Oci::lease_user`]). Its bundle is the loopback one: a host job is never wired.
-    fn make_resources(
-        &self,
-        spec: &RunSpec,
-        container: &ContainerSpec,
-        lease: &LeaseDirs,
-        cgroup: &LeaseCgroup,
-    ) -> Result<(), Fault> {
-        let chown = self.hooks.chown;
-        let host = container.isolation == js_contain::Isolation::Host;
-        let ((job, job_id), dirs, network) = match host {
-            true => {
-                let own = self.oci.own_ids();
-                let dirs = vec![(lease.dir.clone(), Owner::Job)];
-                ((own, own), dirs, JobNetwork::None)
-            }
-            false => {
-                let ids = (self.oci.job_ids(), self.oci.container_ids());
-                (ids, lease.to_make(), spec.network)
-            }
-        };
-        for (dir, owner) in dirs {
-            let (uid, gid) = match owner {
-                Owner::Job => job,
-                Owner::Container => job_id,
-            };
-            // A lease directory made beside the run's is the lifecycle's: it must be there,
-            // empty and in the run's project, or it would be outside the run's bound.
-            let made = match self.leases_beside && dir == lease.dir {
-                true => take_dir(&dir, &spec.scratch, &project_of),
-                false => make_dir(&dir),
-            };
-            made.and_then(|()| chown(&dir, uid, gid))
-                .map_err(|why| Fault::step("make a lease directory", &why))?;
-        }
-        chown(&spec.scratch, job_id.0, job_id.1)
-            .map_err(|why| Fault::step("give the run's scratch directory to the job", &why))?;
-        if spec.files.is_some() {
-            let files = self.files.as_ref().ok_or(Fault::NoFiles)?;
-            files
-                .hand_over_with(&spec.run_id, job_id.0, job_id.1, &chown)
-                .map_err(|why| Fault::step("give the run's files to the job", &why))?;
-        }
-        let booking = Resources::new(spec.cpu_millis, spec.memory_bytes, 0, None)?;
-        cgroup
-            .create_with(&booking, None, LeasePolicy::Hard)
-            .map_err(|why| Fault::step("make the lease's cgroup", &why))?;
-        for file in JOB_OWNED_FILES {
-            chown(&owned(cgroup.dir(), file), job.0, job.1)
-                .map_err(|why| Fault::step("give the lease's cgroup to the job user", &why))?;
-        }
-        self.rt
-            .block_on(net::create(&self.oci, container, network))
-            .map_err(|why| Fault::step("write the bundle", &why))
     }
 
     /// Starts the container `id` that [`CrunRuntime::stage`] made and wires its network. A
@@ -765,8 +698,17 @@ impl CrunRuntime {
     }
 
     /// Reads how the container `name` stands, ending it in the books once its supervisor wrote
-    /// the end.
+    /// the end, and holding a run that ended as running until its sources were checked
+    /// ([`CrunRuntime::checked`]).
     fn status_of(&mut self, name: &str) -> Status {
+        match self.read_status(name) {
+            Status::Exited(exit) => self.checked(name, exit),
+            other => other,
+        }
+    }
+
+    /// [`CrunRuntime::status_of`] before the check of the run's sources.
+    fn read_status(&mut self, name: &str) -> Status {
         let (rt, oci) = (&self.rt, &self.oci);
         let Some(run) = self.runs.get_mut(name) else {
             return Status::Gone;
@@ -853,6 +795,7 @@ impl Runtime for CrunRuntime {
     /// (and changes nothing) if its sidecar is another agent's or is not well formed.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         let (rt, oci, kill_wait) = (&self.rt, &self.oci, self.hooks.kill_wait);
+        let fs = &self.fs;
         let Some(run) = self.runs.get_mut(&id.0) else {
             // Not held by this process: the leftover of an earlier one, if the ledger has
             // it, and nothing otherwise.
@@ -887,6 +830,9 @@ impl Runtime for CrunRuntime {
         run.logs.leave();
         oci.remove(&id.0)
             .map_err(|why| failed("delete the container", &why))?;
+        // After `crun delete` and before the lease directory, which holds the writable layers.
+        let released = fs.as_ref().map_or(Ok(()), |fs| fs.release(&id.0));
+        released.map_err(|why| failed("unmount the run's file system", &why))?;
         run.cgroup
             .remove()
             .map_err(|why| failed("remove the lease's cgroup", &why))?;
@@ -895,9 +841,8 @@ impl Runtime for CrunRuntime {
         {
             return Err(failed("remove the lease directory", &why));
         }
-        oci.unpin_image(&id.0)
+        self.unpin_all(&id.0)
             .map_err(|why| failed("remove the image's pin", &why))?;
-        self.images.release(&id.0);
         self.ledger
             .forget(&id.0)
             .map_err(|why| failed("remove the lease's sidecar", &why))?;
@@ -940,6 +885,40 @@ impl Runtime for CrunRuntime {
 
     fn host_port_lost(&self, id: &RunHandle) -> Option<String> {
         self.runs.get(&id.0)?.net.lost()
+    }
+
+    fn layered_rootfs(&self) -> bool {
+        self.gives_layers()
+    }
+
+    fn check_layer_image(&self, image: &str) -> Result<(), String> {
+        self.check_layer(image)
+    }
+
+    /// None: a job start's host paths are opened beneath their roots, never bound by path.
+    fn binds_named_mounts(&self) -> bool {
+        false
+    }
+
+    fn resolve_fs(&mut self, run_id: &str, image: &str, fs: &JobFs, now_ms: u64) -> FsPrepared {
+        self.resolve(run_id, image, fs, now_ms)
+    }
+
+    fn assemble_fs(&mut self, run_id: &str, now_ms: u64) -> FsPrepared {
+        self.assemble(run_id, now_ms)
+    }
+
+    fn discard_fs(&mut self, run_id: &str) -> Result<(), RuntimeError> {
+        self.discard(run_id)
+    }
+
+    fn mounts_of(&self, run_id: &str) -> Option<PathBuf> {
+        let name = container_name(&self.host_id, run_id).ok()?;
+        Some(self.fs.as_ref()?.dir_of(&name))
+    }
+
+    fn input_failure(&self, id: &RunHandle) -> Option<String> {
+        self.unreadable(&id.0)
     }
 
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {

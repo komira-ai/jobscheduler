@@ -60,6 +60,7 @@ pub fn probe(name: &str) -> Option<Vec<Kv>> {
                 live: &[],
                 slot: None,
                 live_slots: &[],
+                held_mounts: &[],
             });
             fs::set_permissions(&watched, fs::Permissions::from_mode(0o700)).unwrap();
             let (kind, code, detail) = match found {
