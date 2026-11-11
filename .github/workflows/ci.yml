@@ -2,12 +2,12 @@
 # SHAs, and no permission beyond reading the repository.
 #
 # The Cargo cache (registry, git checkouts and target) is keyed on the runner, the job,
-# Cargo.lock and rust-toolchain.toml. Every job but the two coverage jobs restores it (they
-# build from nothing; see `coverage-shard`); only a push to main saves it, and only when
-# the exact key missed, so a pull request never writes the Cargo cache.
+# Cargo.lock and rust-toolchain.toml. Every job restores it except `deny` and the two
+# coverage jobs (they build from nothing; see `coverage-shard`); only a push to main saves
+# it, and only when the exact key missed, so a pull request never writes the Cargo cache.
 #
-# The release tools the `deny`, `coverage-shard` and `coverage` jobs install (cargo-deny, cargo-llvm-cov,
-# cargo-nextest) are pinned by version and SHA-256, and each has a cache entry of its own,
+# The release tools the `deny`, `coverage-shard` and `coverage` jobs install (cargo-deny,
+# cargo-llvm-cov, cargo-nextest) are pinned by version and SHA-256, and each has a cache entry of its own,
 # keyed by both. The step before `cargo xtask fetch` restores it; fetch uses the restored
 # archive when there is one and downloads it from GitHub only when there is not, checks
 # the SHA-256 of whichever it uses, and keeps a download that passed for the step after it
@@ -736,10 +736,10 @@ jobs:
   # .config/nextest.toml starts js-sim-cell's tests first, so the longest tests do not
   # start last.
   #
-  # Nothing here uses the Cargo cache: these builds start from nothing (about six
-  # minutes), which is as fast as restoring a seven-gigabyte cache of instrumented
-  # binaries, and such a cache, saved, pushed the other jobs' caches out of the
-  # repository's ten gigabytes.
+  # Nothing here uses the Cargo cache. Measured on main's runs before the split (the job
+  # logs): a build from nothing took about six minutes, as long as restoring the job's
+  # seven-gigabyte cache of instrumented binaries and building from it; and that cache,
+  # saved, pushed the other jobs' caches out of the repository's ten gigabytes.
   coverage-shard:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -807,8 +807,8 @@ jobs:
       # away lines the report then counts as missed (crates/xtask/tests/profile_overrides.rs
       # fails on any package override outside `test`).
       # LLVM_PROFILE_FILE_NAME (cargo-llvm-cov's, relative to its target directory) puts
-      # every raw profile in a directory of its own, with the shard in its name; the
-      # process id (%p) keeps one process's file apart from another's.
+      # every raw profile in `profiles/`, each file named with the shard; the process id
+      # (%p) keeps one process's file apart from another's.
       - name: Run this shard's tests under coverage
         env:
           SHARD: ${{ matrix.shard }}
