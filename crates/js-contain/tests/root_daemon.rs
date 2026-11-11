@@ -404,8 +404,7 @@ fn the_distribution_crun_has_a_loaded_apparmor_profile_and_no_file_capabilities(
         "no crun profile is loaded; the first control would show an exemption, not the profile:\n{profiles}"
     );
     let crun = var("JS_B_CRUN");
-    let mut buffer = [0u8; 0];
-    let caps = rustix::fs::getxattr(&crun, "security.capability", &mut buffer);
+    let caps = rustix::fs::getxattr_query(&crun, "security.capability");
     println!("security.capability of {crun}: {caps:?}");
     assert_eq!(
         caps,

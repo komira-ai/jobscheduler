@@ -330,8 +330,7 @@ impl<F: UserFlags, C: Cloner> FlagSealer<F, C> {
         at: &Path,
         bytes: &mut u64,
     ) -> Result<(), SealError> {
-        let no_buffer: &mut [u8] = &mut [];
-        if rustix::fs::flistxattr(fd, no_buffer)? > 0 {
+        if rustix::fs::flistxattr_query(fd)? > 0 {
             return Err(refuse(at, "has extended attributes"));
         }
         if self.flags.has_acl(fd.as_fd())? {
