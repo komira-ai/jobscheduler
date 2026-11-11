@@ -20,7 +20,13 @@
 //! uses, downloads only when no file is at `--cache`, and keeps a download there only after
 //! it matched; so this rule and those tests together make every job use the actions cache
 //! when it can, and only a checked archive ever reaches it.
+//!
+//! Debian packages keep the rule of `debs.rs` (tests in `debs_tests.rs`): no job runs apt, and
+//! a pinned set of packages is restored, checked by `cargo xtask debs`, saved on a miss and
+//! installed with dpkg.
 
+mod debs;
+mod debs_tests;
 mod lint;
 
 use lint::{Site, jobs, lint};

@@ -437,9 +437,9 @@ fn run_lines(text: &str) -> Vec<String> {
 
 /// The commands the workflow may run, each a prefix of a whole `run:` line.
 const ALLOWED_RUNS: [&str; 9] = [
-    "sudo apt-get update",
-    "sudo apt-get install --yes --no-install-recommends musl-tools",
     "rustup toolchain install",
+    "cargo xtask debs --pins .github/debs/musl-tools.toml --dir \"$RUNNER_TEMP/debs/musl-tools\"",
+    "sudo dpkg --install \"$RUNNER_TEMP\"/debs/musl-tools/*.deb",
     "rustup target add \"$TARGET\"",
     "cargo xtask release stamp --to \"$VERSION\"",
     "cargo build --locked --release --target \"$TARGET\" -p js-agent --bin js-agent",
@@ -451,7 +451,8 @@ const ALLOWED_RUNS: [&str; 9] = [
 /// The workflow builds the agent, packages it, shows the package and uploads it as a workflow
 /// artifact, and does nothing else with the .deb: no write scope on the repository, packages or
 /// releases, no signing or verification (the release does those in artifacts.yml), no action but
-/// these two pinned by commit, and only these commands. The list of banned words is a tripwire,
+/// these four pinned by commit (the cache's two hold the pinned musl-tools packages), and only
+/// these commands. The list of banned words is a tripwire,
 /// not the proof: the proof is the absence of a write scope (below) and the list of commands.
 #[test]
 fn the_workflow_publishes_signs_and_attests_nothing() {
@@ -494,7 +495,13 @@ fn the_workflow_publishes_signs_and_attests_nothing() {
         if let Some(action) = line.trim_start_matches("- ").strip_prefix("uses: ") {
             let name = action.split('@').next().expect("a name");
             assert!(
-                ["actions/checkout", "actions/upload-artifact"].contains(&name),
+                [
+                    "actions/checkout",
+                    "actions/cache/restore",
+                    "actions/cache/save",
+                    "actions/upload-artifact"
+                ]
+                .contains(&name),
                 "{name}"
             );
             let sha = action.split('@').nth(1).expect("a version");
@@ -549,7 +556,7 @@ fn no_job_holds_a_write_scope_and_build_is_the_only_job() {
 }
 
 /// What starts the workflow: a pull request that touches what the package or the agent are made
-/// of (any crate, the manifests, the toolchain), and nothing else: not a manual run (the release
+/// of (any crate, the manifests, the toolchain, the pinned musl-tools packages), and nothing else: not a manual run (the release
 /// builds and attests the .debs), `pull_request_target`, `workflow_run`, a push or a schedule,
 /// which would give code from outside the repository the workflow's scopes.
 #[test]
@@ -571,6 +578,7 @@ fn the_workflow_starts_only_on_these_pull_requests() {
         paths,
         [
             "'.github/workflows/js-agent-deb.yml'",
+            "'.github/debs/musl-tools.toml'",
             "'packaging/js-agent/**'",
             "'crates/**'",
             "'Cargo.toml'",
@@ -597,7 +605,8 @@ fn the_workflow_starts_only_on_these_pull_requests() {
 
 /// Every checkout drops the token from the clone, and the .deb that is uploaded is the one
 /// `release deb` wrote and `dpkg-deb` showed, by its exact name: no glob that a file of the same
-/// shape in the checkout could match. The version is `0.0.0`, the target the x86_64 musl one.
+/// shape in the checkout could match (the one glob installs the pinned musl-tools packages from
+/// their own directory, outside the checkout). The version is `0.0.0`, the target the x86_64 musl one.
 #[test]
 fn the_deb_is_named_exactly_and_the_checkout_keeps_no_credentials() {
     let text = read(WORKFLOW);
@@ -609,7 +618,13 @@ fn the_deb_is_named_exactly_and_the_checkout_keeps_no_credentials() {
         count("persist-credentials: false")
     );
     assert!(steps.contains(&"path: dist/js-agent_${{ env.VERSION }}_amd64.deb"));
-    assert!(!steps.iter().any(|l| l.contains('*') && l.contains(".deb")));
+    let musl = "run: sudo dpkg --install \"$RUNNER_TEMP\"/debs/musl-tools/*.deb";
+    assert_eq!(count(musl), 1);
+    assert!(
+        !steps
+            .iter()
+            .any(|l| l.contains('*') && l.contains(".deb") && !l.ends_with(musl))
+    );
     let env = block(&indented_code(&text), "env");
     assert!(env.iter().any(|l| l.trim() == "VERSION: 0.0.0"), "{env:?}");
     assert!(

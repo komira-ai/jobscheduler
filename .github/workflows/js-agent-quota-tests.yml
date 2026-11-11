@@ -19,6 +19,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/js-agent-quota-tests.yml'
+      - '.github/debs/musl-tools.toml'
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -49,11 +50,25 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - name: Install musl tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends musl-tools
       - run: rustup toolchain install
+      # musl-tools (the musl-gcc ring's C code needs), pinned by version and SHA-256 in
+      # .github/debs/musl-tools.toml: restored from the actions cache, or fetched from the
+      # pinned mirrors when the cache missed, checked either way, and installed with dpkg. No
+      # apt-get, so an outage of the Ubuntu archive does not stop a run whose cache hit.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: musl-debs
+        with:
+          path: ${{ runner.temp }}/debs/musl-tools
+          key: debs-musl-tools-${{ runner.arch }}-${{ hashFiles('.github/debs/musl-tools.toml') }}
+      - name: Fetch the pinned musl-tools packages
+        run: cargo xtask debs --pins .github/debs/musl-tools.toml --dir "$RUNNER_TEMP/debs/musl-tools"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.musl-debs.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/debs/musl-tools
+          key: ${{ steps.musl-debs.outputs.cache-primary-key }}
+      - name: Install musl tools
+        run: sudo dpkg --install "$RUNNER_TEMP"/debs/musl-tools/*.deb
       - run: rustup target add "$TARGET"
       - name: Build the test binary without running it
         run: |

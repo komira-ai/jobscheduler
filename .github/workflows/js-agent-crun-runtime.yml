@@ -58,14 +58,14 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install
-      - run: sudo apt-get update
-      - run: sudo apt-get install -y --no-install-recommends crun uidmap apparmor jq
+      # The runner image (ubuntu-24.04) carries these packages: no apt, so no step needs the
+      # Ubuntu archive. dpkg-query fails, naming the package, if an image lacks one.
+      - run: dpkg-query --show crun uidmap apparmor jq xfsprogs
       # The quota tests (crates/js-agent/tests/crun_runtime/quota.rs) need a file system that
       # enforces project quota: a loop image of XFS, mounted with prjquota.
       - name: Make and mount a project-quota XFS volume on a loop device
         run: |
           set -euo pipefail
-          sudo apt-get install -y --no-install-recommends xfsprogs
           truncate -s 512M "$RUNNER_TEMP/js-crun-xfs.img"
           sudo mkfs.xfs -q "$RUNNER_TEMP/js-crun-xfs.img"
           sudo mkdir -p /mnt/js-crun-xfs
