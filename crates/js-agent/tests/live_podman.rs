@@ -119,6 +119,7 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
         bundle: None,
         network: Default::default(),
         ports: Vec::new(),
+        host_ports: Vec::new(),
         log_sink: None,
     }
 }

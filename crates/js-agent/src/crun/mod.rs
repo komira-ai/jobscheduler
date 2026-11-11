@@ -138,6 +138,14 @@
 //! when it starts, so such a lease an earlier agent left is removed. A run that ended while no
 //! agent ran has no network left, and is taken over so that its result is reported.
 //!
+//! A run's host ports ([`RunSpec::host_ports`], allowed by [`CrunSettings::host_ports`]) are
+//! offered at every level, after `Oci::start_supervised`: a listener at each job port in the
+//! container's network namespace, each connection joined to the host port on the host's
+//! loopback ([`crate::host_ports`]), while the init holds the job until each listens. They are
+//! closed when the run ends or goes, and recorded in the label `label::HOST_PORTS`, from which
+//! an adopted run that still stands is offered them again; one that cannot be is answered by
+//! [`Runtime::host_port_lost`], and the lifecycle stops it.
+//!
 //! # Host jobs
 //!
 //! A runtime opened with [`CrunSettings::host_jobs`] (`--allow-host-jobs`) launches a run
@@ -188,7 +196,7 @@ use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, projec
 use fault::Fault;
 pub(crate) use net::port_of;
 pub use net::{EgressPort, Wired, start_egress};
-pub use settings::{CgroupSettings, CrunError, CrunSettings, Hooks};
+pub use settings::{CgroupSettings, CrunError, CrunSettings, Hooks, HostPorts};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
 pub use gpu::{
@@ -208,7 +216,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{LogReport, LogTail, NetworkCeiling};
+use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
@@ -218,6 +226,7 @@ use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
 use crate::cli_runtime::container_name;
+use crate::host_ports::Forwarder;
 use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
@@ -302,6 +311,8 @@ pub struct CrunRuntime {
     store: PathBuf,
     /// The host's egress; none in mode none.
     egress: Option<Arc<dyn EgressPort>>,
+    /// The host ports a job may reach, and the forwarder that offers them.
+    host_ports: (Vec<PortRange>, Forwarder),
     hooks: Hooks,
     runs: BTreeMap<String, Run>,
     ledger: Ledger,
@@ -401,6 +412,10 @@ impl CrunRuntime {
             leases_beside,
             store: settings.scratch.clone(),
             egress: settings.egress,
+            host_ports: (
+                settings.host_ports.allowed,
+                Forwarder::new(settings.host_ports.listen),
+            ),
             hooks,
             runs: BTreeMap::new(),
             ledger,
@@ -546,6 +561,10 @@ impl CrunRuntime {
         let mut labels = spec.labels.clone();
         labels.insert(label::AGENT.to_owned(), self.host_id.clone());
         labels.insert(label::CREATED_MS.to_owned(), now.to_string());
+        // A restart offers the run its host ports again from this.
+        if let Some(host_ports) = net::host_ports_label(&spec.host_ports) {
+            labels.insert(label::HOST_PORTS.to_owned(), host_ports);
+        }
         // Before the first thing the sidecar names is made (see the module `ledger`), the
         // image's pin among them: the next start removes a pin a dead process left, once it
         // has removed the lease's container.
@@ -576,8 +595,10 @@ impl CrunRuntime {
                 state: State::Created,
                 net: match host {
                     // The host's own network: nothing to wire, nothing to forward.
-                    true => net::Net::asked(JobNetwork::None, Vec::new()),
-                    false => net::Net::asked(spec.network, spec.ports.clone()),
+                    true => net::Net::asked(JobNetwork::None, Vec::new(), Vec::new()),
+                    false => {
+                        net::Net::asked(spec.network, spec.ports.clone(), spec.host_ports.clone())
+                    }
                 },
                 entry,
                 logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
@@ -724,10 +745,13 @@ impl CrunRuntime {
         let named = self
             .ledger
             .rewrite(&run.entry.supervised(Supervisor::of(started.id())));
-        let (egress, now_ms) = (self.egress.as_deref(), self.hooks.now_ms);
+        let (ports, now_ms) = (
+            (self.egress.as_deref(), &self.host_ports.1),
+            self.hooks.now_ms,
+        );
         let wired = run
             .net
-            .attach(egress, &self.oci, (&run.spec, &started), now_ms);
+            .attach(ports, &self.oci, (&run.spec, &started), now_ms);
         // The sidecar says the run runs from here on: a later start adopts it. A failure to
         // write it leaves the run started, for the caller to remove.
         run.entry = run.entry.running(now, Supervisor::of(started.id()));
@@ -908,6 +932,14 @@ impl Runtime for CrunRuntime {
 
     fn network_ceiling(&self) -> NetworkCeiling {
         net::ceiling(self.egress.as_deref())
+    }
+
+    fn host_ports(&self) -> Vec<PortRange> {
+        self.host_ports.0.clone()
+    }
+
+    fn host_port_lost(&self, id: &RunHandle) -> Option<String> {
+        self.runs.get(&id.0)?.net.lost()
     }
 
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {

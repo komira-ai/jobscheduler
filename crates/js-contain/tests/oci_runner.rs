@@ -147,6 +147,7 @@ impl Node {
             .to_vec(),
             devices: Vec::new(),
             mounted_root: None,
+            listen_ports: Vec::new(),
         }
     }
 }

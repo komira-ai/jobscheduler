@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, Hooks, config_dir};
+use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, Hooks, HostPorts, config_dir};
 use js_agent::image::config_path;
 use js_agent::lifecycle::{Body, DirLayout, FilesRoot, RunHandle, RunSpec, label};
 use js_contain::OciConfig;
@@ -217,6 +217,34 @@ pub struct Node {
     pub digest: String,
 }
 
+/// A test that ends with a run still standing (passed or failed) leaves no process: the node
+/// ends, as it is dropped, the process group of every supervisor its ledger's sidecars name
+/// that is still a process of this node (its command line names the node's directory, so a pid
+/// a process of another test or of the host was given since is never signalled).
+impl Drop for Node {
+    fn drop(&mut self) {
+        let Ok(sidecars) = std::fs::read_dir(self.scratch.join("oci-labels")) else {
+            return;
+        };
+        let mine = self.dir.display().to_string();
+        for sidecar in sidecars.flatten() {
+            let pid = std::fs::read_to_string(sidecar.path())
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|record| record["supervisor"]["pid"].as_i64())
+                .and_then(|raw| i32::try_from(raw).ok())
+                .and_then(rustix::process::Pid::from_raw);
+            let Some(pid) = pid else {
+                continue;
+            };
+            let line = std::fs::read(format!("/proc/{}/cmdline", pid.as_raw_nonzero()));
+            if line.is_ok_and(|line| String::from_utf8_lossy(&line).contains(&mine)) {
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+        }
+    }
+}
+
 impl Node {
     /// A node for the test `name` (a name with `refuse` in it has paths that cannot be given
     /// away; one with `start-fails` has runs whose `crun` cannot be started).
@@ -302,6 +330,7 @@ impl Node {
             gpus: None,
             image_budget: None,
             host_jobs: false,
+            host_ports: HostPorts::default(),
         }
     }
 
@@ -360,6 +389,7 @@ impl Node {
             labels: BTreeMap::from([(label::RUN.to_owned(), run_id.to_owned())]),
             network: Default::default(),
             ports: Vec::new(),
+            host_ports: Vec::new(),
             log_sink: None,
         }
     }

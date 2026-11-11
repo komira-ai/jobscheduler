@@ -211,6 +211,14 @@ impl Default for OciConfig {
     }
 }
 
+/// Whole seconds the init of a container with [`ContainerSpec::listen_ports`] waits for each
+/// to be listening before it gives up (`js-init --wait-listen`), as long as it waits for a
+/// route ([`OciConfig::route_wait`]): the daemon makes the listeners once `crun` names the
+/// container's pid, which it asks for that long.
+///
+/// [`ContainerSpec::listen_ports`]: crate::container::ContainerSpec::listen_ports
+pub const LISTEN_WAIT_SECS: u64 = 30;
+
 /// The start of the name of a lease's directory when it is made beside other directories
 /// ([`OciConfig::leases_in`]). A run id is `[A-Za-z0-9._-]` with a leading alphanumeric, so
 /// no run's own directory is named like a lease's.
@@ -807,9 +815,8 @@ fn id_tool(tool: &'static str, path: Option<&std::ffi::OsStr>) -> Result<(), Oci
     let mode = meta.permissions().mode();
     // Both facts are read: either is enough.
     let setuid = mode & 0o4000 != 0;
-    // The value is not wanted, only whether there is one: an empty buffer asks its size.
-    let mut none: [u8; 0] = [];
-    let capable = rustix::fs::getxattr(&found, "security.capability", &mut none).is_ok();
+    // The value is not wanted, only whether there is one: the size query answers that.
+    let capable = rustix::fs::getxattr_query(&found, "security.capability").is_ok();
     if !(setuid | capable) {
         return Err(refused(format!(
             "{} is neither setuid nor holds file capabilities",

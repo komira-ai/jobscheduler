@@ -352,6 +352,7 @@ impl Cell {
             mounts: shape.mounts,
             devices: Vec::new(),
             mounted_root: None,
+            listen_ports: Vec::new(),
         };
         Lease {
             spec,

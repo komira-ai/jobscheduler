@@ -315,6 +315,7 @@ fn spec(fixture: &Fixture, run_id: &str, exe: &Path, env: &[(&str, &str)]) -> Ru
         bundle: None,
         network: Default::default(),
         ports: Vec::new(),
+        host_ports: Vec::new(),
         log_sink: None,
     }
 }

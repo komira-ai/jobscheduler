@@ -368,8 +368,10 @@ pub struct JobResult {
     /// [`refusal::INPUT_UNREADABLE`] or [`refusal::HOST_PORT_LOST`], from an agent that
     /// reads a start's layers, mounts and host ports. The failure is then the host's,
     /// whatever the outcome and exit status, which are kept as they were. Absent otherwise,
-    /// and left out of the text; no agent of this release sets it. `detail` keeps its meaning
-    /// beside it. A server from before the field ignores it.
+    /// and left out of the text. An agent of this release on the `crun` runtime sets
+    /// `host-port-lost` for a job that did not succeed after a restart at which a host port of
+    /// it could not be offered again; none sets `input-unreadable` yet. `detail` keeps its
+    /// meaning beside it. A server from before the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_failure: Option<String>,
 }

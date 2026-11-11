@@ -50,6 +50,7 @@ async fn run(cell: &Cell, name: &str, argv: &[&str]) -> (Ended, String) {
         mounts: Vec::new(),
         devices: Vec::new(),
         mounted_root: None,
+        listen_ports: Vec::new(),
     };
     cell.oci.create(&spec).await.expect("bundle");
     let mut running = cell.oci.start(&spec, None).expect("started");

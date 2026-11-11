@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use js_agent_wire::LogTail;
+use js_agent_wire::{HostPort, LogTail};
 use js_contain::Isolation;
 use js_contain::cgroup::{LeaseCgroup, OomOutcome};
 use js_contain::container::{ContainerLimits, ContainerSpec, Ended, HostMount};
@@ -109,6 +109,8 @@ pub(super) fn container_spec(
         // A run's GPUs are given after the image's config ([`super::gpu::Wiring::apply`]).
         devices: Vec::new(),
         mounted_root: None,
+        // The job's init waits for the listener of each of its host ports.
+        listen_ports: run.host_ports.iter().map(HostPort::job_port).collect(),
     }
 }
 
@@ -175,6 +177,7 @@ pub(super) fn adopted_spec(
         mounts: Vec::new(),
         devices: Vec::new(),
         mounted_root: None,
+        listen_ports: Vec::new(),
     }
 }
 
