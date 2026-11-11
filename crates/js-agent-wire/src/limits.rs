@@ -23,8 +23,8 @@
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` and [`MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN`] for `egress-ports` |
 //! | a job start's `layers` | [`MAX_LAYERS`] entries; a host path [`MAX_PATH_LEN`] bytes, absolute, in normal form; an image as `image` |
-//! | a job start's path `mounts` | [`MAX_MOUNTS`] entries; `source` as a layer's host path; `target` [`MAX_PATH_LEN`] bytes with its leading `/`, ASCII, outside the runtime's places, no two equal in any case |
-//! | a job start's `host_ports` | [`MAX_PORTS`] entries, each from 1 to 65535, none twice |
+//! | a job start's path `mounts` | [`MAX_MOUNTS`] entries; a host-path `source` as a layer's host path; `target` [`MAX_PATH_LEN`] bytes with its leading `/`, ASCII, outside the runtime's places, no two equal in any case |
+//! | a job start's `host_ports` | [`MAX_PORTS`] entries, each `host_port` from 1 to 65535, none twice |
 //! | declared ports (`JobSpec::ports`) | [`MAX_PORTS`] entries, each port from 1 to 65535; the capability `egress-ports` [`MAX_PORTS`] items |
 //! | caps frame | [`MAX_CAPS_BUNDLES`] digests, [`MAX_CAPS_XCODES`] Xcode builds of [`MAX_XCODE_BUILD_LEN`] bytes |
 //! | free text (`agent_version`, taint, `detail`, `input_failure`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |

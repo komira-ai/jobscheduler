@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use js_agent_wire::{Command, Layer, MountMode, PathMount};
+use js_agent_wire::{Command, HostPort, Layer, MountMode, MountSource, PathMount};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -116,8 +116,12 @@ fn a_previous_agent_drops_the_new_fields() {
     let image = format!("ubuntu:24.04@sha256:{HEX}");
     let new_fields = json!({
         "layers": [{"type": "host_path", "path": "/srv/trees/toolchain"}],
-        "mounts": [{"source": "/srv/trees/src", "target": "/work", "mode": "copy_on_write"}],
-        "host_ports": [9000]
+        "mounts": [{
+            "source": {"type": "host_path", "path": "/srv/trees/src"},
+            "target": "/work",
+            "mode": "copy_on_write"
+        }],
+        "host_ports": [{"host_port": 9000}]
     });
     let wire = layered(new_fields);
     let here: Command = serde_json::from_value(wire.clone()).unwrap();
@@ -134,12 +138,14 @@ fn a_previous_agent_drops_the_new_fields() {
     assert_eq!(
         start.mounts,
         [PathMount {
-            source: "/srv/trees/src".into(),
+            source: MountSource::HostPath {
+                path: "/srv/trees/src".into(),
+            },
             target: "/work".into(),
             mode: MountMode::CopyOnWrite,
         }]
     );
-    assert_eq!(start.host_ports, [9000]);
+    assert_eq!(start.host_ports, [HostPort { host_port: 9000 }]);
 
     let there: PreviousJobStart = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(there.image, image);
@@ -173,7 +179,7 @@ fn a_layered_start_costs_a_previous_agent_no_other_command() {
     let reply = json!({
         "commands": [
             {"type": "job_stop", "job_id": "job-0"},
-            layered(json!({"host_ports": [9000, 9443]})),
+            layered(json!({"host_ports": [{"host_port": 9000}, {"host_port": 9443}]})),
             plain
         ]
     });
@@ -186,6 +192,9 @@ fn a_layered_start_costs_a_previous_agent_no_other_command() {
     let Command::JobStart(start) = &here.commands[1] else {
         panic!("a job start: {:?}", here.commands);
     };
-    assert_eq!(start.host_ports, [9000, 9443]);
+    assert_eq!(
+        start.host_ports,
+        [HostPort { host_port: 9000 }, HostPort { host_port: 9443 }]
+    );
     assert_eq!(here.validate().refused, []);
 }

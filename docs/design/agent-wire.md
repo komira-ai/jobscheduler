@@ -115,8 +115,8 @@ enums do not, each on purpose: an unknown `Phase` reads as `Quarantined` (it tak
 an unknown exclusive-refusal code reads as `RefusalReason::SetupFailed` (`refusal_codes_round_trip_and_unknown_reads_setup_failed`);
 and an unknown `Isolation`, `os` or `arch`, and an unknown value of the run and native bodies' `NetworkLevel`, `Placement`,
 `OutputKind`, `TreeUnavailable` or `InputRef` type (`crates/js-agent-wire/src/native.rs`, none of which has a catch-all variant;
-`docs/design/tree-inputs.md` 2.2 says why `InputRef::Tree` and `TreeUnavailable` add none), and of a job start's `Layer` type or
-`MountMode` (`crates/js-agent-wire/src/rootfs.rs`, neither of which has one either), fails the decode of
+`docs/design/tree-inputs.md` 2.2 says why `InputRef::Tree` and `TreeUnavailable` add none), and of a job start's `Layer` type,
+`MountSource` type or `MountMode` (`crates/js-agent-wire/src/rootfs.rs`, none of which has one either), fails the decode of
 that one start, which then reads as `Command::Unknown` while the commands beside it arrive
 (`unknown_isolation_is_typed_error_not_contained` and `unknown_enum_values_leave_known_entries_intact` in `tests/decode.rs`,
 `an_unknown_confinement_value_reads_as_an_unknown_command` in `tests/native_job.rs`, `an_unknown_platform_reads_as_an_unknown_command`
@@ -326,7 +326,7 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
 - *Correctness.* A `.proto` file becomes the schema and prost generates the structs. The trust-boundary checks do not go away:
   every `validate()` (`lib.rs`: "the server and the agent must call it on every message they receive") and every unknown-value rule
   of section 1 (`Unknown` variants; `Phase` to `Quarantined`; `RefusalReason` to `SetupFailed`; an unknown `Isolation`, `os`, `arch`,
-  `NetworkLevel`, `Placement`, `OutputKind`, `TreeUnavailable`, `InputRef`, `Layer` or `MountMode` refusing its one start) must be kept by hand over the generated types,
+  `NetworkLevel`, `Placement`, `OutputKind`, `TreeUnavailable`, `InputRef`, `Layer`, `MountSource` or `MountMode` refusing its one start) must be kept by hand over the generated types,
   because proto3 enums are open (an unknown value is kept as its number) and a field left at zero is indistinguishable from a field
   not sent. The decode tests named in section 1 and the previous-release tests would have to pass against the protobuf mapping too. `Option<i32>` (`exit_code`) and every `Option` field would need
   `optional`, and a negative `exit_code` costs 10 bytes as `int32` unless it is `sint32`. Either the domain code moves onto the

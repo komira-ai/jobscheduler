@@ -30,7 +30,7 @@ use crate::limits;
 use crate::log_sink::{self, LogReport, LogSink};
 use crate::network;
 use crate::refusal;
-use crate::rootfs::{self, Layer, PathMount};
+use crate::rootfs::{self, HostPort, Layer, PathMount};
 use crate::run::RunSpec;
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
@@ -219,17 +219,18 @@ pub struct JobStartSpec {
     /// [`Isolation::Host`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<Layer>,
-    /// Host directories at paths in the job's file system ([`PathMount`]), made after the
+    /// What the job sees at paths of its file system ([`PathMount`]; today host
+    /// directories), made after the
     /// root, parents before children. At most [`limits::MAX_MOUNTS`]; left out when there
     /// are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<PathMount>,
-    /// TCP ports on the host's loopback the job reaches at the same port on its own
-    /// loopback, whatever its `network`. Not `ports`, which forward the other way. At most
+    /// TCP ports on the host's loopback ([`HostPort`]) the job reaches at the same port on
+    /// its own loopback, whatever its `network`. Not `ports`, which forward the other way. At most
     /// [`limits::MAX_PORTS`], each from 1 to 65535, none twice; left out when there are
     /// none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub host_ports: Vec<u16>,
+    pub host_ports: Vec<HostPort>,
 }
 
 impl JobStartSpec {

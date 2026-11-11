@@ -281,6 +281,12 @@ pub struct PathMount {
 pub enum MountMode { #[default] ReadOnly, ReadWrite, CopyOnWrite }
 ```
 
+**As built** (build item 2), the wire shapes each item as a message so that later kinds and options land
+additively: `PathMount.source` is a `MountSource` tagged by `type` (`{"type": "host_path", "path": ...}`; a `tmpfs` or
+`image` source is a later variant), and `host_ports` is a list of `HostPort { host_port }` (a protocol, a port in the
+job other than the host's, or a Unix-socket pass-through is a later optional field or list). An unknown field is
+ignored; an unknown `type` or mode fails that one start's decode.
+
 `PathMount` is not `Mount` (`crates/js-agent-wire/src/command.rs`, a named root and a relative path, the legacy job
 form's) and does not replace it. `JobStartSpec::validate` applies the rules of 2.3, and `image` may be empty when
 `layers` is not (today it refuses an empty image `invalid-job`). The limits are constants of `limits.rs`: `MAX_LAYERS`
