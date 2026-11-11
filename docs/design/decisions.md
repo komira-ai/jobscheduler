@@ -321,7 +321,7 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   memory and a restart restarts the windows (swaps come later, never sooner).
 - **D66. A job's file system is assembled generically; no client or storage system is named.** A job may name read-only layers (a
   host directory or a digest-pinned image) stacked on its image, mounts of a source (a host directory now; a tmpfs and an image's
-  tree designed) read-only, read-write or copy-on-write with named options (`sub_path`, `no_exec`, private propagation), and host
+  tree designed) read-only, read-write or copy-on-write with named options (`sub_path`, `no_exec`, private propagation; id mapping designed), and host
   loopback ports it may reach at a port of its own (TCP now, UDP designed); host Unix sockets are designed. Every kind is one
   Docker, the OCI runtime or Kubernetes has, and the interface grows only by additions an earlier server refuses by name. The
   host's operator bounds the paths by the mount roots, read as prefixes, the registries by `--image-allow`, and the ports by

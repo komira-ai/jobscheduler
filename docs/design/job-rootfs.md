@@ -121,7 +121,7 @@ Ours follows the same split: a source (a `oneof`) and how it appears (target, mo
 | A service on the host's loopback, from the job | `--network host`, or `host-gateway` with a route | none | `hostNetwork: true` | `JobSpec.host_ports` (`HostPort`: host port, job port, protocol) | now, TCP; UDP designed, later |
 | A volume the runtime keeps between jobs | `type=volume` (named) | none | `persistentVolumeClaim`, `csi`, `ephemeral` | **no** | never: see below |
 | A network or device file system | `type=volume` with a driver (`nfs`, `cifs`) | `type: nfs`, ... | `nfs`, `iscsi`, `csi`, ... | **no** | never: see below |
-| Id-mapped ownership | daemon-wide `userns-remap` | `uidMappings`, `gidMappings`, `idmap` | `hostUsers: false` | **no** (LR5) | not now |
+| Id-mapped ownership | daemon-wide `userns-remap` | `uidMappings`, `gidMappings`, `idmap` | `hostUsers: false` | `Mount.id_mapping` (`IdMapping`) | designed (2.4), later (LR5) |
 | Free option strings | `volume-opt` | `options` | a volume's `mountOptions` | **no**: named fields only (LR18) | never |
 | Expanded paths | none | none | `subPathExpr` | **no** | not now |
 | Facts about the job as files | none | none | `downwardAPI` | **no**: the job's `env` carries what a client sends | not now |
@@ -214,6 +214,8 @@ message Mount {
   bool no_exec = 13;
   // Unspecified: private.
   MountPropagation propagation = 14;
+  // Designed (section 2.4), added with its build item:
+  //   IdMapping id_mapping = 15;
 }
 
 // The transport of a host port.
@@ -359,6 +361,16 @@ message HostSocket {
   string target = 2;
 }
 
+// Designed: Mount.id_mapping = 15. The source's files, owned on the host by `host_uid` and
+// `host_gid`, appear owned by the job's own user, so the job may write over a tree it did not
+// make. Absent: no mapping, as today (LR5).
+message IdMapping {
+  // The owner of the source's files on the host. The host's operator lists the ids a job may
+  // map (--map-id); any other is refused.
+  uint32 host_uid = 1;
+  uint32 host_gid = 2;
+}
+
 // Designed: PortProtocol value 2, PORT_PROTOCOL_UDP: datagrams to host_port on the host's
 // loopback, and the answers back, through a port of the job's loopback.
 ```
@@ -369,6 +381,7 @@ message HostSocket {
 | `Mount.image` | the image's flattened tree, as an image layer is (LR4); mode `READ_ONLY` or `COPY_ON_WRITE` (the store's tree is shared, so `READ_WRITE` is refused at submit); `sub_path` allowed | `mount-image` | the tree in the image store, pinned for the lease, bound as a host path's clone is (4.4) | refused `mount-source-unsupported-here` until the Mac has an image store |
 | `PORT_PROTOCOL_UDP` | a host port by datagram; unique per (protocol, job port); `--host-port` stays TCP's, and UDP gets an entry form of its own (`udp/PORT`), so an operator who allowed a TCP port has not allowed UDP | `host-port-udp` | a UDP socket the agent holds in the job's namespace, relaying each peer's datagrams to the host port and back (4.5) | a Seatbelt `network*` grant of the port, as TCP |
 | `host_sockets` | at most 16; `host_path` must be a socket beneath an operator's `--host-socket` prefix (after links); a path socket, not an abstract one; `target` as a mount's, at most 107 bytes (a socket address's path), and in one namespace with the mount targets: no two equal, and none below a read-only mount that does not hold it | `host-sockets` | 4.5: the socket resolved and cloned as a host path is, but a socket instead of a directory, then bound at the target | a link at the target in `exec/`, and a Seatbelt grant to connect to that socket (5.4) |
+| `Mount.id_mapping` | `host_uid`/`host_gid` mapped to the job's user (uid and gid 1000 in the container); the ids are bounded by an operator's `--map-id UID:GID`, repeatable; any source, every mode | `mount-idmap` | the clone of 4.2 step 3 made an id-mapped mount (`mount_setattr` with `MOUNT_ATTR_IDMAP` and a user namespace that maps `host_uid` to the job's container identity), done before it is attached; reported only where the kernel and the source's file system support id-mapped mounts (FUSE from 6.12; overlay lowers per kernel) | refused `mount-idmap-unsupported-here`: Seatbelt has no ownership mapping |
 | `HostToContainer` propagation | a later `MOUNT_PROPAGATION_RECEIVE`: mounts the host makes below the source after the start appear in the job; never the other way | `mount-propagation-receive` | the clone made a slave of its source instead of private | refused: a link has no propagation |
 
 A host socket is a message of its own rather than a third kind of `Mount.source`, though Docker and Kubernetes say it
@@ -540,7 +553,8 @@ New agent refusal codes, added to `refusal.rs` (add-only, `refusal_codes_snapsho
 | `host-port-lost` | as a result's `input_failure`: a host port could not be offered again after the agent restarted (4.5) |
 
 An image layer outside every `--image-allow` entry is refused `image-not-allowed`, the existing code. The designed
-additions of 2.4 bring one more code, `mount-source-unsupported-here`, with their build items; it is not added before.
+additions of 2.4 bring two more codes, `mount-source-unsupported-here` and `mount-idmap-unsupported-here`, with their
+build items; neither is added before.
 
 ## 4. The agent on Linux (`crun`)
 
@@ -672,7 +686,7 @@ lower fails `EXDEV` (`redirect_dir=off`; GNU `mv` then copies), renaming a file 
 needs the job to have write permission on it as the lower presents it: a host path whose files are owned by an id the
 job's mapping does not hold reads as owned by 65534, which the job cannot write into. A provider of trees a job will
 write over presents them owned by the job's container identity (the host uid `sub_uid + 1000`, `Oci::container_ids`);
-the agent does not change ownership (decision LR5).
+the agent does not change ownership (decision LR5), until the designed `id_mapping` option of 2.4 is built.
 
 ### 4.5 Host ports
 
@@ -1254,6 +1268,8 @@ server and the agent, after items 2 to 6, with its own detected capability, its 
     item 7, on macOS (5.4).
 13. **Receiving propagation** (`MOUNT_PROPAGATION_RECEIVE`, `mount-propagation-receive`), only if a client shows a
     mount it makes below a source after a job's start that the job must see.
+14. **Id-mapped mounts** (`Mount.id_mapping`, `IdMapping`, `--map-id`, `mount-idmap`), on the kernels and file systems
+    that support them; until then a provider presents writable trees owned by the job's container identity (LR5).
 
 ## 12. Decisions
 
@@ -1268,9 +1284,11 @@ Each is decided here; the owner may overturn any.
   overlay `/` (4.3). Cleanup is the agent's, as the mounter (4.6).
 - **LR4. An image layer is the image's flattened tree.** The store keeps one tree per image; per-layer storage with
   whiteouts kept is not asked for (B20). Two image layers stack as whole trees.
-- **LR5. The agent does not change the ownership of a host path.** Idmapped mounts of arbitrary file systems are not
-  available on every kernel and file system a host may use; a provider presents writable trees owned by the job's
-  container identity (4.4).
+- **LR5. The agent does not change the ownership of a host path; id mapping is a named, designed option.** Id-mapped
+  mounts of arbitrary file systems are not available on every kernel and file system a host may use, so until build
+  item 14 a provider presents writable trees owned by the job's container identity (4.4). `Mount.id_mapping` (2.4) is
+  the additive option that lifts this where the host supports it, behind its own capability and an operator's
+  `--map-id` list; it never chowns a file.
 - **LR6. The allow-lists are checked by the agent, not advertised.** Prefix lists do not fit a capability value, and a
   pool's hosts share a configuration; a mismatch is a configuration mistake with a named refusal (2.6).
 - **LR7. Every host path is resolved with `openat2` beneath its root and used through a clone** (4.2), so no path text
@@ -1284,10 +1302,11 @@ Each is decided here; the owner may overturn any.
   The owner decides it from measurements of a lazy provider's real macOS mount. Every candidate realises the same
   `COPY_ON_WRITE` mode, so the spec does not change whichever wins.
 - **LR11. The agent checks a failed job's host paths once after it ends**, and nothing while it runs (section 8).
-- **LR12. No new state or watch for "creating".** `PLACED` with a host and `STARTING` are the moments a client can
-  use, and `JobTimes` already gives the time spent preparing. Section 7 states, as rules a client can rely on, what the
-  existing states promise: forward only (with the whole-host requeue as the one way back), a read may miss a state, the
-  host is known from `PLACED`, inputs are first touched on that host while creating.
+- **LR12. The job's lifecycle is a documented guarantee any client may rely on; no new state or watch for "creating".**
+  `PLACED` with a host and `STARTING` are the moments a client can use, and `JobTimes` already gives the time spent
+  preparing. Section 7 states, as rules a client can rely on, what the existing states promise: forward only (with the
+  whole-host requeue as the one way back), a read may miss a state, the host is known from `PLACED`, inputs are first
+  touched on that host while creating.
 - **LR13. The tree wire is retired additively; only the never-reported capability key is removed** (section 6).
 - **LR14. `input-unavailable` is a public start failure code of its own; a refused allow-list is not.** The first is
   the host's state and worth a retry elsewhere; the second is a configuration mistake, named in the detail.
@@ -1317,8 +1336,8 @@ Each is decided here; the owner may overturn any.
 - **LR22. Volumes the runtime keeps, network and device file systems, and free option strings are not part of the
   interface** (2.1). Each is something Docker, the OCI runtime or Kubernetes has; each would make jobscheduler a storage
   client or the owner of state between jobs, or would give a job options no one validates. A provider mounts such
-  things on the host, and a job names the directory. Id mapping (LR5), path expressions and facts about the job as
-  files are deferred, not refused: none is needed now, and each could be added by the rule of 2.4.
+  things on the host, and a job names the directory. Path expressions and facts about the job as files are deferred,
+  not refused; id mapping is a designed option (LR5).
 
 ## 13. Open questions
 
