@@ -42,6 +42,9 @@ fn start() -> JobStartSpec {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 
@@ -568,6 +571,8 @@ fn a_job_results_input_failure_is_bounded_as_its_detail() {
         refusal::TREE_READ_FAILED.to_owned(),
         refusal::TREE_STALLED.to_owned(),
         refusal::TREE_UNAVAILABLE.to_owned(),
+        refusal::INPUT_UNREADABLE.to_owned(),
+        refusal::HOST_PORT_LOST.to_owned(),
         "tree-later".to_owned(),
         long(MAX_DETAIL_LEN),
     ] {

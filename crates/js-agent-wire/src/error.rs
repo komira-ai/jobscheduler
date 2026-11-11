@@ -36,6 +36,10 @@ pub enum Rule {
     /// The field is only meaningful in a native job, and this job has no native body.
     #[error("needs a native job")]
     NeedsNative,
+    /// A mount target names a place of the job's file system the runtime keeps for itself
+    /// (`js_types::path::RUNTIME_PLACES`), or one below it.
+    #[error("names a place the runtime keeps for itself")]
+    RuntimePlace,
     /// The peer speaks no protocol version this side speaks.
     #[error("names no protocol version this side speaks")]
     UnsupportedProtocol,

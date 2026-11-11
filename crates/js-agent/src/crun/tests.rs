@@ -340,14 +340,7 @@ impl std::io::Write for Lines {
 #[test]
 fn a_lease_whose_memory_events_cannot_be_read_ends_unflagged_and_is_logged() {
     let lines = Lines::default();
-    let writer = lines.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .with_max_level(tracing::Level::WARN)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    tracing::callsite::rebuild_interest_cache();
+    let _guard = crate::test_tracing::capture(lines.clone(), tracing::Level::WARN);
 
     let broken = Fixture::new("unreadable");
     fs::create_dir(broken.mount.join("actions/js-x-r1/memory.events")).expect("unreadable file");

@@ -18,6 +18,10 @@
 //! [`RefusalCode`]; what a host holds is a list of [`Held`] leases, a host a start could
 //! take is a [`Candidate`], and a listed host with its leases is a [`HostCapacity`].
 //!
+//! The paths a job names are held to one set of rules, [`path`], which the server and the
+//! agent share, as they share [`text::hidden`], the characters no text a log may show can
+//! hold.
+//!
 //! The [`sched`] module holds the scheduler's own vocabulary (operations, leases,
 //! control-log records, QoS, farm time, the state-machine trait). It shares names with
 //! the provider slice above (`Resources`, `LeaseId`) and is not re-exported at the root,
@@ -37,12 +41,14 @@ mod job;
 mod labels;
 mod memory;
 mod network;
+pub mod path;
 mod queue;
 mod request;
 mod resources;
 pub mod sched;
 mod shape;
 mod start;
+pub mod text;
 
 pub use accel::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,

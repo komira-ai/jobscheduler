@@ -236,6 +236,9 @@ fn job_start(job: &str, cpu_millis: u64) -> Command {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }))
 }
 

@@ -1,7 +1,8 @@
 //! The capability keys a job request can require of a host: `disk-gib` and `exec`.
 
 use js_caps::{
-    Consumable, DETECTED_KEYS, DISK_GIB, EXEC, NodeCaps, ReportError, Request, RequestError, Unmet,
+    Consumable, DETECTED_KEYS, DISK_GIB, EXEC, LAYERED_ROOTFS, NodeCaps, ReportError, Request,
+    RequestError, Unmet,
 };
 
 fn req(props: &[(&str, &str)]) -> Result<Request, RequestError> {
@@ -111,13 +112,14 @@ fn a_report_with_a_bad_disk_is_refused() {
     assert!(node(&[("disk-gib", "lots")]).is_err());
 }
 
-/// Asserts that the detected keys are exactly these ten, and that a request may name only
-/// `disk-gib` and `exec` of them: each of the other eight is refused as an unknown key,
-/// naming it. It catches a detected key added without the agent detecting it, and a host
+/// Asserts that the detected keys are exactly these eleven, and that a request may name only
+/// `disk-gib`, `exec` and `layered-rootfs` of them (the last because the server asks for it
+/// of a job with layers, mounts or host ports): each of the other eight is refused as an
+/// unknown key, naming it. It catches a detected key added without the agent detecting it, and a host
 /// property a request could ask for though no agent reports it, so that a job naming it
 /// could be placed nowhere.
 #[test]
-fn a_request_names_no_detected_key_but_disk_and_exec() {
+fn a_request_names_no_detected_key_but_disk_exec_and_layered_rootfs() {
     let detected = [
         "runtime",
         "gpu-toolkit",
@@ -129,16 +131,22 @@ fn a_request_names_no_detected_key_but_disk_and_exec() {
         "scratch-default-gib",
         "bundle",
         "bundle-root",
+        "layered-rootfs",
     ];
     assert_eq!(DETECTED_KEYS.as_slice(), detected.as_slice());
     for key in DETECTED_KEYS
         .iter()
-        .filter(|key| ![DISK_GIB, EXEC].contains(key))
+        .filter(|key| ![DISK_GIB, EXEC, LAYERED_ROOTFS].contains(key))
     {
         let refused = req(&[(key, "true")]);
         assert_eq!(refused, Err(RequestError::UnknownKey((*key).to_owned())));
     }
-    assert!(req(&[(DISK_GIB, "1"), (EXEC, "container")]).is_ok());
+    let named = [
+        (DISK_GIB, "1"),
+        (EXEC, "container"),
+        (LAYERED_ROOTFS, "true"),
+    ];
+    assert!(req(&named).is_ok());
 }
 
 /// Asserts that the retired tree capability key, which no agent of any release reported, is

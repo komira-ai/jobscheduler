@@ -266,6 +266,9 @@ fn host_start() -> crate::support::Reply {
         log_sink: None,
         kind: Default::default(),
         isolation: Isolation::Host,
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     };
     let beat = HeartbeatReply {
         commands: vec![Command::JobStart(Box::new(start))],

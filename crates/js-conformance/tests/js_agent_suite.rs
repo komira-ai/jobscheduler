@@ -279,6 +279,9 @@ fn job_start(job: &str, allocation: &str) -> JobStartSpec {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 
