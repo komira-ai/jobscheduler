@@ -140,3 +140,16 @@ fn a_request_names_no_detected_key_but_disk_and_exec() {
     }
     assert!(req(&[(DISK_GIB, "1"), (EXEC, "container")]).is_ok());
 }
+
+/// Asserts that the retired tree capability key, which no agent of any release reported, is
+/// an unknown key to a request since its removal: a request naming it is refused with
+/// `UnknownKey` naming it, and the message says so in full. It catches the key left among
+/// the exact keys, where a job naming it would parse and then be placed nowhere.
+#[test]
+fn the_retired_tree_key_is_unknown_to_a_request() {
+    let retired = "tierstore-trees";
+    let refused = req(&[(retired, "true")]);
+    assert_eq!(refused, Err(RequestError::UnknownKey(retired.to_owned())));
+    let said = refused.unwrap_err().to_string();
+    assert_eq!(said, r#"unknown capability key "tierstore-trees""#);
+}
