@@ -11,8 +11,8 @@
 //! The package depends on [`DEPENDS`] alone (the binary is static musl): the program its
 //! [`POSTINST`] runs, which every host that runs the package's units already has, so
 //! hostkeeper's `apt-get install --simulate` still finds nothing to install there but the
-//! package. The postinst makes the job user of the package's `sysusers.d` file and nothing else;
-//! the package has no other maintainer script and no conffiles, and it enables nothing: the
+//! package. The postinst makes the job user of the package's `sysusers.d` file and gives it a
+//! subordinate uid and gid range where it has none, and does nothing else; the package has no other maintainer script and no conffiles, and it enables nothing: the
 //! host's operator (or hostkeeper, from the hook manifest of the release's targets) starts a unit.
 //!
 //! The binary is never run. It must hold [`version_marker`], the text its `--version` is made
@@ -64,8 +64,9 @@ pub const DESCRIPTION: [&str; 4] = [
 pub const DEPENDS: &str = "systemd | systemd-standalone-sysusers";
 
 /// The `postinst` maintainer script (`packaging/js-agent/deb/postinst`): it runs
-/// `systemd-sysusers` on the package's `sysusers.d` file, so the job user that
-/// `js-agent-crun.service` names (`--job-user jsjob`) exists once the package is configured.
+/// `systemd-sysusers` on the package's `sysusers.d` file and gives the user a range in each of
+/// `/etc/subuid` and `/etc/subgid` that has none, so the job user that `js-agent-crun.service`
+/// names (`--job-user jsjob`) and its ranges exist once the package is configured.
 pub const POSTINST: &str = include_str!("../../../../packaging/js-agent/deb/postinst");
 
 /// One file of the package.

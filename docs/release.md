@@ -214,7 +214,8 @@ control and its files back:
 The package is `js-agent`, version `X.Y.Z`, architecture `amd64` or `arm64`. Its one dependency,
 `systemd | systemd-standalone-sysusers` (the binary is static), provides the `systemd-sysusers` its
 one maintainer script, `postinst` (`packaging/js-agent/deb/postinst`), runs to make the job user
-from the package's sysusers file; nothing enables or starts its units. hostkeeper runs
+from the package's sysusers file and to give it a subordinate uid and gid range where it has none
+(`packaging/js-agent/deb/README.md`); nothing enables or starts its units. hostkeeper runs
 `js-agent-crun.service` (the manifest's `run` unit, below); `js-agent.service` is the unit of a host
 that installs the package by hand and starts it as that unit's header says. The bytes depend
 only on the binary and the packaging files: root-owned entries, a fixed modification time, sorted
@@ -363,7 +364,7 @@ of every other product of the repository as they are.
 | `testing-apt-read` | `apt-publish` | assumes the publish role through the job's OIDC token (`channels assume`) and reads the suite's index and the ETag of each file from the bucket (`channels apt read`) |
 | `testing-apt-index` | `apt-signing` | checks the two packages against `SHA256SUMS` and their attestation by artifacts.yml at this commit, merges them into the index read (`channels apt index`) and signs `Release` (`InRelease`, `Release.gpg`) with the repository's subkey (`channels apt sign`), which it then removes |
 | `testing-apt-write` | `apt-publish` | checks the packages again, uploads each once to the pool (never over other bytes), writes the signed index with `If-Match` on the ETags read, and invalidates `/apt/dists/*` on the CDN (`channels apt write`) |
-| `check-apt` | none | on an amd64 and an arm64 runner, in a clean Ubuntu container pinned by digest: adds the repository with its keyring, installs `js-agent=X.Y.Z` from `testing`, and checks the version, the files, that the agent's own start check accepts the job user `jsjob` (a system account with no home and no login), that nothing is enabled and that nothing runs (`channels check-apt`) |
+| `check-apt` | none | on an amd64 and an arm64 runner, in a clean Ubuntu container pinned by digest: adds the repository with its keyring, installs `js-agent=X.Y.Z` from `testing`, and checks the version, the files, that the agent's own start check accepts the job user `jsjob` (a system account with no home and no login) and its subordinate uid and gid ranges, that nothing is enabled and that nothing runs (`channels check-apt`) |
 | `stable-apt-read`, `stable-apt-index`, `stable-apt-write` | as above | only when `check-apt` passed on both: read both suites, list in `stable` the entries `testing` holds for this version, held to the digests of `SHA256SUMS` (`channels apt promote`), sign, and write the index alone (`--no-pool`): `stable` serves the very bytes `testing` was checked with |
 
 No job holds both the signing key and the cloud role. A write that loses the race for the shared

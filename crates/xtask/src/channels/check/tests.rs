@@ -9,6 +9,8 @@ const URL: &str = "https://packages.komira.ai/apt";
 /// and gid as it picks them from the system range.
 const SYSUSERS_LINE: &str =
     "jsjob:x:998:998:jobscheduler job user:/nonexistent:/usr/sbin/nologin\n";
+/// The line the postinst writes to `/etc/subuid` and to `/etc/subgid` on a clean image.
+const SUBID_LINE: &str = "jsjob:200000:65536\n";
 /// The rest of a clean image's `/etc/passwd`.
 const BASE_PASSWD: &str =
     "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n";
@@ -36,6 +38,9 @@ struct Machine {
     /// The lines the install adds to `etc/passwd` (the postinst's job user); `None` leaves no
     /// `etc/passwd` at all.
     passwd: Option<&'static str>,
+    /// The `etc/subuid` and `etc/subgid` the install leaves (the postinst's ranges); `None`
+    /// leaves no such file.
+    subids: (Option<&'static str>, Option<&'static str>),
 }
 
 impl Machine {
@@ -52,6 +57,7 @@ impl Machine {
             running: false,
             refuse: None,
             passwd: Some(SYSUSERS_LINE),
+            subids: (Some(SUBID_LINE), Some(SUBID_LINE)),
         }
     }
 
@@ -88,6 +94,11 @@ impl Machine {
         self.put("proc/43/comm", b"bash\n");
         if let Some(lines) = self.passwd {
             self.put("etc/passwd", format!("{BASE_PASSWD}{lines}").as_bytes());
+        }
+        for (rel, text) in [("etc/subuid", self.subids.0), ("etc/subgid", self.subids.1)] {
+            if let Some(text) = text {
+                self.put(rel, text.as_bytes());
+            }
         }
     }
 }
@@ -534,7 +545,7 @@ fn the_check_says_the_job_user_was_accepted() {
     assert_eq!(
         said,
         [
-            "check-apt: js-agent 1.2.3 installed from the suite testing on amd64; it says \"js-agent 1.2.3\"; its 9 files are there; the agent's start check accepts the job user jsjob; no unit is enabled and nothing runs"
+            "check-apt: js-agent 1.2.3 installed from the suite testing on amd64; it says \"js-agent 1.2.3\"; its 9 files are there; the agent's start check accepts the job user jsjob and its subordinate ranges; no unit is enabled and nothing runs"
         ]
     );
 }
@@ -552,5 +563,65 @@ fn the_start_check_of_check_apt_runs_no_program() {
     assert_eq!(
         NoPrograms.run_in("/usr/bin/crun", &["--version"], &[("PATH", "/usr/bin")]),
         Err("/usr/bin/crun: not run by check-apt".to_owned())
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_install_whose_postinst_left_the_job_user_without_ranges_is_refused_with_the_agents_own_words()
+{
+    // Catches: a package that makes jsjob but no subordinate range, the second refusal a host
+    // set up from the package alone met ("no range for the daemon's user jsjob"); each file is
+    // judged on its own, a range of another user or of too few ids is no range, and a range
+    // given by the job user's uid is one.
+    let want = |dir: &Path, file: &str| {
+        format!(
+            "the agent's start check refuses the host: {kind} range: {path}/etc/{file} has no range for the daemon's user jsjob (uid 998): the container driver runs every container in a user namespace whose ids map only to subordinate ids. Add one (usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>) (fix: add jsjob:<first id>:65536 to {path}/etc/{file} (`usermod --add-subuids` and `--add-subgids`))",
+            kind = &file[..6],
+            path = dir.display()
+        )
+    };
+    for (name, subids, missing) in [
+        ("ranges-none", (None, None), &["subuid", "subgid"][..]),
+        (
+            "ranges-uid-only",
+            (Some(SUBID_LINE), Some("")),
+            &["subgid"][..],
+        ),
+        (
+            "ranges-other-user",
+            (Some("alice:200000:65536\n"), Some(SUBID_LINE)),
+            &["subuid"][..],
+        ),
+        (
+            "ranges-by-uid",
+            (Some("998:200000:65536\n"), Some("998:200000:65536\n")),
+            &[][..],
+        ),
+    ] {
+        let dir = scratch(name);
+        let mut machine = Machine::new(&dir);
+        machine.subids = subids;
+        let problems = match check_apt(&machine, &apt(&dir)) {
+            Ok(_) => Vec::new(),
+            Err(Error::Refused(problems)) => problems,
+            Err(e) => panic!("{name}: {e}"),
+        };
+        let expected: Vec<String> = missing.iter().map(|file| want(&dir, file)).collect();
+        assert_eq!(problems, expected, "{name}");
+    }
+    // Fewer ids than the agent asks for is its other refusal.
+    let dir = scratch("ranges-too-few");
+    let mut machine = Machine::new(&dir);
+    machine.subids = (Some("jsjob:200000:65535\n"), Some(SUBID_LINE));
+    let Err(Error::Refused(problems)) = check_apt(&machine, &apt(&dir)) else {
+        panic!("not refused");
+    };
+    assert_eq!(
+        problems,
+        [format!(
+            "the agent's start check refuses the host: subuid range: {path}/etc/subuid gives the daemon's user jsjob (uid 998) 65535 subordinate ids; at least 65536 are needed so that every id an image uses maps (fix: add jsjob:<first id>:65536 to {path}/etc/subuid (`usermod --add-subuids` and `--add-subgids`))",
+            path = dir.display()
+        )]
     );
 }

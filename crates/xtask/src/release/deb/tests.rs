@@ -213,40 +213,26 @@ fn the_control_archive_holds_control_md5sums_and_the_postinst_only() {
     assert!(!entries[3].directory);
 }
 
-/// Asserts the postinst makes the package's own job user and does nothing else: at `configure`
-/// (and the abort steps that put a configured package back) it runs `systemd-sysusers` on the
-/// basename of the package's `sysusers.d` file, under `DPKG_ROOT` when dpkg sets one, stops on
-/// the first failure, and starts, enables and removes nothing.
+/// Asserts the postinst names the package's own `sysusers.d` file and does nothing a package
+/// promises not to: it starts, enables and removes nothing. What it does to a system is
+/// asserted by running it (`tests/js_agent_postinst.rs`).
 ///
 /// Catches a postinst that names another file than the one the package installs (sysusers would
-/// find no such file and fail the install), and one that runs at `remove` or at no step.
+/// find no such file and fail the install), and one that touches a unit.
 #[test]
-fn the_postinst_runs_sysusers_on_the_packages_own_file_at_configure() {
+fn the_postinst_runs_sysusers_on_the_packages_own_file() {
     let sysusers = FILES
         .iter()
         .find(|file| file.path.starts_with("/usr/lib/sysusers.d/"))
         .expect("a sysusers.d file");
     assert_eq!(sysusers.path, "/usr/lib/sysusers.d/js-agent.conf");
     assert_eq!(sysusers.mode, 0o644);
-    let code: Vec<&str> = POSTINST
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect();
-    assert_eq!(
-        code,
-        [
-            "set -e",
-            "case \"$1\" in",
-            "configure | abort-upgrade | abort-deconfigure | abort-remove)",
-            "systemd-sysusers ${DPKG_ROOT:+--root=\"$DPKG_ROOT\"} js-agent.conf",
-            ";;",
-            "esac",
-            "exit 0",
-        ]
-    );
     assert!(POSTINST.starts_with("#!/bin/sh\n"));
-    for word in ["systemctl", "deb-systemd", "useradd", "rm "] {
+    assert!(
+        POSTINST.lines().any(|line| line.trim()
+            == "systemd-sysusers ${DPKG_ROOT:+--root=\"$DPKG_ROOT\"} js-agent.conf")
+    );
+    for word in ["systemctl", "deb-systemd", "useradd", "usermod", "rm "] {
         assert!(!POSTINST.contains(word), "{word}");
     }
 }

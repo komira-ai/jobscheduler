@@ -8,9 +8,10 @@
 //! a deb822 `Signed-By`) and the suite `testing`, installs `js-agent=<version>`, and then holds the
 //! installed system to what the package promises: dpkg lists the package at the version, the
 //! binary's `--version` says `js-agent <version>`, every file of the package ([`files`]) is there,
-//! the package's postinst made the job user ([`JOB_USER`]) so that the agent's own start check
-//! (`js_agent::crun_host::check`) finds nothing missing about the account, the account is a
-//! system one with no home and no login, and no unit is enabled and no `js-agent` process runs.
+//! the package's postinst made the job user ([`JOB_USER`]) and its subordinate uid and gid ranges
+//! so that the agent's own start check (`js_agent::crun_host::check`) finds nothing missing about
+//! the account or the ranges, the account is a system one with no home and no login, and no unit
+//! is enabled and no `js-agent` process runs.
 //!
 //! The programs (`apt-get`, `dpkg`, `dpkg-query`, `curl`, the installed binary) run behind
 //! [`Host`], so a test answers in place of them; `--root` is where the checked system is (`/`),
@@ -212,8 +213,8 @@ fn running(root: &Path) -> Vec<String> {
     found
 }
 
-/// A runner that runs no program: the job user's part of the start check runs none, and the
-/// pieces that do (`crun --version`) are not the job user's.
+/// A runner that runs no program: the job user's part of the start check ([`JOB_PIECES`]) runs
+/// none, and the pieces that do (`crun --version`) are not the job user's.
 #[cfg(target_os = "linux")]
 struct NoPrograms;
 
@@ -233,16 +234,22 @@ impl js_agent::CommandRunner for NoPrograms {
     }
 }
 
+/// The pieces of the agent's start check that the package's postinst provides: the job user and
+/// its subordinate uid and gid ranges.
+#[cfg(target_os = "linux")]
+pub const JOB_PIECES: [Piece; 3] = [Piece::JobUser, Piece::SubUid, Piece::SubGid];
+
 /// The agent's start check of `--runtime crun` against the system below `root` (every file it
 /// reads is below `root`), as the packaged unit asks it (`--job-user jsjob`, the distribution's
-/// crun, the unit's state and scratch roots): what it finds missing about the job user, one
-/// problem each. The other pieces (crun, the subordinate ranges, the roots, cgroups, AppArmor)
+/// crun, the unit's state and scratch roots): what it finds missing of [`JOB_PIECES`], one
+/// problem each. The other pieces (crun, newuidmap and newgidmap, the roots, cgroups, AppArmor)
 /// are the host's, which the package does not provide, and are not judged here.
 ///
 /// Linux only, as the start check is (`check-apt` runs in a Linux container; xtask also builds
 /// on macOS, where there is no such check to run).
 #[cfg(target_os = "linux")]
-fn job_user_refusals(root: &Path) -> Vec<String> {
+#[must_use]
+pub fn job_user_refusals(root: &Path) -> Vec<String> {
     let below = |path: &str| root.join(path.trim_start_matches('/'));
     let mut host = CrunHost::system();
     host.ids.passwd = below("/etc/passwd");
@@ -269,7 +276,7 @@ fn job_user_refusals(root: &Path) -> Vec<String> {
     crun_host::check(&request, &host, &NoPrograms)
         .missing
         .iter()
-        .filter(|missing| missing.piece == Piece::JobUser)
+        .filter(|missing| JOB_PIECES.contains(&missing.piece))
         .map(|missing| format!("the agent's start check refuses the host: {missing}"))
         .collect()
 }
@@ -447,7 +454,7 @@ pub fn check_apt(host: &dyn Host, r: &Apt) -> Result<Vec<String>, Error> {
         return Err(Error::Refused(problems));
     }
     Ok(vec![format!(
-        "check-apt: {PACKAGE} {} installed from the suite testing on {}; it says {said:?}; its {} files are there; the agent's start check accepts the job user {JOB_USER}; no unit is enabled and nothing runs",
+        "check-apt: {PACKAGE} {} installed from the suite testing on {}; it says {said:?}; its {} files are there; the agent's start check accepts the job user {JOB_USER} and its subordinate ranges; no unit is enabled and nothing runs",
         r.version,
         r.arch,
         crate::release::deb::FILES.len()

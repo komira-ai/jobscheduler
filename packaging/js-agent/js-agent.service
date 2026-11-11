@@ -2,7 +2,8 @@
 # host with `systemctl cat js-agent`; crates/xtask/tests/js_agent_package.rs pins the settings described here.
 #
 # The package's one maintainer script, its postinst, makes the job user of the crun unit
-# (systemd-sysusers) and nothing else: nothing starts or configures the agent. The sequence, as
+# (systemd-sysusers) and its subordinate id ranges, and nothing else: nothing starts or
+# configures the agent. The sequence, as
 # root:
 #   1. systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
 #        makes the directories below (dpkg does not run systemd-tmpfiles; a reboot would)

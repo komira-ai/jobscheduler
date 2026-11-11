@@ -17,26 +17,40 @@ update hook (`/usr/bin/js-agent update-hook`) for every update.
 | `js-agent-crun.service` | `/usr/lib/systemd/system/js-agent-crun.service` | the agent, run with crun; the one unit hostkeeper starts, stops and enables |
 | `js-agent-crun-gpu.service` | `/usr/lib/systemd/system/js-agent-crun-gpu.service` | the oneshot that writes the GPU drop-in; pulled in by the agent's unit |
 | `tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent-crun.conf` | the directories of the unit |
-| `sysusers.conf` | `/usr/lib/sysusers.d/js-agent.conf` | the job user `jsjob` the unit names with `--job-user`, which the postinst makes |
+| `sysusers.conf` | `/usr/lib/sysusers.d/js-agent.conf` | the job user `jsjob` the unit names with `--job-user`, which the postinst makes (and gives its subordinate ranges) |
 | `../js-agent.service` | `/usr/lib/systemd/system/js-agent.service` | the agent run through Docker or Podman, for a host that installs the package by hand; hostkeeper does not start it |
 | `../tmpfiles.conf` | `/usr/lib/tmpfiles.d/js-agent.conf` | the directories of that unit |
 | `../crun_host_setup.sh` | `/usr/share/js-agent/crun_host_setup.sh` | the host setup script, mode 0755 |
 | `LICENSE` | `/usr/share/doc/js-agent/copyright` | |
 
-The package has one maintainer script, `postinst`, which runs `systemd-sysusers js-agent.conf` at
-`configure`: it makes the job user `jsjob` (a system account with a group of the same name, a uid
-and gid from the system range, home `/nonexistent`, shell `/usr/sbin/nologin`) and keeps an
-account of that name that exists already, as one the setup script or an operator made. Its one
+The package has one maintainer script, `postinst`, which acts at `configure` (and at the abort
+steps that put a configured package back):
+
+1. `systemd-sysusers js-agent.conf` makes the job user `jsjob` (a system account with a group of
+   the same name, a uid and gid from the system range, home `/nonexistent`, shell
+   `/usr/sbin/nologin`) and keeps an account of that name that exists already, as one the setup
+   script or an operator made.
+2. It gives `jsjob` a subordinate range in each of `/etc/subuid` and `/etc/subgid` that has none.
+   A file that has one is left as it is: a line naming the user (or its uid) with a first id
+   above 0 and 65536 ids or more that end below 2^32, the range the agent reads, as the
+   `jsjob:296608:65536` a host set up by the setup script has. The new range is
+   `jsjob:<first>:65536`, the same in both files, where `<first>` is the setup script's choice:
+   the first id from 200000 that starts 65536 ids overlapping no range of either file and holding
+   no uid of `/etc/passwd` and no gid of `/etc/group`. When no such block ends below 2^32 the
+   postinst writes nothing, warns on standard error and the install goes on; the agent's start
+   check then names the missing range.
+
+Its one
 `Depends`, `systemd | systemd-standalone-sysusers`, is what provides `systemd-sysusers`; every
 host that runs the package's units has `systemd`, so it adds nothing to install there. Removing
-or purging the package leaves the account. The package has no conffile and enables no unit: the
+or purging the package leaves the account and its ranges. The package has no conffile and enables no unit: the
 install changes nothing a running agent reads until hostkeeper restarts the unit.
 
 ## What the host provides
 
 The agent's start check of `--runtime crun` (`js-agent-crun.service` exits 2 and
 `journalctl -u js-agent-crun` lists each missing piece) needs more than the package carries. The
-package makes the job user; the rest is the host's, and is placed before hostkeeper starts the
+package makes the job user and its subordinate ranges; the rest is the host's, and is placed before hostkeeper starts the
 unit, by `crun_host_setup.sh` (`docs/runbooks/crun-host-setup.md`), by the machine image, or by
 hand:
 
@@ -44,7 +58,6 @@ hand:
 |---|---|---|
 | `crun`, `crun version` | the distribution's `crun` package, 1.14 or newer, at `/usr/bin/crun` | not a `Depends`: hostkeeper's install must find nothing to install but the package, and the program must be the distribution's file, which its AppArmor profile attaches to |
 | `newuidmap`, `newgidmap` | the `uidmap` package | not a `Depends`, as for `crun` |
-| `subuid range`, `subgid range` | a range of 65536 ids or more for `jsjob` in `/etc/subuid` and in `/etc/subgid`, overlapping no other range, uid or gid of the host: a line `jsjob:<first id>:65536` in each, which names the user and so can be placed before the package makes the account (after it, `usermod --add-subuids` and `--add-subgids` write the same lines) | the free block is the host's to choose: the setup script picks the first free one from 200000 |
 | `apparmor profile` | where `kernel.apparmor_restrict_unprivileged_userns` is 1, the distribution's profile for `/usr/bin/crun` loaded (`apparmor`) | the profile is the distribution's |
 | `scratch root`, `path permissions` | the scratch filesystem mounted at `/var/lib/js-agent/scratch` (the unit starts only on a mount point there), with project quotas (`prjquota`) | the disk is the host's |
 | `cgroup v2 delegation` | cgroup v2 and systemd 254 or newer | the unit asks for it (`Delegate=yes`, `DelegateSubgroup=supervisor`) |
