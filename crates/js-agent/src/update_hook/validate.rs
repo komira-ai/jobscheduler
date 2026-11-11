@@ -4,7 +4,9 @@
 //! The record is the hook's own memory, kept where only root writes; the rules are for the
 //! day that stops being true (a corrupt file, a record of another version, a directory that
 //! was not what it should be). A record that fails one is not acted on: the step exits 1 with
-//! the reason `state_invalid` and changes nothing. Where the record and the system disagree
+//! the reason `state_invalid` and changes nothing. The one exception is `prepare`'s, for a record
+//! of another target that never took the host: it is moved aside, not used (see
+//! `step::supersede`). Where the record and the system disagree
 //! about what was done, the system is believed; that is a step's decision and not a rule here.
 
 use std::ffi::OsStr;

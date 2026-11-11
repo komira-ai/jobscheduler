@@ -319,7 +319,7 @@ fn a_record_of_this_schema_with_a_body_the_type_refuses_is_corrupt() {
     );
 }
 
-/// A save, the first half, the second half, and a delete each refuse to touch a record that a
+/// A save, the first half, the second half, a delete and a set-aside each refuse to touch a record that a
 /// load refuses (newer, corrupt), and leave it and the directory as they were.
 #[test]
 fn nothing_replaces_or_deletes_a_record_that_is_refused() {
@@ -333,6 +333,7 @@ fn nothing_replaces_or_deletes_a_record_that_is_refused() {
             held.write_temp(&note).unwrap_err(),
             held.commit().unwrap_err(),
             held.delete().unwrap_err(),
+            held.set_aside("record.aside.json").unwrap_err(),
         ];
         for error in results {
             assert_eq!(
@@ -343,6 +344,103 @@ fn nothing_replaces_or_deletes_a_record_that_is_refused() {
         }
         assert_eq!(record_text(tmp.path()), body, "{name}");
         assert!(!tmp.path().join(TEMP_FILE).exists(), "{name}");
+        assert!(!tmp.path().join("record.aside.json").exists(), "{name}");
+    }
+}
+
+/// A set-aside moves the record, as it is, to the name given in the directory and says where
+/// it went: the step then finds no record, and the lock and a leftover temporary file stay.
+#[test]
+fn a_record_set_aside_keeps_its_bytes_under_the_new_name_and_leaves_no_record() {
+    let tmp = cell("aside-moves");
+    let held = open(tmp.path()).unwrap();
+    held.save(&Note::new("old")).unwrap();
+    held.write_temp(&Note::new("half")).unwrap();
+    let before = record_text(tmp.path());
+    let moved = held.set_aside("record.superseded.json").unwrap();
+    assert_eq!(moved, tmp.path().join("record.superseded.json"));
+    assert_eq!(fs::read_to_string(&moved).unwrap(), before);
+    assert_eq!(held.load().unwrap(), None);
+    assert!(tmp.path().join(TEMP_FILE).is_file());
+    assert!(tmp.path().join("lock").is_file());
+    // A save after it makes a record of its own and leaves the one set aside alone.
+    held.save(&Note::new("new")).unwrap();
+    assert_eq!(held.load().unwrap(), Some(Note::new("new")));
+    assert_eq!(fs::read_to_string(&moved).unwrap(), before);
+}
+
+/// A set-aside never replaces a file: a name that is taken is an error naming it, and the
+/// record and the file there are both kept as they were.
+#[test]
+fn a_set_aside_onto_a_name_that_is_taken_changes_nothing() {
+    let tmp = cell("aside-taken");
+    let held = open(tmp.path()).unwrap();
+    held.save(&Note::new("old")).unwrap();
+    let taken = tmp.path().join("record.superseded.json");
+    fs::write(&taken, "earlier").unwrap();
+    let before = record_text(tmp.path());
+    let error = held.set_aside("record.superseded.json").unwrap_err();
+    match &error {
+        StateError::Io { path, source } => {
+            assert_eq!(*path, taken);
+            assert_eq!(source.kind(), io::ErrorKind::AlreadyExists);
+        }
+        other => panic!("not an io error: {other:?}"),
+    }
+    assert_eq!(error.reason(), TestReason::StateInvalid);
+    assert_eq!(record_text(tmp.path()), before);
+    assert_eq!(fs::read_to_string(&taken).unwrap(), "earlier");
+}
+
+/// With no record there is nothing to set aside: an error naming the name, and no file made.
+#[test]
+fn a_set_aside_with_no_record_is_an_io_error_and_makes_nothing() {
+    let tmp = cell("aside-none");
+    let held = open(tmp.path()).unwrap();
+    let error = held.set_aside("record.superseded.json").unwrap_err();
+    match &error {
+        StateError::Io { path, source } => {
+            assert_eq!(*path, tmp.path().join("record.superseded.json"));
+            assert_eq!(source.kind(), io::ErrorKind::NotFound);
+        }
+        other => panic!("not an io error: {other:?}"),
+    }
+    assert!(!tmp.path().join("record.superseded.json").exists());
+}
+
+/// A name that is not one plain file name of its own (empty, `.`, `..`, a path, a trailing
+/// slash, or the record's, the temporary file's or the lock's) is refused before anything is
+/// moved.
+#[test]
+fn a_set_aside_takes_only_a_plain_file_name_of_its_own() {
+    let tmp = cell("aside-names");
+    let held = open(tmp.path()).unwrap();
+    held.save(&Note::new("old")).unwrap();
+    let before = record_text(tmp.path());
+    for name in [
+        "",
+        ".",
+        "..",
+        "sub/aside.json",
+        "aside.json/",
+        "/aside.json",
+        RECORD_FILE,
+        TEMP_FILE,
+        "lock",
+    ] {
+        match held.set_aside(name).unwrap_err() {
+            StateError::Io { path, source } => {
+                assert_eq!(path, tmp.path().join(name), "{name:?}");
+                assert_eq!(source.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+                assert_eq!(
+                    source.to_string(),
+                    "not a plain file name of its own",
+                    "{name:?}"
+                );
+            }
+            other => panic!("{name:?}: not an io error: {other:?}"),
+        }
+        assert_eq!(record_text(tmp.path()), before, "{name:?}");
     }
 }
 

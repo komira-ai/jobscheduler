@@ -6,8 +6,11 @@
 //!
 //! In this order, each before anything is written unless it says so:
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
-//!    is `state_invalid` (1). The state directory is made, mode 0700, when it is not there:
-//!    hostkeeper makes none, so a first install finds none;
+//!    is `state_invalid` (1), except a record of another target that never took the host, which
+//!    is superseded (see [`supersede`](super::supersede)): moved aside just before the new record
+//!    is first written (5), and named in the detail of the step's last line. The state
+//!    directory is made, mode 0700, when it is not there: hostkeeper makes none, so a first
+//!    install finds none;
 //! 2. a taint or an `owed-*` record halts (76);
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
 //!    release, see [`agent_in`]) `--version` names the target version (1), and the staged release
@@ -34,33 +37,46 @@ use crate::update_hook::{
     Report, UnitRestart, UpdateInfo, agent_in, plan,
 };
 
-use super::{Env, check, failure, lease_failure, open_state, save, success};
+use super::supersede::{judge, set_aside};
+use super::{Env, check, failure, lease_failure, open_unchecked, save, success};
 
 /// The agent's name, the first word of its `--version`.
 const AGENT_NAME: &str = "js-agent";
 
 /// Runs `prepare` of the release in `params.staged_release`.
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
-    run(env, params).unwrap_or_else(|done| done)
+    let mut superseded = None;
+    let done = run(env, params, &mut superseded).unwrap_or_else(|done| done);
+    note_superseded(done, superseded)
 }
 
-fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
-    let (held, loaded) = open_state(env, params)?;
+fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Result<Done, Done> {
+    let (held, loaded) = open_unchecked(env, params)?;
+    let stale = match &loaded {
+        Some(record) => judge(env, params, record)?,
+        None => false,
+    };
     // Before anything else is looked at or written: no version can repair a taint.
     refuse_host(env)?;
-    let fresh = loaded.is_none();
-    let mut record = match loaded {
-        Some(record) => record,
-        None => {
+    let (fresh, aside, mut record) = match loaded {
+        Some(record) if !stale => (false, None, record),
+        aside => {
             let record = new_record(params);
             check(params, &record)?;
-            record
+            (true, aside, record)
         }
     };
     check_agent(env, params)?;
     let restart = staged_unit(env, params)?;
     if params.previous_version.is_none() {
         join_token(env, params)?;
+    }
+    // The record of another target goes aside only now, when the new one is about to be
+    // written: a refusal before this point leaves the host as it found it.
+    if let Some(aside) = &aside {
+        *superseded = Some(set_aside(env, &held, aside)?);
+    }
+    if params.previous_version.is_none() {
         if fresh {
             save(env, &held, &record)?;
         }
@@ -86,6 +102,17 @@ fn staged_unit(env: &Env<'_>, params: &Params) -> Result<Option<UnitRestart>, Do
         PlanError::Staged { .. } => bad_artifact(why),
         PlanError::Installed { .. } => failure(Reason::StateInvalid, why.to_string()),
     })
+}
+
+/// Any ending of a step that set a record of another target aside says so first.
+fn note_superseded(mut done: Done, superseded: Option<String>) -> Done {
+    if let Some(note) = superseded {
+        done.report.detail = Some(match done.report.detail.take() {
+            Some(detail) => format!("{note}; {detail}"),
+            None => note,
+        });
+    }
+    done
 }
 
 /// A success that says the unit changes, and which keys.

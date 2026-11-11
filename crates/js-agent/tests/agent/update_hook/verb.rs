@@ -81,8 +81,8 @@ fn last_line(out: &str) -> serde_json::Value {
 
 /// Each outcome exits with its status and prints the step's report as the last line; a step that
 /// does not succeed also says on standard error how it ended, with the reason and the detail of
-/// that line, which is what hostkeeper's journal keeps of a hook. Catches a refusal that the
-/// journal shows as a bare reason token.
+/// that line, which is what hostkeeper's journal keeps of a hook, and a success says its detail
+/// there. Catches a refusal that the journal shows as a bare reason token.
 #[test]
 fn each_outcome_exits_with_its_status_and_prints_the_report_the_step_gave() {
     let (_dir, params) = params_file("hook-verb-outcomes", PARAMS);
@@ -90,7 +90,11 @@ fn each_outcome_exits_with_its_status_and_prints_the_report_the_step_gave() {
         format!("js-agent update-hook: verify {ending}: not_implemented: the step's own words\n")
     };
     let cases = [
-        (Outcome::Success, 0, String::new()),
+        (
+            Outcome::Success,
+            0,
+            "js-agent update-hook: verify succeeded: the step's own words\n".to_owned(),
+        ),
         (Outcome::Failure, 1, said("failed")),
         (Outcome::Deferred, 75, said("deferred")),
         (Outcome::Halt, 76, said("halted")),
@@ -118,6 +122,26 @@ fn each_outcome_exits_with_its_status_and_prints_the_report_the_step_gave() {
             assert_eq!(ran.out, format!("{}\n", report.to_line()));
             assert_eq!(ran.err, err, "{outcome:?}");
         }
+    }
+}
+
+/// A success with nothing to say (no detail) writes nothing on standard error, in both forms.
+#[test]
+fn a_success_without_a_detail_says_nothing_on_standard_error() {
+    let (_dir, params) = params_file("hook-verb-quiet-success", PARAMS);
+    let step = |_: &Invocation, _: &Params| Done {
+        outcome: Outcome::Success,
+        report: Report::default(),
+    };
+    for verb in FORMS {
+        let ran = run_in(
+            verb,
+            &["cleanup", "--params", &params],
+            &Host { step: &step },
+        );
+        assert_eq!(ran.status, status(0));
+        assert_eq!(ran.out, format!("{}\n", Report::default().to_line()));
+        assert_eq!(ran.err, "");
     }
 }
 
