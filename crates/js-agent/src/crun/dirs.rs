@@ -8,6 +8,8 @@ use std::io;
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
+use super::fs::assemble::{COW, ROOT_UPPER, ROOT_WORK};
+
 /// Makes the new directory `dir` with the mode `0755` whatever the umask is, setting the mode
 /// by the descriptor of what was made.
 pub(super) fn make_dir(dir: &Path) -> io::Result<()> {
@@ -16,8 +18,9 @@ pub(super) fn make_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Takes the directory `dir` the lifecycle made for the run whose scratch directory is
-/// `reference` ([`Runtime::lease_dir`]) and sets its mode to `0755`. It must be there, be an
-/// empty directory (not a link) and have the project id `project` reads of `reference`
+/// `reference` ([`Runtime::lease_dir`]) and sets its mode to `0755`. It must be there, be a
+/// directory (not a link) that holds nothing but the writable layers the run's assembly put
+/// in it ([`ASSEMBLED`]), and have the project id `project` reads of `reference`
 /// (`None` on both sides, a file system with no project ids, where no quota can be on, is the
 /// same project; a read that failed on either side refuses): otherwise it is refused and
 /// nothing is made, so a lease never lies outside the run's disk bound. Both directories
@@ -33,12 +36,15 @@ pub(super) fn take_dir(
     let held = open_nofollow(reference)?;
     // The listing through the descriptor's own `/proc` link; an entry or a listing that cannot
     // be read counts as something in it.
-    let empty = std::fs::read_dir(format!("/proc/self/fd/{}", open.as_raw_fd()))
-        .is_ok_and(|mut entries| entries.next().is_none());
-    if !empty {
+    let fresh = std::fs::read_dir(format!("/proc/self/fd/{}", open.as_raw_fd()))
+        .is_ok_and(|mut entries| entries.all(|entry| entry.is_ok_and(assembled)));
+    if !fresh {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{} is not an empty directory", dir.display()),
+            format!(
+                "{} holds more than the writable layers of the run's file system",
+                dir.display()
+            ),
         ));
     }
     if project(&open)? != project(&held)? {
@@ -48,6 +54,16 @@ pub(super) fn take_dir(
         ));
     }
     fchmod_open(&open)
+}
+
+/// The names of what the assembly of a run's file system puts in its lease directory before
+/// the container is made: the writable layer and the work directory of a layered root, and
+/// those of its copy-on-write mounts.
+const ASSEMBLED: [&str; 3] = [ROOT_UPPER, ROOT_WORK, COW];
+
+/// Whether `entry` of a lease directory is one [`ASSEMBLED`] names.
+fn assembled(entry: std::fs::DirEntry) -> bool {
+    ASSEMBLED.iter().any(|name| entry.file_name() == *name)
 }
 
 /// The project id of an open directory ([`crate::quota::project_of`]).

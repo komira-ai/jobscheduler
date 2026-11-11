@@ -273,3 +273,28 @@ fn a_lease_directory_is_made_empty_replaced_when_stale_and_removed() {
     }
     assert!(root.is_dir());
 }
+
+/// Asserts that the start sweep, which an agent of the previous release runs as this one
+/// does and which knows nothing of the directory of the runs' mounts, removes a layered
+/// lease's directory (its writable layers) whole and never reaches the directory of mounts
+/// beside the scratch root, where the clone of a read-write host directory is bound: the
+/// host's data behind it is whole. It catches a directory of mounts placed where a sweep
+/// walks, which would delete a host directory through its mount.
+#[test]
+fn the_start_sweep_never_reaches_the_directory_of_mounts() {
+    let h = Harness::new("sweep-mounts");
+    let lease = h.dir.path("scratch").join(".lease-js-0123456789abcdef-r1");
+    for sub in ["rootfs-upper/etc", "rootfs-work/work", "cow/1/upper/out"] {
+        fs::create_dir_all(lease.join(sub)).unwrap();
+    }
+    // The clone of a read-write host directory, as its mount shows it.
+    let bound = h.dir.path("mounts").join("js-0123456789abcdef-r1/src/1");
+    fs::create_dir_all(&bound).unwrap();
+    fs::write(bound.join("data"), "the host's").unwrap();
+    assert_eq!(h.config.scratch.sweep([]), 1);
+    assert!(!lease.exists());
+    assert_eq!(
+        fs::read_to_string(bound.join("data")).unwrap(),
+        "the host's"
+    );
+}

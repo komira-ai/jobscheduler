@@ -370,8 +370,9 @@ pub struct JobResult {
     /// whatever the outcome and exit status, which are kept as they were. Absent otherwise,
     /// and left out of the text. An agent of this release on the `crun` runtime sets
     /// `host-port-lost` for a job that did not succeed after a restart at which a host port of
-    /// it could not be offered again; none sets `input-unreadable` yet. `detail` keeps its
-    /// meaning beside it. A server from before the field ignores it.
+    /// it could not be offered again, and `input-unreadable` for a job that did not succeed
+    /// and a host path of whose layers or mounts no longer answered once it ended. `detail`
+    /// keeps its meaning beside it. A server from before the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_failure: Option<String>,
 }

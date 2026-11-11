@@ -135,9 +135,36 @@ impl MountRoots {
         self.roots.values().map(PathBuf::as_path)
     }
 
+    /// Every root's name and canonical path, by name.
+    pub fn named(&self) -> impl Iterator<Item = (&str, &Path)> {
+        self.roots
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path()))
+    }
+
     /// The canonical path of the root `name`, when there is one.
     pub fn root(&self, name: &str) -> Option<&Path> {
         self.roots.get(name).map(PathBuf::as_path)
+    }
+
+    /// The root that the host path `path` (absolute, as a job start names it) lies beneath:
+    /// the longest of the roots' canonical paths that is a prefix of its text, by whole
+    /// components; `None` when it lies beneath none. Nothing on the host is read: what lies
+    /// beneath the root, links included, is the runtime's to open
+    /// ([`js_contain::job_fs::open_beneath`]), so a link that leads out is refused when the
+    /// path is opened, not here.
+    pub fn beneath(&self, path: &str) -> Option<Beneath<'_>> {
+        let path = Path::new(path);
+        self.roots
+            .iter()
+            .filter_map(|(name, root)| Some((name, root, path.strip_prefix(root).ok()?)))
+            .max_by_key(|(_, root, _)| root.components().count())
+            .map(|(name, root, rest)| Beneath {
+                name,
+                root,
+                rest: rest.to_owned(),
+                read_only: self.read_only.contains(name),
+            })
     }
 
     /// Resolves `mount` below its root.
@@ -190,6 +217,20 @@ impl MountRoots {
         });
         Some(resolved)
     }
+}
+
+/// Where a host path lies among the roots ([`MountRoots::beneath`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Beneath<'a> {
+    /// The root's name.
+    pub name: &'a str,
+    /// The root's canonical path.
+    pub root: &'a Path,
+    /// The rest of the path below the root: relative, empty for the root itself.
+    pub rest: PathBuf,
+    /// The root was given as `--mount-root-ro`: nothing beneath it may be mounted
+    /// read-write.
+    pub read_only: bool,
 }
 
 /// Whether a runtime's mount option can carry `path` as it is: text with no comma (the

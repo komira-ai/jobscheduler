@@ -102,6 +102,7 @@ impl Fixture {
             id_tool_dirs: vec![tools],
             // The tests are not root: the directories they make are owned by this uid.
             owner_uid: fs::metadata(&root).unwrap().uid(),
+            kernel_calls: js_contain::job_fs::probe,
         };
         Self {
             dir,
@@ -503,6 +504,7 @@ fn a_host_with_nothing_set_up_is_refused_naming_every_piece() {
         self_cgroup: nowhere.join("self"),
         id_tool_dirs: vec![nowhere.clone()],
         owner_uid: fx.host.owner_uid,
+        kernel_calls: fx.host.kernel_calls,
     };
     let request = Request {
         crun: &nowhere.join("crun"),
@@ -573,8 +575,16 @@ fn the_crun_flags_are_checked_against_each_other() {
         flags(&cli(&quota)).is_ok(),
         "--scratch-quota bounds /scratch, /work and /root alike"
     );
-    assert!(with(&["--mount-root", "sync=/m"]).starts_with("--mount-root: "));
-    assert!(with(&["--mount-root-ro", "sync=/m"]).starts_with("--mount-root-ro: "));
+    // The mount roots bound a job start's host paths, which the runtime opens beneath them.
+    let roots = [
+        ok.as_slice(),
+        &["--mount-root", "a=/m", "--mount-root-ro", "b=/r"],
+    ]
+    .concat();
+    assert!(
+        flags(&cli(&roots)).is_ok(),
+        "the mount roots are a crun agent's"
+    );
     let without = |drop: &str| {
         let mut all: Vec<&str> = Vec::new();
         let mut skip = false;
@@ -682,21 +692,6 @@ fn the_agent_refuses_runtime_flags_that_cannot_work() {
                 "/usr/bin/docker",
             ],
             "--job-user: needs --runtime crun",
-        ),
-        (
-            vec![
-                "--runtime",
-                "crun",
-                "--job-user",
-                USER,
-                "--state-root",
-                "/s",
-                "--scratch-root",
-                "/r",
-                "--mount-root",
-                "sync=/m",
-            ],
-            "--mount-root: not accepted with --runtime crun",
         ),
     ];
     for (args, why) in cases {

@@ -76,7 +76,7 @@ pub enum RegistryCredentialsError {
     /// An entry that no allow flag lists.
     #[error(
         "--registry-credentials: {0} is not an entry of --image-allow, \
-         --bundle-registry-allow or --bundle-registry-allow-private"
+         --image-allow-loopback, --bundle-registry-allow or --bundle-registry-allow-private"
     )]
     Unlisted(String),
     /// A file that cannot be read or breaks a rule of the module; `why` says which.
@@ -97,11 +97,42 @@ pub enum RegistryCredentialsError {
     },
 }
 
-/// An `--image-allow` entry that is not a js-oci allow-list entry; the js-oci error says
-/// which entry and why.
+/// An `--image-allow` or `--image-allow-loopback` entry that cannot be used.
 #[derive(Debug, thiserror::Error)]
-#[error("--image-allow: {0}")]
-pub struct ImageAllowError(#[source] pub js_oci::Error);
+pub enum ImageAllowError {
+    /// An `--image-allow` entry that is not a js-oci allow-list entry; the js-oci error says
+    /// which entry and why.
+    #[error("--image-allow: {0}")]
+    Entry(#[source] js_oci::Error),
+    /// An `--image-allow-loopback` entry whose registry is not `127.0.0.1` or `[::1]` with a
+    /// port, or that is not a js-oci allow-list entry.
+    #[error("--image-allow-loopback: {0}")]
+    Loopback(String),
+}
+
+/// The `--image-allow-loopback` entry `text`, as parsed: its registry must be `127.0.0.1` or
+/// `[::1]`, with a port.
+///
+/// # Errors
+/// [`ImageAllowError::Loopback`], naming the entry and why.
+fn loopback_entry(text: &str) -> Result<Allow, ImageAllowError> {
+    let authority = text
+        .split_once('/')
+        .map_or(text, |(authority, _)| authority);
+    let loopback = [
+        std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST),
+        std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
+    ];
+    let local = authority
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|address| loopback.contains(&address.ip()));
+    if !local {
+        return Err(ImageAllowError::Loopback(format!(
+            "{text}: not 127.0.0.1:PORT/PREFIX or [::1]:PORT/PREFIX"
+        )));
+    }
+    Allow::parse(text).map_err(|why| ImageAllowError::Loopback(why.to_string()))
+}
 
 /// The credentials of the `--registry-credentials` flags, by allow-list entry.
 ///
@@ -122,6 +153,7 @@ impl RegistryCredentials {
         let listed: Vec<Allow> = cli
             .image_allow
             .iter()
+            .chain(&cli.image_allow_loopback)
             .chain(&cli.bundle_registry_allow)
             .chain(&cli.bundle_registry_allow_private)
             .filter_map(|text| Allow::parse(text).ok())
@@ -156,18 +188,26 @@ impl RegistryCredentials {
         }
     }
 
-    /// The `--image-allow` entries of `cli`, each checked and given its credentials: the
-    /// allow-list of the crun runtime's image client.
+    /// The `--image-allow` entries of `cli`, then its `--image-allow-loopback` entries, each
+    /// checked and given its credentials: the allow-list of the crun runtime's image client.
+    /// A loopback entry may reach its loopback address, over plain http
+    /// ([`Allow::loopback`], [`Allow::plain_http_loopback`]); an entry pulled over plain
+    /// http never sends its credentials.
     ///
     /// # Errors
     ///
-    /// [`ImageAllowError`]: the first entry that is not `HOST[:PORT]/PREFIX`.
+    /// [`ImageAllowError`]: the first entry that is not `HOST[:PORT]/PREFIX`, or a loopback
+    /// entry whose registry is not a loopback address with a port.
     pub fn image_allow(&self, cli: &Cli) -> Result<Vec<Allow>, ImageAllowError> {
-        cli.image_allow
-            .iter()
-            .map(|text| Allow::parse(text).map(|entry| self.attach(entry)))
-            .collect::<Result<_, _>>()
-            .map_err(ImageAllowError)
+        let public = cli.image_allow.iter().map(|text| {
+            Allow::parse(text)
+                .map(|entry| self.attach(entry))
+                .map_err(ImageAllowError::Entry)
+        });
+        let local = cli.image_allow_loopback.iter().map(|text| {
+            loopback_entry(text).map(|entry| self.attach(entry).loopback().plain_http_loopback())
+        });
+        public.chain(local).collect()
     }
 
     /// Every entry of `entries` with its credentials, in order ([`Self::attach`]).
@@ -327,7 +367,8 @@ mod tests {
             (
                 vec![flag("registry.example/other", &ok)],
                 "--registry-credentials: registry.example/other is not an entry of \
-                 --image-allow, --bundle-registry-allow or --bundle-registry-allow-private"
+                 --image-allow, --image-allow-loopback, --bundle-registry-allow or \
+                 --bundle-registry-allow-private"
                     .to_owned(),
             ),
         ] {
@@ -510,12 +551,68 @@ mod tests {
         let refused = table.image_allow(&bare).expect_err("a bare host");
         assert_eq!(
             format!("{refused:?}"),
-            "ImageAllowError(Reference(\"registry.example\"))"
+            "Entry(Reference(\"registry.example\"))"
         );
         assert_eq!(
             refused.to_string(),
             "--image-allow: \"registry.example\" is not a well formed registry reference"
         );
+    }
+
+    /// Proves an `--image-allow-loopback` entry joins the crun runtime's allow-list after the
+    /// `--image-allow` entries, reachable at its loopback address over plain http, with the
+    /// credentials a `--registry-credentials` flag names it with; and that a registry that is
+    /// not `127.0.0.1` or `[::1]` with a port, or an entry with no prefix, is refused naming
+    /// the flag. Catches a loopback entry pulled over https (or not reached at all), a
+    /// non-loopback host given plain http, and credentials lost on a loopback entry.
+    #[test]
+    fn a_loopback_entry_is_pulled_over_plain_http_from_the_loopback_alone() {
+        let dir = private_dir("registry-credentials-loopback");
+        let path = secret(&dir, "local", b"cache:pw", 0o600);
+        // `cli` lists `registry.example/team` first.
+        let cli = cli(&[
+            "--image-allow-loopback=127.0.0.1:5000/cache".to_owned(),
+            "--image-allow-loopback=[::1]:5001/other".to_owned(),
+            flag("127.0.0.1:5000/cache", &path),
+        ]);
+        let table = RegistryCredentials::from_cli(&cli, me()).expect("credentials");
+        let local = |text: &str| entry(text).loopback().plain_http_loopback();
+        assert_eq!(
+            table.image_allow(&cli).expect("image allow"),
+            [
+                entry("registry.example/team"),
+                entry("127.0.0.1:5000/cache")
+                    .with_credentials(credentials("cache", "pw"))
+                    .loopback()
+                    .plain_http_loopback(),
+                local("[::1]:5001/other"),
+            ]
+        );
+        for (given, why) in [
+            (
+                "127.0.0.1/cache",
+                "127.0.0.1/cache: not 127.0.0.1:PORT/PREFIX or [::1]:PORT/PREFIX",
+            ),
+            (
+                "10.0.0.1:5000/cache",
+                "10.0.0.1:5000/cache: not 127.0.0.1:PORT/PREFIX or [::1]:PORT/PREFIX",
+            ),
+            (
+                "localhost:5000/cache",
+                "localhost:5000/cache: not 127.0.0.1:PORT/PREFIX or [::1]:PORT/PREFIX",
+            ),
+            (
+                "127.0.0.1:5000",
+                "\"127.0.0.1:5000\" is not a well formed registry reference",
+            ),
+        ] {
+            let flags = self::cli(&[format!("--image-allow-loopback={given}")]);
+            let refused = table.image_allow(&flags).expect_err(given);
+            assert_eq!(
+                refused.to_string(),
+                format!("--image-allow-loopback: {why}")
+            );
+        }
     }
 
     /// Proves the table prints no secret: its `Debug` shows the entries and a redacted
