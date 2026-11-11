@@ -154,6 +154,20 @@ fn apt_a_canonical_host_and_a_loose_dpkg_install_are_refused() {
             "names a Canonical host",
         ),
         ("sudo dpkg -i a.deb", "a dpkg install that is not"),
+        ("sudo -E apt-get install -y crun", "runs apt-get"),
+        (
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install crun",
+            "runs apt-get",
+        ),
+        (
+            "DEBIAN_FRONTEND=noninteractive apt-get install crun",
+            "runs apt-get",
+        ),
+        ("env apt-get install crun", "runs apt-get"),
+        ("true && sudo apt-get update", "runs apt-get"),
+        ("true || apt install crun", "runs apt"),
+        ("echo y | sudo apt-get install crun", "runs apt-get"),
+        ("sudo -E dpkg -i a.deb", "a dpkg install that is not"),
         ("dpkg --install a.deb", "a dpkg install that is not"),
     ] {
         let step = format!("      - run: {run}");

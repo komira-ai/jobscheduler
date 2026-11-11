@@ -2,7 +2,8 @@
 //! text.
 //!
 //! No `run:` line names a Canonical host (`ubuntu.com`, `launchpad.net`), and none runs
-//! `apt-get`, `apt` or `aptitude` (after an optional `sudo`) but in the workflows of
+//! `apt-get`, `apt` or `aptitude` (as any command of the line, after `sudo`, `env` and
+//! variable assignments) but in the workflows of
 //! [`APT_EXEMPT`]: a CI job never needs the Ubuntu archive. A package a job needs and the runner image lacks is
 //! pinned in `.github/debs/<set>.toml` and installed by four steps in a row, all under one `if:`
 //! or none:
@@ -44,13 +45,27 @@ fn condition(step: &Step) -> Option<&str> {
     })
 }
 
-/// The words of `line` without a leading `sudo`.
-fn command(line: &str) -> Vec<String> {
-    let mut words = words(line.trim());
-    if words.first().is_some_and(|w| w == "sudo") {
-        words.remove(0);
-    }
-    words
+/// The commands of `line`, split at `&&`, `||`, `;` and `|`, each as its words from the program
+/// on: without `sudo` and its options, `env`, and `NAME=value` assignments before it.
+fn commands(line: &str) -> Vec<Vec<String>> {
+    let line = line.replace("&&", ";").replace("||", ";").replace('|', ";");
+    line.split(';')
+        .map(|part| {
+            let mut words = words(part.trim());
+            while words.first().is_some_and(|w| {
+                w == "sudo"
+                    || w == "env"
+                    || w.starts_with('-')
+                    || w.split_once('=').is_some_and(|(name, _)| {
+                        !name.is_empty()
+                            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    })
+            }) {
+                words.remove(0);
+            }
+            words
+        })
+        .collect()
 }
 
 /// The package sets the workflow `file` with text `text` installs, or the reasons it breaks
@@ -83,23 +98,28 @@ pub(crate) fn lint_debs(file: &str, text: &str) -> Result<Vec<DebsSite>, Vec<Str
             let mut fail =
                 |why: String| errors.push(format!("{file}:{}: {}: {why}", step.line, job.name));
             for line in step.get("run").unwrap_or_default().lines() {
-                let words = command(line);
-                let first = words.first().map_or("", String::as_str);
-                if ["apt-get", "apt", "aptitude"].contains(&first) && !APT_EXEMPT.contains(&file) {
-                    fail(format!(
-                        "runs {first}: pin the packages in .github/debs and install them with \
-                         `cargo xtask debs`"
-                    ));
+                for words in commands(line) {
+                    let first = words.first().map_or("", String::as_str);
+                    if ["apt-get", "apt", "aptitude"].contains(&first)
+                        && !APT_EXEMPT.contains(&file)
+                    {
+                        fail(format!(
+                            "runs {first}: pin the packages in .github/debs and install them \
+                             with `cargo xtask debs`"
+                        ));
+                    }
+                    let installs_deb = words.iter().any(|w| w == "--install" || w == "-i");
+                    if first == "dpkg" && installs_deb && !installs.contains(&i) {
+                        fail(
+                            "a dpkg install that is not the last of the four debs steps".to_owned(),
+                        );
+                    }
                 }
                 if ["ubuntu.com", "launchpad.net"]
                     .iter()
                     .any(|h| line.contains(h))
                 {
                     fail("names a Canonical host outside .github/debs".to_owned());
-                }
-                let installs_deb = words.iter().any(|w| w == "--install" || w == "-i");
-                if first == "dpkg" && installs_deb && !installs.contains(&i) {
-                    fail("a dpkg install that is not the last of the four debs steps".to_owned());
                 }
             }
         }
