@@ -6,6 +6,8 @@
 //! - [`stamp`]: sets the release version in the CI checkout (`Cargo.toml` and `Cargo.lock`)
 //!   before the build, so `--version` of every binary prints it. Nothing is committed.
 //! - [`server_image`]: the OCI image tar of `js-lease-server` for one Linux target.
+//! - [`image_digest`]: the manifest digest of the release's linux-x86_64 image and the release's
+//!   addresses of it and its bundle, which the control plane's deploy of `js-server` is given.
 //! - [`stage`]: lays down the files of one release archive, the binary, `LICENSE` and, in the
 //!   Linux archives of `js-lease-server`, the host updater's declaration.
 //!
@@ -34,6 +36,7 @@ use serde::Deserialize;
 
 pub mod deb;
 pub mod desired;
+pub mod image_digest;
 pub mod include;
 pub mod macos_leg;
 pub mod plan;

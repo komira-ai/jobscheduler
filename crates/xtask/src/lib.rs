@@ -26,6 +26,10 @@
 //!   ([`release::desired`]): the targets the hostkeeper set of js-agent is given for a release, or
 //!   `set=false`; refused unless the release's `.deb`s are in the stable apt index at the digests
 //!   of its `SHA256SUMS`.
+//! - `release image-digest --dist <dir> --repo <owner/repo> --version <X.Y.Z> [--output <file>]`
+//!   ([`release::image_digest`]): the manifest digest of the release's linux-x86_64 image of
+//!   js-lease-server, held to `SHA256SUMS`, and the release's addresses of the image and its bundle:
+//!   what the control plane's deploy of `js-server` is given.
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
@@ -123,6 +127,9 @@ pub enum Error {
     /// `release desired` set nothing, or could not tell.
     #[error(transparent)]
     Desired(release::desired::Error),
+    /// `release image-digest` gave no digest.
+    #[error(transparent)]
+    ImageDigest(#[from] release::image_digest::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
@@ -351,6 +358,9 @@ enum ReleaseVerb {
     Image(release::server_image::ImageArgs),
     /// What the hostkeeper set of js-agent is given for a release, or why it sets nothing.
     Desired(release::desired::DesiredArgs),
+    /// The manifest digest of the release's linux-x86_64 image of js-lease-server, and the
+    /// release's addresses of it and its bundle.
+    ImageDigest(release::image_digest::DigestArgs),
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -458,6 +468,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 release::desired::Error::Usage(why) => Error::Usage(why),
                 other => Error::Desired(other),
             })?,
+            ReleaseVerb::ImageDigest(args) => release::image_digest::run(&args)?,
         }),
     }
 }
