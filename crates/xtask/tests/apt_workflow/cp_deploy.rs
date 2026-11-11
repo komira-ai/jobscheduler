@@ -4,8 +4,10 @@
 //! parsed workflow and names every way the jobs differ from what is written here.
 //!
 //! - **When.** Both run under [`CP_IF`] alone: a push to main, the plan's release, and the
-//!   repository variable `CP_DEPLOY_ENDPOINT` not empty, so a repository that sets no endpoint
-//!   (a fork, or before the deploy front is set up) skips both. `cp-deploy-digest` needs `plan`,
+//!   repository variables `CP_DEPLOY_ENDPOINT` and `CP_DEPLOY_TAILSCALE_TAGS` not empty, so a
+//!   repository that sets no endpoint (a fork, or before the deploy front is set up) or no tailnet
+//!   tags skips both, and the call never asks the Tailscale join for a node without tags (which
+//!   it refuses). `cp-deploy-digest` needs `plan`,
 //!   `publish` and `deploy-tool`; `cp-deploy` needs `plan` and `cp-deploy-digest`.
 //! - **`cp-deploy-digest`** holds no permission (`permissions: {}`), names no environment and
 //!   runs on `ubuntu-24.04`. Its actions are exactly [`DOWNLOADS`] (the `xtask` that
@@ -14,7 +16,8 @@
 //!   version alone, and the job's outputs are that step's three, by name. No step names a
 //!   secret, a variable or the run's token: it reads artifacts of this run and nothing else.
 //! - **`cp-deploy`** calls exactly [`CALLED`] (docker-swarm-updater's deploy workflow at the full
-//!   commit the updater's allow-list names) with exactly the inputs [`WITH`], holds
+//!   commit the updater's allow-list names) with exactly the inputs [`WITH`] (the three Tailscale
+//!   inputs among them: client id, audience and tags), holds
 //!   `id-token: write` alone and has no key but [`CALL_KEYS`]: no secret, no matrix, no `env:`.
 //! - **Only these two.** No other job names a `CP_DEPLOY_*` variable, runs
 //!   `xtask release image-digest` or calls docker-swarm-updater.
@@ -28,7 +31,7 @@ pub const DIGEST: &str = "cp-deploy-digest";
 pub const DEPLOY: &str = "cp-deploy";
 
 /// The `if:` of both jobs.
-pub const CP_IF: &str = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' }}";
+pub const CP_IF: &str = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}";
 
 /// The workflow `cp-deploy` calls: docker-swarm-updater's deploy workflow at v0.1.3, the commit
 /// its allow-list pins `job_workflow_ref` to.

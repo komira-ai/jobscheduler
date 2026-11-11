@@ -56,6 +56,12 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "",
         "cp-deploy-digest: `if` is not",
     ),
+    (
+        "cp-deploy-digest",
+        " && vars.CP_DEPLOY_TAILSCALE_TAGS != ''",
+        "",
+        "cp-deploy-digest: `if` is not",
+    ),
     // cp-deploy-digest: nothing private
     (
         "cp-deploy-digest",
@@ -173,6 +179,12 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "",
         "cp-deploy: `if` is not",
     ),
+    (
+        "cp-deploy",
+        " && vars.CP_DEPLOY_TAILSCALE_TAGS != ''",
+        "",
+        "cp-deploy: `if` is not",
+    ),
     // cp-deploy: what it holds and calls
     (
         "cp-deploy",
@@ -224,8 +236,26 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "cp-deploy",
+        "      tailscale-oauth-client-id: ${{ vars.CP_DEPLOY_TAILSCALE_CLIENT_ID }}\n",
+        "",
+        "cp-deploy: passes",
+    ),
+    (
+        "cp-deploy",
+        "      tailscale-audience: ${{ vars.CP_DEPLOY_TAILSCALE_AUDIENCE }}\n",
+        "",
+        "cp-deploy: passes",
+    ),
+    (
+        "cp-deploy",
         "      tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}\n",
         "",
+        "cp-deploy: passes",
+    ),
+    (
+        "cp-deploy",
+        "tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}",
+        "tailscale-tags: tag:ci",
         "cp-deploy: passes",
     ),
     (

@@ -77,7 +77,7 @@ that passes `ci` and ships code. Nothing runs on a timer.
    ([The apt repository](#the-apt-repository)).
 8. `gamma` (off until its variables are set, below) sets the release as the desired version of the
    service `js-server` on the update coordinator and waits for it to converge.
-9. `cp-deploy-digest` and `cp-deploy` (off until their variable is set, below) deploy the release's
+9. `cp-deploy-digest` and `cp-deploy` (off until their variables are set, below) deploy the release's
    linux-x86_64 image of `js-lease-server` to the control plane's Docker Swarm service `js-server`
    through docker-swarm-updater and wait for it to converge ([The control-plane
    deploy](#the-control-plane-deploy)).
@@ -662,15 +662,18 @@ is reported converged and fails otherwise, or when 60 minutes pass first (the de
 The project owner sets up the environment `controlplane` with deployments from `main` only and no
 required reviewer; this repository does not check that it is so.
 
-**It is off by default.** With the repository variable `CP_DEPLOY_ENDPOINT` empty or unset both jobs
-are skipped and the release ends as it did without them. Repository variables (Settings, Secrets and
+**It is off by default.** With either of the repository variables `CP_DEPLOY_ENDPOINT` and
+`CP_DEPLOY_TAILSCALE_TAGS` empty or unset both jobs are skipped and the release ends as it did
+without them. The tags are required because the Tailscale join refuses a workload-identity client
+id without tags. Repository variables (Settings, Secrets and
 variables, Actions, Variables):
 
 | Variable | Meaning |
 |---|---|
 | `CP_DEPLOY_ENDPOINT` | the deploy front, `http[s]://host[:port]`; unset: the deploy is off |
 | `CP_DEPLOY_AUDIENCE` | the audience of the OIDC tokens, the one the deploy front is configured with |
-| `CP_DEPLOY_TAILSCALE_CLIENT_ID`, `CP_DEPLOY_TAILSCALE_AUDIENCE`, `CP_DEPLOY_TAILSCALE_TAGS` | the Tailscale workload-identity client the job joins the deploy front's network with, its audience, and the tags the ephemeral node takes; the client id unset: no join |
+| `CP_DEPLOY_TAILSCALE_CLIENT_ID`, `CP_DEPLOY_TAILSCALE_AUDIENCE` | the Tailscale workload-identity client the job joins the deploy front's network with, and its audience; the client id unset: no join |
+| `CP_DEPLOY_TAILSCALE_TAGS` | the tags the ephemeral node takes, ones that client can issue; unset: the deploy is off |
 
 Like `gamma`, the deploy fails the run's last steps only: the release is already published, and
 "Re-run failed jobs" repeats it. The rules of the two jobs are pinned by

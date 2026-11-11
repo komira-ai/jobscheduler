@@ -83,7 +83,8 @@
 # The control-plane deploy (`cp-deploy-digest`, then `cp-deploy`) deploys the release's
 # linux-x86_64 image of js-lease-server to the Docker Swarm service js-server by calling
 # docker-swarm-updater's reusable deploy workflow. It is off (both jobs skipped) until the
-# repository variable CP_DEPLOY_ENDPOINT is set (docs/release.md, "The control-plane deploy").
+# repository variables CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are set (docs/release.md,
+# "The control-plane deploy").
 #
 # Permissions are per job. Only `artifacts`, `gamma`, `cp-deploy` and the apt read and write jobs
 # hold id-token write here, and `artifacts` also attestations write, only because a called workflow
@@ -481,8 +482,9 @@ jobs:
 
   # The control-plane deploy: the release's linux-x86_64 image of js-lease-server to the Docker
   # Swarm service js-server (docs/release.md, "The control-plane deploy"). Both jobs run only while
-  # the repository variable CP_DEPLOY_ENDPOINT is not empty: with it unset or empty both are
-  # skipped and the release ends as it did without them. The lint
+  # the repository variables CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are both not empty:
+  # with either unset or empty both are skipped and the release ends as it did without them (the
+  # Tailscale join refuses a federated client id without tags, so the call never sends none). The lint
   # (crates/xtask/tests/apt_workflow, `cp_deploy.rs`) holds the two jobs to this shape.
   #
   # cp-deploy-digest  holds no permission. It downloads the files `publish` uploaded (the same
@@ -503,7 +505,7 @@ jobs:
   #          otherwise, after waiting up to 60 minutes. The release stays published whatever it
   #          says, and "Re-run failed jobs" repeats it.
   cp-deploy-digest:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
     needs: [plan, publish, deploy-tool]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -533,7 +535,7 @@ jobs:
         run: tool/xtask release image-digest --dist dist --repo "$GITHUB_REPOSITORY" --version "$VERSION" --output "$GITHUB_OUTPUT"
 
   cp-deploy:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
     needs: [plan, cp-deploy-digest]
     permissions:
       id-token: write
