@@ -1,17 +1,19 @@
 //! What a [`CrunRuntime`](super::CrunRuntime) is opened with ([`CrunSettings`], its
-//! [`CgroupSettings`] and [`Hooks`]) and why it could not be opened ([`CrunError`]).
+//! [`CgroupSettings`], [`HostPorts`] and [`Hooks`]) and why it could not be opened ([`CrunError`]).
 
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use js_agent_wire::PortRange;
 use js_contain::oci::{OciConfig, OciError};
 
 use super::{
     CALL_LIMIT, EgressPort, GpuSettings, KILL_WAIT, LedgerError, PULL_LIMIT, hand_over_no_follow,
 };
 use crate::cli_runtime::Chown;
+use crate::host_ports::{Kernel, Listen};
 use crate::lifecycle::FilesRoot;
 
 /// Where the agent's cgroups are.
@@ -51,6 +53,29 @@ pub struct CrunSettings {
     /// Whether a host job (`isolation = host`) is launched (`--allow-host-jobs`); without it
     /// one is refused before anything is made.
     pub host_jobs: bool,
+    /// The host ports a job may reach, and what makes their listeners.
+    pub host_ports: HostPorts,
+}
+
+/// The host ports of a [`CrunRuntime`]: which a job may name (`--host-port`), and what makes
+/// the listeners in a job's network namespace ([`Kernel`] on a node).
+#[derive(Debug, Clone)]
+pub struct HostPorts {
+    /// The ports of the host's loopback a job may reach; a start that names another is
+    /// refused (`Runtime::host_ports`). None by default.
+    pub allowed: Vec<PortRange>,
+    /// What makes the listeners.
+    pub listen: Arc<dyn Listen>,
+}
+
+impl Default for HostPorts {
+    /// None allowed, listened for by the [`Kernel`].
+    fn default() -> Self {
+        Self {
+            allowed: Vec::new(),
+            listen: Arc::new(Kernel),
+        }
+    }
 }
 
 /// What a runtime does that a test replaces: giving a file away and reading the clock.

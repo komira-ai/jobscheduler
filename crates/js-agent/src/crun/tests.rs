@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use js_agent_wire::{HostPort, PortProtocol};
 use js_contain::cgroup::{LeaseCgroup, OomOutcome};
 use js_contain::container::{ContainerLimits, Ended, HostMount};
 use js_contain::oci::image::PinnedImage;
@@ -99,6 +100,7 @@ fn run(pids: Option<u64>, files: Option<PathBuf>) -> RunSpec {
         labels: BTreeMap::new(),
         network: Default::default(),
         ports: Vec::new(),
+        host_ports: Vec::new(),
         log_sink: None,
     }
 }
@@ -139,7 +141,8 @@ fn a_job_env_goes_over_the_image_env_once_applied() {
 /// image, directories and cgroup; the run's scratch read-write at `/scratch` first, then
 /// its mounts with the access they asked, then its files read-only; the job starting at the
 /// exec root; no shared trees; the process limit the run named, or the default for one that
-/// named none; no program or environment (the image config gives them).
+/// named none; no program or environment (the image config gives them); and the job ports
+/// of its host ports, in order, as the ports its init waits to be listening (none without).
 #[test]
 fn a_run_becomes_the_container_it_asked_for() {
     let image = PinnedImage {
@@ -189,6 +192,29 @@ fn a_run_becomes_the_container_it_asked_for() {
     let plain = container_spec("js-x-r1", &run(None, None), &image, &lease(), "/c");
     assert_eq!(plain.limits.pids, DEFAULT_PIDS);
     assert_eq!(plain.mounts.len(), 3);
+    assert!(
+        plain.listen_ports.is_empty(),
+        "a run without host ports waits for none"
+    );
+    let mut ported = run(None, None);
+    ported.host_ports = vec![
+        HostPort {
+            host_port: 5432,
+            container_port: None,
+            protocol: PortProtocol::Tcp,
+        },
+        HostPort {
+            host_port: 9000,
+            container_port: Some(80),
+            protocol: PortProtocol::Tcp,
+        },
+    ];
+    let ported = container_spec("js-x-r1", &ported, &image, &lease(), "/c");
+    assert_eq!(
+        ported.listen_ports,
+        [5432, 80],
+        "the init waits at the job ports"
+    );
 }
 
 /// Catches a container's end that is read wrongly: an exit code kept as it is; a container

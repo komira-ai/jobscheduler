@@ -51,15 +51,18 @@ getrandom.workspace = true
 hex.workspace = true
 # The project-quota calls (`ioctl`, `quotactl`) of src/quota: rustix has no form of them.
 libc.workspace = true
-rustix = { workspace = true, features = ["fs", "process"] }
+# `net` and `thread`: the listeners of a job's host ports, bound in its network namespace
+# (src/host_ports).
+rustix = { workspace = true, features = ["fs", "net", "process", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 # `fs`: the layer files of the image source (src/image). `net` and `time`: the runtime of
 # the `image-pull` verb (src/image/pull.rs). `rt-multi-thread`: the runtime the image
-# pulls run on (src/lifecycle/prefetch.rs).
-tokio = { workspace = true, features = ["fs", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+# pulls run on (src/lifecycle/prefetch.rs). `io-util`: the copying of a job's host ports
+# (src/host_ports).
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
 tracing.workspace = true
 # The metadata service of `--identity-source` (src/identity), over plain HTTP.
@@ -98,7 +101,8 @@ js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 js-vm-lease = { path = "../js-vm-lease", features = ["fake"] }
 clap.workspace = true
 # `net`: a socket bound and never listening, for a server that is down (update_hook/lease_port).
-rustix = { workspace = true, features = ["net", "process", "thread"] }
+# `event`: the bounded waits of the stand-in host-port tests (crun_stand_in/host_ports.rs).
+rustix = { workspace = true, features = ["event", "net", "process", "thread"] }
 tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing-subscriber.workspace = true

@@ -107,6 +107,10 @@ impl Lifecycle {
             match this.adoptable(&container, now) {
                 Ok(mut job) => {
                     job.cgroup = this.runtime.cgroup(&container.id);
+                    // A run that cannot be offered its host ports again is stopped.
+                    if let Some(why) = this.runtime.host_port_lost(&container.id) {
+                        job.lose_host_ports(why, &mut events);
+                    }
                     // A host job that outlived the agent changed the host, and a marker
                     // written when it started may be all that was lost.
                     if job.host {

@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use js_agent_wire::{
-    HeldRun, HeldState, Isolation, JobSpec, LogReport, NativeSpec, Outcome, RunResult, Taint,
+    HeldRun, HeldState, HostPort, Isolation, JobSpec, LogReport, NativeSpec, Outcome, RunResult,
+    Taint, refusal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,9 @@ pub(super) struct Given {
     /// The start runs in a fresh VM ([`js_agent_wire::StartKind::Vm`]): it is admitted by the
     /// VM rules and its run carries [`label::KIND`].
     pub(super) vm: bool,
+    /// The host ports the start names ([`RunSpec::host_ports`]), which the admission holds
+    /// to the runtime's [`Runtime::host_ports`](crate::lifecycle::Runtime::host_ports).
+    pub(super) host_ports: Vec<HostPort>,
 }
 
 /// What a start that waits for its image keeps to finish starting.
@@ -124,6 +128,17 @@ pub(super) enum Cause {
     TimedOut,
     /// The server was not heard for the silence bound (see `silence`).
     Silenced,
+    /// A run adopted after a restart could not be offered its host ports again
+    /// (`Runtime::host_port_lost`): its result's `input_failure` says `host-port-lost`.
+    HostPortLost,
+}
+
+/// The `input_failure` of the result `how` of a job the agent meant to end for `cause`:
+/// [`refusal::HOST_PORT_LOST`] for a lost host port when the job did not succeed (stopped for
+/// it, or failed by itself first, as a job whose port is gone does), none otherwise.
+pub(super) fn cause_input_failure(cause: Option<Cause>, how: Outcome) -> Option<String> {
+    let lost = cause == Some(Cause::HostPortLost) && how != Outcome::Succeeded;
+    lost.then(|| refusal::HOST_PORT_LOST.to_owned())
 }
 
 /// The detail of the result of a job that `cause` ended: [`detail::SILENCE_STOP`] for a
@@ -252,6 +267,10 @@ pub(super) struct Job {
     /// step of its cleanup, removed once the checks have run).
     pub(super) owed: bool,
     pub(super) result: Option<RunResult>,
+    /// The code of an input the host provides that failed, which a job keyed by job lists
+    /// in its result ([`JobResult::input_failure`](js_agent_wire::JobResult::input_failure)):
+    /// set with the result, and kept with it in the state root.
+    pub(super) input_failure: Option<String>,
     /// What the runtime's capture saw of each stream, read with the result's tail: a job
     /// keyed by job lists it in its result. `None` from a runtime that uploads no live logs,
     /// for a run without a sink, and for a result read back from the state root.
@@ -350,6 +369,15 @@ impl Job {
         self.request_stop_for(Cause::Stopped, silent);
     }
 
+    /// Stops a job adopted after a restart whose host ports could not be offered again
+    /// (`why`), and notes it once: it ends killed, its result's `input_failure` saying
+    /// `host-port-lost`, which a job that exits by itself before the stop reaches it keeps
+    /// too unless it succeeded.
+    pub(super) fn lose_host_ports(&mut self, why: String, events: &mut Vec<Event>) {
+        self.request_stop_for(Cause::HostPortLost, false);
+        self.note(code::HOST_PORT_LOST, why, events);
+    }
+
     /// Asks a running job, or one still waiting for its image, to stop for `cause` (a cause
     /// already set stays); a job past its exit has nothing to stop. Whether it was running
     /// or waiting.
@@ -368,7 +396,9 @@ impl Job {
 pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Option<i32>) {
     match (cause, exit) {
         (Some(Cause::TimedOut), _) => (Outcome::TimedOut, None),
-        (Some(Cause::Stopped | Cause::Silenced), _) => (Outcome::Killed, None),
+        (Some(Cause::Stopped | Cause::Silenced | Cause::HostPortLost), _) => {
+            (Outcome::Killed, None)
+        }
         (
             None,
             Some(Exit {
@@ -473,6 +503,7 @@ impl Job {
             host: spec.isolation == Isolation::Host,
             owed: false,
             result: None,
+            input_failure: None,
             logs: None,
             findings: Vec::new(),
             started_usec: None,
@@ -485,10 +516,10 @@ impl Job {
         }
     }
 
-    /// A job that holds nothing and only owes its `result`, as one read back from the state
-    /// root after a restart: its slot is free, so it is only listed until the result is
+    /// A job that holds nothing and only owes its `result` (with its `input_failure`), as one
+    /// read back from the state root after a restart: its slot is free, so it is only listed until the result is
     /// acknowledged.
-    pub(super) fn held(keyed: Keyed, result: RunResult) -> Self {
+    pub(super) fn held(keyed: Keyed, result: RunResult, input_failure: Option<String>) -> Self {
         Self {
             run_id: result.run_id.clone(),
             lease_id: result.lease_id.clone(),
@@ -508,6 +539,7 @@ impl Job {
             host: false,
             owed: false,
             result: Some(result),
+            input_failure,
             logs: None,
             findings: Vec::new(),
             started_usec: None,
@@ -543,6 +575,7 @@ impl Job {
             host: may_change_host(found),
             owed: false,
             result: None,
+            input_failure: None,
             logs: None,
             findings: Vec::new(),
             started_usec: now
@@ -679,6 +712,7 @@ pub(super) fn run_spec(
         isolation: spec.isolation,
         network: spec.network,
         ports: spec.ports.clone(),
+        host_ports: given.host_ports.clone(),
         labels,
         bundle: spec
             .bundle

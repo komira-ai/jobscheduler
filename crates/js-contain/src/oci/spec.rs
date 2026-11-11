@@ -250,11 +250,23 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
 }
 
 /// The container's `process.args`: the init, then `--` and the job's own argv. The
-/// init runs the job as its child and reaps what the job leaves orphaned.
-fn init_argv(init_dest: &str, route_wait_secs: u64, argv: &[String]) -> Vec<String> {
+/// init runs the job as its child and reaps what the job leaves orphaned. Before it starts
+/// the job it waits `route_wait_secs` for a default route (none when 0), then up to
+/// [`LISTEN_WAIT_SECS`](super::LISTEN_WAIT_SECS) for each of `listen` to be listening (none
+/// when empty).
+fn init_argv(
+    init_dest: &str,
+    (route_wait_secs, listen): (u64, &[u16]),
+    argv: &[String],
+) -> Vec<String> {
     let mut args = vec![init_dest.to_owned()];
     if route_wait_secs > 0 {
         args.extend(["--wait-route".to_owned(), route_wait_secs.to_string()]);
+    }
+    if !listen.is_empty() {
+        let ports: Vec<String> = listen.iter().map(u16::to_string).collect();
+        let wait = super::LISTEN_WAIT_SECS.to_string();
+        args.extend(["--wait-listen".to_owned(), wait, ports.join(",")]);
     }
     args.push("--".to_owned());
     args.extend(argv.iter().cloned());
@@ -362,7 +374,7 @@ pub(crate) fn action_config(
             ))
             .args(init_argv(
                 placement.init_dest,
-                placement.route_wait_secs,
+                (placement.route_wait_secs, &spec.listen_ports),
                 &spec.argv,
             ))
             .env(environment(&spec.env))

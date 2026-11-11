@@ -9,7 +9,9 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, GpuSettings, Hooks, config_dir};
+use js_agent::crun::{
+    CgroupSettings, CrunRuntime, CrunSettings, GpuSettings, Hooks, HostPorts, config_dir,
+};
 use js_agent::image::RegistryImages;
 use js_agent::lifecycle::{
     Capacity, Config, DirLayout, MountRoots, Prepared, RunHandle, RunSpec, ScratchRoot, StateRoot,
@@ -167,6 +169,7 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         gpus: None,
         image_budget: None,
         host_jobs: false,
+        host_ports: HostPorts::default(),
     };
     let crun = CrunRuntime::open(settings.clone(), registry(&scratch))
         .unwrap_or_else(|e| panic!("open: {e}"));

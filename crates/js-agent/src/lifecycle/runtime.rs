@@ -19,7 +19,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{
-    Isolation, LogReport, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, refusal,
+    HostPort, Isolation, LogReport, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, PortRange,
+    refusal,
 };
 use js_types::{JobNetwork, PortMap};
 
@@ -55,6 +56,11 @@ pub mod label {
     /// allocation id), so a restarted agent lists it under the job keying again; absent on
     /// a container of a run start and on one an earlier agent made.
     pub const KEYING: &str = "jobscheduler.dev/keying";
+    /// The host ports of a run the `crun` runtime offers them to (`RunSpec::host_ports`), each
+    /// `HOST` when the job port is the host port and `HOST:JOB` when it is not, comma
+    /// separated in the start's order, so a restarted agent offers them again; absent on a
+    /// run with none and on a container an earlier agent made.
+    pub const HOST_PORTS: &str = "jobscheduler.dev/host-ports";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.
@@ -148,6 +154,12 @@ pub struct RunSpec {
     /// 5.8) by a backend that wires networks; the admission let them through only when the
     /// runtime's ceiling lists their host ports and the level is wired (not `none`).
     pub ports: Vec<PortMap>,
+    /// The ports of the host's loopback the job reaches at ports of its own loopback (the
+    /// other direction from [`RunSpec::ports`]), at every network level: a backend that
+    /// offers them listens on each job port in the job's network namespace and joins each
+    /// connection to the host port. The admission let them through only when the runtime
+    /// allows each host port ([`Runtime::host_ports`]).
+    pub host_ports: Vec<HostPort>,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
     /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
@@ -503,6 +515,23 @@ pub trait Runtime {
     /// `ports-not-supported`. The `crun` runtime answers its egress's ceiling.
     fn network_ceiling(&self) -> NetworkCeiling {
         NetworkCeiling::default()
+    }
+
+    /// The ports of the host's loopback a job of this runtime may reach (`--host-port`,
+    /// [`RunSpec::host_ports`]): a start that names any other is refused `input-not-allowed`
+    /// before anything is made, and never run without it. The default is none: only the
+    /// `crun` runtime offers host ports, and a start through any other that names one is
+    /// refused, never run without the ports it named.
+    fn host_ports(&self) -> Vec<PortRange> {
+        Vec::new()
+    }
+
+    /// Why the run `id`, which this runtime adopted from an earlier process of the agent,
+    /// could not be offered its host ports again ([`RunSpec::host_ports`]): the lifecycle
+    /// stops it, and its result says `host-port-lost`. `None` for a run that lost none, and
+    /// from a runtime that offers no host ports.
+    fn host_port_lost(&self, _id: &RunHandle) -> Option<String> {
+        None
     }
 
     /// Whether the network a native job would get is limited as the agent was told. Called
