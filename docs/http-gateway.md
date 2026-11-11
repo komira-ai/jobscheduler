@@ -405,7 +405,8 @@ answer from what the commit returned; neither holds anything of its own outside 
 **`SubmitJob`**, in order:
 
 1. **Checks.** The image is pinned by digest (`NAME[:TAG]@sha256:<64 hex>`; a tag alone is
-   refused naming `spec.image`). The needs are a share of a host or the whole host alone; a
+   refused naming `spec.image`); it may be empty only beside layers, and the command is then
+   an absolute path (refused naming `spec.command`). The needs are a share of a host or the whole host alone; a
    GPU count needs a class, from `gpuClass` or else the accelerator's model, which the alias
    table resolves (an unknown model passes through). The constraints are in the capability
    vocabulary the hosts report: `os` `linux` or `macos`, any `arch` (`aarch64` is
@@ -418,7 +419,22 @@ answer from what the commit returned; neither holds anything of its own outside 
    the ceiling, `--max-job-wall` (30 days unless given). The network level is a known one;
    each port is 1 to 65535 and no host port is given twice (refused naming
    `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's
-   files are; the labels as a caller's labels are (`Labels::from_caller`). The job id is empty (the service mints one) or 1
+   files are; the labels as a caller's labels are (`Labels::from_caller`). The layers,
+   mounts and host ports (`docs/design/job-rootfs.md`, section 2.5) are at most 16, 64 and
+   16; each layer and mount has one source this server knows (else refused naming
+   `spec.layers[<i>]` or `spec.mounts[<i>]`, "no source this server knows"); a host path is
+   absolute and in normal form, a mount's target absolute, in normal form, outside the
+   runtime's own places and unique in lower case, a `subPath` relative, a mode, propagation
+   and protocol known; a host port and a job port are 1 to 65535, and no job port is given
+   twice or is the container port of one of `ports` (each refused naming the entry's field,
+   such as `spec.mounts[<i>].target` or `spec.hostPorts[<i>].containerPort`). A job with any
+   of them is refused with host isolation (naming `spec.constraints.isolation`), and records
+   `layered-rootfs=true` among its capabilities, which admission and placement ask a host
+   for; one with layers, or a host port at a job port of its own, records the execution mode
+   `container` when it gave none, and is refused with `sandbox-exec` (naming
+   `spec.constraints.exec`). Each default is recorded in its explicit form (read-only,
+   private, TCP, the job port of a host port), so a resubmit that spells a default either way
+   is the same job. The job id is empty (the service mints one) or 1
    to 63 bytes of letters, digits, `.`, `_` and `-`, else refused naming `spec.jobId`. A
    refusal never repeats a value of the request. Every check runs before the id is looked
    up, so a retry of a job the ceiling now refuses is refused, not answered.
