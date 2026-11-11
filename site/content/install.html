@@ -1,5 +1,5 @@
 <h1>Install</h1>
-<p class="lede">The lease server, the <code>js</code> client and the agent are Rust binaries built by the repository's release workflow. The agent is also a Debian package, for x86_64 and arm64, which the release publishes to the apt repository at <code>https://packages.komira.ai/apt</code>. There is no container image and no published macOS installer. The Linux binaries are static (musl, x86_64 and arm64); the macOS ones are for Apple silicon and are not codesigned or notarized. There is no lease server for macOS.</p>
+<p class="lede">The lease server, the <code>js</code> client and the agent are Rust binaries built by the repository's release workflow. The agent is also a Debian package, for x86_64 and arm64, which the release publishes to the apt repository at <code>https://packages.komira.ai/apt</code>. The lease server is also a container image for x86_64 and arm64 Linux. There is no container image of the agent or the client, and no published macOS installer. The Linux binaries are static (musl, x86_64 and arm64); the macOS ones are for Apple silicon and are not codesigned or notarized. There is no lease server for macOS.</p>
 
 <div class="notice notice-warn"><p><strong>The agent's Debian package goes to the suite <code>testing</code> first.</strong> The release attests each package, puts it in <code>testing</code>, installs it from there in a clean container on both architectures, and only then lists the same bytes in <code>stable</code>. A release whose apt settings are not set publishes no package and passes. The macOS installer package of the agent, in <code>packaging/js-agent-macos</code>, is built by its own workflow, which publishes nothing. A host gets the agent from the package or from the release archive and the unit in <code>packaging/js-agent</code>, as the steps below say.</p></div>
 
@@ -17,7 +17,8 @@
     <tr><td><code>js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-mdm-X.Y.Z-aarch64-unknown-linux-musl.tar.gz</code></td><td>the MDM that enrolls Macs as compute hosts, set up on one Linux host</td></tr>
     <tr><td><code>js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz</code>, <code>js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the root helper and the pf anchor installer a Mac node installs</td></tr>
     <tr><td><code>js-agent_X.Y.Z_amd64.deb</code>, <code>js-agent_X.Y.Z_arm64.deb</code></td><td>the agent as a Debian package, each with the bundle of its attestation (<code>.deb.sigstore.json</code>)</td></tr>
-    <tr><td><code>SHA256SUMS</code></td><td>the SHA-256 of the fifteen archives and the two Debian packages</td></tr>
+    <tr><td><code>js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar</code>, <code>js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.oci.tar</code></td><td>the lease server as a container image, named by its digest only, each with the bundle of its attestation (<code>.oci.tar.sigstore.json</code>)</td></tr>
+    <tr><td><code>SHA256SUMS</code></td><td>the SHA-256 of the fifteen archives, the two Debian packages and the two images</td></tr>
     </tbody></table></div>
     <p>Each archive unpacks to a directory named like the archive without <code>.tar.gz</code>, and holds the binary and <code>LICENSE</code>. The Linux lease-server archives also hold <code>updater.d/js-lease-server.toml</code>.</p>
   </li>
@@ -78,7 +79,7 @@ memory_bytes = 17179869184</pre></div>
 
 <h2 id="not-shipped">What is not shipped</h2>
 <ul>
-  <li><span class="tag tag-planned">none</span> A container image of the agent, the lease server or the client, and a package of the lease server or the client.</li>
+  <li><span class="tag tag-planned">none</span> A container image of the agent or the client, and a package of the lease server or the client.</li>
   <li><span class="tag tag-planned">none</span> A published macOS package of the agent: the package is built, and not published.</li>
   <li><span class="tag tag-planned">none</span> A lease server for macOS.</li>
   <li><span class="tag tag-planned">not proven</span> That the macOS archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when built again on a hosted arm64 runner.</li>

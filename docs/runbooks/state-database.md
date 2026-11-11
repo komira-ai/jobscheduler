@@ -146,12 +146,16 @@ Keep the file mode: the job store and the binding file hold job specs and creden
 What the server does by itself, and what to check:
 
 - **The start.** With a Postgres store the log says `the store is open and its writer lock is held` once. A second process is refused
-  with `--store: another process holds the store's writer lock` and exits 2.
+  with `--store: another process holds the store's writer lock` and exits 2, unless it was started with `--ready-listen`: then it logs
+  `waiting for the store's writer lock` once, tries again every second and takes the lock when the holder lets go. Its readiness route
+  (`GET /readyz` on the `--ready-listen` address) answers 503 `waiting for the store's writer lock` until then, 503 `starting` while
+  it binds its listeners, 200 `ready` while it serves, and 503 `draining` from SIGTERM until it exits. A SIGTERM while it waits ends
+  it with status 0, the lock not taken.
 - **`/healthz` is not a lock check.** It answers 200 while the tick loop runs and says nothing about the writer lock: a server that has
   not taken the lock has not started, and one that loses it stops serving and ticking (its listeners close, so `/healthz` is refused
-  rather than answered), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. There is no readiness route. Do not read a 200 as "this server holds the
-  lock"; read the log line, or the lock in `pg_locks` (an advisory lock held by a session whose `application_name` is
-  `js-lease-server`).
+  rather than answered), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. Do not read a 200 as "this server holds the
+  lock"; read the readiness route of a server started with `--ready-listen` (200 `ready` only while it holds the lock and serves), the
+  log line, or the lock in `pg_locks` (an advisory lock held by a session whose `application_name` is `js-lease-server`).
 - **Agents come back.** Their first heartbeat is answered 409 `unknown-host`; they say hello again and list the jobs they hold.
 - **Jobs the restored store does not know are stopped.** A host that lists a job the restored job store has no live allocation for on
   that host (one accepted after the backup) is told to stop it, on every heartbeat while it lists the job; the job's result is
@@ -171,8 +175,6 @@ The test that restores an older job store under live agents and asserts the stop
 
 ## Not built yet
 
-- A server that waits for the writer lock instead of refusing to start, and a readiness route that stays 503 until the lock is taken.
-  Until then, during an update cutover or a node reboot, a server refused at the lock stays down until it is started again.
 - The rest of the server state in the Postgres store. Until it moves there, the backup that matters for a server that runs jobs is the
   job store and the binding file (or, with a store setting, the store that holds the bindings and the scaler's
   records).

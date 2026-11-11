@@ -206,6 +206,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--store", "/store"),
         key("--store-unreachable-after", "90s"),
         key("--metrics-listen", "127.0.0.1:9100"),
+        key("--ready-listen", "127.0.0.1:9101"),
     ];
     rows.push((
         vec!["--usage-off"],

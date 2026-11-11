@@ -230,7 +230,7 @@ async fn an_oversized_request_head_is_refused() {
 /// Sends the head of an authenticated request to [`BODY_ROUTE`] that expects `100 Continue` and
 /// reads that answer: the server has taken the connection and its handler is waiting
 /// for the body, which is never sent. Returns the stream.
-async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
+pub(crate) async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let head = format!(
         "POST {BODY_ROUTE} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n"

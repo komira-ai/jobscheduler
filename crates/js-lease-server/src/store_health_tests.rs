@@ -579,7 +579,7 @@ async fn a_server_without_a_scaler_sends_the_store_alert_to_its_sink() {
         .with_alert_sink(sink.clone());
     let clock = ManualClock::new(Timestamp::from_millis(START_MS));
     let server_clock = SharedClock::new(clock.clone());
-    let (prepared, _) = prepare(config, &server_clock).unwrap();
+    let (prepared, _) = prepare(config, None, &server_clock).unwrap();
     let Opened { shared, scaler, .. } = open(prepared, &server_clock).unwrap();
     assert!(scaler.is_none());
     let health = Arc::clone(shared.store_health().unwrap());
