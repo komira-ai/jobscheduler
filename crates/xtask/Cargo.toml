@@ -27,6 +27,8 @@ test = false
 clap.workspace = true
 flate2.workspace = true
 hex.workspace = true
+# `channels check-apt` runs the agent's own start check of the job user on the installed system.
+js-agent = { path = "../js-agent" }
 # `gen-job-surface` renders the route table of docs/http-gateway.md from the gateway's routes,
 # and its served paragraph from the calls the lease server serves.
 js-api-gateway = { path = "../js-api-gateway" }
@@ -58,9 +60,8 @@ toml.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
-# The paths the elastic boot payload gives its agent, the flags the agent's command line
-# accepts and the server addresses the client refuses (tests/js_agent_package.rs).
-js-agent = { path = "../js-agent" }
+# The server addresses the client refuses (tests/js_agent_package.rs). js-agent, which the tests
+# also read, is a dependency above.
 js-client = { path = "../js-client" }
 # The interpreter that builds the job commands from a generated table, run on the tables the
 # generator renders for the test definition (tests/job_surface.rs).

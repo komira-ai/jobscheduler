@@ -24,6 +24,10 @@ Examples use `js.example.com`, `node-5` and `farm`. Replace them.
 - The release version, plain `X.Y.Z` (the release's tag without the `v`), the same one
   `js-agent --version` prints after the program name.
 - Root on the node.
+- What the agent's start check needs and the package does not carry: `crun` and `uidmap` from
+  the distribution, the scratch mount and, where user namespaces are restricted, crun's AppArmor
+  profile ("What the host provides" in `packaging/js-agent/deb/README.md`). The package makes
+  the job user `jsjob` and its subuid and subgid ranges itself, and keeps ranges a host has.
 - The node's repository entry of the stable suite, `komira-stable` (section 9), which
   hostkeeper's coordinator pushes to every Linux host from its registry of repositories.
 

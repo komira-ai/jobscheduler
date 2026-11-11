@@ -1,0 +1,143 @@
+#!/bin/sh
+# The postinst of the js-agent .deb: makes the job user that js-agent-crun.service names with
+# --job-user, and gives it the subordinate uid and gid ranges the agent's start check asks for.
+#
+# 1. systemd-sysusers on the package's sysusers.d file (/usr/lib/sysusers.d/js-agent.conf, the
+#    user jsjob). It keeps an account that exists already, as one the setup script or an operator
+#    made. The package's Depends brings systemd-sysusers.
+# 2. A range of 65536 ids for jsjob in /etc/subuid and in /etc/subgid, for each file that does not
+#    give it one already: a line naming the user (or its uid) with a first id above 0 and 65536
+#    ids or more that end below 2^32, the range the agent reads. A file that has one is left as
+#    it is, so a reinstall, an upgrade and a host set up by the setup script or by hand change
+#    nothing. The new range is the setup script's: the first block of 65536 ids from 200000
+#    that overlaps no range of either file and holds no uid of /etc/passwd and no gid of
+#    /etc/group, the same block in both files. When there is none below 2^32 nothing is
+#    written and the install goes on with a warning: the agent's start check then names the
+#    missing range.
+#
+# Everything is read and written below $DPKG_ROOT when dpkg sets it. Only shell built-ins and
+# systemd-sysusers run. Nothing is started or enabled, and nothing is removed at purge.
+set -e
+
+JOB_USER=jsjob
+# The ids of the job user's range: the least the agent's start check accepts.
+COUNT=65536
+# The lowest first id of a range this script picks.
+FIRST=200000
+# 2^32: a range ends at or below it.
+LIMIT=4294967296
+
+# number TEXT: 0 when TEXT is a decimal number of at most 10 digits after its leading zeros, and
+# then DEC is that number without them (the shell would read a leading 0 as octal).
+number() {
+	case $1 in '' | *[!0-9]*) return 1 ;; esac
+	DEC=${1#"${1%%[!0]*}"}
+	DEC=${DEC:-0}
+	[ "${#DEC}" -le 10 ]
+}
+
+# job_uid PASSWD: the uid of the job user in the passwd file PASSWD; nothing when it has none.
+job_uid() {
+	[ -f "$1" ] || return 0
+	while IFS=: read -r name _ id _ || [ -n "$name" ]; do
+		if [ "$name" = "$JOB_USER" ]; then
+			printf '%s' "$id"
+			return 0
+		fi
+	done <"$1"
+}
+
+# has_range FILE UID: 0 when a line of the subid file FILE gives the job user (by name, or by
+# UID) a range the agent accepts. The agent reads a line of exactly three fields.
+has_range() {
+	[ -f "$1" ] || return 1
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in *:*:*:*) continue ;; *:*:*) ;; *) continue ;; esac
+		owner=${line%%:*}
+		rest=${line#*:}
+		first=${rest%%:*}
+		n=${rest#*:}
+		[ "$owner" = "$JOB_USER" ] || { [ -n "$2" ] && [ "$owner" = "$2" ]; } || continue
+		number "$first" || continue
+		first=$DEC
+		number "$n" || continue
+		n=$DEC
+		if [ "$first" -gt 0 ] && [ "$n" -ge "$COUNT" ] && [ $((first + n)) -le "$LIMIT" ]; then
+			return 0
+		fi
+	done <"$1"
+	return 1
+}
+
+# free_start ROOT: the first id at or above FIRST that starts COUNT ids overlapping no range of
+# ROOT's /etc/subuid and /etc/subgid and holding no uid of its /etc/passwd and no gid of its
+# /etc/group; nothing, and status 1, when every such block ends above LIMIT.
+free_start() {
+	start=$FIRST
+	moved=1
+	while [ "$moved" = 1 ]; do
+		moved=0
+		for file in "$1/etc/subuid" "$1/etc/subgid"; do
+			[ -f "$file" ] || continue
+			while IFS=: read -r owner first n _ || [ -n "$owner" ]; do
+				number "$first" || continue
+				first=$DEC
+				number "$n" || continue
+				n=$DEC
+				if [ "$start" -lt $((first + n)) ] && [ "$first" -lt $((start + COUNT)) ]; then
+					start=$((first + n))
+					moved=1
+				fi
+			done <"$file"
+		done
+		for file in "$1/etc/passwd" "$1/etc/group"; do
+			[ -f "$file" ] || continue
+			while IFS=: read -r name _ id _ || [ -n "$name" ]; do
+				number "$id" || continue
+				id=$DEC
+				if [ "$id" -ge "$start" ] && [ "$id" -lt $((start + COUNT)) ]; then
+					start=$((id + 1))
+					moved=1
+				fi
+			done <"$file"
+		done
+	done
+	[ $((start + COUNT)) -le "$LIMIT" ] || return 1
+	printf '%s' "$start"
+}
+
+# ends_open FILE: 0 when FILE is not empty and its last line has no newline.
+ends_open() {
+	[ -s "$1" ] || return 1
+	last=
+	while IFS= read -r last; do :; done <"$1"
+	[ -n "$last" ]
+}
+
+# subids ROOT: the job user's range in each of ROOT's subid files that has none.
+subids() {
+	uid=$(job_uid "$1/etc/passwd")
+	need=
+	has_range "$1/etc/subuid" "$uid" || need="$need subuid"
+	has_range "$1/etc/subgid" "$uid" || need="$need subgid"
+	[ -n "$need" ] || return 0
+	if ! start=$(free_start "$1"); then
+		echo "js-agent: no free block of $COUNT ids below 2^32 for $JOB_USER in /etc/subuid and /etc/subgid; add one, or the agent will not start" >&2
+		return 0
+	fi
+	for name in $need; do
+		if ends_open "$1/etc/$name"; then
+			echo >>"$1/etc/$name"
+		fi
+		echo "$JOB_USER:$start:$COUNT" >>"$1/etc/$name"
+	done
+}
+
+case "$1" in
+configure | abort-upgrade | abort-deconfigure | abort-remove)
+	systemd-sysusers ${DPKG_ROOT:+--root="$DPKG_ROOT"} js-agent.conf
+	subids "${DPKG_ROOT:-}"
+	;;
+esac
+
+exit 0
