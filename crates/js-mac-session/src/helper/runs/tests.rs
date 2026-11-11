@@ -110,15 +110,20 @@ fn watch_finds_the_last_run_and_reports_its_end() {
 }
 
 /// Catches: a `stop` that kills before the grace has passed, or never sends the `SIGTERM`;
-/// the clock is the host's, moved by the test.
+/// the clock is the host's, moved by the test. The stopper reads the clock for its grace,
+/// then again under the table's lock before it waits; the test moves the clock only after
+/// both reads, so the stopper waits on the table with the grace still ahead.
 #[test]
 fn stop_sends_sigterm_and_kills_only_after_the_grace() {
     let rig = running("stop-grace");
+    let reads = rig.host.state().clock_reads;
     std::thread::scope(|scope| {
         let stopping = scope.spawn(|| rig.helper.stop("7.1", HOUR));
         until_logged(&rig, &format!("term_group {PID}"));
+        until_read(&rig, reads + 2);
         assert!(!kill_all_logged(&rig), "killed before the grace");
         advance(&rig, HOUR - Duration::from_secs(1));
+        until_read(&rig, reads + 3);
         assert!(!kill_all_logged(&rig), "killed before the grace");
         advance(&rig, Duration::from_secs(1));
         assert_eq!(stopping.join().unwrap(), Ok(()));
