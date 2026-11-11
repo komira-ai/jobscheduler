@@ -23,6 +23,7 @@ mod escape;
 mod escape_xfs;
 mod gpu;
 mod host;
+mod host_ports;
 mod quota;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;

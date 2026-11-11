@@ -205,6 +205,14 @@ impl Default for OciConfig {
     }
 }
 
+/// Whole seconds the init of a container with [`ContainerSpec::listen_ports`] waits for each
+/// to be listening before it gives up (`js-init --wait-listen`), as long as it waits for a
+/// route ([`OciConfig::route_wait`]): the daemon makes the listeners once `crun` names the
+/// container's pid, which it asks for that long.
+///
+/// [`ContainerSpec::listen_ports`]: crate::container::ContainerSpec::listen_ports
+pub const LISTEN_WAIT_SECS: u64 = 30;
+
 /// The start of the name of a lease's directory when it is made beside other directories
 /// ([`OciConfig::leases_in`]). A run id is `[A-Za-z0-9._-]` with a leading alphanumeric, so
 /// no run's own directory is named like a lease's.

@@ -24,6 +24,7 @@ mod egress;
 mod env;
 mod gpus;
 mod host;
+mod host_ports;
 mod images;
 mod logs;
 mod node;

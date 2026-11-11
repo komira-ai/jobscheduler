@@ -145,6 +145,7 @@ impl Node {
             })
             .to_vec(),
             devices: Vec::new(),
+            listen_ports: Vec::new(),
         }
     }
 }

@@ -16,6 +16,7 @@ mod fence;
 mod files;
 mod flags;
 mod held;
+mod host_ports;
 mod layout;
 mod lease_dir;
 mod live_logs;

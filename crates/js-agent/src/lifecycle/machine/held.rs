@@ -67,18 +67,24 @@ const RETIRED_MAX: u64 = 4 << 20;
 /// streams, none when it has no tail. A tail is only ever cut, so a cut changes the mark.
 type Mark = Option<(usize, usize)>;
 
-/// A held result as its file says it.
+/// A held result as its file says it: with its `input_failure` when it has one, which an
+/// agent of an earlier release, which does not read it, ignores.
 #[derive(Serialize)]
 struct Written<'a> {
     keyed: Keyed,
     result: &'a RunResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_failure: Option<&'a str>,
 }
 
-/// A held result as it is read back; fields it does not know are ignored.
+/// A held result as it is read back; fields it does not know are ignored, and a file an
+/// earlier release wrote has no `input_failure`.
 #[derive(Deserialize)]
-struct Stored {
+pub(super) struct Stored {
     keyed: Keyed,
     result: RunResult,
+    #[serde(default)]
+    input_failure: Option<String>,
 }
 
 /// The retired list as its file says it.
@@ -144,13 +150,13 @@ fn write_whole(dir: &Path, name: &str, body: &[u8]) -> io::Result<()> {
         .and_then(|()| sync_dir(dir))
 }
 
-/// The result and keying in the file `name` at `path`.
-fn read_result(path: &Path, name: &str) -> Result<(Keyed, RunResult), String> {
+/// The result, keying and input failure in the file `name` at `path`.
+fn read_result(path: &Path, name: &str) -> Result<Stored, String> {
     let text = read_capped(path, RESULT_MAX).map_err(|why| why.to_string())?;
     let stored: Stored = serde_json::from_str(&text).map_err(|why| why.to_string())?;
     stored.result.validate().map_err(|why| why.to_string())?;
     match name == format!("{}{RESULT_SUFFIX}", stored.result.run_id) {
-        true => Ok((stored.keyed, stored.result)),
+        true => Ok(stored),
         false => Err("the file is named for another run".to_owned()),
     }
 }
@@ -220,7 +226,7 @@ impl Records {
         room: usize,
         taken: &BTreeSet<&str>,
         events: &mut Vec<Event>,
-    ) -> (Vec<(Keyed, RunResult)>, Retired) {
+    ) -> (Vec<Stored>, Retired) {
         let mut found = Vec::new();
         match self.names() {
             Err(why) => unreadable(events, "the held results", &why.to_string()),
@@ -239,9 +245,10 @@ impl Records {
                         false => Err("the agent can hold no more runs".to_owned()),
                     };
                     match read {
-                        Ok((keyed, result)) => {
-                            self.written.insert(result.run_id.clone(), mark_of(&result));
-                            found.push((keyed, result));
+                        Ok(stored) => {
+                            let mark = mark_of(&stored.result);
+                            self.written.insert(stored.result.run_id.clone(), mark);
+                            found.push(stored);
                         }
                         Err(why) => {
                             let _ = fs::remove_file(&path);
@@ -276,14 +283,20 @@ impl Records {
         retired
     }
 
-    /// Writes the file of a result.
-    fn write_result(&self, keyed: Keyed, result: &RunResult) -> io::Result<()> {
+    /// Writes the file of the result of `job`.
+    fn write_result(&self, job: &Job, result: &RunResult) -> io::Result<()> {
         let dir = self.dir();
         DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
         let name = format!("{}{RESULT_SUFFIX}", result.run_id);
-        serde_json::to_vec(&Written { keyed, result })
-            .map_err(io::Error::other)
-            .and_then(|body| write_whole(&dir, &name, &body))
+        let input_failure = job.input_failure.as_deref();
+        let keyed = job.keyed;
+        serde_json::to_vec(&Written {
+            keyed,
+            result,
+            input_failure,
+        })
+        .map_err(io::Error::other)
+        .and_then(|body| write_whole(&dir, &name, &body))
     }
 
     /// Writes the retired list.
@@ -322,7 +335,7 @@ impl Records {
             };
             let mark = mark_of(result);
             if self.written.get(&job.run_id) != Some(&mark) {
-                match self.write_result(job.keyed, result) {
+                match self.write_result(job, result) {
                     Ok(()) => {
                         self.written.insert(job.run_id.clone(), mark);
                     }
@@ -406,11 +419,19 @@ impl Lifecycle {
         let taken: BTreeSet<&str> = self.jobs.iter().map(|job| job.run_id.as_str()).collect();
         let (results, retired) = self.records.load(room, &taken, events);
         self.retired = retired;
-        for (keyed, result) in results {
+        for Stored {
+            keyed,
+            result,
+            input_failure,
+        } in results
+        {
             let taken = self.jobs.iter().position(|job| job.run_id == result.run_id);
             match taken {
-                Some(index) => self.jobs[index].result = Some(result),
-                None => self.jobs.push(Job::held(keyed, result)),
+                Some(index) => {
+                    self.jobs[index].result = Some(result);
+                    self.jobs[index].input_failure = input_failure;
+                }
+                None => self.jobs.push(Job::held(keyed, result, input_failure)),
             }
         }
     }

@@ -518,6 +518,7 @@ fn container() -> ContainerSpec {
             recursive: true,
         }],
         devices: Vec::new(),
+        listen_ports: Vec::new(),
     }
 }
 

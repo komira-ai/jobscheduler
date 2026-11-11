@@ -2,7 +2,10 @@
 //! cleanup in order.
 
 use super::Lifecycle;
-use super::job::{Cause, Stage, blind_taint, cause_detail, check_taint, cleanup_taint, outcome};
+use super::job::{
+    Cause, Stage, blind_taint, cause_detail, cause_input_failure, check_taint, cleanup_taint,
+    outcome,
+};
 use crate::lifecycle::runtime::{RunHandle, Status};
 use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
 
@@ -89,6 +92,7 @@ impl Lifecycle {
                         job.logs = runtime.logs_report(&id);
                     }
                     job.result = Some(result);
+                    job.input_failure = cause_input_failure(job.cause, how);
                     events.push(Event::ResultReady {
                         run_id: job.run_id.clone(),
                     });

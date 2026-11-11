@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use js_agent::crun::{
-    CgroupSettings, CrunRuntime, CrunSettings, EgressPort, config_dir, oci_config,
+    CgroupSettings, CrunRuntime, CrunSettings, EgressPort, HostPorts, config_dir, oci_config,
 };
 use js_agent::egress::{Config, Egress};
 use js_agent::lifecycle::{Body, RunSpec, Runtime as _};
@@ -247,6 +247,7 @@ impl RuntimeHost {
             gpus: None,
             image_budget: None,
             host_jobs: false,
+            host_ports: HostPorts::default(),
         };
         let runtime = CrunRuntime::open(settings, Arc::new(NoImages))
             .map_err(|why| format!("open the crun runtime: {why}"))?;
@@ -309,6 +310,7 @@ impl RuntimeHost {
             labels: BTreeMap::new(),
             network: self.network,
             ports: Vec::new(),
+            host_ports: Vec::new(),
             log_sink: None,
         })
     }

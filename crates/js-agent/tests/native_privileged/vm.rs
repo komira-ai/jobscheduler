@@ -61,6 +61,7 @@ fn a_command_runs_in_a_fresh_vm_and_the_vm_is_destroyed() {
         bundle: None,
         network: Default::default(),
         ports: Vec::new(),
+        host_ports: Vec::new(),
         log_sink: None,
     };
     let id = rt.create_and_start(&spec).unwrap();

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use js_agent::lifecycle::{Event, Lifecycle, NoChecks, Runtime, detail, label};
 use js_agent::vm::{NoVmSlot, VmRuntime, WithVms};
-use js_agent_wire::{Command, HeldJob, JobStartSpec, Outcome, refusal};
+use js_agent_wire::{Command, HeldJob, JobStartSpec, Outcome, PortRange, refusal};
 use js_vm_lease::fake::FakeDriver;
 use js_vm_lease::{ExecEnd, Step};
 use serde_json::{Value, json};
@@ -151,7 +151,8 @@ fn a_vm_job_runs_in_a_vm_beside_an_action_job() {
 
 /// Asserts that a VM start that asks for what a VM does not give is refused before anything
 /// is made, each with its own code: a `run` body, run files, a GPU, network above `none`, a
-/// declared port. Catches a VM start run with less than it asked for.
+/// declared port, a host port (`input-not-allowed`, though the agent's other runtime allows
+/// every host port). Catches a VM start run with less than it asked for.
 #[test]
 fn a_vm_start_that_asks_for_what_a_vm_lacks_is_refused() {
     let cases = [
@@ -172,11 +173,17 @@ fn a_vm_start_that_asks_for_what_a_vm_lacks_is_refused() {
             json!({ "ports": [{ "host": 8080, "container": 80 }] }),
             refusal::PORTS_NOT_SUPPORTED,
         ),
+        // A VM's runtime offers no host port, whatever the agent's runtime allows.
+        (
+            json!({ "host_ports": [{ "host_port": 5432 }] }),
+            refusal::INPUT_NOT_ALLOWED,
+        ),
     ];
     for (n, (extra, code)) in cases.into_iter().enumerate() {
         let dir = Scratch::new(&format!("vm-life-lacks{n}"));
         let driver = Arc::new(FakeDriver::new());
         let (mut life, fake) = life(&dir, Some(&driver));
+        fake.set_host_ports(&[PortRange::new(1, u16::MAX).unwrap()]);
         let events = life.apply(&reply(vec![start_of("job-vm", &extra)]));
         assert_eq!(refused(&events, "job-vm").0, code, "{extra}");
         assert!(driver.calls().is_empty(), "{extra}");

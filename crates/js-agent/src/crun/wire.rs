@@ -16,8 +16,8 @@ use js_oci::{Client, Policy};
 
 use super::adopt::report_lines;
 use super::{
-    CgroupSettings, CrunError, CrunRuntime, CrunSettings, GpuSettings, Hooks, config_dir, port_of,
-    read_node,
+    CgroupSettings, CrunError, CrunRuntime, CrunSettings, GpuSettings, Hooks, HostPorts,
+    config_dir, port_of, read_node,
 };
 use crate::cli_runtime::{CGROUP_ROOT, CrunPlan, Mapping};
 use crate::crun_host::CrunHost;
@@ -225,6 +225,10 @@ pub fn open(
         }),
         image_budget: plan.image_budget,
         host_jobs: plan.host_jobs,
+        host_ports: HostPorts {
+            allowed: plan.host_ports.clone(),
+            ..HostPorts::default()
+        },
     };
     let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?
         .with_live_logs(plan.logs.live());

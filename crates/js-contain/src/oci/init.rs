@@ -294,4 +294,96 @@ mod tests {
             );
         }
     }
+
+    /// Runs the installed init with `options` over a shell that writes `ran` to a marker
+    /// file, its stdin a file to report to. Returns the exit code, whether the program ran,
+    /// and the report's text.
+    fn run_marker(name: &str, options: &[&str]) -> (Option<i32>, bool, String) {
+        let dir = scratch(name);
+        let init = install(&dir).expect("install");
+        let marker = dir.join("marker");
+        let report = create_report(&dir).expect("report");
+        let script = format!("echo ran > {}", marker.display());
+        let status = std::process::Command::new(&init)
+            .args(options)
+            .args(["--", "/bin/sh", "-c", &script])
+            .stdin(report)
+            .status()
+            .expect("the init runs");
+        let said = std::fs::read_to_string(report_path(&dir)).expect("report text");
+        (status.code(), marker.exists(), said)
+    }
+
+    /// Proves `--wait-listen` lets the program start, exit 0, once its port has a listener
+    /// in the init's network namespace. Catches an init that holds a ready container for
+    /// its whole wait, or reports a listening port as missing.
+    #[test]
+    fn a_listening_port_lets_the_program_start() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port().to_string();
+        let (code, ran, said) = run_marker("listen-ready", &["--wait-listen", "1", &port]);
+        assert_eq!(code, Some(0));
+        assert!(ran, "the program ran");
+        assert_eq!(said, "");
+    }
+
+    /// Proves a port with no listener ends the init with 126 after its seconds, the
+    /// program never started, and names that port, the first missing one, in the report. The
+    /// port is one end of a connection the test holds (established, never listening, and
+    /// not available to anything else), listed after a port that does listen. Catches an
+    /// init that starts the program on a port nobody listens on, names a listening port as
+    /// missing, or leaves the report empty.
+    #[test]
+    fn a_port_that_never_listens_is_reported_and_the_program_does_not_start() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let client =
+            std::net::TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let open = listener.local_addr().expect("addr").port();
+        let silent = client.local_addr().expect("client addr").port();
+        let ports = format!("{open},{silent}");
+        let (code, ran, said) = run_marker("listen-missing", &["--wait-listen", "1", &ports]);
+        assert_eq!(code, Some(126));
+        assert!(!ran, "the program must not run");
+        assert_eq!(
+            said,
+            format!("js-init: the network is not ready: port {silent} not listening within 1 s\n")
+        );
+        drop(client);
+    }
+
+    /// Proves a malformed `--wait-listen` is the usage error (exit 2, the program not
+    /// started): seconds of 0, beyond 3600 or not a number, a port of 0 or above 65535, an
+    /// empty entry, an empty list, and no list at all. Catches an init that waits on, or
+    /// starts the program under, a bound or list it cannot meet.
+    #[test]
+    fn a_malformed_listen_wait_is_a_usage_error() {
+        let cases: [&[&str]; 8] = [
+            &["--wait-listen", "0", "80"],
+            &["--wait-listen", "1", "0"],
+            &["--wait-listen", "1", "65536"],
+            &["--wait-listen", "1", "80,"],
+            &["--wait-listen", "1", ""],
+            &["--wait-listen", "x", "80"],
+            &["--wait-listen", "1"],
+            &["--wait-listen", "3601", "80"],
+        ];
+        for (n, options) in cases.iter().enumerate() {
+            let (code, ran, _) = run_marker(&format!("listen-usage-{n}"), options);
+            assert_eq!(code, Some(2), "{options:?}");
+            assert!(!ran, "{options:?}: the program must not run");
+        }
+    }
+
+    /// Proves the options have a fixed order: `--wait-route` after `--wait-listen` is a
+    /// usage error. Catches an init that accepts them in either order, so a bundle's
+    /// arguments would mean two things.
+    #[test]
+    fn a_route_wait_after_a_listen_wait_is_a_usage_error() {
+        let (code, ran, _) = run_marker(
+            "listen-order",
+            &["--wait-listen", "1", "80", "--wait-route", "1"],
+        );
+        assert_eq!(code, Some(2));
+        assert!(!ran, "the program must not run");
+    }
 }

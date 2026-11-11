@@ -185,6 +185,7 @@ mod tests {
             isolation: Default::default(),
             network: Default::default(),
             ports: Vec::new(),
+            host_ports: Vec::new(),
             labels: labels.collect(),
             bundle: None,
             log_sink: None,

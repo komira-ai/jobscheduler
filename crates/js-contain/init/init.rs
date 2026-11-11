@@ -7,8 +7,9 @@
 //! reap; without this program the job itself was the container's first process and
 //! did not.
 //!
-//! Usage: `js-init [--wait-route <seconds>] [--end-descendants] -- <program> [argument...]`,
-//! with the working directory and the environment the program is to have.
+//! Usage: `js-init [--wait-route <seconds>] [--wait-listen <seconds> <port,...>]
+//! [--end-descendants] -- <program> [argument...]`, the options in that order, with the
+//! working directory and the environment the program is to have.
 //!
 //! - With `--wait-route` the program is not started until the container's network namespace
 //!   has a default route (a line of `/proc/net/route` with destination and mask 0 and the
@@ -16,6 +17,12 @@
 //!   outside while this program waits, and adds the default route last, so the job's first
 //!   packet leaves a network that is complete. A namespace with no route in time is the
 //!   node's failure (exit 126, a line in the report, the program never started).
+//! - With `--wait-listen` the program is not started until each of the ports (1 to 65535,
+//!   comma separated) is listening in the container's network namespace (a line of
+//!   `/proc/net/tcp` in state `LISTEN` at that local port), for at most that many seconds:
+//!   the host's agent makes those listeners from outside (a job's host ports), and nothing
+//!   connects to find out. Ports not listening in time are the node's failure, as a route
+//!   is. It is waited for after the route.
 //!
 //! - The program is looked up as `crun` looks it up: a name with a slash as it is (a
 //!   relative one from the working directory), a bare name on the environment's `PATH`
@@ -109,6 +116,16 @@ fn main() {
         );
         first = args.next();
     }
+    let mut wait_listen = None;
+    if first.as_deref() == Some(OsStr::new("--wait-listen")) {
+        let secs = args
+            .next()
+            .and_then(|text| text.to_str().and_then(|text| text.parse::<u64>().ok()))
+            .filter(|secs| (1..=3600).contains(secs));
+        let ports = args.next().and_then(|text| text.to_str().and_then(port_list));
+        wait_listen = Some(secs.zip(ports).unwrap_or_else(|| usage()));
+        first = args.next();
+    }
     let end_descendants = first.as_deref() == Some(OsStr::new("--end-descendants"));
     if end_descendants {
         first = args.next();
@@ -155,6 +172,16 @@ fn main() {
         if !default_route_within(secs) {
             let words =
                 format!("js-init: the network is not ready: no default route within {secs} s");
+            eprintln!("{words}");
+            report(&words);
+            std::process::exit(126);
+        }
+    }
+    if let Some((secs, ports)) = wait_listen {
+        if let Some(missing) = not_listening_after(secs, &ports) {
+            let words = format!(
+                "js-init: the network is not ready: port {missing} not listening within {secs} s"
+            );
             eprintln!("{words}");
             report(&words);
             std::process::exit(126);
@@ -233,9 +260,46 @@ fn has_default_route(table: &str) -> bool {
     })
 }
 
+/// The ports of `text`, comma separated, each from 1 to 65535, at least one; `None` for
+/// anything else.
+fn port_list(text: &str) -> Option<Vec<u16>> {
+    let port = |part: &str| part.parse::<u16>().ok().filter(|port| *port != 0);
+    text.split(',').map(port).collect()
+}
+
+/// The first of `ports` that is not listening in this network namespace after `secs`
+/// seconds, `None` once all are: polled every 10 ms in `/proc/net/tcp` (read as the
+/// namespace's own, which is the reader's).
+fn not_listening_after(secs: u64, ports: &[u16]) -> Option<u16> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let table = std::fs::read_to_string("/proc/net/tcp").unwrap_or_default();
+        let missing = ports.iter().find(|port| !listens(&table, **port)).copied();
+        if missing.is_none() || std::time::Instant::now() >= deadline {
+            return missing;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Whether a `/proc/net/tcp` listing holds a socket in state `LISTEN` (`0A`) whose local
+/// port (the hexadecimal after the address's `:`) is `port` (the header line and short
+/// lines name no socket).
+fn listens(table: &str, port: u16) -> bool {
+    table.lines().skip(1).any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let local = fields
+            .get(1)
+            .and_then(|address| address.rsplit_once(':'))
+            .and_then(|(_, hex)| u16::from_str_radix(hex, 16).ok());
+        local == Some(port) && fields.get(3) == Some(&"0A")
+    })
+}
+
 fn usage() -> ! {
     eprintln!(
-        "usage: js-init [--wait-route <seconds>] [--end-descendants] -- <program> [argument...]"
+        "usage: js-init [--wait-route <seconds>] [--wait-listen <seconds> <port,...>] \
+         [--end-descendants] -- <program> [argument...]"
     );
     std::process::exit(2);
 }

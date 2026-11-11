@@ -8,6 +8,8 @@ use clap::{CommandFactory, Parser, ValueEnum};
 use crate::facts::Platform;
 use crate::identity::IdentityFlags;
 
+mod flag_sets;
+
 /// What `--version` prints after the version: the runtimes this build can run jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
 /// where `--runtime crun` is wired says `docker crun`; a Mac build says `docker native` (it
@@ -518,6 +520,14 @@ pub struct Cli {
     /// `--egress allow-list` or `open`.
     #[arg(long, value_name = "PORT|LO-HI")]
     pub egress_forward_port: Vec<String>,
+    /// A port of the host's loopback a job may reach (`host_ports`), `PORT` or `LO-HI`, each
+    /// from 1 to 65535; repeatable, at most 16. A job reaches each host port it names at a port
+    /// of its own loopback, whatever its network level, through a listener the agent holds
+    /// in the job's network namespace; a job that names a host port not listed is refused
+    /// `input-not-allowed`, as is every job that names one when none is given. Needs
+    /// `--runtime crun`.
+    #[arg(long, value_name = "PORT|LO-HI")]
+    pub host_port: Vec<String>,
     /// The IPv4 network the jobs' addresses are taken from, one /30 each, `<addr>/16` to
     /// `<addr>/24`; by default `198.18.0.0/16`. Needs `--egress allow-list` or `open`.
     #[arg(long, value_name = "CIDR")]
@@ -707,45 +717,6 @@ impl Cli {
         let native = self.native_flags().into_iter().any(|(_, given)| given);
         self.runtime
             .or((platform.os == "linux" && !native).then_some(RuntimeKind::Crun))
-    }
-
-    /// The flags of the GPUs a crun job is given, with whether each was given: an agent
-    /// that does not run the crun runtime refuses them all.
-    #[must_use]
-    pub fn gpu_flags(&self) -> [(&'static str, bool); 3] {
-        [
-            ("--gpu-device", !self.gpu_devices.is_empty()),
-            ("--gpu-mount", !self.gpu_mounts.is_empty()),
-            ("--gpu-env", !self.gpu_env.is_empty()),
-        ]
-    }
-
-    /// Every `--native-*` flag with whether it was given, kept beside the fields so that a
-    /// runtime that takes none of them refuses them all; a test walks the flags clap knows
-    /// and fails when one is missing here.
-    #[must_use]
-    pub fn native_flags(&self) -> [(&'static str, bool); 13] {
-        [
-            (
-                "--native-helper-socket",
-                self.native_helper_socket.is_some(),
-            ),
-            ("--native-homes", self.native_homes.is_some()),
-            ("--native-network", self.native_network.is_some()),
-            ("--native-deny-read", !self.native_deny_read.is_empty()),
-            ("--native-max-file-mib", self.native_max_file_mib.is_some()),
-            (
-                "--native-max-processes",
-                self.native_max_processes.is_some(),
-            ),
-            ("--native-tool-root", !self.native_tool_roots.is_empty()),
-            ("--native-pf-uid-start", self.native_pf_uid_start.is_some()),
-            ("--native-pf-uid-count", self.native_pf_uid_count.is_some()),
-            ("--native-pf-endpoint", !self.native_pf_endpoints.is_empty()),
-            ("--native-pf-anchor", self.native_pf_anchor.is_some()),
-            ("--native-pf-state-dir", self.native_pf_state_dir.is_some()),
-            ("--native-pfctl", self.native_pfctl.is_some()),
-        ]
     }
 }
 

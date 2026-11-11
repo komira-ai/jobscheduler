@@ -101,4 +101,8 @@ pub mod code {
     /// The agent had not heard from the server for its silence bound and stopped the job
     /// (its result says [`detail::SILENCE_STOP`](super::detail::SILENCE_STOP)).
     pub const SILENCE_STOP: &str = "silence-stop";
+    /// A run the agent adopted after a restart could not be offered its host ports again,
+    /// and the agent stopped it (its result's `input_failure` says
+    /// [`refusal::HOST_PORT_LOST`](js_agent_wire::refusal::HOST_PORT_LOST)).
+    pub const HOST_PORT_LOST: &str = "host-port-lost";
 }

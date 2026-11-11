@@ -49,6 +49,7 @@ pub fn spec(run_id: &str, args: &[&str]) -> RunSpec {
         bundle: None,
         network: Default::default(),
         ports: Vec::new(),
+        host_ports: Vec::new(),
         log_sink: None,
     }
 }

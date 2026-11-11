@@ -18,6 +18,7 @@ use std::fmt::{self, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
+use js_agent_wire::PortRange;
 use js_contain::subids::{IdFiles, MIN_SUBORDINATE_IDS, check_subordinate_ids};
 
 use crate::Cli;
@@ -694,6 +695,9 @@ pub struct Ready {
     pub job_ids: (u32, u32),
     /// What the operator should read, though the host may run jobs.
     pub warnings: Vec<String>,
+    /// The ports of the host's loopback a job may reach (`--host-port`); none from
+    /// [`ready`], which [`start`] gives them to.
+    pub host_ports: Vec<PortRange>,
 }
 
 /// What a start that names no `--runtime` is told after why `crun` cannot run, on a line of
@@ -706,16 +710,24 @@ pub const DEFAULTED: &str = "no --runtime was given, so the runtime is crun, the
      --allow-container-engine";
 
 /// What `--runtime crun`, or a Linux start that names no `--runtime` (see
-/// [`Cli::effective_runtime`]), asks of the other flags, and then of the host.
+/// [`Cli::effective_runtime`]), asks of the other flags, and then of the host; the host ports
+/// a job may reach (`--host-port`) come with what it found.
 ///
 /// # Errors
 ///
 /// The text for exit status 2: a flag that is wrong or missing, or [`Report::refusal`]; for a
 /// start that names no `--runtime`, followed by [`DEFAULTED`].
 pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result<Ready, String> {
-    let checked = flags(cli).and_then(|request| {
+    // Before anything of the host is asked: a wrong entry is named first.
+    let host_ports = crate::host_ports::allowed(&cli.host_port).map_err(|why| why.to_string());
+    let checked = host_ports.and_then(|host_ports| {
+        let request = flags(cli)?;
         let report = check(&request, host, commands);
-        ready(&request, report)
+        let ready = ready(&request, report)?;
+        Ok(Ready {
+            host_ports,
+            ..ready
+        })
     });
     match cli.runtime {
         None => checked.map_err(|why| format!("{why}\n{DEFAULTED}")),
@@ -746,6 +758,7 @@ pub fn ready(request: &Request<'_>, report: Report) -> Result<Ready, String> {
         job_user: request.job_user.to_owned(),
         job_ids,
         warnings: report.warnings,
+        host_ports: Vec::new(),
     })
 }
 
