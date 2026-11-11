@@ -1,8 +1,10 @@
 # js-agent on a Linux host, installed by the js-agent deb (packaging/js-agent). Read it on the
 # host with `systemctl cat js-agent`; crates/xtask/tests/js_agent_package.rs pins the settings described here.
 #
-# The package has no maintainer script: `dpkg --install` only unpacks files, and nothing
-# starts or configures the agent. The sequence, as root:
+# The package's one maintainer script, its postinst, makes the job user of the crun unit
+# (systemd-sysusers) and its subordinate id ranges, and nothing else: nothing starts or
+# configures the agent. The sequence, as
+# root:
 #   1. systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
 #        makes the directories below (dpkg does not run systemd-tmpfiles; a reboot would)
 #   2. write the pool's join token to /etc/js-agent/token, mode 0600
@@ -13,7 +15,7 @@
 #   5. systemctl enable --now js-agent
 #        With the mount of step 3 missing this exits 0 and starts nothing, silently:
 #        `systemctl status js-agent` shows the unmet ConditionPathIsMountPoint.
-# Upgrade: there is no maintainer script, so after installing a newer deb run
+# Upgrade: no maintainer script restarts the unit, so after installing a newer deb run
 # `systemctl daemon-reload && systemctl restart js-agent`.
 # The unit runs jobs through the container engine, named with --runtime docker and allowed with
 # --allow-container-engine: crun is the agent's default Linux runtime, and the engine is a

@@ -205,13 +205,17 @@ control and its files back:
 | `/usr/lib/systemd/system/js-agent-crun.service` | 0644 | `packaging/js-agent/deb/js-agent-crun.service`, the agent run with crun |
 | `/usr/lib/systemd/system/js-agent-crun-gpu.service` | 0644 | `packaging/js-agent/deb/js-agent-crun-gpu.service`, the oneshot that writes the GPU drop-in |
 | `/usr/lib/tmpfiles.d/js-agent-crun.conf` | 0644 | `packaging/js-agent/deb/tmpfiles.conf`, the directories of the unit |
+| `/usr/lib/sysusers.d/js-agent.conf` | 0644 | `packaging/js-agent/deb/sysusers.conf`, the job user `jsjob` of the unit |
 | `/usr/lib/systemd/system/js-agent.service` | 0644 | `packaging/js-agent/js-agent.service`, the agent run through Docker or Podman on a host without hostkeeper |
 | `/usr/lib/tmpfiles.d/js-agent.conf` | 0644 | `packaging/js-agent/tmpfiles.conf`, the directories of that unit |
 | `/usr/share/js-agent/crun_host_setup.sh` | 0755 | `packaging/js-agent/crun_host_setup.sh`, the held host setup script |
 | `/usr/share/doc/js-agent/copyright` | 0644 | `LICENSE` |
 
-The package is `js-agent`, version `X.Y.Z`, architecture `amd64` or `arm64`, with no dependency (the
-binary is static) and no maintainer script; nothing enables or starts its units. hostkeeper runs
+The package is `js-agent`, version `X.Y.Z`, architecture `amd64` or `arm64`. Its one dependency,
+`systemd | systemd-standalone-sysusers` (the binary is static), provides the `systemd-sysusers` its
+one maintainer script, `postinst` (`packaging/js-agent/deb/postinst`), runs to make the job user
+from the package's sysusers file and to give it a subordinate uid and gid range where it has none
+(`packaging/js-agent/deb/README.md`); nothing enables or starts its units. hostkeeper runs
 `js-agent-crun.service` (the manifest's `run` unit, below); `js-agent.service` is the unit of a host
 that installs the package by hand and starts it as that unit's header says. The bytes depend
 only on the binary and the packaging files: root-owned entries, a fixed modification time, sorted
@@ -360,7 +364,7 @@ of every other product of the repository as they are.
 | `testing-apt-read` | `apt-publish` | assumes the publish role through the job's OIDC token (`channels assume`) and reads the suite's index and the ETag of each file from the bucket (`channels apt read`) |
 | `testing-apt-index` | `apt-signing` | checks the two packages against `SHA256SUMS` and their attestation by artifacts.yml at this commit, merges them into the index read (`channels apt index`) and signs `Release` (`InRelease`, `Release.gpg`) with the repository's subkey (`channels apt sign`), which it then removes |
 | `testing-apt-write` | `apt-publish` | checks the packages again, uploads each once to the pool (never over other bytes), writes the signed index with `If-Match` on the ETags read, and invalidates `/apt/dists/*` on the CDN (`channels apt write`) |
-| `check-apt` | none | on an amd64 and an arm64 runner, in a clean Ubuntu container pinned by digest: adds the repository with its keyring, installs `js-agent=X.Y.Z` from `testing`, and checks the version, the files, that nothing is enabled and that nothing runs (`channels check-apt`) |
+| `check-apt` | none | on an amd64 and an arm64 runner, in a clean Ubuntu container pinned by digest: adds the repository with its keyring, installs `js-agent=X.Y.Z` from `testing`, and checks the version, the files, that the agent's own start check accepts the job user `jsjob` (a system account with no home and no login) and its subordinate uid and gid ranges, that nothing is enabled and that nothing runs (`channels check-apt`) |
 | `stable-apt-read`, `stable-apt-index`, `stable-apt-write` | as above | only when `check-apt` passed on both: read both suites, list in `stable` the entries `testing` holds for this version, held to the digests of `SHA256SUMS` (`channels apt promote`), sign, and write the index alone (`--no-pool`): `stable` serves the very bytes `testing` was checked with |
 
 No job holds both the signing key and the cloud role. A write that loses the race for the shared
