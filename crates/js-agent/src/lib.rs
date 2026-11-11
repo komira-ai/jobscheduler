@@ -305,6 +305,8 @@ mod run;
 mod session;
 mod signals;
 mod system;
+#[cfg(test)]
+mod test_tracing;
 mod transport;
 mod trusted_file;
 pub mod update_hook;

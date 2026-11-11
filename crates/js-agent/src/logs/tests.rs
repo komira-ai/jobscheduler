@@ -816,16 +816,8 @@ impl Lines {
     }
 
     /// Collects every event of every level, on this thread and the uploaders' it starts.
-    pub(super) fn capture(&self) -> tracing::subscriber::DefaultGuard {
-        let writer = self.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .with_max_level(tracing::Level::TRACE)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        tracing::callsite::rebuild_interest_cache();
-        guard
+    pub(super) fn capture(&self) -> crate::test_tracing::Capture {
+        crate::test_tracing::capture(self.clone(), tracing::Level::TRACE)
     }
 }
 
