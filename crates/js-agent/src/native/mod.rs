@@ -116,6 +116,9 @@
 //! to the helper in the `env` of the `run` request, never on the command line, whose
 //! arguments every user of the Mac can read (`native/env.rs`).
 //!
+//! A start that names a `tree` input, which is retired and which no server sends, is refused
+//! `native-unsupported`.
+//!
 //! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
 //! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
 //! start that declares any is refused `ports-not-supported`, see `native/network.rs`), or
@@ -846,9 +849,10 @@ impl Runtime for NativeRuntime {
     /// Refuses, before anything is made: a level above the agent's ceiling
     /// (`network-above-ceiling`; it is never run with less), then any declared port
     /// (`ports-not-supported`: a Mac forwards none), then a `stage` input
-    /// (`native-unsupported`: this agent keeps no stage trees), then a working directory
-    /// whose text leaves `exec/` (`invalid-job`). Mount inputs are staged into `exec/` when
-    /// the run starts and outputs are collected when it is removed.
+    /// (`native-unsupported`: this agent keeps no stage trees) or a retired `tree` input
+    /// (`native-unsupported`: no server sends one, and nothing here attaches it), then a
+    /// working directory whose text leaves `exec/` (`invalid-job`). Mount inputs are staged
+    /// into `exec/` when the run starts and outputs are collected when it is removed.
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
         let refused = |why: NetworkRefusal| NativeRefusal {
             code: why.code,
@@ -856,14 +860,17 @@ impl Runtime for NativeRuntime {
         };
         network::admit(self.config.network, network::of_body(native.network)).map_err(refused)?;
         network::check_ports(&native.ports).map_err(refused)?;
-        if native
-            .inputs
-            .iter()
-            .any(|input| matches!(input, InputRef::Stage { .. }))
-        {
+        for input in &native.inputs {
+            let why = match input {
+                InputRef::Mount { .. } => continue,
+                InputRef::Stage { .. } => {
+                    "this agent keeps no stage trees: only mount inputs are staged"
+                }
+                InputRef::Tree { .. } => "a tree input is retired: only mount inputs are staged",
+            };
             return Err(NativeRefusal {
                 code: refusal::NATIVE_UNSUPPORTED,
-                why: "this agent keeps no stage trees: only mount inputs are staged".to_owned(),
+                why: why.to_owned(),
             });
         }
         cwd::check(&native.cwd).map_err(|why| NativeRefusal {

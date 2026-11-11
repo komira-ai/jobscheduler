@@ -11,6 +11,7 @@ use std::path::Path;
 mod apt;
 mod artifacts;
 mod debs;
+mod images;
 
 /// The text of `.github/workflows/<file>`.
 fn read_workflow(file: &str) -> String {
@@ -594,8 +595,9 @@ fn expected_assets(sums: &[String]) -> Vec<String> {
 
 /// Asserts that `sums` expects exactly the fifteen archives (each of `js-lease-server`, `js`,
 /// `js-agent`, `js-bundle` and `js-mdm` for both Linux targets, `js`, `js-agent` and `js-bundle`
-/// and the two Mac host tools for darwin, which is also what the matrix builds) and the two .debs
-/// of js-agent (`js-agent_<version>_amd64.deb` and `js-agent_<version>_arm64.deb`); and that the
+/// and the two Mac host tools for darwin, which is also what the matrix builds), the two .debs
+/// of js-agent (`js-agent_<version>_amd64.deb` and `js-agent_<version>_arm64.deb`) and the two
+/// images of js-lease-server (`js-lease-server-<version>-<target>.oci.tar`); and that the
 /// list is in `LC_ALL=C` order once `$VERSION` is a version, as `ls | LC_ALL=C sort` prints the
 /// files. Catches a missing or extra name (a build that stops making an asset must fail here,
 /// before attest) and an unsorted list, which would never equal the listing and would fail every
@@ -626,7 +628,11 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
     for arch in ["amd64", "arm64"] {
         wanted.push(format!("js-agent_${{VERSION}}_{arch}.deb"));
     }
-    assert_eq!(expected.len(), 17, "{expected:?}");
+    // The two images of js-lease-server, one per Linux target.
+    for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
+        wanted.push(format!("js-lease-server-$VERSION-{target}.oci.tar"));
+    }
+    assert_eq!(expected.len(), 19, "{expected:?}");
     let mut have = expected.clone();
     have.sort();
     wanted.sort();

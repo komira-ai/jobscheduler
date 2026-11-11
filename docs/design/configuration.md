@@ -22,6 +22,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--job-allocation-retention` | `server.job_allocation_retention`, same default (`14d`) and rules as `--job-retention`: how long a freed allocation's row is kept after its free, a whole count of days or a duration of at least one minute. The tick deletes freed rows past it, at most 500 a tick; booked and releasing rows, and the usage history of an allocation, are never deleted. It is read once at start and applies to the job store of `--job-listen`; without `--job-listen` the setting is checked and kept, and nothing reads it |
 | `--job-listen` | `server.job_listen`, off unless given: the address the job service is served on (see "The job service's port" below); off the loopback it needs `server.tls_cert` and `server.tls_key`, the same pair as `server.listen`; refused unless a pool registers agents |
 | `--metrics-listen` | `server.metrics_listen`, off unless given: the address the operator's metrics are served on (see "The metrics port" below); a private address only, plain HTTP, no token; an address that is not a private one is refused at start naming the flag or the key; needs no agent registration |
+| `--ready-listen` | `server.ready_listen`, off unless given: the address the readiness route is served on (see "The readiness port" below); a loopback address only, plain HTTP, no token; an address that is not a loopback one is refused at start naming the flag or the key; with a store setting it also makes the server wait for a held writer lock instead of refusing to start |
 | `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
 | `--store`, `--allow-sqlite-store` | `server.store` and `server.allow_sqlite_store` (`false` unless given; `true` is refused without `server.store`, as the flag is without `--store`): the store the server's state is to be kept in, and the gate of its SQLite backend; see "The store" below |
 | `--store-unreachable-after` | `server.store_unreachable_after`, `"60s"` unless given: how long the store paths of the tick (the job pass) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both; zero or an unparsable value is refused at start naming the flag or the key |
@@ -147,11 +148,14 @@ file, the job store and the usage file are kept as without it.
   is for tests and single-node development`. With a Postgres store the flag is accepted and does nothing, so one file serves both kinds
   of environment. Like every flag, it is refused beside `--config`.
 - **The lock.** The server takes the store's writer lock before anything else (before it reads any file of the state file's family and before it
-  binds a listener) and holds it for its life: a session-level advisory lock on a connection of its own on Postgres, the lock file
-  beside the store's file on SQLite. It tries once and does not wait.
-- **A refused start.** A second server on the same store exits 2 with one line, `--store: another process holds the store's writer
+  binds a listener, except the readiness listener of `--ready-listen`) and holds it for its life: a session-level advisory lock on a
+  connection of its own on Postgres, the lock file beside the store's file on SQLite. It tries once and does not wait, unless
+  `--ready-listen` is given: then it logs `waiting for the store's writer lock` once, tries again every second while another process
+  holds the lock, and takes it before it reads anything from the store or binds any other listener (see "The readiness port").
+- **A refused start.** Without `--ready-listen`, a second server on the same store exits 2 with one line, `--store: another process holds the store's writer
   lock`, having bound nothing and opened neither the store nor any file of the state file's family. A lock that cannot be tried (the server is down, the
-  login is refused) is `--store: the store's writer lock could not be taken: ...`, also exit 2.
+  login is refused) is `--store: the store's writer lock could not be taken: ...`, also exit 2, with `--ready-listen` too: only a lock another
+  process holds is waited for.
 - **A lost lock.** Every tick asks the lock's session first. When the session is gone (the database restarted, an administrator ended
   it, the connection broke), the lock is gone with it: the tick does nothing more, the server stops serving and ticking, writes
   nothing more (there is no final tick), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. Taking the
@@ -219,6 +223,29 @@ names no job, lease, run or token: its labels are a state, a failure code, a hos
   start. The port needs no TLS and speaks plain HTTP whatever the other ports speak: bind it to a private or tailnet address.
 - **Limits.** The port has the connection cap and timeouts of the other listeners, and stops with them. An address in use is refused
   at start naming the flag or the key.
+
+### The readiness port
+
+`--ready-listen <addr>` (`server.ready_listen`) serves `GET /readyz` on a port of its own, plain HTTP, with no token. It is off by
+default: without it the server binds no such port, tries the store's writer lock once and refuses a start whose lock another process
+holds. Any other path, on that port, is a 404.
+
+| phase | answer |
+|---|---|
+| another process holds the store's writer lock and the server retries | 503 `waiting for the store's writer lock` |
+| the lock is held (a server without a store setting has none to take) and the listeners are not all serving yet | 503 `starting` |
+| every listener is bound and serving | 200 `ready` |
+| from the SIGTERM or ctrl-c that starts the stop, and after a loss of the writer lock, until the process exits | 503 `draining` |
+
+- **Address.** A loopback address only, since the route takes no token; any other address is refused at start naming the flag or the
+  key. An address in use is refused at start naming the flag or the key.
+- **Order.** The port is bound before the store's writer lock is tried, so a supervisor sees the phases from outside; the program
+  prints `ready on <addr>` as soon as it is bound, and `listening on <addr>` when the start is done. The port is the last listener
+  closed at a stop and answers through the whole drain of the others.
+- **A signal while waiting.** SIGTERM or ctrl-c while the server waits for the lock or starts ends the process with status 0, at
+  once, without a drain and with the lock not taken. A server without `--ready-listen` does the same with a signal that arrives
+  before its start is done.
+- **`/healthz`** is another question, served on `--listen`: whether the tick loop and the store paths work.
 
 ### Machine providers, platforms and pool settings
 

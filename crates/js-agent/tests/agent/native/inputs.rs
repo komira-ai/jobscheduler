@@ -7,7 +7,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use js_agent::lifecycle::{ResolvedMount, Runtime};
-use js_agent_wire::{InputRef, refusal};
+use js_agent_wire::{InputRef, Placement, TreeUnavailable, refusal};
 
 use super::{Rig, native, parse};
 
@@ -284,6 +284,43 @@ fn a_stage_input_is_refused_and_a_mount_input_admitted() {
     assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
     let why = "this agent keeps no stage trees: only mount inputs are staged";
     assert_eq!(refused.why, why);
+}
+
+/// A retired tree input at `dest`.
+fn tree(dest: &str, placement: Placement) -> InputRef {
+    InputRef::Tree {
+        digest: format!("sha256:{}", "b".repeat(64)),
+        dest: dest.to_owned(),
+        placement,
+        unavailable: TreeUnavailable::Fail,
+    }
+}
+
+/// Asserts that admission refuses a start holding a retired `tree` input
+/// `native-unsupported`, saying it is retired: read-only at a `dest`, writable at the exec
+/// root, alone and after a mount input that passes. It catches a tree input passed over
+/// when the inputs are staged, so that the job runs without it.
+#[test]
+fn a_tree_input_is_refused_native_unsupported() {
+    let rig = Rig::new("inputs-tree");
+    let mounted = InputRef::Mount {
+        root_name: "data".to_owned(),
+        rel: "x".to_owned(),
+        dest: "in".to_owned(),
+    };
+    let cases = [
+        vec![tree("in", Placement::ReadOnly)],
+        vec![tree("", Placement::Writable)],
+        vec![mounted, tree("t", Placement::ReadOnly)],
+    ];
+    for inputs in cases {
+        let mut body = native("/bin/sh", &[]);
+        body.inputs = inputs;
+        let refused = rig.rt.check_native(&body).unwrap_err();
+        assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED, "{body:?}");
+        let why = "a tree input is retired: only mount inputs are staged";
+        assert_eq!(refused.why, why);
+    }
 }
 
 /// Asserts the lifecycle's part: a native start's mount input is resolved below the agent's

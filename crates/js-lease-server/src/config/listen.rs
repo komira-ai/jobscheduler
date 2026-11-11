@@ -6,7 +6,9 @@
 //! `server.job_listen`) each ask it, and differ only in how they name the two TLS settings.
 //!
 //! The metrics listener (`--metrics-listen`, `server.metrics_listen`) carries no token, so it
-//! is held to another rule: [`not_private`].
+//! is held to another rule: [`not_private`]. The readiness listener (`--ready-listen`,
+//! `server.ready_listen`) carries no token either, and is held to a stricter one:
+//! [`not_loopback`].
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -36,6 +38,40 @@ pub(crate) struct MetricsListen {
     pub(crate) addr: SocketAddr,
     /// `--metrics-listen`, or `server.metrics_listen` when the configuration file gave it.
     pub(crate) flag: &'static str,
+}
+
+/// The address the readiness route is served on (`--ready-listen`, `server.ready_listen`),
+/// and the flag or key that names it in a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReadyListen {
+    /// The address to bind.
+    pub(crate) addr: SocketAddr,
+    /// `--ready-listen`, or `server.ready_listen` when the configuration file gave it.
+    pub(crate) flag: &'static str,
+}
+
+/// Why the readiness route may not be served on `addr`, or `None` when it may: it takes no
+/// token, so only a loopback address serves it.
+pub(crate) fn not_loopback(addr: SocketAddr) -> Option<String> {
+    let outside = !addr.ip().is_loopback();
+    outside.then(|| {
+        format!(
+            "{addr} is not a loopback address: the readiness route takes no token, so it is served on a loopback address only"
+        )
+    })
+}
+
+/// Where `--ready-listen` serves the readiness route, named by the flag; `None` when it is off.
+///
+/// # Errors
+/// The refusal of an address that is not a loopback one ([`not_loopback`]).
+pub(super) fn ready_listen(cli: &Cli) -> Result<Option<ReadyListen>, StartupError> {
+    let flag = "--ready-listen";
+    let checked = |addr: SocketAddr| match not_loopback(addr) {
+        Some(reason) => Err(StartupError::new(flag, reason)),
+        None => Ok(ReadyListen { addr, flag }),
+    };
+    cli.ready_listen.map(checked).transpose()
 }
 
 /// Why the metrics may not be served on `addr`, or `None` when they may: they take no token,

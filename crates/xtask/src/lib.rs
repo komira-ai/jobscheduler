@@ -329,6 +329,8 @@ enum ReleaseVerb {
     MacosLeg(release::macos_leg::LegArgs),
     /// Build the Debian package of js-agent for one Linux platform.
     Deb(release::deb::DebArgs),
+    /// Build the OCI image tar of js-lease-server for one Linux target.
+    Image(release::server_image::ImageArgs),
     /// What the hostkeeper set of js-agent is given for a release, or why it sets nothing.
     Desired(release::desired::DesiredArgs),
 }
@@ -423,6 +425,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,
+            ReleaseVerb::Image(args) => release::server_image::run(&args)?,
             ReleaseVerb::Desired(args) => release::desired::run(&args).map_err(|e| match e {
                 release::desired::Error::Usage(why) => Error::Usage(why),
                 other => Error::Desired(other),

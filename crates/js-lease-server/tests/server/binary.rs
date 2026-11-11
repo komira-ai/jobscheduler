@@ -28,10 +28,50 @@ impl Drop for Guard {
     }
 }
 
+/// The lines a child process printed on one of its streams, read as they come.
+pub(crate) struct Lines(std::sync::mpsc::Receiver<String>);
+
+impl Lines {
+    /// The lines `stream` yields, from a thread that reads it to its end.
+    pub(crate) fn of(stream: impl std::io::Read + Send + 'static) -> Self {
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self(lines)
+    }
+
+    /// The next line. Only a hang reaches the limit: a program that is working prints at once.
+    pub(crate) fn next(&self) -> String {
+        self.0
+            .recv_timeout(START_LIMIT)
+            .expect("the program printed a line")
+    }
+
+    /// The first line from here on that contains `needle`.
+    pub(crate) fn until(&self, needle: &str) -> String {
+        loop {
+            let line = self.next();
+            if line.contains(needle) {
+                return line;
+            }
+        }
+    }
+
+    /// Every line left, read to the end of the stream: call it once the program has ended.
+    pub(crate) fn rest(&self) -> Vec<String> {
+        self.0.iter().collect()
+    }
+}
+
 /// Starts the program on `args` (the program name first) with a timer that never fires
-/// in a test, standard error going to `stderr`, and returns it with the address it
-/// printed.
-pub(crate) fn launch(args: &[OsString], stderr: Stdio) -> (Guard, SocketAddr) {
+/// in a test, standard error going to `stderr`, and returns it with what it prints on
+/// standard output.
+pub(crate) fn spawn(args: &[OsString], stderr: Stdio) -> (Guard, Lines) {
     let mut child = Guard(
         Command::new(PROGRAM)
             .args(&args[1..])
@@ -42,20 +82,37 @@ pub(crate) fn launch(args: &[OsString], stderr: Stdio) -> (Guard, SocketAddr) {
             .unwrap(),
     );
     let stdout = child.0.stdout.take().unwrap();
-    let (first, line) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = BufReader::new(stdout).read_line(&mut text);
-        let _ = first.send(text);
-    });
-    let line = line.recv_timeout(START_LIMIT).unwrap();
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap()
-        .parse()
-        .unwrap();
-    (child, addr)
+    (child, Lines::of(stdout))
+}
+
+/// The address a line of the form `<prefix><address>` names.
+pub(crate) fn address_in(line: &str, prefix: &str) -> SocketAddr {
+    line.trim().strip_prefix(prefix).unwrap().parse().unwrap()
+}
+
+/// [`launch`], and the address of the readiness route as well when the program has one
+/// (`--ready-listen`), which it prints before the address it listens on.
+pub(crate) fn launch_with_ready(
+    args: &[OsString],
+    stderr: Stdio,
+) -> (Guard, SocketAddr, Option<SocketAddr>) {
+    let (child, lines) = spawn(args, stderr);
+    let mut line = lines.next();
+    let ready = line
+        .starts_with("ready on ")
+        .then(|| address_in(&line, "ready on "));
+    if ready.is_some() {
+        line = lines.next();
+    }
+    (child, address_in(&line, "listening on "), ready)
+}
+
+/// Starts the program on `args` (the program name first) with a timer that never fires
+/// in a test, standard error going to `stderr`, and returns it with the address it
+/// printed. A line that names the readiness address before it is skipped.
+pub(crate) fn launch(args: &[OsString], stderr: Stdio) -> (Guard, SocketAddr) {
+    let (child, listen, _) = launch_with_ready(args, stderr);
+    (child, listen)
 }
 
 /// Asserts that the real program prints the address it listens on, answers requests

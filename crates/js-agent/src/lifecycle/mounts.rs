@@ -165,7 +165,7 @@ impl MountRoots {
     }
 
     /// Resolves the native input `input` below its root, read-only, with the input's `dest`
-    /// as its target; `None` for a `stage` input, which names no root.
+    /// as its target; `None` for a `stage` or a `tree` input, which names no root.
     ///
     /// # Errors
     ///

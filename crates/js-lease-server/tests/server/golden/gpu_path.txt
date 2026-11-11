@@ -28,6 +28,7 @@
 --placement default=none required=false values=registry|js-sched
 --profile-store-bytes default=268435456 required=false
 --read-timeout default=30s required=false
+--ready-listen default=none required=false
 --require-host-credential default=none required=false values=true|false
 --state-file default=none required=false
 --store default=none required=false

@@ -84,6 +84,9 @@ fn each_linux_leg_packages_the_agent_as_a_deb_and_uploads_it() {
     assert!(at("- name: Check the binaries") < at("- name: Package js-agent as a .deb"));
     assert!(at("- name: Package js-agent as a .deb") < at("name: dist-${{ matrix.target }}"));
     assert!(joined.contains("path: |\n            dist/*.tar.gz\n            dist/*.deb\n"));
+    assert!(joined.contains(
+        "path: |\n            dist/*.tar.gz\n            dist/*.deb\n            dist/*.oci.tar\n"
+    ));
     // The platform the matrix names is one `release deb` is given for the architecture.
     for (arch, platform) in DEBS {
         assert!(
@@ -94,9 +97,10 @@ fn each_linux_leg_packages_the_agent_as_a_deb_and_uploads_it() {
 }
 
 /// Asserts that `sums` runs no repository code and no hostkeeper verb (it downloads the legs'
-/// artifacts and sums them), lists the archives and the two .debs, and writes SHA256SUMS over
-/// exactly the archives and the .debs, after the list of assets is checked. Catches sums that
-/// leave a package out, a leftover index, and a checkout beside the sums.
+/// artifacts and sums them), lists the archives, the two .debs and the two images, and writes
+/// SHA256SUMS over exactly the archives, the .debs and the images, after the list of assets is
+/// checked. Catches sums that leave a package out, a leftover index, and a checkout beside the
+/// sums.
 #[test]
 fn sums_lists_the_archives_and_the_debs_and_nothing_else() {
     let text = artifacts_workflow();
@@ -115,7 +119,7 @@ fn sums_lists_the_archives_and_the_debs_and_nothing_else() {
     assert!(joined.contains("pattern: dist-*\n          merge-multiple: true\n"));
     assert!(joined.contains("VERSION: ${{ inputs.version }}"));
     assert!(
-        joined.contains("sha256sum -- *.tar.gz *.deb > SHA256SUMS"),
+        joined.contains("sha256sum -- *.tar.gz *.deb *.oci.tar > SHA256SUMS"),
         "{joined}"
     );
     assert!(!joined.contains("*.tar.zst"), "{joined}");
@@ -159,14 +163,15 @@ fn attest_verify_and_publish_carry_the_debs_and_their_bundles() {
         attest.contains("VERSION: ${{ inputs.version }}"),
         "{attest}"
     );
-    assert_eq!(attest.matches("cp \"$BUNDLE\"").count(), 2, "{attest}");
+    // Two for the .debs and two for the images (images.rs reads the latter).
+    assert_eq!(attest.matches("cp \"$BUNDLE\"").count(), 4, "{attest}");
     assert!(
         attest.contains("name: bundles\n          path: dist/*.sigstore.json\n"),
         "{attest}"
     );
     let verify = job(&jobs, "verify").join("\n");
     assert!(
-        verify.contains("for file in ./*.tar.gz ./*.deb; do"),
+        verify.contains("for file in ./*.tar.gz ./*.deb ./*.oci.tar; do"),
         "{verify}"
     );
     assert!(
@@ -175,7 +180,10 @@ fn attest_verify_and_publish_carry_the_debs_and_their_bundles() {
         ),
         "{verify}"
     );
-    assert!(verify.contains("for package in ./*.deb; do"), "{verify}");
+    assert!(
+        verify.contains("for package in ./*.deb ./*.oci.tar; do"),
+        "{verify}"
+    );
     for flag in [
         r#"--signer-workflow "$REPO/.github/workflows/artifacts.yml""#,
         "--source-ref refs/heads/main",
@@ -190,10 +198,13 @@ fn attest_verify_and_publish_carry_the_debs_and_their_bundles() {
     let publish = job(&jobs, "publish").join("\n");
     assert!(publish.contains("name: bundles"), "{publish}");
     assert!(
-        publish.contains("for file in ./*.tar.gz ./*.deb ./*.deb.sigstore.json SHA256SUMS; do"),
+        publish.contains("for file in ./*.tar.gz ./*.deb ./*.deb.sigstore.json ./*.oci.tar ./*.oci.tar.sigstore.json SHA256SUMS; do"),
         "{publish}"
     );
-    assert!(publish.contains("for package in ./*.deb; do"), "{publish}");
+    assert!(
+        publish.contains("for package in ./*.deb ./*.oci.tar; do"),
+        "{publish}"
+    );
     let missing = publish
         .find(r#"if [ ! -f "$package.sigstore.json" ]; then"#)
         .expect("the check for a package's bundle");

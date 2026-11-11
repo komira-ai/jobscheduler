@@ -5,6 +5,7 @@
 //!   that ships changed since the latest `v*` tag, and the version if so.
 //! - [`stamp`]: sets the release version in the CI checkout (`Cargo.toml` and `Cargo.lock`)
 //!   before the build, so `--version` of every binary prints it. Nothing is committed.
+//! - [`server_image`]: the OCI image tar of `js-lease-server` for one Linux target.
 //! - [`stage`]: lays down the files of one release archive, the binary, `LICENSE` and, in the
 //!   Linux archives of `js-lease-server`, the host updater's declaration.
 //!
@@ -36,6 +37,7 @@ pub mod desired;
 pub mod include;
 pub mod macos_leg;
 pub mod plan;
+pub mod server_image;
 pub mod stage;
 pub mod stamp;
 
@@ -132,6 +134,15 @@ pub enum Error {
         "{path} does not hold the version {version} and its runtimes line: it is not a build of that version"
     )]
     VersionNotInBinary {
+        /// The binary.
+        path: String,
+        /// The version asked for.
+        version: String,
+    },
+    /// The binary does not hold the version as text, so it is not a build of the version the
+    /// image would name.
+    #[error("{path} does not hold the version {version}: it is not a build of that version")]
+    NotOfVersion {
         /// The binary.
         path: String,
         /// The version asked for.
