@@ -23,19 +23,21 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    the Linux ones are static and that `--version` prints the release version, and packages them:
    `cargo xtask release stage` lays down the files of each archive (`crates/xtask/src/release/stage.rs`
    lists them) and `tar` makes it. Each of the two Linux targets also packages the `js-agent` it
-   built as a Debian package with `cargo xtask release deb` (below), which `dpkg-deb` then reads.
-   `sums` writes one `SHA256SUMS` over the archives and the two Debian packages.
+   built as a Debian package with `cargo xtask release deb` (below), which `dpkg-deb` then reads,
+   and builds the `js-lease-server` it built into a container image with `cargo xtask release image`
+   (below). `sums` writes one `SHA256SUMS` over the archives, the two Debian packages and the two images.
 5. artifacts.yml's `attest` attests every archive and Debian package with build provenance
    (`actions/attest-build-provenance`, from `SHA256SUMS`), after refusing sums other than the ones
-   `sums` made and files that differ from them; it then attests each Debian package alone and keeps
-   the bundle of that attestation beside it as `<package>.sigstore.json`. Its `verify` then checks
-   the attestations the way a user does (below), and each Debian package from its bundle. The
+   `sums` made and files that differ from them; it then attests each Debian package and each image
+   alone and keeps the bundle of that attestation beside it as `<file>.sigstore.json`. Its `verify`
+   then checks the attestations the way a user does (below), and each Debian package and each image
+   from its bundle. The
    signer of every attestation is `.github/workflows/artifacts.yml`, not `release.yml`: the apt jobs
    below publish a package only after checking its attestation by that file.
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
-   commit), uploads the archives, the Debian packages and their bundles and `SHA256SUMS` to it, and
-   publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a Debian
-   package without its bundle.
+   commit), uploads the archives, the Debian packages, the images, their bundles and `SHA256SUMS` to
+   it, and publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a
+   Debian package or an image without its bundle.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
@@ -168,7 +170,10 @@ For version `X.Y.Z`:
 | `js-agent_X.Y.Z_amd64.deb` | the Debian package of `js-agent` for x86_64 Linux hosts (below) |
 | `js-agent_X.Y.Z_arm64.deb` | the Debian package of `js-agent` for arm64 Linux hosts |
 | `js-agent_X.Y.Z_<arch>.deb.sigstore.json` | for each of the two Debian packages, the Sigstore bundle of its own build provenance attestation |
-| `SHA256SUMS` | SHA-256 of the fifteen archives and the two Debian packages (not of the bundles) |
+| `js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar` | the `js-lease-server` container image for x86_64 Linux hosts, an OCI image layout that `docker load` reads (below) |
+| `js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.oci.tar` | the same image for arm64 Linux hosts |
+| `js-lease-server-X.Y.Z-<target>.oci.tar.sigstore.json` | for each of the two images, the Sigstore bundle of its own build provenance attestation |
+| `SHA256SUMS` | SHA-256 of the fifteen archives, the two Debian packages and the two images (not of the bundles) |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
@@ -223,6 +228,126 @@ The `.deb` replaces the hostkeeper archive package of earlier releases (`js-agen
 and `js-agent-index.json`): hostkeeper installs native packages only. The pull-request check
 `.github/workflows/js-agent-deb.yml` builds the x86_64 package the same way on every pull request
 that changes a crate, the lock file, the toolchain or the packaging, and publishes nothing.
+
+### The js-lease-server image
+
+`build` makes an image of the `js-lease-server` it built for each Linux target, with
+`cargo xtask release image --binary <path> --version X.Y.Z --target
+x86_64-unknown-linux-musl|aarch64-unknown-linux-musl --out dist`
+(`crates/xtask/src/release/server_image.rs`). The file is an OCI image layout in a tar: `oci-layout`,
+`index.json`, the blobs under `blobs/sha256/` (the manifest, the config and one gzip layer) and a
+`manifest.json` that engines older than the OCI layout read, which names the same config and layer.
+`docker load -i` reads it; so does anything that reads an OCI layout from a directory once the tar is
+unpacked.
+
+The layer holds two files and the directories above them, all owned by `root`:
+
+| File | Mode | From |
+|---|---|---|
+| `/usr/local/bin/js-lease-server` | 0755 | the release binary, byte for byte |
+| `/usr/share/doc/js-lease-server/LICENSE` | 0644 | `LICENSE` |
+
+Nothing else is in the image: no shell, no libraries (the binary is static musl) and no certificate
+bundle. The server does not read the system's certificates. Its calls to the cloud providers' APIs and
+the Tailscale API trust the public roots built into the binary, so they need nothing mounted; the
+root certificate of the state store's TLS (`verify-ca` and `verify-full`) is the file the store URL
+names with `sslrootcert`, which the operator mounts into the container.
+
+The config runs `/usr/local/bin/js-lease-server` as the numeric user and group `65532:65532` (the
+image has no `/etc/passwd`) from `/`, with `SIGTERM` as the stop
+signal, and gives the program no command: the server's flags follow the image in `docker run`. It
+exposes no port, because the server listens where its flags say (`--listen` is the loopback by
+default, and a listener off the loopback needs TLS), and declares no volume. The labels are
+`org.opencontainers.image.version` (`X.Y.Z`), `org.opencontainers.image.source` (this repository) and
+`org.opencontainers.image.licenses` (`Apache-2.0`). The config has no creation time, so the bytes depend
+only on the binary, the version and the target: root-owned entries, a fixed modification time, sorted
+names, gzip without a name or a time. The verb refuses a target other than the two, a version that is
+not `X.Y.Z`, a binary that does not hold the version as text, and a file that is already there. It
+prints the file's SHA-256 and size and the image's digest.
+
+The image has no name and no tag. It is identified by its digest: the `sha256` of the manifest that
+`index.json` names. Read it from the tar, or from the line `release image` printed:
+
+```sh
+tar -xOf js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar index.json
+```
+
+`manifests[0].digest` is `sha256:<hex>`; `manifests[0].platform` says `linux/amd64` or `linux/arm64`. On
+an engine that uses the containerd image store, `docker load` reports that same digest as the image
+ID. Deploy by that digest, not by a tag the image does not have.
+
+#### Running the image
+
+What a deployer gives the container, and what it can expect back. The server's flags, with their
+defaults and refusals, are documented in `crates/js-lease-server/src/lib.rs` ("Flags"); this is
+what changes when the server runs in a container.
+
+**Command.** The entrypoint is `/usr/local/bin/js-lease-server` and the image has no command, so
+everything after the image in `docker run` is the server's flags: either the flags themselves or
+`--config <path>`, the one file that replaces them. The server's own required settings apply
+(`--boot`, `--state-file`, `--token-file`, `--agent-pool-config` or the file's `[[pool]]`, and
+`--store` where the state is kept in a store). The image adds no flag and no environment variable.
+
+**Network and ports.** The image exposes no port: each listener is where its flag puts it.
+
+| Flag | Default | Serves | Note for a container |
+|---|---|---|---|
+| `--listen` | `127.0.0.1:7300` | the API, the agents, `GET /healthz` | an address off the loopback needs `--tls-cert` and `--tls-key`. With the default, run on the host's network or nothing outside the container reaches it |
+| `--job-listen` | off | the job service | same TLS rule |
+| `--metrics-listen` | off | `GET /metrics` | a private address |
+| `--ready-listen` | off | `GET /readyz` | the loopback only: the probe must run in the container's network namespace (the host's network, or a sidecar in the same namespace). The image has no shell and no HTTP client, so an engine `HEALTHCHECK` that runs a command inside it cannot be used |
+
+**Files and volumes.** The image declares no volume and runs as `65532:65532`. Mount:
+
+| What | Mode in the container | Why |
+|---|---|---|
+| the directory of `--state-file` | read-write, owned by `65532` | the server writes `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and, unless `--usage-db` puts it elsewhere, `usage.db` beside them. This is the state that must outlive the container |
+| `--usage-db`'s directory, when it is not that one | read-write, owned by `65532` | the usage file |
+| `--token-file`, `--client-token` files, `--agent-token-file`, `--store`, `--tls-key` | read-only, owned by `65532`, mode 0600 or 0400 | the server refuses a secret file that is not owner-only. For `--tls-key` a symbolic link, as secret mounts make, is followed and the file it leads to is checked |
+| `--agent-pool-config` or `--config`, `--tls-cert` | read-only | |
+| the store's `sslrootcert`, or the directory of a Postgres Unix socket | read-only | the store URL names them |
+
+**Readiness and health.** Two routes answer two questions:
+
+- `GET /readyz` on `--ready-listen`: 503 `waiting for the store's writer lock` while another process
+  holds it, 503 `starting` until every listener serves, 200 `ready`, then 503 `draining` from SIGTERM
+  until the process exits. Route traffic to a container only while it answers 200. With
+  `--ready-listen` and a store, a server whose store's writer lock is held waits for it instead of
+  exiting, so a replacement can be started before the old process has let the lock go.
+- `GET /healthz` on `--listen`: 200 `ok` while the tick loop runs; 503 `tick loop stopped`, or 503
+  `store unreachable` once the store paths have failed for `--store-unreachable-after`. It says
+  nothing about the writer lock.
+
+**Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
+`/readyz` 503 `draining` at once, stops accepting, gives the requests in flight `--drain-timeout`
+(`10s` by default) to finish, cuts what is still open, ticks once more and exits 0. Give the engine a
+stop timeout longer than `--drain-timeout` plus that last tick, for example
+`docker stop --time 30` with the default drain, so the engine's `SIGKILL` never cuts the drain. A
+signal while the server waits for the lock or starts ends it at once with status 0, without taking
+the lock.
+
+**Exit status.** 0 after a stop. 2 when the start is refused: a bad flag or file, the store
+unreachable, or (without `--ready-listen`) another process holding the store's writer lock. Do not
+restart a container in a loop on 2: the same flags are refused again. 1 when the server stops on its
+own while running, such as when it loses the store's writer lock.
+
+**One writer per store.** Two servers never serve one store at once: the writer lock lets one in.
+With `--ready-listen`, a second server waits and answers 503 until the first lets the lock go.
+
+An example, with the server on the host's network, its state in `/var/lib/js-lease-server` and its
+flags in a file under `/etc/js-lease-server`, run by the image ID `docker load` printed (the manifest's digest on an engine with the containerd image store):
+
+```sh
+docker load -i js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar
+docker run --name js-lease-server --network host --stop-timeout 30 \
+  -v /var/lib/js-lease-server:/var/lib/js-lease-server \
+  -v /etc/js-lease-server:/etc/js-lease-server:ro \
+  sha256:<image id> \
+  --config /etc/js-lease-server/server.toml
+```
+
+with the `[server]` table of `server.toml` setting `state_file = "/var/lib/js-lease-server/state"`,
+`ready_listen = "127.0.0.1:<port>"` and the rest of the server's settings.
 
 ### The apt repository
 
@@ -374,7 +499,7 @@ gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R 
 `git rev-parse` needs a clone with the tags; without one, the commit is the one the release page shows
 for the tag. For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'` instead
 (`js-[0-9]*` keeps the other archives out of the match), and for the agent
-`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'` (the Debian package: `-p 'js-agent_*_amd64.deb'`), and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`.
+`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'` (the Debian package: `-p 'js-agent_*_amd64.deb'`), and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`. The server archive pattern `js-lease-server-*-x86_64-unknown-linux-musl.tar.gz` leaves the image out; the image has its own, below.
 
 On an arm64 Linux host, write `aarch64-unknown-linux-musl` where these say `x86_64-unknown-linux-musl`,
 in the pattern and in the file name: for the agent `-p 'js-agent-*-aarch64-unknown-linux-musl.tar.gz'`
@@ -391,6 +516,24 @@ names. A release whose assets have no `.sigstore.json` was signed by `release.ym
 A Debian package can also be checked from its bundle, as the apt jobs do, with
 `gh attestation verify js-agent_X.Y.Z_amd64.deb --bundle js-agent_X.Y.Z_amd64.deb.sigstore.json`
 and the same flags (download the bundle with `-p 'js-agent_*_amd64.deb.sigstore.json'`).
+
+A `js-lease-server` image is checked from its bundle before it is loaded, and is deployed by its digest:
+
+```sh
+gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.oci.tar*' -p SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar \
+  --bundle js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar.sigstore.json -R komira-ai/jobscheduler \
+  --signer-workflow komira-ai/jobscheduler/.github/workflows/artifacts.yml \
+  --source-ref refs/heads/main \
+  --source-digest "$(git rev-parse vX.Y.Z^{commit})"
+docker load -i js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar
+```
+
+The pattern ends in `.oci.tar*` to take the bundle too, and `--bundle` makes `gh attestation verify`
+read the attestation from that file instead of fetching it. The digest to deploy by is in the
+tar's `index.json` ([The js-lease-server image](#the-js-lease-server-image)); for arm64 write
+`aarch64-unknown-linux-musl`.
 
 ## Configuration the project owner must set
 
@@ -498,7 +641,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | `publish` failed at the last call or after it | Possibly the tag and a published release | Re-run failed jobs: the tag stays, files the release lacks are added, the tag is checked to name the commit. |
 | `publish` says a file differs | The release holds a file that is not this run's | Never delete or replace assets of a published release. Cut a new version: push a change that ships (the next version counts from the tag). |
 | The run was green but released nothing | `plan` printed why | a later release exists past the commit, or nothing that ships changed. Nothing to do. |
-| "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files and signs them again; `publish` compares each against the release and keeps them, and keeps the release's bundles without comparing them (each signing writes new bytes for the same package). If a file differs the run fails and nothing is changed. |
+| "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files and signs them again; `publish` compares each against the release and keeps them, and keeps the release's bundles without comparing them (each signing writes new bytes for the same file). If a file differs the run fails and nothing is changed. |
 
 Runs that wait: a release run starts with its push and waits for the jobs of `ci` but `macos`; if one fails there, the run fails
 at `ci-passed` (red, with the `ci` run's link and the failed jobs) and the change is released by the next push that passes

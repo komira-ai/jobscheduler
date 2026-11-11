@@ -23,7 +23,7 @@ pub(crate) fn serve(config: Config, out: &mut dyn Write) -> Result<(), Failure> 
         .and_then(|runtime| runtime.block_on(serve_until_signal(config, out)))
 }
 
-async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), Failure> {
+async fn serve_until_signal(mut config: Config, out: &mut dyn Write) -> Result<(), Failure> {
     // The subscriber is global; a second server in one process keeps the first's.
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -31,11 +31,28 @@ async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), F
     let ticker = IntervalTicker::new(config.tick_period());
     // Before the address is printed, so a SIGHUP sent once it is known is not lost.
     let mut hangup = signal(SignalKind::hangup()).map_err(Failure::Runtime)?;
-    let running = start(config, SharedClock::new(SystemClock), ticker).await?;
+    // Before the readiness address is printed, so a SIGTERM sent once it is known is
+    // handled, not left to kill the process.
+    let mut termination = Termination::register().map_err(Failure::Runtime)?;
+    // Bound before the start, which can wait for the store's writer lock for as long as
+    // another process holds it: the address says where the readiness route answers meanwhile.
+    if let Some(ready) = config.bind_ready()? {
+        let _ = writeln!(out, "ready on {ready}");
+        let _ = out.flush();
+    }
+    // A stop signalled while the start waits ends the process, with the lock not taken.
+    let running = tokio::select! {
+        started = start(config, SharedClock::new(SystemClock), ticker) => started?,
+        () = termination.arrived() => return Ok(()),
+    };
     let _ = writeln!(out, "listening on {}", running.addr());
     let _ = out.flush();
     {
-        let mut stopping = std::pin::pin!(stop_or_fence(&running, termination()));
+        let signalled = async {
+            termination.arrived().await;
+            Ok(())
+        };
+        let mut stopping = std::pin::pin!(stop_or_fence(&running, signalled));
         loop {
             tokio::select! {
                 stopped = &mut stopping => {
@@ -54,17 +71,29 @@ async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), F
     running.shutdown().await.map_err(Failure::Runtime)
 }
 
-/// Completes at SIGTERM or SIGINT.
-async fn termination() -> std::io::Result<()> {
-    let (sender, mut received) = mpsc::channel(2);
-    for kind in [SignalKind::terminate(), SignalKind::interrupt()] {
-        let mut stream = signal(kind)?;
-        let sender = sender.clone();
-        tokio::spawn(async move {
-            stream.recv().await;
-            let _ = sender.send(()).await;
-        });
+/// SIGTERM and SIGINT, registered when it is made.
+struct Termination {
+    received: mpsc::Receiver<()>,
+}
+
+impl Termination {
+    /// Registers both signals now: from here on neither ends the process by its default
+    /// action.
+    fn register() -> std::io::Result<Self> {
+        let (sender, received) = mpsc::channel(2);
+        for kind in [SignalKind::terminate(), SignalKind::interrupt()] {
+            let mut stream = signal(kind)?;
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                stream.recv().await;
+                let _ = sender.send(()).await;
+            });
+        }
+        Ok(Self { received })
     }
-    received.recv().await;
-    Ok(())
+
+    /// Completes at the first of the two.
+    async fn arrived(&mut self) {
+        self.received.recv().await;
+    }
 }
