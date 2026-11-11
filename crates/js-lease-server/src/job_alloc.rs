@@ -233,15 +233,15 @@ fn reason_of(job: &JobRecord) -> EndReason {
         JobState::Lost => EndReason::HostAbsent,
         JobState::FailedToStart(StartFailure::StartTimeout) => EndReason::StartTimeout,
         JobState::FailedToStart(StartFailure::ExclusiveNotReady) => EndReason::FailedPrepare,
-        JobState::FailedToStart(StartFailure::AgentRefused | StartFailure::NoCapacity) => {
-            EndReason::Refused
-        }
+        JobState::FailedToStart(
+            StartFailure::AgentRefused | StartFailure::NoCapacity | StartFailure::InputUnavailable,
+        ) => EndReason::Refused,
         JobState::Succeeded | JobState::Failed => {
             match job.result.as_ref().map(|result| result.reason) {
                 Some(ResultReason::WallLimit) => EndReason::WallLimit,
                 Some(ResultReason::Memory) => EndReason::Memory,
                 Some(ResultReason::Cancelled) => EndReason::Cancelled,
-                Some(ResultReason::Exit) | None => EndReason::Exited,
+                Some(ResultReason::Exit | ResultReason::InputFailed) | None => EndReason::Exited,
             }
         }
         // Not ended, with a cancel asked for: the stop is what ends it.

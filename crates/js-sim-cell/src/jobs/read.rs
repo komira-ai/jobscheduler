@@ -186,6 +186,9 @@ pub(crate) fn state_name(state: JobState) -> &'static str {
             "failed-to-start(exclusive-not-ready)"
         }
         JobState::FailedToStart(StartFailure::AgentRefused) => "failed-to-start(agent-refused)",
+        JobState::FailedToStart(StartFailure::InputUnavailable) => {
+            "failed-to-start(input-unavailable)"
+        }
     }
 }
 
@@ -219,6 +222,7 @@ mod tests {
             JobState::FailedToStart(StartFailure::StartTimeout),
             JobState::FailedToStart(StartFailure::ExclusiveNotReady),
             JobState::FailedToStart(StartFailure::AgentRefused),
+            JobState::FailedToStart(StartFailure::InputUnavailable),
         ];
         let names: BTreeSet<&str> = states.into_iter().map(state_name).collect();
         assert_eq!(names.len(), states.len());

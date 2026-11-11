@@ -436,6 +436,7 @@ mod tests {
             exec: None,
             network: js_types::JobNetwork::None,
             host_ports: Vec::new(),
+            layered_rootfs: false,
         }
     }
 

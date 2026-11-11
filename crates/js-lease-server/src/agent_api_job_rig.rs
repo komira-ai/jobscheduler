@@ -56,7 +56,7 @@ pub(crate) fn image() -> String {
 /// A job that runs `run --fast` from [`image`] for at most ten minutes, with no network.
 pub(crate) fn spec() -> JobSpec {
     JobSpec {
-        image: ImageDigestRef::parse(&image()).unwrap(),
+        image: ImageDigestRef::parse(&image()).ok(),
         command: vec!["run".to_owned()],
         args: vec!["--fast".to_owned()],
         env: BTreeMap::new(),
@@ -67,6 +67,9 @@ pub(crate) fn spec() -> JobSpec {
         ports: Vec::new(),
         files: js_jobs::JobFiles::default(),
         labels: Labels::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 

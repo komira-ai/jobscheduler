@@ -270,7 +270,7 @@ fn queued_job(id: &str, disk_bytes: u64) -> NewJob {
         .with_disk_bytes(disk_bytes);
     let image = format!("team/app@sha256:{}", "a".repeat(64));
     let spec = JobSpec {
-        image: ImageDigestRef::parse(&image).unwrap(),
+        image: ImageDigestRef::parse(&image).ok(),
         command: vec!["run".to_owned()],
         args: Vec::new(),
         env: BTreeMap::new(),
@@ -281,6 +281,9 @@ fn queued_job(id: &str, disk_bytes: u64) -> NewJob {
         ports: Vec::new(),
         files: JobFiles::default(),
         labels: Labels::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     };
     NewJob {
         id: Some(JobId::parse(id).unwrap()),

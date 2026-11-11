@@ -201,7 +201,7 @@ port and counts nothing. Any other path, on that port, is answered as an unknown
 | `js_queue_oldest_age_seconds` | gauge | | how long the oldest queued job has waited since its submit, 0 with none queued; only with the job service on |
 | `js_job_placements_total` | counter | | the queued jobs placed on a host |
 | `js_queue_wait_seconds` | histogram | | each placed job's wait from its submit to its placement |
-| `js_job_start_failures_total` | counter | `code` | the jobs that failed to start, by code (`no-capacity`, `start-timeout`, `exclusive-not-ready`, `agent-refused`) |
+| `js_job_start_failures_total` | counter | `code` | the jobs that failed to start, by code (`no-capacity`, `start-timeout`, `exclusive-not-ready`, `agent-refused`, `input-unavailable`) |
 | `js_jobs_lost_total` | counter | | the jobs lost: their host read gone by the job pass, or their container missing from the first listing after a new hello |
 | `js_store_write_failures_total` | counter | | the passes over the job tables the server makes itself (the job pass, a placement, a heartbeat's job listing) that failed, so their write did not commit; a client's submit or cancel that fails is answered to the client |
 | `js_job_pass_duration_seconds` | histogram | | how long each job pass of the tick took |

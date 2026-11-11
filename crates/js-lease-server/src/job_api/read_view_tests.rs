@@ -87,6 +87,9 @@ fn full_shown() -> v1::JobSpec {
         }],
         priority: 5,
         labels: BTreeMap::from([("team".to_owned(), "ml".to_owned())]),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 

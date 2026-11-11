@@ -39,6 +39,7 @@ fn floor() -> Demand {
         exec: Some(ExecMode::Container),
         network: Reach::None,
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 
@@ -116,6 +117,7 @@ fn a_share_job_asks_for_what_admission_asked() {
         accelerator,
         network: Reach::Open,
         host_ports: vec![8000, 9000],
+        layered_rootfs: false,
     };
     assert_eq!(wanted, expected);
 

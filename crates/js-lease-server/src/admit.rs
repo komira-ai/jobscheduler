@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_agent_wire::HOST_JOBS_CAPABILITY;
+use js_caps::{FLAG_SET, LAYERED_ROOTFS};
 use js_elastic::CapacityProvider;
 use js_jobs::Isolation;
 use js_registry::{HostMark, HostState as RegistryState, HostView as RegistryView, Registry};
@@ -115,6 +116,12 @@ fn reports(claim: &Shape) -> bool {
 /// ([`HOST_JOBS_CAPABILITY`] is exactly `"true"`).
 pub(crate) fn reports_host_jobs(capabilities: &BTreeMap<String, String>) -> bool {
     capabilities.get(HOST_JOBS_CAPABILITY).map(String::as_str) == Some("true")
+}
+
+/// Whether `capabilities`, those a host's hello reported, say its agent gives a job layers,
+/// mounts and host ports ([`LAYERED_ROOTFS`] is exactly [`FLAG_SET`]).
+pub(crate) fn reports_layered_rootfs(capabilities: &BTreeMap<String, String>) -> bool {
+    capabilities.get(LAYERED_ROOTFS).map(String::as_str) == Some(FLAG_SET)
 }
 
 /// `one`'s provider as admission sees it at `now`: enabled (no key turns a provider off),

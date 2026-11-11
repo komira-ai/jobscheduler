@@ -42,6 +42,7 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
             shape: None,
             logs: None,
             metrics: &NoMetrics,
+            layered_rootfs: false,
         },
         &[],
         std::slice::from_ref(&long),
@@ -75,6 +76,7 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
             shape: None,
             logs: None,
             metrics: &NoMetrics,
+            layered_rootfs: false,
         },
         &listing,
         &[],
@@ -116,6 +118,7 @@ fn a_failed_end_commit_is_an_error() {
             shape: None,
             logs: None,
             metrics: &NoMetrics,
+            layered_rootfs: false,
         },
         &listing,
         &[],
@@ -158,6 +161,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             shape: None,
             logs: None,
             metrics: &NoMetrics,
+            layered_rootfs: false,
         },
         &[],
         &[],
@@ -182,6 +186,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             shape: None,
             logs: None,
             metrics: &NoMetrics,
+            layered_rootfs: false,
         },
         &[],
         &[],
@@ -224,6 +229,7 @@ fn a_whole_host_job_is_started_only_once_ready_and_never_stopped_while_preparing
         shape: Some(&booked),
         logs: None,
         metrics: &NoMetrics,
+        layered_rootfs: false,
     };
     let beat = |listed: &[HeldJob]| serve(&jobs, &context, listed, &[], 8).unwrap();
 

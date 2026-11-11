@@ -109,6 +109,7 @@ pub fn demand() -> Demand {
         }),
         network: Default::default(),
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 

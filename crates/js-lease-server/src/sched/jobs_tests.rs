@@ -423,6 +423,7 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
         logs: None,
         metrics: &NoMetrics,
         host_jobs: false,
+        layered_rootfs: false,
     };
     let holds = [HeldJob {
         job_id: "job-a".to_owned(),
@@ -504,6 +505,7 @@ fn only_absent_frees_an_allocation() {
                     logs: None,
                     metrics: &NoMetrics,
                     host_jobs: false,
+                    layered_rootfs: false,
                 };
                 let holds = [HeldJob {
                     job_id: "job-a".to_owned(),

@@ -322,7 +322,7 @@ pub(super) fn spec(labels: &[(&str, &str)]) -> JobSpec {
         .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
         .collect();
     JobSpec {
-        image: ImageDigestRef::parse(&image()).expect("an image"),
+        image: ImageDigestRef::parse(&image()).ok(),
         command: vec!["run".to_owned()],
         args: vec!["--fast".to_owned()],
         env: BTreeMap::from([("MODE".to_owned(), "test".to_owned())]),
@@ -333,6 +333,9 @@ pub(super) fn spec(labels: &[(&str, &str)]) -> JobSpec {
         ports: Vec::new(),
         files: js_jobs::JobFiles::default(),
         labels: Labels::from_caller(&labels).expect("labels"),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 
@@ -436,6 +439,7 @@ fn result_of_exit_3(times: v1::JobTimes) -> v1::JobResult {
             disk_bytes: None,
             gpus: 0,
         }),
+        input_failure: None,
     }
 }
 

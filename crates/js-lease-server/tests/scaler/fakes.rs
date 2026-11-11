@@ -555,6 +555,7 @@ pub fn request_demand() -> Requirements {
         }),
         network: JobNetwork::None,
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 
@@ -573,7 +574,7 @@ fn tables() -> JobStore<Fake, RandomIds> {
 /// A job that asks for `needs`.
 pub fn spec_of(needs: Needs) -> JobSpec {
     JobSpec {
-        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).unwrap(),
+        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).ok(),
         command: vec!["run".to_owned()],
         args: Vec::new(),
         env: BTreeMap::new(),
@@ -584,6 +585,9 @@ pub fn spec_of(needs: Needs) -> JobSpec {
         ports: Vec::new(),
         files: js_jobs::JobFiles::default(),
         labels: Labels::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 

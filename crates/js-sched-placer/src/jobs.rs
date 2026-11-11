@@ -69,8 +69,9 @@
 //!    job the host's taint after it ([`JobStarts::tainted`]); the taint itself is a row of the
 //!    same transaction (written by the job store). A failed commit lets the engine's hold go
 //!    ([`Engine::job_failed`]): nothing is booked, the job stays queued and the next pass
-//!    places it. A job that books the whole host and runs on the host itself is not marked or
-//!    committed by the whole-host pass: it stays queued.
+//!    places it. A job that books the whole host and runs on the host itself, or names
+//!    layers, mounts or host ports, is not marked or committed by the whole-host pass: it
+//!    stays queued.
 //! 6. **Records why each job waits** (`docs/design/queue-status.md`): what pass 2 told of a
 //!    job since the last pass ([`SchedPlacer::note_outcomes`]), then the pass's own outcome
 //!    for it, decided by [`js_sched::queue_status::notes`] against the code the job showed.
@@ -109,7 +110,7 @@ use js_sched::queue_status::{self, Outcome};
 use js_sched::{Event, Prediction, ProviderRank, Request};
 use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WorkKey};
-use js_types::{HostId, JobNetwork, QueueCode, QueueNote, Resources};
+use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
 use super::whole_jobs::{WholeJobStep, WholeJobs};
@@ -527,21 +528,27 @@ fn walker(job: &JobRecord) -> Option<Walker> {
     })
 }
 
-/// The scheduler's request for the queued `job`, which needs `resources`: its capabilities,
-/// with its `os` and `arch` when it names them, as platform requirements, its GPU class as
-/// `gpu.kind`, and the booking of `resources`, as an `action` lease at `batch` urgency,
-/// named by its job id. How it runs (`exec`) is the host's business, not placement's.
+/// The scheduler's request for the queued `job`, which needs `resources`: its capabilities
+/// (`layered-rootfs` among them for a job with layers, mounts or host ports), with its `os`,
+/// `arch` and `exec` when it names them, as platform requirements, its GPU class as
+/// `gpu.kind`, and the booking of `resources`, as an `action` lease at `batch` urgency, named
+/// by its job id. Admission asks a host for the same `exec`, so a job is placed only where it
+/// was admitted.
 ///
 /// # Errors
 /// As [`map::needs_of`].
 pub fn job_request(job: &JobRecord, resources: &Resources) -> Result<Request, MapError> {
     let constraints = &job.spec.constraints;
     let mut capabilities = constraints.capabilities.clone();
-    let named = [("os", &constraints.os), ("arch", &constraints.arch)];
-    let named = named.into_iter().filter_map(|(key, value)| {
-        let value = value.clone();
-        value.map(|value| (key.to_owned(), value))
-    });
+    let exec = constraints.exec.map(|mode| mode.name().to_owned());
+    let named = [
+        ("os", constraints.os.clone()),
+        ("arch", constraints.arch.clone()),
+        (EXEC_KEY, exec),
+    ];
+    let named = named
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)));
     capabilities.extend(named);
     Ok(Request {
         key: WorkKey::new("job", job.id.as_str()),
@@ -679,11 +686,15 @@ impl SchedPlacer {
         // The whole-host engine marks and commits only the jobs that book the whole host and
         // run contained: it does not yet hold a job to the hosts that run host jobs, so a
         // whole-host job with host isolation stays queued.
+        // Nor does it hold a job to the hosts that report `layered-rootfs`, so a whole-host job
+        // with layers, mounts or host ports stays queued too, rather than drain a host that
+        // could not be sent its start.
         let whole: Vec<JobRecord> = queued
             .iter()
             .filter(|job| {
                 let needs_whole = matches!(job.spec.needs, Needs::WholeHost);
-                needs_whole & (job.spec.constraints.isolation != Isolation::Host)
+                let contained = job.spec.constraints.isolation != Isolation::Host;
+                needs_whole & contained & !job.spec.uses_layered_rootfs()
             })
             .cloned()
             .collect();

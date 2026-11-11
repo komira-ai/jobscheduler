@@ -14,8 +14,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
-    Accelerator, CancelJobRequest, Constraints, GetJobRequest, JobFile, JobSpec, ListJobsRequest,
-    Needs, PortForward, SubmitJobRequest, SubmitJobResponse,
+    Accelerator, CancelJobRequest, Constraints, GetJobRequest, HostPort, JobFile, JobSpec, Layer,
+    ListJobsRequest, Mount, Needs, PortForward, SubmitJobRequest, SubmitJobResponse, layer, mount,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use proptest::collection::{btree_map, vec};
@@ -162,6 +162,54 @@ fn constraints() -> impl Strategy<Value = Constraints> {
         )
 }
 
+fn host_port() -> impl Strategy<Value = HostPort> {
+    (any::<u32>(), proptest::option::of(any::<u32>()), variant(2)).prop_map(
+        |(host_port, container_port, protocol)| HostPort {
+            host_port,
+            container_port,
+            protocol,
+        },
+    )
+}
+
+fn layer() -> impl Strategy<Value = Layer> {
+    let source = prop_oneof![
+        text().prop_map(layer::Source::HostPath),
+        text().prop_map(layer::Source::Image),
+    ];
+    proptest::option::of(source).prop_map(|source| Layer { source })
+}
+
+fn mount() -> impl Strategy<Value = Mount> {
+    (
+        proptest::option::of(text().prop_map(mount::Source::HostPath)),
+        text(),
+        variant(4),
+        text(),
+        any::<bool>(),
+        variant(2),
+    )
+        .prop_map(
+            |(source, target, mode, sub_path, no_exec, propagation)| Mount {
+                source,
+                target,
+                mode,
+                sub_path,
+                no_exec,
+                propagation,
+            },
+        )
+}
+
+/// A job spec's host ports, layers and mounts.
+fn rootfs() -> impl Strategy<Value = (Vec<HostPort>, Vec<Layer>, Vec<Mount>)> {
+    (
+        vec(host_port(), 0..3),
+        vec(layer(), 0..3),
+        vec(mount(), 0..3),
+    )
+}
+
 fn job_spec() -> impl Strategy<Value = JobSpec> {
     let strings = (job_id(), text(), text(), vec(text(), 0..4), entries());
     let resources = (
@@ -176,11 +224,12 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
         any::<i32>(),
         entries(),
     );
-    (strings, resources, rest).prop_map(
+    (strings, resources, rest, rootfs()).prop_map(
         |(
             (job_id, image, command, args, env),
             (needs, constraints, wall_limit_seconds, network),
             (ports, files, priority, labels),
+            (host_ports, layers, mounts),
         )| JobSpec {
             job_id,
             image,
@@ -204,6 +253,9 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
                 .collect(),
             priority,
             labels: labels.into_iter().collect(),
+            host_ports,
+            layers,
+            mounts,
         },
     )
 }

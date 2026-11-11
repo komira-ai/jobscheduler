@@ -69,6 +69,7 @@ fn build_for(
             shape,
             logs: None,
             metrics: &NoMetrics,
+            layered_rootfs: false,
         },
     )
 }

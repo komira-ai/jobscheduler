@@ -11,6 +11,8 @@ publish.workspace = true
 js-alert = { path = "../js-alert" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-api-gateway = { path = "../js-api-gateway" }
+# The capability keys a job asks of its host (`layered-rootfs`, src/job_api/validate.rs).
+js-caps = { path = "../js-caps" }
 js-elastic = { path = "../js-elastic" }
 js-jobs = { path = "../js-jobs" }
 js-logmint = { path = "../js-logmint" }

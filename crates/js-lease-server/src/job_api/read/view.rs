@@ -21,9 +21,17 @@
 //!   the job is queued, and on a job past the queue only when it is `placed`: a job that ended
 //!   without being placed shows none, since its last wait no longer holds ([`queue_status`]).
 //!   Its attempts and events are shown in every state.
+//! - A job without an image (a root of layers alone) shows an empty image.
+//! - The record keeps every mode, propagation and protocol of a job's mounts and host ports
+//!   in its explicit form, and every host port's job port, as a submit recorded them: they are
+//!   shown so, never unspecified and never absent. An absent `sub_path` is shown empty. The
+//!   `layered-rootfs` capability a submit records beside them has no field and is not shown.
+//! - The record keeps the agent's code of a start it refused: it is the job's
+//!   `start_failure_detail`, empty for every other job.
 
 use std::time::Duration;
 
+use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_jobs::{
     Isolation, JobEvent, JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy,
     ResourceUsage, ResultReason, StartFailure,
@@ -72,6 +80,9 @@ fn start_failure(state: JobState) -> v1::StartFailureCode {
             v1::StartFailureCode::ExclusiveNotReady
         }
         JobState::FailedToStart(StartFailure::AgentRefused) => v1::StartFailureCode::AgentRefused,
+        JobState::FailedToStart(StartFailure::InputUnavailable) => {
+            v1::StartFailureCode::InputUnavailable
+        }
         _ => v1::StartFailureCode::Unspecified,
     }
 }
@@ -83,6 +94,7 @@ fn reason(reason: ResultReason) -> v1::ResultReason {
         ResultReason::WallLimit => v1::ResultReason::WallLimit,
         ResultReason::Memory => v1::ResultReason::Memory,
         ResultReason::Cancelled => v1::ResultReason::Cancelled,
+        ResultReason::InputFailed => v1::ResultReason::InputFailed,
     }
 }
 
@@ -152,6 +164,47 @@ fn accelerator(spec: &JobSpec) -> Option<v1::Accelerator> {
     })
 }
 
+/// A layer as the job service shows it.
+fn layer(layer: &Layer) -> v1::Layer {
+    let source = match layer {
+        Layer::HostPath { path } => v1::layer::Source::HostPath(path.clone()),
+        Layer::Image { image } => v1::layer::Source::Image(image.clone()),
+    };
+    v1::Layer {
+        source: Some(source),
+    }
+}
+
+/// A mount as the job service shows it: its mode and propagation explicit, an absent
+/// `sub_path` empty.
+fn mount(mount: &JobMount) -> v1::Mount {
+    let MountSource::HostPath { path } = &mount.source;
+    let mode = match mount.mode {
+        MountMode::ReadOnly => v1::MountMode::ReadOnly,
+        MountMode::ReadWrite => v1::MountMode::ReadWrite,
+        MountMode::CopyOnWrite => v1::MountMode::CopyOnWrite,
+    };
+    let Propagation::Private = mount.propagation;
+    v1::Mount {
+        source: Some(v1::mount::Source::HostPath(path.clone())),
+        target: mount.target.clone(),
+        mode: mode.into(),
+        sub_path: mount.sub_path.clone().unwrap_or_default(),
+        no_exec: mount.no_exec,
+        propagation: v1::MountPropagation::Private.into(),
+    }
+}
+
+/// A host port as the job service shows it: its job port and its protocol explicit.
+fn host_port(port: &HostPort) -> v1::HostPort {
+    let PortProtocol::Tcp = port.protocol;
+    v1::HostPort {
+        host_port: port.host_port.into(),
+        container_port: Some(port.job_port().into()),
+        protocol: v1::PortProtocol::Tcp.into(),
+    }
+}
+
 /// The job `spec` of the job `id` with `priority`, as the job service shows it.
 fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
     let mut command = spec.command.iter().cloned();
@@ -159,7 +212,11 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
     let args = command.chain(spec.args.iter().cloned()).collect();
     v1::JobSpec {
         job_id: id.to_owned(),
-        image: format!("{}@{}", spec.image.name(), spec.image.digest()),
+        image: spec
+            .image
+            .as_ref()
+            .map(|image| format!("{}@{}", image.name(), image.digest()))
+            .unwrap_or_default(),
         command: program,
         args,
         env: spec.env.clone(),
@@ -197,6 +254,9 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             .iter()
             .map(|(key, value)| (key.to_owned(), value.to_owned()))
             .collect(),
+        host_ports: spec.host_ports.iter().map(host_port).collect(),
+        layers: spec.layers.iter().map(layer).collect(),
+        mounts: spec.mounts.iter().map(mount).collect(),
     }
 }
 
@@ -225,7 +285,7 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
         spec: Some(spec(job.id.as_str(), &job.spec, job.priority)),
         state: state(job.state).into(),
         start_failure: start_failure(job.state).into(),
-        start_failure_detail: String::new(),
+        start_failure_detail: job.start_failure_detail.clone().unwrap_or_default(),
         host_id: job
             .host
             .as_ref()
@@ -303,7 +363,7 @@ fn usage(usage: ResourceUsage) -> v1::ResourceUsage {
 }
 
 /// The result of `job`, which has ended, from the result it stored: its state, exit code,
-/// reason, tails, times and usage. A job that ended without a result (lost, or failed to
+/// reason, tails, times, usage and the code of an input that failed. A job that ended without a result (lost, or failed to
 /// start) shows its state and its record's times, and no exit code, reason, tail or usage.
 pub(crate) fn result(job: &JobRecord) -> v1::JobResult {
     let state = state(job.state).into();
@@ -334,5 +394,6 @@ fn stored(state: i32, result: &JobResult) -> v1::JobResult {
             ended_at_ms: Some(millis(timing.ended_at)),
         }),
         usage: result.usage.map(usage),
+        input_failure: result.input_failure.clone(),
     }
 }

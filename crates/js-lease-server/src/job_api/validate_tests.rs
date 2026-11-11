@@ -96,7 +96,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
     .collect();
     let labels = BTreeMap::from([("team".to_owned(), "build".to_owned())]);
     let recorded = JobSpec {
-        image: ImageDigestRef::parse(&image()).unwrap(),
+        image: ImageDigestRef::parse(&image()).ok(),
         command: vec!["run".to_owned()],
         args: vec!["--fast".to_owned()],
         env: BTreeMap::from([("MODE".to_owned(), "fast".to_owned())]),
@@ -119,6 +119,9 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
             b"secret".to_vec(),
         )])),
         labels: Labels::from_caller(&labels).unwrap(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     };
     let accelerator = AcceleratorNeed::requested(&capabilities, &resources).unwrap();
     assert!(accelerator.is_some());
@@ -132,6 +135,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         accelerator,
         network: Reach::Open,
         host_ports: vec![8080],
+        layered_rootfs: false,
     };
     let expected = Valid {
         id: Some(JobId::parse("job-1").unwrap()),

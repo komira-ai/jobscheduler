@@ -11,15 +11,26 @@
 //! |---|---|---|
 //! | `spec` | present | `field: spec` |
 //! | `spec.jobId` | empty (the store mints an id), or 1 to 63 bytes of letters, digits, `.`, `_` and `-` | `field: spec.jobId` |
-//! | `spec.image` | `NAME[:TAG]@sha256:<64 hex>`: a tag alone is refused | `field: spec.image` |
+//! | `spec.image` | `NAME[:TAG]@sha256:<64 hex>`: a tag alone is refused; empty only beside `spec.layers` | `field: spec.image` |
+//! | `spec.command` | with an empty image, an absolute path in normal form ([`js_types::path::absolute`]) | `field: spec.command` |
 //! | `spec.env` | names and values as given; nothing to refuse | |
 //! | `spec.needs` | `whole_host` with no other need; a GPU count with a class (from `gpu_class`, else `constraints.accelerator.model`) and a class with a count | `field: spec.needs`, `spec.needs.gpus`, `spec.needs.gpuClass` |
-//! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode; `isaLevel` empty or a level; `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained) | `field: spec.constraints.<name>` |
+//! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode, and not `sandbox-exec` for a job with layers or a host port at a job port of its own; `isaLevel` empty or a level; `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained), and not `host` for a job with layers, mounts or host ports | `field: spec.constraints.<name>` |
 //! | `spec.wallLimitSeconds` | present and above 0, and at most the ceiling | the refusals `wall-time-not-positive` and `wall-time-above-ceiling` |
 //! | `spec.network` | a known level | `field: spec.network` |
 //! | `spec.ports` | each port 1 to 65535, no host port twice | `field: spec.ports[i].hostPort`, `spec.ports[i].containerPort` |
+//! | `spec.hostPorts` | the rules of `rootfs` | `field: spec.hostPorts[i].<name>` |
 //! | `spec.files` | as a start's run files are (`js_agent_wire::validate_files`) | `field: spec.files` |
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
+//! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
+//!
+//! The cross-field rules (an empty image, its command, `exec` and `isolation` beside the
+//! layers, mounts and host ports) are checked once those fields are, and before `isolation`.
+//!
+//! A job with layers, mounts or host ports records `layered-rootfs=true` among its
+//! capabilities and asks admission for it, so it is placed and started only on a host whose
+//! agent reports it; one with layers, or a host port at a job port of its own, records
+//! `exec=container` when it left `exec` unspecified.
 //!
 //! A field is named by its JSON name, as the gateway names it. A refusal never repeats a
 //! value of the request: not the id, not the image, not a file.
@@ -33,7 +44,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_agent_wire::{RunFile, validate_files};
+use js_agent_wire::{Layer, RunFile, validate_files};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
 };
@@ -47,6 +59,8 @@ use js_types::{
 // by a path separator reads as the server's network module to the source scan of design
 // section 8.6, which only the files that launch or check through a mode may name.
 use js_types::JobNetwork as Reach;
+
+use super::rootfs;
 
 /// The capability key a job's least ISA level is recorded under: the key a lease request
 /// names it by.
@@ -72,6 +86,12 @@ pub(crate) enum Fault {
     Field(&'static str),
     /// The field, by its JSON name, of the port at this index of `spec.ports`.
     Port(usize, &'static str),
+    /// The field, by its JSON name, of the entry at this index of the list `spec.<list>`
+    /// (`layers`, `mounts`, `hostPorts`).
+    Entry(&'static str, usize, &'static str),
+    /// The entry at this index of the list `spec.<list>` has no source this server knows: none
+    /// was given, or one a later release added.
+    NoSource(&'static str, usize),
     /// The wall limit is absent or 0.
     WallNotPositive,
     /// The wall limit is above the ceiling.
@@ -85,18 +105,39 @@ pub(crate) enum Fault {
 pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid, Fault> {
     let spec = spec.ok_or(Fault::Field("spec"))?;
     let id = id(&spec.job_id)?;
-    let image = ImageDigestRef::parse(&spec.image).map_err(|_| Fault::Field("spec.image"))?;
+    let image = Some(spec.image.as_str())
+        .filter(|image| !image.is_empty())
+        .map(ImageDigestRef::parse)
+        .transpose()
+        .map_err(|_| Fault::Field("spec.image"))?;
     let constraints = spec.constraints.clone().unwrap_or_default();
     let resources = resources(spec.needs.as_ref(), &constraints)?;
-    let (kept, capabilities) = host(&constraints)?;
+    let (mut kept, mut capabilities) = host(&constraints)?;
     let wall_limit_secs = wall(spec.wall_limit_seconds, ceiling)?;
     let network = network(spec.network)?;
     let ports = ports(&spec.ports)?;
+    let host_ports = rootfs::host_ports(&spec.host_ports, &ports)?;
     let files = files(&spec.files)?;
     let labels = labels(&spec.labels)?;
+    let layers = rootfs::layers(&spec.layers)?;
+    let mounts = rootfs::mounts(&spec.mounts)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
         .map_err(|_| Fault::Field("spec.constraints.accelerator"))?;
+    imageless(image.as_ref(), &spec.command, &layers)?;
+    let layered = !(layers.is_empty() & mounts.is_empty() & host_ports.is_empty());
+    if rootfs::needs_container(&layers, &host_ports) {
+        kept.exec = match kept.exec {
+            None | Some(ExecMode::Container) => Some(ExecMode::Container),
+            Some(ExecMode::SandboxExec) => return Err(Fault::Field("spec.constraints.exec")),
+        };
+    }
+    if layered {
+        capabilities.insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
+    }
     let isolation = isolation(constraints.isolation)?;
+    if layered & (isolation == Isolation::Host) {
+        return Err(Fault::Field("spec.constraints.isolation"));
+    }
     let wanted = Requirements {
         resources: resources.shape().clone(),
         disk_bytes: Some(resources.shape().disk_bytes()).filter(|bytes| *bytes > 0),
@@ -112,6 +153,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
             .collect::<BTreeSet<u16>>()
             .into_iter()
             .collect(),
+        layered_rootfs: layered,
     };
     let command = Some(spec.command.clone()).filter(|command| !command.is_empty());
     let job = JobSpec {
@@ -132,6 +174,9 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         ports,
         files,
         labels,
+        layers,
+        mounts,
+        host_ports,
     };
     Ok(Valid {
         id,
@@ -139,6 +184,18 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         priority: spec.priority,
         wanted,
     })
+}
+
+/// The command of a job without an image: an absolute path, since no image configuration
+/// names a program; and such a job has layers, which are then its whole root.
+fn imageless(image: Option<&ImageDigestRef>, command: &str, layers: &[Layer]) -> Result<(), Fault> {
+    if image.is_some() {
+        return Ok(());
+    }
+    if layers.is_empty() {
+        return Err(Fault::Field("spec.image"));
+    }
+    js_types::path::absolute(command).map_err(|_| Fault::Field("spec.command"))
 }
 
 /// The client's id: none when empty, else a job id.

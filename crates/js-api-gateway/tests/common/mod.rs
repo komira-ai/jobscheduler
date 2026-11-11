@@ -409,6 +409,26 @@ pub fn spec() -> JobSpec {
         }],
         priority: -7,
         labels: map(&[("team", "build"), ("kind", "test")]),
+        host_ports: vec![js_proto::v1::HostPort {
+            host_port: 7070,
+            container_port: Some(7171),
+            protocol: js_proto::v1::PortProtocol::Tcp.into(),
+        }],
+        layers: vec![js_proto::v1::Layer {
+            source: Some(js_proto::v1::layer::Source::HostPath(
+                "/srv/trees/sdk".to_owned(),
+            )),
+        }],
+        mounts: vec![js_proto::v1::Mount {
+            source: Some(js_proto::v1::mount::Source::HostPath(
+                "/srv/trees/src".to_owned(),
+            )),
+            target: "/work".to_owned(),
+            mode: js_proto::v1::MountMode::CopyOnWrite.into(),
+            sub_path: "lib".to_owned(),
+            no_exec: true,
+            propagation: js_proto::v1::MountPropagation::Private.into(),
+        }],
     }
 }
 
@@ -540,6 +560,7 @@ pub fn result() -> JobResult {
             disk_bytes: Some(4096),
             gpus: 2,
         }),
+        input_failure: Some("input-unreadable".to_owned()),
     }
 }
 

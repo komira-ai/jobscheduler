@@ -60,6 +60,9 @@ pub fn spec(contents: &str) -> JobSpec {
         }],
         priority: 7,
         labels: map(&[("team", "build"), ("kind", "test")]),
+        host_ports: Vec::new(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
     }
 }
 
