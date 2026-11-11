@@ -145,8 +145,8 @@ fn the_ar_archive_has_the_three_members_in_order_owned_by_root() {
     }
 }
 
-/// Asserts the control file of the package exactly: the fields in order, no `Depends`, the
-/// installed size rounded up to the kilobyte of the files' bytes, the description with ` .`
+/// Asserts the control file of the package exactly: the fields in order, `Depends` naming only
+/// what provides `systemd-sysusers` (which the postinst runs), the installed size rounded up to the kilobyte of the files' bytes, the description with ` .`
 /// for its empty line.
 #[test]
 fn the_control_file_is_exactly_this() {
@@ -158,27 +158,40 @@ fn the_control_file_is_exactly_this() {
         control(VERSION, "arm64", &files),
         "Package: js-agent\nVersion: 1.2.3\nArchitecture: arm64\n\
          Maintainer: komira-ai <noreply@komira.com>\nInstalled-Size: 2\n\
+         Depends: systemd | systemd-standalone-sysusers\n\
          Section: admin\nPriority: optional\nHomepage: https://github.com/komira-ai/jobscheduler\n\
          Description: job scheduler agent: runs the jobs a lease server leases to this host\n \
          js-agent joins a js-lease-server pool and runs the jobs it is leased in containers.\n .\n \
-         The package installs the program, the systemd units of a host that runs jobs with crun and\n \
-         the host setup script. It starts and enables nothing: place the host's files, then start a unit.\n"
+         The package installs the program, the systemd units of a host that runs jobs with crun, their\n \
+         job user and the host setup script. It starts and enables nothing: place the host's files, then start a unit.\n"
     );
 }
 
-/// Asserts the control archive holds the control file of the platform's architecture and the
-/// md5sums of every file, and no maintainer script and no conffiles: nothing runs at install
-/// and no file is kept at removal.
+/// Asserts the control archive holds the control file of the platform's architecture, the
+/// md5sums of every file and the postinst (executable, the text of
+/// `packaging/js-agent/deb/postinst`), and no other maintainer script and no conffiles: the
+/// postinst is all that runs at install and no file is kept at removal.
 #[test]
-fn the_control_archive_holds_control_and_md5sums_only() {
+fn the_control_archive_holds_control_md5sums_and_the_postinst_only() {
     let bin = binary(false);
     let members = read_ar(&package(&bin, Platform::LinuxArm64));
     let entries = read_tar_gz(&members[1].content);
     let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
-    assert_eq!(paths, ["./", "./control", "./md5sums"]);
+    assert_eq!(paths, ["./", "./control", "./md5sums", "./postinst"]);
     let control_text = String::from_utf8(entries[1].content.clone()).expect("text");
     assert_eq!(control_text, control(VERSION, "arm64", &files(&bin)));
-    assert!(!control_text.contains("Depends"));
+    assert_eq!(
+        control_text
+            .lines()
+            .filter(|line| line.starts_with("Depends:"))
+            .collect::<Vec<_>>(),
+        ["Depends: systemd | systemd-standalone-sysusers"]
+    );
+    assert_eq!(
+        entries[3].content,
+        std::fs::read(repo_root().join("packaging/js-agent/deb/postinst")).expect("postinst")
+    );
+    assert_eq!(entries[3].mode, 0o755);
     for entry in &entries {
         assert_eq!(
             (entry.ids, entry.names.clone(), entry.mtime),
@@ -192,7 +205,36 @@ fn the_control_archive_holds_control_and_md5sums_only() {
         );
     }
     assert!(entries[0].directory && entries[0].mode == 0o755);
-    assert!(entries[1..].iter().all(|e| !e.directory && e.mode == 0o644));
+    assert!(
+        entries[1..3]
+            .iter()
+            .all(|e| !e.directory && e.mode == 0o644)
+    );
+    assert!(!entries[3].directory);
+}
+
+/// Asserts the postinst names the package's own `sysusers.d` file and does nothing a package
+/// promises not to: it starts, enables and removes nothing. What it does to a system is
+/// asserted by running it (`tests/js_agent_postinst.rs`).
+///
+/// Catches a postinst that names another file than the one the package installs (sysusers would
+/// find no such file and fail the install), and one that touches a unit.
+#[test]
+fn the_postinst_runs_sysusers_on_the_packages_own_file() {
+    let sysusers = FILES
+        .iter()
+        .find(|file| file.path.starts_with("/usr/lib/sysusers.d/"))
+        .expect("a sysusers.d file");
+    assert_eq!(sysusers.path, "/usr/lib/sysusers.d/js-agent.conf");
+    assert_eq!(sysusers.mode, 0o644);
+    assert!(POSTINST.starts_with("#!/bin/sh\n"));
+    assert!(
+        POSTINST.lines().any(|line| line.trim()
+            == "systemd-sysusers ${DPKG_ROOT:+--root=\"$DPKG_ROOT\"} js-agent.conf")
+    );
+    for word in ["systemctl", "deb-systemd", "useradd", "usermod", "rm "] {
+        assert!(!POSTINST.contains(word), "{word}");
+    }
 }
 
 /// Asserts the md5sums file: one line per file, in path order, `md5sum`'s `<hex>  <path>`.
@@ -209,10 +251,10 @@ fn md5sums_lists_each_file_in_path_order() {
 }
 
 /// Asserts the data archive: every directory above a file (each once, mode 0755) before what is
-/// in it, then the eight files with their modes, all owned by root:root at the fixed time, the
+/// in it, then the nine files with their modes, all owned by root:root at the fixed time, the
 /// binary's bytes at `usr/bin/js-agent` and every packaged text as the repository has it.
 #[test]
-fn the_data_archive_holds_the_eight_files_and_their_directories() {
+fn the_data_archive_holds_the_nine_files_and_their_directories() {
     let bin = binary(true);
     let members = read_ar(&package(&bin, Platform::LinuxX86_64));
     let entries = read_tar_gz(&members[2].content);
@@ -230,6 +272,8 @@ fn the_data_archive_holds_the_eight_files_and_their_directories() {
             ("./usr/lib/systemd/system/js-agent-crun-gpu.service", 0o644),
             ("./usr/lib/systemd/system/js-agent-crun.service", 0o644),
             ("./usr/lib/systemd/system/js-agent.service", 0o644),
+            ("./usr/lib/sysusers.d/", 0o755),
+            ("./usr/lib/sysusers.d/js-agent.conf", 0o644),
             ("./usr/lib/tmpfiles.d/", 0o755),
             ("./usr/lib/tmpfiles.d/js-agent-crun.conf", 0o644),
             ("./usr/lib/tmpfiles.d/js-agent.conf", 0o644),
@@ -289,16 +333,16 @@ fn the_md5sums_match_the_data_archive() {
     assert_eq!(sums, from_data.concat());
 }
 
-/// Asserts the table of files: eight absolute paths, none twice, the program the only one with
+/// Asserts the table of files: nine absolute paths, none twice, the program the only one with
 /// no text, the texts the repository's files, and the modes the units' and scripts' (only the
 /// program and the setup script execute).
 #[test]
-fn the_files_table_names_the_eight_files_and_their_sources() {
-    assert_eq!(FILES.len(), 8);
+fn the_files_table_names_the_nine_files_and_their_sources() {
+    assert_eq!(FILES.len(), 9);
     let mut paths: Vec<&str> = FILES.iter().map(|f| f.path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 8);
+    assert_eq!(paths.len(), 9);
     assert!(FILES.iter().all(|f| f.path.starts_with('/')));
     let sources = [
         (
@@ -312,6 +356,10 @@ fn the_files_table_names_the_eight_files_and_their_sources() {
         (
             "/usr/lib/tmpfiles.d/js-agent-crun.conf",
             "packaging/js-agent/deb/tmpfiles.conf",
+        ),
+        (
+            "/usr/lib/sysusers.d/js-agent.conf",
+            "packaging/js-agent/deb/sysusers.conf",
         ),
         (
             "/usr/lib/systemd/system/js-agent.service",
