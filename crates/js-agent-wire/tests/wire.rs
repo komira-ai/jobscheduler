@@ -84,6 +84,7 @@ fn refusal_codes_snapshot() {
         refusal::INPUT_UNAVAILABLE,
         refusal::ROOTFS_UNSUPPORTED_HERE,
         refusal::MOUNT_TARGET_UNSUPPORTED_HERE,
+        refusal::HOST_PORT_REMAP_UNSUPPORTED_HERE,
         refusal::INPUT_UNREADABLE,
         refusal::HOST_PORT_LOST,
     ];
@@ -101,7 +102,8 @@ fn refusal_codes_snapshot() {
          tree-unavailable tree-invalid tree-read-failed tree-stalled tree-placement-unsupported \
          tree-unsupported-here outputs-unsupported-here too-many-inputs-here cwd-in-tree \
          input-not-allowed input-unavailable rootfs-unsupported-here \
-         mount-target-unsupported-here input-unreadable host-port-lost"
+         mount-target-unsupported-here host-port-remap-unsupported-here input-unreadable \
+         host-port-lost"
     );
 }
 

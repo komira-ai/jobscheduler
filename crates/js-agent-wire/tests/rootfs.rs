@@ -1,5 +1,6 @@
 //! A job start's file system beyond its image: the wire form of its `layers`, `mounts` and
-//! `host_ports` ([`Layer`], [`PathMount`], [`MountSource`], [`MountMode`], [`HostPort`]), every rule `validate` holds them
+//! `host_ports` ([`Layer`], [`JobMount`], [`MountSource`], [`MountMode`], [`Propagation`],
+//! [`HostPort`], [`PortProtocol`]), every rule `validate` holds them
 //! to at both sides of its bound, and how an unknown layer kind or mode decodes.
 
 mod common;
@@ -7,8 +8,8 @@ mod common;
 use common::{broken, expect};
 use js_agent_wire::limits::{MAX_LAYERS, MAX_MOUNTS, MAX_PATH_LEN, MAX_PORTS};
 use js_agent_wire::{
-    BookedResources, Command, HeartbeatReply, HostPort, Isolation, JobStartSpec, Layer, MountMode,
-    MountSource, PathMount, Rule, ValidationError, refusal,
+    BookedResources, Command, HeartbeatReply, HostPort, Isolation, JobMount, JobStartSpec, Layer,
+    MountMode, MountSource, PortProtocol, Propagation, Rule, ValidationError, refusal,
 };
 use serde_json::{Value, json};
 
@@ -53,29 +54,41 @@ fn start() -> JobStartSpec {
         ],
         mounts: vec![
             mount("/srv/trees/src", "/work", MountMode::CopyOnWrite),
-            mount("/srv/trees/sdk", "/work/sdk", MountMode::ReadOnly),
+            JobMount {
+                sub_path: Some("14/lib".into()),
+                no_exec: true,
+                ..mount("/srv/trees/sdk", "/work/sdk", MountMode::ReadOnly)
+            },
             mount("/srv/out/job-1", "/out", MountMode::ReadWrite),
         ],
-        host_ports: ports(&[9000, 9443]),
+        host_ports: vec![port(9000, None), port(9443, Some(19443))],
+    }
+}
+
+fn port(host_port: u16, container_port: Option<u16>) -> HostPort {
+    HostPort {
+        host_port,
+        container_port,
+        protocol: PortProtocol::Tcp,
     }
 }
 
 fn ports(numbers: &[u16]) -> Vec<HostPort> {
-    numbers
-        .iter()
-        .map(|&host_port| HostPort { host_port })
-        .collect()
+    numbers.iter().map(|&number| port(number, None)).collect()
 }
 
 fn host(path: &str) -> MountSource {
     MountSource::HostPath { path: path.into() }
 }
 
-fn mount(source: &str, target: &str, mode: MountMode) -> PathMount {
-    PathMount {
+fn mount(source: &str, target: &str, mode: MountMode) -> JobMount {
+    JobMount {
         source: host(source),
         target: target.into(),
         mode,
+        sub_path: None,
+        no_exec: false,
+        propagation: Propagation::Private,
     }
 }
 
@@ -103,8 +116,9 @@ fn rooted(len: usize) -> String {
 }
 
 /// Asserts the exact text of a start with every new field set: each layer kind under its
-/// `type` tag, each mode in snake case with read-only left out, and the host ports as plain
-/// numbers; and that the text decodes back to the start. It catches a renamed tag, field or
+/// `type` tag, each mode in snake case with read-only left out, a `sub_path` and `no_exec`,
+/// private propagation and TCP left out, and a host port with and one without its own job
+/// port; and that the text decodes back to the start. It catches a renamed tag, field or
 /// mode, a lost `snake_case`, and a read-only mode written out, which would change the text
 /// of every read-only mount.
 #[test]
@@ -123,16 +137,30 @@ fn a_layered_start_has_the_documented_wire_form() {
         ],
         "mounts": [
             {"source": {"type": "host_path", "path": "/srv/trees/src"}, "target": "/work", "mode": "copy_on_write"},
-            {"source": {"type": "host_path", "path": "/srv/trees/sdk"}, "target": "/work/sdk"},
+            {
+                "source": {"type": "host_path", "path": "/srv/trees/sdk"},
+                "target": "/work/sdk",
+                "sub_path": "14/lib",
+                "no_exec": true
+            },
             {"source": {"type": "host_path", "path": "/srv/out/job-1"}, "target": "/out", "mode": "read_write"}
         ],
-        "host_ports": [{"host_port": 9000}, {"host_port": 9443}]
+        "host_ports": [{"host_port": 9000}, {"host_port": 9443, "container_port": 19443}]
     });
     let command = Command::JobStart(Box::new(start()));
     assert_eq!(serde_json::to_value(&command).unwrap(), wire);
     assert_eq!(serde_json::from_value::<Command>(wire).unwrap(), command);
     assert_eq!(command.validate(), Ok(()));
     assert_eq!(MountMode::default(), MountMode::ReadOnly);
+    assert_eq!(Propagation::default(), Propagation::Private);
+    assert_eq!(PortProtocol::default(), PortProtocol::Tcp);
+    assert_eq!(
+        (
+            port(9000, None).job_port(),
+            port(9443, Some(19443)).job_port()
+        ),
+        (9000, 19443)
+    );
 }
 
 /// Asserts the minimal form of each field alone: a root of one host-path layer with no image
@@ -331,7 +359,7 @@ fn layers_are_bounded_and_held_to_the_path_rules() {
 #[test]
 fn path_mounts_are_bounded_and_held_to_the_path_rules() {
     let code = refusal::INVALID_MOUNT;
-    let many = |n: usize| -> Vec<PathMount> {
+    let many = |n: usize| -> Vec<JobMount> {
         (0..n)
             .map(|i| mount("/srv/m", &format!("/m/{i}"), MountMode::ReadOnly))
             .collect()
@@ -387,24 +415,103 @@ fn host_ports_are_bounded_distinct_and_above_zero() {
     let max = u16::try_from(MAX_PORTS).unwrap();
     accepted(|s| s.host_ports = ports(&(1..=max).collect::<Vec<_>>()));
     accepted(|s| s.host_ports = ports(&[1, u16::MAX]));
+    accepted(|s| s.host_ports = vec![port(9000, Some(1)), port(9001, Some(u16::MAX))]);
+    accepted(|s| s.host_ports = vec![port(9000, None), port(9000, Some(19000))]);
+    accepted(|s| s.host_ports = vec![port(9000, Some(9000)), port(9001, None)]);
     refused(
         |s| s.host_ports = ports(&(1..=max + 1).collect::<Vec<_>>()),
         "host_ports",
         Rule::TooMany,
         job,
     );
+    let checks: [(Vec<HostPort>, &str, Rule); 5] = [
+        (ports(&[9000, 0]), "host_ports.host_port", Rule::OutOfRange),
+        (
+            vec![port(9000, Some(0))],
+            "host_ports.container_port",
+            Rule::OutOfRange,
+        ),
+        (
+            ports(&[9000, 9443, 9000]),
+            "host_ports.container_port",
+            Rule::Duplicate,
+        ),
+        (
+            vec![port(9000, Some(8000)), port(9001, Some(8000))],
+            "host_ports.container_port",
+            Rule::Duplicate,
+        ),
+        (
+            vec![port(9000, None), port(9001, Some(9000))],
+            "host_ports.container_port",
+            Rule::Duplicate,
+        ),
+    ];
+    for (host_ports, field, rule) in checks {
+        refused(|s| s.host_ports = host_ports, field, rule, job);
+    }
+    let declared = |s: &mut JobStartSpec| {
+        s.network = js_types::JobNetwork::AllowList;
+        s.ports = vec![js_types::PortMap {
+            host: 8080,
+            container: 80,
+        }];
+    };
+    accepted(declared);
     refused(
-        |s| s.host_ports = ports(&[9000, 0]),
-        "host_ports",
-        Rule::OutOfRange,
+        |s| {
+            declared(s);
+            s.host_ports = vec![port(9000, Some(80))];
+        },
+        "host_ports.container_port",
+        Rule::Inconsistent,
         job,
     );
     refused(
-        |s| s.host_ports = ports(&[9000, 9443, 9000]),
-        "host_ports",
-        Rule::Duplicate,
+        |s| {
+            declared(s);
+            s.host_ports = ports(&[80]);
+        },
+        "host_ports.container_port",
+        Rule::Inconsistent,
         job,
     );
+    let mut wire = serde_json::to_value(start()).unwrap();
+    wire["host_ports"][0]["container_port"] = json!(65536);
+    assert!(serde_json::from_value::<JobStartSpec>(wire.clone()).is_err());
+    wire["host_ports"][0] = json!({"host_port": 65536});
+    assert!(serde_json::from_value::<JobStartSpec>(wire).is_err());
+}
+
+/// Asserts a mount's `sub_path` rules at their edges, refused `invalid-mount` on
+/// `mounts.sub_path`: absolute, with `..`, not in normal form, with a NUL, or of 4097 bytes
+/// refused; 4096 bytes, a relative path and the empty path (the source's root) accepted.
+/// It catches a `sub_path` that leaves its source by its text, and one the agent's open
+/// beneath the source could not take.
+#[test]
+fn a_sub_path_is_relative_and_in_normal_form() {
+    let code = refusal::INVALID_MOUNT;
+    let sub = |s: &mut JobStartSpec, path: String| s.mounts[1].sub_path = Some(path);
+    for good in [
+        "".to_owned(),
+        "lib".to_owned(),
+        "a/b-c.d".to_owned(),
+        "a".repeat(MAX_PATH_LEN),
+    ] {
+        accepted(|s| sub(s, good));
+    }
+    for (path, rule) in [
+        ("/lib".to_owned(), Rule::Escapes),
+        ("../lib".to_owned(), Rule::Escapes),
+        ("a/../../b".to_owned(), Rule::Escapes),
+        ("a//b".to_owned(), Rule::Empty),
+        ("a/./b".to_owned(), Rule::Empty),
+        ("lib/".to_owned(), Rule::Empty),
+        ("li\0b".to_owned(), Rule::BadChars),
+        ("a".repeat(MAX_PATH_LEN + 1), Rule::TooLong),
+    ] {
+        refused(|s| sub(s, path), "mounts.sub_path", rule, code);
+    }
 }
 
 /// Asserts that a host start (`isolation: host`, which runs on the machine itself) is
@@ -440,7 +547,8 @@ fn a_host_start_names_none_of_the_three() {
 
 /// Asserts that a start whose layer or mount source has a kind this release does not know
 /// (a `tmpfs` source, say), or no `type` at all, or whose source is a bare path string, or
-/// whose mount has a mode it does not know, reads inside a reply as an unknown
+/// whose mount has a mode or propagation it does not know, or whose host port has a
+/// protocol it does not know, or a `no_exec` that is not a boolean, reads inside a reply as an unknown
 /// command, while the job stop and the start beside it arrive whole. It catches a catch-all
 /// variant that would let an agent run a job on another root, or with another mount, than
 /// the one asked for, and an unknown value that costs the other commands of the reply.
@@ -448,7 +556,10 @@ fn a_host_start_names_none_of_the_three() {
 fn an_unknown_layer_kind_or_mount_mode_reads_as_an_unknown_command() {
     let start_value = serde_json::to_value(Command::JobStart(Box::new(start()))).unwrap();
     let stop = json!({"type": "job_stop", "job_id": "job-0"});
-    let edits: [fn(&mut Value); 7] = [
+    let edits: [fn(&mut Value); 10] = [
+        |v| v["mounts"][0]["propagation"] = json!("receive"),
+        |v| v["host_ports"][0]["protocol"] = json!("udp"),
+        |v| v["mounts"][0]["no_exec"] = json!("yes"),
         |v| v["layers"][0] = json!({"type": "overlay", "path": "/srv/root"}),
         |v| v["mounts"][0]["source"] = json!({"type": "tmpfs", "size": 1024}),
         |v| v["mounts"][0]["source"] = json!({"path": "/srv/trees/src"}),
@@ -487,12 +598,46 @@ fn the_messages_grow_additively() {
     let mut wire = serde_json::to_value(start()).unwrap();
     wire["mounts"][1]["options"] = json!(["noexec"]);
     wire["mounts"][1]["source"]["uid"] = json!(1000);
-    wire["host_ports"][0]["protocol"] = json!("tcp");
-    wire["host_ports"][0]["container_port"] = json!(19000);
+    wire["mounts"][1]["read_only_recursive"] = json!(true);
+    wire["host_ports"][0]["address"] = json!("127.0.0.1");
     let read: JobStartSpec = serde_json::from_value(wire).unwrap();
     assert_eq!(read, start());
     let text = serde_json::to_value(start()).unwrap();
     assert!(text["mounts"][0]["source"].is_object(), "{text}");
     assert!(text["layers"][0].is_object(), "{text}");
     assert!(text["host_ports"][0].is_object(), "{text}");
+}
+
+/// Asserts that a mount and a host port that spell every option at its default (`read_only`,
+/// `private`, `no_exec: false`, `tcp`, a `container_port` equal to `host_port`) decode,
+/// validate, and are written with the defaults left out, as the text of a start that never
+/// named them; except the equal `container_port`, which is kept as given, so a start reads
+/// back what it said. It catches a default written out, which would change the text of every
+/// start with a mount and make an option added later present in starts that do not use it.
+#[test]
+fn defaults_spelled_out_are_written_as_left_out() {
+    let mut spec = start();
+    spec.mounts.truncate(1);
+    spec.mounts[0] = mount("/srv/trees/src", "/work", MountMode::ReadOnly);
+    spec.host_ports = vec![port(9000, None)];
+    let mut spelled = serde_json::to_value(&spec).unwrap();
+    spelled["mounts"][0]["mode"] = json!("read_only");
+    spelled["mounts"][0]["propagation"] = json!("private");
+    spelled["mounts"][0]["no_exec"] = json!(false);
+    spelled["host_ports"][0]["protocol"] = json!("tcp");
+    let read: JobStartSpec = serde_json::from_value(spelled).unwrap();
+    assert_eq!(read, spec);
+    assert_eq!(read.validate(), Ok(()));
+    let text = serde_json::to_value(&read).unwrap();
+    assert_eq!(
+        text["mounts"],
+        json!([{"source": {"type": "host_path", "path": "/srv/trees/src"}, "target": "/work"}])
+    );
+    assert_eq!(text["host_ports"], json!([{"host_port": 9000}]));
+    spec.host_ports = vec![port(9000, Some(9000))];
+    let text = serde_json::to_value(&spec).unwrap();
+    assert_eq!(
+        text["host_ports"],
+        json!([{"host_port": 9000, "container_port": 9000}])
+    );
 }

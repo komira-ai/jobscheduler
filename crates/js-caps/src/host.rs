@@ -16,7 +16,7 @@
 //! | [`SCRATCH_DEFAULT_GIB`] | whole GiB | the quota it enforces on a run that names none |
 //! | [`BUNDLE`] | the held bundle manifest digests, `sha256:<hex>`, comma-separated | the agent has a bundle store and holds at least one bundle |
 //! | [`BUNDLE_ROOT`] | the absolute path of the bundle store | the agent has a bundle store |
-//! | [`LAYERED_ROOTFS`] | [`FLAG_SET`] | the agent reads a job start's layers, path mounts and host ports, and its runtime and kernel can make them (or refuse by name what they cannot) |
+//! | [`LAYERED_ROOTFS`] | [`FLAG_SET`] | the agent reads a job start's layers, mounts and host ports, and its runtime and kernel can make them (or refuse by name what they cannot) |
 //! | [`TIERSTORE_TREES`] | [`FLAG_SET`] | the agent is configured for the node's `tierstore fs` and its control socket answered the agent's start-time probe |
 //!
 //! A job request may require [`EXEC`] (the same mode), [`DISK_GIB`] (at least that

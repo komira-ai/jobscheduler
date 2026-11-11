@@ -86,9 +86,9 @@ pub const RUN_UNSUPPORTED: &str = "run-unsupported";
 /// registry is asked. A Linux agent has no such code.
 pub const IMAGE_NOT_ALLOWED: &str = "image-not-allowed";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root; or a
-/// job start with a path mount (`mounts`) whose source is not an absolute path in normal
+/// job start with a mount (`mounts`) whose source is not an absolute path in normal
 /// form, whose target breaks the target rules (`js_types::path::target`) or repeats
-/// another, or with more than [`crate::limits::MAX_MOUNTS`] of them. An agent also answers
+/// another, whose `sub_path` is not a relative path in normal form, or with more than [`crate::limits::MAX_MOUNTS`] of them. An agent also answers
 /// it, as the detail of a `failed_to_start` result, for a target below a read-only mount
 /// that does not exist in that mount.
 pub const INVALID_MOUNT: &str = "invalid-mount";
@@ -220,27 +220,33 @@ pub const TOO_MANY_INPUTS_HERE: &str = "too-many-inputs-here";
 /// directory.
 pub const CWD_IN_TREE: &str = "cwd-in-tree";
 
-/// As the detail of a `failed_to_start` result: a start whose layers, path mounts or host
+/// As the detail of a `failed_to_start` result: a start whose layers, mounts or host
 /// ports name what the host's operator did not allow: a host path under no `--mount-root`
 /// or `--mount-root-ro` once its links are followed, a read-write mount under a read-only
-/// root, or a host port not in `--host-port`. Nothing was created. A mistake of the host's
+/// root, a mount's `sub_path` that leads out of its source by a link, or a host port not in
+/// `--host-port`. Nothing was created. A mistake of the host's
 /// configuration, not of the job or the host's state; an image layer outside every
 /// `--image-allow` entry is [`IMAGE_NOT_ALLOWED`] instead.
 pub const INPUT_NOT_ALLOWED: &str = "input-not-allowed";
-/// As the detail of a `failed_to_start` result: a host path of a layer or a path mount that
-/// is missing, is not a directory, cannot be read, or whose lookup passed its bound; or a
+/// As the detail of a `failed_to_start` result: a host path of a layer or a mount, or a
+/// mount's `sub_path`, that is missing, is not a directory, cannot be read, or whose lookup
+/// passed its bound; or a
 /// mount's source the job's user cannot reach. The host's state: another host or a later
 /// try may succeed.
 pub const INPUT_UNAVAILABLE: &str = "input-unavailable";
 /// As the detail of a `failed_to_start` result: a start with `layers` on an agent whose
 /// runtime has no root to replace (the macOS native runtime). Nothing was created.
 pub const ROOTFS_UNSUPPORTED_HERE: &str = "rootfs-unsupported-here";
-/// As the detail of a `failed_to_start` result: on the macOS native runtime, a path mount
+/// As the detail of a `failed_to_start` result: on the macOS native runtime, a mount
 /// whose target is outside `/work`, or a read-only or read-write one at `/work` itself.
 /// Nothing was created.
 pub const MOUNT_TARGET_UNSUPPORTED_HERE: &str = "mount-target-unsupported-here";
+/// As the detail of a `failed_to_start` result: on the macOS native runtime, a host port
+/// whose `container_port` differs from its `host_port`: a native job has no loopback of its
+/// own to offer another port on. Nothing was created; placement never sends one there.
+pub const HOST_PORT_REMAP_UNSUPPORTED_HERE: &str = "host-port-remap-unsupported-here";
 /// As a result's `input_failure` ([`crate::JobResult::input_failure`]): a job that did not
-/// succeed, after which a host path of its layers or path mounts no longer answered. The
+/// succeed, after which a host path of its layers or mounts no longer answered. The
 /// failure is the host's; the outcome and exit status are kept.
 pub const INPUT_UNREADABLE: &str = "input-unreadable";
 /// As a result's `input_failure` ([`crate::JobResult::input_failure`]): a host port of the

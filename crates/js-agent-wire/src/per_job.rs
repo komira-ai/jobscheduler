@@ -30,7 +30,7 @@ use crate::limits;
 use crate::log_sink::{self, LogReport, LogSink};
 use crate::network;
 use crate::refusal;
-use crate::rootfs::{self, HostPort, Layer, PathMount};
+use crate::rootfs::{self, HostPort, JobMount, Layer};
 use crate::run::RunSpec;
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
@@ -117,7 +117,7 @@ impl BookedResources {
 /// The `run`, `os` and `arch` of the one job definition are here as on a run start
 /// ([`crate::JobSpec::run`]); a native body and a bundle are not carried. Fields a later
 /// change adds, as optional fields: the network policy and the declared ports (the job
-/// network change), the kind of start, the isolation, and the layers, path mounts and host
+/// network change), the kind of start, the isolation, and the layers, mounts and host
 /// ports of a job's file system (`docs/design/job-rootfs.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobStartSpec {
@@ -219,14 +219,14 @@ pub struct JobStartSpec {
     /// [`Isolation::Host`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<Layer>,
-    /// What the job sees at paths of its file system ([`PathMount`]; today host
+    /// What the job sees at paths of its file system ([`JobMount`]; today host
     /// directories), made after the
     /// root, parents before children. At most [`limits::MAX_MOUNTS`]; left out when there
     /// are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mounts: Vec<PathMount>,
-    /// TCP ports on the host's loopback ([`HostPort`]) the job reaches at the same port on
-    /// its own loopback, whatever its `network`. Not `ports`, which forward the other way. At most
+    pub mounts: Vec<JobMount>,
+    /// Ports on the host's loopback ([`HostPort`]) the job reaches at ports of its own
+    /// loopback, whatever its `network`. Not `ports`, which forward the other way. At most
     /// [`limits::MAX_PORTS`], each from 1 to 65535, none twice; left out when there are
     /// none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -236,7 +236,7 @@ pub struct JobStartSpec {
 impl JobStartSpec {
     /// Checks the start: the ids, that an image or a layer is named and the image well
     /// formed, the command, the environment, the files, the booked resources, the wall
-    /// limit, the declared ports, and the layers, path mounts and host ports
+    /// limit, the declared ports, and the layers, mounts and host ports
     /// ([`crate::rootfs`]). The server calls it before it sends a start and the agent before
     /// it acts on one, together with [`JobStartSpec::require_pinned`]. It does not look at
     /// `log_sink`: a sink never refuses a start ([`JobStartSpec::log_sink_checked`]).
@@ -270,7 +270,7 @@ impl JobStartSpec {
         network::check_ports(&network::JOB_PORTS, &self.ports)?;
         rootfs::check_layers(&self.layers)?;
         rootfs::check_mounts(&self.mounts)?;
-        rootfs::check_host_ports(&self.host_ports)?;
+        rootfs::check_host_ports(&self.host_ports, &self.ports)?;
         let rootfs = [
             self.layers.is_empty(),
             self.mounts.is_empty(),
@@ -368,7 +368,7 @@ pub struct JobResult {
     /// while the job ran: [`refusal::TREE_READ_FAILED`], [`refusal::TREE_STALLED`] or
     /// [`refusal::TREE_UNAVAILABLE`]. The failure is then the host's, whatever the outcome
     /// and exit status, which are kept as they were. An agent that reads a start's layers,
-    /// path mounts and host ports sends [`refusal::INPUT_UNREADABLE`] or
+    /// mounts and host ports sends [`refusal::INPUT_UNREADABLE`] or
     /// [`refusal::HOST_PORT_LOST`] here in the same sense. Absent otherwise, and left out
     /// of the text. `detail` keeps its meaning beside it. A server from before the field ignores
     /// it.

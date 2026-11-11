@@ -90,12 +90,12 @@
 //! contained): a server sends `isolation: host` only to a host whose hello reports
 //! `host-jobs` ([`HOST_JOBS_CAPABILITY`]), and leaves the field out for a contained start.
 //! `JobStartSpec::layers`, `JobStartSpec::mounts` and `JobStartSpec::host_ports` are three
-//! more ([`Layer`], [`PathMount`], [`HostPort`]; an older agent would run the job on its
+//! more ([`Layer`], [`JobMount`], [`HostPort`]; an older agent would run the job on its
 //! image alone): a
 //! server sends them only to a host whose hello reports `layered-rootfs`
 //! (`js_caps::LAYERED_ROOTFS`), and leaves each out when it is empty, so a start without
-//! them is the text it was. An unknown [`Layer`] or [`MountSource`] kind or [`MountMode`] is
-//! a decode error like an unknown `Isolation`.
+//! them is the text it was. An unknown [`Layer`] or [`MountSource`] kind, or an unknown [`MountMode`],
+//! [`Propagation`] or [`PortProtocol`], is a decode error like an unknown `Isolation`.
 //!
 //! # Live logs
 //!
@@ -212,7 +212,7 @@ pub use per_job::{
 };
 pub use platform::{ImagePlatform, check_platform};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
-pub use rootfs::{HostPort, Layer, MountMode, MountSource, PathMount};
+pub use rootfs::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 pub use run::RunSpec;
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration

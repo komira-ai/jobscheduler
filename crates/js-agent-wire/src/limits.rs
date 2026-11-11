@@ -23,8 +23,8 @@
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` and [`MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN`] for `egress-ports` |
 //! | a job start's `layers` | [`MAX_LAYERS`] entries; a host path [`MAX_PATH_LEN`] bytes, absolute, in normal form; an image as `image` |
-//! | a job start's path `mounts` | [`MAX_MOUNTS`] entries; a host-path `source` as a layer's host path; `target` [`MAX_PATH_LEN`] bytes with its leading `/`, ASCII, outside the runtime's places, no two equal in any case |
-//! | a job start's `host_ports` | [`MAX_PORTS`] entries, each `host_port` from 1 to 65535, none twice |
+//! | a job start's `mounts` | [`MAX_MOUNTS`] entries; a host-path `source` as a layer's host path; a `sub_path` as a target after its `/`, or empty; `target` [`MAX_PATH_LEN`] bytes with its leading `/`, ASCII, outside the runtime's places, no two equal in any case |
+//! | a job start's `host_ports` | [`MAX_PORTS`] entries; `host_port` and a given `container_port` from 1 to 65535; no two of one protocol at one job port, none at a declared port's `container` |
 //! | declared ports (`JobSpec::ports`) | [`MAX_PORTS`] entries, each port from 1 to 65535; the capability `egress-ports` [`MAX_PORTS`] items |
 //! | caps frame | [`MAX_CAPS_BUNDLES`] digests, [`MAX_CAPS_XCODES`] Xcode builds of [`MAX_XCODE_BUILD_LEN`] bytes |
 //! | free text (`agent_version`, taint, `detail`, `input_failure`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
@@ -73,7 +73,7 @@ pub const MAX_ROOT_NAME_LEN: usize = 64;
 pub const MAX_REL_LEN: usize = js_types::path::MAX_PATH_LEN;
 /// Most layers of a job start's root ([`crate::JobStartSpec::layers`]).
 pub const MAX_LAYERS: usize = 16;
-/// Longest host path of a layer or a path mount, and longest mount target, in bytes, a
+/// Longest host path of a layer or a mount, and longest mount target, in bytes, a
 /// target's leading `/` included: `js-types`' bound on a path, which the server holds a
 /// job's paths to as well.
 pub const MAX_PATH_LEN: usize = js_types::path::MAX_PATH_LEN;

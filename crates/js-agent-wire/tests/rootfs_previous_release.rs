@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use js_agent_wire::{Command, HostPort, Layer, MountMode, MountSource, PathMount};
+use js_agent_wire::{
+    Command, HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -72,6 +74,15 @@ fn previous_commands(reply: &Value) -> Vec<PreviousCommand> {
         .iter()
         .map(|item| PreviousCommand::deserialize(item).unwrap_or(PreviousCommand::Unknown))
         .collect()
+}
+
+/// A TCP host port the job reaches at the same number.
+fn tcp(host_port: u16) -> HostPort {
+    HostPort {
+        host_port,
+        container_port: None,
+        protocol: PortProtocol::Tcp,
+    }
 }
 
 /// The frozen container start, with `fields` added to its text.
@@ -137,15 +148,18 @@ fn a_previous_agent_drops_the_new_fields() {
     );
     assert_eq!(
         start.mounts,
-        [PathMount {
+        [JobMount {
             source: MountSource::HostPath {
                 path: "/srv/trees/src".into(),
             },
             target: "/work".into(),
             mode: MountMode::CopyOnWrite,
+            sub_path: None,
+            no_exec: false,
+            propagation: Propagation::Private,
         }]
     );
-    assert_eq!(start.host_ports, [HostPort { host_port: 9000 }]);
+    assert_eq!(start.host_ports, [tcp(9000)]);
 
     let there: PreviousJobStart = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(there.image, image);
@@ -192,9 +206,6 @@ fn a_layered_start_costs_a_previous_agent_no_other_command() {
     let Command::JobStart(start) = &here.commands[1] else {
         panic!("a job start: {:?}", here.commands);
     };
-    assert_eq!(
-        start.host_ports,
-        [HostPort { host_port: 9000 }, HostPort { host_port: 9443 }]
-    );
+    assert_eq!(start.host_ports, [tcp(9000), tcp(9443)]);
     assert_eq!(here.validate().refused, []);
 }
