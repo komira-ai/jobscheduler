@@ -809,9 +809,8 @@ fn id_tool(tool: &'static str, path: Option<&std::ffi::OsStr>) -> Result<(), Oci
     let mode = meta.permissions().mode();
     // Both facts are read: either is enough.
     let setuid = mode & 0o4000 != 0;
-    // The value is not wanted, only whether there is one: an empty buffer asks its size.
-    let mut none: [u8; 0] = [];
-    let capable = rustix::fs::getxattr(&found, "security.capability", &mut none).is_ok();
+    // The value is not wanted, only whether there is one: the size query answers that.
+    let capable = rustix::fs::getxattr_query(&found, "security.capability").is_ok();
     if !(setuid | capable) {
         return Err(refused(format!(
             "{} is neither setuid nor holds file capabilities",
