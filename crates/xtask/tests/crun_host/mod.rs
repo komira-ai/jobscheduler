@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 
 pub const SHIM: &str = env!("CARGO_BIN_EXE_host-shim");
 
+pub const SCRIPT: &str = "packaging/js-agent/crun_host_setup.sh";
+pub const UNIT: &str = "packaging/js-agent/js-agent-crun.service";
+pub const TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
+pub const GPU_UNIT: &str = "packaging/js-agent/js-agent-crun-gpu.service";
+
 /// Puts a copy of the program `from` at `to`, mode 0755, written by a process that has ended
 /// ([`install_copy`]), so that it is never busy when the code under test executes it.
 ///
@@ -23,10 +28,6 @@ pub const SHIM: &str = env!("CARGO_BIN_EXE_host-shim");
 pub fn install_program(from: &Path, to: &Path) {
     install_copy(from, to, "755");
 }
-pub const SCRIPT: &str = "packaging/js-agent/crun_host_setup.sh";
-pub const UNIT: &str = "packaging/js-agent/js-agent-crun.service";
-pub const TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
-pub const GPU_UNIT: &str = "packaging/js-agent/js-agent-crun-gpu.service";
 
 /// The programs the script runs that read or change the host. Each has a stand-in.
 pub const GUARDED: [&str; 16] = [

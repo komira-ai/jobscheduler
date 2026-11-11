@@ -61,9 +61,26 @@ fn a_program_being_installed_when_a_child_forks_is_not_busy() {
     // The feeder stops only once its open of the pipe has returned, which is once the
     // installer has opened the pipe to read; the installer then opens the destination to
     // write, and keeps it open until the pipe ends.
-    let (_, stop) = waitpid(Some(feeder_pid), WaitOptions::UNTRACED)
+    // An installer that ended before it opened the pipe leaves the feeder blocked in its
+    // open: the wait then stops it and fails, rather than waiting for ever.
+    let stop = loop {
+        if let Some((_, status)) = waitpid(
+            Some(feeder_pid),
+            WaitOptions::UNTRACED | WaitOptions::NOHANG,
+        )
         .expect("waitpid")
-        .expect("the feeder changed state");
+        {
+            break status;
+        }
+        if installer.is_finished() {
+            feeder.kill().expect("the feeder is stopped");
+            panic!(
+                "the installer ended before it opened the pipe: {:?}",
+                installer.join()
+            );
+        }
+        std::thread::yield_now();
+    };
     assert!(
         stop.stopped(),
         "the feeder ended before it stopped: {stop:?}"
