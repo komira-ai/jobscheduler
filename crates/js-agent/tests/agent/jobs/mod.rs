@@ -16,6 +16,8 @@ mod crun_egress;
 #[cfg(target_os = "linux")]
 mod crun_gpu_hello;
 #[cfg(target_os = "linux")]
+mod crun_host_ports;
+#[cfg(target_os = "linux")]
 mod crun_logs;
 #[cfg(target_os = "linux")]
 mod crun_machine;

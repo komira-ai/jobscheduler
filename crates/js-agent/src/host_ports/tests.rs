@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use js_agent_wire::{HostPort, PortProtocol};
 
-use super::kernel::{job_namespace, listen_in, listen_on};
+use super::kernel::{enter, job_namespace, listen_in, listen_on};
 use super::{Forwarder, Kernel, Listen, OfferError};
 
 /// How many times a test looks for what the forwarder's threads do before it fails: far more
@@ -271,6 +271,35 @@ fn the_kernel_listens_on_loopback_at_the_port_asked() {
     assert_eq!(taken.kind(), io::ErrorKind::AddrInUse);
 }
 
+/// A step that leaves the thread in the namespace it is in: the test's own.
+fn stay(_: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    Ok(())
+}
+
+/// Proves that once its thread is in the namespace, the listen makes a listener on loopback at
+/// each port asked, in order, each accepting; that a port that cannot be bound fails the whole
+/// listen, the listeners already made closed with it; and that a namespace that was not opened
+/// is passed on as the error, nothing entered. Catches a listen that keeps a half of its
+/// listeners, or binds where the thread has not entered.
+#[test]
+fn the_thread_in_the_namespace_binds_each_port_on_loopback() {
+    let own = || File::open("/proc/self/ns/net");
+    let made = listen_in(own(), &[0, 0], stay).expect("bound in the test's namespace");
+    assert_eq!(made.len(), 2);
+    for listener in &made {
+        let address = listener.local_addr().expect("an address");
+        assert!(address.ip().is_loopback(), "{address}");
+        let _job = TcpStream::connect(address).expect("it accepts");
+        listener.accept().expect("accepted");
+    }
+    let taken = made[1].local_addr().expect("an address").port();
+    let failed = listen_in(own(), &[0, taken], stay).expect_err("the second port is taken");
+    assert_eq!(failed.kind(), io::ErrorKind::AddrInUse);
+    let unopened = Err(io::Error::from(io::ErrorKind::NotFound));
+    let none = listen_in(unopened, &[0], stay).expect_err("no namespace");
+    assert_eq!(none.kind(), io::ErrorKind::NotFound);
+}
+
 /// Proves that the kernel refuses the agent's own network namespace, and a process that is
 /// not there, before it enters anything; and that entering a namespace is the kernel's to
 /// allow (root may, an ordinary user may not). Catches a forwarder that would listen on the
@@ -289,8 +318,8 @@ fn the_kernel_refuses_the_agents_own_namespace() {
     assert_eq!(refused.to_string(), shared.to_string());
     let gone = job_namespace(u32::MAX).expect_err("no such process");
     assert_eq!(gone.kind(), io::ErrorKind::NotFound);
-    let namespace = File::open("/proc/self/ns/net").expect("the test's namespace");
-    let entered = listen_in(namespace, vec![0]);
+    let namespace = File::open("/proc/self/ns/net");
+    let entered = listen_in(namespace, &[0], enter);
     match rustix::process::geteuid().is_root() {
         true => assert_eq!(entered.expect("root enters").len(), 1),
         false => {

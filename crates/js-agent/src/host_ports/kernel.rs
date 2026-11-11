@@ -8,13 +8,14 @@
 //! while it makes the container, and the agent may bind before it has, when `127.0.0.1` is
 //! not yet an address of the namespace. A freely bound listener answers once it is.
 //!
-//! Every call is a straight line, so a test that calls it where it can only fail (entering
-//! a namespace needs `CAP_SYS_ADMIN`) still runs every line of it.
+//! The step that enters the namespace is a parameter of [`listen_in`] ([`enter`] on a node),
+//! so a test runs what follows it in its own namespace; [`enter`] itself is one call, which a
+//! test makes where it can only fail (entering a namespace needs `CAP_SYS_ADMIN`).
 
 use std::fs::{self, File};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::MetadataExt;
 
 use rustix::net::{AddressFamily, SocketFlags, SocketType};
@@ -32,8 +33,21 @@ pub struct Kernel;
 
 impl Listen for Kernel {
     fn listen(&self, pid: u32, ports: &[u16]) -> io::Result<Vec<TcpListener>> {
-        job_namespace(pid).and_then(|namespace| listen_in(namespace, ports.to_vec()))
+        listen_in(job_namespace(pid), ports, enter)
     }
+}
+
+/// How the thread of [`listen_in`] enters the namespace it is given: [`enter`] on a node.
+pub(super) type Enter = fn(BorrowedFd<'_>) -> io::Result<()>;
+
+/// Moves the calling thread into the network namespace `namespace` (`setns`).
+///
+/// # Errors
+///
+/// The kernel refused it: the caller lacks `CAP_SYS_ADMIN` over the namespace, or it is not
+/// a network namespace.
+pub(super) fn enter(namespace: BorrowedFd<'_>) -> io::Result<()> {
+    move_into_link_name_space(namespace, Some(LinkNameSpaceType::Network)).map_err(Into::into)
 }
 
 /// The network namespace of the process `pid`, opened.
@@ -44,36 +58,42 @@ impl Listen for Kernel {
 /// listener there would be the host's, not the job's).
 pub(super) fn job_namespace(pid: u32) -> io::Result<File> {
     let namespace = File::open(format!("/proc/{pid}/ns/net"))?;
-    let (theirs, own) = (namespace.metadata()?, fs::metadata("/proc/self/ns/net")?);
-    let own_namespace = (theirs.dev(), theirs.ino()) == (own.dev(), own.ino());
+    let identity = |meta: fs::Metadata| (meta.dev(), meta.ino());
+    let theirs = namespace.metadata().map(identity);
+    let own = fs::metadata("/proc/self/ns/net").map(identity);
     let shared = || {
         io::Error::other(format!(
             "process {pid} shares the agent's network namespace"
         ))
     };
-    (!own_namespace).then_some(namespace).ok_or_else(shared)
+    let apart = theirs.and_then(|theirs| own.map(|own| theirs != own));
+    apart.and_then(|apart| apart.then_some(namespace).ok_or_else(shared))
 }
 
 /// A listener at each of `ports` on `127.0.0.1` in `namespace`, made by a thread that enters
-/// it and ends.
+/// it with `enter` and ends.
 ///
 /// # Errors
 ///
-/// The thread could not be made, the namespace could not be entered, or a port could not be
-/// bound; the listeners already bound are closed.
-pub(super) fn listen_in(namespace: File, ports: Vec<u16>) -> io::Result<Vec<TcpListener>> {
-    let network = Some(LinkNameSpaceType::Network);
+/// The namespace was not opened, the thread could not be made, the namespace could not be
+/// entered, or a port could not be bound; the listeners already bound are closed.
+pub(super) fn listen_in(
+    namespace: io::Result<File>,
+    ports: &[u16],
+    enter: Enter,
+) -> io::Result<Vec<TcpListener>> {
+    let namespace = namespace?;
     let mut listened = Ok(Vec::new());
     // The scope joins the thread before it ends, and a panic of the thread is the caller's.
-    std::thread::scope(|scope| {
+    let spawned = std::thread::scope(|scope| {
         let thread = std::thread::Builder::new().name("js-ports-ns".to_owned());
         let entered = thread.spawn_scoped(scope, || {
-            let moved = move_into_link_name_space(namespace.as_fd(), network).map_err(Into::into);
-            listened = moved.and_then(|()| ports.into_iter().map(listen_on).collect());
+            let entered = enter(namespace.as_fd());
+            listened = entered.and_then(|()| ports.iter().copied().map(listen_on).collect());
         });
         entered.map(drop)
-    })?;
-    listened
+    });
+    spawned.and(listened)
 }
 
 /// A listener on `127.0.0.1` at `port`, in the calling thread's network namespace, bound

@@ -13,7 +13,7 @@ use js_agent::lifecycle::{
 };
 use js_agent::quota::ScratchQuota;
 use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock, System};
-use js_agent_wire::LogTail;
+use js_agent_wire::{LogTail, PortRange};
 
 use super::crun_e2e::seams;
 use super::fake::FakeMachine;
@@ -32,7 +32,13 @@ pub(super) struct CrunMachine {
     /// The image budget (`--image-budget-gib`, in bytes) of the crun settings of every runtime
     /// opened, in order.
     pub(super) image_budgets: Arc<Mutex<Vec<Option<u64>>>>,
+    /// The host ports (`--host-port`) of the crun settings of every runtime opened, beside the
+    /// ones the runtime opened from them allows ([`Runtime::host_ports`]), in order.
+    pub(super) host_ports: Arc<Mutex<Vec<HostPortsSeen>>>,
 }
+
+/// The host ports a crun runtime was opened with, and the ones it then allowed.
+pub(super) type HostPortsSeen = (Vec<PortRange>, Vec<PortRange>);
 
 impl CrunMachine {
     pub(super) fn new() -> Arc<Self> {
@@ -47,6 +53,7 @@ impl CrunMachine {
             stops: Arc::default(),
             log_file_caps: Arc::default(),
             image_budgets: Arc::default(),
+            host_ports: Arc::default(),
         })
     }
 }
@@ -98,6 +105,14 @@ impl Runtime for Noting {
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         self.inner.cgroup(id)
     }
+
+    fn host_ports(&self) -> Vec<PortRange> {
+        self.inner.host_ports()
+    }
+
+    fn host_port_lost(&self, id: &RunHandle) -> Option<String> {
+        self.inner.host_port_lost(id)
+    }
 }
 
 impl Machine for CrunMachine {
@@ -106,13 +121,22 @@ impl Machine for CrunMachine {
     }
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
+        let mut planned = None;
         if let Backend::Container(settings) = build.backend {
             let caps = settings.crun().map(|plan| plan.logs.file_cap);
             self.log_file_caps.lock().expect("caps").extend(caps);
             let budgets = settings.crun().map(|plan| plan.image_budget);
             self.image_budgets.lock().expect("budgets").extend(budgets);
+            planned = settings.crun().map(|plan| plan.host_ports.clone());
         }
         let (inner, warnings) = self.system.runtime(build)?;
+        if let Some(planned) = planned {
+            let allowed = inner.host_ports();
+            self.host_ports
+                .lock()
+                .expect("host ports")
+                .push((planned, allowed));
+        }
         let stops = self.stops.clone();
         Ok((Box::new(Noting { inner, stops }), warnings))
     }
