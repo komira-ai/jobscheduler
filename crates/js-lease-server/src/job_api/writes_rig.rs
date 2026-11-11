@@ -15,12 +15,14 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request as HttpRequest, StatusCode, header};
+use js_agent_wire::Hello;
 use js_api_gateway::Answer;
 use js_jobs::interfere::Interfere;
 use js_jobs::{Isolation, JobId, MAX_PAGE, Retention};
 use js_proto::v1::{
     self, CancelJobRequest, CancelJobResponse, SubmitJobRequest, SubmitJobResponse,
 };
+use js_registry::Credential;
 use js_state::ManualClock;
 use js_state::fake::Fake;
 use js_types::Requirements;
@@ -314,6 +316,22 @@ pub(super) fn wire(id: &str) -> v1::JobSpec {
         wall_limit_seconds: Some(600),
         ..v1::JobSpec::default()
     }
+}
+
+/// Registers `host` in `rig`'s registry, as an agent with eight cores, 16 GiB and a GPU that reports
+/// the `per-job` and `exec` (container) capabilities and `layered-rootfs` as `value`.
+pub(super) fn register_layered(rig: &Rig, host: &str, value: &str) {
+    let hello: Hello = serde_json::from_value(serde_json::json!({
+        "host_id": host,
+        "pool": "burst",
+        "agent_version": "0.1.0",
+        "shape": { "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 1, "gpu_class": "nvidia-a100" },
+        "capabilities": { "per-job": "true", "exec": "container", "layered-rootfs": value, "arch": "x86_64" },
+        "phase": "serving",
+    }))
+    .unwrap();
+    let who = Credential::of_token(&"j".repeat(40));
+    rig.agents.registry.hello(&hello, &who).unwrap();
 }
 
 /// Limits long enough that no job of a test runs out of time.

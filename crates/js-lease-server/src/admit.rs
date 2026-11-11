@@ -213,4 +213,25 @@ mod tests {
             assert!(!said(other), "{other:?}");
         }
     }
+
+    /// Asserts that a hello reports layered rootfs only with the capability `layered-rootfs`
+    /// set to exactly `true`: absent, `false`, another case, `1` or a padded value do not, and
+    /// the `host-jobs` capability does not stand for it. Catches a host that reports nothing,
+    /// or something else, sent a job with layers, mounts or host ports.
+    #[test]
+    fn layered_rootfs_is_reported_only_by_the_value_true() {
+        let said = |value: Option<&str>| {
+            let caps: BTreeMap<String, String> = value
+                .map(|value| (LAYERED_ROOTFS.to_owned(), value.to_owned()))
+                .into_iter()
+                .collect();
+            reports_layered_rootfs(&caps)
+        };
+        assert!(said(Some("true")));
+        for other in [None, Some("false"), Some("TRUE"), Some("1"), Some("true ")] {
+            assert!(!said(other), "{other:?}");
+        }
+        let host_jobs = BTreeMap::from([(HOST_JOBS_CAPABILITY.to_owned(), "true".to_owned())]);
+        assert!(!reports_layered_rootfs(&host_jobs));
+    }
 }

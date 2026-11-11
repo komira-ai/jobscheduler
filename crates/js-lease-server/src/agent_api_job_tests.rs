@@ -4,6 +4,7 @@
 
 use js_agent_wire::{Ack, HeldState, Outcome};
 use js_jobs::{AllocationStep, EndReason, JobId, JobState, ResultReason, StartFailure};
+use js_proto::v1;
 
 use super::job_rig::{FakeAgent, rig, starts, stops};
 use crate::per_job::NO_EXIT_CODE;
@@ -105,7 +106,10 @@ async fn listed_states_commit_with_the_allocation_change() {
 /// out-of-memory stop fail the job with their reason, a stop nobody asked for and a failure
 /// with no status fail it with [`NO_EXIT_CODE`], a refused start fails it to start; an outcome
 /// this version does not know is left unanswered and changes nothing; an end the job's state
-/// cannot take (a refused start of a running job) is answered stale and changes nothing.
+/// cannot take (a refused start of a running job) is answered stale and changes nothing. A
+/// start refused with `input-unavailable` fails to start as the host's input, and with another
+/// code as the agent's, each job showing the code it was refused with; a clean exit that
+/// names an input failure fails the job with the reason input failed and the exit status kept.
 #[tokio::test]
 async fn every_listed_outcome_is_recorded_as_sent() {
     let mut rig = rig("outcomes", true);
@@ -124,12 +128,21 @@ async fn every_listed_outcome_is_recorded_as_sent() {
         ("nostatus", Outcome::Failed, None),
         ("refused", Outcome::FailedToStart, None),
         ("unknown", Outcome::Unknown, None),
+        ("unavailable", Outcome::FailedToStart, None),
+        ("notallowed", Outcome::FailedToStart, None),
+        ("inputfailed", Outcome::Succeeded, Some(0)),
     ];
     for (name, outcome, code) in cases {
         let id = rig.place(name, "host-a");
         let allocation = rig.allocation(&id).allocation_id.to_string();
         agent.hold(name, &allocation, HeldState::ExitedUnacked);
-        agent.end(name, outcome, code);
+        let (detail, input_failure) = match name {
+            "unavailable" => (Some("input-unavailable"), None),
+            "notallowed" => (Some("input-not-allowed"), None),
+            "inputfailed" => (None, Some("input-unreadable")),
+            _ => (None, None),
+        };
+        agent.end_naming(name, (outcome, code), (detail, input_failure));
     }
 
     let reply = rig.beat(&agent).await.unwrap();
@@ -157,11 +170,55 @@ async fn every_listed_outcome_is_recorded_as_sent() {
         ended("refused"),
         (JobState::FailedToStart(StartFailure::AgentRefused), None)
     );
+    assert_eq!(
+        ended("unavailable"),
+        (
+            JobState::FailedToStart(StartFailure::InputUnavailable),
+            None
+        )
+    );
+    assert_eq!(
+        ended("notallowed"),
+        (JobState::FailedToStart(StartFailure::AgentRefused), None)
+    );
+    assert_eq!(
+        ended("inputfailed"),
+        (JobState::Failed, Some((ResultReason::InputFailed, Some(0))))
+    );
+    let shown = |name: &str| {
+        let job = rig.job(&JobId::parse(name).unwrap());
+        let shown = crate::job_api::read::view::job(&job);
+        (shown.start_failure(), shown.start_failure_detail)
+    };
+    assert_eq!(
+        shown("unavailable"),
+        (
+            v1::StartFailureCode::InputUnavailable,
+            "input-unavailable".to_owned()
+        )
+    );
+    assert_eq!(
+        shown("notallowed"),
+        (
+            v1::StartFailureCode::AgentRefused,
+            "input-not-allowed".to_owned()
+        )
+    );
+    assert_eq!(shown("refused").1, "");
     assert_eq!(ended("unknown"), (JobState::Placed, None));
     assert_eq!(verdict("unknown"), None);
     assert_eq!(ended("running"), (JobState::Running, None));
     assert_eq!(verdict("running"), Some(Ack::Stale));
-    for name in ["wall", "memory", "killed", "nostatus", "refused"] {
+    for name in [
+        "wall",
+        "memory",
+        "killed",
+        "nostatus",
+        "refused",
+        "unavailable",
+        "notallowed",
+        "inputfailed",
+    ] {
         assert_eq!(verdict(name), Some(Ack::Accepted), "{name}");
     }
 }

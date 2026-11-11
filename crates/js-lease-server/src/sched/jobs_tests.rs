@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent_wire::{Command, HeldJob, HeldState, NetworkCeiling};
+use js_agent_wire::{Command, HeldJob, HeldState, Layer, NetworkCeiling};
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     AllocationStep, Booked, Constraints, Isolation, JobEnd, JobId, JobSpec, JobState, Needs,
@@ -22,7 +22,7 @@ use js_sched_placer::place::SchedPlacer;
 use js_state::Store;
 use js_state::fake::Fake;
 use js_types::sched::FarmTime;
-use js_types::{HostId, Resources, Shape};
+use js_types::{ExecMode, HostId, Resources, Shape};
 use js_types::{ManualClock, Timestamp};
 
 use crate::agent_api::job_rig::{placed, spec, tables};
@@ -755,4 +755,52 @@ fn a_fenced_read_of_the_queue_trips_the_fence() {
     agents.place_jobs();
     assert!(agents.fence.is_tripped());
     assert_eq!(state(&jobs, "job-a"), JobState::Queued);
+}
+
+/// A placer whose engine was told of `host-a`, which reports `exec=container` and
+/// `layered-rootfs=true`, and of `host-b`, which reports `exec=container` only.
+fn placer_with_one_layered_host() -> SchedPlacer {
+    let placer = SchedPlacer::new(Settings::default(), SharedClock::new(clock()));
+    for (name, layered) in [("host-a", true), ("host-b", false)] {
+        let mut caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
+        caps.insert("exec".to_owned(), "container".to_owned());
+        if layered {
+            caps.insert("layered-rootfs".to_owned(), "true".to_owned());
+        }
+        let resources = Resources::new(8000, 16 * GIB, 0, None).unwrap();
+        placer.host_up(&host(name), &Shape::new(resources, caps));
+    }
+    placer
+}
+
+/// Asserts that a job with layers, which admission records as needing `exec=container` and
+/// `layered-rootfs=true`, is placed on the one of two hosts that reports `layered-rootfs`
+/// and never on the other: with both offered it goes to `host-a`; with only `host-b` offered
+/// it stays queued and closes nothing behind it, so a plain job queued after it is placed. It
+/// catches a layered job sent to a host that cannot make its root, and one that holds the
+/// jobs behind it back while it waits.
+#[test]
+fn a_job_with_layers_is_placed_only_on_a_host_that_reports_layered_rootfs() {
+    let placer = placer_with_one_layered_host();
+    let (_store, jobs) = tables();
+    let mut layered = sized(2);
+    layered.layers = vec![Layer::HostPath {
+        path: "/srv/layer".to_owned(),
+    }];
+    layered.constraints.exec = Some(ExecMode::Container);
+    layered
+        .constraints
+        .capabilities
+        .insert("layered-rootfs".to_owned(), "true".to_owned());
+    queue_spec(&jobs, "job-l", layered, 5);
+    queue(&jobs, "job-p", 2, 0);
+    let only_b = open(&["host-b"]);
+    let placed = placer.place_jobs(&jobs, &only_b, (&NoStarts, &NoMetrics));
+    assert_eq!(placed, Ok(vec![JobId::parse("job-p").unwrap()]));
+    assert_eq!(state(&jobs, "job-l"), JobState::Queued);
+
+    let both = open(&["host-a", "host-b"]);
+    let placed = placer.place_jobs(&jobs, &both, (&NoStarts, &NoMetrics));
+    assert_eq!(placed, Ok(vec![JobId::parse("job-l").unwrap()]));
+    assert_eq!(host_of(&jobs, "job-l"), "host-a");
 }

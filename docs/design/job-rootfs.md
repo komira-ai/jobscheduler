@@ -1,7 +1,7 @@
 # A job's file system: layers, mounts and host ports
 
-Status: **design for the owner's review; of its build items (section 11), item 2, the agent wire, item 4, the
-mounts in `js-contain`, and item 6, host ports on `crun`, are built.** It replaces `docs/design/tree-inputs.md` and its build
+Status: **design for the owner's review; of its build items (section 11), item 2, the agent wire, item 3, the
+public API and the server, item 4, the mounts in `js-contain`, and item 6, host ports on `crun`, are built.** It replaces `docs/design/tree-inputs.md` and its build
 items: jobscheduler does not know that a node-local cache exists, let alone which one. What tree-inputs.md asked of
 jobscheduler is met here by things any container runtime offers (layers, mounts, and access to a host port or socket),
 and the pieces of its wire that already merged (komira-ai/jobscheduler#842) are retired additively (section 6).
@@ -427,8 +427,11 @@ The three fields are part of "the same job" for an idempotent resubmit: `js_jobs
 `container_port` equal to one given as the same number as `host_port`, and an unspecified mode, propagation or protocol
 equal to its default value given explicitly: the server stores each in its explicit form, so a resubmit that spells a
 default either way is the same job. The stored row gains three tags after the highest in use
-(`crates/js-jobs/src/codec.rs` and a `rootfs_fields` module beside the others), and one for the start failure detail
-(section 8).
+(`crates/js-jobs/src/codec.rs` and a `rootfs_fields` module beside the others), one for the start failure detail
+and one for a result's `input_failure` (section 8). The row of a job with an empty `image` holds no image tag, which
+every earlier server reads as a field every row holds: such a row is written with the format byte 2, which an earlier
+server reads as a later build's row and leaves out of its reads, as it leaves any such row, rather than fail its
+listings on a row it takes for corrupt.
 
 ### 2.6 Placement
 
@@ -1064,8 +1067,9 @@ every other refusal to `AgentRefused`, with the code. A result with `input_failu
   as one it cannot read, and not to resubmit it as read. A resubmit of a mount with no source is refused; a resubmit of
   any changed job under the same id is `job-id-conflict`.
   The designed additions take the numbers 2.2 and 2.4 give them, so no two releases give one number two meanings.
-- **The stored row.** Four new tags; an earlier server keeps unknown tags through a rewrite (`Carried`), and a missing
-  tag reads as empty.
+- **The stored row.** Five new tags; an earlier server keeps unknown tags through a rewrite (`Carried`), and a missing
+  tag reads as empty. The row of a job without an image has the format byte 2 (2.5), which an earlier server leaves
+  out as a later build's row.
 - **Agent wire.** The three `JobStartSpec` fields are absent when empty. An agent of an earlier release ignores them,
   which is why placement and `start_of` require `layered-rootfs` (2.6). `Layer`, `MountSource`, `MountMode`,
   `Propagation` and `PortProtocol` have no catch-all: an agent that meets an unknown kind or value fails that one

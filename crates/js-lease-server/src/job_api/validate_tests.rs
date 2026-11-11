@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS};
 use js_jobs::{Constraints, DeclaredPort, Isolation, JobId, JobSpec, Needs, NetworkPolicy};
 use js_proto::v1;
 use js_types::JobNetwork as Reach;
@@ -425,4 +427,294 @@ fn isolation_is_recorded_as_given_and_unspecified_is_contained() {
         });
         assert_eq!(checked.spec.constraints.isolation, recorded);
     }
+}
+
+/// A job's layers: each a host directory `/layer/<n>`.
+fn host_layers(count: u32) -> Vec<v1::Layer> {
+    (0..count)
+        .map(|at| v1::Layer {
+            source: Some(v1::layer::Source::HostPath(format!("/layer/{at}"))),
+        })
+        .collect()
+}
+
+/// One mount of `/src` at `/data`.
+fn one_mount() -> Vec<v1::Mount> {
+    vec![v1::Mount {
+        source: Some(v1::mount::Source::HostPath("/src".to_owned())),
+        target: "/data".to_owned(),
+        ..v1::Mount::default()
+    }]
+}
+
+/// One host port from `host`, to `job` when given.
+fn one_host_port(host: u32, job: Option<u32>) -> Vec<v1::HostPort> {
+    vec![v1::HostPort {
+        host_port: host,
+        container_port: job,
+        protocol: v1::PortProtocol::Unspecified.into(),
+    }]
+}
+
+/// The capabilities a job asks of its host when it uses the fields of a layered root.
+fn layered_capabilities() -> BTreeMap<String, String> {
+    BTreeMap::from([(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned())])
+}
+
+/// Asserts that an empty image is refused naming `spec.image` when the job has no layers and
+/// accepted, recorded as no image, when it has some (mounts and host ports alone do not
+/// stand in). It catches a job with no root at all reaching the tables, and a layered job
+/// recorded with an image it does not have.
+#[test]
+fn an_empty_image_needs_layers() {
+    for change in [
+        (|spec: &mut v1::JobSpec| spec.image = String::new()) as fn(&mut v1::JobSpec),
+        |spec| {
+            spec.image = String::new();
+            spec.mounts = one_mount();
+        },
+        |spec| {
+            spec.image = String::new();
+            spec.host_ports = one_host_port(80, None);
+        },
+    ] {
+        assert_eq!(fault(change), Fault::Field("spec.image"));
+    }
+    let layered = valid(|spec| {
+        spec.image = String::new();
+        spec.command = "/bin/run".to_owned();
+        spec.layers = host_layers(1);
+    });
+    assert_eq!(layered.spec.image, None);
+    assert_eq!(layered.spec.layers.len(), 1);
+}
+
+/// Asserts that a job with an empty image takes its command from the job: a relative or an
+/// empty command is refused naming `spec.command`, an absolute one accepted, and that a
+/// job with an image may keep a relative command. It catches a layered job that would start
+/// with no program to run, there being no image configuration to name one.
+#[test]
+fn an_imageless_job_needs_an_absolute_command() {
+    for command in ["run", "", "./run", "/bin/../run", "/bin/"] {
+        let refused = fault(|spec| {
+            spec.image = String::new();
+            spec.layers = host_layers(1);
+            spec.command = command.to_owned();
+        });
+        assert_eq!(refused, Fault::Field("spec.command"), "{command:?}");
+    }
+    let accepted = valid(|spec| {
+        spec.image = String::new();
+        spec.layers = host_layers(1);
+        spec.command = "/bin/run".to_owned();
+    });
+    assert_eq!(accepted.spec.command, ["/bin/run"]);
+    let with_image = valid(|spec| {
+        spec.layers = host_layers(1);
+        spec.command = "run".to_owned();
+    });
+    assert_eq!(with_image.spec.command, ["run"]);
+}
+
+/// Asserts that host isolation is refused naming `spec.constraints.isolation` with layers,
+/// with mounts and with host ports, each alone, and accepted without them. It catches a
+/// host-isolated job, which runs on the host's own root, given a root of its own.
+#[test]
+fn host_isolation_is_refused_with_any_rootfs_field() {
+    let host = Some(constraints(|c| c.isolation = v1::Isolation::Host.into()));
+    let changes: Vec<Change> = vec![
+        Box::new(|spec| spec.layers = host_layers(1)),
+        Box::new(|spec| spec.mounts = one_mount()),
+        Box::new(|spec| spec.host_ports = one_host_port(80, None)),
+    ];
+    for change in changes {
+        let refused = fault(|spec| {
+            change(spec);
+            spec.constraints = host.clone();
+        });
+        assert_eq!(refused, Fault::Field("spec.constraints.isolation"));
+    }
+    let plain = valid(|spec| spec.constraints = host.clone());
+    assert_eq!(plain.spec.constraints.isolation, Isolation::Host);
+}
+
+/// Asserts that sandbox-exec is refused naming `spec.constraints.exec` with layers and with
+/// a host port whose job port differs from its host port (given), and accepted with a host
+/// port at its own number (given or absent) and with mounts alone. It catches a job asking
+/// for a root or a network the sandbox cannot give.
+#[test]
+fn sandbox_exec_is_refused_for_layers_and_a_remapped_port() {
+    let sandbox = Some(constraints(|c| c.exec = v1::ExecMode::SandboxExec.into()));
+    let refused: Vec<Change> = vec![
+        Box::new(|spec| spec.layers = host_layers(1)),
+        Box::new(|spec| spec.host_ports = one_host_port(80, Some(8080))),
+        Box::new(|spec| {
+            spec.host_ports = [one_host_port(80, None), one_host_port(81, Some(82))].concat()
+        }),
+    ];
+    for change in refused {
+        let fault = fault(|spec| {
+            change(spec);
+            spec.constraints = sandbox.clone();
+        });
+        assert_eq!(fault, Fault::Field("spec.constraints.exec"));
+    }
+    let accepted: Vec<Change> = vec![
+        Box::new(|spec| spec.host_ports = one_host_port(80, Some(80))),
+        Box::new(|spec| spec.host_ports = one_host_port(80, None)),
+        Box::new(|spec| spec.mounts = one_mount()),
+    ];
+    for change in accepted {
+        let checked = valid(|spec| {
+            change(spec);
+            spec.constraints = sandbox.clone();
+        });
+        assert_eq!(checked.spec.constraints.exec, Some(ExecMode::SandboxExec));
+        assert_eq!(checked.wanted.exec, Some(ExecMode::SandboxExec));
+    }
+}
+
+/// Asserts that an unspecified exec is recorded as container for layers and for a remapped
+/// host port, in the record and in what admission asks, is left unset for mounts alone and
+/// for an unremapped host port, and that an explicit container is kept. It catches a
+/// layered job that is placed on a host that cannot stack a root.
+#[test]
+fn exec_is_container_when_the_job_needs_one() {
+    let container: Vec<Change> = vec![
+        Box::new(|spec| spec.layers = host_layers(2)),
+        Box::new(|spec| spec.host_ports = one_host_port(80, Some(8080))),
+        Box::new(|spec| {
+            spec.mounts = one_mount();
+            spec.constraints = Some(constraints(|c| c.exec = v1::ExecMode::Container.into()));
+        }),
+    ];
+    for change in container {
+        let checked = valid(change);
+        assert_eq!(checked.spec.constraints.exec, Some(ExecMode::Container));
+        assert_eq!(checked.wanted.exec, Some(ExecMode::Container));
+    }
+    let unset: Vec<Change> = vec![
+        Box::new(|spec| spec.mounts = one_mount()),
+        Box::new(|spec| spec.host_ports = one_host_port(80, None)),
+        Box::new(|spec| spec.host_ports = one_host_port(80, Some(80))),
+    ];
+    for change in unset {
+        let checked = valid(change);
+        assert_eq!(checked.spec.constraints.exec, None);
+        assert_eq!(checked.wanted.exec, None);
+    }
+}
+
+/// Asserts that each of layers, mounts and host ports alone records the `layered-rootfs`
+/// capability and asks admission for it, and that a job with none records no capability and
+/// does not ask. It catches a layered job placed on a host that does not report the
+/// capability, and a plain job refused by one that does not.
+#[test]
+fn each_rootfs_field_alone_asks_for_the_layered_rootfs_capability() {
+    let each: Vec<Change> = vec![
+        Box::new(|spec| spec.layers = host_layers(1)),
+        Box::new(|spec| spec.mounts = one_mount()),
+        Box::new(|spec| spec.host_ports = one_host_port(80, None)),
+    ];
+    for change in each {
+        let checked = valid(change);
+        assert_eq!(
+            checked.spec.constraints.capabilities,
+            layered_capabilities()
+        );
+        assert!(checked.wanted.layered_rootfs);
+    }
+    let none = valid(|_| {});
+    assert_eq!(none.spec.constraints.capabilities, BTreeMap::new());
+    assert!(!none.wanted.layered_rootfs);
+}
+
+/// Asserts that a job with layers, mounts and host ports becomes the record in explicit
+/// form (defaults spelled out, an empty subPath none, the job port filled in) with a
+/// container exec, the capability and no image, and that admission is asked for the host
+/// port's host number. It catches a field dropped or left in its default spelling on the way
+/// to the record.
+#[test]
+fn a_job_with_layers_mounts_and_host_ports_becomes_the_explicit_record() {
+    let checked = valid(|spec| {
+        spec.image = String::new();
+        spec.command = "/bin/run".to_owned();
+        spec.layers = vec![
+            v1::Layer {
+                source: Some(v1::layer::Source::HostPath("/base".to_owned())),
+            },
+            v1::Layer {
+                source: Some(v1::layer::Source::Image(image())),
+            },
+        ];
+        spec.mounts = vec![
+            v1::Mount {
+                source: Some(v1::mount::Source::HostPath("/data".to_owned())),
+                target: "/in".to_owned(),
+                ..v1::Mount::default()
+            },
+            v1::Mount {
+                source: Some(v1::mount::Source::HostPath("/out".to_owned())),
+                target: "/mnt/out".to_owned(),
+                mode: v1::MountMode::ReadWrite.into(),
+                sub_path: "results".to_owned(),
+                no_exec: true,
+                propagation: v1::MountPropagation::Private.into(),
+            },
+        ];
+        spec.host_ports = vec![v1::HostPort {
+            host_port: 5432,
+            container_port: None,
+            protocol: v1::PortProtocol::Unspecified.into(),
+        }];
+    });
+    assert_eq!(checked.spec.image, None);
+    assert_eq!(
+        checked.spec.layers,
+        [
+            Layer::HostPath {
+                path: "/base".to_owned()
+            },
+            Layer::Image { image: image() },
+        ]
+    );
+    assert_eq!(
+        checked.spec.mounts,
+        [
+            JobMount {
+                source: MountSource::HostPath {
+                    path: "/data".to_owned()
+                },
+                target: "/in".to_owned(),
+                mode: MountMode::ReadOnly,
+                sub_path: None,
+                no_exec: false,
+                propagation: Propagation::Private,
+            },
+            JobMount {
+                source: MountSource::HostPath {
+                    path: "/out".to_owned()
+                },
+                target: "/mnt/out".to_owned(),
+                mode: MountMode::ReadWrite,
+                sub_path: Some("results".to_owned()),
+                no_exec: true,
+                propagation: Propagation::Private,
+            },
+        ]
+    );
+    assert_eq!(
+        checked.spec.host_ports,
+        [HostPort {
+            host_port: 5432,
+            container_port: Some(5432),
+            protocol: PortProtocol::Tcp,
+        }]
+    );
+    assert_eq!(checked.spec.constraints.exec, Some(ExecMode::Container));
+    assert_eq!(
+        checked.spec.constraints.capabilities,
+        layered_capabilities()
+    );
+    assert!(checked.wanted.layered_rootfs);
 }
