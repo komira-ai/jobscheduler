@@ -746,7 +746,7 @@ fn run_with(inputs: Vec<InputRef>) -> RunSpec {
 /// A tree's digest is `sha256:` and exactly 64 lower case hex digits, in a `run` body as in a
 /// native one, each refused `invalid-job` on the body's `inputs` as a bad stage id is. It
 /// catches a digest one digit short or long, in upper case, without its algorithm, or of
-/// another algorithm, any of which the agent would pass to `tierstore fs` as a tree name.
+/// another algorithm, any of which would name no tree.
 #[test]
 fn a_tree_digest_is_sha256_and_64_lower_case_hex_digits() {
     let short = &STAGE[..STAGE.len() - 1];
