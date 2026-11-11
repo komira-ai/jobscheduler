@@ -389,6 +389,7 @@ mod tests {
             accelerator: None,
             network: JobNetwork::None,
             host_ports: Vec::new(),
+            layered_rootfs: false,
         }
     }
 

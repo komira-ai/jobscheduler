@@ -12,7 +12,7 @@ use js_state::conformance::Backend;
 use js_state::{Cond, Store, StoreError, StoreTime, Txn};
 
 use super::{Rig, cancelled, exited, host, job_id, rig, whole_host_spec};
-use crate::codec::{DecodeError, FORMAT, field_of, set_field};
+use crate::codec::{DecodeError, FORMAT, LATER_FORMAT, field_of, set_field};
 use crate::interfere::INJECTED;
 use crate::keys;
 use crate::{
@@ -320,7 +320,7 @@ pub fn a_mark_row_this_build_cannot_read_is_refused_or_left<B: Backend>(backend:
     let (good, mark) = marked(&rig, "ur-good");
     let newer = rig.queue_spec("ur-newer", whole_host_spec());
     let newer_key = keys::mark(&newer);
-    rig.put_raw(&newer_key, vec![FORMAT + 1]);
+    rig.put_raw(&newer_key, vec![LATER_FORMAT]);
     let unknown = JobStoreError::UnknownRow {
         key: newer_key.clone(),
     };
@@ -346,7 +346,7 @@ pub fn a_mark_row_this_build_cannot_read_is_refused_or_left<B: Backend>(backend:
     rig.jobs.raise_at_boot(boot).expect("raises the rest");
     assert_eq!(
         rig.raw(&newer_key).map(|row| row.value),
-        Some(vec![FORMAT + 1]),
+        Some(vec![LATER_FORMAT]),
         "{name}: the boot wrote a later build's mark"
     );
     assert_eq!(rig.jobs.delete_mark(&newer), Ok(true), "{name}: a delete");

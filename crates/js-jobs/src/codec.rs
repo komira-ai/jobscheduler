@@ -1,4 +1,4 @@
-//! The bytes of the job, allocation, mark and taint rows (see `mark_fields`, `host_fields`).
+//! The bytes of the job, allocation, mark and taint rows (`mark_fields`, `host_fields`).
 //!
 //! A row is a format byte ([`FORMAT`]) and then fields, each a tag (two bytes, big-endian),
 //! a length (four bytes, big-endian) and that many bytes of value:
@@ -26,7 +26,6 @@
 //! Any other row that does not parse is an error naming what is wrong; nothing here panics or
 //! reads past a length.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -45,18 +44,24 @@ mod host_fields;
 mod mark_fields;
 mod queue_fields;
 mod result_fields;
+pub(crate) mod rootfs_fields;
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
 mod whole_fields;
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use host_fields::job_host_tag;
 pub(crate) use host_fields::{decode_taint, encode_taint};
 pub(crate) use mark_fields::{decode_mark, encode_mark};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use test_support::{LATER_FORMAT, field_of, rearranged, set_field};
 
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
 /// The tags of a job row (the whole-host tags 45 and 46 are in `whole_fields`, the isolation
-/// tag 47 in `host_fields`).
+/// tag 47 in `host_fields`, the queue tags 48 to 53 in `queue_fields`, 54 to 58 in
+/// `rootfs_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -256,11 +261,16 @@ impl Writer {
         }
     }
 
-    /// The row: the format byte, then the fields and `carried`, in tag order.
+    /// The row of format [`FORMAT`]: [`Writer::finish_as`].
     fn finish(self, carried: &Carried) -> Result<Vec<u8>, JobStoreError> {
+        self.finish_as(FORMAT, carried)
+    }
+
+    /// The row: the format byte `format`, then the fields and `carried`, in tag order.
+    fn finish_as(self, format: u8, carried: &Carried) -> Result<Vec<u8>, JobStoreError> {
         let mut fields = carried.0.clone();
         fields.extend(self.0);
-        let mut out = vec![FORMAT];
+        let mut out = vec![format];
         for (tag, value) in fields {
             // The error is built eagerly: no test can allocate a field over 4 GiB, and a closure
             // that never runs would be a line no test covers.
@@ -314,10 +324,7 @@ fn text_map(pairs: &BTreeMap<String, String>) -> Vec<u8> {
 
 fn put_spec(row: &mut Writer, spec: &JobSpec) {
     use job_tag as t;
-    row.put(
-        t::IMAGE,
-        format!("{}@{}", spec.image.name(), spec.image.digest()),
-    );
+    rootfs_fields::put_image(row, spec.image.as_ref());
     row.put(t::COMMAND, texts(&spec.command));
     row.put(t::ARGS, texts(&spec.args));
     row.put(t::ENV, text_map(&spec.env));
@@ -355,6 +362,7 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
         .collect();
     row.put(t::PORTS, ports);
     file_fields::put_files(row, &spec.files);
+    rootfs_fields::put_spec(row, &spec.layers, &spec.mounts, &spec.host_ports);
     row.put(
         t::LABELS,
         map(spec
@@ -384,6 +392,7 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
     row.put_opt(t::CANCEL_REQUESTED_AT, job.cancel_requested_at.map(time));
     row.put_opt(t::RETENTION_ENDS, job.retention_ends.map(time));
     result_fields::put_result(&mut row, job.result.as_ref());
+    rootfs_fields::put_detail(&mut row, job.start_failure_detail.as_deref());
     row.put_opt(t::DEADLINE_FLOOR, job.deadline_floor.map(time));
     row.put_opt(
         t::CLIENT,
@@ -391,7 +400,8 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
     );
     whole_fields::put_job(&mut row, job);
     queue_fields::put_job(&mut row, &job.queue);
-    row.finish(&job.carried)
+    let format = rootfs_fields::format_of(job.spec.image.as_ref());
+    row.finish_as(format, &job.carried)
 }
 
 /// The row of `allocation`.
@@ -443,17 +453,29 @@ pub(crate) fn encode_allocation(allocation: &AllocationRecord) -> Result<Vec<u8>
 
 // ---- reading ---------------------------------------------------------------------------
 
-/// The fields of a row being read; what is left after the known ones are taken is carried.
-struct Fields(BTreeMap<u16, Vec<u8>>);
+/// The fields of a row being read, and its format byte; what is left after the known ones
+/// are taken is carried.
+struct Fields(BTreeMap<u16, Vec<u8>>, u8);
 
 impl Fields {
-    /// The fields of `row`.
+    /// The fields of `row`, an allocation, mark or taint row, of format [`FORMAT`].
     fn of(row: &[u8]) -> Result<Fields, DecodeError> {
+        Self::up_to(row, FORMAT)
+    }
+
+    /// The fields of `row`, a job row, also of format `rootfs_fields::FORMAT_NO_IMAGE`.
+    fn of_job(row: &[u8]) -> Result<Fields, DecodeError> {
+        Self::up_to(row, rootfs_fields::FORMAT_NO_IMAGE)
+    }
+
+    /// The fields of `row`, whose format byte is from [`FORMAT`] to `newest`.
+    fn up_to(row: &[u8], newest: u8) -> Result<Fields, DecodeError> {
         let (&format, mut rest) = row.split_first().ok_or(DecodeError::Empty)?;
-        match format.cmp(&FORMAT) {
-            Ordering::Equal => {}
-            Ordering::Greater => return Err(DecodeError::Newer),
-            Ordering::Less => return Err(DecodeError::BadFormat),
+        if format > newest {
+            return Err(DecodeError::Newer);
+        }
+        if format < FORMAT {
+            return Err(DecodeError::BadFormat);
         }
         let mut fields = BTreeMap::new();
         while let Some((tag, after)) = rest.split_first_chunk::<2>() {
@@ -470,7 +492,7 @@ impl Fields {
             rest = after;
         }
         rest.is_empty()
-            .then_some(Fields(fields))
+            .then_some(Fields(fields, format))
             .ok_or(DecodeError::Truncated)
     }
 
@@ -732,6 +754,7 @@ fn state_code(state: JobState) -> u8 {
         JobState::FailedToStart(StartFailure::StartTimeout) => 9,
         JobState::FailedToStart(StartFailure::ExclusiveNotReady) => 10,
         JobState::FailedToStart(StartFailure::AgentRefused) => 11,
+        JobState::FailedToStart(StartFailure::InputUnavailable) => 12,
     }
 }
 
@@ -749,6 +772,7 @@ fn state_of(tag: u16, value: Vec<u8>) -> Result<JobState, DecodeError> {
         9 => Ok(JobState::FailedToStart(StartFailure::StartTimeout)),
         10 => Ok(JobState::FailedToStart(StartFailure::ExclusiveNotReady)),
         11 => Ok(JobState::FailedToStart(StartFailure::AgentRefused)),
+        12 => Ok(JobState::FailedToStart(StartFailure::InputUnavailable)),
         _ => Err(DecodeError::Newer),
     }
 }
@@ -830,7 +854,7 @@ fn take_resources(fields: &mut Fields) -> Result<Resources, DecodeError> {
 
 fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     use job_tag as t;
-    let image = fields.need(t::IMAGE, image_of)?;
+    let image = rootfs_fields::take_image(fields)?;
     let command = fields.opt(t::COMMAND, texts_of)?.unwrap_or_default();
     let args = fields.opt(t::ARGS, texts_of)?.unwrap_or_default();
     let env = fields.opt(t::ENV, text_map_of)?.unwrap_or_default();
@@ -853,6 +877,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let ports = fields.opt(t::PORTS, ports_of)?.unwrap_or_default();
     let files = file_fields::take_files(fields)?;
     let labels = fields.opt(t::LABELS, labels_of)?.unwrap_or_default();
+    let (layers, mounts, host_ports) = rootfs_fields::take_spec(fields)?;
     Ok(JobSpec {
         image,
         command,
@@ -865,6 +890,9 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
         ports,
         files,
         labels,
+        layers,
+        mounts,
+        host_ports,
     })
 }
 
@@ -875,7 +903,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
 /// does not parse.
 pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     use job_tag as t;
-    let mut fields = Fields::of(row)?;
+    let mut fields = Fields::of_job(row)?;
     let id = fields.need(t::ID, job_id_of)?;
     let spec = take_spec(&mut fields)?;
     let priority = fields.opt(t::PRIORITY, i32_of)?.unwrap_or(0);
@@ -889,6 +917,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let cancel_requested_at = fields.opt(t::CANCEL_REQUESTED_AT, time_of)?;
     let retention_ends = fields.opt(t::RETENTION_ENDS, time_of)?;
     let result = result_fields::take_result(&mut fields)?;
+    let start_failure_detail = rootfs_fields::take_detail(&mut fields)?;
     let deadline_floor = fields.opt(t::DEADLINE_FLOOR, time_of)?;
     let client = fields.opt(t::CLIENT, client_of)?;
     let (failed_prepares, prepare_bars) = whole_fields::take_job(&mut fields)?;
@@ -905,6 +934,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         cancel_requested,
         cancel_requested_at,
         result,
+        start_failure_detail,
         retention_ends,
         deadline_floor,
         client,
@@ -957,37 +987,6 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
         wall_limit_secs,
         carried: fields.carried(),
     })
-}
-
-/// The value of field `tag` in `row`, if the row parses and holds it. Test support.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn field_of(row: &[u8], tag: u16) -> Option<Vec<u8>> {
-    Fields::of(row).ok()?.0.remove(&tag)
-}
-
-/// `row` with its field `tag` set to `value` (added, or put in place of the one it holds),
-/// as a later build might write it; `None` when `row` does not parse. Test support.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_field(row: &[u8], tag: u16, value: &[u8]) -> Option<Vec<u8>> {
-    let mut fields = Fields::of(row).ok()?;
-    fields.0.insert(tag, value.to_vec());
-    Writer(fields.0).finish(&Carried::default()).ok()
-}
-
-/// `row` with its fields in descending tag order and the fields `without` left out: the same
-/// record, if what is left out is a default, in bytes no build writes. Test support.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn rearranged(row: &[u8], without: &[u16]) -> Option<Vec<u8>> {
-    let fields = Fields::of(row).ok()?;
-    let mut out = vec![FORMAT];
-    for (tag, value) in fields.0.iter().rev() {
-        if !without.contains(tag) {
-            out.extend_from_slice(&tag.to_be_bytes());
-            out.extend_from_slice(&(value.len() as u32).to_be_bytes());
-            out.extend_from_slice(value);
-        }
-    }
-    Some(out)
 }
 
 #[cfg(test)]

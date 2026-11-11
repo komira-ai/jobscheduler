@@ -1,5 +1,5 @@
-//! The result fields of a job row, tags 31 (the reason) to 40 (the usage) and 43 (the stream
-//! lengths). They are written only when the job has a result, and the reason is what says it
+//! The result fields of a job row, tags 31 (the reason) to 40 (the usage), 43 (the stream
+//! lengths) and 58 (the code of an input that failed, `rootfs_fields`). They are written only when the job has a result, and the reason is what says it
 //! has one: a row without it, as every row written before results were stored, reads with no
 //! result. A result without tag 43, as every result written before the lengths were stored,
 //! reads with none; a build from before tag 43 keeps it as a field it does not know and writes
@@ -7,6 +7,7 @@
 
 use js_state::StoreTime;
 
+use super::rootfs_fields::job_rootfs_tag::RESULT_INPUT_FAILURE as INPUT_FAILURE;
 use super::{
     DecodeError, Fields, Writer, bool_of, byte_of, i32_of, job_tag as t, text, text_of, time,
     time_of, u64_of,
@@ -39,6 +40,7 @@ pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
     row.put(t::RESULT_ENDED_AT, time(timing.ended_at));
     row.put_opt(t::RESULT_USAGE, result.usage.map(usage));
     row.put_opt(t::RESULT_LOGS, result.logs.map(lengths));
+    row.put_opt(INPUT_FAILURE, result.input_failure.as_deref().map(text));
 }
 
 /// The result the row holds: `None` when it holds no reason.
@@ -60,6 +62,7 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
         },
         usage: fields.opt(t::RESULT_USAGE, usage_of)?,
         logs: fields.opt(t::RESULT_LOGS, lengths_of)?,
+        input_failure: fields.opt(INPUT_FAILURE, text_of)?,
     }))
 }
 
@@ -117,6 +120,7 @@ fn reason_code(reason: ResultReason) -> u8 {
         ResultReason::WallLimit => 1,
         ResultReason::Memory => 2,
         ResultReason::Cancelled => 3,
+        ResultReason::InputFailed => 4,
     }
 }
 
@@ -126,6 +130,7 @@ fn reason_of(tag: u16, value: Vec<u8>) -> Result<ResultReason, DecodeError> {
         1 => Ok(ResultReason::WallLimit),
         2 => Ok(ResultReason::Memory),
         3 => Ok(ResultReason::Cancelled),
+        4 => Ok(ResultReason::InputFailed),
         _ => Err(DecodeError::Newer),
     }
 }

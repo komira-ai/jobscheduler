@@ -4,7 +4,7 @@
 use super::taint_tag as t;
 use super::{decode_taint, encode_taint};
 use crate::codec::tests::{full_job, job_row, with, without};
-use crate::codec::{DecodeError, FORMAT, decode_job, field_of, job_host_tag};
+use crate::codec::{DecodeError, FORMAT, LATER_FORMAT, decode_job, field_of, job_host_tag};
 use crate::ids::JobId;
 use crate::record::{HostTaint, Isolation, JobRecord};
 use crate::suite::host_spec;
@@ -104,7 +104,7 @@ fn a_taint_row_skips_a_tag_it_does_not_know() {
 fn every_malformed_taint_row_is_an_error() {
     let row = encode_taint(&taint()).expect("encodes");
     assert_eq!(decode_taint(&[]), Err(DecodeError::Empty));
-    assert_eq!(decode_taint(&[FORMAT + 1]), Err(DecodeError::Newer));
+    assert_eq!(decode_taint(&[LATER_FORMAT]), Err(DecodeError::Newer));
     assert_eq!(
         decode_taint(&without(&row, t::JOB)),
         Err(DecodeError::Missing { tag: t::JOB })

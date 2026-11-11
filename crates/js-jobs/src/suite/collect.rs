@@ -10,7 +10,7 @@ use js_state::conformance::Backend;
 use js_state::{Cond, Store, Txn};
 
 use super::{exited, host, job_id, rig, whole_host_spec};
-use crate::codec::{FORMAT, encode_allocation};
+use crate::codec::{LATER_FORMAT, encode_allocation};
 use crate::{
     AllocationRecord, AllocationStep, Booked, EndReason, JobId, JobStore, RandomIds, Retention,
     SWEEP_BATCH,
@@ -74,7 +74,7 @@ pub fn the_tick_deletes_only_freed_allocations_past_their_window<B: Backend>(bac
     let mut freed = crate::codec::decode_allocation(&young_row).expect("decodes");
     freed.job = job_id("gc-later");
     let mut newer = encode_allocation(&freed).expect("encodes");
-    newer[0] = FORMAT + 1;
+    newer[0] = LATER_FORMAT;
     rig.put_raw("alloc/gc-later", newer.clone());
     let usage_before = rig.store.scan_prefix("usage/").expect("reads");
     assert_eq!(

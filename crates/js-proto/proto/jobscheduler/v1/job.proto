@@ -110,6 +110,100 @@ message JobFile {
   string contents = 2;
 }
 
+// One read-only layer of a job's root file system (docs/design/job-rootfs.md, section 2).
+message Layer {
+  // Where the layer comes from: exactly one. A layer with none, or with a source this
+  // server does not know, is refused.
+  oneof source {
+    // An absolute path of a directory on the host, in normal form: no empty, `.` or `..`
+    // part and no `/` at its end; at most 4096 bytes, with no control character. The host's
+    // operator lists the prefixes a job may name; a path outside them fails to start. Read
+    // through the job's id mapping: a file owned by an id outside it reads as owned by
+    // 65534, so it needs read (and, to run it, execute) permission for others.
+    string host_path = 1;
+    // An image from a registry the host allows, pinned by digest: NAME[:TAG]@sha256:HEX. Its
+    // own layers are flattened into one tree (whiteouts applied), which is the layer; its
+    // configuration (entrypoint, command, environment) is not used.
+    string image = 2;
+  }
+}
+
+// How a mount's tree appears in the job.
+enum MountMode {
+  // Read as read-only in a request. The server stores and answers the explicit value, so a
+  // job it returns never holds this; a reader that meets it, or a value it does not know,
+  // treats the mount as one it cannot read.
+  MOUNT_MODE_UNSPECIFIED = 0;
+  // The job cannot write the tree, nor anything mounted below it in the source.
+  MOUNT_MODE_READ_ONLY = 1;
+  // The job's writes reach the source. For a host path, the host's operator lists the
+  // prefixes a job may mount read-write.
+  MOUNT_MODE_READ_WRITE = 2;
+  // The job may change the tree; its changes are its own, kept in the job's scratch, and
+  // never reach the source.
+  MOUNT_MODE_COPY_ON_WRITE = 3;
+}
+
+// Whether mounts made on one side of a mount appear on the other.
+enum MountPropagation {
+  // Read as private in a request; never in a job the server returns, as for MountMode.
+  MOUNT_PROPAGATION_UNSPECIFIED = 0;
+  // Neither side sees the other's later mounts: the job sees what was mounted below the
+  // source when its start was prepared, and nothing the host mounts or unmounts after.
+  MOUNT_PROPAGATION_PRIVATE = 1;
+}
+
+// A tree at a path in the job's file system.
+message Mount {
+  // Where the tree comes from: exactly one. Numbers 1 to 9 are kept for sources. A mount
+  // with none, or with a source this server does not know, is refused.
+  oneof source {
+    // An absolute path of a directory on the host, held to the rules of Layer.host_path.
+    string host_path = 1;
+  }
+  // Where it appears: an absolute path in the job's file system in normal form, not "/",
+  // ASCII, with no `:`, `,` or `\`, at most 4096 bytes, and not in a place the runtime keeps
+  // for itself (/proc, /dev, /sys, /run/js-files, /scratch, /root, /tmp, /var/tmp, /run, or
+  // below one). No two mounts of a job have the same target, compared in lower case; one may
+  // lie below another.
+  string target = 10;
+  // How the job may change the tree. Unspecified: read-only.
+  MountMode mode = 11;
+  // A relative path in the source whose directory is mounted instead of the source's root,
+  // in normal form, at most 4096 bytes, with no control character. It is resolved beneath
+  // the source: a link in it may not lead out of the source. Empty: the source's root.
+  string sub_path = 12;
+  // No file in the mount may be executed or mapped executable (noexec); an interpreter can
+  // still read one. False: as the files' modes allow. Set-id bits and device files are
+  // ignored in every mount, whatever this says.
+  bool no_exec = 13;
+  // Unspecified: private.
+  MountPropagation propagation = 14;
+}
+
+// The transport of a host port.
+enum PortProtocol {
+  // Read as TCP in a request; never in a job the server returns, as for MountMode.
+  PORT_PROTOCOL_UNSPECIFIED = 0;
+  // A TCP connection to the host port, through a listener at the job's port.
+  PORT_PROTOCOL_TCP = 1;
+}
+
+// A port on the host's loopback (127.0.0.1) that the job reaches at a port of its own
+// loopback. Not a PortForward, which is the other direction.
+message HostPort {
+  // The port on the host's loopback: 1 to 65535. The host's operator lists the ports a job
+  // may name.
+  uint32 host_port = 1;
+  // The port on the job's loopback at which it reaches host_port: 1 to 65535. Absent: the
+  // same number as host_port; a job the server returns always holds it. No two host ports of
+  // one protocol have the same job port, and none is the container_port of one of the job's
+  // ports. A job port other than host_port runs the job in a container.
+  optional uint32 container_port = 2;
+  // Unspecified: TCP.
+  PortProtocol protocol = 3;
+}
+
 // A job as the client submits it: one OCI image run to completion (design section 3.2).
 message JobSpec {
   // The job's id: 1 to 63 bytes of letters, digits, dot, underscore and dash (design
@@ -119,10 +213,12 @@ message JobSpec {
   // without an id that is repeated after a lost answer makes a second job.
   string job_id = 1;
   // The image, pinned by digest: NAME@sha256:HEX, with an optional tag after the name. The
-  // service rejects an image without a digest.
+  // service rejects an image without a digest. Empty only when layers is not: the root is
+  // then the layers alone.
   string image = 2;
   // The program to run. Empty: the image's default. How it combines with the image's own
-  // entrypoint and command is set by the server that implements SubmitJob.
+  // entrypoint and command is set by the server that implements SubmitJob. With an empty
+  // image, the absolute path of the program in the job's root.
   string command = 3;
   // The arguments the program is started with, in order.
   repeated string args = 4;
@@ -140,6 +236,11 @@ message JobSpec {
   NetworkLevel network = 30;
   // The host ports forwarded to the job. Empty: none, and no inbound path to the job.
   repeated PortForward ports = 31;
+  // Ports on the host's loopback the job may connect to, each at a port of its own
+  // loopback, whatever its network level: at most 16. Empty: none. A job with host ports,
+  // layers or mounts runs only on a host that reports it can give them, and never with host
+  // isolation.
+  repeated HostPort host_ports = 32;
   // The files the host writes for the job before it starts.
   repeated JobFile files = 40;
   // The job's priority among queued jobs. 0 when not given. A resubmit that differs from
@@ -147,6 +248,13 @@ message JobSpec {
   int32 priority = 50;
   // The client's labels, by key. A listing can filter by them.
   map<string, string> labels = 51;
+  // The read-only layers of the job's root, base first, stacked on image (or in place of it,
+  // when image is empty): at most 16. A later layer's file hides an earlier one's. With
+  // layers, the root is writable and the writes are the job's own, and the job runs in a
+  // container. Empty: the root is image alone, read-only, as before.
+  repeated Layer layers = 60;
+  // Trees at paths in the job's file system: at most 64. Empty: none.
+  repeated Mount mounts = 61;
 }
 
 // The states of a job (design section 3.2). Queued, placed, starting and running are live;
@@ -191,6 +299,11 @@ enum StartFailureCode {
   // The host's agent refused the start, for example because the host is tainted or the
   // image fetch failed; the start failure detail holds the agent's own code.
   START_FAILURE_CODE_AGENT_REFUSED = 4;
+  // An input the job named could not be read on its host: a host path of a layer or mount
+  // that is missing, is not a directory, cannot be read, or did not answer in time. The
+  // host's state, not the job's: another host or a later try may succeed. The start failure
+  // detail holds the agent's code.
+  START_FAILURE_CODE_INPUT_UNAVAILABLE = 5;
 }
 
 // The times of a job, in milliseconds since the Unix epoch. A time the job has not reached
@@ -329,6 +442,10 @@ enum ResultReason {
   RESULT_REASON_MEMORY = 3;
   // The job was stopped because the client cancelled it.
   RESULT_REASON_CANCELLED = 4;
+  // A host path or host port the job named failed while it ran, and the job did not
+  // succeed: the failure is the host's, not the job's. The state is failed; the exit code is
+  // kept, and input_failure names the failure.
+  RESULT_REASON_INPUT_FAILED = 5;
 }
 
 // The resources a job used, as the host's agent reported them.
@@ -361,6 +478,9 @@ message JobResult {
   JobTimes times = 10;
   // The resources the job used.
   ResourceUsage usage = 11;
+  // With RESULT_REASON_INPUT_FAILED: the agent's code, such as input-unreadable or
+  // host-port-lost. Absent otherwise.
+  optional string input_failure = 12;
 }
 
 // Why the service refuses a submit. A refused submit records nothing, so the client may

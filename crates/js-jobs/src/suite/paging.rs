@@ -7,7 +7,7 @@ use js_state::conformance::Backend;
 use js_state::{Cond, Store, Txn};
 
 use super::{Rig, host, rig, share};
-use crate::codec::{FORMAT, job_tag, set_field};
+use crate::codec::{LATER_FORMAT, job_tag, set_field};
 use crate::{JobId, JobPage, JobState, MAX_PAGE};
 
 fn limit(n: usize) -> NonZeroUsize {
@@ -64,7 +64,7 @@ pub fn list_jobs_walks_past_pages_with_nothing_to_show<B: Backend>(backend: &B) 
     }
     let newer: Vec<String> = (0..10).map(|n| format!("job/n{n:02}")).collect();
     for key in &newer {
-        rig.put_raw(key, vec![FORMAT + 1]);
+        rig.put_raw(key, vec![LATER_FORMAT]);
     }
     queued.push(rig.queue("z00"));
 

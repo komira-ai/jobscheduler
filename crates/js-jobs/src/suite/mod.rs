@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_state::conformance::Backend;
 use js_state::{CommitStats, Cond, ManualClock, Store, Txn, Versioned};
 use js_types::{ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources};
@@ -457,7 +458,9 @@ pub(crate) fn digest(digit: char) -> String {
 pub(crate) fn full_spec() -> JobSpec {
     let caller = BTreeMap::from([("team".to_owned(), "infra".to_owned())]);
     JobSpec {
-        image: ImageDigestRef::parse(&format!("team/app:1@{}", digest('a'))).expect("an image"),
+        image: Some(
+            ImageDigestRef::parse(&format!("team/app:1@{}", digest('a'))).expect("an image"),
+        ),
         command: vec!["run".to_owned()],
         args: vec!["--fast".to_owned(), "--seed=7".to_owned()],
         env: BTreeMap::from([
@@ -489,6 +492,48 @@ pub(crate) fn full_spec() -> JobSpec {
         labels: Labels::from_caller(&caller)
             .and_then(|labels| labels.with_reserved(ReservedKey::Run, "run-1"))
             .expect("labels"),
+        layers: vec![
+            Layer::Image {
+                image: format!("team/base@{}", digest('d')),
+            },
+            Layer::HostPath {
+                path: "/srv/trees/sdk".to_owned(),
+            },
+        ],
+        mounts: vec![
+            JobMount {
+                source: MountSource::HostPath {
+                    path: "/srv/trees/src".to_owned(),
+                },
+                target: "/work".to_owned(),
+                mode: MountMode::CopyOnWrite,
+                sub_path: Some("lib".to_owned()),
+                no_exec: true,
+                propagation: Propagation::Private,
+            },
+            JobMount {
+                source: MountSource::HostPath {
+                    path: "/srv/cache".to_owned(),
+                },
+                target: "/work/cache".to_owned(),
+                mode: MountMode::ReadWrite,
+                sub_path: None,
+                no_exec: false,
+                propagation: Propagation::Private,
+            },
+        ],
+        host_ports: vec![
+            HostPort {
+                host_port: 7070,
+                container_port: Some(7171),
+                protocol: PortProtocol::Tcp,
+            },
+            HostPort {
+                host_port: 9000,
+                container_port: Some(9000),
+                protocol: PortProtocol::Tcp,
+            },
+        ],
     }
 }
 

@@ -7,7 +7,7 @@ use js_state::conformance::Backend;
 use js_state::{Cond, ManualClock, Store, StoreError, Txn};
 
 use super::{host, job_id, rig, share, whole_host_spec};
-use crate::codec::{FORMAT, alloc_tag, set_field};
+use crate::codec::{LATER_FORMAT, alloc_tag, set_field};
 use crate::ids::ScriptedIds;
 use crate::interfere::{INJECTED, Interfere};
 use crate::{
@@ -533,7 +533,7 @@ pub fn booked_on_sums_the_live_allocations_of_a_host<B: Backend>(backend: &B) {
         "booked_on_sums_the_live_allocations_of_a_host: an overflowing sum was answered"
     );
 
-    rig.put_raw("alloc/h-newer", vec![FORMAT + 1]);
+    rig.put_raw("alloc/h-newer", vec![LATER_FORMAT]);
     assert_eq!(
         rig.jobs.booked_on(&host("host-a")),
         Err(JobStoreError::UnknownRow {

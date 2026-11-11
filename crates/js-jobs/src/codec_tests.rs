@@ -41,6 +41,7 @@ pub(super) fn full_result() -> JobResult {
             stdout_dropped: 1,
             stderr_dropped: 2,
         }),
+        input_failure: Some("input-unreadable".to_owned()),
     }
 }
 
@@ -59,6 +60,7 @@ pub(super) fn full_job() -> JobRecord {
         cancel_requested: true,
         cancel_requested_at: Some(at(5)),
         result: Some(full_result()),
+        start_failure_detail: Some("input-not-allowed".to_owned()),
         retention_ends: Some(at(6)),
         deadline_floor: Some(at(7)),
         client: Some(ClientName::parse("ci-1").expect("a client name")),
@@ -86,6 +88,9 @@ pub(super) fn bare_job() -> JobRecord {
     spec.ports.clear();
     spec.files = crate::record::JobFiles::default();
     spec.labels = Labels::default();
+    spec.layers.clear();
+    spec.mounts.clear();
+    spec.host_ports.clear();
     JobRecord {
         id: JobId::parse("bare-1").expect("an id"),
         spec,
@@ -99,6 +104,7 @@ pub(super) fn bare_job() -> JobRecord {
         cancel_requested: false,
         cancel_requested_at: None,
         result: None,
+        start_failure_detail: None,
         retention_ends: None,
         deadline_floor: None,
         client: None,
@@ -145,10 +151,10 @@ fn allocation_row(allocation: &AllocationRecord) -> Vec<u8> {
 
 /// `row` without its field `tag`.
 pub(super) fn without(row: &[u8], tag: u16) -> Vec<u8> {
-    let mut fields = Fields::of(row).expect("the row parses");
+    let mut fields = Fields::of_job(row).expect("the row parses");
     fields.0.remove(&tag);
     Writer(fields.0)
-        .finish(&Carried::default())
+        .finish_as(fields.1, &Carried::default())
         .expect("encodes")
 }
 
@@ -181,6 +187,7 @@ fn a_record_reads_back_as_written() {
             },
             usage: None,
             logs: None,
+            input_failure: None,
         }),
         ..bare_job()
     };
@@ -218,6 +225,7 @@ fn every_enum_value_has_its_own_fixed_code() {
         (JobState::FailedToStart(StartTimeout), 9),
         (JobState::FailedToStart(ExclusiveNotReady), 10),
         (JobState::FailedToStart(AgentRefused), 11),
+        (JobState::FailedToStart(InputUnavailable), 12),
     ];
     for (state, code) in states {
         let written = job_row(&JobRecord {
@@ -297,6 +305,7 @@ fn every_enum_value_has_its_own_fixed_code() {
         (ResultReason::WallLimit, 1),
         (ResultReason::Memory, 2),
         (ResultReason::Cancelled, 3),
+        (ResultReason::InputFailed, 4),
     ] {
         let mut record = full_job();
         if let Some(result) = record.result.as_mut() {
@@ -317,10 +326,10 @@ fn every_enum_value_has_its_own_fixed_code() {
 fn an_enum_value_this_build_does_not_know_is_newer() {
     let job = job_row(&full_job());
     for (tag, code) in [
-        (job_tag::STATE, 12),
+        (job_tag::STATE, 13),
         (job_tag::EXEC, 2),
         (job_tag::NETWORK, 3),
-        (job_tag::RESULT_REASON, 4),
+        (job_tag::RESULT_REASON, 5),
         (job_host_tag::ISOLATION, 2),
     ] {
         assert_eq!(
@@ -337,7 +346,7 @@ fn an_enum_value_this_build_does_not_know_is_newer() {
             "tag {tag}"
         );
     }
-    assert_eq!(decode_job(&[FORMAT + 1]), Err(DecodeError::Newer));
+    assert_eq!(decode_job(&[LATER_FORMAT]), Err(DecodeError::Newer));
     let later_label = items(&[b"jobscheduler.dev/later", b"x"]);
     assert_eq!(
         decode_job(&with(&job, job_tag::LABELS, &later_label)),
@@ -439,6 +448,37 @@ fn the_layout_is_pinned_byte_for_byte() {
         ),
         (45, 2u32.to_be_bytes().to_vec()),
         (46, bars),
+        (
+            54,
+            framed(&[
+                &[
+                    b"\x01team/base@sha256:".as_slice(),
+                    "d".repeat(64).as_bytes(),
+                ]
+                .concat(),
+                b"\x00/srv/trees/sdk",
+            ]),
+        ),
+        (
+            55,
+            framed(&[
+                &framed(&[
+                    b"\x00/srv/trees/src",
+                    b"/work",
+                    &[2],
+                    b"\x01lib",
+                    &[1],
+                    &[0],
+                ]),
+                &framed(&[b"\x00/srv/cache", b"/work/cache", &[1], &[], &[0], &[0]]),
+            ]),
+        ),
+        (
+            56,
+            framed(&[&[0x1b, 0x9e, 0x1c, 0x03, 0], &[0x23, 0x28, 0x23, 0x28, 0]]),
+        ),
+        (57, b"input-not-allowed".to_vec()),
+        (58, b"input-unreadable".to_vec()),
     ]);
     assert_eq!(job_row(&full_job()), job);
     assert_eq!(decode_job(&job), Ok(full_job()));
@@ -522,7 +562,8 @@ fn the_layout_is_pinned_byte_for_byte() {
     assert_eq!(field_of(&bare, 45), None, "a count of zero is not written");
     assert_eq!(field_of(&bare, 46), None, "no bars are not written");
     assert_eq!(field_of(&bare, 6), Some(Vec::new()), "a marker is empty");
-    for tag in (31..=40).chain([job_tag::RESULT_LOGS]) {
+    let input_failure = rootfs_fields::job_rootfs_tag::RESULT_INPUT_FAILURE;
+    for tag in (31..=40).chain([job_tag::RESULT_LOGS, input_failure]) {
         assert_eq!(
             field_of(&bare, tag),
             None,
@@ -643,7 +684,8 @@ fn a_field_the_row_lacks_reads_as_its_default() {
     );
     // A row without a reason, as every row before results were stored, has no result.
     let mut before_results = job_row(&full_job());
-    for tag in (31..=40).chain([job_tag::RESULT_LOGS]) {
+    let input_failure = rootfs_fields::job_rootfs_tag::RESULT_INPUT_FAILURE;
+    for tag in (31..=40).chain([job_tag::RESULT_LOGS, input_failure]) {
         before_results = without(&before_results, tag);
     }
     assert_eq!(

@@ -11,7 +11,7 @@ use js_state::conformance::Backend;
 use js_state::{Store, StoreError};
 
 use super::{Rig, full_spec, host, host_spec, rig, share, whole_host_spec};
-use crate::codec::{DecodeError, FORMAT, field_of, job_host_tag, set_field};
+use crate::codec::{DecodeError, FORMAT, LATER_FORMAT, field_of, job_host_tag, set_field};
 use crate::interfere::INJECTED;
 use crate::{
     AllocationStep, Booked, Constraints, EndReason, HostTaint, Isolation, JobId, JobSpec, JobState,
@@ -312,7 +312,7 @@ where
     );
     rig.delete_raw("taint/bad host");
 
-    rig.put_raw("taint/host-e", vec![FORMAT + 1]);
+    rig.put_raw("taint/host-e", vec![LATER_FORMAT]);
     assert_eq!(
         rig.jobs.host_taints().map(drop),
         Err(JobStoreError::UnknownRow {
