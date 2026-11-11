@@ -827,16 +827,17 @@ jobs:
       # `<workspace>-%p-%<n>m.profraw` at the top of target/llvm-cov-target.
       - name: Run this shard's tests under coverage
         run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --no-fail-fast --cargo-profile coverage --branch --no-report --partition "slice:${{ matrix.shard }}/${{ strategy.job-total }}"
-      # One indexed profile from every raw one, merged as `llvm-cov report` merges them
-      # (`-sparse`, and the inputs from a list file, `-f`, so thousands of names never go
-      # on the command line). The profile carries the shard's number, so the three never
-      # meet under one name, and keeps the `.profraw` ending so that `coverage` can hand
-      # it to `cargo llvm-cov report` beside its own raw profiles: llvm-profdata, which
-      # merges them there, reads raw and indexed profiles alike, by their content. It is
-      # written even when a test failed, so the report still shows what ran.
+      # One indexed profile from every raw one, merged by the toolchain's llvm-profdata as
+      # `llvm-cov report` merges them (`cargo xtask merge-profiles`, crates/xtask/src/
+      # merge_profiles.rs: the inputs go in a list file, so thousands of names never go on
+      # a command line). The profile carries the shard's number, so the three never meet
+      # under one name, and keeps the `.profraw` ending so that `coverage` can hand it to
+      # `cargo llvm-cov report` beside its own raw profiles: llvm-profdata, which merges
+      # them there, reads raw and indexed profiles alike, by their content. It is written
+      # even when a test failed, so the report still shows what ran.
       - name: Merge this shard's profiles into one
         if: ${{ !cancelled() }}
-        run: find target/llvm-cov-target -maxdepth 1 -name '*.profraw' > target/profraw-list && "$(rustc "+$COVERAGE_TOOLCHAIN" --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata" merge -sparse -f target/profraw-list -o "target/jobscheduler-shard-${{ matrix.shard }}.profraw"
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask merge-profiles --dir target/llvm-cov-target --out "target/jobscheduler-shard-${{ matrix.shard }}.profraw"
       # Kept a day: `coverage`, later in this run, is its only reader.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}

@@ -59,6 +59,12 @@ fn check(workflow: &str) -> Vec<String> {
     if !shard.contains("name: coverage-profile-${{ matrix.shard }}\n") {
         errors.push("the shard does not upload coverage-profile-<shard>".to_owned());
     }
+    // The shard's merged profile is the file it uploads.
+    let merged = r#"xtask merge-profiles --dir target/llvm-cov-target --out "target/jobscheduler-shard-${{ matrix.shard }}.profraw""#;
+    let uploaded = "path: target/jobscheduler-shard-${{ matrix.shard }}.profraw\n";
+    if !(shard.contains(merged) && shard.contains(uploaded)) {
+        errors.push("the shard does not upload the profile it merged".to_owned());
+    }
     if value(report, "needs") != Some("coverage-shard") {
         errors.push("coverage does not need coverage-shard".to_owned());
     }
@@ -137,8 +143,9 @@ fn a_profile_downloaded_twice_is_refused() {
     );
 }
 
-/// Asserts that a shard count written by hand, an unpartitioned run, a renamed upload, and a
-/// report job that does not wait for the shards are each refused.
+/// Asserts that a shard count written by hand, an unpartitioned run, a renamed upload, an
+/// upload of another file than the merged profile, and a report job that does not wait for
+/// the shards are each refused.
 #[test]
 fn each_broken_link_between_the_jobs_is_refused() {
     let ci = ci();
@@ -164,6 +171,16 @@ fn each_broken_link_between_the_jobs_is_refused() {
         "name: coverage-profile-${{ matrix.shard }}\n",
         "name: profile-${{ matrix.shard }}\n",
         "the shard does not upload coverage-profile-<shard>",
+    );
+    one(
+        "path: target/jobscheduler-shard-${{ matrix.shard }}.profraw\n",
+        "path: target/llvm-cov-target/*.profraw\n",
+        "the shard does not upload the profile it merged",
+    );
+    one(
+        r#"--out "target/jobscheduler-shard-${{ matrix.shard }}.profraw""#,
+        r#"--out "target/merged.profraw""#,
+        "the shard does not upload the profile it merged",
     );
     one(
         "needs: coverage-shard\n",
