@@ -18,7 +18,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 
 use rustix::net::{AddressFamily, SocketFlags, SocketType};
-use rustix::thread::LinkNameSpaceType;
+use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
 use super::Listen;
 
@@ -63,16 +63,17 @@ pub(super) fn job_namespace(pid: u32) -> io::Result<File> {
 /// bound; the listeners already bound are closed.
 pub(super) fn listen_in(namespace: File, ports: Vec<u16>) -> io::Result<Vec<TcpListener>> {
     let network = Some(LinkNameSpaceType::Network);
-    let thread = std::thread::Builder::new().name("js-ports-ns".to_owned());
-    let entered = thread.spawn(move || {
-        rustix::thread::move_into_link_name_space(namespace.as_fd(), network)
-            .map_err(io::Error::from)
-            .and_then(|()| ports.into_iter().map(listen_on).collect())
+    let mut listened = Ok(Vec::new());
+    // The scope joins the thread before it ends, and a panic of the thread is the caller's.
+    std::thread::scope(|scope| {
+        let thread = std::thread::Builder::new().name("js-ports-ns".to_owned());
+        let entered = thread.spawn_scoped(scope, || {
+            let moved = move_into_link_name_space(namespace.as_fd(), network).map_err(Into::into);
+            listened = moved.and_then(|()| ports.into_iter().map(listen_on).collect());
+        });
+        entered.map(drop)
     })?;
-    // A panic of the thread is the caller's.
-    entered
-        .join()
-        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    listened
 }
 
 /// A listener on `127.0.0.1` at `port`, in the calling thread's network namespace, bound

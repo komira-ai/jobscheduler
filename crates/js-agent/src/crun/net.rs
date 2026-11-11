@@ -206,16 +206,15 @@ impl Net {
     /// among the reasons. A container whose state `crun` read and that names no usable pid is
     /// ending (its sidecar says it ran, so it was made), and nothing is offered.
     pub(super) fn offer_again(&mut self, forwarder: &Forwarder, pid: Result<u32, String>) {
-        let pid = match pid {
+        (self.offered, self.lost) = match pid {
             _ if self.host_ports.is_empty() => return,
             Err(why) if answered(&why) => return,
-            Err(why) => Err(format!("find the container's pid: {why}")),
-            Ok(pid) => offer(forwarder, pid, &self.host_ports).map_err(|why| why.to_string()),
+            Err(why) => (None, Some(format!("find the container's pid: {why}"))),
+            Ok(pid) => match offer(forwarder, pid, &self.host_ports) {
+                Ok(offered) => (offered, None),
+                Err(why) => (None, Some(why.to_string())),
+            },
         };
-        match pid {
-            Ok(offered) => self.offered = offered,
-            Err(why) => self.lost = Some(why),
-        }
     }
 
     /// Why the run's host ports could not be offered again after a restart; `None` when they
