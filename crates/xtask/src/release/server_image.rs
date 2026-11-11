@@ -213,9 +213,10 @@ fn stream_error(what: &str, e: &std::io::Error) -> Error {
 }
 
 /// Writes the tar of `entries` to `sink`, in order, each owned by `root` and dated [`MTIME`], and
-/// gives the sink back once the archive is finished. A write to a `Vec` does not fail; one to
-/// any other sink may.
-fn tar_to<W: Write>(sink: W, entries: &[Entry]) -> Result<W, Error> {
+/// finishes the archive. A write to a `Vec` does not fail; one to any other sink may. The sink is
+/// a trait object, so the one body that runs in a release is the one the failing sinks of the
+/// tests run.
+fn tar_to(sink: &mut dyn Write, entries: &[Entry]) -> Result<(), Error> {
     let mut tar = tar::Builder::new(sink);
     for (path, mode, content) in entries {
         let mut header = tar::Header::new_ustar();
@@ -240,19 +241,21 @@ fn tar_to<W: Write>(sink: W, entries: &[Entry]) -> Result<W, Error> {
         tar.append(&header, bytes)
             .map_err(|e| stream_error(path, &e))?;
     }
-    tar.into_inner()
+    tar.finish()
         .map_err(|e| stream_error("the tar archive", &e))
 }
 
-/// Writes the gzip stream of `bytes` to `sink`, with no file name and no time, and gives the
-/// sink back once the stream is finished.
-fn gzip_to<W: Write>(sink: W, bytes: &[u8]) -> Result<W, Error> {
+/// Writes the gzip stream of `bytes` to `sink`, with no file name and no time, and finishes the
+/// stream.
+fn gzip_to(sink: &mut dyn Write, bytes: &[u8]) -> Result<(), Error> {
     let mut gzip = flate2::GzBuilder::new()
         .mtime(0)
         .write(sink, Compression::best());
     gzip.write_all(bytes)
         .map_err(|e| stream_error("the layer", &e))?;
-    gzip.finish().map_err(|e| stream_error("the layer", &e))
+    gzip.finish()
+        .map(drop)
+        .map_err(|e| stream_error("the layer", &e))
 }
 
 /// What makes a tar of entries: [`tar_to`] into a `Vec`, or a failing one in a test.
@@ -359,8 +362,14 @@ pub fn build(version: Version, target: Target, binary: &[u8]) -> Result<Image, E
         version,
         target,
         binary,
-        &|entries| tar_to(Vec::new(), entries),
-        &|bytes| gzip_to(Vec::new(), bytes),
+        &|entries| {
+            let mut out = Vec::new();
+            tar_to(&mut out, entries).map(|()| out)
+        },
+        &|bytes| {
+            let mut out = Vec::new();
+            gzip_to(&mut out, bytes).map(|()| out)
+        },
     )
 }
 

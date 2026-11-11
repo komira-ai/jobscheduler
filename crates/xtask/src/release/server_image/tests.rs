@@ -539,11 +539,11 @@ impl Write for Full {
 #[test]
 fn a_tar_sink_that_fails_is_an_error_naming_what_was_written() {
     let entries: Vec<Entry> = vec![("a".to_owned(), 0o644, Some(b"text".to_vec()))];
-    let Err(Error::Io { path, why }) = tar_to(Full { room: 0 }, &entries) else {
+    let Err(Error::Io { path, why }) = tar_to(&mut Full { room: 0 }, &entries) else {
         panic!("a full sink must fail");
     };
     assert_eq!((path.as_str(), why.as_str()), ("a", "the sink is full"));
-    let Err(Error::Io { path, why }) = tar_to(Full { room: 1024 }, &entries) else {
+    let Err(Error::Io { path, why }) = tar_to(&mut Full { room: 1024 }, &entries) else {
         panic!("a sink that fills at the end must fail");
     };
     assert_eq!(
@@ -558,7 +558,7 @@ fn a_tar_sink_that_fails_is_an_error_naming_what_was_written() {
 #[test]
 fn a_gzip_sink_that_fails_is_an_error_naming_the_layer() {
     for room in [0, 10] {
-        let Err(Error::Io { path, why }) = gzip_to(Full { room }, b"text") else {
+        let Err(Error::Io { path, why }) = gzip_to(&mut Full { room }, b"text") else {
             panic!("a sink that fills must fail");
         };
         assert_eq!(
@@ -592,16 +592,18 @@ fn a_stream_that_cannot_be_made_fails_the_image() {
             Target::X86_64,
             &bin,
             &|entries| {
-                step(
-                    fail_at == calls.get(),
-                    tar_to(Vec::new(), entries).expect("tar"),
-                )
+                step(fail_at == calls.get(), {
+                    let mut out = Vec::new();
+                    tar_to(&mut out, entries).expect("tar");
+                    out
+                })
             },
             &|bytes| {
-                step(
-                    fail_at == calls.get(),
-                    gzip_to(Vec::new(), bytes).expect("gzip"),
-                )
+                step(fail_at == calls.get(), {
+                    let mut out = Vec::new();
+                    gzip_to(&mut out, bytes).expect("gzip");
+                    out
+                })
             },
         );
         assert_eq!(
