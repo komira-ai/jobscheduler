@@ -32,9 +32,10 @@
 //!   symlink and without crossing into another mount; [`walk`] holds the
 //!   descriptor-relative steps it is made of.
 //!
-//! These modules were written in the container driver of the first service that used this
-//! repository and moved here unchanged apart from the types they named of that service
-//! (see each module's header).
+//! All but [`job_fs`] were written in the container driver of the first service that used
+//! this repository and moved here unchanged apart from the types they named of that service
+//! (see each module's header); [`job_fs`] was written here, and [`remove`] has since learnt
+//! not to cross into another mount.
 
 pub mod cgroup;
 pub mod cgroup_usage;

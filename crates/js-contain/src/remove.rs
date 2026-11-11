@@ -181,6 +181,11 @@ mod tests {
     /// A hook that changes nothing.
     fn no_hook(_: Step, _: &OwnedFd, _: &OsStr) {}
 
+    /// A mount id that cannot be read, as on a kernel that does not report them.
+    fn unsupported(_: &OwnedFd) -> std::io::Result<u64> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
     /// The mount id of the directory open as `fd`, as [`remove_tree`] reads it.
     fn real_mount(fd: &OwnedFd) -> std::io::Result<u64> {
         mount_id_at(fd, Path::new(""))
@@ -404,10 +409,7 @@ mod tests {
             &rustix::fs::openat(CWD, top.join("mounted"), DIRECTORY, Mode::empty()).expect("open"),
         )
         .expect("identity");
-        let mount_of = |fd: &OwnedFd| {
-            let id = identity(fd)?;
-            Ok(if id == mounted { 2 } else { 1 })
-        };
+        let mount_of = |fd: &OwnedFd| identity(fd).map(|id| if id == mounted { 2 } else { 1 });
         let why = remove_tree_with(&top, &mut no_hook, &mount_of).expect_err("crossed");
         assert_eq!(why.kind(), std::io::ErrorKind::ResourceBusy, "{why}");
         assert_eq!(
@@ -432,20 +434,14 @@ mod tests {
         let top = dir.join("top");
         std::fs::create_dir_all(top.join("sub")).expect("mkdir");
         std::fs::write(top.join("sub/f"), b"f").expect("write");
-        let unsupported = |_: &OwnedFd| -> std::io::Result<u64> {
-            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-        };
         let why = remove_tree_with(&top, &mut no_hook, &unsupported).expect_err("root");
         assert_eq!(why.kind(), std::io::ErrorKind::Unsupported);
         let root =
             identity(&rustix::fs::openat(CWD, &top, DIRECTORY, Mode::empty()).expect("open"))
                 .expect("identity");
-        let only_root = |fd: &OwnedFd| {
-            if identity(fd)? == root {
-                Ok(1)
-            } else {
-                Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-            }
+        let only_root = |fd: &OwnedFd| match identity(fd) {
+            Ok(id) if id == root => Ok(1),
+            _ => unsupported(fd),
         };
         let why = remove_tree_with(&top, &mut no_hook, &only_root).expect_err("sub");
         assert_eq!(why.kind(), std::io::ErrorKind::Unsupported);
