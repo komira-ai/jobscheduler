@@ -184,7 +184,7 @@ impl Rig {
 }
 
 /// Asserts a range the host gives the job user already is kept, file by file: the one the setup
-/// script wrote on node-01 and an operator copied to other nodes, one named by the user's uid,
+/// script wrote on one host and an operator copied to others, one named by the user's uid,
 /// and one of more ids than the agent needs; a file that lacks one gets a block clear of the
 /// other file's range.
 ///
@@ -225,13 +225,14 @@ fn a_range_the_host_has_already_is_kept_and_only_a_file_without_one_gets_a_block
 }
 
 /// Asserts what is not a range the agent accepts is not kept as one: too few ids, a first id of
-/// 0, a range that passes 2^32, ids that are not numbers and another user's range. The new
+/// 0, a range that passes 2^32, ids that are not numbers, a line of more than three fields (a
+/// fourth, or an empty one after a final `:`) and another user's range. The new
 /// block is clear of every one of them that is a range.
 ///
 /// Catches a postinst that reads a range the agent would refuse as the job user's.
 #[test]
 fn a_range_the_agent_would_refuse_is_not_taken_for_one() {
-    let subuid = "jsjob:200000:65535\njsjob:0:65536\njsjob:4294967295:65536\njsjob:x:y\nalice:300000:65536\n";
+    let subuid = "jsjob:200000:65535\njsjob:0:65536\njsjob:4294967295:65536\njsjob:x:y\njsjob:100000:65536:extra\njsjob:100000:65536:\nalice:300000:65536\n";
     let rig = Rig::new("refused-ranges", Some(subuid), None, 0, JSJOB);
     assert_eq!(rig.run("configure"), rig.ok());
     assert_eq!(

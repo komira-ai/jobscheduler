@@ -48,10 +48,15 @@ job_uid() {
 }
 
 # has_range FILE UID: 0 when a line of the subid file FILE gives the job user (by name, or by
-# UID) a range the agent accepts.
+# UID) a range the agent accepts. The agent reads a line of exactly three fields.
 has_range() {
 	[ -f "$1" ] || return 1
-	while IFS=: read -r owner first n _ || [ -n "$owner" ]; do
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in *:*:*:*) continue ;; *:*:*) ;; *) continue ;; esac
+		owner=${line%%:*}
+		rest=${line#*:}
+		first=${rest%%:*}
+		n=${rest#*:}
 		[ "$owner" = "$JOB_USER" ] || { [ -n "$2" ] && [ "$owner" = "$2" ]; } || continue
 		number "$first" || continue
 		first=$DEC
