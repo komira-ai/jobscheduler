@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use js_types::path;
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
@@ -116,25 +117,7 @@ impl RunSpec {
         if let Some(entrypoint) = program.strip_prefix(BUNDLE_PROGRAM_PREFIX) {
             return check::token(at, entrypoint, BUNDLE_ENTRYPOINT_MAX, entrypoint_byte);
         }
-        if program.is_empty() {
-            return Err(at.fail(Rule::Empty));
-        }
-        if program.len() > limits::MAX_PROGRAM_LEN {
-            return Err(at.fail(Rule::TooLong));
-        }
-        if program.chars().any(check::hidden) {
-            return Err(at.fail(Rule::BadChars));
-        }
-        let Some(below) = program.strip_prefix('/') else {
-            return Err(at.fail(Rule::Escapes));
-        };
-        if below.split('/').any(|part| part == "..") {
-            return Err(at.fail(Rule::Escapes));
-        }
-        if below.split('/').any(|part| part.is_empty() || part == ".") {
-            return Err(at.fail(Rule::Empty));
-        }
-        Ok(())
+        check::path(at, path::absolute(program))
     }
 
     fn check_inputs(&self, at: At) -> Result<(), ValidationError> {
@@ -233,37 +216,13 @@ fn entrypoint_byte(byte: u8) -> bool {
     check::ident_byte(byte) || byte == b'+'
 }
 /// A relative path as a mount's `rel` is, or the empty path when `allow_empty`, and ASCII
-/// only. The agent runs on case-insensitive APFS, where `A` and `a`, or `\u{e9}` composed
-/// and decomposed, are one name; ASCII keeps the overlap checks exact with a lower-case
-/// fold and needs no Unicode tables. Mount sources (`rel` of a mount input) are not
-/// compared and keep the mount rules.
+/// only: `js-types`' rule ([`path::relative`]), which says why. Mount sources (`rel` of a
+/// mount input) are not compared and keep the mount rules.
 ///
 /// A `..` that reaches outside through a symlink is not visible here: refusing it is the
 /// staging code's duty, when it resolves the path under the run directory.
 fn rel_path(at: At, value: &str, allow_empty: bool) -> Result<(), ValidationError> {
-    if value.is_empty() {
-        return if allow_empty {
-            Ok(())
-        } else {
-            Err(at.fail(Rule::Empty))
-        };
-    }
-    if value.len() > limits::MAX_REL_LEN {
-        return Err(at.fail(Rule::TooLong));
-    }
-    if value
-        .chars()
-        .any(|c| check::hidden(c) || !c.is_ascii() || matches!(c, ':' | ',' | '\\'))
-    {
-        return Err(at.fail(Rule::BadChars));
-    }
-    if value.starts_with('/') || value.split('/').any(|part| part == "..") {
-        return Err(at.fail(Rule::Escapes));
-    }
-    if value.split('/').any(|part| part.is_empty() || part == ".") {
-        return Err(at.fail(Rule::Empty));
-    }
-    Ok(())
+    check::path(at, path::relative(value, allow_empty))
 }
 
 /// `sha256:` and 64 lower case hex digits: a stage id, or a tree's digest.
@@ -276,23 +235,9 @@ fn stage_digest(at: At, value: &str) -> Result<(), ValidationError> {
     }
 }
 
-/// No two paths are equal, and none is below another, once folded to lower case.
+/// No two paths are equal, and none is below another, once folded to lower case
+/// ([`path::disjoint`]): a repeat is [`crate::Rule::Duplicate`], a nesting
+/// [`crate::Rule::Inconsistent`].
 fn disjoint(at: At, paths: &[&str]) -> Result<(), ValidationError> {
-    let folded: Vec<String> = paths.iter().map(|p| p.to_ascii_lowercase()).collect();
-    let below = |inner: &str, outer: &str| {
-        inner
-            .strip_prefix(outer)
-            .is_some_and(|rest| rest.starts_with('/'))
-    };
-    for (index, one) in folded.iter().enumerate() {
-        for two in &folded[index + 1..] {
-            if one == two {
-                return Err(at.fail(Rule::Duplicate));
-            }
-            if [below(one, two), below(two, one)].contains(&true) {
-                return Err(at.fail(Rule::Inconsistent));
-            }
-        }
-    }
-    Ok(())
+    check::path(at, path::disjoint(paths))
 }

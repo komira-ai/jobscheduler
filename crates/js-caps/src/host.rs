@@ -16,10 +16,12 @@
 //! | [`SCRATCH_DEFAULT_GIB`] | whole GiB | the quota it enforces on a run that names none |
 //! | [`BUNDLE`] | the held bundle manifest digests, `sha256:<hex>`, comma-separated | the agent has a bundle store and holds at least one bundle |
 //! | [`BUNDLE_ROOT`] | the absolute path of the bundle store | the agent has a bundle store |
+//! | [`LAYERED_ROOTFS`] | [`FLAG_SET`] | the agent reads a job start's layers, path mounts and host ports, and its runtime and kernel can make them (or refuse by name what they cannot) |
 //! | [`TIERSTORE_TREES`] | [`FLAG_SET`] | the agent is configured for the node's `tierstore fs` and its control socket answered the agent's start-time probe |
 //!
 //! A job request may require [`EXEC`] (the same mode), [`DISK_GIB`] (at least that
 //! much free disk) and [`TIERSTORE_TREES`] (the same value); see [`crate::Request`].
+//! It may require [`LAYERED_ROOTFS`] too, with the same value.
 //!
 //! A pool that declares an execution mode makes a [`HostContract`] of it: `runtime` must
 //! equal the mode, and a pool with GPUs also needs `gpu-toolkit`. The check is
@@ -84,11 +86,19 @@ pub const GPU_PASSTHROUGH: &str = "gpu-passthrough";
 /// there. A request compares it exactly.
 pub const TIERSTORE_TREES: &str = "tierstore-trees";
 
+/// The capability key of an agent that reads a job start's `layers`, `mounts` and
+/// `host_ports` (`js_agent_wire::JobStartSpec`) and refuses by name what its runtime cannot
+/// make of them. Its value is [`FLAG_SET`]. An agent without it ignores the three fields and
+/// would run the job on its image alone, so a job that sets any of them is placed only on a
+/// host that reports this key, and its start is sent only there. A request compares it
+/// exactly.
+pub const LAYERED_ROOTFS: &str = "layered-rootfs";
+
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 11] = [
+pub const DETECTED_KEYS: [&str; 12] = [
     RUNTIME,
     GPU_TOOLKIT,
     GPU_PASSTHROUGH,
@@ -100,6 +110,7 @@ pub const DETECTED_KEYS: [&str; 11] = [
     BUNDLE,
     BUNDLE_ROOT,
     TIERSTORE_TREES,
+    LAYERED_ROOTFS,
 ];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.

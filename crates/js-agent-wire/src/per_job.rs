@@ -30,6 +30,7 @@ use crate::limits;
 use crate::log_sink::{self, LogReport, LogSink};
 use crate::network;
 use crate::refusal;
+use crate::rootfs::{self, Layer, PathMount};
 use crate::run::RunSpec;
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
@@ -116,7 +117,8 @@ impl BookedResources {
 /// The `run`, `os` and `arch` of the one job definition are here as on a run start
 /// ([`crate::JobSpec::run`]); a native body and a bundle are not carried. Fields a later
 /// change adds, as optional fields: the network policy and the declared ports (the job
-/// network change), the kind of start, and the isolation.
+/// network change), the kind of start, the isolation, and the layers, path mounts and host
+/// ports of a job's file system (`docs/design/job-rootfs.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobStartSpec {
     /// The job's id; the key of every idempotent step. The grammar of every id here
@@ -125,12 +127,17 @@ pub struct JobStartSpec {
     /// The id of the allocation this start is for, new at every placement of the job.
     pub allocation_id: String,
     /// The container image, pinned by a `sha256:` digest ([`JobStartSpec::require_pinned`]),
-    /// in the grammar of [`crate::JobSpec::image`]. A start that names none (absent or
-    /// empty) is refused `invalid-job`.
-    #[serde(default)]
+    /// in the grammar of [`crate::JobSpec::image`]. It may be empty (or absent) only when
+    /// `layers` is not: the root is then the layers alone, with no image configuration. A
+    /// start with neither is refused `invalid-job`. Left out of the text when empty, which
+    /// only a start with layers may be.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub image: String,
     /// The program and its arguments after the image, as [`crate::JobSpec::args`]: at most
-    /// [`limits::MAX_ARGS`] entries, no NUL.
+    /// [`limits::MAX_ARGS`] entries, no NUL. With an empty `image` there is no image
+    /// command to follow, so the first entry is the program, an absolute path in the root
+    /// held to the rules of a run's `program` (refused `invalid-program` naming `command`
+    /// otherwise, and when there is none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
     /// What runs from the image ([`RunSpec`]), as [`crate::JobSpec::run`]: checked by
@@ -201,22 +208,46 @@ pub struct JobStartSpec {
     /// whose hello reports [`HOST_JOBS_CAPABILITY`].
     #[serde(default, skip_serializing_if = "Isolation::is_contained")]
     pub isolation: Isolation,
+    /// The read-only layers of the job's root, base first, above `image` (or in place of it,
+    /// when `image` is empty); a later layer's file hides an earlier one's. With layers the
+    /// root is writable and the writes are the job's own. At most [`limits::MAX_LAYERS`];
+    /// left out when there are none, and the root is then `image` alone, read-only.
+    ///
+    /// This and the two fields below are sent only to a host that reports the capability
+    /// `layered-rootfs` (`js_caps::LAYERED_ROOTFS`): an agent that predates them ignores
+    /// them and would run the job on its image alone. None is allowed with
+    /// [`Isolation::Host`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
+    /// Host directories at paths in the job's file system ([`PathMount`]), made after the
+    /// root, parents before children. At most [`limits::MAX_MOUNTS`]; left out when there
+    /// are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<PathMount>,
+    /// TCP ports on the host's loopback the job reaches at the same port on its own
+    /// loopback, whatever its `network`. Not `ports`, which forward the other way. At most
+    /// [`limits::MAX_PORTS`], each from 1 to 65535, none twice; left out when there are
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_ports: Vec<u16>,
 }
 
 impl JobStartSpec {
-    /// Checks the start: the ids, that an image is named and well formed, the command, the
-    /// environment, the files, the booked resources, the wall limit and the declared ports. The server calls it
-    /// before it sends a start and the agent before it acts on one, together with
-    /// [`JobStartSpec::require_pinned`]. It does not look at `log_sink`: a sink never
-    /// refuses a start ([`JobStartSpec::log_sink_checked`]).
+    /// Checks the start: the ids, that an image or a layer is named and the image well
+    /// formed, the command, the environment, the files, the booked resources, the wall
+    /// limit, the declared ports, and the layers, path mounts and host ports
+    /// ([`crate::rootfs`]). The server calls it before it sends a start and the agent before
+    /// it acts on one, together with [`JobStartSpec::require_pinned`]. It does not look at
+    /// `log_sink`: a sink never refuses a start ([`JobStartSpec::log_sink_checked`]).
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("job_id"), &self.job_id)?;
         check::ident(at.field("allocation_id"), &self.allocation_id)?;
         if self.image.is_empty() {
-            return Err(at.field("image").fail(Rule::Empty));
+            self.check_imageless(at)?;
+        } else {
+            image::image(At::new("image", refusal::INVALID_IMAGE), &self.image)?;
         }
-        image::image(At::new("image", refusal::INVALID_IMAGE), &self.image)?;
         check::args(at.field("command"), &self.command)?;
         if let Some(run) = &self.run {
             run.validate()?;
@@ -235,7 +266,36 @@ impl JobStartSpec {
             ));
         }
         check::range(at.field("wall_ms"), self.wall_ms, 1, limits::MAX_WALL_MS)?;
-        network::check_ports(&network::JOB_PORTS, &self.ports)
+        network::check_ports(&network::JOB_PORTS, &self.ports)?;
+        rootfs::check_layers(&self.layers)?;
+        rootfs::check_mounts(&self.mounts)?;
+        rootfs::check_host_ports(&self.host_ports)?;
+        let rootfs = [
+            self.layers.is_empty(),
+            self.mounts.is_empty(),
+            self.host_ports.is_empty(),
+        ];
+        if self.isolation == Isolation::Host && rootfs.contains(&false) {
+            return Err(at.field("isolation").fail(Rule::Inconsistent));
+        }
+        Ok(())
+    }
+
+    /// A start with an empty image: it has layers (`image`, `invalid-job`), no `run`, which
+    /// names its job by the image (`run`, `invalid-image`), and a command whose first entry
+    /// is an absolute program (`command`, `invalid-program`).
+    fn check_imageless(&self, at: At) -> Result<(), ValidationError> {
+        if self.layers.is_empty() {
+            return Err(at.field("image").fail(Rule::Empty));
+        }
+        if self.run.is_some() {
+            return Err(At::new("run", refusal::INVALID_IMAGE).fail(Rule::Inconsistent));
+        }
+        let program = At::new("command", refusal::INVALID_PROGRAM);
+        let Some(first) = self.command.first() else {
+            return Err(program.fail(Rule::Empty));
+        };
+        check::path(program, js_types::path::absolute(first))
     }
 
     /// The start's [`LogSink`], checked: `Ok(None)` when there is none, and an error with
@@ -256,14 +316,19 @@ impl JobStartSpec {
         sink.check(at, &self.job_id).map(|()| Some(sink))
     }
 
-    /// Checks that the image is pinned by a `sha256:` digest, after
-    /// [`JobStartSpec::validate`] has passed: a tag-only image is refused with
-    /// [`refusal::IMAGE_DIGEST_REQUIRED`] naming `image`, as for a run start.
+    /// Checks that the image and every image layer are pinned by a `sha256:` digest, after
+    /// [`JobStartSpec::validate`] has passed: a tag-only one is refused with
+    /// [`refusal::IMAGE_DIGEST_REQUIRED`] naming `image` or `layers.image`, as for a run
+    /// start. An empty image, which `validate` lets pass only beside layers, is not looked
+    /// at.
     pub fn require_pinned(&self) -> Result<(), ValidationError> {
-        image::pinned(
-            At::new("image", refusal::IMAGE_DIGEST_REQUIRED),
-            &self.image,
-        )
+        if !self.image.is_empty() {
+            image::pinned(
+                At::new("image", refusal::IMAGE_DIGEST_REQUIRED),
+                &self.image,
+            )?;
+        }
+        rootfs::pin_layers(&self.layers)
     }
 }
 
@@ -301,8 +366,10 @@ pub struct JobResult {
     /// The code of the input failure, when a tree input ([`crate::InputRef::Tree`]) failed
     /// while the job ran: [`refusal::TREE_READ_FAILED`], [`refusal::TREE_STALLED`] or
     /// [`refusal::TREE_UNAVAILABLE`]. The failure is then the host's, whatever the outcome
-    /// and exit status, which are kept as they were. Absent otherwise, and left out of the
-    /// text. `detail` keeps its meaning beside it. A server from before the field ignores
+    /// and exit status, which are kept as they were. An agent that reads a start's layers,
+    /// path mounts and host ports sends [`refusal::INPUT_UNREADABLE`] or
+    /// [`refusal::HOST_PORT_LOST`] here in the same sense. Absent otherwise, and left out
+    /// of the text. `detail` keeps its meaning beside it. A server from before the field ignores
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_failure: Option<String>,

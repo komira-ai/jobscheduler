@@ -33,6 +33,9 @@ fn start(kind: StartKind) -> JobStartSpec {
         log_sink: None,
         kind,
         isolation: Default::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 

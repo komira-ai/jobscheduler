@@ -108,6 +108,9 @@ fn start_of(job: &str, allocation: &str) -> Command {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }))
 }
 

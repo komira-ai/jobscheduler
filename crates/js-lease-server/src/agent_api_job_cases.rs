@@ -43,6 +43,9 @@ async fn a_start_is_resent_until_listed() {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     };
     let mut last = None;
     for _ in 0..3 {

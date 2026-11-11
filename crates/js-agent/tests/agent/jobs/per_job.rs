@@ -45,6 +45,9 @@ fn job_starts(jobs: &[&str]) -> HeartbeatReply {
                 log_sink: None,
                 kind: Default::default(),
                 isolation: Default::default(),
+                layers: Vec::new(),
+                mounts: Vec::new(),
+                host_ports: Vec::new(),
             }))
         })
         .collect();

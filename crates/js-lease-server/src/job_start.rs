@@ -166,6 +166,11 @@ pub(crate) fn start_of(
         log_sink,
         kind: Default::default(),
         isolation,
+        // A job names no layers, path mounts or host ports yet, so its start carries none
+        // and is the text it was.
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);

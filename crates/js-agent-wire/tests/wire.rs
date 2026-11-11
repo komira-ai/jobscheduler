@@ -80,6 +80,12 @@ fn refusal_codes_snapshot() {
         refusal::OUTPUTS_UNSUPPORTED_HERE,
         refusal::TOO_MANY_INPUTS_HERE,
         refusal::CWD_IN_TREE,
+        refusal::INPUT_NOT_ALLOWED,
+        refusal::INPUT_UNAVAILABLE,
+        refusal::ROOTFS_UNSUPPORTED_HERE,
+        refusal::MOUNT_TARGET_UNSUPPORTED_HERE,
+        refusal::INPUT_UNREADABLE,
+        refusal::HOST_PORT_LOST,
     ];
     assert_eq!(
         codes.join(" "),
@@ -93,7 +99,9 @@ fn refusal_codes_snapshot() {
          platform-mismatch image-unsupported-here run-unsupported env-unsupported image-not-allowed \
          invalid-log-sink invalid-log-credential vm-unavailable \
          tree-unavailable tree-invalid tree-read-failed tree-stalled tree-placement-unsupported \
-         tree-unsupported-here outputs-unsupported-here too-many-inputs-here cwd-in-tree"
+         tree-unsupported-here outputs-unsupported-here too-many-inputs-here cwd-in-tree \
+         input-not-allowed input-unavailable rootfs-unsupported-here \
+         mount-target-unsupported-here input-unreadable host-port-lost"
     );
 }
 

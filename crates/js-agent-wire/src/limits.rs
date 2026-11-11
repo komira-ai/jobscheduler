@@ -22,6 +22,9 @@
 //! | run files | [`MAX_RUN_FILES`] entries; name [`MAX_RUN_FILE_NAME_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric, none twice; contents [`MAX_RUN_FILE_LEN`] bytes each and [`MAX_RUN_FILES_TOTAL_BYTES`] in all, no NUL |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` and [`MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN`] for `egress-ports` |
+//! | a job start's `layers` | [`MAX_LAYERS`] entries; a host path [`MAX_PATH_LEN`] bytes, absolute, in normal form; an image as `image` |
+//! | a job start's path `mounts` | [`MAX_MOUNTS`] entries; `source` as a layer's host path; `target` [`MAX_PATH_LEN`] bytes with its leading `/`, ASCII, outside the runtime's places, no two equal in any case |
+//! | a job start's `host_ports` | [`MAX_PORTS`] entries, each from 1 to 65535, none twice |
 //! | declared ports (`JobSpec::ports`) | [`MAX_PORTS`] entries, each port from 1 to 65535; the capability `egress-ports` [`MAX_PORTS`] items |
 //! | caps frame | [`MAX_CAPS_BUNDLES`] digests, [`MAX_CAPS_XCODES`] Xcode builds of [`MAX_XCODE_BUILD_LEN`] bytes |
 //! | free text (`agent_version`, taint, `detail`, `input_failure`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
@@ -47,8 +50,8 @@ pub const MAX_ARGS: usize = 1024;
 pub const MAX_ARG_LEN: usize = 16 * 1024;
 /// Most bytes all arguments of one job may hold together.
 pub const MAX_ARGS_TOTAL_BYTES: usize = 256 * 1024;
-/// Longest `program` of a run or a native job, in bytes.
-pub const MAX_PROGRAM_LEN: usize = 4096;
+/// Longest `program` of a run or a native job, in bytes: `js-types`' bound on a path.
+pub const MAX_PROGRAM_LEN: usize = js_types::path::MAX_PATH_LEN;
 /// Most environment entries on a run, a native job or a job start.
 pub const MAX_ENV: usize = 256;
 /// Longest environment variable name, in bytes.
@@ -62,12 +65,18 @@ pub const MAX_ENV_TOTAL_BYTES: usize = 128 * 1024;
 pub const MAX_INPUTS: usize = 256;
 /// Most declared outputs on a run or a native job.
 pub const MAX_OUTPUTS: usize = 256;
-/// Most mounts on one job.
+/// Most mounts on one job: a run start's `mounts`, and a job start's path `mounts`.
 pub const MAX_MOUNTS: usize = 64;
 /// Longest mount root name, in bytes.
 pub const MAX_ROOT_NAME_LEN: usize = 64;
-/// Longest path below a mount root, in bytes.
-pub const MAX_REL_LEN: usize = 4096;
+/// Longest path below a mount root, in bytes: `js-types`' bound on a path.
+pub const MAX_REL_LEN: usize = js_types::path::MAX_PATH_LEN;
+/// Most layers of a job start's root ([`crate::JobStartSpec::layers`]).
+pub const MAX_LAYERS: usize = 16;
+/// Longest host path of a layer or a path mount, and longest mount target, in bytes, a
+/// target's leading `/` included: `js-types`' bound on a path, which the server holds a
+/// job's paths to as well.
+pub const MAX_PATH_LEN: usize = js_types::path::MAX_PATH_LEN;
 /// Most files one job may be given (`JobSpec::files`).
 pub const MAX_RUN_FILES: usize = 8;
 /// Longest run file name, in bytes; the same grammar and cap as a mount root name.
@@ -107,7 +116,8 @@ pub const MAX_CAPS_XCODES: usize = 16;
 /// Longest Xcode build id in a [`crate::Caps`] frame, in bytes.
 pub const MAX_XCODE_BUILD_LEN: usize = 32;
 
-/// Most ports one job may declare (`JobSpec::ports`), and most items of the capability
+/// Most ports one job may declare (`JobSpec::ports`), most host ports a job start may name
+/// ([`crate::JobStartSpec::host_ports`]), and most items of the capability
 /// [`crate::EGRESS_PORTS_CAPABILITY`] (the host ports an agent allows).
 pub const MAX_PORTS: usize = 16;
 /// Longest value of the capability [`crate::EGRESS_PORTS_CAPABILITY`], in bytes: that many

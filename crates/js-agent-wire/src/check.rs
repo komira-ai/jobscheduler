@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use js_types::path::PathFault;
 use js_types::{Labels, RESERVED_PREFIX};
 
 use crate::error::{Rule, ValidationError};
@@ -94,45 +95,25 @@ pub(crate) fn text(at: At, value: &str, max: usize) -> Result<(), ValidationErro
     Ok(())
 }
 
-/// A character that must not appear in text a person or a log may read: a control
-/// character, a format character or a line or paragraph separator.
-pub(crate) fn hidden(c: char) -> bool {
-    c.is_control() || is_format(c)
-}
+/// A character that must not appear in text a person or a log may read: `js-types`' one
+/// predicate ([`js_types::text::hidden`]), which the server checks with too.
+pub(crate) use js_types::text::hidden;
 
-/// The Unicode format characters (general category Cf) of Unicode 16.0, as listed by
-/// UCD 16.0.0 (the data `regex-syntax` 0.8.11 and `unicode-general-category` 1.1.0 are
-/// generated from), and U+2028 and U+2029 (categories Zl and Zp). None draws a glyph,
-/// but each can reorder or hide the text around it. The tests name a code point at both
-/// ends of every range and one just outside each.
-const FORMAT_RANGES: [(u32, u32); 21] = [
-    (0x00AD, 0x00AD),
-    (0x0600, 0x0605),
-    (0x061C, 0x061C),
-    (0x06DD, 0x06DD),
-    (0x070F, 0x070F),
-    (0x0890, 0x0891),
-    (0x08E2, 0x08E2),
-    (0x180E, 0x180E),
-    (0x200B, 0x200F),
-    (0x2028, 0x202E),
-    (0x2060, 0x2064),
-    (0x2066, 0x206F),
-    (0xFEFF, 0xFEFF),
-    (0xFFF9, 0xFFFB),
-    (0x110BD, 0x110BD),
-    (0x110CD, 0x110CD),
-    (0x13430, 0x1343F),
-    (0x1BCA0, 0x1BCA3),
-    (0x1D173, 0x1D17A),
-    (0xE0001, 0xE0001),
-    (0xE0020, 0xE007F),
-];
-fn is_format(c: char) -> bool {
-    let code = u32::from(c);
-    FORMAT_RANGES
-        .iter()
-        .any(|&(low, high)| (low..=high).contains(&code))
+/// The result of one of `js-types`' path rules ([`js_types::path`]) as the error of `at`:
+/// each [`PathFault`] is the [`Rule`] of the same name, and [`PathFault::Nested`] is
+/// [`Rule::Inconsistent`], as a nested input or output always was here.
+pub(crate) fn path(at: At, checked: Result<(), PathFault>) -> Result<(), ValidationError> {
+    checked.map_err(|fault| {
+        at.fail(match fault {
+            PathFault::Empty => Rule::Empty,
+            PathFault::TooLong => Rule::TooLong,
+            PathFault::BadChars => Rule::BadChars,
+            PathFault::Escapes => Rule::Escapes,
+            PathFault::Duplicate => Rule::Duplicate,
+            PathFault::Nested => Rule::Inconsistent,
+            PathFault::RuntimePlace => Rule::RuntimePlace,
+        })
+    })
 }
 
 /// Present text; absent text passes.

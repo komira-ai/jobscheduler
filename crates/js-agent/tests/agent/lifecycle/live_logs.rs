@@ -41,6 +41,9 @@ fn start(job_id: &str, bucket: &str, prefix: &str) -> JobStartSpec {
         }),
         kind: Default::default(),
         isolation: Default::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 
