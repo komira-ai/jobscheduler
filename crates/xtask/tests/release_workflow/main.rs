@@ -10,8 +10,11 @@ use std::path::Path;
 
 mod apt;
 mod artifacts;
+mod calls;
 mod debs;
 mod images;
+
+use calls::{CALLED, CALLERS, calls};
 
 /// The text of `.github/workflows/<file>`.
 fn read_workflow(file: &str) -> String {
@@ -62,21 +65,10 @@ fn job<'a>(jobs: &'a [(String, Vec<String>)], name: &str) -> &'a [String] {
         .1
 }
 
-/// The one workflow a job of the release calls, as its `uses:` line writes it.
-const CALLED: &str = "uses: ./.github/workflows/artifacts.yml";
-
-/// The `uses:` value of a job that calls a workflow (`uses:` at the job's own level), if it is one.
-fn calls(lines: &[String]) -> Option<&str> {
-    lines
-        .iter()
-        .find_map(|l| l.strip_prefix("    uses: "))
-        .map(str::trim)
-}
-
-/// Asserts, in both files, that every action `uses:` names a full 40-digit commit SHA with its
-/// version in a comment (the one local call, the release's `artifacts` job, excepted), that the
-/// top level grants nothing, and that every job runs on a GitHub-hosted runner image of a
-/// pinned version, or is that call.
+/// Asserts, in both files, that every action and called workflow `uses:` names a full 40-digit
+/// commit SHA with its version in a comment (the one local call, the release's `artifacts` job,
+/// excepted), that the top level grants nothing, and that every job runs on a GitHub-hosted
+/// runner image of a pinned version, or is one of the release's two calls ([`CALLERS`]).
 #[test]
 fn actions_are_pinned_and_the_top_grants_nothing() {
     for (file, text, least) in [
@@ -108,13 +100,10 @@ fn actions_are_pinned_and_the_top_grants_nothing() {
                 .filter(|l| l.trim_start().starts_with("runs-on:"))
                 .collect();
             if let Some(called) = calls(&lines) {
-                assert_eq!(
-                    (file, name.as_str(), called),
-                    (
-                        "release.yml",
-                        "artifacts",
-                        "./.github/workflows/artifacts.yml"
-                    )
+                assert_eq!(file, "release.yml", "{name}");
+                assert!(
+                    CALLERS.contains(&(name.as_str(), called)),
+                    "{name}: {called}"
                 );
                 assert!(runs_on.is_empty(), "{name}");
                 continue;
@@ -163,9 +152,17 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     );
     let push = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
     let jobs = jobs(&text);
-    let mut gated: Vec<String> = ["ci-passed", "plan", "publish", "deploy-tool", "gamma"]
-        .map(str::to_owned)
-        .to_vec();
+    let mut gated: Vec<String> = [
+        "ci-passed",
+        "plan",
+        "publish",
+        "deploy-tool",
+        "gamma",
+        "cp-deploy-digest",
+        "cp-deploy",
+    ]
+    .map(str::to_owned)
+    .to_vec();
     gated.extend(apt::apt_jobs(&text));
     for name in &gated {
         let ifs: Vec<&String> = job(&jobs, name)
@@ -251,7 +248,8 @@ fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     assert!(job(&jobs, "plan").join("\n").contains("needs: [ci-passed]"));
 }
 
-/// Asserts that publish, deploy-tool and gamma run only on the plan's word that a release is
+/// Asserts that publish, deploy-tool, gamma and the control-plane deploy run only on the plan's
+/// word that a release is
 /// made, and never with a status function that would run them after a failed or skipped job,
 /// and that publish needs the call of artifacts.yml (so a failed attest or verify there stops
 /// it).
@@ -264,7 +262,13 @@ fn the_release_jobs_need_the_plans_release_and_no_status_function() {
             .iter()
             .any(|l| l == "    needs: [plan, artifacts]")
     );
-    for name in ["publish", "deploy-tool", "gamma"] {
+    for name in [
+        "publish",
+        "deploy-tool",
+        "gamma",
+        "cp-deploy-digest",
+        "cp-deploy",
+    ] {
         let ifs: Vec<&String> = job(&all, name)
             .iter()
             .filter(|l| l.starts_with("    if:"))

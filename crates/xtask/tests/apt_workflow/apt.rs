@@ -8,7 +8,8 @@
 //! of one step cannot sign and publish.
 //! - The jobs that read and write (environment `apt-publish`) hold `id-token: write` and the
 //!   role of the environment, assumed by one step; they name no signing key. No other job but
-//!   `artifacts` (the call of artifacts.yml) and `gamma` holds `id-token: write`.
+//!   `artifacts` (the call of artifacts.yml), `gamma` and `cp-deploy` (the call of
+//!   docker-swarm-updater's deploy workflow) holds `id-token: write`.
 //! - The index job (environment `apt-signing`) holds `contents: read` alone, assumes no role and
 //!   names no variable of the role; the key is read by its gate and its signing step alone, and
 //!   the signing step comes after the merge.
@@ -328,8 +329,9 @@ pub fn is_role_job(name: &str) -> bool {
 }
 
 /// The jobs besides the apt jobs that may hold `id-token: write` in `release.yml`: the call of
-/// artifacts.yml, whose jobs sign, and the gamma step.
-const TOKEN_HOLDERS: [&str; 2] = ["artifacts", "gamma"];
+/// artifacts.yml, whose jobs sign, the gamma step, and the call of docker-swarm-updater's deploy
+/// workflow, which asks for a token for each request to the deploy front.
+const TOKEN_HOLDERS: [&str; 3] = ["artifacts", "gamma", "cp-deploy"];
 
 /// The verb each kind of job runs, and no other kind: the index job of the suite `testing` merges
 /// the release's packages (`apt index`), the one of `stable` promotes the entries testing lists
@@ -401,7 +403,7 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
         }
         if !is_role_job(name) && !TOKEN_HOLDERS.contains(&name) && holds_token(found) {
             problems.push(format!(
-                "{name}: holds `id-token: write`; only artifacts, gamma and the apt jobs that read and write may"
+                "{name}: holds `id-token: write`; only artifacts, gamma, cp-deploy and the apt jobs that read and write may"
             ));
         }
         if own.is_none()

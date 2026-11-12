@@ -90,7 +90,7 @@ pub fn members(bin: &str, target: &str) -> Vec<Member> {
 /// letters, digits, `.`, `_` and `-`, not empty, and not starting with `.` or `-` (so not `.`,
 /// `..`, a hidden name or something a program reads as a flag). No `/`: a name never reaches
 /// outside `--out`.
-fn is_name(word: &str) -> bool {
+pub(crate) fn is_name(word: &str) -> bool {
     let first_ok = word
         .bytes()
         .next()

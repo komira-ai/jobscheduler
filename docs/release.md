@@ -77,6 +77,10 @@ that passes `ci` and ships code. Nothing runs on a timer.
    ([The apt repository](#the-apt-repository)).
 8. `gamma` (off until its variables are set, below) sets the release as the desired version of the
    service `js-server` on the update coordinator and waits for it to converge.
+9. `cp-deploy-digest` and `cp-deploy` (off until their variables are set, below) deploy the release's
+   linux-x86_64 image of `js-lease-server` to the control plane's Docker Swarm service `js-server`
+   through docker-swarm-updater and wait for it to converge ([The control-plane
+   deploy](#the-control-plane-deploy)).
 
 After the run, `.github/workflows/hostkeeper-desired.yml` (off until its variable is set) sets the
 release as hostkeeper's desired version of `js-agent` ([Deploying through
@@ -86,17 +90,20 @@ Each job holds only the permission it needs: `contents: read` for plan, build, d
 verify, the apt index jobs and `check-apt` (plus `attestations: read` for verify), `id-token` and
 `attestations` write for `attest`, `actions: read` alone for `ci-passed`, `contents` write for
 `publish` (the tag and the release), `contents: read` and `id-token` write for the apt read and
-write jobs (the token is exchanged for the apt publish role), `id-token` write alone for `gamma`.
+write jobs (the token is exchanged for the apt publish role), `id-token` write alone for `gamma`
+and for `cp-deploy` (the call of docker-swarm-updater's deploy workflow), nothing for
+`cp-deploy-digest`.
 The `artifacts` job of release.yml grants `contents: read` and the two writes of `attest`, since a
 called workflow's jobs can hold no more than the calling job grants; each job of artifacts.yml then
 asks for its own. No job
-that holds a write permission or the signing key compiles code: `gamma` and the apt read, index and
-write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
+that holds a write permission or the signing key compiles this repository's code: `gamma`,
+`cp-deploy-digest` and the apt read, index and write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
 the build, whose scripts run code from the locked dependency set, never shares a job with the token
 service's address, the cloud role or the key. The rules (SHA-pinned
-actions, no permission at the top, `id-token` write in `attest`, the apt read and write jobs and
-`gamma` only, signing in artifacts.yml's `attest` only) are pinned by
-`crates/xtask/tests/release_workflow`, and the apt jobs by `crates/xtask/tests/apt_workflow`.
+actions, no permission at the top, `id-token` write in `attest`, the apt read and write jobs,
+`gamma` and `cp-deploy` only, signing in artifacts.yml's `attest` only) are pinned by
+`crates/xtask/tests/release_workflow`, and the apt jobs and the control-plane deploy by
+`crates/xtask/tests/apt_workflow`.
 
 ## What is released
 
@@ -538,8 +545,9 @@ tar's `index.json` ([The js-lease-server image](#the-js-lease-server-image)); fo
 
 ## Configuration the project owner must set
 
-Apart from the apt jobs' two environments ([The apt repository](#the-apt-repository)), the
-workflow needs no secret and no environment. It does need repository settings that only the
+Apart from the apt jobs' two environments ([The apt repository](#the-apt-repository)) and the
+control-plane deploy's environment `controlplane` ([The control-plane
+deploy](#the-control-plane-deploy)), the workflow needs no secret and no environment. It does need repository settings that only the
 project owner can make. This section says what to set; it does not say what has been set. At the time
 of writing the repository has no ruleset and no branch protection, so none of the following holds
 until it is set.
@@ -612,6 +620,64 @@ The coordinator must already run the service `js-server` and allow this reposito
 workflow on `main` to set it; until it does, the calls are refused and
 the job fails, so leave `JS_COORDINATOR_URL` unset until then. The job fails the run's last step
 only: the release is already published, and "Re-run failed jobs" repeats the step.
+
+## The control-plane deploy
+
+After a release is published, `cp-deploy` deploys the release's linux-x86_64 image of
+`js-lease-server` (`js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.oci.tar`, above) to the Docker
+Swarm service `js-server` of the control plane, through docker-swarm-updater. It calls that
+repository's reusable workflow `komira-ai/docker-swarm-updater/.github/workflows/deploy.yml`, pinned
+by the full commit the updater's allow-list names for the calling workflow (`c1fcc476...`, the
+updater's v0.1.3); a newer commit is refused by the updater until its allow-list names it.
+
+`cp-deploy-digest` comes first. It holds no permission and compiles nothing: it downloads the files
+`publish` uploaded (the run's `release-assets` and `bundles` artifacts, the same bytes) and the
+`xtask` that `deploy-tool` built, and runs that `xtask release image-digest --dist dist --repo
+<owner/repo> --version X.Y.Z` (`crates/xtask/src/release/image_digest.rs`). That refuses the image
+unless `SHA256SUMS` lists it exactly once with its SHA-256 and its bundle is there, then reads the
+one manifest the image's `index.json` names, checks that the manifest's blob hashes to that digest,
+and outputs `digest=sha256:<hex>` and the release's download addresses of the image and its bundle
+(`https://github.com/<owner/repo>/releases/download/vX.Y.Z/<file>`).
+
+`cp-deploy` then calls the deploy workflow with `id-token: write` alone and these inputs:
+
+| Input | Value |
+|---|---|
+| `service` | `js-server` |
+| `version` | the plan's `X.Y.Z`, as for `gamma` |
+| `image-digest`, `image-url`, `bundle-url` | the outputs of `cp-deploy-digest` |
+| `endpoint`, `audience` | the variables `CP_DEPLOY_ENDPOINT`, `CP_DEPLOY_AUDIENCE` |
+| `environment` | `controlplane` |
+| `wait-minutes` | 60 |
+| `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` | the variables `CP_DEPLOY_TAILSCALE_CLIENT_ID`, `CP_DEPLOY_TAILSCALE_AUDIENCE`, `CP_DEPLOY_TAILSCALE_TAGS` |
+
+The signer inputs keep the called workflow's defaults: this repository, `.github/workflows/artifacts.yml`
+and `refs/heads/main`, which is the signer of every attestation of the release. The called job runs in
+this repository's environment `controlplane`, joins the updater's Tailscale network when
+`CP_DEPLOY_TAILSCALE_CLIENT_ID` is set, and asks GitHub for a fresh OIDC token for each request.
+docker-swarm-updater (its `docs/design.md`) checks the token's claims and the image's bundle against
+the signer, then updates the service by digest; nothing in this repository enforces that side. The job passes when the deploy
+is reported converged and fails otherwise, or when 60 minutes pass first (the deploy then goes on).
+
+The project owner sets up the environment `controlplane` with deployments from `main` only and no
+required reviewer; this repository does not check that it is so.
+
+**It is off by default.** With either of the repository variables `CP_DEPLOY_ENDPOINT` and
+`CP_DEPLOY_TAILSCALE_TAGS` empty or unset both jobs are skipped and the release ends as it did
+without them. The tags are required because the Tailscale join refuses a workload-identity client
+id without tags. Repository variables (Settings, Secrets and
+variables, Actions, Variables):
+
+| Variable | Meaning |
+|---|---|
+| `CP_DEPLOY_ENDPOINT` | the deploy front, `http[s]://host[:port]`; unset: the deploy is off |
+| `CP_DEPLOY_AUDIENCE` | the audience of the OIDC tokens, the one the deploy front is configured with |
+| `CP_DEPLOY_TAILSCALE_CLIENT_ID`, `CP_DEPLOY_TAILSCALE_AUDIENCE` | the Tailscale workload-identity client the job joins the deploy front's network with, and its audience; the client id unset: no join |
+| `CP_DEPLOY_TAILSCALE_TAGS` | the tags the ephemeral node takes, ones that client can issue; unset: the deploy is off |
+
+Like `gamma`, the deploy fails the run's last steps only: the release is already published, and
+"Re-run failed jobs" repeats it. The rules of the two jobs are pinned by
+`crates/xtask/tests/apt_workflow` (`cp_deploy.rs`).
 
 ## Recovery
 
