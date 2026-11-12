@@ -34,12 +34,9 @@
 # site/.node-version. The network is touched by `npm ci` alone, with install scripts off.
 # The site steps build and test; they hold no cloud access and put nothing anywhere.
 #
-# Every pull request runs the `macos` job on GitHub's hosted macos-15 runner (the workspace's
-# tests on Apple silicon, then the release's macOS build), and js-agent-macos-pkg.yml builds the
-# macOS package for it; both are to be required checks of main
-# (tools/held/required-checks/require_macos_checks.sh). No macOS job that runs on a pull
-# request names a secret or holds a write permission, and a newer push to a pull request cancels
-# its older macOS runs (crates/xtask/tests/pr_macos_jobs holds every workflow to that).
+# A pull request runs Linux x86_64 on GitHub's hosted ubuntu runners and nothing else: macOS and
+# arm64 are the beta stage of the release (beta.yml, called by release.yml on a push to main;
+# crates/xtask/tests/pr_linux_only holds every workflow that a pull request starts to that).
 name: ci
 
 on:
@@ -53,7 +50,7 @@ on:
 permissions: {}
 
 # One run per workflow and pull request: a new push to a PR cancels that PR's queued or
-# running run (macOS runners are scarce). A push to main gets a group of its own (the run
+# running run. A push to main gets a group of its own (the run
 # id), so it is never cancelled and never replaced while pending: GitHub keeps only one
 # pending run per group, and the release runs only after a main run succeeds.
 concurrency:
@@ -210,111 +207,6 @@ jobs:
       - name: v1 acceptance over the server binary, an agent and js
         if: ${{ !cancelled() }}
         run: cargo test --locked -p js-lease-server --test v1_acceptance
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
-
-  # The workspace builds and passes its tests on Apple silicon, on every pull request and every
-  # push to main, but for the three crates that are Linux code and are not built for macOS:
-  # js-contain (the crun runtime, cgroups), js-host-step (the Linux host steps) and js-mdm
-  # (which applies its rendering to a Linux host through js-host-step; the rendering,
-  # js-mdm-core, is tested here). Tests that
-  # need Linux (pidfds, /proc, crun) are cfg-gated, not removed; the coverage and the Postgres
-  # tests stay on Linux. js-mac-pool's Seatbelt profile builder also runs its generated profile
-  # under the real `sandbox-exec` here (tests/runner.rs), and xtask's macOS package tests build
-  # a package with Apple's pkgbuild.
-  #
-  # On a pull request the job then makes, from the pull request's commit, what the release's
-  # macOS leg makes after a merge (artifacts.yml, `build` for aarch64-apple-darwin): the release
-  # build of each binary of that leg and its archive directory (`release stage`), with the
-  # leg's checks (each binary's minos is at most the pinned macOS and its --version prints
-  # the version). The version is the workspace's, not stamped, and nothing is uploaded. A push
-  # to main skips those steps: the release's own leg makes the same files from that commit.
-  # crates/xtask/tests/pr_macos_jobs pins that the step builds the leg's binaries.
-  macos:
-    runs-on: macos-15
-    # Pushes to main share one group with cancel-in-progress false: one run executes, one
-    # waits, and a newer waiting run replaces an older one, so the hosted macOS pool never
-    # holds a backlog of main runs (the newest main commit's result covers the older ones;
-    # main's run is the fix-forward backstop). A pull request gets a group of its own per run,
-    # and the workflow's group above cancels it when the pull request is pushed again.
-    concurrency:
-      group: ${{ github.event_name == 'pull_request' && format('ci-macos-{0}', github.run_id) || 'ci-macos-main' }}
-      cancel-in-progress: false
-    # The workspace's tests take about an hour on the hosted runner (the first full run: the
-    # build 10 minutes, the tests 47 minutes before one test hung).
-    timeout-minutes: 120
-    env:
-      # The oldest macOS the binaries must run on; a newer image must not raise it
-      # (the step after the build reads each binary's minos and fails above this).
-      MACOSX_DEPLOYMENT_TARGET: "11.0"
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: rustup toolchain install
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cargo-cache
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      # The tests' host, prepared as the Linux jobs prepare theirs. A second loopback address:
-      # Linux routes all of 127.0.0.0/8 to the loopback interface, macOS answers on 127.0.0.1
-      # alone, and the lease server's tests put a second listener on 127.0.0.2. And a Postgres
-      # server for the tests that need one (macOS runners have no service containers), from
-      # Homebrew as the Linux jobs take theirs from the distribution: a data directory of this
-      # job, local connections trusted and the socket in the job's temporary directory, as the
-      # `test` job's service container; its URL is the one that job sets. A test that needs
-      # the server fails, and does not skip, when it is not there.
-      - name: Add the loopback address 127.0.0.2
-        run: sudo ifconfig lo0 alias 127.0.0.2 up
-      - name: Install Postgres from Homebrew
-        run: brew install --quiet postgresql@17
-      # crates/xtask/src/postgres_for_tests.rs: initdb, start and wait, then the URL in
-      # GITHUB_ENV for the steps after this one.
-      - name: Start a Postgres server for the tests that need one
-        run: cargo xtask postgres-for-tests --bin-dir /opt/homebrew/opt/postgresql@17/bin --data-dir "$RUNNER_TEMP/pg" --socket-dir "$RUNNER_TEMP" --github-env "$GITHUB_ENV"
-      - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step --exclude js-mdm
-      - name: Check the minimum macOS of the built binaries
-        run: |
-          set -euo pipefail
-          checked=0
-          for f in target/debug/*; do
-            [ -f "$f" ] && [ -x "$f" ] || continue
-            file "$f" | grep -q 'Mach-O 64-bit executable arm64' || continue
-            minos="$(otool -l "$f" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
-            echo "$f minos $minos"
-            if [ "$(printf '%s\n%s\n' "$minos" "$MACOSX_DEPLOYMENT_TARGET" | sort -V | tail -n 1)" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
-              echo "::error::$f needs macOS $minos, above the pinned $MACOSX_DEPLOYMENT_TARGET"
-              exit 1
-            fi
-            checked=$((checked + 1))
-          done
-          [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
-      # --no-fail-fast: a red run names every failing test, as in the Linux `test` job.
-      - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step --exclude js-mdm
-      - name: Add the release's macOS target
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        run: rustup target add aarch64-apple-darwin
-      # crates/xtask/src/release/macos_leg.rs: for each binary, the release build, `release
-      # stage`, its minos against the pinned macOS and its --version.
-      - name: Build, stage and package the release's macOS binaries
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        env:
-          TARGET: aarch64-apple-darwin
-          BUILDS: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
-        run: cargo xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos "$MACOSX_DEPLOYMENT_TARGET" --out "$RUNNER_TEMP/release-leg"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

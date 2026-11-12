@@ -1,6 +1,6 @@
 //! `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <MAJOR.MINOR>
-//! --out <dir>`: the darwin leg of a release, as the pull request's `macos` job runs it
-//! (`.github/workflows/ci.yml`) and as `artifacts.yml` (which `release.yml` calls) builds it.
+//! --out <dir>`: the darwin leg of a release, as `artifacts.yml` (which
+//! `release.yml` calls) builds it, made by hand on a Mac.
 //!
 //! For each `<package>:<bin>` of `--builds`, in order: `cargo build --locked --release --target
 //! <triple> -p <package> --bin <bin>` in `--repo-dir`; the archive's directory as `release stage`

@@ -1,20 +1,18 @@
 # Releasing js-lease-server, js, js-agent, js-bundle, js-mdm and the Mac host tools
 
 Releases are continuous. Nobody tags, and nothing is run by hand: every push to `main` that
-changes code that ships is released as the next version, after the jobs of `ci` other than `macos` have passed on it.
+changes code that ships is released as the next version, after the jobs of `ci` have passed on it.
 
 ## What happens on each merge to main
 
 1. `ci` runs on the push, as for any push, and the `release` workflow (`.github/workflows/release.yml`)
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
-2. `ci-passed` waits for the jobs of the `ci` run of that commit, all but the one named `macos` (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
-   and passes when every other job succeeded or was skipped, even while `macos` is still queued or after it failed.
-   If any other job failed, was cancelled or timed out, the release fails with an error naming those jobs and the `ci`
+2. `ci-passed` waits for the jobs of the `ci` run of that commit (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
+   and passes when every job succeeded or was skipped.
+   If any job failed, was cancelled or timed out, the release fails with an error naming those jobs and the `ci`
    run, and nothing is released. It holds `actions: read` and nothing else, and checks out no code.
-   A release therefore does not wait for macOS `ci`: that job queues for hours on the hosted macOS runners, so
-   main's own macOS run is the backstop (a failure there is fixed forward), and the release's own `aarch64-apple-darwin`
-   build still runs on a Mac (below).
+   `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a).
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
 4. The `artifacts` job calls `.github/workflows/artifacts.yml` with that version; its jobs run in
@@ -37,7 +35,9 @@ changes code that ships is released as the next version, after the jobs of `ci` 
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
    commit), uploads the archives, the Debian packages, the images, their bundles and `SHA256SUMS` to
    it, and publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a
-   Debian package or an image without its bundle.
+   Debian package or an image without its bundle. It leaves the macOS archives (`*-aarch64-apple-darwin.tar.gz`) out: step 6a adds them.
+
+6a. The beta stage, the platforms other than Linux x86_64, runs after `artifacts` and beside `publish` and everything after it (nothing of the Linux files, the Debian packages, the apt repository, `gamma` or the control-plane deploy waits for it). On the hosted `macos-15` runners it runs three jobs, each calling a workflow that holds `contents: read` and no secret: `beta-macos` (`beta.yml`: the workspace's tests on Apple silicon, all but the Linux-only crates js-contain, js-host-step and js-mdm), `beta-macos-pkg` (`js-agent-macos-pkg.yml`: the unsigned installer package of the agent, built and read back, kept as a workflow artifact for seven days) and `beta-macos-probe` (`macos-probe.yml`: what the native runtime relies on, probed on the runner). When the three and `publish` succeeded, `promote-macos` (`contents: write` alone, no repository code) adds the macOS archives to the published release; an archive the release already has must equal this run's byte for byte and is kept. `SHA256SUMS` lists them from the start, so until they are added `sha256sum -c --ignore-missing SHA256SUMS` is the check. A beta job that fails leaves the release without the macOS archives and the run red; fix forward, then re-run the failed jobs and `promote-macos` adds them. Following the owner's rule, a pull request runs none of this (`cargo test -p xtask --test pr_linux_only`): a pull request that changes `release.yml` runs `plan` as a dry run on Linux x86_64 and builds nothing, since `artifacts.yml`'s build matrix names the arm64 and macOS runners.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
@@ -559,11 +559,12 @@ until it is set.
   counts from.
 - **Branch protection for `main`**: require a pull request. A push to `main` that passes `ci` is a
   release, so whoever can push to `main` can cut one. The workflow does not depend on this, but the
-  guarantee that a release is a reviewed change does. Its required status checks include the two
-  macOS checks every pull request runs, `macos` (ci.yml) and `js-agent-macos-pkg`
-  (js-agent-macos-pkg.yml), so a change that breaks the Mac build or package cannot merge;
-  `tools/held/required-checks/require_macos_checks.sh` adds them (a dry run by default,
-  `--apply` to change the protection).
+  guarantee that a release is a reviewed change does. Its required status checks name Linux x86_64
+  checks only. `macos` (ci.yml) and `js-agent-macos-pkg` (js-agent-macos-pkg.yml) were required
+  while every pull request ran them; no pull request runs them now (they are the beta stage of the
+  release, step 6a), so remove them from the required checks, or every pull request waits for a
+  check that never reports. A change that breaks the Mac build or package is found by the beta
+  stage after the merge and fixed forward.
 - **The environments `apt-publish` and `apt-signing`**, restricted to `main`, with the variables and
   secrets [The apt repository](#the-apt-repository) lists. Until they exist every apt job passes
   doing nothing, and the release ends with the GitHub release published and no package in the
@@ -710,7 +711,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | The run was green but released nothing | `plan` printed why | a later release exists past the commit, or nothing that ships changed. Nothing to do. |
 | "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files and signs them again; `publish` compares each against the release and keeps them, and keeps the release's bundles without comparing them (each signing writes new bytes for the same file). If a file differs the run fails and nothing is changed. |
 
-Runs that wait: a release run starts with its push and waits for the jobs of `ci` but `macos`; if one fails there, the run fails
+Runs that wait: a release run starts with its push and waits for the jobs of `ci`; if one fails there, the run fails
 at `ci-passed` (red, with the `ci` run's link and the failed jobs) and the change is released by the next push that passes
 `ci` and ships code. Re-run the failed jobs after re-running `ci`, if the commit should release itself.
 
