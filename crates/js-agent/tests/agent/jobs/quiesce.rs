@@ -338,8 +338,10 @@ fn the_host_never_returns_an_answer_for_another_lease() {
 
 /// Asserts the same for the clean-up after a lease: the worker's `Done` for one lease is
 /// busy when asked about another, and nothing is done while the worker still follows the
-/// lease. It catches a restore that ends early on a reply the worker has not applied, and
-/// one answered with another lease's `Done`.
+/// lease; the question about the other lease is answered afresh (the checks run again and
+/// its own `Done` replaces the first lease's). It catches a restore that ends early on a
+/// reply the worker has not applied, one answered with another lease's `Done`, and a worker
+/// that keeps any lease's `Done` and so never answers the next lease.
 #[test]
 fn a_restored_answer_is_only_for_its_lease() {
     let dir = Scratch::new("jobs-quiesce-restore");
@@ -367,7 +369,12 @@ fn a_restored_answer_is_only_for_its_lease() {
     assert_eq!(host.restore(LEASE), Restored::Busy, "asked afresh");
     assert!(handle.settle());
     assert_eq!(host.restore(LEASE), Restored::Done);
+    let checked = machine.world.checked();
     assert_eq!(host.restore(OTHER), Restored::Busy, "the done is for LEASE");
+    assert!(handle.settle());
+    assert_eq!(host.restore(OTHER), Restored::Done, "answered for OTHER");
+    assert_eq!(machine.world.checked(), checked + 1, "the checks ran again");
+    assert_eq!(host.restore(LEASE), Restored::Busy, "replaced by OTHER's");
 }
 
 /// Asserts the readiness hook runs on the worker's thread and once for each lease: asked
