@@ -122,6 +122,7 @@ async fn fixture(name: &str) -> Fixture {
         StartFailure::StartTimeout,
         StartFailure::ExclusiveNotReady,
         StartFailure::AgentRefused,
+        StartFailure::InputUnavailable,
     ] {
         recorder.start_failed(failure);
     }

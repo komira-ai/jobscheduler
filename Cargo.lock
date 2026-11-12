@@ -1414,6 +1414,7 @@ dependencies = [
  "js-agent-wire",
  "js-alert",
  "js-api-gateway",
+ "js-caps",
  "js-cli",
  "js-conformance",
  "js-contain",

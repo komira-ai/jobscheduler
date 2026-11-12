@@ -44,6 +44,13 @@ pub(crate) enum Unsendable {
     /// agent that does not report it is never sent a host job.
     #[error("the job runs on the machine itself and the host does not report host-jobs")]
     HostJobsNotReported,
+    /// The job names layers, mounts or host ports and the host's hello did not report
+    /// `layered-rootfs`; an agent that does not report it would run the job without them, so
+    /// it is never sent such a job.
+    #[error(
+        "the job names layers, mounts or host ports and the host does not report layered-rootfs"
+    )]
+    RootfsNotReported,
     /// The wall limit in milliseconds overflows.
     #[error("the wall limit overflows")]
     WallLimit,
@@ -71,9 +78,11 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 
 /// The start of the job `job` for its allocation `allocation`, to the host of `context`
 /// (whose agent reports the ceiling `context` holds), and the one place a start is built: the
-/// image, the command then its arguments, the environment, the files, what the
-/// allocation booked, the wall limit, the network level, the declared ports and the isolation
-/// (left out of the wire for a contained job), keyed by the job id and the allocation id, and
+/// image (empty for a job of layers alone), the command then its arguments, the environment,
+/// the files, what the allocation booked, the wall limit, the network level, the declared
+/// ports, the isolation (left out of the wire for a contained job), and the layers, mounts and
+/// host ports as the job's record holds them (each left out of the wire when empty, so a job
+/// without them starts as before), keyed by the job id and the allocation id, and
 /// the job's log sink when `context` has sinks (the host uploads live logs). The start is
 /// checked as the agent checks it ([`JobStartSpec::validate`] and
 /// [`JobStartSpec::require_pinned`]) before it is returned; a sink that fails the agent's check
@@ -81,7 +90,8 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 /// sink never refuses a start.
 ///
 /// A job that runs on the machine itself is sent only to a host whose agent reported
-/// `host-jobs` ([`BeatContext::host_jobs`]).
+/// `host-jobs` ([`BeatContext::host_jobs`]), and one with layers, mounts or host ports only to
+/// a host whose agent reported `layered-rootfs` ([`BeatContext::layered_rootfs`]).
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -95,6 +105,9 @@ pub(crate) fn start_of(
     let isolation = isolation_of(job);
     if !isolation.is_contained() & !context.host_jobs {
         return Err(Unsendable::HostJobsNotReported);
+    }
+    if spec.uses_layered_rootfs() & !context.layered_rootfs {
+        return Err(Unsendable::RootfsNotReported);
     }
     let booked = match allocation.booked {
         Booked::WholeHost => whole_host(context.shape)?,
@@ -152,7 +165,11 @@ pub(crate) fn start_of(
     let mut start = JobStartSpec {
         job_id: job.id.to_string(),
         allocation_id: allocation.allocation_id.to_string(),
-        image: format!("{}@{}", spec.image.name(), spec.image.digest()),
+        image: spec
+            .image
+            .as_ref()
+            .map(|image| format!("{}@{}", image.name(), image.digest()))
+            .unwrap_or_default(),
         command: spec.command.iter().chain(&spec.args).cloned().collect(),
         run: None,
         os: None,
@@ -166,11 +183,9 @@ pub(crate) fn start_of(
         log_sink,
         kind: Default::default(),
         isolation,
-        // A job names no layers, path mounts or host ports yet, so its start carries none
-        // and is the text it was.
-        layers: Vec::new(),
-        mounts: Vec::new(),
-        host_ports: Vec::new(),
+        layers: spec.layers.clone(),
+        mounts: spec.mounts.clone(),
+        host_ports: spec.host_ports.clone(),
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);

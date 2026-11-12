@@ -8,7 +8,7 @@ use js_state::Store;
 use js_state::conformance::Backend;
 
 use super::{Rig, full_spec, host, job_id, rig, share, whole_host_spec};
-use crate::codec::{DecodeError, FORMAT, field_of, job_tag, set_field};
+use crate::codec::{DecodeError, FORMAT, LATER_FORMAT, field_of, job_tag, set_field};
 use crate::keys;
 use crate::{Booked, EndReason, JobId, JobState, JobStoreError, NewJob};
 
@@ -123,7 +123,7 @@ pub fn a_row_this_build_cannot_read_refuses_every_write<B: Backend>(backend: &B)
     let name = "a_row_this_build_cannot_read_refuses_every_write";
     let rig = rig(backend);
     let unreadable: [Unreadable; 2] = [
-        (vec![FORMAT + 1], |key| JobStoreError::UnknownRow { key }),
+        (vec![LATER_FORMAT], |key| JobStoreError::UnknownRow { key }),
         (vec![FORMAT, 0], |key| JobStoreError::Corrupt {
             key,
             why: DecodeError::Truncated,

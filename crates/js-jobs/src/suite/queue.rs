@@ -8,7 +8,7 @@ use js_state::conformance::Backend;
 use js_state::{Store, StoreError};
 
 use super::{full_spec, host, job_id, rig};
-use crate::codec::{DecodeError, FORMAT};
+use crate::codec::{DecodeError, FORMAT, LATER_FORMAT};
 use crate::interfere::INJECTED;
 use crate::{AllocationRecord, AllocationStep, EndReason, JobStoreError, NewJob, keys};
 
@@ -40,7 +40,7 @@ pub fn queued_lists_the_queue_in_order<B: Backend>(backend: &B) {
     rig.tick();
     queue("q-later", 0);
     rig.placed("q-placed");
-    rig.put_raw("job/q-newer", vec![FORMAT + 1, 0, 1, 0, 0, 0, 0]);
+    rig.put_raw("job/q-newer", vec![LATER_FORMAT, 0, 1, 0, 0, 0, 0]);
     let order: Vec<String> = rig
         .jobs
         .queued()

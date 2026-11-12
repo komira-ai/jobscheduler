@@ -2,7 +2,7 @@
 # tests/schema.rs (shipped_fields_are_a_subset_of_current_fields). A field row is
 # `Message.field = number : type`, with `repeated` or `optional` before the type when the
 # field has that label, a map field written `map<key, value>`, and ` (oneof NAME)` after
-# the type of a member of a real oneof (none has shipped); an enum row is
+# the type of a member of a real oneof; an enum row is
 # `Enum.VALUE = number`. Types of this package are named without the package. Each row must
 # still hold in the descriptor set, so a field cannot be removed, renamed, renumbered or
 # retyped; a field the descriptor has and this file does not is new and passes. A new
@@ -50,9 +50,12 @@ JobSpec.constraints = 11 : Constraints
 JobSpec.wall_limit_seconds = 20 : optional uint64
 JobSpec.network = 30 : NetworkLevel
 JobSpec.ports = 31 : repeated PortForward
+JobSpec.host_ports = 32 : repeated HostPort
 JobSpec.files = 40 : repeated JobFile
 JobSpec.priority = 50 : int32
 JobSpec.labels = 51 : map<string, string>
+JobSpec.layers = 60 : repeated Layer
+JobSpec.mounts = 61 : repeated Mount
 JobState.JOB_STATE_UNSPECIFIED = 0
 JobState.JOB_STATE_QUEUED = 1
 JobState.JOB_STATE_PLACED = 2
@@ -68,6 +71,7 @@ StartFailureCode.START_FAILURE_CODE_NO_CAPACITY = 1
 StartFailureCode.START_FAILURE_CODE_START_TIMEOUT = 2
 StartFailureCode.START_FAILURE_CODE_EXCLUSIVE_NOT_READY = 3
 StartFailureCode.START_FAILURE_CODE_AGENT_REFUSED = 4
+StartFailureCode.START_FAILURE_CODE_INPUT_UNAVAILABLE = 5
 JobTimes.queued_at_ms = 1 : uint64
 JobTimes.placed_at_ms = 2 : optional uint64
 JobTimes.started_at_ms = 3 : optional uint64
@@ -113,6 +117,7 @@ ResultReason.RESULT_REASON_EXIT = 1
 ResultReason.RESULT_REASON_WALL_LIMIT = 2
 ResultReason.RESULT_REASON_MEMORY = 3
 ResultReason.RESULT_REASON_CANCELLED = 4
+ResultReason.RESULT_REASON_INPUT_FAILED = 5
 ResourceUsage.cpu_usec = 1 : uint64
 ResourceUsage.peak_memory_bytes = 2 : uint64
 ResourceUsage.disk_bytes = 3 : optional uint64
@@ -125,6 +130,7 @@ JobResult.stderr_tail = 5 : bytes
 JobResult.truncated = 6 : bool
 JobResult.times = 10 : JobTimes
 JobResult.usage = 11 : ResourceUsage
+JobResult.input_failure = 12 : optional string
 RefusalCode.REFUSAL_CODE_UNSPECIFIED = 0
 RefusalCode.REFUSAL_CODE_JOB_ID_CONFLICT = 1
 RefusalCode.REFUSAL_CODE_NO_CAPABLE_HOST = 2
@@ -293,3 +299,22 @@ GetUsageRequest.page_size = 10 : uint32
 GetUsageRequest.page_token = 11 : string
 GetUsageResponse.records = 1 : repeated UsageRecord
 GetUsageResponse.next_page_token = 2 : string
+Layer.host_path = 1 : string (oneof source)
+Layer.image = 2 : string (oneof source)
+MountMode.MOUNT_MODE_UNSPECIFIED = 0
+MountMode.MOUNT_MODE_READ_ONLY = 1
+MountMode.MOUNT_MODE_READ_WRITE = 2
+MountMode.MOUNT_MODE_COPY_ON_WRITE = 3
+MountPropagation.MOUNT_PROPAGATION_UNSPECIFIED = 0
+MountPropagation.MOUNT_PROPAGATION_PRIVATE = 1
+Mount.host_path = 1 : string (oneof source)
+Mount.target = 10 : string
+Mount.mode = 11 : MountMode
+Mount.sub_path = 12 : string
+Mount.no_exec = 13 : bool
+Mount.propagation = 14 : MountPropagation
+PortProtocol.PORT_PROTOCOL_UNSPECIFIED = 0
+PortProtocol.PORT_PROTOCOL_TCP = 1
+HostPort.host_port = 1 : uint32
+HostPort.container_port = 2 : optional uint32
+HostPort.protocol = 3 : PortProtocol

@@ -23,6 +23,7 @@ fn wanted() -> Requirements {
         exec: None,
         network: JobNetwork::None,
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 
@@ -497,4 +498,29 @@ fn a_provider_without_host_ports_is_passed_over_for_a_job_with_ports() {
     );
     assert_eq!(can_ever_serve(&plain, &[], &[without]), OFFER);
     assert_eq!(can_ever_serve(&with_port, &[], &[with]), OFFER);
+}
+
+/// Asserts that a job naming layers, mounts or host ports is capable only on a host that
+/// reports `layered-rootfs=true`: a host that reports nothing, or another value, is not
+/// capable, and a pool with one that reports it admits through that host; a job that names
+/// none of them is capable on a host that does not report it. Catches admission that queues
+/// a layered job no host can be sent.
+#[test]
+fn a_layered_job_is_capable_only_on_a_host_that_reports_layered_rootfs() {
+    let layered = Requirements {
+        layered_rootfs: true,
+        ..wanted()
+    };
+    let silent = host("h1");
+    let other = advertising("h2", &[("layered-rootfs", "false")]);
+    let reporting = advertising("h3", &[("layered-rootfs", "true")]);
+    assert_eq!(
+        can_ever_serve(&layered, &[silent.clone(), other.clone()], &[]),
+        Admission::Refuse
+    );
+    assert_eq!(
+        can_ever_serve(&layered, &[silent.clone(), other, reporting], &[]),
+        HOST
+    );
+    assert_eq!(can_ever_serve(&wanted(), &[silent], &[]), HOST);
 }

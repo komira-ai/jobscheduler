@@ -295,6 +295,7 @@ mod tests {
             accelerator: need("nvidia-sample", 2),
             network: Default::default(),
             host_ports: Vec::new(),
+            layered_rootfs: false,
         }
     }
 
@@ -313,6 +314,7 @@ mod tests {
             accelerator: None,
             network: Default::default(),
             host_ports: Vec::new(),
+            layered_rootfs: false,
         };
         assert_eq!(offer().fit(&nothing), Ok(()));
         let mut small = demand();

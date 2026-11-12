@@ -38,7 +38,7 @@ fn metered(rig: &Rig) -> Arc<Recorder> {
 }
 
 /// What `recorder` counted: start failures by code, losses and failed writes.
-fn counted(recorder: &Recorder) -> ([u64; 4], u64, u64) {
+fn counted(recorder: &Recorder) -> ([u64; 5], u64, u64) {
     let failures = recorder.start_failures.each_ref();
     let failures = failures.map(|count| count.load(Ordering::Relaxed));
     let lost = recorder.lost.load(Ordering::Relaxed);
@@ -83,12 +83,12 @@ fn a_job_pass_counts_its_start_failures_its_duration_and_its_failure() {
         .unwrap();
     rig.advance(Duration::from_secs(660));
     rig.agents.job_pass();
-    assert_eq!(counted(&recorder), ([1, 1, 0, 0], 0, 0));
+    assert_eq!(counted(&recorder), ([1, 1, 0, 0, 0], 0, 0));
     let (below, passes, sum_micros) = recorder.job_pass.read();
     assert_eq!((below[1], passes, sum_micros), (("0.005", 0), 1, 7_000));
     rig.store.fail_read_after(0);
     rig.agents.job_pass();
-    assert_eq!(counted(&recorder), ([1, 1, 0, 0], 0, 1));
+    assert_eq!(counted(&recorder), ([1, 1, 0, 0, 0], 0, 1));
     assert_eq!(recorder.job_pass.read().1, 2);
     // A pass that ends one job and fails at the next commit still counts the one it ended.
     queue(&rig, "ends-first");
@@ -96,7 +96,7 @@ fn a_job_pass_counts_its_start_failures_its_duration_and_its_failure() {
     rig.advance(Duration::from_secs(660));
     rig.store.fail_after(1);
     rig.agents.job_pass();
-    assert_eq!(counted(&recorder), ([2, 1, 0, 0], 0, 2));
+    assert_eq!(counted(&recorder), ([2, 1, 0, 0, 0], 0, 2));
 }
 
 /// Asserts what a pass over the queued jobs counts: a placement, with the time its job waited
@@ -126,7 +126,7 @@ async fn a_placement_counts_its_wait_and_one_that_does_not_commit_a_failed_write
         JobState::Queued
     );
     assert_eq!(recorder.placed.load(Ordering::Relaxed), 1);
-    assert_eq!(counted(&recorder), ([0; 4], 0, 1));
+    assert_eq!(counted(&recorder), ([0; 5], 0, 1));
 }
 
 /// Takes `host` out of the registry as the scaler does when its provider reads it gone.
@@ -167,24 +167,24 @@ async fn a_heartbeat_counts_a_refused_start_a_lost_job_and_a_listing_that_does_n
     rig.beat(&on_a).await.unwrap();
     let ended = JobState::FailedToStart(StartFailure::AgentRefused);
     assert_eq!(rig.job(&refused).state, ended);
-    assert_eq!(counted(&recorder), ([0, 0, 0, 1], 0, 0));
+    assert_eq!(counted(&recorder), ([0, 0, 0, 1, 0], 0, 0));
     let gone_with_a = running(&rig, &mut on_a, "gone-with-a").await;
     let gone_with_b = running(&rig, &mut on_b, "gone-with-b").await;
     remove(&rig, "host-a");
     rig.tick();
     assert_eq!(rig.job(&gone_with_a).state, JobState::Lost);
-    assert_eq!(counted(&recorder), ([0, 0, 0, 1], 1, 0));
+    assert_eq!(counted(&recorder), ([0, 0, 0, 1, 0], 1, 0));
     remove(&rig, "host-b");
     rig.register("host-b", true);
     let mut fresh = FakeAgent::new("host-b");
     fresh.take(&rig.beat(&fresh).await.unwrap());
     assert_eq!(rig.job(&gone_with_b).state, JobState::Lost);
-    assert_eq!(counted(&recorder), ([0, 0, 0, 1], 2, 0));
+    assert_eq!(counted(&recorder), ([0, 0, 0, 1, 0], 2, 0));
     rig.place("unwritten", "host-b");
     fresh.take(&rig.beat(&fresh).await.unwrap());
     rig.store.fail_next();
     assert!(rig.beat(&fresh).await.is_err());
-    assert_eq!(counted(&recorder), ([0, 0, 0, 1], 2, 1));
+    assert_eq!(counted(&recorder), ([0, 0, 0, 1, 0], 2, 1));
 }
 
 /// Asserts that a whole-host job whose prepare fails for the last time the pool allows ends
@@ -214,12 +214,12 @@ async fn a_terminal_failed_prepare_counts_exclusive_not_ready() {
     rig.tick();
     rig.tick();
     agent.take(&rig.beat(&agent).await.unwrap());
-    assert_eq!(counted(&recorder), ([0; 4], 0, 0));
+    assert_eq!(counted(&recorder), ([0; 5], 0, 0));
     agent.refuse(RefusalReason::NotQuiet);
     agent.take(&rig.beat(&agent).await.unwrap());
     let ended = JobState::FailedToStart(StartFailure::ExclusiveNotReady);
     assert_eq!(rig.job(&job).state, ended);
-    assert_eq!(counted(&recorder), ([0, 0, 1, 0], 0, 0));
+    assert_eq!(counted(&recorder), ([0, 0, 1, 0, 0], 0, 0));
 }
 
 /// Asserts that a meter set once stays: a second one given to the agent side is ignored, so

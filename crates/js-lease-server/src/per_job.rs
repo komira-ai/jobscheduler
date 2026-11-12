@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::{
     Ack, Command, HeldJob, HeldState, JobResult, JobResultAck, JobStartSpec, NetworkCeiling,
-    Outcome,
+    Outcome, refusal,
 };
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, JobEnd, JobId, JobRecord, JobState, JobStoreError,
@@ -92,6 +92,9 @@ pub(crate) struct BeatContext<'a> {
     /// ([`js_agent_wire::HOST_JOBS_CAPABILITY`]); a host-isolation start is built only for
     /// one that did.
     pub(crate) host_jobs: bool,
+    /// Whether the host's agent reported `layered-rootfs=true` ([`js_caps::LAYERED_ROOTFS`]); a
+    /// start with layers, mounts or host ports is built only for one that did.
+    pub(crate) layered_rootfs: bool,
     /// What the registry books for the host, which a start of the whole host books; `None`
     /// when it is not known.
     pub(crate) shape: Option<&'a Resources>,
@@ -246,7 +249,10 @@ fn commit_result(
     }
     let ran = matches!(
         end,
-        JobEnd::Exited { .. } | JobEnd::WallLimit { .. } | JobEnd::Memory { .. }
+        JobEnd::Exited { .. }
+            | JobEnd::WallLimit { .. }
+            | JobEnd::Memory { .. }
+            | JobEnd::InputFailed { .. }
     );
     let job = if ran {
         advance(jobs, job, JobState::Running)?
@@ -254,7 +260,7 @@ fn commit_result(
         job
     };
     let failure = match &end {
-        JobEnd::FailedToStart(failure) => Some(*failure),
+        JobEnd::FailedToStart(failure) | JobEnd::Refused { failure, .. } => Some(*failure),
         _ => None,
     };
     match jobs.end_job(&job.id, end) {
@@ -298,6 +304,13 @@ fn advance(
 /// result's `logs` are kept with it when the report is consistent
 /// ([`JobResult::logs_report`]); an inconsistent one is dropped and the result recorded
 /// without it, so that a reader of the job's live logs knows where each stream ends.
+///
+/// A start the agent refused keeps the agent's code (`detail`) as the job's start failure
+/// detail: [`StartFailure::InputUnavailable`] for `input-unavailable`, and
+/// [`StartFailure::AgentRefused`] for any other code and for a refusal without one. A job that
+/// ran and whose result names an input that failed (`input_failure`) is failed for its input
+/// ([`JobEnd::InputFailed`]), whatever its outcome, with the exit status it reported: the
+/// failure is its host's (`docs/design/job-rootfs.md`, section 8).
 pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
     let tail = result.log_tail.clone().unwrap_or_default();
     let logs = result.logs_report().map(|report| LogLengths {
@@ -315,6 +328,14 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
     };
     let code = result.exit_code;
     let failed = code.filter(|code| *code != 0).unwrap_or(NO_EXIT_CODE);
+    let ran = !matches!(result.outcome, Outcome::FailedToStart | Outcome::Unknown);
+    if let Some(input_failure) = result.input_failure.clone().filter(|_| ran) {
+        return Some(JobEnd::InputFailed {
+            exit_code: code,
+            input_failure,
+            output,
+        });
+    }
     let end = match result.outcome {
         Outcome::Succeeded => JobEnd::Exited {
             exit_code: code.unwrap_or(0),
@@ -336,10 +357,28 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
             exit_code: code,
             output,
         },
-        Outcome::FailedToStart => JobEnd::FailedToStart(StartFailure::AgentRefused),
+        Outcome::FailedToStart => refused(result.detail.as_deref()),
         Outcome::Unknown => return None,
     };
     Some(end)
+}
+
+/// The end of a start the agent refused with the code `detail`: `input-unavailable` is the
+/// host's input failing ([`StartFailure::InputUnavailable`]), every other code the agent's
+/// refusal ([`StartFailure::AgentRefused`]), each keeping the code; a refusal without a code
+/// keeps none.
+fn refused(detail: Option<&str>) -> JobEnd {
+    let Some(detail) = detail else {
+        return JobEnd::FailedToStart(StartFailure::AgentRefused);
+    };
+    let failure = match detail {
+        refusal::INPUT_UNAVAILABLE => StartFailure::InputUnavailable,
+        _ => StartFailure::AgentRefused,
+    };
+    JobEnd::Refused {
+        failure,
+        detail: detail.to_owned(),
+    }
 }
 
 /// Whether `job`, placed on `allocation`, is a whole-host job still preparing: the host holds

@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use js_agent_wire::{
-    BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, Isolation, NetworkCeiling, RunFile,
+    BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, HostPort, Isolation, JobMount,
+    Layer, MountMode, MountSource, NetworkCeiling, PortProtocol, Propagation, RunFile,
 };
 use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobFiles, JobId, JobRecord, NetworkPolicy};
 use js_types::{HostId, JobNetwork as Level, PortMap, Resources};
@@ -69,6 +70,7 @@ fn build_for(
             shape,
             logs: None,
             metrics: &NoMetrics,
+            layered_rootfs: false,
         },
     )
 }
@@ -267,5 +269,189 @@ fn a_whole_host_start_books_the_hosts_shape_and_the_allocations_wall_limit() {
     assert_eq!(
         build_on(&job, &allocation, &ceiling, Some(&gpus)),
         Err(Unsendable::GpuIndices(2))
+    );
+}
+
+/// The start of `job` for `allocation` to `host-a`, whose agent reports `ceiling` and, when
+/// `layered_rootfs`, the `layered-rootfs` capability.
+fn build_layered(
+    job: &JobRecord,
+    allocation: &AllocationRecord,
+    ceiling: &NetworkCeiling,
+    layered_rootfs: bool,
+) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
+    let host = HostId::new("host-a").unwrap();
+    start_of(
+        job,
+        allocation,
+        &BeatContext {
+            host: &host,
+            ceiling,
+            host_jobs: false,
+            shape: None,
+            logs: None,
+            metrics: &NoMetrics,
+            layered_rootfs,
+        },
+    )
+}
+
+/// A host-path layer.
+fn host_layer(path: &str) -> Layer {
+    Layer::HostPath {
+        path: path.to_owned(),
+    }
+}
+
+/// A mount of the host directory `source` at `target`, with every option at its default.
+fn mount_of(source: &str, target: &str) -> JobMount {
+    JobMount {
+        source: MountSource::HostPath {
+            path: source.to_owned(),
+        },
+        target: target.to_owned(),
+        mode: MountMode::ReadOnly,
+        sub_path: None,
+        no_exec: false,
+        propagation: Propagation::Private,
+    }
+}
+
+/// A host port the job reaches at the same port.
+fn host_port(port: u16) -> HostPort {
+    HostPort {
+        host_port: port,
+        container_port: None,
+        protocol: PortProtocol::Tcp,
+    }
+}
+
+/// A job's layers (a host path and an image), mounts (one with every option set) and host
+/// ports (one remapped) are carried into the start exactly as the record holds them, in
+/// order, beside the image, and are built only for a host that reports `layered-rootfs`. It
+/// catches a start that drops a list, reorders it, or rewrites an option.
+#[test]
+fn a_start_carries_the_layers_mounts_and_host_ports_as_the_record_holds_them() {
+    let (mut job, allocation) = records();
+    let layers = vec![
+        host_layer("/opt/tools"),
+        Layer::Image {
+            image: format!("team/base@sha256:{}", "b".repeat(64)),
+        },
+    ];
+    let mounts = vec![
+        mount_of("/data/in", "/in"),
+        JobMount {
+            mode: MountMode::CopyOnWrite,
+            sub_path: Some("sub/dir".to_owned()),
+            no_exec: true,
+            ..mount_of("/data/work", "/cache")
+        },
+    ];
+    let host_ports = vec![
+        host_port(5432),
+        HostPort {
+            container_port: Some(6000),
+            ..host_port(7000)
+        },
+    ];
+    job.spec.layers.clone_from(&layers);
+    job.spec.mounts.clone_from(&mounts);
+    job.spec.host_ports.clone_from(&host_ports);
+    let start = build_layered(&job, &allocation, &allow_list(), true).unwrap();
+    assert_eq!(start.layers, layers);
+    assert_eq!(start.mounts, mounts);
+    assert_eq!(start.host_ports, host_ports);
+    assert_eq!(start.image, image());
+}
+
+/// A named change that gives a job one of the three rootfs fields.
+type Field = (&'static str, fn(&mut JobRecord));
+
+/// A job with layers, mounts or host ports, each alone, is not sent to a host that does not
+/// report `layered-rootfs`, with the text the log and the start timeout show; sent to one that
+/// does, each builds. It catches a job started on an agent that would ignore the fields and
+/// run it on the image alone, and a trigger that needs two of the three.
+#[test]
+fn a_job_with_any_rootfs_field_is_not_sent_to_a_host_without_layered_rootfs() {
+    let (job, allocation) = records();
+    let ceiling = allow_list();
+    let fields: [Field; 3] = [
+        ("layers", |job| {
+            job.spec.layers = vec![host_layer("/opt/tools")]
+        }),
+        ("mounts", |job| {
+            job.spec.mounts = vec![mount_of("/data/in", "/in")];
+        }),
+        ("host ports", |job| {
+            job.spec.host_ports = vec![host_port(5432)]
+        }),
+    ];
+    for (name, set) in fields {
+        let mut job = job.clone();
+        set(&mut job);
+        assert_eq!(
+            build_layered(&job, &allocation, &ceiling, false),
+            Err(Unsendable::RootfsNotReported),
+            "{name}"
+        );
+        assert!(
+            build_layered(&job, &allocation, &ceiling, true).is_ok(),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        Unsendable::RootfsNotReported.to_string(),
+        "the job names layers, mounts or host ports and the host does not report layered-rootfs"
+    );
+}
+
+/// A job with no layers, mounts or host ports starts with three empty lists, and is sent to
+/// a host that does not report `layered-rootfs` with the start's JSON carrying none of
+/// `layers`, `mounts` or `host_ports`, as before the fields. It catches a start that gains
+/// keys an older agent reads as unknown, and a plain job refused for a capability it does not
+/// need.
+#[test]
+fn a_job_without_rootfs_fields_starts_on_any_host_with_none_of_their_keys() {
+    let (job, allocation) = records();
+    for layered_rootfs in [false, true] {
+        let start = build_layered(&job, &allocation, &allow_list(), layered_rootfs).unwrap();
+        assert!(start.layers.is_empty() & start.mounts.is_empty() & start.host_ports.is_empty());
+        let json = serde_json::to_value(&start).unwrap();
+        let keys = json.as_object().unwrap();
+        for key in ["layers", "mounts", "host_ports"] {
+            assert!(!keys.contains_key(key), "{key} with {layered_rootfs}");
+        }
+    }
+}
+
+/// A job of layers alone (no image) starts with an empty image and its absolute command, the
+/// command then its arguments. It catches an image invented for a job without one, and a
+/// start refused for the empty image the layers stand in for.
+#[test]
+fn a_job_of_layers_alone_starts_with_an_empty_image() {
+    let (mut job, allocation) = records();
+    job.spec.image = None;
+    job.spec.layers = vec![host_layer("/opt/rootfs")];
+    job.spec.command = vec!["/bin/run".to_owned()];
+    let start = build_layered(&job, &allocation, &allow_list(), true).unwrap();
+    assert_eq!(start.image, "");
+    assert_eq!(start.command, ["/bin/run", "--fast"]);
+    assert_eq!(start.layers, [host_layer("/opt/rootfs")]);
+}
+
+/// A record whose layer the wire refuses (a host path not in normal form) is not sent: the
+/// start is unsendable naming the wire's code and field, as the agent would refuse it. It
+/// catches a stored job whose layer is passed to an agent unchecked.
+#[test]
+fn a_layer_the_wire_refuses_is_unsendable_naming_the_code_and_field() {
+    let (mut job, allocation) = records();
+    job.spec.layers = vec![host_layer("/opt/../tools")];
+    assert_eq!(
+        build_layered(&job, &allocation, &allow_list(), true),
+        Err(Unsendable::Invalid {
+            code: "invalid-job",
+            field: "layers.path",
+        })
     );
 }

@@ -9,7 +9,7 @@ use js_types::HostId;
 use super::mark_tag as t;
 use super::{decode_mark, encode_mark};
 use crate::codec::tests::{at, framed, with, without};
-use crate::codec::{Carried, DecodeError, FORMAT, field_of, rearranged};
+use crate::codec::{Carried, DecodeError, FORMAT, LATER_FORMAT, field_of, rearranged};
 use crate::ids::JobId;
 use crate::record::{Exclusion, MarkRecord};
 
@@ -119,7 +119,7 @@ fn a_mark_row_is_additive() {
         ..full_mark()
     };
     assert_eq!(decode_mark(&older), Ok(defaults));
-    assert_eq!(decode_mark(&[FORMAT + 1]), Err(DecodeError::Newer));
+    assert_eq!(decode_mark(&[LATER_FORMAT]), Err(DecodeError::Newer));
 }
 
 // Catches a mark row that does not parse taken for a mark (or a panic): each required field

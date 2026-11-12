@@ -204,7 +204,7 @@ pub(crate) fn queue_job(scratch: &Scratch, id: &str) {
     let store: Arc<dyn js_state::Store> = Arc::new(store);
     let jobs = JobStore::new(Arc::new(store), RandomIds).unwrap();
     let spec = JobSpec {
-        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).unwrap(),
+        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).ok(),
         command: vec!["run".to_owned()],
         args: Vec::new(),
         env: BTreeMap::new(),
@@ -217,6 +217,9 @@ pub(crate) fn queue_job(scratch: &Scratch, id: &str) {
         ports: Vec::new(),
         files: js_jobs::JobFiles::default(),
         labels: Labels::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     };
     let new = NewJob {
         id: Some(JobId::parse(id).unwrap()),

@@ -44,6 +44,9 @@ pub enum ResultReason {
     Memory,
     /// The client cancelled it.
     Cancelled,
+    /// A host path or host port it named failed while it ran, and it did not succeed: the
+    /// failure is the host's ([`JobResult::input_failure`] names it).
+    InputFailed,
 }
 
 /// When a job was recorded, placed, started and ended, by the store's clock.
@@ -106,6 +109,9 @@ pub struct JobResult {
     /// The lengths of its output streams; `None` when the agent reported none (a runtime that
     /// does not upload live logs, or a build from before them).
     pub logs: Option<LogLengths>,
+    /// With [`ResultReason::InputFailed`], the agent's code of the input that failed
+    /// (`input-unreadable`, `host-port-lost`); `None` otherwise.
+    pub input_failure: Option<String>,
 }
 
 /// What the host reported of a job that stopped: the tails of its output, its usage and the
@@ -160,6 +166,26 @@ pub enum JobEnd {
     Lost,
     /// It did not get to run.
     FailedToStart(StartFailure),
+    /// Its host's agent refused the start, or failed it while preparing, with its own code:
+    /// it did not get to run. `failure` is [`StartFailure::InputUnavailable`] for
+    /// `input-unavailable` and [`StartFailure::AgentRefused`] for any other code; `detail`,
+    /// the code, is kept as the job's [`JobRecord::start_failure_detail`].
+    Refused {
+        /// Why, as a client reads it.
+        failure: StartFailure,
+        /// The agent's code.
+        detail: String,
+    },
+    /// It ran, did not succeed, and an input its host provides failed while it ran: failed,
+    /// whatever its process did (`docs/design/job-rootfs.md`, section 8).
+    InputFailed {
+        /// The exit code, when the process gave one.
+        exit_code: Option<i32>,
+        /// The agent's code of the input that failed.
+        input_failure: String,
+        /// What the host reported.
+        output: Output,
+    },
 }
 
 impl JobEnd {
@@ -168,29 +194,53 @@ impl JobEnd {
     pub fn state(&self) -> JobState {
         match self {
             JobEnd::Exited { exit_code: 0, .. } => JobState::Succeeded,
-            JobEnd::Exited { .. } | JobEnd::WallLimit { .. } | JobEnd::Memory { .. } => {
-                JobState::Failed
-            }
+            JobEnd::Exited { .. }
+            | JobEnd::WallLimit { .. }
+            | JobEnd::Memory { .. }
+            | JobEnd::InputFailed { .. } => JobState::Failed,
             JobEnd::Cancelled { .. } => JobState::Cancelled,
             JobEnd::Lost => JobState::Lost,
-            JobEnd::FailedToStart(failure) => JobState::FailedToStart(*failure),
+            JobEnd::FailedToStart(failure) | JobEnd::Refused { failure, .. } => {
+                JobState::FailedToStart(*failure)
+            }
         }
     }
 
-    /// The reason, the exit code and the output, for an end that has a result.
-    fn report(self) -> Option<(ResultReason, Option<i32>, Output)> {
+    /// The agent's code a refused start keeps; `None` for every other end.
+    fn detail(&self) -> Option<String> {
+        match self {
+            JobEnd::Refused { detail, .. } => Some(detail.clone()),
+            _ => None,
+        }
+    }
+
+    /// The reason, the exit code, the output and the failed input's code, for an end that
+    /// has a result.
+    fn report(self) -> Option<(ResultReason, Option<i32>, Output, Option<String>)> {
         match self {
             JobEnd::Exited { exit_code, output } => {
-                Some((ResultReason::Exit, Some(exit_code), output))
+                Some((ResultReason::Exit, Some(exit_code), output, None))
             }
             JobEnd::WallLimit { exit_code, output } => {
-                Some((ResultReason::WallLimit, exit_code, output))
+                Some((ResultReason::WallLimit, exit_code, output, None))
             }
-            JobEnd::Memory { exit_code, output } => Some((ResultReason::Memory, exit_code, output)),
+            JobEnd::Memory { exit_code, output } => {
+                Some((ResultReason::Memory, exit_code, output, None))
+            }
             JobEnd::Cancelled { exit_code, output } => {
-                Some((ResultReason::Cancelled, exit_code, output))
+                Some((ResultReason::Cancelled, exit_code, output, None))
             }
-            JobEnd::Lost | JobEnd::FailedToStart(_) => None,
+            JobEnd::InputFailed {
+                exit_code,
+                input_failure,
+                output,
+            } => Some((
+                ResultReason::InputFailed,
+                exit_code,
+                output,
+                Some(input_failure),
+            )),
+            JobEnd::Lost | JobEnd::FailedToStart(_) | JobEnd::Refused { .. } => None,
         }
     }
 }
@@ -261,7 +311,8 @@ fn tail_of(mut text: String) -> (String, bool) {
 }
 
 /// `job` ended as `end` says at `now`: its state, its end time, its result (none for a job
-/// that was lost or failed to start, with the tails cut to the cap), its retention end,
+/// that was lost or failed to start, with the tails cut to the cap), the agent's code of a
+/// refused start, its retention end,
 /// `now` plus `retention`, and its files' contents replaced by their digests
 /// ([`crate::JobFiles`]). This is the one place a job record is made ended, so every write
 /// that ends a job drops the contents in the same write.
@@ -278,25 +329,30 @@ pub(crate) fn ended(
         started_at: job.started_at,
         ended_at: now,
     };
-    let result = end.report().map(|(reason, exit_code, output)| {
-        let (stdout_tail, stdout_cut) = tail_of(output.stdout);
-        let (stderr_tail, stderr_cut) = tail_of(output.stderr);
-        JobResult {
-            exit_code,
-            reason,
-            stdout_tail,
-            stderr_tail,
-            truncated: output.truncated | stdout_cut | stderr_cut,
-            timing,
-            usage: output.usage,
-            logs: output.logs,
-        }
-    });
+    let start_failure_detail = end.detail();
+    let result = end
+        .report()
+        .map(|(reason, exit_code, output, input_failure)| {
+            let (stdout_tail, stdout_cut) = tail_of(output.stdout);
+            let (stderr_tail, stderr_cut) = tail_of(output.stderr);
+            JobResult {
+                exit_code,
+                reason,
+                stdout_tail,
+                stderr_tail,
+                truncated: output.truncated | stdout_cut | stderr_cut,
+                timing,
+                usage: output.usage,
+                logs: output.logs,
+                input_failure,
+            }
+        });
     JobRecord {
         spec: job.spec.digested(),
         state,
         ended_at: Some(now),
         result,
+        start_failure_detail,
         retention_ends: Some(now.saturating_add(retention.window())),
         ..job
     }
@@ -400,6 +456,7 @@ mod tests {
             prepare_bars: std::collections::BTreeMap::new(),
             queue: crate::QueueTrail::default(),
             carried: crate::codec::Carried::default(),
+            start_failure_detail: None,
         }
     }
 
@@ -507,11 +564,51 @@ mod tests {
                             peak_memory_bytes: 4096,
                         }),
                         logs: Some(LENGTHS),
+                        input_failure: None,
                     },
                     "{end:?}"
                 );
             }
         }
+    }
+
+    // Catches an agent's refusal kept without its code (or with it as a result), its failure
+    // read as another, an input failure read as the job's own end (its reason, its code or
+    // its exit code lost), and a code kept on an end that has none.
+    #[test]
+    fn a_refusal_keeps_its_code_and_an_input_failure_its_reason() {
+        let retention = Retention::new(Duration::from_secs(60)).expect("a window");
+        let end = |end: JobEnd| ended(job("e", JobState::Starting, None), end, at(9), retention);
+        for failure in [StartFailure::InputUnavailable, StartFailure::AgentRefused] {
+            let refused = end(JobEnd::Refused {
+                failure,
+                detail: "input-not-allowed".to_owned(),
+            });
+            assert_eq!(refused.state, JobState::FailedToStart(failure));
+            assert_eq!(
+                refused.start_failure_detail.as_deref(),
+                Some("input-not-allowed")
+            );
+            assert_eq!(refused.result, None);
+        }
+        let failed = end(JobEnd::InputFailed {
+            exit_code: Some(0),
+            input_failure: "input-unreadable".to_owned(),
+            output: output("ok"),
+        });
+        assert_eq!(failed.state, JobState::Failed);
+        assert_eq!(failed.start_failure_detail, None);
+        let result = failed.result.expect("a result");
+        assert_eq!(
+            (
+                result.reason,
+                result.exit_code,
+                result.input_failure.as_deref()
+            ),
+            (ResultReason::InputFailed, Some(0), Some("input-unreadable"))
+        );
+        let timed_out = end(JobEnd::FailedToStart(StartFailure::StartTimeout));
+        assert_eq!(timed_out.start_failure_detail, None);
     }
 
     // Catches a cap that is not enforced, one that keeps the head instead of the tail, a cut

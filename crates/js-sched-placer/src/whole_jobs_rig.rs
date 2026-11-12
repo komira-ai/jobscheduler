@@ -121,7 +121,7 @@ pub(crate) fn settings() -> WholeNodeConfig {
 /// The spec of a job that asks for `needs` and may run `wall_limit_secs`.
 pub(crate) fn spec_of(needs: Needs, wall_limit_secs: u64) -> JobSpec {
     JobSpec {
-        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).unwrap(),
+        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).ok(),
         command: vec!["run".to_owned()],
         args: Vec::new(),
         env: BTreeMap::new(),
@@ -132,6 +132,9 @@ pub(crate) fn spec_of(needs: Needs, wall_limit_secs: u64) -> JobSpec {
         ports: Vec::new(),
         files: JobFiles::default(),
         labels: Labels::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 

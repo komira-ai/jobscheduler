@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobEnd, JobId, JobSpec, JobState, Needs, NetworkPolicy,
     NewJob, Output, StartFailure,
@@ -47,6 +48,29 @@ fn full() -> JobSpec {
             "upload-url".to_owned(),
             b"secret".to_vec(),
         )])),
+        layers: vec![
+            Layer::Image {
+                image: format!("team/base:v2@sha256:{}", "b".repeat(64)),
+            },
+            Layer::HostPath {
+                path: "/opt/layers/tools".to_owned(),
+            },
+        ],
+        mounts: vec![JobMount {
+            source: MountSource::HostPath {
+                path: "/data/in".to_owned(),
+            },
+            target: "/in".to_owned(),
+            mode: MountMode::ReadOnly,
+            sub_path: Some("a/b".to_owned()),
+            no_exec: true,
+            propagation: Propagation::Private,
+        }],
+        host_ports: vec![HostPort {
+            host_port: 5432,
+            container_port: Some(15432),
+            protocol: PortProtocol::Tcp,
+        }],
         ..spec(&[("team", "ml")])
     }
 }
@@ -87,6 +111,30 @@ fn full_shown() -> v1::JobSpec {
         }],
         priority: 5,
         labels: BTreeMap::from([("team".to_owned(), "ml".to_owned())]),
+        layers: vec![
+            v1::Layer {
+                source: Some(v1::layer::Source::Image(format!(
+                    "team/base:v2@sha256:{}",
+                    "b".repeat(64)
+                ))),
+            },
+            v1::Layer {
+                source: Some(v1::layer::Source::HostPath("/opt/layers/tools".to_owned())),
+            },
+        ],
+        mounts: vec![v1::Mount {
+            source: Some(v1::mount::Source::HostPath("/data/in".to_owned())),
+            target: "/in".to_owned(),
+            mode: v1::MountMode::ReadOnly.into(),
+            sub_path: "a/b".to_owned(),
+            no_exec: true,
+            propagation: v1::MountPropagation::Private.into(),
+        }],
+        host_ports: vec![v1::HostPort {
+            host_port: 5432,
+            container_port: Some(15432),
+            protocol: v1::PortProtocol::Tcp.into(),
+        }],
     }
 }
 
@@ -592,6 +640,10 @@ fn cancel_requested_is_the_flag_only_before_the_end_and_when_lost() {
             false,
         ),
         (JobState::FailedToStart(StartFailure::AgentRefused), false),
+        (
+            JobState::FailedToStart(StartFailure::InputUnavailable),
+            false,
+        ),
     ];
     for (state, shows) in states {
         for flag in [false, true] {
@@ -605,4 +657,266 @@ fn cancel_requested_is_the_flag_only_before_the_end_and_when_lost() {
             );
         }
     }
+}
+
+/// Asserts that `GetJob` shows the mounts and host ports of a record in explicit form: every
+/// mount mode as its own value, an absent `sub_path` as empty and a present one as it is,
+/// `no_exec` as kept, the propagation private, a host port's job port always present (the
+/// host port when the record holds none) and its protocol TCP; and that the layers keep their
+/// order and kinds. Catches a mode mapped to another, a `sub_path` or `no_exec` dropped, a
+/// job port left absent and a layer list reordered.
+#[tokio::test]
+async fn get_job_shows_mounts_and_host_ports_in_explicit_form() {
+    let clock = clock();
+    let rig = Rig::over(over_fake(&clock), clock).await;
+    let mount = |target: &str, mode, sub_path: Option<&str>, no_exec| JobMount {
+        source: MountSource::HostPath {
+            path: "/data".to_owned(),
+        },
+        target: target.to_owned(),
+        mode,
+        sub_path: sub_path.map(str::to_owned),
+        no_exec,
+        propagation: Propagation::Private,
+    };
+    let shown = |target: &str, mode: v1::MountMode, sub_path: &str, no_exec| v1::Mount {
+        source: Some(v1::mount::Source::HostPath("/data".to_owned())),
+        target: target.to_owned(),
+        mode: mode.into(),
+        sub_path: sub_path.to_owned(),
+        no_exec,
+        propagation: v1::MountPropagation::Private.into(),
+    };
+    let port = |host_port, container_port| HostPort {
+        host_port,
+        container_port,
+        protocol: PortProtocol::Tcp,
+    };
+    let shown_port = |host_port, container_port| v1::HostPort {
+        host_port,
+        container_port: Some(container_port),
+        protocol: v1::PortProtocol::Tcp.into(),
+    };
+    let given = JobSpec {
+        mounts: vec![
+            mount("/ro", MountMode::ReadOnly, None, false),
+            mount("/rw", MountMode::ReadWrite, Some("sub"), false),
+            mount("/cow", MountMode::CopyOnWrite, None, true),
+        ],
+        host_ports: vec![port(8080, None), port(9090, Some(80))],
+        layers: vec![
+            Layer::HostPath {
+                path: "/l/one".to_owned(),
+            },
+            Layer::HostPath {
+                path: "/l/two".to_owned(),
+            },
+        ],
+        ..spec(&[])
+    };
+    queue(&rig.jobs, "rootfs-1", given);
+    let job = rig.get_job("rootfs-1").await.expect("read").spec.unwrap();
+    assert_eq!(
+        job.mounts,
+        vec![
+            shown("/ro", v1::MountMode::ReadOnly, "", false),
+            shown("/rw", v1::MountMode::ReadWrite, "sub", false),
+            shown("/cow", v1::MountMode::CopyOnWrite, "", true),
+        ]
+    );
+    assert_eq!(
+        job.host_ports,
+        vec![shown_port(8080, 8080), shown_port(9090, 80)]
+    );
+    let host_path = |text: &str| v1::Layer {
+        source: Some(v1::layer::Source::HostPath(text.to_owned())),
+    };
+    assert_eq!(job.layers, vec![host_path("/l/one"), host_path("/l/two")]);
+}
+
+/// Asserts that a record with no image (a root of layers alone) shows an empty image, and
+/// one with an image shows it as name and digest. Catches an absent image that is an error
+/// or a made-up reference.
+#[tokio::test]
+async fn a_job_with_no_image_shows_an_empty_image() {
+    let clock = clock();
+    let rig = Rig::over(over_fake(&clock), clock).await;
+    let bare = JobSpec {
+        image: None,
+        layers: vec![Layer::HostPath {
+            path: "/l/root".to_owned(),
+        }],
+        ..spec(&[])
+    };
+    queue(&rig.jobs, "bare-1", bare);
+    queue(&rig.jobs, "imaged-1", spec(&[]));
+    let bare = rig.get_job("bare-1").await.expect("read").spec.unwrap();
+    assert_eq!(bare.image, "");
+    let imaged = rig.get_job("imaged-1").await.expect("read").spec.unwrap();
+    assert_eq!(imaged.image, image());
+}
+
+/// Asserts that a job refused at its start shows the agent's code as `start_failure_detail`
+/// beside its failure code: `input-unavailable` as `START_FAILURE_CODE_INPUT_UNAVAILABLE`,
+/// another code (`input-not-allowed`) as `AGENT_REFUSED`; and that a job that failed to start
+/// with no detail, and one that did not fail to start, show it empty. The result of a refused
+/// job carries its state and times and no reason. Catches a detail dropped, one shown for a
+/// job that has none, and the new code mapped to another.
+#[tokio::test]
+async fn a_refused_start_shows_its_code_and_detail() {
+    let clock = clock();
+    let rig = Rig::over(over_fake(&clock), clock).await;
+    let jobs = &rig.jobs;
+    let cases = [
+        (
+            "unavailable-1",
+            JobEnd::Refused {
+                failure: StartFailure::InputUnavailable,
+                detail: "input-unavailable".to_owned(),
+            },
+            v1::StartFailureCode::InputUnavailable,
+            "input-unavailable",
+        ),
+        (
+            "not-allowed-1",
+            JobEnd::Refused {
+                failure: StartFailure::AgentRefused,
+                detail: "input-not-allowed".to_owned(),
+            },
+            v1::StartFailureCode::AgentRefused,
+            "input-not-allowed",
+        ),
+        (
+            "plain-1",
+            JobEnd::FailedToStart(StartFailure::AgentRefused),
+            v1::StartFailureCode::AgentRefused,
+            "",
+        ),
+        (
+            "unavailable-2",
+            JobEnd::FailedToStart(StartFailure::InputUnavailable),
+            v1::StartFailureCode::InputUnavailable,
+            "",
+        ),
+    ];
+    for (text, end, failure, detail) in cases {
+        let job = taken(jobs, text, Before::Starting);
+        rig.advance(Duration::from_secs(1));
+        jobs.end_job(&job, end).expect("the job ends");
+        let shown = rig.get_job(text).await.expect("read");
+        assert_eq!(
+            (
+                shown.state,
+                shown.start_failure,
+                shown.start_failure_detail.as_str()
+            ),
+            (
+                i32::from(v1::JobState::FailedToStart),
+                i32::from(failure),
+                detail
+            ),
+            "{text}"
+        );
+        let result = rig.get_result(text).await.expect("the result");
+        let expected = v1::JobResult {
+            state: v1::JobState::FailedToStart.into(),
+            times: shown.times,
+            ..v1::JobResult::default()
+        };
+        assert_eq!(result, expected, "{text}");
+    }
+    let exited = taken(jobs, "exited-1", Before::Running);
+    let end = JobEnd::Exited {
+        exit_code: 0,
+        output: quiet(),
+    };
+    jobs.end_job(&exited, end).expect("the job ends");
+    let shown = rig.get_job("exited-1").await.expect("read");
+    assert_eq!(shown.start_failure_detail, "");
+}
+
+/// Asserts that a job that ran and whose input failed shows state FAILED, no start failure
+/// and no detail, and a result with reason `RESULT_REASON_INPUT_FAILED`, the raw exit code
+/// (also when absent) and the agent's code as `input_failure`, over `GetResult` and
+/// `view::result`; and that a job that exited by itself shows no `input_failure`. Catches an
+/// input failure shown as a plain exit, the code dropped, and one shown on another end.
+#[tokio::test]
+async fn an_input_failure_shows_its_reason_and_code() {
+    let clock = clock();
+    let rig = Rig::over(over_fake(&clock), clock).await;
+    let jobs = &rig.jobs;
+    let cases = [
+        ("input-1", Some(3), Some("input-unreadable")),
+        ("input-2", None, Some("host-port-lost")),
+        ("exit-1", Some(3), None),
+    ];
+    for (text, exit_code, code) in cases {
+        let job = taken(jobs, text, Before::Running);
+        rig.advance(Duration::from_secs(1));
+        let end = match code {
+            Some(code) => JobEnd::InputFailed {
+                exit_code,
+                input_failure: code.to_owned(),
+                output: quiet(),
+            },
+            None => JobEnd::Exited {
+                exit_code: 3,
+                output: quiet(),
+            },
+        };
+        jobs.end_job(&job, end).expect("the job ends");
+        let shown = rig.get_job(text).await.expect("read");
+        assert_eq!(
+            (
+                shown.state,
+                shown.start_failure,
+                shown.start_failure_detail.as_str()
+            ),
+            (
+                i32::from(v1::JobState::Failed),
+                i32::from(v1::StartFailureCode::Unspecified),
+                ""
+            ),
+            "{text}"
+        );
+        let reason = match code {
+            Some(_) => v1::ResultReason::InputFailed,
+            None => v1::ResultReason::Exit,
+        };
+        let result = rig.get_result(text).await.expect("the result");
+        let expected = v1::JobResult {
+            state: v1::JobState::Failed.into(),
+            exit_code,
+            reason: reason.into(),
+            times: result.times,
+            input_failure: code.map(str::to_owned),
+            ..v1::JobResult::default()
+        };
+        assert_eq!(result, expected, "{text}");
+        let record = jobs.get_job(&id(text)).expect("read").expect("recorded");
+        assert_eq!(view::result(&record), result, "{text}");
+    }
+}
+
+/// Asserts that the `layered-rootfs` capability a job with layers records is shown in no
+/// field of the spec: its constraints read back as the defaults. Catches a requirement the
+/// server adds for itself that leaks into the constraints a client reads.
+#[tokio::test]
+async fn the_layered_rootfs_capability_is_not_shown() {
+    let clock = clock();
+    let rig = Rig::over(over_fake(&clock), clock).await;
+    let layered = JobSpec {
+        constraints: Constraints {
+            capabilities: BTreeMap::from([("layered-rootfs".to_owned(), "true".to_owned())]),
+            ..Constraints::default()
+        },
+        layers: vec![Layer::HostPath {
+            path: "/l/root".to_owned(),
+        }],
+        ..spec(&[])
+    };
+    queue(&rig.jobs, "layered-1", layered);
+    let shown = rig.get_job("layered-1").await.expect("read").spec.unwrap();
+    assert_eq!(shown.constraints, Some(v1::Constraints::default()));
+    assert!(!format!("{shown:?}").contains("layered-rootfs"));
 }

@@ -52,6 +52,7 @@ fn spec() -> SubmitSpec {
         accelerator: None,
         network: JobNetwork::None,
         host_ports: Vec::new(),
+        layered_rootfs: false,
     };
     SubmitSpec::new(
         "submit-1",

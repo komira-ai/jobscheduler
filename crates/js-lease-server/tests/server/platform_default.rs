@@ -180,6 +180,7 @@ fn wanting(cores: u64, gpus: u64) -> Requirements {
         exec: None,
         network: JobNetwork::None,
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 

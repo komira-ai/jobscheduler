@@ -445,6 +445,7 @@ async fn the_log_lengths_are_stored_with_the_result_and_swept_with_it() {
         shape: None,
         logs: Some(&*logs.grants),
         metrics: &NoMetrics,
+        layered_rootfs: false,
     };
     let served = per_job::serve(&jobs, &context, &listing, &[], 16).unwrap();
     assert_eq!(served.job_acks.len(), 3);
@@ -484,6 +485,7 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
         shape: None,
         logs: Some(&*grants),
         metrics: &NoMetrics,
+        layered_rootfs: false,
     };
     let start = crate::job_start::start_of(&job, &allocation, &context).unwrap();
     assert_eq!(start.log_sink, None);
