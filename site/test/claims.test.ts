@@ -210,7 +210,7 @@ const ROWS: readonly Row[] = [
   ['install', '<code>packaging/js-agent/crun_host_setup.sh</code> sets a host up for it', 'packaging/js-agent/crun_host_setup.sh', 'sets up a Linux host to run js-agent with `--runtime crun`'],
   ['install', '<span class="tag tag-planned">none</span> A lease server for macOS.', 'docs/release.md', 'there is no macOS `js-lease-server`'],
   ['install', 'Take the archives <span class="tag tag-ok">works today</span>', 'docs/release.md', '`publish` creates the GitHub release for `vX.Y.Z`'],
-  ['install', '<code>ci</code> other than the macOS job have passed.', 'docs/release.md', 'after the jobs of `ci` other than `macos` have passed on it'],
+  ['install', 'after the checks of <code>ci</code> have passed.', 'docs/release.md', 'after the jobs of `ci` have passed on it'],
   ['install', 'A <a href="https://github.com/komira-ai/jobscheduler/releases">release</a> for version <code>X.Y.Z</code> carries:', 'docs/release.md', 'For version `X.Y.Z`:'],
   ['install', 'Each archive unpacks to a directory named like the archive without <code>.tar.gz</code>', 'docs/release.md', 'Each archive unpacks to a directory named like the archive without `.tar.gz`.'],
   ['install', 'and holds the binary and <code>LICENSE</code>', 'docs/release.md', '| the `js` binary and `LICENSE` |'],
