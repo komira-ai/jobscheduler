@@ -61,6 +61,11 @@ fn a_confirmation_frees_with_the_reason_of_the_jobs_end() {
         ),
         (failed(StartFailure::AgentRefused), EndReason::Refused),
         (failed(StartFailure::NoCapacity), EndReason::Refused),
+        (failed(StartFailure::InputUnavailable), EndReason::Refused),
+        (
+            with(JobState::Failed, Some(ResultReason::InputFailed)),
+            EndReason::Exited,
+        ),
         (
             with(JobState::Succeeded, Some(ResultReason::Exit)),
             EndReason::Exited,
@@ -86,6 +91,52 @@ fn a_confirmation_frees_with_the_reason_of_the_jobs_end() {
     for (index, (found, expected)) in cases.into_iter().enumerate() {
         assert_eq!(found, expected, "case {index}");
     }
+}
+
+/// A job whose input failed while it ran ends failed with reason input-failed, and its
+/// allocation is freed as exited: its process ran and stopped, the failure being the host's
+/// input's, not a stop by the server. One whose input was unavailable at the start is freed as
+/// refused, as any start the agent refused. It catches the two new ends of a job's file system
+/// freed under another reason (a cancel, a wall limit) than the one they ended for.
+#[test]
+fn an_input_failure_frees_as_exited_and_an_unavailable_input_as_refused() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    jobs.transition(&job.id, JobState::Placed, JobState::Starting)
+        .unwrap();
+    jobs.transition(&job.id, JobState::Starting, JobState::Running)
+        .unwrap();
+    let ended = jobs
+        .end_job(
+            &job.id,
+            JobEnd::InputFailed {
+                exit_code: Some(1),
+                input_failure: "input-unreadable".to_owned(),
+                output: Output::default(),
+            },
+        )
+        .unwrap();
+    assert_eq!(ended.state, JobState::Failed);
+    assert_eq!(
+        ended.result.as_ref().map(|result| result.reason),
+        Some(ResultReason::InputFailed)
+    );
+    assert_eq!(reason_of(&ended), EndReason::Exited);
+    let (refused, _) = placed(&jobs, "job-b", "host-a", spec(), BOOKED);
+    let refused = jobs
+        .end_job(
+            &refused.id,
+            JobEnd::Refused {
+                failure: StartFailure::InputUnavailable,
+                detail: "input-unavailable".to_owned(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        refused.state,
+        JobState::FailedToStart(StartFailure::InputUnavailable)
+    );
+    assert_eq!(reason_of(&refused), EndReason::Refused);
 }
 
 /// A confirmation does not free the allocation of a job still meant to run (it is not ended
