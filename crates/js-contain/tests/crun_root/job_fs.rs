@@ -364,6 +364,58 @@ async fn each_mode_writes_where_it_says() {
     assert_eq!(fs::read_to_string(upper.join("new")).expect("new"), "n\n");
 }
 
+/// Catches a source presented as a provider of writable trees presents it (decision LR5 of
+/// `docs/design/job-rootfs.md`: mode 0700 and owned by the job's own identity, the host ids
+/// `sub_uid + 1000`, which the job user that runs `crun` is not) that `crun` cannot bind in
+/// the job's namespace, or that the job cannot use once bound: the job reads the read-write
+/// mount's file and writes a new one, which is on the host owned by the job's identity, and
+/// changes a file of the copy-on-write mount, whose change is in its upper while the host's
+/// file is unchanged.
+#[tokio::test]
+#[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
+async fn a_private_source_owned_by_the_job_is_bound_and_written() {
+    let cell = Cell::new("private-src");
+    let job = cell.job_ids();
+    let root = host_root(&cell);
+    for source in ["rw-src", "cow-src"] {
+        let dir = root.join(source);
+        mkdir(&dir, 0o700);
+        lchown(&dir, Some(job.0), Some(job.1)).expect("give a directory");
+        owned_file(&dir.join("f"), "orig\n", job);
+    }
+    let script = "exec 2>&1; cat /out/f; echo w > /out/new; echo rw=$?; \
+                  echo changed > /work/f; echo cow=$?; cat /work/f";
+    let mut lease = cell.lease("private", &["/bin/sh", "-c", script], Shape::default());
+    let mut mounts = Mounts::new(&cell, &lease);
+    let rw = mounts.clone(0, &root, "rw-src", "", Attributes::default());
+    mounts.clone(1, &root, "cow-src", "", Attributes::default());
+    let cow = mounts.cow(&cell, 1, false);
+    let image = cell
+        .store()
+        .join(cell.image.digest.trim_start_matches("sha256:"))
+        .join("rootfs");
+    lease.spec.mounted_root = Some(mounts.root(&cell, vec![image]));
+    lease.spec.mounts = vec![
+        bind("/work", &cow, false, false),
+        bind("/out", &rw, false, false),
+    ];
+    let ran = run(&cell, &lease).await;
+    assert_eq!(ran.out(), "orig\nrw=0\ncow=0\nchanged\n", "{}", ran.said);
+    let new = root.join("rw-src/new");
+    assert_eq!(fs::read_to_string(&new).expect("rw"), "w\n");
+    let made = fs::metadata(&new).expect("the new file");
+    assert_eq!((made.uid(), made.gid()), job);
+    assert_eq!(
+        fs::read_to_string(root.join("cow-src/f")).expect("cow"),
+        "orig\n"
+    );
+    let upper = lease.spec.dir.join("cow/1/upper");
+    assert_eq!(
+        fs::read_to_string(upper.join("f")).expect("copied up"),
+        "changed\n"
+    );
+}
+
 /// Catches `no_exec` not reaching the mount (a program in it runs) or reaching a mount that
 /// did not ask for it, in a read-only and a copy-on-write mount; and a set-id bit or a
 /// device node honoured in any kind of mount: the same program runs from the mount without

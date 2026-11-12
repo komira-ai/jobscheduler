@@ -142,8 +142,10 @@ pub(super) type Gate = (Mutex<Sender<()>>, Mutex<Receiver<()>>);
 pub(super) struct Paths {
     /// Each lookup and check says it began, then waits for a word, when set.
     pub(super) gate: Option<Gate>,
-    /// The job user's search: refused with this error, or allowed.
+    /// A search of a mount's source: refused with this error, or allowed.
     pub(super) search: Option<i32>,
+    /// The ids of each search, in the order made.
+    pub(super) searched: Mutex<Vec<(u32, u32)>>,
     /// A check of a source: this error, or the kernel's answer.
     pub(super) answer: Option<i32>,
 }
@@ -174,7 +176,8 @@ impl PathCalls for Paths {
         Kernel.open_beneath(dir, rest)
     }
 
-    fn search_as(&self, _dir: &Path, _ids: (u32, u32)) -> io::Result<()> {
+    fn search_as(&self, _dir: &Path, ids: (u32, u32)) -> io::Result<()> {
+        self.searched.lock().expect("searched").push(ids);
         match self.search {
             Some(errno) => Err(io::Error::from_raw_os_error(errno)),
             None => Ok(()),

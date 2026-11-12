@@ -550,7 +550,7 @@ New agent refusal codes, added to `refusal.rs` (add-only, `refusal_codes_snapsho
 | Code | When |
 |---|---|
 | `input-not-allowed` | a host path lies under no `--mount-root`/`--mount-root-ro` (after links are followed), a read-write mount lies under a read-only root, a `sub_path` leads out of its source by a link, or a host port is not in `--host-port` |
-| `input-unavailable` | a host path, or its `sub_path`, is missing, not a directory, cannot be read, or its lookup passed its bound (4.7); a mount's source the job user cannot reach (4.2) |
+| `input-unavailable` | a host path, or its `sub_path`, is missing, not a directory, cannot be read, or its lookup passed its bound (4.7); a mount's source the job cannot reach (4.2) |
 | `rootfs-unsupported-here` | `layers` on an agent whose runtime has no root to replace (macOS) |
 | `mount-target-unsupported-here` | on macOS, a mount target outside `/work`, or a read-only or read-write mount at `/work` itself (5.1) |
 | `host-port-remap-unsupported-here` | on macOS, a host port whose job port differs from its host port (5.1); placement never sends one there (2.6) |
@@ -612,11 +612,14 @@ changes nothing, and the path text never reaches a mount option, so the rule tha
 has no `mount_setattr`, which goes in the crate's platform bindings as one system call with a `// SAFETY:` comment (R2),
 unless a safe wrapper exists by then.
 
-`crun` runs as the job user and binds the sources of the read-only and read-write mounts itself, so the job user must be
-able to reach them: `<mounts>` and every directory below it are mode 0711, owned by root. For each mount source, at
-assembly, the agent checks with `faccessat` under the job user's ids that the clone's root can be searched; a source the
-job user cannot reach is `input-unavailable` at the start, rather than a `crun` error. Layers need no such check, since
-the agent mounts them.
+`crun` runs as the job user and binds the sources of the mounts itself, in the job's user namespace, where the job user's
+own ids are not mapped and the job's are: `<mounts>` and every directory below it are mode 0711, owned by root, so any
+id passes them. For each mount source, at assembly, the agent checks with `faccessat` under the job's own ids (the host
+ids `sub_uid + 1000`, `Oci::container_ids`) that the clone's root can be searched; a source the job cannot reach is
+`input-unavailable` at the start, rather than a `crun` error or a mount the job cannot use. The job user's ids would be
+the wrong test: a source of mode 0700 owned by the job's identity, as a provider presents a writable tree (LR5), is one
+`crun` binds and the job uses, and the job user cannot search it. Layers need no such check, since the agent mounts
+them.
 
 The race is closed for every host path of the new fields. Lifting the `crun_host.rs` refusal also needs `--mount-root`'s
 legacy `Mount` form to go the same way on `crun`; it does, because `crun` jobs receive starts, and the legacy form is
@@ -690,7 +693,8 @@ What the job sees through a lower, compared with a tree in its scratch (the over
 lower fails `EXDEV` (`redirect_dir=off`; GNU `mv` then copies), renaming a file works. Writing over a lower directory
 needs the job to have write permission on it as the lower presents it: a host path whose files are owned by an id the
 job's mapping does not hold reads as owned by 65534, which the job cannot write into. A provider of trees a job will
-write over presents them owned by the job's container identity (the host uid `sub_uid + 1000`, `Oci::container_ids`);
+write over presents them owned by the job's container identity (the host uid `sub_uid + 1000`, `Oci::container_ids`;
+for `tierstore fs`, its `fs.owner`, as `docs/runbooks/fuse-layers-and-mounts.md` says);
 the agent does not change ownership (decision LR5), until the designed `id_mapping` option of 2.4 is built.
 
 ### 4.5 Host ports
@@ -1034,7 +1038,7 @@ and the host's input is to blame), or the job's own result stands.
 | A program in a `no_exec` mount is run | the job | the job's own result (`EACCES`), as for any file it may not run |
 | The job's writes fill its quota | the job | the job's own result (`ENOSPC`), as today |
 | A target below a read-only mount that does not exist in that mount | assembly (preparing) | start fails `invalid-mount`, public `AGENT_REFUSED`: the spec's fault on this host's data |
-| A mount source the job's user cannot search | assembly (preparing) | start fails `input-unavailable` |
+| A mount source the job's own ids cannot search | assembly (preparing) | start fails `input-unavailable` |
 
 The after-exit check is the one place the agent looks at an input after the job. It looks at what the job used, never
 at the path text again: the agent keeps an `O_PATH` descriptor of each clone's root (`<mounts>/<lease>/src/<i>`) from
@@ -1150,8 +1154,8 @@ port 0.
   `127.0.0.1` with a port, given by `--image-allow-loopback`, pulled over plain HTTP from an in-process registry on
   port 0; `--image-allow-loopback` refused at start for a host that is not a loopback address and for an entry without a
   port; an image layer's failed pull failing the start as an image's does;
-- assembly: a target below a read-only mount that does not exist in it refused `invalid-mount`; a mount source the job
-  user cannot search refused `input-unavailable`; a failed overlay or clone mount from the fake failing the start with
+- assembly: a target below a read-only mount that does not exist in it refused `invalid-mount`; a mount source the job's
+  own ids cannot search refused `input-unavailable`, and the search made as those ids, not the job user's; a failed overlay or clone mount from the fake failing the start with
   the runtime failure code and unmounting what was made before it;
 - a layers-only root: with an empty image, the job's command run as given with the default `PATH`;
 - cleanup: the list file names every mount before it is made; `remove`, `remove_leftover`, `tear_down` and the
@@ -1181,7 +1185,8 @@ user; the system calls themselves run in the root suites that exist.
 container over a root of three lowers (an image's tree and two directories): it reads a file of each, sees the top one's
 where two have the same name, writes a file and deletes a lower file and a lower directory (whiteouts in the upper), and
 the lowers are unchanged after; a read-only mount refuses a write `EROFS`; a read-write mount's write reaches the host
-directory; a copy-on-write mount at `/work` takes a write that does not reach the host directory; a program in a
+directory; a read-write and a copy-on-write mount of a directory of mode 0700 owned by the job's own ids (LR5) are bound
+and written; a copy-on-write mount at `/work` takes a write that does not reach the host directory; a program in a
 `no_exec` mount fails to run `EACCES` and one in the same tree without it runs; a mount of a host path with a mount
 below it shows that mount, and one the test makes on the host after the start does not appear (private); a read-only
 mount of a source with a writable mount below it refuses a write below too (recursive); a set-uid program in a mount
@@ -1253,8 +1258,9 @@ One subject per pull request, in this order; each names its tests from section 1
 8. **An end-to-end run on one Linux node** with a FUSE file system as a layer's and a mount's source, a registry on
    `127.0.0.1`, and a service on a host port: the job reads lazily, writes copy up, the upload reaches the service, the
    run directory is removed, the integrity check passes, and a restart of the FUSE file system's service while no job
-   runs leaves later jobs working. A runbook entry under `docs/runbooks/`, not a test of the PR set (B9). It also
-   measures the forwarder's throughput for an upload of a build's size (13, Q2).
+   runs leaves later jobs working. A runbook entry under `docs/runbooks/`, not a test of the PR set (B9): it is
+   `docs/runbooks/fuse-layers-and-mounts.md`. It also measures the forwarder's throughput for an upload of a build's
+   size (13, Q2).
 
 **Items 4 to 6 are unaffected by this amendment** in subject, order, dependencies and mechanism: no new system call,
 pool, file, flag or cleanup path. Each carries its half of an option of 2.2, as the sentence added to it says, because

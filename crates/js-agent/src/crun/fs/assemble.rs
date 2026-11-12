@@ -4,8 +4,9 @@
 //!
 //! 1. each opened host path (the layers' first, then the mounts') cloned private, `nosuid`
 //!    and `nodev` (read-only for a layer and a read-only mount, `noexec` when the mount asks)
-//!    at `<mounts>/<lease>/src/<i>`, and the job user's search of each mount's clone checked,
-//!    since `crun` binds it as that user;
+//!    at `<mounts>/<lease>/src/<i>`, and each mount's clone checked to be searchable by the
+//!    job's own identity (the host ids the job runs as), which must use it: `crun` binds it in
+//!    the job's user namespace, where the job user's own ids are not mapped;
 //! 2. with layers, the root: an overlay at `<mounts>/<lease>/rootfs` of the layers (top
 //!    first) over the image's tree, with its writable layer `rootfs-upper` (owned by the
 //!    container's root, mode `0755`) in the lease directory;
@@ -56,9 +57,9 @@ pub(crate) struct Owners {
     /// writable layer and the targets made in it.
     pub(crate) root: (u32, u32),
     /// The job's own identity in the container: a copy-on-write mount's writable layer
-    /// and the targets made in it.
+    /// and the targets made in it, and the ids each mount's clone must be searchable by.
     pub(crate) job: (u32, u32),
-    /// The job user, as which `crun` binds a mount's clone.
+    /// The job user, which runs `crun`: the overlays' work directories.
     pub(crate) user: (u32, u32),
 }
 
@@ -148,12 +149,9 @@ pub(crate) fn assemble(
     }
     for (j, mount) in plan.mounts.iter().enumerate() {
         paths
-            .search_as(&src(host_layers + j), plan.owners.user)
+            .search_as(&src(host_layers + j), plan.owners.job)
             .map_err(|why| {
-                let why = format!(
-                    "the job user cannot reach the source of {}: {why}",
-                    mount.target
-                );
+                let why = format!("the job cannot reach the source of {}: {why}", mount.target);
                 refused(refusal::INPUT_UNAVAILABLE, why)
             })?;
     }
