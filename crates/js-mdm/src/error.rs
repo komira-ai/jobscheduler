@@ -185,6 +185,62 @@ pub enum MdmError {
     /// The certificate file is not one openssl reads.
     #[error("{0} is there and is not a PEM certificate")]
     NotCertificate(String),
+    /// A service's address is not loopback.
+    #[error("{0} is not a loopback address: the API keys never leave the host")]
+    NotLoopback(String),
+    /// The running binary is one others could replace.
+    #[error(
+        "{0}: the API calls carry keys, so they are made only by a binary root owns alone (chown root and chmod go-w it)"
+    )]
+    Untrusted(String),
+    /// The listener on a service's port is not the service's.
+    #[error(
+        "port {port} on loopback is held by uid {uid}, not root or the service user: the API key is not sent (ss -ltnp 'sport = :{port}')"
+    )]
+    Squatter {
+        /// The port.
+        port: u16,
+        /// The owner of the listener.
+        uid: u32,
+    },
+    /// The recorded profile uuid is not one.
+    #[error(
+        "{0} does not hold a profile uuid of 16 to 64 hex digits: run js-mdm dep define-profile --apply --replace"
+    )]
+    BadRecord(String),
+    /// A call to a service failed or was refused by it.
+    #[error("{call}: {why}")]
+    Api {
+        /// The call, as it is printed.
+        call: String,
+        /// Why it failed.
+        why: String,
+    },
+    /// A service's answer is not what the verb needs.
+    #[error("{what}: {why}")]
+    Answer {
+        /// What the answer was for.
+        what: &'static str,
+        /// Why it is not usable.
+        why: String,
+    },
+    /// No ADE profile has been defined.
+    #[error(
+        "no ADE profile is recorded ({0} is not there): run js-mdm dep define-profile --apply first"
+    )]
+    NoProfile(String),
+    /// The recorded ADE profile is not this render.
+    #[error(
+        "an ADE profile is already defined (uuid {uuid}) from a render with sha256 {recorded:?}, and this render has sha256 {rendered}: if the MDM_ADE_* settings should differ, define a second profile with --replace; otherwise set them to the recorded profile's values"
+    )]
+    ProfileDiffers {
+        /// The recorded profile's uuid.
+        uuid: String,
+        /// The sha256 recorded with it (empty when none is).
+        recorded: String,
+        /// The sha256 of this render.
+        rendered: String,
+    },
 }
 
 impl MdmError {
@@ -196,6 +252,8 @@ impl MdmError {
             | MdmError::Io(_)
             | MdmError::Rejected { .. }
             | MdmError::Download { .. }
+            | MdmError::Api { .. }
+            | MdmError::Answer { .. }
             | MdmError::Command { .. }
             | MdmError::NoCertificate(_)
             | MdmError::NotCertificate(_) => 1,
