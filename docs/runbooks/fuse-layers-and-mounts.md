@@ -97,7 +97,8 @@ stage_dir = "/var/cache/tierstore/put-stage"
 
 `fill_socket` and `cache_path` are the node tierstore's `local_cache.fill_socket` and `local_cache.path`. The mount is
 at `/run/tierstore/fs` (the default `fs.mountpoint`), with `allow_other`, which tierstore always sets: the agent reads
-the trees as root, and the job reads and writes as `sub_uid + 1000`. Start it (`systemctl start tierstore-fs@a`) and
+the trees as root, and the job reads and writes as `sub_uid + 1000`. The unit starts only when its marker `/var/lib/tierstore/run-fs-a` exists, which nothing writes yet: create it, start the
+unit (`systemctl start tierstore-fs@a`), and
 check that `systemctl status tierstore-fs@a` says it is running and that its journal names the mode
 (`tierstore fs: kernel offers ... mode=...`).
 
@@ -156,7 +157,9 @@ arch = "x86_64"
 ```
 
 The agent's flags file, `/etc/js-agent/flags` ([farm-node-enroll.md](farm-node-enroll.md) says its rules), with the
-join token in `/etc/js-agent/token`:
+join token in `/etc/js-agent/token`. Only the packaged unit (the deb's `js-agent-crun.service`, which passes
+`--flags-file /etc/js-agent/flags`) reads it; the unit `crun_host_setup.sh` installs names its own `--server` and
+`--pool` and no flags file, and farm-node-enroll.md (section 4) says how to remove it first:
 
 ```text
 --server=http://127.0.0.1:7300
@@ -240,7 +243,7 @@ js job run --server http://127.0.0.1:7302 --token-file <work>/client.token --id 
 ## 4. What to check
 
 Before the job, note which blobs the node's cache holds: `ls /var/cache/tierstore/obj/*/*/` (each blob is named by its
-sha256), and the node tierstore's `tierstore_cache_fills_total` on its metrics route.
+sha256, beside a `<sha256>.meta` of its own), and the node tierstore's `tierstore_cache_fills_total` on its metrics route.
 
 | Check | How | Mark |
 |---|---|---|
@@ -249,7 +252,7 @@ sha256), and the node tierstore's `tierstore_cache_fills_total` on its metrics r
 | Writes copy up | `cat /run/tierstore/fs/trees/<tree>/e2e/read.txt` still prints `read by the job`, and no `new.txt` is there: both writes went to the job's own layers | **LIVE**; **CI** for the overlays over plain directories (`job_fs::a_root_of_layers_reads_through_and_keeps_its_writes`, `job_fs::each_mode_writes_where_it_says`) |
 | The read-write mount's commit is an upload | `aws s3api get-object --bucket <bucket> --key cas/b/e2e/<nonce>/result <file>` gets `result` and a line end; the `mv` returned only after the upload | **LIVE** |
 | The upload reaches the service | the receiver's `pv` says 1.00 GiB | **LIVE** |
-| The run's directories are removed | the agent's journal has `js-agent: job: ContainerRemoved`, `ScratchRemoved` and `ChecksPassed` lines for the run; then `ls -A /var/lib/js-agent/scratch/runs` shows neither `<run>` nor `.lease-js-<tag>-<run>`, `ls -A /run/js-agent/mounts` is empty, and `grep -c js-agent/mounts /proc/self/mountinfo` prints 0 | **LIVE**; **CI** (the unmounts and `remove_tree`, `job_fs::remove_tree_does_not_cross_a_bind_of_the_same_file_system`) |
+| The run's directories are removed | the agent's journal has `js-agent: job: ContainerRemoved`, `ScratchRemoved` and `ChecksPassed` lines for the run; then `ls -A /var/lib/js-agent/scratch/runs` shows neither `<run>` nor `.lease-js-<tag>-<run>`, `ls -A /run/js-agent/mounts` is empty, and `grep -c 'js-agent/mounts/' /proc/self/mountinfo` prints 0 (the agent's own bind of `/run/js-agent/mounts` itself stays while it runs) | **LIVE**; **CI** (the unmounts and `remove_tree`, `job_fs::remove_tree_does_not_cross_a_bind_of_the_same_file_system`) |
 | The integrity check passes | `js-agent: job: ChecksPassed { run_id: "<run>" }` and no `Tainted` or `Finding` line; `GET /v1/hosts` shows no `taint` | **LIVE** |
 
 ### The FUSE service restarts while no job runs
