@@ -10,6 +10,16 @@ komira-ai/jobscheduler#842. Written against `main` of this repository at
 (called "the tierstore design" below, its sections cited as "tierstore 6.7"). That design asks for this one in its
 section 6.7 and lists it as item 9 of its phase 1 plan (tierstore 12).
 
+**Amended** to close five gaps found when kbf on jobscheduler and tierstore was looked at end to end. The amendments
+read tierstore's `main` at `37ffa7d7` for its control socket, cache and pins, which its operations guide documents as
+built so far; the macOS sections (4) were not re-read, although tierstore has since chosen its macOS frontend (C9), and
+build item 5 revisits them. Five changes, each marked where it is made, and each placed in a build item of section 9:
+**A1** an attach that prefetches the tree inside the preparing stage (3.3); **A2** a tree is attached only within the
+submitting client's namespace (2.6); **A3** the agent ends the fastest-growing job when the scratch volume falls below
+its low-water mark (6.1); **A4** a tree's size is declared, reserved at attach and refused there when the host has no
+room, never failed mid-job for want of pins or table room (2.7); **A5** a job may name hosts it must not be placed on
+(2.8). Every new public field, value and refusal is listed in 7.1.
+
 **What changes for a user.** Today a job that needs a tree of inputs (a build action's input root) fetches it itself:
 kbf's task tool downloads every blob over HTTPS and lays the tree out in the container's scratch before the action runs
 (`kbf-on-js-agent.md`, S4). After this design, the job names the tree by its digest when it is submitted; the host's
@@ -98,12 +108,39 @@ Tree {
     /// own (section 5). Absent means the start fails.
     #[serde(default)]
     unavailable: TreeUnavailable,
+    /// A1: fill every blob of the tree before the job starts, in the preparing stage (3.3).
+    /// Absent means false: a blob is filled when the job first opens it.
+    #[serde(default)]
+    prefetch: bool,
+    /// A2: the tree namespace of the client that submitted the job, set by the server from
+    /// the client's configuration, never from the request (2.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    namespace: Option<String>,
+    /// A4: the most the tree holds, which the attach reserves on the node (2.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size: Option<TreeSize>,
 },
 ```
 
 ```rust
+/// A4: what a tree needs of the node: the bytes of its distinct blobs and its entries below
+/// the root, counted as tierstore counts them for `tree too large`.
+pub struct TreeSize {
+    pub blob_bytes: u64,
+    pub entries: u64,
+}
+```
+
+The three fields are optional on the wire, so the variant stays additive to the one of build item 1
+(komira-ai/jobscheduler#842) whether or not that has merged. The server always sets `namespace` and `size` (2.6,
+2.7); a `crun` agent refuses at admission a tree that lacks either, `invalid-job` (3.2), so its attach line always
+carries both words (3.3). `namespace` follows the client-name rule
+(1 to 40 bytes of letters, digits, `.`, `_`, `-`), checked by `check_input`.
+
+```rust
 /// What the agent does when a tree input cannot be attached because `tierstore fs` is down,
-/// does not answer in time, or refuses for a reason other than the tree itself.
+/// does not answer an attach in time, or refuses it for want of room or upstream (amended:
+/// never for a refused namespace or a failed or slow prefetch; section 5 lists the cases).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TreeUnavailable {
@@ -141,6 +178,19 @@ so a submitter cannot forge it.
 `tree-unavailable`) when a tree input failed while the job ran. `detail` keeps its meaning (a refusal code when the
 outcome is not a clean exit), so a reader of `detail` is not surprised by a new use of it.
 
+Amended (A1, A2, A4, A5): `input_failure` is also set on a `failed_to_start` result whose start failed for a tree
+(every row of section 5 marked "start fails"), with that row's code; the new codes are `tree-prefetch-failed`,
+`tree-prefetch-slow` and `tree-not-permitted`. So every tree failure, before or during the run, reaches the client as
+`INPUT_FAILED` with its code beside the job's `host_id`. The code says whose the failure is: `tree-invalid` and
+`tree-not-permitted` are the submission's, and no retry helps; every other code is the host's state, and a retry that
+avoids the host (2.8) may succeed. A `failed_to_start` result without it maps as today.
+
+A3 adds one `Outcome` (`crates/js-agent-wire/src/heartbeat.rs:48-69`), `ScratchLowWater` (`scratch_low_water`): the
+agent ended the job because the scratch volume fell below its low-water mark and this job's writes grew fastest (6.1).
+Its exit code is unconstrained, as `killed`'s is. Such a result never carries `input_failure`, even when the exit-time
+detach reports failed fills or is not answered: a full volume is what made those fills fail, and the job was ended for
+filling it.
+
 Why a new variant and not `Stage` (tierstore 6.7 says the same): `stage_id` names a tree of `js-treestore`, a different
 namespace with different digests (`js-treestore` names a tree by its diff id), and `Stage`'s `dest` may not be empty.
 Re-meaning `Stage` would break B8. `Stage` stays as it is, refused by every runtime.
@@ -173,6 +223,11 @@ The doc comments of `run-files` and `scratch-quota` say the server sends those f
 (`crates/js-caps/src/host.rs:45-55`), but `start_of` checks neither today. The tree check is written in `start_of` and
 tested there, not left to a comment.
 
+A4 adds two detected keys beside it, reported only with `tierstore-trees=true`, from the probe's first line (3.1):
+`tierstore-pin-gib`, the node's `local_cache.pin_limit` in whole GiB rounded down, and `tierstore-tree-entries`, the
+node's bound on flattened entries (section 12). Both are countable keys (`Consumable`, `matching.rs:58-66`): a host
+matches when it has at least the amount. `DETECTED_KEYS` grows from 11 to 13. 2.7 says how the server asks for them.
+
 ### 2.4 The public submit
 
 `job.proto` gains, all additive:
@@ -189,6 +244,12 @@ message TreeInput {
   bool writable = 3;
   // The tree may be left out when the host cannot attach it: the job then stages it itself.
   bool job_stages_if_unavailable = 4;
+  // A1. Fill the whole tree before the job starts; the time is not charged to its wall limit.
+  bool prefetch = 5;
+  // A4. Required: the bytes of the tree's distinct blobs, and its entries below the root. The
+  // host must hold at least this much; a tree larger than declared fails `tree-invalid`.
+  optional uint64 blob_bytes = 6;
+  optional uint64 entries = 7;
 }
 
 message JobSpec {
@@ -197,6 +258,8 @@ message JobSpec {
   // trees, `command` is the whole program, an absolute path in the image, and the image's
   // own entrypoint is not used.
   repeated TreeInput trees = 41;
+  // A5. Hosts (a Job's host_id) the job is never placed on. At most 16. Empty: any host.
+  repeated string avoid_hosts = 52;
 }
 
 message JobResult {
@@ -207,10 +270,15 @@ message JobResult {
 
 enum ResultReason {
   ...
-  // An input tree could not be read while the job ran, or reading it stalled the job past its
-  // wall limit: the failure is the host's, not the job's, and a retry may succeed. The job's
-  // state is FAILED even when its process exited 0; the exit code is kept.
+  // An input tree could not be attached, prefetched or read for the job, or reading it stalled
+  // the job past its wall limit. input_failure says whose the failure is: tree-invalid and
+  // tree-not-permitted are the submission's, and no retry helps; every other code is the
+  // host's, and a retry that avoids the host may succeed. The job's state is FAILED even when
+  // its process exited 0; the exit code is kept.
   RESULT_REASON_INPUT_FAILED = 5;
+  // A3. The host's scratch volume fell below its low-water mark and this job's writes grew
+  // fastest, so the host ended it. Not a quota. The job's state is FAILED; no exit code.
+  RESULT_REASON_SCRATCH_LOW_WATER = 6;
 }
 
 enum RefusalCode {
@@ -218,14 +286,23 @@ enum RefusalCode {
   // A tree input breaks a rule of TreeInput, two trees are the working root, or a job with
   // trees has an empty or relative command.
   REFUSAL_CODE_INVALID_TREE_INPUT = 5;
+  // A2. The submitting client has no tree namespace, so it may not submit trees.
+  REFUSAL_CODE_TREES_NOT_PERMITTED = 6;
+  // A5. avoid_hosts has more than 16 entries, a repeated one, or one that is not a host id.
+  REFUSAL_CODE_INVALID_AVOID_HOSTS = 7;
 }
 ```
+
+The amended rules of `TreeInput` (A1, A4): `blob_bytes` and `entries` are both present, or the submit refuses
+`INVALID_TREE_INPUT`; zero is allowed for an empty tree. `prefetch` has no rule.
 
 `invalid-tree-input` is the submit's refusal; the agent's own codes (`tree-invalid` and the others of section 5) are a
 different layer and never reach a submit. `trees` is part of "the same job" for an idempotent resubmit, as `files` is.
 The server's `end_of` (`crates/js-lease-server/src/per_job.rs:301`) maps a result that carries `input_failure` to a new
-`JobEnd` case that becomes state `FAILED` with reason `INPUT_FAILED`, whatever the outcome; a result without it maps as
-today.
+`JobEnd` case that becomes state `FAILED` with reason `INPUT_FAILED`, whatever the outcome (amended: `failed_to_start`
+included), except `scratch_low_water`; a result without it maps as today. A3: an outcome `scratch_low_water` maps to a
+second new `JobEnd` case, state `FAILED` with reason `SCRATCH_LOW_WATER` and no exit code, and is checked before
+`input_failure`, so a result that carries both (which the agent never sends, 2.2) still reads as the job's.
 
 ### 2.5 The server's start: a `run` body
 
@@ -234,7 +311,8 @@ the job:
 
 - `run.program` is the job's `command`, which must therefore be an absolute path in the image (the submit rule of
   2.4); `run.args` are the job's `args`; `run.env` is the job's `env`; `run.cwd` is empty (the exec root);
-  `run.network` is the job's level; `run.inputs` are the job's trees as `InputRef::Tree`; `run.outputs` is empty.
+  `run.network` is the job's level; `run.inputs` are the job's trees as `InputRef::Tree`, each with its `prefetch`, the
+  client's `namespace` (2.6) and its `size` (2.7); `run.outputs` is empty.
 - The start's own `command` and `env` are empty: `JobStartSpec::validate` refuses a `run` beside a non-empty `command`
   (`crates/js-agent-wire/src/per_job.rs:221-225`), and the job's environment is given once, in `run.env`, which is the
   one the new `crun` path reads (3.2). Today `start_of` puts `command` followed by `args` in the start's `command`
@@ -246,6 +324,81 @@ entrypoint as the server combines them today; with, it is the whole program. The
 
 Why not a new `inputs` field on the container start: inputs already have one home on the wire, the `run` body, with its
 validation, its limits and its previous-release tests; a second list would be a second way to say the same thing.
+
+### 2.6 Who may name a tree (A2)
+
+`TreeInput.digest` is the client's, and today it is the only credential: tierstore's attach takes a digest and a run and
+nothing else, gated only by the control socket's group (tierstore 6.5); a manifest's blob `source` may name any object
+key outside tierstore's own prefixes (`_journal/`, `_tiering/`, `_entries/`, which a fill refuses); so a client that
+knows a digest, or writes a manifest whose sources point at another's objects, reads them. Neither side can close this
+alone. The server knows the client (the bearer token names it, `job_api/auth.rs`, and the job records it, `Job.client`)
+but never reads the store; tierstore knows where every byte comes from but not who asked. So the check is split, and
+**tierstore enforces it**:
+
+- **The server** gives each client that may use trees a tree namespace, a configuration key of the `[[client]]` table
+  (`tree_namespace = "<name>"`, `crates/js-lease-server/src/file/clients.rs`); a client given by `--client-token`
+  alone has none. A submit with trees from a client without one is refused `TREES_NOT_PERMITTED`. `start_of` writes
+  the namespace of the job's recorded client into every tree of the `run` body, from the configuration at that moment;
+  if the client lost it since, the start is `Unsendable::TreesNotPermitted` and the job ends at the start timeout. The
+  request never carries a namespace, so a client cannot name another's.
+- **The agent** passes it on: `attach <64 hex> for js.<run id> namespace <name>`. It checks nothing about it, since it
+  holds no client configuration.
+- **tierstore** maps each namespace to the object-key prefixes it may read, in its own configuration, as its scoped
+  keys already list `read_prefixes`; it resolves the root manifest, every child manifest and every blob `source` of an
+  attach only under those prefixes, and refuses the attach otherwise (`not in namespace`), or when it names none while
+  namespaces are configured (`namespace required`). The check is per attach, not per tree: a tree another namespace
+  attached is checked again for this one. Section 12 asks for it; how keys are laid out per namespace (a
+  content-addressed `cas/l/` shared by all cannot be one namespace's) is tierstore's and the writing client's to
+  decide.
+
+The agent maps both refusals to `tree-not-permitted`: a start failure, carried as `input_failure`, with no fallback,
+not retriable (section 5). If the split were wrong, what a client gains is read access to another namespace's build
+inputs on any node where it can run a job; tierstore's design calls tree contents build inputs, not secrets (tierstore
+6.8), which is why a namespace, not a per-digest grant, is the unit.
+
+### 2.7 A tree's size: the placement need, and the attach that refuses (A4)
+
+tierstore today never refuses an attach for pin or table room (it can refuse one `no space` when a manifest's own fill
+finds the cache past its `critical` share, a row of section 5): a pin past `local_cache.pin_limit` is refused and the
+blob kept by recency only, so it may be evicted and filled again at its next open ("a refused pin costs speed, never a
+job", tierstore D9), and a fill past the cache's `critical` share answers `no space`, which is `EIO` on the open.
+Flattened manifests are held in memory with no bound but the per-tree one (about 110 B per entry, tierstore 6.3). So
+many concurrent distinct trees end as an `EIO` in the middle of some job, or as a `tierstore fs` out of memory. This
+design moves that failure to the attach, before the job starts:
+
+- **The client declares** each tree's `blob_bytes` and `entries` (2.4). It wrote the manifests, so it has both.
+- **The attach reserves them**: `attach … reserve <blob_bytes> <entries>`. tierstore refuses `tree larger than
+  declared` when the tree exceeds either (`tree-invalid`, the submitter's mistake); otherwise it pins every blob of the
+  tree at once, filled or not, against `pin_limit`, and counts the entries against a node bound on flattened entries,
+  refusing `no pin room` or `no table room` when either would pass. A blob another attachment already pinned costs
+  nothing more, and a tree already flattened for another run counts its entries once, so a toolchain shared by many
+  jobs is reserved once. A fill of a reserved blob evicts unpinned entries rather than answering `no space` for the
+  cache's budget or its `critical` share. The reservation ends at the tree's last detach. Section 12 asks for this.
+- **The agent maps** `no pin room` and `no table room` to `tree-unavailable` at attach: retriable, carried as
+  `input_failure`, and the job stages the tree itself when it asked to (section 5).
+- **The placement need.** The server adds to the job's capabilities `tierstore-pin-gib` at least the sum of its trees'
+  `blob_bytes` in GiB rounded up, and `tierstore-tree-entries` at least the sum of their `entries` (2.3), beside
+  `tierstore-trees=true`, overwriting a client's own. So a job is placed only on a host whose limits could hold its
+  trees at all. The need is matched, not booked: booking each job's bytes would count a shared toolchain once per job
+  that reads it, and refuse room the node has. Two jobs that each fit but not together meet the attach refusal above.
+
+What remains a mid-job failure is what no attach can foresee: a blob missing upstream, a fetch that fails, or a
+scratch volume shared with the cache that jobs' own writes have filled, where a fill cannot be written whatever is
+reserved (`tree-read-failed` in each case). The last is the case of 6.1, whose guard ends the job that fills it.
+
+### 2.8 Not on that host again (A5)
+
+After an `INPUT_FAILED` result (or any other), a client may resubmit the job under a new id with
+`JobSpec.avoid_hosts` naming the host the failed run had (`Job.host_id`, field 10, which every job carries once
+placed). The placer never places the job on a listed host: `walk_jobs`'s `fits`
+(`crates/js-sched-placer/src/jobs.rs:386-394`) gains one conjunct, and the whole-host walk drops the listed hosts from
+its candidates the same way. Rules: at most 16 entries, each a host id (`js_types::HostId`), none repeated, else
+`INVALID_AVOID_HOSTS`. A host that no longer exists is allowed. The submit's capable-host check does not read the list,
+since a pool may still launch a new host; a job that every present host is listed against waits, and ends by the
+queue's wait bound as any unplaceable job does. The field is not about trees: any failure that is the host's may use
+it, and a client does not set it after `tree-invalid` or `tree-not-permitted`, which no host cures. It takes part in
+"the same job" (`JobSpec::same_job_as` destructures every field), which costs nothing, since a
+retry after a terminal failure needs a new id anyway.
 
 ## 3. The agent on Linux (`crun`)
 
@@ -273,6 +426,11 @@ The probe also compares `fs.owner` with the host uid the job's action runs as: t
 container (overlayfs cannot copy up a file whose owner is not mapped in the container's user namespace), so the
 capability is not reported and the warning names both ids. The check runs once, at start, as B20 asks.
 
+Amended (A1, A2, A4): the first line also names the node's `pin_limit` and its bound on flattened entries, which become
+`tierstore-pin-gib` and `tierstore-tree-entries` (2.3), and its version must be one that has `prefetched`, `namespace`
+and `reserve` (section 12). A version without them is a version the agent does not know: no capability, and the
+warning says so.
+
 The agent is root on a `crun` host (`agent-privilege.md`), so it may use the control socket whatever its group.
 
 ### 3.2 Admission
@@ -291,6 +449,7 @@ nothing else about a `run` on `crun` changes:
 | a `run` with a `Writable` tree at a non-empty `dest` | `tree-placement-unsupported` (new); 3.4 says why |
 | a `run` with a `ReadOnly` tree at an empty `dest` | refused by the wire's own check (2.2) |
 | a `Tree` input on an agent that does not report `tierstore-trees` (no `--tierstore-fs`, a failed probe, an owner mismatch) | `tree-unsupported-here` (new) |
+| amended (A2, A4): a `Tree` without `namespace` or without `size` | `invalid-job`: only a server that does not set them sends one (2.2) |
 
 The `run`'s program, args, env and network replace the container's command, args, env and network exactly as the
 start's own fields would; nothing else of the container changes.
@@ -311,6 +470,38 @@ every tree is attached. `Prepared { Pending, Ready, Failed }` (`lifecycle/runtim
 are read the way the prefetcher's are. The agent bounds each attach at 120 s, a number chosen here (TI5), not
 tierstore's; past it the attach counts as unavailable (section 5), and section 12 asks tierstore to state a bound of
 its own.
+
+The attach line is, in full, `attach <64 hex> for js.<run id> namespace <name> reserve <blob_bytes> <entries>`
+(2.6, 2.7), with ` prefetch all` appended for a tree that asked for it (A1, below).
+
+**Prefetch, inside the preparing stage (A1).** Without it, a file's bytes are fetched whole on its first open, inside
+the job (tierstore 6.4: no block-wise fetch yet), so a cold 150 to 190 MB toolchain binary is a wait charged to the
+action's wall time, and the attach bound above covers manifests only. With `prefetch` the agent appends `prefetch all`
+to the attach, which tierstore already parses: its answer still comes once the manifests are flattened, and a thread of
+tierstore then fills every blob the cache lacks and pins it (tierstore's operations guide, control socket). That answer
+does not say when the fill has ended, so the agent then sends `prefetched <64 hex> for js.<run id>` on the same
+connection, a verb asked of tierstore in section 12, which answers once the tree's prefetch has ended, with the blobs it
+could not have, in the shape of `detach`'s `failures`. tierstore does not prefetch a tree twice: when another run's
+attach already started the tree's prefetch, this run's `prefetched` waits for that one, gets the same `failures`, and
+finds the blobs pinned for its own run as well; the prefetch goes on while any run holds the tree. The job leaves the
+preparing stage only when its image is ready, every tree is attached, and every prefetching tree has answered
+`prefetched`:
+
+- empty `failures`: the tree is ready, and every blob is in the cache and pinned for the run (with the reservation of
+  2.7, a pin cannot be refused, so no blob is evicted before the job opens it);
+- any failure: the start fails `tree-prefetch-failed`, carried as `input_failure` (section 5);
+- no answer within `TREE_PREFETCH_LIMIT`, 10 minutes from the attach's answer, a constant chosen here: the start fails
+  `tree-prefetch-slow`, likewise. The pool's start timeout (15 minutes by default, counted from placement,
+  `job_expiry.rs`) also covers the image wait and the attaches, so whichever passes first ends the job: when those
+  took more than about 5 minutes, or the pool's start timeout is shorter, the job ends `start-timeout`, as it would for
+  a slow image, and the client does not learn that the prefetch was slow.
+
+Each waiting `prefetched` holds its own connection, on a waiter thread per prefetching job (at most the agent's job
+slots), so one slow tree never holds back another job's attach on the tree thread. The time is not charged to the
+job: the wall limit starts in `settle`, after the preparing stage; the lease end, when the start has one, still caps
+the two together, as it does an image wait. `prefetch` is all or nothing. tierstore refuses `prefetch some`, so
+prefetching only the large files is not offered; it can be added later as another optional field when tierstore
+offers it (TI18). How long a cold prefetch and a cold first open take is measured in build item 6.
 
 The wall limit is not running in the preparing stage (the deadline is set in `settle`, `machine/mod.rs:937`), so a slow
 attach is never charged to the job; the server's start timeout bounds it from outside.
@@ -380,9 +571,9 @@ answer on a later pass, as it reads the attaches'. Detach does no fetch, and the
   branch for an adopted or leftover run (`remove_leftover`, `crun/mod.rs:834-839`) and the teardown of a run whose
   making failed (`tear_down`, `crun/adopt.rs:527`, through `ledger.discard`).
 - **At the ends of the preparing stage.** A job that ends before it has a container never reaches `remove`: an image
-  that failed (`Prepared::Failed`, then `settle` with an error), an attach that failed or passed its bound, a stop, a
-  cancel or a lease end while preparing (`end_unstarted`, `lifecycle/machine/job.rs:326-335`). Each of these asks for a
-  detach of every tree the job attached.
+  that failed (`Prepared::Failed`, then `settle` with an error), an attach or a prefetch (A1) that failed or passed
+  its bound, a stop, a cancel or a lease end while preparing (`end_unstarted`, `lifecycle/machine/job.rs:326-335`).
+  Each of these asks for a detach of every tree the job attached.
 - **At restart**, `detach-all-except` (3.6) is the backstop for a detach that was asked for and never answered.
 
 `not attached` is a success: detach is idempotent.
@@ -537,10 +728,19 @@ Every failure below ends in one of three places: the start fails (no job ran), t
 tierstore's (7.4): a recorded failure of the filesystem makes the run an infrastructure failure, whatever the job's exit
 status, so that a compiler's "cannot read file" caused by a fetch is never reported as the user's build error.
 
+Amended: a "start fails" row below is reported as a `failed_to_start` result whose `input_failure` is the row's code
+(2.2), so the client reads it as `FAILED`, reason `INPUT_FAILED`, beside the host it was placed on, and may resubmit
+avoiding that host (2.8), except after `tree-invalid` or `tree-not-permitted`, which are the submission's. A start that
+fails for any other reason is `FAILED_TO_START` as today.
+
 | Failure | When the agent learns it | Result | With `job_stages` |
 |---|---|---|---|
 | The control socket does not exist, refuses, or does not answer the attach within 120 s | attach | start fails `tree-unavailable`, retriable | the job starts without the tree; `JS_TREES_UNATTACHED` names its `dest` |
-| `tierstore fs` refuses the attach for a reason that is not the tree's (`upstream <status>`, `no space`) | attach | start fails `tree-unavailable` | as above |
+| `tierstore fs` refuses the attach for a reason that is not the tree's (`upstream <status>`, `no space`; A4: `no pin room`, `no table room`) | attach | start fails `tree-unavailable` | as above |
+| A2: `tierstore fs` refuses the namespace (`not in namespace`, `namespace required`) | attach | start fails `tree-not-permitted`, not retriable | the same: no fallback |
+| A4: the tree is larger than its declared `blob_bytes` or `entries` (`tree larger than declared`) | attach | start fails `tree-invalid`, not retriable | the same: no fallback |
+| A1: `prefetched` answers with failures | prefetch | start fails `tree-prefetch-failed`, retriable | the same: no fallback |
+| A1: `prefetched` is not answered within `TREE_PREFETCH_LIMIT` (10 minutes) | prefetch | start fails `tree-prefetch-slow`, retriable | the same: no fallback |
 | `tierstore fs` refuses the tree itself (`unsupported entry name`, `unsupported entry kind`, `unsupported manifest version`, `tree too large`, a manifest whose bytes do not hash to its digest) | attach | start fails `tree-invalid`, not retriable | the same: no fallback |
 | The attach answers a path that is not `<mount>/trees/<digest>` | attach | start fails `tree-unavailable` and a local finding | the same: no fallback |
 | A fill fails while the job runs (`EIO` on an open), or `tierstore fs` aborts | detach at exit | `FAILED`, reason `INPUT_FAILED`, `input_failure: tree-read-failed`, the exit code kept | n/a |
@@ -548,11 +748,15 @@ status, so that a compiler's "cannot read file" caused by a fetch is never repor
 | The detach at exit is not answered within 5 s, and the job did not succeed | detach at exit | `FAILED`, reason `INPUT_FAILED`, `input_failure: tree-unavailable` | n/a |
 | The detach at exit is not answered within 5 s, and the job succeeded | detach at exit | succeeded; the detach is asked again in `remove` | n/a |
 | A job's write to its upper directory runs out of space | the job | the job's own result (`ENOSPC`, as with a tree in scratch) | n/a |
+| A3: the scratch volume falls below its low-water mark and this job's writes grew fastest | the scratch watch (6.1) | `FAILED`, reason `SCRATCH_LOW_WATER`, no exit code | n/a |
 | The node reboots | the next start | runs lost as today; the new mount has no attachments | n/a |
 
 `tree-invalid` has no fallback: the manifest is the submitter's, and a submitter that wrote a wrong one would stage the
 same wrong tree itself or a different one; failing by name shows the defect where it was made. The other refusals are
-the host's state, which another host or a later try does not share.
+the host's state, which another host or a later try does not share. `tree-not-permitted` has none either: staging the
+tree itself would read the same objects the namespace keeps the client from (2.6). A failed or slow prefetch has none,
+since the blobs it could not have are the ones the job would fetch from the same store; another host may have them
+(2.8).
 
 An unanswered detach after a failed job counts as the input's: the job failed while the filesystem it was reading did
 not answer, and calling that a build error is the mistake the rule above exists to prevent. A job that succeeded read
@@ -582,12 +786,51 @@ There is no per-job disk quota on the farm: its pools book no disk, and its agen
   scheduler compares only with jobs that ask for disk; on the farm none does. When tierstore's cache shares the scratch
   volume, the bytes it holds are already out of the volume's free space, and its unused budget would be promised twice.
   Tierstore 6.7 and 6.9 say the offer subtracts that unused budget, and its plan puts it in this work (tierstore 12,
-  item 9). This design does not build it now (TI9): the deployment that puts the cache on the scratch volume sets
-  `--scratch-low-water-gib` to at least the cache's budget, at the source of the configuration and once (B20). That
-  over-reserves by the bytes the cache holds, which are already out of the free space, and is safe. If a pool that books
-  disk ever runs on such a node, the reserve is a small change beside the image reserve of `disk.rs`, with tierstore's
-  own report of its used bytes as the input, since a walk of a cache of millions of files on every reread (every 30 s,
-  `disk.rs:36`) is not acceptable.
+  item 9). This design does not build it now (TI9), since on the farm no job asks for disk and the offer promises
+  nothing. Amended: the deployment no longer sets `--scratch-low-water-gib` to the cache's budget, as this paragraph
+  first said, because the mark is now also the level at which the agent ends a job (6.1): with a large budget and a
+  near-empty cache, jobs would be ended while the volume still had that budget free. It sets the mark to the free space
+  the cache needs to keep filling, a margin of the deployment's choosing, at the source and once (B20). If a pool that
+  books disk ever runs on such a node, the reserve is a small change beside the image reserve of `disk.rs`, with
+  tierstore's own report of its used bytes as the input, since a walk of a cache of millions of files on every reread
+  (every 30 s, `disk.rs:36`) is not acceptable.
+
+### 6.1 The low-water mark at run time (A3)
+
+Without a quota, one runaway job's `upper` and copy-ups can fill the scratch volume; when the cache shares it, every
+fill then fails (`io`, its directory cannot be written, or `no space` past the cache's `critical` share), the open is
+`EIO`, and other jobs fail `tree-read-failed` for a job that is not theirs. The reservation of 2.7 does not help there:
+it holds the cache's budget, not the volume's free space.
+`--scratch-low-water-gib` today only lowers the disk offer (`host.rs:107-112`): nothing watches the volume while jobs
+run, and nothing ends a job for it (`Cause` has `Stopped`, `TimedOut`, `Silenced` only,
+`lifecycle/machine/job.rs:120-127`). This design keeps the farm without a quota and adds a node-level guard, not a
+per-job limit:
+
+- **When it is armed.** On a `crun` agent with both `--tierstore-fs` and `--scratch-low-water-gib`: the case of a cache
+  that shares the scratch volume. No new flag, and no change on any other agent. Once armed it covers every running job
+  of the agent, tree or not, since all of them write to the same volume.
+- **The watch.** A scratch watch thread reads the volume's free space every 5 s (`LOW_WATER_POLL_MS`) with
+  `facts::free_bytes` (`crates/js-agent/src/facts.rs:692`, a `df` through the agent's `CommandRunner`), called
+  directly, not through the disk gauge (`ScratchDisk`), which keeps an answer for 30 s. While the free space is above
+  the mark it does nothing more. The lifecycle worker never reads the disk.
+- **Who is ended.** The first poll at or below the mark takes a baseline: the size of each candidate's writes (its
+  `upper` and its run directory, with `disk::tree_bytes`, links not followed: the job's own bytes, not the cache's).
+  A candidate is a job that is running and has no stop asked for, for any cause. The next poll, if the volume is still
+  at or below the mark, measures again and ends the one candidate whose writes grew most between the two, the one
+  started last among equals; a job present in only one of the two measurements (started or ended between them) is not
+  compared. A job that grew by nothing is never ended: if none grew (the cache, or something outside the jobs, took the
+  space) nothing is ended and the agent logs one warning per crossing. After an ending, no new baseline is taken until
+  that job's run directory has been removed, so a second job is never chosen while the first one's bytes are still on
+  the volume; then, if the volume is still at or below the mark, a new round begins.
+- **How it ends.** The worker takes a fourth `Cause`, `ScratchLow`, and stops the job with the grace a wall-limit stop
+  has. The result's outcome is `scratch_low_water` (2.2), which the server records as `FAILED`, reason
+  `SCRATCH_LOW_WATER` (2.4). The client can tell it from its own failure and from a host's input failure; whether a
+  retry may succeed is for the client to judge, since the job may be the runaway.
+
+It is not a quota: no job has a number of its own, a job may write as much as the volume holds while the node has room,
+and only a node that crosses its operator's mark ends one job, the fastest grower. The walks run only below the mark,
+so they cost nothing on a healthy node. macOS has no overlay and no cache on the scratch volume yet; whether it needs
+the watch is decided with its frontend in build item 5.
 
 ## 7. Compatibility (B8)
 
@@ -607,12 +850,43 @@ There is no per-job disk quota on the farm: its pools book no disk, and its agen
   (`NodeCaps::from_report`, `crates/js-caps/src/report.rs`).
 - **The agent's refusal codes** (`tree-unavailable`, `tree-invalid`, `tree-read-failed`, `tree-stalled`,
   `tree-placement-unsupported`, `tree-unsupported-here`, `outputs-unsupported-here`, `too-many-inputs-here`,
-  `cwd-in-tree`) are added to `refusal.rs`, which is add-only and snapshot-tested (`refusal_codes_snapshot`).
+  `cwd-in-tree`, and with the amendments `tree-prefetch-failed`, `tree-prefetch-slow`, `tree-not-permitted`) are added
+  to `refusal.rs`, which is add-only and snapshot-tested (`refusal_codes_snapshot`).
 - **The ledger** of a `crun` run does not change (3.6).
 - **tierstore's control protocol** is a local interface between two processes of one node. Tierstore 10 says its local
   sockets are versioned by their first line; the control socket's line is asked for in section 12. The agent refuses a
   version it does not know at the start-time probe, so a mismatch shows as a missing capability and a warning, not as
   failed jobs.
+- **The amendments.** `Tree`'s `prefetch`, `namespace` and `size` are optional with defaults, so a start without them
+  reads as before; a previous agent never meets them, since it never gets a tree start. `Outcome::ScratchLowWater`
+  reaches a previous server as `unknown`, which `end_of` does not record, so servers upgrade before agents, as for every
+  agent wire addition (`agent-wire.md`, section 1). The two new detected keys are dropped by a previous server, like
+  `tierstore-trees`. In the public API, `TreeInput` fields 5 to 7, `JobSpec.avoid_hosts` (field 52),
+  `RESULT_REASON_SCRATCH_LOW_WATER` and the two refusal codes are additive, and a previous client reads the new values
+  as `UNSPECIFIED`. A previous server drops `avoid_hosts` and may place the job on a listed host, so a client that sends
+  it checks `Job.spec`, as for `trees`. `blob_bytes` and `entries` are required only of a job with trees, which no
+  released client sends. The client configuration key `tree_namespace` is new; a configuration without it reads as
+  before.
+
+### 7.1 Public interface changes
+
+Every item is new; nothing is renamed, removed or re-meant, except that the comment of `RESULT_REASON_INPUT_FAILED`,
+which no release has shipped, widens to failures before the run. Each is a **public interface change**.
+
+| Item | Where | Amendment |
+|---|---|---|
+| `TreeInput.prefetch` (5), `TreeInput.blob_bytes` (6), `TreeInput.entries` (7) | `job.proto` | A1, A4 |
+| `JobSpec.avoid_hosts` (52) | `job.proto` | A5 |
+| `RESULT_REASON_SCRATCH_LOW_WATER` (6) | `job.proto` | A3 |
+| `REFUSAL_CODE_TREES_NOT_PERMITTED` (6), `REFUSAL_CODE_INVALID_AVOID_HOSTS` (7) | `job.proto` | A2, A5 |
+| `JobResult.input_failure` set on a start that failed for a tree | `job.proto` semantics, agent wire | A1, A2, A4 |
+| `[[client]] tree_namespace` | the server's configuration file | A2 |
+| `InputRef::Tree.prefetch`, `.namespace`, `.size`; `TreeSize` | agent wire | A1, A2, A4 |
+| `Outcome::ScratchLowWater` (`scratch_low_water`) | agent wire | A3 |
+| codes `tree-prefetch-failed`, `tree-prefetch-slow`, `tree-not-permitted` | agent wire, `refusal.rs` | A1, A2 |
+| keys `tierstore-pin-gib`, `tierstore-tree-entries` | `js-caps` detected keys | A4 |
+| the control socket's first line: `pin_limit`, the entry bound, a version with the words below | tierstore's control socket (3.1, section 12) | A1, A2, A4 |
+| verbs `prefetched`; attach words `namespace`, `reserve`; refusals `not in namespace`, `namespace required`, `no pin room`, `no table room`, `tree larger than declared` | tierstore's control socket (section 12) | A1, A2, A4 |
 
 ## 8. Tests
 
@@ -637,6 +911,11 @@ with this agent's id mapping, by the run of build item 6.
   missing `sha256:`; an empty `dest` with `ReadOnly`; two empty `dest`s; a `ReadOnly` tree at `a` beside a `Writable`
   one at the exec root (allowed); two non-empty `dest`s where one lies below the other (refused, as today); an unknown
   `unavailable` value reading as an unknown command; 256 inputs (allowed) and 257 (refused).
+- amended (A1 to A4): the goldens of a `Tree` with `prefetch`, `namespace` and `size`, and of a `scratch_low_water`
+  result and a `failed_to_start` result carrying `input_failure`; a `Tree` without the three fields reads with their
+  defaults; a `namespace` of 40 bytes (allowed), 41 and 0 (refused) and one with a `/` (refused); `size` with
+  `blob_bytes` 0 and `entries` 0 (allowed); a previous server's frozen `Outcome` reading `scratch_low_water` as
+  `unknown` (the B8 pair of the new outcome).
 
 **Server** (`crates/js-lease-server`, `crates/js-sched-placer`, `crates/js-caps`, `crates/js-proto`):
 
@@ -652,6 +931,23 @@ with this agent's id mapping, by the run of build item 6.
   each outcome including `Succeeded`; a result without it maps as today;
 - the proto golden; a previous client's decode of `INPUT_FAILED` and `INVALID_TREE_INPUT` as `UNSPECIFIED`; and a
   previous server's decode of a `JobSpec` with `trees` dropping them (the hazard of section 7, pinned).
+- amended, A2: a client with `tree_namespace` submits trees; one without, and the `default` operator from
+  `--token-file`, are refused `TREES_NOT_PERMITTED`; `start_of` writes the job's client's namespace into every tree,
+  ignoring nothing from the request since the request has no such field; a client whose namespace was removed after
+  submit is `Unsendable::TreesNotPermitted`;
+- amended, A4: a tree without `blob_bytes`, or without `entries`, is refused `INVALID_TREE_INPUT`, and one with both 0
+  is accepted; `job_request` of two trees of 1 GiB + 1 byte and 1 GiB asks `tierstore-pin-gib` at least 3 and
+  `tierstore-tree-entries` at least their sum, overwriting a client's own; a host reporting one GiB less than that is
+  not a candidate, one reporting exactly that is; `js-caps` parses both keys as countable and refuses either from an
+  operator's `--capability`;
+- amended, A5: `avoid_hosts` of 16 hosts (accepted), 17, a repeated host, and a value that is not a host id (each
+  refused `INVALID_AVOID_HOSTS`); a job avoiding one of two capable hosts is placed on the other, and avoiding both
+  stays queued; a whole-host job is likewise never placed on a listed host; a host id unknown to the server is accepted;
+  the same job id resubmitted with the same `avoid_hosts` is the same job, and with another list `job-id-conflict`;
+- amended: `end_of` maps a `failed_to_start` result with `input_failure` to `INPUT_FAILED` and without it as today, and
+  `scratch_low_water` to `SCRATCH_LOW_WATER` with no exit code, also when it carries `input_failure`; the proto golden
+  of the new fields and values, a previous client's decode of them as `UNSPECIFIED`, and a previous server dropping
+  `avoid_hosts`.
 
 **Agent, Linux** (`crates/js-agent/tests/agent/`, with the fake):
 
@@ -673,6 +969,27 @@ with this agent's id mapping, by the run of build item 6.
 - integrity: a `fuse.tierstore` mount at the configured point appearing after the baseline is not a finding; a FUSE
   mount at another point is `new-mount`; another type at that point is `new-mount`; with no `--tierstore-fs` the
   allowance does not exist.
+- amended, A1: the attach line with `prefetch all`, then `prefetched`; the job stays preparing until `prefetched`
+  answers and starts on an empty `failures`; fails `tree-prefetch-failed` on one failure; fails `tree-prefetch-slow` at
+  `TREE_PREFETCH_LIMIT` on the injected clock and not one millisecond before; a held `prefetched` of one job does not
+  delay another job's attach; a tree without `prefetch` sends no `prefetched`; the wall deadline is set after
+  `prefetched` answers, not at the attach; a second job attaching a tree whose prefetch another job started waits for
+  the same `prefetched` answer and its failures; after `tree-prefetch-failed` and after `tree-prefetch-slow` the agent
+  detaches every tree the job attached;
+- amended, A2 and A4: the attach line is exactly `attach <hex> for js.<run> namespace <name> reserve <bytes> <entries>`;
+  `not in namespace` and `namespace required` give `tree-not-permitted` with no fallback even with `job_stages`;
+  `tree larger than declared` gives `tree-invalid`; `no pin room` and `no table room` give `tree-unavailable` and the
+  `job_stages` fallback; the probe reports both new keys from the first line, and no capability for a first line of a
+  version without the new verbs; a `Tree` without `namespace`, and one without `size`, is refused `invalid-job` at
+  admission and no attach is sent;
+- amended, A3 (fake free-space reader, fake walker, injected clock): not armed without `--tierstore-fs` or without the
+  mark; above the mark, no walk; free space exactly at the mark and below it both take a baseline; of three jobs the
+  one that grew most between the two walks is stopped, outcome `scratch_low_water`; two that grew equally, the later
+  started; a job started or ended between the walks is not compared; a job already being stopped is not a candidate;
+  the volume recovering above the mark before the second read ends nothing; no job grown ends nothing and logs one
+  warning per crossing; still below after one stop, no second job is chosen until the first's run directory is
+  removed, and then a new round begins; a stopped job whose exit-time detach reports failed fills, or is not answered,
+  still has outcome `scratch_low_water` and no `input_failure`.
 
 **Removal** (a new case in `crates/js-contain/tests/crun_root`, run by the existing `crun-root` job of `ci.yml`; no new
 job): a container over a plain directory as its lower deletes a lower file, removes a lower directory and writes a file
@@ -697,13 +1014,18 @@ row of the admission table of 3.2, each validation rule of 2.2 and 2.4 at its bo
 the input bound on both sides, one empty `dest` against two, the macOS list bound on both sides), both directions of
 each compatibility edge of section 7 (agent and server, client and server), the five ways the probe can fail, every
 place a detach is asked from (exit, `remove`, `remove_leftover`, `tear_down`, each end of the preparing stage, restart)
-with and without an answer, and for the integrity allowance one case inside it and one on each side of it.
+with and without an answer, and for the integrity allowance one case inside it and one on each side of it. The
+amendments keep that shape: each new failure row, each new rule at its boundary (`avoid_hosts` at 16 and 17, a
+namespace at 40 and 41 bytes, a size of 0, a pin need at one GiB rounding, the prefetch bound at and before it, the
+low-water mark at and above it), each new compatibility edge in both directions, and for the scratch watch each branch
+of its choice (armed or not, one or several growing, a tie, none growing, recovery).
 
 ## 9. Build items
 
-One subject per pull request, in this order; each names its tests from section 8. Items 1 to 4 land before tierstore's
-control socket exists (they use the fake); item 6 needs item 5 of tierstore's phase 1 plan (the core and
-`tierstore fs` on Linux) on a node.
+One subject per pull request, in this order; each names its tests from section 8. Items 1 and 2 need nothing of
+tierstore. Items 3 and 4 are written against the fake (amended: tierstore's control socket now exists, but not the
+words section 12 asks for, which the fake speaks as asked); item 6 needs item 5 of tierstore's phase 1 plan (the core
+and `tierstore fs` on Linux) on a node.
 
 1. **js-agent-wire, js-caps**: `InputRef::Tree`, `TreeUnavailable`, `JobResult.input_failure`, the validation, the
    refusal codes, the `tierstore-trees` key in `DETECTED_KEYS` and `EXACT_KEYS`, the wire tests, and `agent-wire.md`
@@ -724,6 +1046,22 @@ control socket exists (they use the fake); item 6 needs item 5 of tierstore's ph
    write copies up, the run directory is removed, the integrity check passes, a restart of `tierstore fs`'s unit leaves
    the agent's capability and a later attach working. A runbook entry under `docs/runbooks/`, not a test of the PR set
    (B9).
+
+The amendments land in the same items, whose boundaries do not move:
+
+| Item | A1 prefetch | A2 namespace | A3 low-water | A4 size | A5 avoid hosts |
+|---|---|---|---|---|---|
+| 1 | `Tree.prefetch`; codes `tree-prefetch-failed`, `tree-prefetch-slow` | `Tree.namespace`, its rule; code `tree-not-permitted` | `Outcome::ScratchLowWater` | `Tree.size`, `TreeSize`; keys `tierstore-pin-gib`, `tierstore-tree-entries` | |
+| 2 | `TreeInput.prefetch`; `input_failure` on a failed start in `end_of` | `tree_namespace`, `TREES_NOT_PERMITTED`, the namespace in `start_of`, `Unsendable::TreesNotPermitted` | `SCRATCH_LOW_WATER`, its `JobEnd` | `blob_bytes`, `entries`, their check, the two needs in `job_request` | `avoid_hosts`, `INVALID_AVOID_HOSTS`, both placement walks |
+| 3 | the `prefetch all` word and `prefetched` in the client | the `namespace` word | | the `reserve` word; the first line's limits and the two keys in the probe | |
+| 4 | the wait in the preparing stage, its bound, the waiter threads | the refusal mapping | the scratch watch, `Cause::ScratchLow` | the refusal mapping | |
+| 5 | the same on macOS | the same | decided there (6.1) | the same | |
+| 6 | the cold prefetch time and cold first-open latency, measured | a refused attach outside the namespace | | | |
+
+If item 1 (komira-ai/jobscheduler#842) merges before this amendment, its A1 to A4 rows land as a second pull request of
+item 1's crates, before item 2; the fields are optional, so either order keeps the wire additive. Items 3 to 6 need
+tierstore's answers to section 12 in its control protocol: items 3 and 4 against the fake, item 6 against tierstore's
+build.
 
 The disk reserve of tierstore's item 9 is left out of item 4 on purpose (section 6, TI9). kbf's side, naming its trees
 in the job and dropping its own download when the tree attached, is kbf's design; this one gives it `JobSpec.trees` and
@@ -767,6 +1105,30 @@ Each was not decided by the tierstore design, and is decided here; the owner may
 - **TI17. A `cwd` inside a tree is refused on macOS** (4.3) rather than letting the working-directory check follow a
   link out of `exec/`.
 
+Decided with the amendments:
+
+- **TI18. Prefetch is whole-tree, waited for in preparing, bounded at 10 minutes by a constant** (3.3). tierstore offers
+  only `prefetch all`; a per-job bound would be a knob without a caller (B20). 10 minutes leaves the agent room to
+  name the failure before a default pool's start timeout when the image and the attaches are quick; otherwise the
+  start timeout ends the job first, as for a slow image.
+- **TI19. A failed or slow prefetch, and every tree failure before the run, reach the client as `INPUT_FAILED`** with
+  their code (2.2, section 5), not as `FAILED_TO_START`, so that a client can tell a tree failure from its build's,
+  and from the code whether it is the host's (retry elsewhere, 2.8) or the submission's (`tree-invalid`,
+  `tree-not-permitted`: no retry helps).
+- **TI20. tierstore enforces the namespace; the server assigns it from the client's configuration** (2.6). The server
+  never reads the store and tierstore never sees the client, so each does the half it can; the agent only passes it.
+- **TI21. A namespace per client, not a grant per digest** (2.6). Tree contents are build inputs, not secrets
+  (tierstore 6.8); a per-digest grant would need the server to learn every digest a client wrote.
+- **TI22. A tree's size is declared by the client, reserved by tierstore at attach, and matched, not booked, at
+  placement** (2.7). Booking would count a shared toolchain once per job; the attach refusal covers what matching
+  cannot.
+- **TI23. The low-water watch arms only with both `--tierstore-fs` and `--scratch-low-water-gib`, covers every job of
+  that agent, ends the fastest grower, one at a time, and never a job that did not grow** (6.1). It protects the
+  cache's share of the volume; it is not a quota. The mark is now a level at which jobs end, so it is sized as a
+  margin, not as the cache's budget (section 6).
+- **TI24. `avoid_hosts` is a field of the job, generic, at most 16, ignored by the submit's capable-host check** (2.8).
+  A retry needs a new id anyway; elastic pools may launch hosts the list does not name.
+
 ## 11. Open questions
 
 - **Q1. A writable tree on macOS**: copy (a), a link per file (b), or tierstore's views (c) (4.3). It depends on C9 and
@@ -797,3 +1159,21 @@ written against it:
   a fetch (3.5);
 - the refusal reasons of tierstore 6.1 and 7.4 as stable words, since the agent sorts them into `tree-invalid` and
   `tree-unavailable` (section 5).
+
+Asked with the amendments:
+
+- **A1.** `prefetched <sha256> for <run>`, answered once the tree's `prefetch all` has ended, whichever run's attach
+  started it, with the blobs it could not have in the shape of `detach`'s `failures`, every blob pinned for the asking
+  run too, so that the agent can wait for the fill inside the preparing stage (3.3); this is the `prefetch` of
+  tierstore's pull request 6, plus a completion answer it does not give today.
+- **A2.** An attach word `namespace <name>`; tierstore's configuration mapping each namespace to the key prefixes it may
+  read; the root manifest, every child manifest and every blob `source` resolved only under them; refusals `not in
+  namespace` and `namespace required` (2.6). How objects are keyed per namespace is tierstore's and its writing clients'
+  to decide.
+- **A4.** An attach word `reserve <blob_bytes> <entries>`: refused `tree larger than declared` when the tree exceeds
+  either; otherwise every blob of the tree pinned at once against `pin_limit`, and its entries counted against a node
+  bound on flattened entries (a tree already flattened counted once), refused `no pin room` or `no table room` when
+  either would pass; a reserved blob's fill evicting unpinned entries rather than answering `no space` for the cache's
+  budget or `critical` share (a volume full for other reasons still fails it, 6.1); the reservation released at the last
+  detach (2.7). For attaches that reserve, this replaces tierstore's D9 ("a refused pin costs speed, never a job") with
+  a refusal before the job starts. The first line names `pin_limit` and the entry bound (3.1).
