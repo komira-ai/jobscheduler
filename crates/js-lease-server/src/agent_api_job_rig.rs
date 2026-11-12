@@ -490,11 +490,12 @@ impl Rig {
         self.register_with(host, capabilities);
     }
 
-    /// Registers `host` past the route, as an agent that reports the `per-job` capability and
-    /// `layered-rootfs` as `value`.
+    /// Registers `host` past the route, as an agent that reports the `per-job` capability, the
+    /// `container` exec mode (a job with layers records it) and `layered-rootfs` as `value`.
     pub(crate) fn register_layered_rootfs(&mut self, host: &str, value: &str) {
         let capabilities = json!({
             "per-job": "true",
+            "exec": "container",
             "layered-rootfs": value,
             "arch": "x86_64",
         });

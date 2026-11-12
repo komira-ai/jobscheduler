@@ -23,8 +23,7 @@ use crate::agent_api::job_rig::{FakeAgent, clocked_rig};
 use crate::job_api::JobApi;
 use crate::job_api::submit::Ctx;
 use crate::job_api::writes_rig::{
-    CEILING, Fixed, NEVER, Via, Writes, id, over_fake, register_layered, rows, said, served,
-    to_json, wire,
+    CEILING, Fixed, NEVER, Via, Writes, id, over_fake, rows, said, served, to_json, wire,
 };
 
 /// The answer of a refusal by `code`, as the gateway says it, beside its gRPC code.
@@ -885,7 +884,7 @@ async fn a_layered_job_is_admitted_only_when_a_host_reports_layered_rootfs() {
         json!({ "error": "no-capable-host" }),
     );
     rig.register("host-a", true);
-    register_layered(&rig, "host-b", "false");
+    rig.register_layered_rootfs("host-b", "false");
     let layered = |named: &str, what: usize| {
         let full = rooted(named);
         match what {
@@ -915,7 +914,7 @@ async fn a_layered_job_is_admitted_only_when_a_host_reports_layered_rootfs() {
     assert_eq!(rows(&rig.jobs), 0);
     let plain = writes.submit(Via::Json, &wire("job-p")).await.unwrap();
     assert_eq!(plain.state(), v1::JobState::Queued);
-    register_layered(&rig, "host-c", "true");
+    rig.register_layered_rootfs("host-c", "true");
     for what in 0..3 {
         let named = format!("job-l{what}");
         let made = writes
