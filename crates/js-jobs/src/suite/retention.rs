@@ -10,7 +10,7 @@ use js_state::conformance::Backend;
 use js_state::{Cond, Store, StoreError, StoreTime, Txn};
 
 use super::{Rig, cancelled, exited, job_id, output, rig};
-use crate::codec::{FORMAT, encode_job};
+use crate::codec::{LATER_FORMAT, encode_job};
 use crate::interfere::INJECTED;
 use crate::{
     AllocationStep, BOOT_GRACE, EndReason, JobEnd, JobRecord, JobResult, JobState, JobStore,
@@ -76,6 +76,7 @@ pub fn a_result_is_readable_until_the_retention_end_and_not_after<B: Backend>(ba
             peak_memory_bytes: 64 << 20,
         }),
         logs: None,
+        input_failure: None,
     };
     assert_eq!(
         (ended.state, ended.result.clone(), ended.retention_ends),
@@ -240,7 +241,7 @@ pub fn a_boot_raises_floors_and_retention_ends_in_one_commit<B: Backend>(backend
         .transition(&starting, JobState::Placed, JobState::Starting)
         .expect("starts");
     let running = rig.running("b-running");
-    rig.put_raw("job/b-zz-later", vec![FORMAT + 1]);
+    rig.put_raw("job/b-zz-later", vec![LATER_FORMAT]);
     rig.clock.advance(WEEK + Duration::from_secs(3600));
     let boot = now(&rig);
     let floor = boot.saturating_add(BOOT_GRACE);
@@ -316,7 +317,7 @@ pub fn retention_ends_are_raised_at_boot_after_a_long_outage<B: Backend>(backend
     let early = rig.running("o-early");
     let early_ended = rig.jobs.end_job(&early, exited(0)).expect("ends");
     let queued = rig.queue("o-queued");
-    rig.put_raw("job/o-zz-later", vec![FORMAT + 1]);
+    rig.put_raw("job/o-zz-later", vec![LATER_FORMAT]);
 
     // The outage: past the first end by an hour; then a job ends just before the boot.
     rig.clock.advance(WEEK + Duration::from_secs(3600));
@@ -723,7 +724,7 @@ pub fn the_tick_deletes_in_batches_and_leaves_what_it_cannot_read<B: Backend>(ba
         .txn(bulk)
         .expect("reachable")
         .expect("unconditional puts commit");
-    rig.put_raw("job/b-later", vec![FORMAT + 1]);
+    rig.put_raw("job/b-later", vec![LATER_FORMAT]);
     rig.clock.advance(WEEK);
     let young = rig.running("b-young");
     rig.jobs.end_job(&young, exited(0)).expect("ends");

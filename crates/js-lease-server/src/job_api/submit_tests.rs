@@ -683,3 +683,282 @@ async fn a_request_above_64_kib_is_refused() {
     );
     assert_eq!(rows(&writes.jobs), 0);
 }
+
+/// A job `id` with two layers, two mounts and two host ports, every default left out: no mode,
+/// propagation, protocol or job port, and no `subPath` on the first mount.
+fn rooted(id: &str) -> v1::JobSpec {
+    let mount = |target: &str, sub_path: &str| v1::Mount {
+        source: Some(v1::mount::Source::HostPath("/data".to_owned())),
+        target: target.to_owned(),
+        sub_path: sub_path.to_owned(),
+        ..v1::Mount::default()
+    };
+    let port = |host_port, container_port| v1::HostPort {
+        host_port,
+        container_port,
+        ..v1::HostPort::default()
+    };
+    v1::JobSpec {
+        layers: vec![
+            v1::Layer {
+                source: Some(v1::layer::Source::HostPath("/l/one".to_owned())),
+            },
+            v1::Layer {
+                source: Some(v1::layer::Source::Image(format!(
+                    "team/base@sha256:{}",
+                    "c".repeat(64)
+                ))),
+            },
+        ],
+        mounts: vec![mount("/in", ""), mount("/out", "sub")],
+        host_ports: vec![port(8080, None), port(9090, Some(80))],
+        ..wire(id)
+    }
+}
+
+/// [`rooted`] with every default spelled out.
+fn spelled(id: &str) -> v1::JobSpec {
+    let mut spec = rooted(id);
+    for mount in &mut spec.mounts {
+        mount.mode = v1::MountMode::ReadOnly.into();
+        mount.propagation = v1::MountPropagation::Private.into();
+    }
+    for port in &mut spec.host_ports {
+        port.container_port = Some(port.container_port.unwrap_or(port.host_port));
+        port.protocol = v1::PortProtocol::Tcp.into();
+    }
+    spec.network = v1::NetworkLevel::None.into();
+    spec.constraints = Some(v1::Constraints {
+        exec: v1::ExecMode::Container.into(),
+        ..v1::Constraints::default()
+    });
+    spec
+}
+
+/// Asserts the refusal text of a fault in an entry of a list, over gRPC (the message) and
+/// JSON (the `field`): `field: spec.mounts[1].target` for a relative target of the second
+/// mount, `field: spec.layers[1].image` for a tag-only image, `field: spec.hostPorts[1]
+/// .containerPort` for a job port 0; and, for a mount and a layer with no source,
+/// `field: spec.mounts[0]: no source this server knows` and the same for `layers[0]`. It
+/// catches a refusal that names the list and not the entry, or the entry and not its field.
+#[tokio::test]
+async fn a_refusal_names_the_entry_and_its_field() {
+    let (_, writes) = over_fake(Fixed::new(true)).await;
+    let base = rooted("job-r");
+    let cases: Vec<(&str, Change)> = vec![
+        (
+            "field: spec.mounts[1].target",
+            Box::new(|spec| spec.mounts[1].target = "relative".to_owned()),
+        ),
+        (
+            "field: spec.layers[1].image",
+            Box::new(|spec| {
+                spec.layers[1].source = Some(v1::layer::Source::Image("team/base:v1".to_owned()));
+            }),
+        ),
+        (
+            "field: spec.hostPorts[1].containerPort",
+            Box::new(|spec| spec.host_ports[1].container_port = Some(0)),
+        ),
+        (
+            "field: spec.mounts[0]: no source this server knows",
+            Box::new(|spec| spec.mounts[0].source = None),
+        ),
+        (
+            "field: spec.layers[0]: no source this server knows",
+            Box::new(|spec| spec.layers[0].source = None),
+        ),
+    ];
+    for (text, change) in cases {
+        let mut spec = base.clone();
+        change(&mut spec);
+        let status = writes.submit_grpc(&spec).await.unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument, "{text}");
+        assert_eq!(status.message(), text);
+        let (http, body) = writes.submit(Via::Json, &spec).await.unwrap_err();
+        let field = text.strip_prefix("field: ").unwrap();
+        assert_eq!(
+            (http, body["field"].clone()),
+            (StatusCode::BAD_REQUEST, json!(field)),
+            "{text}"
+        );
+    }
+    assert_eq!(rows(&writes.jobs), 0);
+}
+
+/// Asserts that the same job with the same layers, mounts and host ports, resubmitted over
+/// both transports, is answered with the job already made (one row, one admission). It
+/// catches a resubmit of a job with these lists refused as a conflict.
+#[tokio::test]
+async fn the_same_layers_mounts_and_host_ports_are_the_same_job() {
+    let fixed = Fixed::new(true);
+    let (_, writes) = over_fake(Arc::clone(&fixed)).await;
+    let first = writes.submit(Via::Grpc, &rooted("job-s")).await.unwrap();
+    for via in Via::BOTH {
+        let again = writes.submit(via, &rooted("job-s")).await.unwrap();
+        assert_eq!(again, first, "{via:?}");
+    }
+    assert_eq!((rows(&writes.jobs), fixed.asked()), (1, 1));
+}
+
+/// Asserts that a default spelled out (read-only, private, TCP, a job port equal to the host
+/// port, `exec` container for a job with layers) and the same default left out are the same
+/// job, whichever is submitted first, and both answers show the explicit forms. It catches a
+/// resubmit that compares the request's spelling and not the recorded form.
+#[tokio::test]
+async fn a_default_spelled_out_and_left_out_is_the_same_job() {
+    for (first, second) in [
+        (spelled("job-d"), rooted("job-d")),
+        (rooted("job-e"), spelled("job-e")),
+    ] {
+        let (_, writes) = over_fake(Fixed::new(true)).await;
+        let made = writes.submit(Via::Json, &first).await.unwrap();
+        let again = writes.submit(Via::Grpc, &second).await.unwrap();
+        assert_eq!(again, made, "{}", first.job_id);
+        assert_eq!(rows(&writes.jobs), 1);
+    }
+}
+
+/// Asserts that the same id with the layers, the mounts or the host ports in another order,
+/// or with one mount's `subPath`, `noExec`, mode or target, one host port's job port or one
+/// layer changed, is `job-id-conflict` over both transports and leaves the stored job as it
+/// was. It catches an order or an option left out of the comparison.
+#[tokio::test]
+async fn a_change_of_layers_mounts_or_host_ports_is_a_conflict() {
+    let (_, writes) = over_fake(Fixed::new(true)).await;
+    writes.submit(Via::Grpc, &rooted("job-c")).await.unwrap();
+    let before = writes.jobs.get_job(&id("job-c")).unwrap();
+    let changes: Vec<(&str, Change)> = vec![
+        ("layer order", Box::new(|spec| spec.layers.reverse())),
+        ("layer", Box::new(|spec| drop(spec.layers.pop()))),
+        ("mount order", Box::new(|spec| spec.mounts.reverse())),
+        ("port order", Box::new(|spec| spec.host_ports.reverse())),
+        (
+            "sub_path",
+            Box::new(|spec| spec.mounts[1].sub_path = "other".to_owned()),
+        ),
+        (
+            "sub_path set",
+            Box::new(|spec| spec.mounts[0].sub_path = "x".to_owned()),
+        ),
+        ("no_exec", Box::new(|spec| spec.mounts[0].no_exec = true)),
+        (
+            "mode",
+            Box::new(|spec| spec.mounts[0].mode = v1::MountMode::CopyOnWrite.into()),
+        ),
+        (
+            "target",
+            Box::new(|spec| spec.mounts[0].target = "/elsewhere".to_owned()),
+        ),
+        (
+            "job port",
+            Box::new(|spec| spec.host_ports[0].container_port = Some(81)),
+        ),
+    ];
+    for (field, change) in changes {
+        let mut spec = rooted("job-c");
+        change(&mut spec);
+        for via in Via::BOTH {
+            let answer = writes.submit(via, &spec).await.unwrap_err();
+            assert_eq!(
+                answer,
+                refusal(RefusalCode::JobIdConflict),
+                "{field} {via:?}"
+            );
+        }
+    }
+    assert_eq!(writes.jobs.get_job(&id("job-c")).unwrap(), before);
+}
+
+/// Asserts admission of a job with layers, with mounts and with host ports over the
+/// registry's hosts: while no host reports `layered-rootfs` as `true` (one reports nothing,
+/// one `false`) each is refused `no-capable-host` and nothing is recorded, while a plain job
+/// is admitted; once a host reports it each is recorded as queued. It catches a layered job
+/// admitted on a host that cannot build its root.
+#[tokio::test]
+async fn a_layered_job_is_admitted_only_when_a_host_reports_layered_rootfs() {
+    let mut rig = clocked_rig("submit_layered", false, NEVER);
+    let writes = served(&rig).await;
+    let refused = (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        json!({ "error": "no-capable-host" }),
+    );
+    rig.register("host-a", true);
+    rig.register_layered_rootfs("host-b", "false");
+    let layered = |named: &str, what: usize| {
+        let full = rooted(named);
+        match what {
+            0 => v1::JobSpec {
+                mounts: vec![],
+                host_ports: vec![],
+                ..full
+            },
+            1 => v1::JobSpec {
+                layers: vec![],
+                host_ports: vec![],
+                ..full
+            },
+            _ => v1::JobSpec {
+                layers: vec![],
+                mounts: vec![],
+                ..full
+            },
+        }
+    };
+    for what in 0..3 {
+        for via in Via::BOTH {
+            let answer = writes.submit(via, &layered("job-l", what)).await;
+            assert_eq!(answer.unwrap_err(), refused, "{what} {via:?}");
+        }
+    }
+    assert_eq!(rows(&rig.jobs), 0);
+    let plain = writes.submit(Via::Json, &wire("job-p")).await.unwrap();
+    assert_eq!(plain.state(), v1::JobState::Queued);
+    rig.register_layered_rootfs("host-c", "true");
+    for what in 0..3 {
+        let named = format!("job-l{what}");
+        let made = writes
+            .submit(Via::Json, &layered(&named, what))
+            .await
+            .unwrap();
+        assert_eq!(made.state(), v1::JobState::Queued, "{what}");
+    }
+    assert_eq!(rows(&rig.jobs), 4);
+}
+
+/// Asserts that the answer of a submit shows layers, mounts and host ports in explicit form
+/// (mode read-only, propagation private, protocol TCP, a job port equal to the host port),
+/// with `exec` container inserted for a job with layers and for one whose host port has a job
+/// port of its own, and `exec` left unspecified for a host port at its own number. It catches
+/// a default left implicit in the answer and an `exec` the job did not ask for or lacks.
+#[tokio::test]
+async fn the_answer_shows_the_explicit_forms_and_the_inserted_exec() {
+    let (_, writes) = over_fake(Fixed::new(true)).await;
+    let made = writes.submit(Via::Json, &rooted("job-x")).await.unwrap();
+    assert_eq!(made.spec.unwrap(), spelled("job-x"));
+    let ported = |named: &str, host_ports: Vec<v1::HostPort>| v1::JobSpec {
+        host_ports,
+        ..wire(named)
+    };
+    let own = v1::HostPort {
+        host_port: 8080,
+        ..v1::HostPort::default()
+    };
+    let made = writes
+        .submit(Via::Grpc, &ported("job-o", vec![own]))
+        .await
+        .unwrap();
+    let shown = made.spec.unwrap();
+    assert_eq!(shown.constraints, Some(v1::Constraints::default()));
+    assert_eq!(shown.host_ports[0].container_port, Some(8080));
+    let other = v1::HostPort {
+        container_port: Some(81),
+        ..own
+    };
+    let made = writes
+        .submit(Via::Grpc, &ported("job-t", vec![other]))
+        .await
+        .unwrap();
+    let exec = made.spec.unwrap().constraints.unwrap().exec;
+    assert_eq!(exec, i32::from(v1::ExecMode::Container));
+}

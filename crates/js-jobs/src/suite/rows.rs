@@ -11,7 +11,7 @@ use js_state::conformance::Backend;
 use js_types::{ImageDigestRef, Labels, Resources};
 
 use super::{Rig, digest, full_spec, host, job_id, rig, share};
-use crate::codec::{DecodeError, FORMAT, alloc_tag, field_of, job_tag, set_field};
+use crate::codec::{DecodeError, FORMAT, LATER_FORMAT, alloc_tag, field_of, job_tag, set_field};
 use crate::{JobId, JobState, JobStoreError, Needs, NetworkPolicy, NewJob};
 
 /// A tag no build has used, standing for a field a later build adds.
@@ -119,6 +119,16 @@ pub fn a_row_without_the_newest_tag_reads_with_defaults<B: Backend>(backend: &B)
         crate::QueueTrail::default(),
         "{name}: a row from before the queue status did not read with no status, attempt or event"
     );
+    assert_eq!(
+        (
+            job.spec.layers.is_empty(),
+            job.spec.mounts.is_empty(),
+            job.spec.host_ports.is_empty(),
+            job.start_failure_detail.clone(),
+        ),
+        (true, true, true, None),
+        "{name}: a row from before layers, mounts and host ports did not read with none"
+    );
     let image = ImageDigestRef::parse(&format!("team/app:1@{}", digest('c'))).expect("an image");
     let needs = Needs::Shape(Resources::new(1000, 1 << 30, 0, None).expect("resources"));
     assert_eq!(
@@ -135,7 +145,7 @@ pub fn a_row_without_the_newest_tag_reads_with_defaults<B: Backend>(backend: &B)
         ),
         (
             id.clone(),
-            image,
+            Some(image),
             vec!["run".to_owned()],
             Vec::new(),
             BTreeMap::new(),
@@ -180,7 +190,7 @@ pub fn a_row_with_a_higher_format_byte_is_unknown_not_missing<B: Backend>(backen
     let rig = rig(backend);
     let first = rig.queue("m-1");
     let last = rig.queue("m-3");
-    let newer = vec![FORMAT + 1, 0, 1, 0, 0, 0, 0];
+    let newer = vec![LATER_FORMAT, 0, 1, 0, 0, 0, 0];
     rig.put_raw("job/m-2", newer.clone());
     let unknown = |key: &str| -> Result<(), JobStoreError> {
         Err(JobStoreError::UnknownRow {

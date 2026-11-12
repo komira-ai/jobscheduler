@@ -70,6 +70,24 @@ one, is its subject and its flag is required (`GetJob` is `js job get --job-id I
 field is a flag named by its path (`--spec.needs.cpu-millis`); a field the flags cannot spell is
 read from a file of proto3 JSON (`--spec.ports-file`).
 
+A job's file system beyond its image (`docs/design/job-rootfs.md`) is three such lists:
+`--spec.layers-file`, `--spec.mounts-file` and `--spec.host-ports-file`. Each file holds the
+list as proto3 JSON: a source is the one member of its `oneof` that is set, by its JSON name,
+and an enum value is its full name. For example, a mounts file
+
+```json
+[
+  {"hostPath": "/srv/trees/src", "target": "/work", "mode": "MOUNT_MODE_COPY_ON_WRITE"},
+  {"hostPath": "/srv/cache", "target": "/work/cache", "mode": "MOUNT_MODE_READ_WRITE",
+   "subPath": "v2", "noExec": true}
+]
+```
+
+and a host-ports file `[{"hostPort": 7070, "containerPort": 7171}]`. The job a submit answers
+with (`Job.spec`) holds every default spelled out (`MOUNT_MODE_READ_ONLY`,
+`MOUNT_PROPAGATION_PRIVATE`, `PORT_PROTOCOL_TCP`, a `containerPort` equal to the `hostPort`),
+so a client can check that the server kept each list it sent.
+
 The subject rule has one limit: a request whose one singular scalar field is really optional
 gets a required flag. The fix is to mark the field `optional` in the definition, which is
 additive.

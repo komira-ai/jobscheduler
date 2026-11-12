@@ -317,6 +317,7 @@ fn request(gpus: u64) -> Demand {
         accelerator: booked(H100, gpus),
         network: Default::default(),
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 

@@ -21,6 +21,7 @@ fn demand() -> Demand {
         accelerator: None,
         network: Default::default(),
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 

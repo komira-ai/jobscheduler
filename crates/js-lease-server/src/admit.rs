@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_agent_wire::HOST_JOBS_CAPABILITY;
+use js_caps::{FLAG_SET, LAYERED_ROOTFS};
 use js_elastic::CapacityProvider;
 use js_jobs::Isolation;
 use js_registry::{HostMark, HostState as RegistryState, HostView as RegistryView, Registry};
@@ -117,6 +118,12 @@ pub(crate) fn reports_host_jobs(capabilities: &BTreeMap<String, String>) -> bool
     capabilities.get(HOST_JOBS_CAPABILITY).map(String::as_str) == Some("true")
 }
 
+/// Whether `capabilities`, those a host's hello reported, say its agent gives a job layers,
+/// mounts and host ports ([`LAYERED_ROOTFS`] is exactly [`FLAG_SET`]).
+pub(crate) fn reports_layered_rootfs(capabilities: &BTreeMap<String, String>) -> bool {
+    capabilities.get(LAYERED_ROOTFS).map(String::as_str) == Some(FLAG_SET)
+}
+
 /// `one`'s provider as admission sees it at `now`: enabled (no key turns a provider off),
 /// with its share and limits, its capabilities, and its catalog as `catalogs` holds it. A
 /// provider that launches nothing (`static`) has no catalog, and none is read.
@@ -205,5 +212,26 @@ mod tests {
         for other in [None, Some("false"), Some("True"), Some("true ")] {
             assert!(!said(other), "{other:?}");
         }
+    }
+
+    /// Asserts that a hello reports layered rootfs only with the capability `layered-rootfs`
+    /// set to exactly `true`: absent, `false`, another case, `1` or a padded value do not, and
+    /// the `host-jobs` capability does not stand for it. Catches a host that reports nothing,
+    /// or something else, sent a job with layers, mounts or host ports.
+    #[test]
+    fn layered_rootfs_is_reported_only_by_the_value_true() {
+        let said = |value: Option<&str>| {
+            let caps: BTreeMap<String, String> = value
+                .map(|value| (LAYERED_ROOTFS.to_owned(), value.to_owned()))
+                .into_iter()
+                .collect();
+            reports_layered_rootfs(&caps)
+        };
+        assert!(said(Some("true")));
+        for other in [None, Some("false"), Some("TRUE"), Some("1"), Some("true ")] {
+            assert!(!said(other), "{other:?}");
+        }
+        let host_jobs = BTreeMap::from([(HOST_JOBS_CAPABILITY.to_owned(), "true".to_owned())]);
+        assert!(!reports_layered_rootfs(&host_jobs));
     }
 }

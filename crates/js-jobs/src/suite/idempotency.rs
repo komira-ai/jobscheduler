@@ -11,7 +11,7 @@ use js_state::conformance::Backend;
 use js_types::ImageDigestRef;
 
 use super::{digest, full_spec, host, job_id, rig, share};
-use crate::codec::{FORMAT, job_tag, rearranged};
+use crate::codec::{LATER_FORMAT, job_tag, rearranged};
 use crate::ids::ScriptedIds;
 use crate::interfere::INJECTED;
 use crate::{
@@ -162,13 +162,12 @@ pub fn same_id_different_job_is_a_conflict<B: Backend>(backend: &B) {
     let before = rig.raw("job/b");
     let changes: &[Change] = &[
         ("image name", |spec| {
-            spec.image =
-                ImageDigestRef::parse(&format!("team/app:2@{}", digest('a'))).expect("an image");
+            spec.image = ImageDigestRef::parse(&format!("team/app:2@{}", digest('a'))).ok();
         }),
         ("image digest", |spec| {
-            spec.image =
-                ImageDigestRef::parse(&format!("team/app:1@{}", digest('b'))).expect("an image");
+            spec.image = ImageDigestRef::parse(&format!("team/app:1@{}", digest('b'))).ok();
         }),
+        ("no image", |spec| spec.image = None),
         ("command", |spec| spec.command.push("again".to_owned())),
         ("args", |spec| spec.args.reverse()),
         ("an environment value", |spec| {
@@ -210,6 +209,37 @@ pub fn same_id_different_job_is_a_conflict<B: Backend>(backend: &B) {
             spec.files = crate::JobFiles::Contents(files);
         }),
         ("labels", |spec| spec.labels = js_types::Labels::default()),
+        ("a layer", |spec| {
+            spec.layers.pop();
+        }),
+        ("the layers' order", |spec| spec.layers.reverse()),
+        ("a mount", |spec| {
+            spec.mounts.pop();
+        }),
+        ("the mounts' order", |spec| spec.mounts.reverse()),
+        ("a mount's source", |spec| {
+            spec.mounts[0].source = js_agent_wire::MountSource::HostPath {
+                path: "/srv/trees/other".to_owned(),
+            };
+        }),
+        ("a mount's target", |spec| {
+            spec.mounts[0].target = "/work/src".to_owned();
+        }),
+        ("a mount's mode", |spec| {
+            spec.mounts[0].mode = js_agent_wire::MountMode::ReadOnly;
+        }),
+        ("a mount's sub_path", |spec| spec.mounts[0].sub_path = None),
+        ("a mount's no_exec", |spec| spec.mounts[0].no_exec = false),
+        ("a host port", |spec| {
+            spec.host_ports.pop();
+        }),
+        ("the host ports' order", |spec| spec.host_ports.reverse()),
+        ("a host port's host port", |spec| {
+            spec.host_ports[0].host_port = 7072
+        }),
+        ("a host port's job port", |spec| {
+            spec.host_ports[0].container_port = Some(7172);
+        }),
     ];
     for &(field, change) in changes {
         let mut spec = full_spec();
@@ -616,7 +646,7 @@ where
 
     let unreadable = [0xf5; 16];
     let key = crate::keys::job(&JobId::minted(unreadable));
-    rig.put_raw(&key, vec![FORMAT + 1]);
+    rig.put_raw(&key, vec![LATER_FORMAT]);
     let source = Counted::new(vec![Ok(unreadable), Ok([0xf6; 16])]);
     let inserted = rig
         .minting(source)
@@ -629,7 +659,7 @@ where
     );
     assert_eq!(
         rig.raw(&key).map(|row| row.value),
-        Some(vec![FORMAT + 1]),
+        Some(vec![LATER_FORMAT]),
         "{name}: the unreadable row was written over"
     );
 }

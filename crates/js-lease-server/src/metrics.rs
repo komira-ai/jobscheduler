@@ -263,11 +263,12 @@ impl Histogram {
 }
 
 /// The start failure codes, in the order they are written, as the job service spells them.
-const FAILURE_CODES: [&str; 4] = [
+const FAILURE_CODES: [&str; 5] = [
     "no-capacity",
     "start-timeout",
     "exclusive-not-ready",
     "agent-refused",
+    "input-unavailable",
 ];
 
 fn failure_slot(failure: StartFailure) -> usize {
@@ -276,6 +277,7 @@ fn failure_slot(failure: StartFailure) -> usize {
         StartFailure::StartTimeout => 1,
         StartFailure::ExclusiveNotReady => 2,
         StartFailure::AgentRefused => 3,
+        StartFailure::InputUnavailable => 4,
     }
 }
 
@@ -304,7 +306,7 @@ fn fails_over(answer: &Acquired) -> bool {
 pub(crate) struct Recorder {
     placed: AtomicU64,
     queue_wait: Histogram,
-    start_failures: [AtomicU64; 4],
+    start_failures: [AtomicU64; 5],
     lost: AtomicU64,
     store_write_failures: AtomicU64,
     job_pass: Histogram,

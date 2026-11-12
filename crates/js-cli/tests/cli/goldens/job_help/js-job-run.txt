@@ -22,7 +22,7 @@ Options:
           The arguments the program is started with, in order. Repeat for more.
 
       --spec.command <TEXT>
-          The program to run. Empty: the image's default. How it combines with the image's own entrypoint and command is set by the server that implements SubmitJob.
+          The program to run. Empty: the image's default. How it combines with the image's own entrypoint and command is set by the server that implements SubmitJob. With an empty image, the absolute path of the program in the job's root.
 
       --spec.constraints.accelerator.count <N>
           The least number of devices.
@@ -67,11 +67,20 @@ Options:
       --spec.files-file <PATH>
           The files the host writes for the job before it starts. Read from a file holding the field's value in proto3 JSON.
 
+      --spec.host-ports-file <PATH>
+          Ports on the host's loopback the job may connect to, each at a port of its own loopback, whatever its network level: at most 16. Empty: none. A job with host ports, layers or mounts runs only on a host that reports it can give them, and never with host isolation. Read from a file holding the field's value in proto3 JSON.
+
       --spec.image <TEXT>
-          The image, pinned by digest: NAME@sha256:HEX, with an optional tag after the name. The service rejects an image without a digest.
+          The image, pinned by digest: NAME@sha256:HEX, with an optional tag after the name. The service rejects an image without a digest. Empty only when layers is not: the root is then the layers alone.
 
       --spec.labels <KEY=VALUE>
           The client's labels, by key. A listing can filter by them. KEY=VALUE; repeat for more.
+
+      --spec.layers-file <PATH>
+          The read-only layers of the job's root, base first, stacked on image (or in place of it, when image is empty): at most 16. A later layer's file hides an earlier one's. With layers, the root is writable and the writes are the job's own, and the job runs in a container. Empty: the root is image alone, read-only, as before. Read from a file holding the field's value in proto3 JSON.
+
+      --spec.mounts-file <PATH>
+          Trees at paths in the job's file system: at most 64. Empty: none. Read from a file holding the field's value in proto3 JSON.
 
       --spec.needs.cpu-millis <N>
           CPU, in thousandths of a core.

@@ -53,6 +53,7 @@ fn demand(need: Option<AcceleratorNeed>) -> Demand {
         accelerator: need,
         network: Default::default(),
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 

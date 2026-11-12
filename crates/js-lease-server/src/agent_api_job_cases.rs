@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use js_agent_wire::{Ack, BookedResources, HeldState, JobStartSpec, Outcome};
+use js_agent_wire::{Ack, BookedResources, HeldState, JobStartSpec, Layer, Outcome};
 use js_jobs::{AllocationStep, EndReason, JobEnd, JobId, JobState, NewJob};
 
 use super::job_rig::{FakeAgent, image, placing_rig, rig, spec, starts, stops};
@@ -332,4 +332,102 @@ async fn a_host_that_lists_an_unknown_job_takes_no_start_until_its_listing_is_cl
     let reply = rig.beat(&agent).await.unwrap();
     let started: Vec<String> = starts(&reply).into_iter().map(|s| s.job_id).collect();
     assert_eq!(started, ["job-q"]);
+}
+
+/// A job that names a layer, queued under `--placement js-sched` with the capability the job
+/// service records for it (`layered-rootfs=true`), which the placer asks a host for.
+fn queue_layered(rig: &super::job_rig::Rig, id: &str) -> JobId {
+    let mut layered = spec();
+    layered
+        .constraints
+        .capabilities
+        .insert("layered-rootfs".to_owned(), "true".to_owned());
+    layered.layers = vec![Layer::HostPath {
+        path: "/opt/tools".to_owned(),
+    }];
+    let new = NewJob {
+        id: Some(JobId::parse(id).unwrap()),
+        spec: layered,
+        priority: 0,
+        client: None,
+    };
+    rig.jobs.insert_queued(new).unwrap().record.id
+}
+
+/// A job with layers is placed on, and started on, only the host whose hello reported
+/// `layered-rootfs` as `true`: with one host that did and one that did not (and one that
+/// reported `false`), the job lands on the first and its start, resent until listed, carries
+/// the layer; the others are sent no start. With only hosts that did not, the job stays
+/// queued, no allocation is made and no start is sent. A layered job already placed on a host
+/// that does not report it (a placement from before the host's agent changed) is sent no start
+/// either and stays placed. It catches a layered job run by an agent that would ignore its
+/// layers and run it on the image alone.
+#[tokio::test]
+async fn a_job_with_layers_is_started_only_on_a_host_that_reports_layered_rootfs() {
+    let mut rig = placing_rig("layered_capable");
+    rig.register("host-a", true);
+    rig.register_layered_rootfs("host-c", "false");
+    rig.register_layered_rootfs("host-b", "true");
+    let id = queue_layered(&rig, "job-l");
+    let mut capable = FakeAgent::new("host-b");
+    for host in ["host-a", "host-c", "host-b"] {
+        let reply = rig.beat(&FakeAgent::new(host)).await.unwrap();
+        assert!(reply.commands.is_empty() | (host == "host-b"), "{host}");
+    }
+    assert_eq!(rig.allocation(&id).host.as_str(), "host-b");
+    let mut last = None;
+    for _ in 0..2 {
+        let reply = rig.beat(&capable).await.unwrap();
+        let sent = starts(&reply);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].job_id, "job-l");
+        assert_eq!(
+            sent[0].layers,
+            [Layer::HostPath {
+                path: "/opt/tools".to_owned()
+            }]
+        );
+        last = Some(reply);
+    }
+    capable.take(&last.unwrap());
+    for host in ["host-a", "host-c"] {
+        assert!(starts(&rig.beat(&FakeAgent::new(host)).await.unwrap()).is_empty());
+    }
+
+    let mut plain = placing_rig("layered_incapable");
+    plain.register("host-a", true);
+    plain.register_layered_rootfs("host-c", "false");
+    let id = queue_layered(&plain, "job-l");
+    for host in ["host-a", "host-c", "host-a"] {
+        let reply = plain.beat(&FakeAgent::new(host)).await.unwrap();
+        assert_eq!(starts(&reply), Vec::new(), "{host}");
+    }
+    assert_eq!(plain.job(&id).state, JobState::Queued);
+    assert!(plain.jobs.get_allocation(&id).unwrap().is_none());
+
+    let stale = rig_with_placed_layered_job();
+    let reply = stale.0.beat(&FakeAgent::new("host-a")).await.unwrap();
+    assert_eq!(starts(&reply), Vec::new());
+    assert_eq!(
+        stale.0.states(&stale.1),
+        (JobState::Placed, AllocationStep::Booked)
+    );
+}
+
+/// A rig whose host `host-a` reports no `layered-rootfs`, with a job of layers placed on it.
+fn rig_with_placed_layered_job() -> (super::job_rig::Rig, JobId) {
+    let mut rig = rig("layered_placed_elsewhere", true);
+    rig.register("host-a", true);
+    let mut layered = spec();
+    layered.layers = vec![Layer::HostPath {
+        path: "/opt/tools".to_owned(),
+    }];
+    let (job, _) = super::job_rig::placed(
+        &rig.jobs,
+        "job-l",
+        "host-a",
+        layered,
+        super::job_rig::BOOKED,
+    );
+    (rig, job.id)
 }

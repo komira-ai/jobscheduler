@@ -315,6 +315,7 @@ mod answers {
                 disk_bytes: Some(5 << 20),
                 gpus: 2,
             }),
+            input_failure: None,
         }
     }
 

@@ -145,6 +145,12 @@ fn refused(fault: Fault) -> Status {
         Fault::Port(at, field) => {
             Status::invalid_argument(format!("field: spec.ports[{at}].{field}"))
         }
+        Fault::Entry(list, at, field) => {
+            Status::invalid_argument(format!("field: spec.{list}[{at}].{field}"))
+        }
+        Fault::NoSource(list, at) => Status::invalid_argument(format!(
+            "field: spec.{list}[{at}]: no source this server knows"
+        )),
         Fault::WallNotPositive => refusal_status(
             RefusalCode::WallTimeNotPositive,
             "the job has no wall limit, or one of 0",

@@ -96,6 +96,7 @@ pub(crate) mod fleet;
 pub(crate) mod logs;
 pub(crate) mod read;
 pub(crate) mod roles;
+mod rootfs;
 pub(crate) mod submit;
 pub(crate) mod validate;
 mod wiring;

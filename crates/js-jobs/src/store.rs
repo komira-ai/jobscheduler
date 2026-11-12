@@ -307,6 +307,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             prepare_bars: BTreeMap::new(),
             queue: QueueTrail::default(),
             carried: Carried::default(),
+            start_failure_detail: None,
         }
     }
 
@@ -921,7 +922,7 @@ mod tests {
             .finish();
         let store = fake();
         store
-            .txn(Txn::new().put("job/later", vec![crate::codec::FORMAT + 1], Cond::Any))
+            .txn(Txn::new().put("job/later", vec![crate::codec::LATER_FORMAT], Cond::Any))
             .expect("reachable")
             .expect("commits");
         let jobs = JobStore::new(Arc::clone(&store), RandomIds).expect("opens");
@@ -950,7 +951,7 @@ mod tests {
             .finish();
         let store = fake();
         store
-            .txn(Txn::new().put("job/later", vec![crate::codec::FORMAT + 1], Cond::Any))
+            .txn(Txn::new().put("job/later", vec![crate::codec::LATER_FORMAT], Cond::Any))
             .expect("reachable")
             .expect("commits");
         let jobs = JobStore::new(store, RandomIds).expect("opens");

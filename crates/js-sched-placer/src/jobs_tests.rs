@@ -6,14 +6,17 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_elastic::RefusalCode;
-use js_jobs::{Booked, Isolation, JobId, JobRecord, JobState, JobStoreError, Needs, NewJob};
+use js_jobs::{
+    Booked, Isolation, JobId, JobRecord, JobSpec, JobState, JobStoreError, Needs, NewJob,
+};
 use js_registry::{Placer, WholeNodeConfig};
 use js_sched::Backfill;
 use js_sched::failover::Refused;
 use js_sched::queue_status::Outcome;
 use js_state::{Store, StoreError};
-use js_types::{HostId, Resources};
+use js_types::{ExecMode, HostId, Resources, Shape};
 use js_types::{JobEventKind, ProviderId, QueueCode};
 use js_types::{ManualClock, Timestamp};
 
@@ -92,6 +95,29 @@ impl Rig {
             placer,
             clock,
             tables,
+        }
+    }
+
+    /// A rig whose engine knows the hosts `a` and `b` (quiet, of 8 cores and 16 GiB), each
+    /// reporting the capabilities `reports` gives it besides its `arch`.
+    fn reporting(reports: [&[(&str, &str)]; 2]) -> Self {
+        let clock = ManualClock::new(Timestamp::from_millis(0));
+        let placer = SchedPlacer::new(Settings::default(), clock.clone());
+        for (name, caps) in ["a", "b"].into_iter().zip(reports) {
+            let mut caps: BTreeMap<String, String> = caps
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect();
+            caps.insert("arch".to_owned(), "x86_64".to_owned());
+            let resources = Resources::new(8000, 16 << 30, 0, None).unwrap();
+            placer
+                .engine()
+                .host_up(&host(name), &Shape::new(resources, caps), at(0));
+        }
+        Self {
+            placer,
+            clock,
+            tables: Tables::new(),
         }
     }
 
@@ -787,4 +813,175 @@ fn what_pass_2_told_survives_a_placement_that_failed() {
     assert_eq!(job.queue.code(), QueueCode::FailingOver);
     assert_eq!(job.queue.attempts(), 1);
     assert!(rig.placer.take_outcomes().is_empty());
+}
+
+/// Records the queued job `id` asking for one core and 1 GiB whose spec `change` edits.
+fn share_with(rig: &Rig, id: &str, change: impl FnOnce(&mut JobSpec)) -> JobId {
+    let resources = Resources::new(1000, 1 << 30, 0, None).unwrap();
+    let mut spec = spec_of(Needs::Shape(resources), 600);
+    change(&mut spec);
+    let new = NewJob {
+        id: Some(JobId::parse(id).unwrap()),
+        spec,
+        priority: 0,
+        client: None,
+    };
+    rig.tables.jobs.insert_queued(new).unwrap().record.id
+}
+
+/// The host the job `id` is placed on after one pass at 1 s, `None` if it stays queued.
+fn placed_on(rig: &Rig, id: &JobId) -> Option<HostId> {
+    rig.at(1_000);
+    rig.go(&Recorder::default());
+    read(rig, id).host
+}
+
+/// Catches: a job with an explicit execution mode placed on a host that reports another or
+/// none, because the request left the `exec` out. A job that asks for `container` is placed
+/// on `b` of three hosts, the only one that reports `exec=container` (`a` reports
+/// `sandbox-exec`); with only `a` and a host reporting no `exec` offered it stays queued.
+#[test]
+fn a_job_with_an_exec_mode_is_placed_only_on_a_host_that_reports_it() {
+    let rig = Rig::reporting([&[("exec", "sandbox-exec")], &[("exec", "container")]]);
+    let id = share_with(&rig, "j", |spec| {
+        spec.constraints.exec = Some(ExecMode::Container);
+    });
+    assert_eq!(placed_on(&rig, &id), Some(host("b")));
+
+    let rig = Rig::reporting([&[("exec", "sandbox-exec")], &[]]);
+    let id = share_with(&rig, "j", |spec| {
+        spec.constraints.exec = Some(ExecMode::Container);
+    });
+    assert_eq!(placed_on(&rig, &id), None);
+    assert_eq!(read(&rig, &id).state, JobState::Queued);
+}
+
+/// Catches: a job that names no execution mode held to hosts that report one. With no `exec`
+/// in its constraints the job is placed on `a`, which reports `sandbox-exec`, when `a` is the
+/// only host that has room, and on `b`, which reports `container`, when `b` is.
+#[test]
+fn a_job_with_no_exec_mode_is_placed_on_a_host_of_either() {
+    let rig = Rig::reporting([&[("exec", "sandbox-exec")], &[("exec", "container")]]);
+    let id = share_with(&rig, "j", |_| {});
+    let mut open = rig.open();
+    open.remove(&host("b"));
+    rig.at(1_000);
+    let hello = hosts(&["a", "b"]);
+    let on = JobHosts {
+        open: &open,
+        hello: &hello,
+        whole: None,
+    };
+    let recorder = Recorder::default();
+    rig.placer.heard(&host("a"), None);
+    rig.placer.heard(&host("b"), None);
+    let placed = rig
+        .placer
+        .place_jobs_with(&rig.tables.jobs, &on, (&recorder, &recorder));
+    assert_eq!(placed, Ok(vec![id.clone()]));
+    assert_eq!(read(&rig, &id).host, Some(host("a")));
+
+    let rig = Rig::reporting([&[("exec", "sandbox-exec")], &[("exec", "container")]]);
+    let id = share_with(&rig, "j", |_| {});
+    let mut open = rig.open();
+    open.remove(&host("a"));
+    rig.at(1_000);
+    let on = JobHosts {
+        open: &open,
+        hello: &hello,
+        whole: None,
+    };
+    rig.placer.heard(&host("a"), None);
+    rig.placer.heard(&host("b"), None);
+    let placed = rig
+        .placer
+        .place_jobs_with(&rig.tables.jobs, &on, (&recorder, &recorder));
+    assert_eq!(placed, Ok(vec![id.clone()]));
+    assert_eq!(read(&rig, &id).host, Some(host("b")));
+}
+
+/// Catches: a job that needs `layered-rootfs` (as admission records it among its
+/// capabilities) placed on a host that does not report it. Of `a`, which reports
+/// `layered-rootfs=true`, and `b`, which does not, the job is placed on `a`; with `b` the only
+/// host offered it stays queued.
+#[test]
+fn a_job_that_needs_layered_rootfs_is_placed_only_on_a_host_that_reports_it() {
+    let rig = Rig::reporting([&[("layered-rootfs", "true")], &[]]);
+    let id = share_with(&rig, "j", |spec| {
+        let caps = &mut spec.constraints.capabilities;
+        caps.insert("layered-rootfs".to_owned(), "true".to_owned());
+    });
+    assert_eq!(placed_on(&rig, &id), Some(host("a")));
+
+    let rig = Rig::reporting([&[], &[("layered-rootfs", "false")]]);
+    let id = share_with(&rig, "j", |spec| {
+        let caps = &mut spec.constraints.capabilities;
+        caps.insert("layered-rootfs".to_owned(), "true".to_owned());
+    });
+    assert_eq!(placed_on(&rig, &id), None);
+    assert_eq!(read(&rig, &id).state, JobState::Queued);
+}
+
+/// An edit of a job spec.
+type Edit = fn(&mut JobSpec);
+
+/// The layer, mount and host port a whole-host job may name.
+fn rootfs_fields() -> [(&'static str, Edit); 3] {
+    [
+        ("layers", |spec| {
+            spec.layers = vec![Layer::HostPath {
+                path: "/srv/layer".to_owned(),
+            }];
+        }),
+        ("mounts", |spec| {
+            spec.mounts = vec![JobMount {
+                source: MountSource::HostPath {
+                    path: "/srv/data".to_owned(),
+                },
+                target: "/data".to_owned(),
+                mode: MountMode::default(),
+                sub_path: None,
+                no_exec: false,
+                propagation: Propagation::default(),
+            }];
+        }),
+        ("host ports", |spec| {
+            spec.host_ports = vec![HostPort {
+                host_port: 8080,
+                container_port: None,
+                protocol: PortProtocol::Tcp,
+            }];
+        }),
+    ]
+}
+
+/// Catches: a whole-host job with layers, mounts or host ports marked or committed by the
+/// whole-host pass, which does not hold a job to hosts that report `layered-rootfs`. On quiet
+/// hosts each such job `w` stays queued with no mark and nothing is placed, while the same job
+/// without the field is committed on `a`.
+#[test]
+fn a_whole_host_job_with_layers_mounts_or_host_ports_stays_queued() {
+    for (name, change) in rootfs_fields() {
+        let rig = Rig::quiet();
+        let mut spec = spec_of(Needs::WholeHost, 600);
+        change(&mut spec);
+        let new = NewJob {
+            id: Some(JobId::parse("w").unwrap()),
+            spec,
+            priority: 0,
+            client: None,
+        };
+        let w = rig.tables.jobs.insert_queued(new).unwrap().record;
+        rig.at(1_000);
+        let recorder = Recorder::default();
+        assert!(rig.go(&recorder).is_empty(), "{name}");
+        assert_eq!(read(&rig, &w.id).state, JobState::Queued, "{name}");
+        assert_eq!(rig.tables.jobs.get_mark(&w.id).unwrap(), None, "{name}");
+        assert!(recorder.started.lock().unwrap().is_empty(), "{name}");
+    }
+    let rig = Rig::quiet();
+    let w = rig.tables.whole("w");
+    rig.at(1_000);
+    assert_eq!(rig.go(&Recorder::default()), std::slice::from_ref(&w.id));
+    assert_eq!(read(&rig, &w.id).host, Some(host("a")));
 }

@@ -294,6 +294,7 @@ impl Runner<'_, '_> {
             accelerator: None,
             network: Default::default(),
             host_ports: Vec::new(),
+            layered_rootfs: false,
         };
         let options = match provider.launch_options(&want) {
             Ok(options) => options,

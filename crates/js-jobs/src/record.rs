@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use js_agent_wire::{HostPort, JobMount, Layer};
 use js_state::StoreTime;
 use js_types::{ExecMode, HostId, ImageDigestRef, Labels, Resources};
 use sha2::{Digest as _, Sha256};
@@ -183,8 +184,9 @@ impl JobFiles {
 /// the same job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobSpec {
-    /// The image, pinned by digest.
-    pub image: ImageDigestRef,
+    /// The image, pinned by digest. `None` only for a job whose root is its [`Self::layers`]
+    /// alone.
+    pub image: Option<ImageDigestRef>,
     /// The command.
     pub command: Vec<String>,
     /// The command's arguments.
@@ -206,13 +208,32 @@ pub struct JobSpec {
     pub files: JobFiles,
     /// The job's labels.
     pub labels: Labels,
+    /// The read-only layers of the job's root, base first, above [`Self::image`]
+    /// (`docs/design/job-rootfs.md`, section 2).
+    pub layers: Vec<Layer>,
+    /// The trees at paths of the job's file system, each with its mode and every option in
+    /// its explicit form.
+    pub mounts: Vec<JobMount>,
+    /// The ports of the host's loopback the job reaches, each with its job port given
+    /// (`container_port` is never `None` in a job the job service recorded) and its protocol.
+    /// Not [`Self::ports`], which go the other way, and not booked on the host.
+    pub host_ports: Vec<HostPort>,
 }
 
 impl JobSpec {
+    /// Whether the job names layers, mounts or host ports, so that only a host that reports
+    /// `layered-rootfs` may be sent it.
+    #[must_use]
+    pub fn uses_layered_rootfs(&self) -> bool {
+        !(self.layers.is_empty() & self.mounts.is_empty() & self.host_ports.is_empty())
+    }
+
     /// Whether `self`, a stored job, and `submitted` are the same job (design section 5.3,
     /// step 2): every field equal, the files compared as [`JobFiles`] compares them, so a
     /// resubmit of an ended job, whose files are digests, matches by the digest of each
-    /// submitted file.
+    /// submitted file. The layers, mounts and host ports are compared in order, every option
+    /// included; the job service records each default in its explicit form, so a resubmit
+    /// that spells a default either way compares equal.
     pub(crate) fn same_job_as(&self, submitted: &JobSpec) -> bool {
         // Every field named, so a field added later cannot be left out of the comparison.
         let JobSpec {
@@ -227,6 +248,9 @@ impl JobSpec {
             ports,
             files,
             labels,
+            layers,
+            mounts,
+            host_ports,
         } = self;
         (*image == submitted.image)
             & (*command == submitted.command)
@@ -239,6 +263,9 @@ impl JobSpec {
             & (*ports == submitted.ports)
             & files.same_as(&submitted.files)
             & (*labels == submitted.labels)
+            & (*layers == submitted.layers)
+            & (*mounts == submitted.mounts)
+            & (*host_ports == submitted.host_ports)
     }
 
     /// This spec with its files' contents replaced by their digests: what an ended job keeps.
@@ -259,8 +286,12 @@ pub enum StartFailure {
     StartTimeout,
     /// A whole-host prepare failed as often as the pool allows.
     ExclusiveNotReady,
-    /// The agent refused the job (a tainted host, a failed image fetch).
+    /// The agent refused the job (a tainted host, a failed image fetch, a host path it does
+    /// not allow).
     AgentRefused,
+    /// An input the job named could not be read on its host (`input-unavailable`): the
+    /// host's state, not the job's.
+    InputUnavailable,
 }
 
 /// Where a job is (design section 3.2).
@@ -307,12 +338,14 @@ impl JobState {
 /// queued) have operations of their own and are not moves here.
 pub(crate) fn may_move(from: JobState, to: JobState) -> bool {
     use JobState::{Cancelled, FailedToStart, Lost, Placed, Queued, Running, Starting};
-    use StartFailure::{AgentRefused, ExclusiveNotReady, NoCapacity, StartTimeout};
+    use StartFailure::{
+        AgentRefused, ExclusiveNotReady, InputUnavailable, NoCapacity, StartTimeout,
+    };
     match (from, to) {
         (Placed, Starting) | (Starting, Running) => true,
         (Running, JobState::Succeeded | JobState::Failed) => true,
         (Queued, FailedToStart(NoCapacity)) => true,
-        (Placed | Starting, FailedToStart(StartTimeout | AgentRefused)) => true,
+        (Placed | Starting, FailedToStart(StartTimeout | AgentRefused | InputUnavailable)) => true,
         (Placed, FailedToStart(ExclusiveNotReady)) => true,
         (from, Cancelled | Lost) => !from.is_ended(),
         _ => false,
@@ -349,6 +382,9 @@ pub struct JobRecord {
     /// What the job left for its client to read, set when it ends: `None` until then, and
     /// for a job that was lost or failed to start.
     pub result: Option<JobResult>,
+    /// The agent's code for a start it refused ([`crate::JobEnd::Refused`]), set when the job
+    /// ends so; `None` otherwise.
+    pub start_failure_detail: Option<String>,
     /// When the job's record may be deleted: set when it ends, to the end plus the store's
     /// retention window, and raised at boot ([`crate::JobStore::raise_deadlines_at_boot`]);
     /// `None` until it ends.

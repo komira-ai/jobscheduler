@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_types::ExecMode;
 use proptest::collection::{btree_map, vec};
 use proptest::prelude::*;
@@ -103,10 +104,62 @@ fn labels() -> impl Strategy<Value = Labels> {
         })
 }
 
+fn layer() -> impl Strategy<Value = Layer> {
+    prop_oneof![
+        any_text().prop_map(|path| Layer::HostPath { path }),
+        any_text().prop_map(|image| Layer::Image { image }),
+    ]
+}
+
+fn mount() -> impl Strategy<Value = JobMount> {
+    (
+        any_text(),
+        any_text(),
+        prop::sample::select(vec![
+            MountMode::ReadOnly,
+            MountMode::ReadWrite,
+            MountMode::CopyOnWrite,
+        ]),
+        proptest::option::of(any_text()),
+        any::<bool>(),
+    )
+        .prop_map(|(path, target, mode, sub_path, no_exec)| JobMount {
+            source: MountSource::HostPath { path },
+            target,
+            mode,
+            sub_path,
+            no_exec,
+            propagation: Propagation::Private,
+        })
+}
+
+fn host_port() -> impl Strategy<Value = HostPort> {
+    (any::<u16>(), proptest::option::of(1..=u16::MAX)).prop_map(|(host_port, container_port)| {
+        HostPort {
+            host_port,
+            container_port,
+            protocol: PortProtocol::Tcp,
+        }
+    })
+}
+
+/// The image (absent: a job of layers alone), layers, mounts and host ports of a spec.
+fn rootfs() -> impl Strategy<Value = RootfsParts> {
+    (
+        proptest::option::of(prop::sample::select(vec!['a', 'b', '0'])),
+        vec(layer(), 0..3),
+        vec(mount(), 0..3),
+        vec(host_port(), 0..3),
+    )
+}
+
+/// What [`rootfs`] generates.
+type RootfsParts = (Option<char>, Vec<Layer>, Vec<JobMount>, Vec<HostPort>);
+
 fn spec() -> impl Strategy<Value = JobSpec> {
     (
         (
-            prop::sample::select(vec!['a', 'b', '0']),
+            rootfs(),
             vec(any_text(), 0..3),
             vec(any_text(), 0..3),
             text_pairs(),
@@ -127,12 +180,12 @@ fn spec() -> impl Strategy<Value = JobSpec> {
     )
         .prop_map(
             |(
-                (digit, command, args, env, needs, constraints),
+                ((digit, layers, mounts, host_ports), command, args, env, needs, constraints),
                 (wall, network, ports, files, labels),
             )| {
-                let image = format!("team/app:1@{}", digest(digit));
+                let image = digit.map(|digit| format!("team/app:1@{}", digest(digit)));
                 JobSpec {
-                    image: ImageDigestRef::parse(&image).expect("an image"),
+                    image: image.map(|image| ImageDigestRef::parse(&image).expect("an image")),
                     command,
                     args,
                     env,
@@ -146,6 +199,9 @@ fn spec() -> impl Strategy<Value = JobSpec> {
                         .collect(),
                     files,
                     labels,
+                    layers,
+                    mounts,
+                    host_ports,
                 }
             },
         )
@@ -179,6 +235,7 @@ fn state() -> impl Strategy<Value = JobState> {
         JobState::FailedToStart(StartFailure::StartTimeout),
         JobState::FailedToStart(StartFailure::ExclusiveNotReady),
         JobState::FailedToStart(StartFailure::AgentRefused),
+        JobState::FailedToStart(StartFailure::InputUnavailable),
     ])
 }
 
@@ -191,10 +248,12 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                 ResultReason::WallLimit,
                 ResultReason::Memory,
                 ResultReason::Cancelled,
+                ResultReason::InputFailed,
             ]),
             any_text(),
             any_text(),
             any::<bool>(),
+            proptest::option::of(any_text()),
         ),
         (
             store_time(),
@@ -207,7 +266,7 @@ fn job_result() -> impl Strategy<Value = JobResult> {
     )
         .prop_map(
             |(
-                (exit_code, reason, stdout_tail, stderr_tail, truncated),
+                (exit_code, reason, stdout_tail, stderr_tail, truncated, input_failure),
                 (q, p, s, e, usage, logs),
             )| {
                 JobResult {
@@ -234,6 +293,7 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                             stderr_dropped,
                         },
                     ),
+                    input_failure,
                 }
             },
         )
@@ -267,6 +327,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
             proptest::option::of(store_time()),
             proptest::option::of(store_time()),
             proptest::option::of(ident()),
+            proptest::option::of(any_text()),
         ),
         (any::<u32>(), btree_map(host_id(), exclusion(), 0..4)),
         queue_trail(),
@@ -275,7 +336,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
             |(
                 (id, spec, priority, state, submitted_at),
                 (placed_at, started_at, ended_at, host, cancel_requested, cancel_requested_at),
-                (result, retention_ends, deadline_floor, client),
+                (result, retention_ends, deadline_floor, client, start_failure_detail),
                 (failed_prepares, prepare_bars),
                 queue,
             )| JobRecord {
@@ -298,6 +359,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 prepare_bars,
                 queue,
                 carried: Carried::default(),
+                start_failure_detail,
             },
         )
 }
@@ -492,7 +554,7 @@ fn framed_row(fields: &[(u16, Vec<u8>)]) -> Vec<u8> {
 }
 
 fn field_soup() -> impl Strategy<Value = Vec<u8>> {
-    vec((1..=47u16, vec(any::<u8>(), 0..14)), 0..10).prop_map(|fields| framed_row(&fields))
+    vec((1..=58u16, vec(any::<u8>(), 0..14)), 0..10).prop_map(|fields| framed_row(&fields))
 }
 
 proptest! {
@@ -596,7 +658,7 @@ fn a_malformed_job_row_raises_the_error_that_names_what_is_wrong() {
     let rows: Vec<(&str, Vec<u8>, DecodeError)> = vec![
         ("empty", vec![], DecodeError::Empty),
         ("format byte 0", vec![0], DecodeError::BadFormat),
-        ("a newer format", vec![FORMAT + 1], DecodeError::Newer),
+        ("a newer format", vec![LATER_FORMAT], DecodeError::Newer),
         ("the highest format", vec![u8::MAX], DecodeError::Newer),
         ("half a tag", vec![FORMAT, 0], DecodeError::Truncated),
         (
@@ -721,7 +783,11 @@ fn a_malformed_allocation_row_raises_the_error_that_names_what_is_wrong() {
     let rows: Vec<(&str, Vec<u8>, DecodeError)> = vec![
         ("empty", vec![], DecodeError::Empty),
         ("format byte 0", vec![0], DecodeError::BadFormat),
-        ("a newer format", vec![FORMAT + 1, 0, 1], DecodeError::Newer),
+        (
+            "a newer format",
+            vec![LATER_FORMAT, 0, 1],
+            DecodeError::Newer,
+        ),
         (
             "a length of u32::MAX",
             vec![FORMAT, 0, 1, 0xff, 0xff, 0xff, 0xff],

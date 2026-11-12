@@ -56,7 +56,7 @@ pub(crate) fn image() -> String {
 /// A job that runs `run --fast` from [`image`] for at most ten minutes, with no network.
 pub(crate) fn spec() -> JobSpec {
     JobSpec {
-        image: ImageDigestRef::parse(&image()).unwrap(),
+        image: ImageDigestRef::parse(&image()).ok(),
         command: vec!["run".to_owned()],
         args: vec!["--fast".to_owned()],
         env: BTreeMap::new(),
@@ -67,6 +67,9 @@ pub(crate) fn spec() -> JobSpec {
         ports: Vec::new(),
         files: js_jobs::JobFiles::default(),
         labels: Labels::default(),
+        layers: Vec::new(),
+        mounts: Vec::new(),
+        host_ports: Vec::new(),
     }
 }
 
@@ -394,7 +397,10 @@ fn rig_on(
     let resources = Resources::new(8000, 17179869184, gpus, gpu_class).unwrap();
     let arch = ("arch".to_owned(), "x86_64".to_owned());
     let shape = Shape::new(resources, [arch].into_iter().collect());
-    let pool = PoolConfig::new(ProviderId::new("burst").unwrap(), class, shape, 4);
+    // As the server's own pool: it is placed on what its hosts report in their hellos too
+    // (the capabilities a job is held to, `layered-rootfs` among them).
+    let pool =
+        PoolConfig::new(ProviderId::new("burst").unwrap(), class, shape, 4).placing_by_hello();
     let pool = match &extra.whole {
         Some(whole) => pool.with_whole_node(whole.rules.clone()).unwrap(),
         None => pool,
@@ -479,6 +485,18 @@ impl Rig {
         let capabilities = json!({
             "per-job": "true",
             "host-jobs": value,
+            "arch": "x86_64",
+        });
+        self.register_with(host, capabilities);
+    }
+
+    /// Registers `host` past the route, as an agent that reports the `per-job` capability, the
+    /// `container` exec mode (a job with layers records it) and `layered-rootfs` as `value`.
+    pub(crate) fn register_layered_rootfs(&mut self, host: &str, value: &str) {
+        let capabilities = json!({
+            "per-job": "true",
+            "exec": "container",
+            "layered-rootfs": value,
             "arch": "x86_64",
         });
         self.register_with(host, capabilities);
@@ -828,6 +846,20 @@ impl FakeAgent {
         let held = self.held.get_mut(id).unwrap();
         held.state = HeldState::ExitedUnacked;
         held.result = Some(result(id, &held.allocation_id, outcome, exit_code));
+    }
+
+    /// The held job `id` ends with `outcome` and `exit_code`, its result giving the refusal
+    /// code `detail` and the input failure `input_failure`.
+    pub(crate) fn end_naming(
+        &mut self,
+        id: &str,
+        (outcome, exit_code): (Outcome, Option<i32>),
+        (detail, input_failure): (Option<&str>, Option<&str>),
+    ) {
+        self.end(id, outcome, exit_code);
+        let ended = self.held.get_mut(id).unwrap().result.as_mut().unwrap();
+        ended.detail = detail.map(str::to_owned);
+        ended.input_failure = input_failure.map(str::to_owned);
     }
 
     /// The held job `id` ends with a clean exit whose result reports `logs`.

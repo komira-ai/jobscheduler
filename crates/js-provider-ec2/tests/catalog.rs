@@ -318,6 +318,7 @@ fn wanting(model: &str, count: u32) -> Demand {
         }),
         network: Default::default(),
         host_ports: Vec::new(),
+        layered_rootfs: false,
     }
 }
 

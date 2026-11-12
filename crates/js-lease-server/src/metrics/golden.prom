@@ -35,6 +35,7 @@ js_job_start_failures_total{code="no-capacity"} 1
 js_job_start_failures_total{code="start-timeout"} 1
 js_job_start_failures_total{code="exclusive-not-ready"} 1
 js_job_start_failures_total{code="agent-refused"} 1
+js_job_start_failures_total{code="input-unavailable"} 1
 # HELP js_jobs_lost_total Jobs lost with their host or container.
 # TYPE js_jobs_lost_total counter
 js_jobs_lost_total 2

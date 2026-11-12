@@ -11,7 +11,7 @@ use js_state::conformance::Backend;
 use js_state::{Cond, Store, Txn};
 
 use super::{Rig, cancelled, exited, full_spec, host, job_id, rig, whole_host_spec};
-use crate::codec::{FORMAT, decode_allocation, decode_job, encode_allocation, encode_job};
+use crate::codec::{LATER_FORMAT, decode_allocation, decode_job, encode_allocation, encode_job};
 use crate::store::queue_order;
 use crate::{
     AllocationRecord, AllocationStep, Backfill, Booked, EndReason, HostBooking, JobId, JobRecord,
@@ -234,7 +234,7 @@ pub fn the_backfill_makes_the_indexes_agree_and_a_second_changes_nothing<B: Back
     }
     let later = rig.raw("job/bf-queued").expect("written").value;
     let mut newer = later.clone();
-    newer[0] = FORMAT + 1;
+    newer[0] = LATER_FORMAT;
     wipe = wipe
         .put("job/bf-later", newer, Cond::Any)
         .put("idx/job/active/bf-gone", Vec::new(), Cond::Any)
@@ -363,7 +363,7 @@ pub fn an_indexed_read_judges_the_row_not_the_entry<B: Backend>(backend: &B) {
         ..allocation(&rebooked)
     };
     let mut unread_now = encode_allocation(&allocation(&unread)).expect("encodes");
-    unread_now[0] = FORMAT + 1;
+    unread_now[0] = LATER_FORMAT;
     let txn = Txn::new()
         .put(
             crate::keys::job(&active),
@@ -574,7 +574,7 @@ where
             },
         ),
     ] {
-        let value = vec![FORMAT + 1];
+        let value = vec![LATER_FORMAT];
         rig.store
             .inner()
             .txn(Txn::new().put(key, value.clone(), Cond::Any))

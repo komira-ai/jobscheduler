@@ -126,8 +126,9 @@ mod tests {
             concat!(
                 r#"SubmitJobRequest { spec: Some(JobSpec { job_id: "", image: "", command: "", "#,
                 r#"args: [], env: {}, needs: None, constraints: None, wall_limit_seconds: None, "#,
-                r#"network: Unspecified, ports: [], files: [JobFile { name: "upload-url", "#,
-                r#"contents_len: 16, .. }], priority: 0, labels: {} }) }"#,
+                r#"network: Unspecified, ports: [], host_ports: [], files: [JobFile { "#,
+                r#"name: "upload-url", contents_len: 16, .. }], priority: 0, labels: {}, "#,
+                r#"layers: [], mounts: [] }) }"#,
             )
         );
     }

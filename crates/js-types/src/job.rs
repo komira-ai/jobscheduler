@@ -228,6 +228,9 @@ pub struct Requirements {
     /// The host ports the job declares, sorted ascending, each once. A lease request
     /// declares none.
     pub host_ports: Vec<u16>,
+    /// The job names layers, mounts or host ports (`docs/design/job-rootfs.md`), so its host
+    /// must report `layered-rootfs=true`. A lease request names none.
+    pub layered_rootfs: bool,
 }
 
 /// Why a request's `disk-gib`, `exec`, `isa_level` or `accelerator.*` capabilities are not a
@@ -291,6 +294,7 @@ impl Requirements {
             accelerator: AcceleratorNeed::booked(&request.resources),
             network: JobNetwork::None,
             host_ports: Vec::new(),
+            layered_rootfs: false,
         })
     }
 
@@ -340,6 +344,7 @@ impl Requirements {
             accelerator: need_of(request)?,
             network: JobNetwork::None,
             host_ports: Vec::new(),
+            layered_rootfs: false,
         })
     }
 
@@ -523,6 +528,7 @@ mod tests {
             accelerator: a10(),
             network: JobNetwork::None,
             host_ports: Vec::new(),
+            layered_rootfs: false,
         };
         assert_eq!(read(&[]), Ok(none.clone()));
         for arch in ["x86_64", "arm64"] {
@@ -593,6 +599,7 @@ mod tests {
                 accelerator: a10(),
                 network: JobNetwork::None,
                 host_ports: Vec::new(),
+                layered_rootfs: false,
             };
             assert_eq!(lenient, want, "{refusal}");
         }
