@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use js_contain::job_fs::{ResolveError, open_beneath};
 use rustix::fs::{Access, AtFlags, CWD, Mode, OFlags, ResolveFlags};
+use rustix::io::Errno;
 use rustix::process::{Gid, Uid};
 
 /// The calls of a job's file system that read a host path.
@@ -166,16 +167,40 @@ pub(super) fn reach(
     Ok(())
 }
 
+/// How many times [`in_root`] calls `openat2` for one path while the kernel answers
+/// `EAGAIN` (a rename or a mount somewhere on the host raced the resolution of a `..`, and
+/// the kernel asks the caller to try again) before that answer is the path's. The calls
+/// follow each other with no wait.
+pub(super) const RESOLVE_ATTEMPTS: usize = 16;
+
 /// The directory `rel` of the tree open as `root`, opened for its name alone, its links
-/// read inside the tree; the tree itself for an empty `rel`.
+/// read inside the tree; the tree itself for an empty `rel`. A resolution a rename or a
+/// mount raced (`EAGAIN`) is made again, up to [`RESOLVE_ATTEMPTS`] times in all.
 fn in_root(root: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
+    let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS;
+    in_root_with(rel, &mut |rel| {
+        rustix::fs::openat2(root.as_fd(), rel, PATH_DIRECTORY, Mode::empty(), resolve)
+    })
+}
+
+/// [`in_root`] with its `openat2` given as `openat2`, which is called with the path to
+/// resolve: `rel`, or `.` for an empty `rel`.
+pub(super) fn in_root_with(
+    rel: &Path,
+    openat2: &mut dyn FnMut(&Path) -> Result<OwnedFd, Errno>,
+) -> io::Result<OwnedFd> {
     let rel = match rel.as_os_str().is_empty() {
         true => Path::new("."),
         false => rel,
     };
-    let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS;
-    rustix::fs::openat2(root.as_fd(), rel, PATH_DIRECTORY, Mode::empty(), resolve)
-        .map_err(io::Error::from)
+    let mut left = RESOLVE_ATTEMPTS;
+    loop {
+        left -= 1;
+        match openat2(rel) {
+            Err(Errno::AGAIN) if left > 0 => {}
+            answer => return answer.map_err(io::Error::from),
+        }
+    }
 }
 
 /// Makes the directory `name` in the directory open as `parent`, mode `0755` whatever the
