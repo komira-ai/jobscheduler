@@ -9,9 +9,9 @@ use js_agent_wire::{JobMount, MountMode, refusal};
 use js_contain::container::HostMount;
 use js_testkit::dir::TestDir;
 
-use super::assemble::{Lower, Plan, Unassembled, assemble};
+use super::assemble::{Lower, Owners, Plan, Unassembled, assemble};
 use super::list;
-use super::tests::{Mounts, Paths, mount, owners, scratch};
+use super::tests::{Mounts, Paths, mount, own, owners, scratch};
 use crate::lifecycle::NativeRefusal;
 
 /// A host directory with a file and a directory in it, and the lease directories of an
@@ -262,7 +262,7 @@ fn a_root_of_layers_alone_and_mounts_with_no_root() {
     );
 }
 
-/// Catches a source the job user cannot reach left to fail in `crun`, and a failed mount or
+/// Catches a source the job cannot reach left to fail in `crun`, and a failed mount or
 /// listing taken for success: a search refused is `input-unavailable` naming the target, and
 /// a clone, an overlay or the list that fails is the host's failure, named.
 #[test]
@@ -283,7 +283,7 @@ fn an_assembly_that_cannot_be_made_says_why() {
         refused,
         Unassembled::Refused(NativeRefusal {
             code: refusal::INPUT_UNAVAILABLE,
-            why: "the job user cannot reach the source of /data: Permission denied (os error 13)"
+            why: "the job cannot reach the source of /data: Permission denied (os error 13)"
                 .to_owned(),
         })
     );
@@ -313,4 +313,35 @@ fn an_assembly_that_cannot_be_made_says_why() {
         panic!("failed: {failed:?}");
     };
     assert!(text.starts_with("list a clone: "), "{text}");
+}
+
+/// Catches a mount's source checked with the ids of the job user, which runs `crun` and is
+/// not mapped in the job's namespace, instead of the job's own: a source of mode `0700`
+/// owned by the job's identity, as a provider presents a writable tree (decision LR5 of
+/// `docs/design/job-rootfs.md`), is one the job can use and the job user cannot search.
+/// With the three identities apart, the read-only and the read-write mount's sources are
+/// each searched once, in spec order, as the job's identity and never as another.
+#[test]
+fn a_mounts_source_is_searched_as_the_job_not_the_job_user() {
+    let bench = Bench::new("assemble-search-ids");
+    let data = bench.host("data", &[]);
+    let out = bench.host("out", &[]);
+    let mut plan = bench.plan(
+        None,
+        (Vec::new(), vec![data.clone(), out.clone()]),
+        vec![
+            mount(&data, "/data", MountMode::ReadOnly),
+            mount(&out, "/out", MountMode::ReadWrite),
+        ],
+    );
+    let (uid, gid) = own();
+    let job = (uid.wrapping_add(1000), gid.wrapping_add(1000));
+    plan.owners = Owners {
+        root: own(),
+        job,
+        user: (uid.wrapping_add(2000), gid.wrapping_add(2000)),
+    };
+    let paths = Paths::default();
+    assemble(&Mounts::under(bench.dir.path()), &paths, &plan).expect("assembled");
+    assert_eq!(*paths.searched.lock().expect("searched"), [job, job]);
 }
