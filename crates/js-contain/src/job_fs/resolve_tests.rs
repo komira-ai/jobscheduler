@@ -2,10 +2,13 @@
 //! directory: the kernel's resolution itself, which needs no privilege.
 
 use std::os::fd::AsFd as _;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
+use super::resolve::{RESOLVE_ATTEMPTS, resolve_with};
 use super::*;
 use crate::walk::{Identity, identity};
+use rustix::io::Errno;
 
 /// A scratch directory for one test.
 fn scratch(name: &str) -> crate::test_dir::TestDir {
@@ -161,4 +164,85 @@ fn a_path_swapped_for_a_link_after_it_was_opened_changes_nothing() {
     assert_eq!(identity(&opened).expect("identity"), before);
     let again = open_beneath(at.as_fd(), Path::new("tree/sub")).expect_err("now a link out");
     assert!(matches!(again, ResolveError::Escapes { .. }), "{again}");
+}
+
+/// An `openat2` that answers `EAGAIN` the first `races` times it is called and then opens
+/// `dir` again, counting its calls in `calls` and recording the paths it was given.
+fn racing<'a>(
+    dir: &'a OwnedFd,
+    races: usize,
+    calls: &'a mut Vec<PathBuf>,
+) -> impl FnMut(&Path) -> Result<OwnedFd, Errno> + 'a {
+    move |path| {
+        calls.push(path.to_owned());
+        match calls.len() <= races {
+            true => Err(Errno::AGAIN),
+            false => Ok(dir.try_clone().expect("a clone")),
+        }
+    }
+}
+
+/// Catches a resolution a rename or a mount raced being given up at once, or made again
+/// for another answer: `EAGAIN` once, and on every attempt but the last, is followed by
+/// another call with the same path, which opens the directory; an empty path is resolved
+/// as `.` each time.
+#[test]
+fn a_resolution_raced_by_a_rename_is_made_again() {
+    let dir = scratch("raced");
+    let at = open_root(&dir).expect("the root");
+    for (rest, given, races) in [
+        ("sub/up", "sub/up", 1),
+        ("sub/up", "sub/up", RESOLVE_ATTEMPTS - 1),
+        ("", ".", RESOLVE_ATTEMPTS - 1),
+    ] {
+        let mut calls = Vec::new();
+        let opened = resolve_with(Path::new(rest), &mut racing(&at, races, &mut calls))
+            .expect("opened on a later attempt");
+        assert_eq!(identity(&opened).expect("identity"), id_of(&dir));
+        assert_eq!(calls, vec![PathBuf::from(given); races + 1]);
+    }
+}
+
+/// Catches a resolution made again without bound, or one whose last `EAGAIN` is reported
+/// as anything but the path being unavailable with the kernel's answer: after a fixed
+/// number of attempts, each raced, the path is unavailable, naming it.
+#[test]
+fn a_resolution_raced_on_every_attempt_is_unavailable() {
+    let dir = scratch("always-raced");
+    let at = open_root(&dir).expect("the root");
+    let mut calls = Vec::new();
+    let why = resolve_with(
+        Path::new("sub/up"),
+        &mut racing(&at, usize::MAX, &mut calls),
+    )
+    .expect_err("raced every time");
+    assert_eq!(calls.len(), RESOLVE_ATTEMPTS);
+    assert!(
+        matches!(&why, ResolveError::Unavailable { path, .. } if path == Path::new("sub/up")),
+        "{why}"
+    );
+    assert_eq!(
+        why.to_string(),
+        "sub/up: Resource temporarily unavailable (os error 11)"
+    );
+}
+
+/// Catches an answer other than `EAGAIN` being taken for a race: a path that leads out, or
+/// one that is missing, is answered after one call.
+#[test]
+fn an_answer_other_than_a_race_is_not_made_again() {
+    for (errno, escapes) in [(Errno::XDEV, true), (Errno::NOENT, false)] {
+        let mut calls = 0;
+        let why = resolve_with(Path::new("x"), &mut |_| {
+            calls += 1;
+            Err(errno)
+        })
+        .expect_err("refused");
+        assert_eq!(calls, 1);
+        assert_eq!(
+            matches!(why, ResolveError::Escapes { .. }),
+            escapes,
+            "{why}"
+        );
+    }
 }

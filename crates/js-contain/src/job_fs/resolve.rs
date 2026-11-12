@@ -12,6 +12,13 @@ use rustix::io::Errno;
 /// not read.
 const PATH_DIRECTORY: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
 
+/// How many times [`open_beneath`] calls `openat2` for one path while the kernel answers
+/// `EAGAIN` (a rename or a mount somewhere on the host raced the resolution of a `..`, and
+/// the kernel asks the caller to try again) before that answer is the path's. The calls
+/// follow each other with no wait: each is a fresh resolution, and the host's renames and
+/// mounts are the only thing it waits on.
+pub(super) const RESOLVE_ATTEMPTS: usize = 16;
+
 /// Why a path could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
@@ -55,27 +62,48 @@ pub fn open_root(path: &Path) -> Result<OwnedFd, ResolveError> {
 /// given). The descriptor names the directory found then, whatever later happens to the
 /// path.
 ///
+/// A resolution the kernel answers `EAGAIN`, because a rename or a mount anywhere on the
+/// host raced a `..` in it, is made again, up to `RESOLVE_ATTEMPTS` (16) times in all, with no
+/// wait between.
+///
 /// # Errors
 /// [`ResolveError::Escapes`] for a path that leads out of `dir`; otherwise
 /// [`ResolveError::Unavailable`] with the kernel's answer (`ENOENT`, `ENOTDIR`, `EACCES`,
-/// `ELOOP` for a link loop or a magic link, `EAGAIN` for a rename or a mount that raced a
-/// `..`).
+/// `ELOOP` for a link loop or a magic link, `EAGAIN` when renames or mounts raced every
+/// attempt).
 pub fn open_beneath(dir: BorrowedFd<'_>, rest: &Path) -> Result<OwnedFd, ResolveError> {
+    let resolve = ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS;
+    resolve_with(rest, &mut |path| {
+        rustix::fs::openat2(dir, path, PATH_DIRECTORY, Mode::empty(), resolve)
+    })
+}
+
+/// [`open_beneath`] with its `openat2` given as `openat2`, which is called with the path
+/// to resolve: `rest`, or `.` for an empty `rest`.
+pub(super) fn resolve_with(
+    rest: &Path,
+    openat2: &mut dyn FnMut(&Path) -> Result<OwnedFd, Errno>,
+) -> Result<OwnedFd, ResolveError> {
     let path = if rest.as_os_str().is_empty() {
         Path::new(".")
     } else {
         rest
     };
-    let resolve = ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS;
-    rustix::fs::openat2(dir, path, PATH_DIRECTORY, Mode::empty(), resolve).map_err(|errno| {
-        match errno {
-            Errno::XDEV => ResolveError::Escapes {
-                path: rest.to_owned(),
-            },
-            other => ResolveError::Unavailable {
-                path: rest.to_owned(),
-                source: other.into(),
-            },
+    let mut left = RESOLVE_ATTEMPTS;
+    let answer = loop {
+        left -= 1;
+        match openat2(path) {
+            Err(Errno::AGAIN) if left > 0 => {}
+            answer => break answer,
         }
+    };
+    answer.map_err(|errno| match errno {
+        Errno::XDEV => ResolveError::Escapes {
+            path: rest.to_owned(),
+        },
+        other => ResolveError::Unavailable {
+            path: rest.to_owned(),
+            source: other.into(),
+        },
     })
 }

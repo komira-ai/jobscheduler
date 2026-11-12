@@ -19,7 +19,10 @@ use js_contain::job_fs::{Attributes, MountCalls, ResolveError};
 use js_testkit::dir::TestDir;
 
 use super::assemble::Owners;
-use super::kernel::{Kernel, PathCalls, become_user, missing_call, reach, search_with, unreadable};
+use super::kernel::{
+    Kernel, PathCalls, RESOLVE_ATTEMPTS, become_user, in_root_with, missing_call, reach,
+    search_with, unreadable,
+};
 use super::list;
 use super::pool::{Poll, Pool};
 
@@ -314,6 +317,52 @@ fn a_target_is_made_inside_its_tree_as_the_tree_reads() {
     assert_eq!(
         gone.expect_err("no tree").raw_os_error(),
         Some(libc::ENOENT)
+    );
+}
+
+/// Catches a lookup in a tree a rename or a mount raced being given up at once, made
+/// again without bound, or made again for another answer: `EAGAIN` on every attempt but
+/// the last is followed by another call with the same path (`.` for the tree itself),
+/// which opens the directory; `EAGAIN` on every attempt is the answer after a fixed number
+/// of them; any other answer is the answer after one.
+#[test]
+fn a_lookup_raced_by_a_rename_is_made_again_a_bounded_number_of_times() {
+    let dir = scratch("raced");
+    let tree = rustix::fs::open(
+        dir.path(),
+        rustix::fs::OFlags::PATH,
+        rustix::fs::Mode::empty(),
+    )
+    .expect("the tree");
+    // `openat2` answering `EAGAIN` the first `races` times and then `answer`, as the
+    // paths it was given.
+    let lookup = |rel: &str, races: usize, answer: Option<rustix::io::Errno>| {
+        let mut given = Vec::new();
+        let found = in_root_with(Path::new(rel), &mut |path| {
+            given.push(path.to_owned());
+            match (given.len() <= races, answer) {
+                (true, _) => Err(rustix::io::Errno::AGAIN),
+                (false, None) => Ok(tree.try_clone().expect("a clone")),
+                (false, Some(errno)) => Err(errno),
+            }
+        });
+        (found.map(|_| ()).map_err(|why| why.raw_os_error()), given)
+    };
+    let last = RESOLVE_ATTEMPTS - 1;
+    let path = |rel: &str, n: usize| vec![PathBuf::from(rel); n];
+    assert_eq!(lookup("usr/lib", 1, None), (Ok(()), path("usr/lib", 2)));
+    assert_eq!(
+        lookup("", last, None),
+        (Ok(()), path(".", RESOLVE_ATTEMPTS))
+    );
+    assert_eq!(
+        lookup("usr/lib", usize::MAX, None),
+        (Err(Some(libc::EAGAIN)), path("usr/lib", RESOLVE_ATTEMPTS))
+    );
+    let missing = Some(rustix::io::Errno::NOENT);
+    assert_eq!(
+        lookup("usr/lib", 0, missing),
+        (Err(Some(libc::ENOENT)), path("usr/lib", 1))
     );
 }
 
