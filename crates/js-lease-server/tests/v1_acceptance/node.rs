@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, channel};
 
-use js_agent::crun::{CgroupSettings, CgroupSource, Hooks, IdSources, Seams};
+use js_agent::crun::{CgroupSettings, CgroupSource, Hooks, IdSources, MountSeam, Seams};
 use js_agent::crun_host::CrunHost;
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
@@ -101,6 +101,42 @@ fn current_host() -> CrunHost {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .expect("a case set its node")
+}
+
+/// The mounts' calls of a node whose runtime mounts nothing: the directory of the runs'
+/// mounts is a mount of its own already, and private; no other call is made.
+#[derive(Debug)]
+struct Unmounted;
+
+impl js_contain::job_fs::MountCalls for Unmounted {
+    fn clone_tree(&self, _: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os::fd::OwnedFd> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn set_attributes(
+        &self,
+        _: std::os::fd::BorrowedFd<'_>,
+        _: js_contain::job_fs::Attributes,
+    ) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn attach(&self, _: std::os::fd::BorrowedFd<'_>, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn mount_overlay(&self, _: &Path, _: bool, _: &str) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn detach(&self, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn is_mount_point(&self, _: &Path) -> std::io::Result<bool> {
+        Ok(true)
+    }
+    fn bind_onto_itself(&self, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn make_private(&self, _: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The host of one case.
@@ -215,6 +251,7 @@ impl Node {
             self_cgroup: root.join("self_cgroup"),
             id_tool_dirs: vec![tools.clone()],
             owner_uid: fs::metadata(&root).expect("the node").uid(),
+            kernel_calls: js_contain::job_fs::probe,
         };
         *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(host);
         Self {
@@ -254,6 +291,12 @@ impl Node {
                 check_search: false,
             },
             daemon: std::env::current_exe().expect("the test binary"),
+            // The directory of the runs' mounts is the node's, a private mount already.
+            mounts: MountSeam {
+                dir: self.path().join("mounts"),
+                calls: std::sync::Arc::new(Unmounted),
+                ..MountSeam::default()
+            },
         }
     }
 

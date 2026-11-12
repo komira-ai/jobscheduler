@@ -52,7 +52,7 @@
 //!   `--silence-stop`, see [`DEFAULT_SILENCE_STOP`] for the bound). Contact is a welcome or
 //!   a heartbeat reply the session accepted, stamped on the lifecycle's clock by the
 //!   session ([`Contact`]); a reply the worker had no room for counts. Once the server has
-//!   not been heard for the bound, every job that runs or waits for its image is stopped as
+//!   not been heard for the bound, every job that runs or waits to start is stopped as
 //!   a `Stop` stops it (the stop grace, then the kill; a native run is killed at once), its
 //!   fence is retired and its result is `killed` with the detail `silence-stop`. It is done
 //!   once for each silence; a contact ends the silence, and starts that follow are judged
@@ -78,7 +78,10 @@
 //! - **A start waits for its image without holding the worker.** When the runtime says
 //!   the image is being fetched ([`Runtime::prepare`]) the run is held as `starting` with
 //!   its booking and slot and nothing else: no scratch directory, files or container. Each
-//!   [`Lifecycle::step`] asks again, and the container is made when the image is here. The
+//!   [`Lifecycle::step`] asks again, and the container is made when the image is here. A
+//!   job start with layers or mounts waits too for every image of its layers, for the
+//!   lookups of its host paths and, once its directories are made, for its assembly
+//!   ([`Runtime::resolve_fs`], [`Runtime::assemble_fs`]), each off the worker. The
 //!   wall time then counts from that moment, but never past the end of the lease the
 //!   start's `valid_for_ms` named. A stop or cancel while it waits ends it without a
 //!   container, and a fetch that failed ends every run that waited on it
@@ -259,7 +262,7 @@ pub use event::{Event, Finding, Skip};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
-pub use mounts::{MountError, MountRoots};
+pub use mounts::{Beneath, MountError, MountRoots};
 pub use prefetch::{Forgetter, Prefetcher, PullFuture};
 pub use quota::RunQuota;
 use quota_flags::scratch_quota_limits;
@@ -270,8 +273,8 @@ pub use quota_flags::{
 };
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    Body, Exit, Found, NativeRefusal, Prepared, ResolvedMount, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, check_run_env, label,
+    Body, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, Prepared, ResolvedMount,
+    RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, check_run_env, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use silence::{
@@ -301,6 +304,10 @@ pub struct Finished<'a> {
     pub slot: Option<u32>,
     /// The slots of the jobs in `live` (those whose container is still on the host).
     pub live_slots: &'a [u32],
+    /// The directories under which the runtime mounts the file systems of the agent's other
+    /// jobs, a job that has no container yet among them (`<mounts>/<lease>`,
+    /// [`Runtime::mounts_of`]): a mount below one is that job's, not the finished one's.
+    pub held_mounts: &'a [std::path::PathBuf],
 }
 
 /// Runs after every job, after cleanup and before the slot is freed (design 5.12). The
@@ -600,6 +607,7 @@ impl Local {
         let crun = crun.map(|settings| settings.with_host_jobs(cli.allow_host_jobs));
         let egress = egress_of(cli, crun.is_some())?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
+        let crun = crun.map(|settings| settings.with_mount_roots(&mounts));
         let scratch = cli
             .scratch_root
             .as_deref()

@@ -9,8 +9,8 @@ use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 
 use super::VmRuntime;
 use crate::lifecycle::{
-    Found, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
-    label,
+    Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
+    Status, Ticket, label,
 };
 
 /// The agent's runtime and its VM runtime; see the [module](self).
@@ -125,6 +125,48 @@ impl Runtime for WithVms {
 
     fn check_native_egress(&self, native: &NativeSpec) -> Result<(), RuntimeError> {
         self.other.check_native_egress(native)
+    }
+
+    /// The other runtime's: a VM start with layers or mounts is refused at admission.
+    fn layered_rootfs(&self) -> bool {
+        self.other.layered_rootfs()
+    }
+
+    fn check_layer_image(&self, image: &str) -> Result<(), String> {
+        self.other.check_layer_image(image)
+    }
+
+    fn binds_named_mounts(&self) -> bool {
+        self.other.binds_named_mounts()
+    }
+
+    fn resolve_fs(&mut self, run_id: &str, image: &str, fs: &JobFs, now_ms: u64) -> FsPrepared {
+        self.other.resolve_fs(run_id, image, fs, now_ms)
+    }
+
+    fn assemble_fs(&mut self, run_id: &str, now_ms: u64) -> FsPrepared {
+        self.other.assemble_fs(run_id, now_ms)
+    }
+
+    /// The other runtime's, for every run: a VM run's file system is never prepared, and
+    /// the other runtime holds nothing of it.
+    fn discard_fs(&mut self, run_id: &str) -> Result<(), RuntimeError> {
+        self.other.discard_fs(run_id)
+    }
+
+    fn mounts_of(&self, run_id: &str) -> Option<PathBuf> {
+        self.other.mounts_of(run_id)
+    }
+
+    /// The other runtime's: a VM run has no input of the host, and the other runtime
+    /// holds none of it.
+    fn input_failure(&self, id: &RunHandle) -> Option<String> {
+        self.other.input_failure(id)
+    }
+
+    /// The other runtime's: a VM's end is never held.
+    fn ends_held(&self, id: &RunHandle) -> bool {
+        self.other.ends_held(id)
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {

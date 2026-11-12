@@ -574,6 +574,43 @@ fn host_ports_are_a_flag_of_the_crun_runtime() {
     }
 }
 
+/// Proves `--image-allow-loopback` is refused at start, naming `--runtime crun`, on an agent
+/// whose runtime is the container engine or none; and that an entry whose registry is not a
+/// loopback address with a port is refused naming the flag, whatever the runtime. Catches a
+/// plain-http registry accepted by a runtime that does not pull with js-oci, and a
+/// non-loopback host given plain http.
+#[test]
+fn image_allow_loopback_is_a_flag_of_the_crun_runtime() {
+    let host = linux_host();
+    let docker = [
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
+        "--container-bin",
+        "/bin/sh",
+    ];
+    for runtime in [&docker[..], &["--runtime", "none"][..]] {
+        let mut given = vec!["--image-allow-loopback", "127.0.0.1:5000/cache"];
+        given.extend(runtime);
+        let said = refused(&given, &host);
+        assert!(
+            said.contains("--image-allow-loopback: needs --runtime crun"),
+            "{runtime:?}: {said}"
+        );
+    }
+    for wrong in [
+        "10.0.0.1:5000/cache",
+        "127.0.0.1/cache",
+        "localhost:5000/cache",
+    ] {
+        let said = refused(&["--image-allow-loopback", wrong], &host);
+        let want = format!(
+            "--image-allow-loopback: {wrong}: not 127.0.0.1:PORT/PREFIX or [::1]:PORT/PREFIX"
+        );
+        assert!(said.contains(&want), "{wrong}: {said}");
+    }
+}
+
 /// What the agent prints for `--container-network`, which was removed.
 const NO_NETWORK: &str = "--container-network: removed. A job run through the container \
     engine now always has network none. For networking give --runtime crun with --egress, and \

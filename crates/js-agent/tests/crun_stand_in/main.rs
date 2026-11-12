@@ -26,6 +26,7 @@ mod gpus;
 mod host;
 mod host_ports;
 mod images;
+mod layered;
 mod logs;
 mod node;
 mod open;

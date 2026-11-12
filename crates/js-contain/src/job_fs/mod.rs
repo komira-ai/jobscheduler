@@ -43,7 +43,7 @@ use std::io;
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
-pub use kernel::Kernel;
+pub use kernel::{Kernel, probe};
 pub use resolve::{ResolveError, open_beneath, open_root};
 
 /// The options every overlay this module mounts is given, besides its directories: no

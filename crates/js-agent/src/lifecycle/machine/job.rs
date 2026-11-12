@@ -12,7 +12,9 @@ use js_agent_wire::{
 use serde::{Deserialize, Serialize};
 
 use super::{RETIRED_CAP, SLOTS};
-use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Ticket};
+use crate::lifecycle::runtime::{
+    Body, Exit, Found, JobFs, ResolvedMount, RunHandle, RunSpec, Ticket,
+};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, detail, label};
 use crate::logs::Sink;
@@ -20,8 +22,9 @@ use crate::logs::Sink;
 /// Where a job is. The container's id travels with the stages that need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Stage {
-    /// The slot is booked and the image is being fetched: no scratch directory, files or
-    /// container exist yet, and the wall-time limit has not begun.
+    /// The slot is booked and the start waits for its images, and for the lookups and the
+    /// assembly of its file system ([`Phase`]): no files or container exist yet, no scratch
+    /// directory either before the assembly, and the wall-time limit has not begun.
     Preparing(Box<Waiting>),
     /// The container runs.
     Running(RunHandle),
@@ -51,9 +54,24 @@ pub(super) struct Given {
     /// The host ports the start names ([`RunSpec::host_ports`]), which the admission holds
     /// to the runtime's [`Runtime::host_ports`](crate::lifecycle::Runtime::host_ports).
     pub(super) host_ports: Vec<HostPort>,
+    /// The layers and mounts the start names, which the runtime prepares before the
+    /// container is made ([`Runtime::resolve_fs`](crate::lifecycle::Runtime::resolve_fs)).
+    pub(super) fs: JobFs,
 }
 
-/// What a start that waits for its image keeps to finish starting.
+/// What a start that waits is waiting for besides its images.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Phase {
+    /// Nothing else: a start with no layer and no mount.
+    Images,
+    /// The lookups of its host paths.
+    Resolving,
+    /// The assembly of its file system, once its directories are made: `scratch` is the
+    /// run's scratch directory, the lease directory beside it made too.
+    Assembling(PathBuf),
+}
+
+/// What a start that waits (for its images, or its file system) keeps to finish starting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Waiting {
     pub(super) spec: JobSpec,
@@ -63,8 +81,11 @@ pub(super) struct Waiting {
     pub(super) slot: u32,
     /// The disk the run books.
     pub(super) booked: u64,
-    /// The fetch of the image that the runtime said the run waits on.
-    pub(super) ticket: Ticket,
+    /// The images still being fetched (the image, and the images of its layers), each with
+    /// the fetch the runtime said it waits on.
+    pub(super) tickets: Vec<(String, Ticket)>,
+    /// What else it waits for.
+    pub(super) phase: Phase,
     /// When the lease the start named ends, on the agent's clock (`u64::MAX` when the
     /// start named none): the run's wall time never reaches past it.
     pub(super) lease_end_ms: u64,
@@ -139,6 +160,21 @@ pub(super) enum Cause {
 pub(super) fn cause_input_failure(cause: Option<Cause>, how: Outcome) -> Option<String> {
     let lost = cause == Some(Cause::HostPortLost) && how != Outcome::Succeeded;
     lost.then(|| refusal::HOST_PORT_LOST.to_owned())
+}
+
+/// The code of an input of the host that failed, for a job's result: the host port it lost
+/// ([`cause_input_failure`]) first, then, for a job that did not succeed, what the runtime
+/// found unreadable once it ended (`unreadable`, `Runtime::input_failure`).
+pub(super) fn input_failure(
+    cause: Option<Cause>,
+    how: Outcome,
+    unreadable: Option<String>,
+) -> Option<String> {
+    match (cause_input_failure(cause, how), how) {
+        (Some(lost), _) => Some(lost),
+        (None, Outcome::Succeeded) => None,
+        (None, _) => unreadable,
+    }
 }
 
 /// The detail of the result of a job that `cause` ended: [`detail::SILENCE_STOP`] for a
@@ -340,8 +376,9 @@ impl Job {
     }
 
     /// Ends a job that was stopped before its container was made: killed, and silent (no
-    /// result) when it was cancelled. Nothing was created, so the cleanup that follows
-    /// only gives the slot back.
+    /// result) when it was cancelled. No container was made: the cleanup that follows
+    /// discards what the runtime prepared of its file system, removes the directories made
+    /// for its assembly, if any, and gives the slot back.
     pub(super) fn end_unstarted(&mut self, events: &mut Vec<Event>) {
         if !self.silent {
             let detail = cause_detail(self.cause);
@@ -353,7 +390,7 @@ impl Job {
         self.stage = Stage::Scratch;
     }
 
-    /// Where the job is, as a heartbeat lists it: starting while it waits for its image,
+    /// Where the job is, as a heartbeat lists it: starting while it waits to start,
     /// running while its container runs, and exited from then on.
     pub(super) fn held_state(&self) -> HeldState {
         match self.stage {
@@ -363,7 +400,7 @@ impl Job {
         }
     }
 
-    /// Asks a running job, or one still waiting for its image, to stop; a job past its
+    /// Asks a running job, or one still waiting to start, to stop; a job past its
     /// exit has nothing to stop.
     pub(super) fn request_stop(&mut self, silent: bool) {
         self.request_stop_for(Cause::Stopped, silent);
@@ -378,7 +415,7 @@ impl Job {
         self.note(code::HOST_PORT_LOST, why, events);
     }
 
-    /// Asks a running job, or one still waiting for its image, to stop for `cause` (a cause
+    /// Asks a running job, or one still waiting to start, to stop for `cause` (a cause
     /// already set stays); a job past its exit has nothing to stop. Whether it was running
     /// or waiting.
     pub(super) fn request_stop_for(&mut self, cause: Cause, silent: bool) -> bool {

@@ -169,6 +169,9 @@ pub struct CrunHost {
     /// The uid that must own the state root and the scratch root: root on a machine (a test
     /// names the uid it runs as).
     pub owner_uid: u32,
+    /// The kernel's answer to each system call of a job's layers and mounts
+    /// ([`js_contain::job_fs::probe`] on a machine).
+    pub kernel_calls: fn() -> [(&'static str, std::io::Result<()>); 4],
 }
 
 impl CrunHost {
@@ -185,6 +188,7 @@ impl CrunHost {
                 .map(PathBuf::from)
                 .into(),
             owner_uid: 0,
+            kernel_calls: js_contain::job_fs::probe,
         }
     }
 }
@@ -698,6 +702,51 @@ pub struct Ready {
     /// The ports of the host's loopback a job may reach (`--host-port`); none from
     /// [`ready`], which [`start`] gives them to.
     pub host_ports: Vec<PortRange>,
+    /// Whether the kernel has every system call a job's layers and mounts need
+    /// ([`layered_rootfs`]); false from [`ready`], which [`start`] asks the kernel for.
+    pub layered: bool,
+}
+
+impl Ready {
+    /// The settings of the crun runtime of this host: its `crun`, job user and ids, the
+    /// registries of `image_allow`, the host ports a job may reach, and whether the kernel
+    /// gives a job layers and mounts.
+    #[must_use]
+    pub fn settings(self, image_allow: Vec<js_oci::Allow>) -> crate::cli_runtime::Settings {
+        let settings = crate::cli_runtime::Settings::for_crun(
+            self.crun,
+            &self.job_user,
+            self.job_ids,
+            image_allow,
+        );
+        settings
+            .with_host_ports(self.host_ports)
+            .with_layered(self.layered)
+    }
+}
+
+/// Whether a kernel that gave `answers` ([`js_contain::job_fs::probe`]) has every system
+/// call a job's layers and mounts need, and the warning naming those it lacks (`ENOSYS`):
+/// without them the agent runs jobs as before, gives none layers or mounts, and does not
+/// report `layered-rootfs`.
+#[must_use]
+pub fn layered_rootfs(answers: &[(&'static str, std::io::Result<()>)]) -> (bool, Option<String>) {
+    let missing: Vec<&str> = answers
+        .iter()
+        .filter(|(_, answer)| crate::crun::fs::kernel::missing_call(answer))
+        .map(|(name, _)| *name)
+        .collect();
+    match missing.is_empty() {
+        true => (true, None),
+        false => (
+            false,
+            Some(format!(
+                "the kernel has no {}: no job is given layers or mounts, and the hello does \
+                 not report layered-rootfs",
+                missing.join(", ")
+            )),
+        ),
+    }
 }
 
 /// What a start that names no `--runtime` is told after why `crun` cannot run, on a line of
@@ -723,9 +772,12 @@ pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result
     let checked = host_ports.and_then(|host_ports| {
         let request = flags(cli)?;
         let report = check(&request, host, commands);
-        let ready = ready(&request, report)?;
+        let mut ready = ready(&request, report)?;
+        let (layered, warning) = layered_rootfs(&(host.kernel_calls)());
+        ready.warnings.extend(warning);
         Ok(Ready {
             host_ports,
+            layered,
             ..ready
         })
     });
@@ -759,6 +811,7 @@ pub fn ready(request: &Request<'_>, report: Report) -> Result<Ready, String> {
         job_ids,
         warnings: report.warnings,
         host_ports: Vec::new(),
+        layered: false,
     })
 }
 
@@ -790,18 +843,12 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
             "{flag}: not accepted with --runtime crun (a flag of the container engine, which the crun runtime does not use; --runtime docker --allow-container-engine selects the engine)"
         ));
     }
-    let mut other_flags = vec![
-        // A job's mount is bound from a directory the job's writer may swap for a link
-        // between the agent's check and the bind; `CrunRuntime` does not read the binds
-        // back yet, so no mount root is accepted.
-        ("--mount-root", !cli.mount_roots.is_empty()),
-        ("--mount-root-ro", !cli.mount_roots_ro.is_empty()),
-    ];
-    // Native jobs are a Mac runtime; a crun agent would start and ignore them.
-    other_flags.extend(cli.native_flags());
-    if let Some((flag, _)) = other_flags.into_iter().find(|(_, given)| *given) {
+    // Native jobs are a Mac runtime; a crun agent would start and ignore them. The mount
+    // roots are accepted: the runtime opens a job's host path beneath its root and binds
+    // what it opened, never the path.
+    if let Some((flag, _)) = cli.native_flags().into_iter().find(|(_, given)| *given) {
         return Err(format!(
-            "{flag}: not accepted with --runtime crun (a flag of native jobs, or a mount root, which the crun runtime does not read back after it binds)"
+            "{flag}: not accepted with --runtime crun (a flag of native jobs)"
         ));
     }
     let crun = cli.crun_bin.as_deref().unwrap_or(Path::new(DISTRO_CRUN));
