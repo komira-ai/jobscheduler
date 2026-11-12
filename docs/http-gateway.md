@@ -428,7 +428,8 @@ answer from what the commit returned; neither holds anything of its own outside 
    and protocol known; a host port and a job port are 1 to 65535, and no job port is given
    twice or is the container port of one of `ports` (each refused naming the entry's field,
    such as `spec.mounts[<i>].target` or `spec.hostPorts[<i>].containerPort`). A job with any
-   of them is refused with host isolation (naming `spec.constraints.isolation`), and records
+   of them is refused with host isolation (naming `spec.constraints.isolation`) and with the
+   whole host (naming `spec.needs`), and records
    `layered-rootfs=true` among its capabilities, which admission and placement ask a host
    for; one with layers, or a host port at a job port of its own, records the execution mode
    `container` when it gave none, and is refused with `sandbox-exec` (naming

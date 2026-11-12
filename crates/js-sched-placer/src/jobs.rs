@@ -687,8 +687,8 @@ impl SchedPlacer {
         // run contained: it does not yet hold a job to the hosts that run host jobs, so a
         // whole-host job with host isolation stays queued.
         // Nor does it hold a job to the hosts that report `layered-rootfs`, so a whole-host job
-        // with layers, mounts or host ports stays queued too, rather than drain a host that
-        // could not be sent its start.
+        // with layers, mounts or host ports (which the job service refuses at submit) stays
+        // queued too, rather than drain a host that could not be sent its start.
         let whole: Vec<JobRecord> = queued
             .iter()
             .filter(|job| {

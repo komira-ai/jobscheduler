@@ -14,7 +14,7 @@ fn items(items: &[&[u8]]) -> Vec<u8> {
 }
 
 /// [`full_job`] without layers, mounts, host ports, refused start's code or input failure.
-fn plain_job() -> JobRecord {
+pub(crate) fn plain_job() -> JobRecord {
     let mut job = full_job();
     job.spec.layers.clear();
     job.spec.mounts.clear();
@@ -255,4 +255,63 @@ fn an_input_failure_is_read_only_beside_a_result() {
         field_of(&job_row(&job), t::RESULT_INPUT_FAILURE),
         Some(b"input-unreadable".to_vec())
     );
+}
+
+/// `items` framed as a list value: each item's length (`u32`, big-endian), then its bytes.
+fn framed(items: &[&[u8]]) -> Vec<u8> {
+    items
+        .iter()
+        .flat_map(|item| [&(item.len() as u32).to_be_bytes()[..], item].concat())
+        .collect()
+}
+
+// Catches a change to the bytes of tags 54 to 58: a tag's number, a kind, mode or option
+// byte, the order of a mount's parts, the width of a host port, or the framing of a list. The
+// values are written out here with literal tags and bytes, independent of the codec.
+#[test]
+fn the_rootfs_fields_are_pinned_byte_for_byte() {
+    let image = [
+        b"\x01team/base@sha256:".as_slice(),
+        "d".repeat(64).as_bytes(),
+    ]
+    .concat();
+    let src = [
+        b"\x00/srv/trees/src".as_slice(),
+        b"/work",
+        &[2],
+        b"\x01lib",
+        &[1],
+        &[0],
+    ];
+    let cache = [
+        b"\x00/srv/cache".as_slice(),
+        b"/work/cache",
+        &[1],
+        &[],
+        &[0],
+        &[0],
+    ];
+    let pinned: [(u16, Vec<u8>); 5] = [
+        (54, framed(&[&image, b"\x00/srv/trees/sdk"])),
+        (55, framed(&[&framed(&src), &framed(&cache)])),
+        (
+            56,
+            framed(&[&[0x1b, 0x9e, 0x1c, 0x03, 0], &[0x23, 0x28, 0x23, 0x28, 0]]),
+        ),
+        (57, b"input-not-allowed".to_vec()),
+        (58, b"input-unreadable".to_vec()),
+    ];
+    let row = job_row(&full_job());
+    for (tag, value) in pinned {
+        assert_eq!(field_of(&row, tag), Some(value.clone()), "tag {tag}");
+        let rebuilt = with(&job_row(&plain_job()), tag, &value);
+        assert_eq!(field_of(&rebuilt, tag), Some(value), "tag {tag}");
+    }
+    let rebuilt = [54, 55, 56, 57, 58]
+        .iter()
+        .fold(job_row(&plain_job()), |row, tag| {
+            let value = field_of(&job_row(&full_job()), *tag).expect("written");
+            with(&row, *tag, &value)
+        });
+    assert_eq!(decode_job(&rebuilt), Ok(full_job()));
 }

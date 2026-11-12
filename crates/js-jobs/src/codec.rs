@@ -20,9 +20,10 @@
 //! back can move a job a newer build wrote without losing the newer fields. A field this
 //! build knows but the row lacks reads as its default (`None`, empty, zero, the default
 //! network policy), so a row an older build wrote reads too. A row whose format byte is above
-//! [`FORMAT`], or which holds an enum value this build does not know (but a queue code or event
-//! kind, which reads as unspecified: `queue_fields`), is [`DecodeError::Newer`]: the store
-//! answers it as an unknown row, never as a missing one.
+//! [`FORMAT`] (for a job row, above `rootfs_fields::FORMAT_NO_IMAGE`, the format of a job
+//! without an image, which a build before it so leaves out), or which holds an enum value this
+//! build does not know (but a queue code or event kind, which reads as unspecified:
+//! `queue_fields`), is [`DecodeError::Newer`]: the store answers it as an unknown row.
 //! Any other row that does not parse is an error naming what is wrong; nothing here panics or
 //! reads past a length.
 

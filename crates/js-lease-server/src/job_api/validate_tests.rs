@@ -538,6 +538,32 @@ fn host_isolation_is_refused_with_any_rootfs_field() {
     assert_eq!(plain.spec.constraints.isolation, Isolation::Host);
 }
 
+/// Asserts that a whole-host job is refused naming `spec.needs` with layers, with mounts and
+/// with host ports, each alone, and accepted without them. It catches a job the whole-host
+/// pass never places (it does not hold a job to the hosts that report `layered-rootfs`) taken
+/// and left queued until it expires.
+#[test]
+fn a_whole_host_job_is_refused_with_any_rootfs_field() {
+    let whole = Some(v1::Needs {
+        whole_host: true,
+        ..v1::Needs::default()
+    });
+    let changes: Vec<Change> = vec![
+        Box::new(|spec| spec.layers = host_layers(1)),
+        Box::new(|spec| spec.mounts = one_mount()),
+        Box::new(|spec| spec.host_ports = one_host_port(80, None)),
+    ];
+    for change in changes {
+        let refused = fault(|spec| {
+            change(spec);
+            spec.needs = whole.clone();
+        });
+        assert_eq!(refused, Fault::Field("spec.needs"));
+    }
+    let plain = valid(|spec| spec.needs = whole.clone());
+    assert_eq!(plain.spec.needs, Needs::WholeHost);
+}
+
 /// Asserts that sandbox-exec is refused naming `spec.constraints.exec` with layers and with
 /// a host port whose job port differs from its host port (given), and accepted with a host
 /// port at its own number (given or absent) and with mounts alone. It catches a job asking

@@ -270,4 +270,4 @@ fn host_port_of(tag: u16, item: &[u8]) -> Result<HostPort, DecodeError> {
 
 #[cfg(test)]
 #[path = "rootfs_fields_tests.rs"]
-mod tests;
+pub(crate) mod tests;

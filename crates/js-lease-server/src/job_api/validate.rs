@@ -24,8 +24,10 @@
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
 //!
-//! The cross-field rules (an empty image, its command, `exec` and `isolation` beside the
-//! layers, mounts and host ports) are checked once those fields are, and before `isolation`.
+//! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
+//! `isolation` beside the layers, mounts and host ports) are checked once those fields are, and
+//! before `isolation`. A whole-host job may name none of them (`field: spec.needs`): the
+//! whole-host pass does not hold a job to the hosts that report `layered-rootfs`.
 //!
 //! A job with layers, mounts or host ports records `layered-rootfs=true` among its
 //! capabilities and asks admission for it, so it is placed and started only on a host whose
@@ -132,6 +134,9 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         };
     }
     if layered {
+        if let Asked::WholeHost(_) = resources {
+            return Err(Fault::Field("spec.needs"));
+        }
         capabilities.insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
     }
     let isolation = isolation(constraints.isolation)?;
