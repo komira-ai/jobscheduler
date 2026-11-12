@@ -443,3 +443,41 @@ fn a_native_input_resolves_as_a_read_only_mount_at_its_dest() {
     };
     assert!(roots.resolve_input(&stage).is_none());
 }
+
+/// Asserts that a job start's host path lies beneath the longest root that is a prefix of
+/// its text by whole components, with the rest below it and whether the root is read-only,
+/// that the root itself lies beneath itself, and that a path whose text only begins like a
+/// root's, or lies beneath none, has no root; and that the roots are listed by name. It
+/// catches a shorter root chosen over a nested one (a read-write root taking a path the
+/// operator gave read-only), and a byte prefix taken for a directory.
+#[test]
+fn a_host_path_lies_beneath_the_longest_root_that_holds_it() {
+    let dir = Scratch::new("mounts-beneath");
+    for sub in ["data/inner/deep", "data-evil"] {
+        fs::create_dir_all(dir.path(sub)).unwrap();
+    }
+    let roots = MountRoots::with_read_only(
+        &[("data".to_owned(), dir.path("data"))],
+        &[("inner".to_owned(), dir.path("data/inner"))],
+    )
+    .unwrap();
+    let text = |sub: &str| dir.path(sub).display().to_string();
+    let deep = roots
+        .beneath(&text("data/inner/deep/x"))
+        .expect("beneath a root");
+    assert_eq!(
+        (deep.name, deep.rest.as_path(), deep.read_only),
+        ("inner", std::path::Path::new("deep/x"), true)
+    );
+    assert_eq!(deep.root, dir.path("data/inner"));
+    let outer = roots
+        .beneath(&text("data/other"))
+        .expect("beneath the outer root");
+    assert_eq!((outer.name, outer.read_only), ("data", false));
+    let itself = roots.beneath(&text("data")).expect("the root itself");
+    assert_eq!(itself.rest, std::path::PathBuf::new());
+    assert!(roots.beneath(&text("data-evil/x")).is_none());
+    assert!(roots.beneath("/elsewhere").is_none());
+    let named: Vec<&str> = roots.named().map(|(name, _)| name).collect();
+    assert_eq!(named, ["data", "inner"]);
+}

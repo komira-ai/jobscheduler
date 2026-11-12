@@ -1,7 +1,8 @@
 # A job's file system: layers, mounts and host ports
 
 Status: **design for the owner's review; of its build items (section 11), item 2, the agent wire, item 3, the
-public API and the server, item 4, the mounts in `js-contain`, and item 6, host ports on `crun`, are built.** It replaces `docs/design/tree-inputs.md` and its build
+public API and the server, item 4, the mounts in `js-contain`, item 5, the `crun` agent's file system, and item 6, host
+ports on `crun`, are built.** It replaces `docs/design/tree-inputs.md` and its build
 items: jobscheduler does not know that a node-local cache exists, let alone which one. What tree-inputs.md asked of
 jobscheduler is met here by things any container runtime offers (layers, mounts, and access to a host port or socket),
 and the pieces of its wire that already merged (komira-ai/jobscheduler#842) are retired additively (section 6).

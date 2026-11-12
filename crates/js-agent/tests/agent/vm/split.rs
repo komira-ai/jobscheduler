@@ -1,9 +1,10 @@
 //! [`WithVms`]: VM runs go to the VM runtime, everything else to the runtime the agent had.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent::lifecycle::{Prepared, RunHandle, Runtime, Status, label};
+use js_agent::lifecycle::{FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, label};
 use js_agent::vm::{VmRuntime, WithVms};
 use js_agent_wire::{LogReport, LogTail, NetworkLevel, PortRange, refusal};
 use js_vm_lease::fake::FakeDriver;
@@ -124,6 +125,26 @@ fn every_host_question_is_the_other_runtimes() {
         alone.check_native_egress(&open)
     );
     assert_eq!(with.lease_dir("run-1"), alone.lease_dir("run-1"));
+    // A job's layers and mounts are the other runtime's to give and to prepare.
+    fake.give_layers();
+    fake.mount_in(Path::new("/mounts"));
+    fake.refuse_layer_image("registry.example/l@sha256:0");
+    assert!(with.layered_rootfs());
+    assert_eq!(
+        with.check_layer_image("registry.example/l@sha256:0"),
+        alone.check_layer_image("registry.example/l@sha256:0")
+    );
+    assert!(!with.binds_named_mounts());
+    let fs = JobFs::default();
+    fake.resolve_answers("run-1", FsPrepared::Pending);
+    assert_eq!(with.resolve_fs("run-1", "", &fs, 0), FsPrepared::Pending);
+    assert_eq!(with.assemble_fs("run-1", 0), FsPrepared::Ready);
+    assert_eq!(with.discard_fs("run-1"), Ok(()));
+    assert_eq!(
+        with.mounts_of("run-1"),
+        Some(PathBuf::from("/mounts/run-1"))
+    );
+    assert_eq!(with.input_failure(&RunHandle(leaked.clone())), None);
     assert_eq!(with.places_in_cgroup(), alone.places_in_cgroup());
     assert_eq!(with.check_vm(), Ok(()));
     assert_eq!(

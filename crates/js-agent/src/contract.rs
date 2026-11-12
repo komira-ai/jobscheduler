@@ -61,12 +61,13 @@ use js_agent_wire::{
     START_FENCE_CAPABILITY,
 };
 use js_caps::{
-    EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB,
-    SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
+    EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, LAYERED_ROOTFS, RUN_FILES, RUNTIME,
+    SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
 };
 use js_types::ExecMode;
 
 use crate::cli::Cli;
+use crate::cli_runtime::Settings;
 use crate::facts::CommandRunner;
 use crate::native::Ceiling;
 
@@ -143,6 +144,20 @@ fn report_per_job(hello: &mut Hello) {
     hello
         .capabilities
         .insert(START_FENCE_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+}
+
+/// Says what an agent's `crun` runtime gives a job beyond a container: host jobs, when it
+/// was started with `--allow-host-jobs` (which the start check takes only with
+/// `--runtime crun`), and layers and mounts of host paths (`layered-rootfs`), when the start
+/// check found the system calls they need in the kernel.
+pub(crate) fn report_crun(hello: &mut Hello, local: &crate::lifecycle::Local) {
+    report_host_jobs(hello, local.allow_host_jobs);
+    let crun = local.container.as_ref().and_then(Settings::crun);
+    if crun.is_some_and(|plan| plan.layered) {
+        hello
+            .capabilities
+            .insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
+    }
 }
 
 /// Says that the agent launches host jobs, when it was started with `--allow-host-jobs`

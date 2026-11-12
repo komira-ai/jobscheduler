@@ -594,6 +594,12 @@ pub struct Cli {
     /// `image-not-allowed`.
     #[arg(long, value_name = "HOST/PREFIX")]
     pub image_allow: Vec<String>,
+    /// A registry on this host's own loopback that a `--runtime crun` job's image, or an
+    /// image of its layers, may be pulled from over plain http: `127.0.0.1:PORT/PREFIX` or
+    /// `[::1]:PORT/PREFIX`; repeatable. Another host, or an entry with no port, is refused at
+    /// start. `--registry-credentials` may name it as any other entry.
+    #[arg(long, value_name = "127.0.0.1:PORT/PREFIX")]
+    pub image_allow_loopback: Vec<String>,
     /// The credentials an allow-list entry sends to its registry's token realm, for a
     /// private package: `ENTRY=PATH`, where `ENTRY` is an `--image-allow`,
     /// `--bundle-registry-allow` or `--bundle-registry-allow-private` entry as given there

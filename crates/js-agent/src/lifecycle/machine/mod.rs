@@ -12,6 +12,7 @@ mod held;
 mod job;
 mod per_job;
 mod prepare;
+mod rootfs;
 mod silence;
 mod slots;
 mod tails;
@@ -27,13 +28,11 @@ use js_agent_wire::{
 
 pub use self::exclusive::{Quiet, Restored};
 use self::held::Records;
-use self::job::{
-    Given, Job, Keyed, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec,
-};
+use self::job::{Given, Job, Keyed, Retired, Stage, Stuck, blind_taint, host_taint};
 pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
-use super::runtime::{Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError};
+use super::runtime::{ResolvedMount, RunHandle, Runtime, RuntimeError};
 use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
 use crate::quota::QuotaError;
@@ -492,6 +491,8 @@ impl Lifecycle {
         let offered = (!given.vm).then(|| self.runtime.host_ports());
         crate::host_ports::admit(&offered.unwrap_or_default(), &given.host_ports)
             .map_err(|why| (refusal::INPUT_NOT_ALLOWED, why))?;
+        // And layers and mounts it does not give, or paths beneath no root of the agent's.
+        self.admit_fs(spec, given)?;
         // Last, so that a job refused for another reason costs no call. Before every
         // contained create: the firewall can change between two jobs. A native job has its
         // own check (a Mac pool is limited by a packet filter, not a container network).
@@ -816,111 +817,12 @@ impl Lifecycle {
                 return;
             }
         };
-        // The image is asked for after the slot is taken and before anything is made: a run
-        // whose image is still being fetched waits as `starting`, holding its booking, and
-        // costs the worker nothing until the image is here (see `Runtime::prepare`).
-        // A host-isolation run uses no image store (the runtime pulls for it inside the
-        // create, as it always did): it is never asked about one. (A start with no image
-        // is refused as `invalid-image`, and a native one as `native-unsupported`, before
-        // this point.)
-        // A VM start boots the agent's base image, never an image of the store.
-        let prepared = match (spec.isolation, given.vm) {
-            (Isolation::Host, _) | (_, true) => Prepared::Ready,
-            (Isolation::Contained, false) => self.runtime.prepare(&spec.image, None),
-        };
-        match prepared {
-            Prepared::Pending(ticket) => {
-                // The lease the start names ends `valid_for_ms` after the reply came; a run
-                // that waits for its image is held to that end when it starts.
-                let lease_end_ms = match spec.valid_for_ms {
-                    0 => u64::MAX,
-                    valid => received.saturating_add(valid),
-                };
-                let waiting = Waiting {
-                    spec: spec.clone(),
-                    given: given.clone(),
-                    mounts,
-                    slot,
-                    booked,
-                    ticket,
-                    lease_end_ms,
-                };
-                let stage = Stage::Preparing(Box::new(waiting));
-                let mut job = Job::of(spec, stage, 0, Some(slot), booked);
-                job.keyed = keyed;
-                self.jobs.push(job);
-            }
-            Prepared::Ready => {
-                let started = self.begin((spec, keyed), given, mounts, slot, booked, events);
-                let at = (None, u64::MAX);
-                self.settle((spec, keyed), started, (slot, booked), at, events);
-            }
-            Prepared::Failed(why) => {
-                let failure = runtime_failure(&why);
-                let at = (None, u64::MAX);
-                self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
-            }
-        }
-    }
-
-    /// Makes the run's scratch directory (with its quota) and files and creates and starts
-    /// its container.
-    fn begin(
-        &mut self,
-        (spec, keyed): (&JobSpec, Keyed),
-        given: &Given,
-        mounts: Vec<ResolvedMount>,
-        slot: u32,
-        booked: u64,
-        events: &mut Vec<Event>,
-    ) -> Result<RunHandle, Failure> {
-        let run_id = &spec.run_id;
-        let failed = |why: std::io::Error| {
-            (
-                detail::SCRATCH_FAILED,
-                code::SCRATCH_FAILED,
-                why.to_string(),
-                false,
-            )
-        };
-        let started = self.config.scratch.create(run_id).map_err(failed);
-        // The quota is set on the empty directory, before the container is created (which
-        // gives the directory to the slot's user) and before anything is written to it: a
-        // file made earlier would carry no project and escape the count. A failure leaves
-        // the directory to the cleanup, which removes it and clears the project.
-        let started = started.and_then(|scratch| {
-            // What the runtime keeps beside the run's directory (a container's `/work` overlay
-            // and home) is made empty and put under the same project: one bound, one usage,
-            // for everything the job writes.
-            let lease = self
-                .runtime
-                .lease_dir(run_id)
-                .map(|dir| self.config.scratch.create_lease(&dir))
-                .transpose()
-                .map_err(failed)?;
-            for dir in std::iter::once(&scratch).chain(lease.as_ref()) {
-                self.bind(dir, slot, booked, events)
-                    .map_err(|why| failed(why.into()))?;
-            }
-            Ok(scratch)
-        });
-        // The files are written before the container exists, and only here: a start that
-        // is sent again finds its job above and never reaches this point. `admit` has
-        // seen to it that a start with files has a files root.
-        let started = started.and_then(|scratch| {
-            let written = match (&self.config.files, spec.files.is_empty()) {
-                (Some(root), false) => root.write(run_id, &spec.files).map(Some),
-                _ => Ok(None),
-            };
-            written.map(|files| (scratch, files)).map_err(failed)
-        });
-        started.and_then(|(scratch, files)| {
-            let made = (mounts, scratch, files);
-            let run = run_spec((spec, keyed), given, made, slot, booked);
-            self.runtime
-                .create_and_start(&run)
-                .map_err(|why| runtime_failure(&why))
-        })
+        // What the start needs is asked for after the slot is taken and before anything is
+        // made: a run whose images are still being fetched, or whose file system is being
+        // prepared, waits as `starting`, holding its booking, and costs the worker nothing
+        // until it is ready (see `Runtime::prepare` and `prepare`).
+        let made = (mounts, slot, booked);
+        self.prepare_or_begin((spec, keyed), given, made, received, events);
     }
 
     /// Records how a start went: a running job (its wall-time limit begins now, after any

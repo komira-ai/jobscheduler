@@ -32,6 +32,18 @@ fn until_logged(rig: &Rig, line: &str) {
     panic!("{line} never came: {:?}", seen(rig));
 }
 
+/// Waits until the fake host's clock has been read `reads` times in all, by another thread.
+fn until_read(rig: &Rig, reads: usize) {
+    for _ in 0..LOOKS {
+        if rig.host.state().clock_reads >= reads {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    let read = rig.host.state().clock_reads;
+    panic!("the clock was read {read} times, never {reads}");
+}
+
 /// Moves the fake clock by `by` and wakes the waits on the table.
 fn advance(rig: &Rig, by: Duration) {
     rig.host.state().advanced += by;
@@ -98,15 +110,20 @@ fn watch_finds_the_last_run_and_reports_its_end() {
 }
 
 /// Catches: a `stop` that kills before the grace has passed, or never sends the `SIGTERM`;
-/// the clock is the host's, moved by the test.
+/// the clock is the host's, moved by the test. The stopper reads the clock for its grace,
+/// then again under the table's lock before it waits; the test moves the clock only after
+/// both reads, so the stopper waits on the table with the grace still ahead.
 #[test]
 fn stop_sends_sigterm_and_kills_only_after_the_grace() {
     let rig = running("stop-grace");
+    let reads = rig.host.state().clock_reads;
     std::thread::scope(|scope| {
         let stopping = scope.spawn(|| rig.helper.stop("7.1", HOUR));
         until_logged(&rig, &format!("term_group {PID}"));
+        until_read(&rig, reads + 2);
         assert!(!kill_all_logged(&rig), "killed before the grace");
         advance(&rig, HOUR - Duration::from_secs(1));
+        until_read(&rig, reads + 3);
         assert!(!kill_all_logged(&rig), "killed before the grace");
         advance(&rig, Duration::from_secs(1));
         assert_eq!(stopping.join().unwrap(), Ok(()));
@@ -171,18 +188,25 @@ fn stop_without_a_running_process_kills_at_once_and_refuses_what_it_cannot_do() 
 
 /// Catches: a deadline not enforced once the host's clock passes it (the run outlives a
 /// dead agent with no bound), one enforced early, and a run that ended before its deadline
-/// killed anyway.
+/// killed anyway. The holder waits on the table with the deadline still ahead each time
+/// the test moves the clock: the test moves it only once the holder has read it, and the
+/// holder reads it under the table's lock, which [`advance`] takes to wake it.
 #[test]
 fn the_helper_ends_a_run_when_its_deadline_passes() {
     let rig = running("deadline");
     let lease = parse_lease("7.1").unwrap();
-    let at = rig.host.state().advanced;
+    let (at, reads) = {
+        let state = rig.host.state();
+        (state.advanced, state.clock_reads)
+    };
     rig.helper
         .runs
         .started(lease, PID, Some(crate::testing::epoch() + at + HOUR));
     std::thread::scope(|scope| {
         let holding = scope.spawn(|| rig.helper.hold_deadline(PID));
+        until_read(&rig, reads + 1);
         advance(&rig, HOUR - Duration::from_secs(1));
+        until_read(&rig, reads + 2);
         assert!(!kill_all_logged(&rig), "killed before the deadline");
         advance(&rig, Duration::from_secs(1));
         holding.join().unwrap();

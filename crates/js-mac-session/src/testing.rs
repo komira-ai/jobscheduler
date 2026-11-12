@@ -79,6 +79,9 @@ pub(crate) struct State {
     pub(crate) stubborn_groups: usize,
     /// How far the fake clock has moved past [`NOW`].
     pub(crate) advanced: Duration,
+    /// How many times the clock has been read: a test waits on it for another thread to
+    /// have looked at the clock before the test moves it.
+    pub(crate) clock_reads: usize,
     /// The launchd domains that exist (`gui/<uid>` once a login has completed). As
     /// launchd does, `bootout user/<uid>` ends the domain only while no process of the
     /// uid lives (in `procs`): a live one makes it again.
@@ -250,7 +253,9 @@ impl FakeHost {
 
 impl Host for FakeHost {
     fn now(&self) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(NOW) + self.state().advanced
+        let mut state = self.state();
+        state.clock_reads += 1;
+        UNIX_EPOCH + Duration::from_secs(NOW) + state.advanced
     }
 
     fn uid_taken(&self, uid: u32) -> io::Result<bool> {

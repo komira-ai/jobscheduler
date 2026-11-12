@@ -3,8 +3,7 @@
 
 use super::Lifecycle;
 use super::job::{
-    Cause, Stage, blind_taint, cause_detail, cause_input_failure, check_taint, cleanup_taint,
-    outcome,
+    Cause, Stage, blind_taint, cause_detail, check_taint, cleanup_taint, input_failure, outcome,
 };
 use crate::lifecycle::runtime::{RunHandle, Status};
 use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
@@ -33,7 +32,9 @@ impl Lifecycle {
         // say is no reason to let the job run past its limit. A container that is gone has
         // nothing to stop, and the job ends as if it had exited.
         let mut seen = runtime.poll(&id);
-        if !matches!(seen, Ok(Status::Exited(_))) {
+        // A run whose end is held while the runtime checks its inputs has ended by itself:
+        // neither its limit nor a stop is its end.
+        if !matches!(seen, Ok(Status::Exited(_))) && !runtime.ends_held(&id) {
             if job.cause.is_none() && now >= job.deadline_ms {
                 job.cause = Some(Cause::TimedOut);
             }
@@ -92,7 +93,7 @@ impl Lifecycle {
                         job.logs = runtime.logs_report(&id);
                     }
                     job.result = Some(result);
-                    job.input_failure = cause_input_failure(job.cause, how);
+                    job.input_failure = input_failure(job.cause, how, runtime.input_failure(&id));
                     events.push(Event::ResultReady {
                         run_id: job.run_id.clone(),
                     });
@@ -107,7 +108,7 @@ impl Lifecycle {
     /// container, the scratch directory, the checks, then the slot. A step that fails
     /// ends the pass with the slot still booked.
     pub(super) fn clean(&mut self, index: usize, events: &mut Vec<Event>) {
-        // A run waiting for its image has nothing to clean (and its stage holds the start).
+        // A run that waits to start is cleaned once it ends (its stage holds the start).
         if matches!(self.jobs[index].stage, Stage::Preparing(_)) {
             return;
         }
@@ -128,6 +129,15 @@ impl Lifecycle {
             .filter(|(_, job)| job.stage.container().is_some())
             .filter_map(|(_, job)| job.slot)
             .chain(self.stuck.iter().filter_map(|held| held.slot))
+            .collect();
+        // Where the runtime mounts the file systems of the other jobs it still holds, a job
+        // that waits for its assembly or for its cleanup among them.
+        let held_mounts: Vec<std::path::PathBuf> = self
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(other, job)| *other != index && job.stage != Stage::Freed)
+            .filter_map(|(_, job)| self.runtime.mounts_of(&job.run_id))
             .collect();
         let Self {
             jobs,
@@ -184,7 +194,13 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Scratch => match remove_run_dirs(config, &run_id, lease.as_deref()) {
+                // What the runtime mounted for a run it never made (an assembly before the
+                // container) goes first: the run's directories hold its writable layers.
+                Stage::Scratch => match runtime
+                    .discard_fs(&run_id)
+                    .map_err(std::io::Error::other)
+                    .and_then(|()| remove_run_dirs(config, &run_id, lease.as_deref()))
+                {
                     Ok(()) => {
                         // The tree is gone; now the bound comes off its project, and the
                         // slot stays held until the project reads no usage (the file system
@@ -266,6 +282,7 @@ impl Lifecycle {
                     live: &live,
                     slot: job.slot,
                     live_slots: &live_slots,
+                    held_mounts: &held_mounts,
                 }) {
                     // A marker that is not on disk yet (it could not be written when the
                     // host was tainted) holds the slot, whatever the job left; so does a

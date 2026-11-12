@@ -256,12 +256,13 @@ impl CrunRuntime {
             self.runs.insert(name, run);
         }
         self.remove_unrecorded(&mut report);
+        self.sweep_mounts(&mut report);
         self.sweep_store_leases();
         Ok(report)
     }
 
     /// The start of the name of every lease of this agent: `js-<agent tag>-`.
-    fn lease_prefix(&self) -> String {
+    pub(super) fn lease_prefix(&self) -> String {
         format!("{NAME_PREFIX}{}-", agent_tag(&self.host_id))
     }
 
@@ -419,6 +420,8 @@ impl CrunRuntime {
             // Its uploader, if its lease holds a progress record, comes with the runtime's live
             // logs (`resume_uploads`); the sink came only in its start.
             logs: RunLogs::adopted(None),
+            // What its file system cloned, from its list of mounts, for the check after it ends.
+            fs: self.run_fs_of(&entry.name),
         }
     }
 
@@ -595,6 +598,11 @@ impl CrunRuntime {
                 removed.as_ref().err().map(ToString::to_string),
             )?;
         }
+        // After `crun delete` and before the lease directory, which holds the writable layers.
+        step(
+            "unmount the lease's file system",
+            self.release_fs(name).err(),
+        )?;
         if has_dir {
             for dir in [Some(&lease.dir), legacy.as_ref()].into_iter().flatten() {
                 if dir.exists() {
@@ -606,13 +614,8 @@ impl CrunRuntime {
                 }
             }
         }
-        // Last: the image may go only once nothing of the lease can use it.
-        let unpinned = self.oci.unpin_image(name);
-        self.images.release(name);
-        step(
-            "remove the image's pin",
-            unpinned.as_ref().err().map(ToString::to_string),
-        )
+        // Last: the images may go only once nothing of the lease can use them.
+        step("remove the image's pin", self.unpin_all(name).err())
     }
 }
 

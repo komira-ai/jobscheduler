@@ -139,6 +139,7 @@ impl Lifecycle {
             live: &[],
             slot: None,
             live_slots: &[],
+            held_mounts: &[],
         });
         let Err(found) = verdict else { return Ok(()) };
         let message = match &found {

@@ -146,6 +146,14 @@ pub(super) fn job_env(container: &mut ContainerSpec, env: &[(String, String)]) {
     container.env.extend(env.iter().cloned());
 }
 
+/// Sets the program of a root of layers alone, which has no image configuration: `args` as
+/// given (the first an absolute path in the root, the program), with an environment of the
+/// default `PATH` alone, which the job's goes over ([`job_env`]).
+pub(super) fn bare(args: &[String], container: &mut ContainerSpec) {
+    container.argv = args.to_vec();
+    container.env = vec![("PATH".to_owned(), crate::image::DEFAULT_PATH.to_owned())];
+}
+
 /// The container of an adopted run, rebuilt from what its sidecar records: what a stop, an
 /// end, the pid ask and the image collection read of it (its name, directory, image digest
 /// and cgroup). The bundle exists already and the container is never made again, so the rest

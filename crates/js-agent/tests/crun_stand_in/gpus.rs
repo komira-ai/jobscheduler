@@ -618,6 +618,8 @@ fn the_runtime_opened_from_the_settings_passes_the_gpus_and_reads_the_host() {
             check_search: false,
         },
         daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
+        // The plan names no kernel check: the runtime mounts nothing.
+        mounts: js_agent::crun::MountSeam::default(),
     };
     let settings = |gpus: Option<GpuPassthrough>| {
         let crun = node.dir.join("crun");

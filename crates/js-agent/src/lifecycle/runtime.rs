@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{
-    HostPort, Isolation, LogReport, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, PortRange,
-    refusal,
+    HostPort, Isolation, JobMount, Layer, LogReport, LogTail, MountSource, NativeSpec,
+    NetworkCeiling, NetworkLevel, PortRange, refusal,
 };
 use js_types::{JobNetwork, PortMap};
 
@@ -308,6 +308,92 @@ pub enum Prepared {
     Failed(RuntimeError),
 }
 
+/// What a job start asks of its file system beyond its image (`docs/design/job-rootfs.md`):
+/// the read-only layers of its root and the trees at paths of its own, as the start carries
+/// them ([`js_agent_wire::JobStartSpec::layers`], [`js_agent_wire::JobStartSpec::mounts`]).
+/// Empty for a start that asks for neither, and for a run start.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobFs {
+    /// The layers of the root, base first.
+    pub layers: Vec<Layer>,
+    /// The trees at paths of the job's file system.
+    pub mounts: Vec<JobMount>,
+}
+
+impl JobFs {
+    /// Whether the start asks for no layer and no mount.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty() && self.mounts.is_empty()
+    }
+
+    /// The host paths the start names, each with the `sub_path` of its mount and whether
+    /// the job may write through it (a read-write mount's), in the order a runtime counts
+    /// its sources: the layers' first, in their order, then the mounts'.
+    #[must_use]
+    pub fn host_paths(&self) -> Vec<HostSource<'_>> {
+        let layers = self.layers.iter().filter_map(|layer| match layer {
+            Layer::HostPath { path } => Some(HostSource {
+                path,
+                sub_path: None,
+                writes: false,
+            }),
+            Layer::Image { .. } => None,
+        });
+        let mounts = self.mounts.iter().map(|mount| {
+            let MountSource::HostPath { path } = &mount.source;
+            HostSource {
+                path,
+                sub_path: mount.sub_path.as_deref(),
+                writes: mount.mode == js_agent_wire::MountMode::ReadWrite,
+            }
+        });
+        layers.chain(mounts).collect()
+    }
+
+    /// The images of the start's image layers, base first.
+    #[must_use]
+    pub fn images(&self) -> Vec<&str> {
+        self.layers.iter().filter_map(layer_image).collect()
+    }
+}
+
+/// The image of an image layer.
+fn layer_image(layer: &Layer) -> Option<&str> {
+    match layer {
+        Layer::Image { image } => Some(image),
+        Layer::HostPath { .. } => None,
+    }
+}
+
+/// One host path of a [`JobFs`] ([`JobFs::host_paths`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostSource<'a> {
+    /// The absolute path on the host.
+    pub path: &'a str,
+    /// The directory below it that the job sees instead (a mount's `sub_path`).
+    pub sub_path: Option<&'a str>,
+    /// The job writes through it: a read-write mount, which only a root the job may mount
+    /// read-write allows.
+    pub writes: bool,
+}
+
+/// How a runtime's preparation of a start's file system stands ([`Runtime::resolve_fs`],
+/// [`Runtime::assemble_fs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsPrepared {
+    /// Done.
+    Ready,
+    /// Under way off the lifecycle's worker: ask again at the next step.
+    Pending,
+    /// Refused for what the start named on this host's data, with the wire code
+    /// ([`refusal::INPUT_UNAVAILABLE`], [`refusal::INPUT_NOT_ALLOWED`],
+    /// [`refusal::INVALID_MOUNT`]) and why.
+    Refused(NativeRefusal),
+    /// A call of the runtime failed: the host's, not the start's.
+    Failed(RuntimeError),
+}
+
 /// What the lifecycle needs of a container runtime.
 pub trait Runtime {
     /// Begins getting `image` onto the host when it is not there, and says where that
@@ -534,6 +620,91 @@ pub trait Runtime {
         None
     }
 
+    /// Whether this runtime gives a job layers and mounts of host paths ([`JobFs`]): the
+    /// `crun` runtime on a kernel with the system calls it needs. A start that asks for
+    /// either through a runtime that does not is refused
+    /// [`refusal::ROOTFS_UNSUPPORTED_HERE`] before anything is made, never run without them.
+    fn layered_rootfs(&self) -> bool {
+        false
+    }
+
+    /// Whether this runtime may pull the image of an image layer (`image`, pinned by
+    /// digest), asked at admission: one on none of its registry entries is refused
+    /// [`refusal::IMAGE_NOT_ALLOWED`]. The default allows every image: only a runtime that
+    /// gives layers ([`Runtime::layered_rootfs`]) is asked.
+    ///
+    /// # Errors
+    ///
+    /// Why the image is not allowed.
+    fn check_layer_image(&self, _image: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Whether this runtime binds a run start's mounts of the agent's named roots
+    /// ([`RunSpec::mounts`]), which the lifecycle resolves by path before the runtime binds
+    /// them. A runtime that opens host paths beneath their roots itself (the `crun` one)
+    /// binds no path the lifecycle resolved, and a start that names one is refused
+    /// [`refusal::INVALID_MOUNT`]. The default binds them.
+    fn binds_named_mounts(&self) -> bool {
+        true
+    }
+
+    /// Begins, or follows, the lookup of the host paths of the run `run_id`'s file system
+    /// `fs` (over the image `image`, empty for a root of layers alone), off the lifecycle's
+    /// worker: the lifecycle asks at every step until the answer is not
+    /// [`FsPrepared::Pending`], `now_ms` on its own clock, by which a lookup's bound is
+    /// counted. The first ask starts it. Asked only of a runtime that gives layers. The
+    /// default has nothing to look up.
+    fn resolve_fs(&mut self, _run_id: &str, _image: &str, _fs: &JobFs, _now_ms: u64) -> FsPrepared {
+        FsPrepared::Ready
+    }
+
+    /// Begins, or follows, the assembly of the file system of the run `run_id` whose host
+    /// paths [`Runtime::resolve_fs`] found and whose images are here, once the lifecycle has
+    /// made the run's directories ([`Runtime::lease_dir`] among them), asked as
+    /// [`Runtime::resolve_fs`] is. What it made is found by [`Runtime::create_and_start`],
+    /// and removed by [`Runtime::discard_fs`] when the run is never made. The default has
+    /// nothing to assemble.
+    fn assemble_fs(&mut self, _run_id: &str, _now_ms: u64) -> FsPrepared {
+        FsPrepared::Ready
+    }
+
+    /// Unmounts and forgets what [`Runtime::resolve_fs`] and [`Runtime::assemble_fs`] made
+    /// for the run `run_id` and no container took over: called at every cleanup of a run's
+    /// directories, before they are removed, whether or not anything was made. An assembly
+    /// still under way is never discarded: the lifecycle waits for its answer. The default
+    /// made nothing.
+    ///
+    /// # Errors
+    ///
+    /// A mount could not be removed; the host holds it.
+    fn discard_fs(&mut self, _run_id: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// The directory under which this runtime mounts what the run `run_id`'s file system
+    /// is made of (`<mounts>/<lease>`), whose mounts the post-job checks of another run do
+    /// not count as that run's; `None` from a runtime that mounts nothing.
+    fn mounts_of(&self, _run_id: &str) -> Option<PathBuf> {
+        None
+    }
+
+    /// The code of an input of the host that no longer answered once the run `id` ended
+    /// ([`refusal::INPUT_UNREADABLE`]): asked when the result of a job that did not succeed
+    /// is built, which a runtime that checks holds back ([`Status::Running`]) until its
+    /// check has answered. `None` from a runtime that checks none.
+    fn input_failure(&self, _id: &RunHandle) -> Option<String> {
+        None
+    }
+
+    /// Whether the run `id`, which [`Runtime::poll`] answers as running, has in fact ended and
+    /// is held while the runtime checks its inputs ([`Runtime::input_failure`]): it is not
+    /// stopped, and its wall-time limit does not end it. False from a runtime that holds no
+    /// end.
+    fn ends_held(&self, _id: &RunHandle) -> bool {
+        false
+    }
+
     /// Whether the network a native job would get is limited as the agent was told. Called
     /// before every native start, and only for a native start (a container start has
     /// [`Runtime::check_egress`]); a start whose check fails is refused (`egress-unchecked`)
@@ -588,5 +759,134 @@ pub trait Runtime {
     /// of its own is never blind for lack of one.
     fn places_in_cgroup(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A runtime that keeps every default of the trait.
+    struct Bare;
+
+    impl Runtime for Bare {
+        fn create_and_start(&mut self, _: &RunSpec) -> Result<RunHandle, RuntimeError> {
+            Err(RuntimeError::new("bare"))
+        }
+        fn poll(&mut self, _: &RunHandle) -> Result<Status, RuntimeError> {
+            Ok(Status::Gone)
+        }
+        fn stop(&mut self, _: &RunHandle, _: Duration) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn remove(&mut self, _: &RunHandle) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Catches a runtime that gives no layers (the container engine's, a Mac's, a VM's)
+    /// answering as if it did: it gives none, allows any image of a layer (it is never
+    /// asked), binds the mounts of named roots, has nothing to prepare, discard or check,
+    /// and mounts nothing.
+    #[test]
+    fn a_runtime_that_gives_no_layers_prepares_nothing() {
+        let mut bare = Bare;
+        let id = RunHandle("c1".to_owned());
+        assert!(bare.create_and_start(&spec()).is_err());
+        assert_eq!(bare.poll(&id), Ok(Status::Gone));
+        assert_eq!(bare.stop(&id, Duration::ZERO), Ok(()));
+        assert_eq!(bare.remove(&id), Ok(()));
+        assert_eq!(bare.list_labelled(), Ok(Vec::new()));
+        assert!(!bare.layered_rootfs());
+        assert_eq!(
+            bare.check_layer_image("registry.example/a@sha256:0"),
+            Ok(())
+        );
+        assert!(bare.binds_named_mounts());
+        let fs = JobFs::default();
+        assert_eq!(bare.resolve_fs("r1", "", &fs, 0), FsPrepared::Ready);
+        assert_eq!(bare.assemble_fs("r1", 0), FsPrepared::Ready);
+        assert_eq!(bare.discard_fs("r1"), Ok(()));
+        assert_eq!(bare.mounts_of("r1"), None);
+        assert_eq!(bare.input_failure(&id), None);
+        assert!(!bare.ends_held(&id));
+    }
+
+    /// Catches the host paths of a start counted in another order than the runtime's sources
+    /// (a layer's after a mount's), a read-write mount not marked as writing, a `sub_path`
+    /// lost, and an image layer taken for a host path or the other way round.
+    #[test]
+    fn a_starts_host_paths_are_its_layers_then_its_mounts() {
+        use js_agent_wire::{MountMode, Propagation};
+        let mount = |path: &str, mode, sub_path: Option<&str>| JobMount {
+            source: MountSource::HostPath {
+                path: path.to_owned(),
+            },
+            target: "/t".to_owned(),
+            mode,
+            sub_path: sub_path.map(str::to_owned),
+            no_exec: false,
+            propagation: Propagation::Private,
+        };
+        let fs = JobFs {
+            layers: vec![
+                Layer::Image {
+                    image: "registry.example/a@sha256:0".to_owned(),
+                },
+                Layer::HostPath {
+                    path: "/l".to_owned(),
+                },
+            ],
+            mounts: vec![
+                mount("/rw", MountMode::ReadWrite, Some("sub")),
+                mount("/cow", MountMode::CopyOnWrite, None),
+            ],
+        };
+        assert!(!fs.is_empty());
+        assert!(JobFs::default().is_empty());
+        let source = |path, sub_path, writes| HostSource {
+            path,
+            sub_path,
+            writes,
+        };
+        assert_eq!(
+            fs.host_paths(),
+            [
+                source("/l", None, false),
+                source("/rw", Some("sub"), true),
+                source("/cow", None, false),
+            ]
+        );
+        assert_eq!(fs.images(), ["registry.example/a@sha256:0"]);
+    }
+
+    /// A run of no consequence.
+    fn spec() -> RunSpec {
+        RunSpec {
+            run_id: "r1".to_owned(),
+            body: Body::Container {
+                image: String::new(),
+                args: Vec::new(),
+            },
+            env: Vec::new(),
+            cpu_millis: 0,
+            memory_bytes: 0,
+            pids: None,
+            gpu_indices: Vec::new(),
+            mounts: Vec::new(),
+            scratch: PathBuf::new(),
+            files: None,
+            slot: 0,
+            isolation: Isolation::Contained,
+            network: JobNetwork::None,
+            ports: Vec::new(),
+            host_ports: Vec::new(),
+            labels: BTreeMap::new(),
+            bundle: None,
+            log_sink: None,
+        }
     }
 }
