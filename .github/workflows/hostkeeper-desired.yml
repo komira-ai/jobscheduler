@@ -30,8 +30,9 @@
 # below (komira-ai/hostkeeper/.github/workflows/set-desired.yml@<that commit>). Moving the pin
 # moves the `job_workflow_ref`, so the entry moves with it.
 #
-# The call names the service only: which hosts are ordered the package is the coordinator's
-# placement of the service js-agent (its rollout file), not an input of this call.
+# The call names the service and the host group all-in-one (the six Linux build nodes): one deployment
+# to that group (hostkeeper docs/design/hostgroups.md, section 2.1). Which hosts are ordered the package is
+# the group's: the coordinator's host group lists js-agent, and the allow-list entry must admit the group.
 #
 # Two jobs:
 #  - check        holds no token that writes. `cargo xtask release desired` (crates/xtask,
@@ -120,13 +121,14 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@318bcc93c9bcd009d40597c45227278742acc622 # v0.1.242
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@cc1f624d8a01439a2468a2bde0773b49351739b3 # v0.1.312
     with:
       service: js-agent
+      host_group: all-in-one
       version: ${{ needs.check.outputs.package-version }}
       targets: ${{ needs.check.outputs.targets }}
-      hostkeeper_version: 0.1.242
-      hostkeeper_commit: 318bcc93c9bcd009d40597c45227278742acc622
+      hostkeeper_version: 0.1.312
+      hostkeeper_commit: cc1f624d8a01439a2468a2bde0773b49351739b3
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
       coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
       audience: jobscheduler-hostkeeper-desired
