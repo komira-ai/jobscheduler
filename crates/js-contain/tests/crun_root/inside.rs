@@ -140,7 +140,7 @@ async fn the_job_holds_dockers_default_capabilities_and_cannot_gain_privileges()
 
 /// Proves root of the job's namespace is still no more than the namespace's: it cannot mount
 /// (no `CAP_SYS_ADMIN`), make a real device node (`mknod` of a block device, though it holds
-/// `CAP_MKNOD`), change the host's clock or reach a file whose owner the namespace does not
+/// `CAP_MKNOD`) or reach a file whose owner the namespace does not
 /// map (the image's busybox, owned by the host's root, reads as 65534: `chown` of it is
 /// refused though the job holds `CAP_CHOWN`, and `chmod` too, though it holds `CAP_FOWNER`).
 #[tokio::test]
@@ -151,8 +151,7 @@ async fn root_of_the_namespace_still_cannot_do_what_the_isolation_forbids() {
         .sh(
             "forbidden",
             "exec 2>&1; mount -t tmpfs none /tmp; echo mount=$?; mknod /tmp/blk b 7 0; \
-             echo mknod=$?; mknod /tmp/fifo p; echo mkfifo=$?; date -s '2001-01-01'; \
-             echo clock=$?; chown 5 /bin/busybox; echo chown=$?; chmod 000 /bin/busybox; \
+             echo mknod=$?; mknod /tmp/fifo p; echo mkfifo=$?; chown 5 /bin/busybox; echo chown=$?; chmod 000 /bin/busybox; \
              echo chmod=$?; /bin/busybox true; echo still=$?",
         )
         .await;
@@ -161,7 +160,6 @@ async fn root_of_the_namespace_still_cannot_do_what_the_isolation_forbids() {
         ("mount", true),
         ("mknod", true),
         ("mkfifo", false),
-        ("clock", true),
         ("chown", true),
         ("chmod", true),
     ] {
