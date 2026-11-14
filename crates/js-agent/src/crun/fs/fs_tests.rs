@@ -34,6 +34,30 @@ fn open(dir: &TestDir, paths: Paths) -> (Fs, Arc<Mounts>) {
     (Fs::open(settings).expect("opened"), calls)
 }
 
+/// Catches a directory of mounts under a parent that only root may search: on a node the
+/// parent, `/run/js-agent`, is made first by the subordinate-id claim, mode `0700`, so
+/// neither the job user (which runs `crun`) nor the job's own ids could search down to a
+/// clone, and every job with a mount was refused `input-unavailable` ("Permission denied").
+/// Opening the runs' directory makes it and its parent `0711`, an existing parent too.
+#[test]
+fn a_parent_only_root_could_search_is_opened_to_search() {
+    let dir = scratch("fs-open-parent");
+    let parent = dir.path().join("parent");
+    fs::create_dir(&parent).expect("a parent");
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).expect("closed");
+    let settings = FsSettings {
+        dir: parent.join("mounts"),
+        roots: MountRoots::default(),
+        calls: Arc::new(Mounts::under(dir.path())),
+        paths: Arc::new(Paths::default()),
+        image_allow: Vec::new(),
+    };
+    drop(Fs::open(settings).expect("opened"));
+    let mode = |path: &Path| fs::metadata(path).expect("there").permissions().mode() & 0o777;
+    assert_eq!(mode(&parent), 0o711);
+    assert_eq!(mode(&parent.join("mounts")), 0o711);
+}
+
 /// A start's file system of the mounts `mounts` alone.
 fn job(mounts: Vec<JobMount>) -> JobFs {
     JobFs {
