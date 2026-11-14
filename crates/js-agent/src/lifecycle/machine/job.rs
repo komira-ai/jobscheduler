@@ -324,6 +324,10 @@ pub(super) struct Job {
     pub(super) cgroup_missing_told: bool,
     /// The host was tainted because the runtime could not name this run's group.
     pub(super) blind_told: bool,
+    /// A step saw this run running with no control group the runtime could name. The host is
+    /// tainted only when the next step sees the same, since a run that ended a moment ago has
+    /// no group left and is still read as running until its end is read.
+    pub(super) blind_seen: bool,
     /// Taken over from an earlier process of the agent: its first minutes were not seen.
     pub(super) adopted: bool,
     /// When the project of the finished run first read usage after its tree was removed,
@@ -547,6 +551,7 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             blind_told: false,
+            blind_seen: false,
             adopted: false,
             usage_held: None,
             slot_parked: false,
@@ -583,6 +588,7 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             blind_told: false,
+            blind_seen: false,
             adopted: false,
             usage_held: None,
             slot_parked: false,
@@ -621,6 +627,7 @@ impl Job {
             cgroup: None,
             cgroup_missing_told: false,
             blind_told: false,
+            blind_seen: false,
             adopted: true,
             usage_held: None,
             slot_parked: false,

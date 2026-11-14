@@ -29,6 +29,12 @@ fn a_run_whose_group_was_never_seen_taints_the_host() {
     h.fake.promise_cgroups(true);
     h.start(job("r1"));
     assert!(!h.life.is_tainted(), "the start alone says nothing");
+    let first = names(&h.life.step());
+    assert!(
+        !first.iter().any(|event| event.starts_with("tainted")),
+        "one sighting is not blindness: {first:?}"
+    );
+    assert!(!h.life.is_tainted());
     let events = names(&h.life.step());
     assert!(
         events.contains(&"tainted r1 unchecked".to_owned()),
@@ -98,6 +104,27 @@ fn an_ended_run_with_no_group_is_not_blind() {
     h.fake.promise_cgroups(true);
     h.start(job("r1"));
     h.fake.exit("r1", 0);
+    h.life.step();
+    assert!(!h.life.is_tainted());
+    assert_eq!(h.life.pending_taint(), None);
+}
+
+/// Asserts that a run that is read as running with no group at one step, and as ended at the
+/// next, taints nothing: a container that exits at once has no group left by the time the agent
+/// looks, and its end is read a moment after. It catches a host tainted as unchecked by the first
+/// sighting of a run that has already ended.
+#[test]
+fn a_run_that_ends_after_one_look_with_no_group_is_not_blind() {
+    let mut h = Harness::new("ends-after-one-look");
+    h.fake.promise_cgroups(true);
+    h.start(job("r1"));
+    let first = names(&h.life.step());
+    assert!(
+        !first.iter().any(|event| event.starts_with("tainted")),
+        "{first:?}"
+    );
+    h.fake.exit("r1", 1);
+    h.life.step();
     h.life.step();
     assert!(!h.life.is_tainted());
     assert_eq!(h.life.pending_taint(), None);

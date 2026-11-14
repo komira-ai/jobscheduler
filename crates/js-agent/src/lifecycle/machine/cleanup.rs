@@ -54,12 +54,19 @@ impl Lifecycle {
                 // A runtime that puts every container in a group the agent can read, and
                 // cannot name this running container's group (not at the start, not at a
                 // window, not now), left the agent blind to it: its usage is not sampled
-                // and what it leaves is not known to be checkable. A run seen only after
-                // it ended has no group to look at (`cgroup` says `None` for it): that is
-                // not blindness.
+                // and what it leaves is not known to be checkable, when two steps in a row
+                // find it so. A run seen only after it ended has no group to look at
+                // (`cgroup` says `None` for it), and one that ended between the poll and the
+                // look is read as ended by the next step: neither is blindness.
                 if runtime.places_in_cgroup() && job.cgroup.is_none() && !job.blind_told {
                     job.cgroup = runtime.cgroup(&id);
-                    if job.cgroup.is_none() {
+                    // The first sighting is not enough: a run that ended a moment ago has
+                    // no group left, and is still read as running until its end is read
+                    // (the next step reads it as ended). Only a run that is still running
+                    // and still has no group at the next step is one the agent cannot see.
+                    if job.cgroup.is_none() && !job.blind_seen {
+                        job.blind_seen = true;
+                    } else if job.cgroup.is_none() {
                         job.blind_told = true;
                         job.taint(taint, blind_taint(&job.run_id), events);
                     }
