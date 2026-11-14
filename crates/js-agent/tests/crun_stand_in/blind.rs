@@ -69,8 +69,8 @@ fn job(node: &Node, run_id: &str) -> JobSpec {
 
 /// Proves the wiring of the blind-runtime taint to `CrunRuntime`: a run that holds (it never
 /// ends by itself) whose container cgroup the stand-in never makes is seen by the lifecycle
-/// while it runs, and the host is tainted as unchecked for that run, as for a start the
-/// agent cannot see. Catches a
+/// while it runs, and the host is tainted as unchecked for that run at the second step that
+/// finds it so (the first alone taints nothing), as for a start the agent cannot see. Catches a
 /// crun runtime that does not say it places its runs in cgroups (a run no one can sample
 /// would pass unnoticed).
 #[test]
@@ -113,6 +113,11 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
     };
     let started = life.apply(&start(job(&node, "r1-hold")));
     assert!(!life.is_tainted(), "the start alone says nothing");
+    let first = life.step();
+    assert!(
+        !life.is_tainted(),
+        "one sighting of a run with no group is not blindness; step: {first:?}"
+    );
     let stepped = life.step();
     assert_eq!(
         life.pending_taint(),
