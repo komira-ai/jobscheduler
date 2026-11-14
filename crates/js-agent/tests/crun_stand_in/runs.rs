@@ -15,8 +15,8 @@ fn read(path: &std::path::Path) -> String {
 }
 
 /// Proves the whole of a run the runtime makes and reads. A run becomes: the lease's
-/// directories, given to the job user or to the job's id (first id of the subordinate range
-/// plus 1000) in the order the layout says, then the run's scratch directory to the job's
+/// directories, given to the job user or to the job's id (the first id of the subordinate range, container root)
+/// in the order the layout says, then the run's scratch directory to the job's
 /// id, then the lease's cgroup and its four files to the job user; a cgroup limited by the
 /// booking (`memory.max` the booking, no swap, `cpu.max` the booked cores,
 /// `memory.oom.group`); a bundle that runs the image's entrypoint with the run's arguments
@@ -82,7 +82,7 @@ fn a_run_is_made_started_read_and_removed() {
         .expect("a scratch mount");
     assert_eq!(scratch["source"], json!(spec.scratch));
 
-    let (job, job_id) = ((node.uid, node.gid), (SUB_UID + 1000, SUB_GID + 1000));
+    let (job, job_id) = ((node.uid, node.gid), (SUB_UID, SUB_GID));
     let own = |path: std::path::PathBuf, (uid, gid): (u32, u32)| (path, uid, gid);
     assert_eq!(
         given(&node.dir)[before..],
@@ -320,7 +320,7 @@ fn the_files_of_a_run_are_given_to_the_job() {
     let mut spec = node.spec("r8-exit");
     spec.files = Some(dir.clone());
     let id = runtime.create_and_start(&spec).expect("started");
-    let ids = (SUB_UID + 1000, SUB_GID + 1000);
+    let ids = (SUB_UID, SUB_GID);
     let given = given(&files_dir);
     assert!(given.contains(&(dir.join("token"), ids.0, ids.1)));
     assert!(given.contains(&(dir.clone(), ids.0, ids.1)));

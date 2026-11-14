@@ -28,7 +28,7 @@ fn reached(out: &str, target: &str) -> String {
 /// never local delivery) and masqueraded (the far host saw the host's address, not the
 /// job's). The job's view is one `eth0` and a default route, its `resolv.conf` names the
 /// configured resolver only, and the firewall still reads back as loaded. The job connected
-/// under the seccomp profile resolved for the capabilities a job gets (none).
+/// under the seccomp profile resolved for the capabilities a job gets (Docker's default set).
 #[test]
 #[ignore = "needs root, crun, busybox, a job user: see the module docs"]
 fn an_allowed_endpoint_answers_and_everything_else_is_refused_by_its_rule() {

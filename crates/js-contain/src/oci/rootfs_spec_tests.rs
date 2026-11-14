@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::spec::{Placement, action_config, render};
+use super::user::Identity;
 use crate::container::tests::spec;
 use crate::container::{ContainerSpec, HostMount};
 use crate::subids::DaemonIds;
@@ -30,6 +31,7 @@ fn config_of(spec: &ContainerSpec) -> Value {
         init: Path::new("/scratch/oci-bin/js-init"),
         init_dest: "/dev/js-init",
         route_wait_secs: 0,
+        identity: Identity::root(),
     };
     let config = action_config(spec, &placement).expect("config");
     serde_json::from_slice(&render(&config).expect("render")).expect("json")

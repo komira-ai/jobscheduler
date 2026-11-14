@@ -8,8 +8,8 @@
 //! | id mappings             | onto the job user's subordinate range           | none (no user namespace)                              |
 //! | `root`                  | the image's unpacked root, read-only            | the host's `/`, as it is mounted                      |
 //! | `mounts`                | `/proc`, `/dev`, the overlay, the binds, ...    | none: a mount would change the host's mount namespace |
-//! | `process.user`          | 1000:1000 in the user namespace                 | 0:0, the host's root                                  |
-//! | capabilities            | none                                            | every capability                                      |
+//! | `process.user`          | 0:0 in the user namespace, or the image's `User` | 0:0, the host's root                                  |
+//! | capabilities            | Docker's default set, in the namespace          | every capability                                      |
 //! | seccomp, masked paths   | the pinned profile and lists                    | none                                                  |
 //! | `noNewPrivileges`       | true                                            | false (a host job may run a set-uid program)          |
 //! | `hostname`              | `localhost`                                     | none: setting it would rename the host                |

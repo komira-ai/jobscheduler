@@ -50,14 +50,15 @@ fn after<'a>(out: &'a str, marker: &str) -> Vec<&'a str> {
     out.lines().skip_while(|l| *l != marker).skip(1).collect()
 }
 
-/// Catches a container whose ids are not the job user's subordinate range, or whose root
-/// maps to the real root (the maps are read from inside, where the kernel answers for the
-/// job's own namespace): id 0 of the namespace is the first id of the job user's range for
-/// the full 65536, the job is the unprivileged id 1000, and a file the host's root owns
-/// (the image's busybox) is owned by nobody, since no id of the host's root is mapped.
+/// Proves the container's ids are the job user's subordinate range and its root maps to no
+/// real root (the maps are read from inside, where the kernel answers for the job's own
+/// namespace): id 0 of the namespace is the first id of the job user's range for the full
+/// 65536, the job runs as uid and gid 0 of it as in a Docker container, and a file the
+/// host's root owns (the image's busybox) is owned by nobody, since no id of the host's root
+/// is mapped.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
-async fn the_job_is_id_1000_in_a_namespace_mapped_onto_the_job_users_subordinate_range() {
+async fn the_job_is_container_root_in_a_namespace_mapped_onto_the_job_users_subordinate_range() {
     let cell = Cell::new("ids");
     let run = cell
         .sh(
@@ -86,18 +87,24 @@ async fn the_job_is_id_1000_in_a_namespace_mapped_onto_the_job_users_subordinate
         "{}",
         run.said
     );
-    assert_eq!(parts[2], ["1000", "1000"], "{}", run.said);
+    assert_eq!(parts[2], ["0", "0"], "{}", run.said);
     // `-rwxr-xr-x 1 <uid> <gid> ...`: the owner of a file of the host's root.
     let owner = words(&parts[3]);
     assert_eq!(owner[2..4], ["65534", "65534"], "{}", run.said);
 }
 
-/// Catches a capability left in any of the five sets, no_new_privs left off, and a core
-/// dump allowed: every capability set of the job is empty, the job cannot gain
-/// privileges through a set-uid program, and its core file size limit is 0.
+/// The capabilities of Docker's default set as the kernel prints them: CHOWN, DAC_OVERRIDE,
+/// FOWNER, FSETID, KILL, SETGID, SETUID, SETPCAP, NET_BIND_SERVICE, NET_RAW, SYS_CHROOT,
+/// MKNOD, AUDIT_WRITE and SETFCAP.
+const DOCKER_CAPS: &str = "00000000a80425fb";
+
+/// Proves the job holds Docker's default capabilities and no more, can still not gain
+/// privileges, and may not dump core: the bounding, permitted and effective sets are
+/// [`DOCKER_CAPS`], the inheritable and ambient sets are empty, `NoNewPrivs` is 1 and the core
+/// file size limit is 0.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
-async fn the_job_holds_no_capability_and_cannot_gain_privileges() {
+async fn the_job_holds_dockers_default_capabilities_and_cannot_gain_privileges() {
     let cell = Cell::new("caps");
     let run = cell
         .sh(
@@ -110,8 +117,14 @@ async fn the_job_holds_no_capability_and_cannot_gain_privileges() {
     let caps: Vec<&str> = out.lines().filter(|l| l.starts_with("Cap")).collect();
     assert_eq!(caps.len(), 5, "{}", run.said);
     for line in caps {
-        let value = line.split_once(':').map_or("", |(_, v)| v.trim());
-        assert_eq!(value, "0000000000000000", "{line}: {}", run.said);
+        let (name, value) = line
+            .split_once(':')
+            .map_or(("", ""), |(n, v)| (n, v.trim()));
+        let want = match name {
+            "CapInh" | "CapAmb" => "0000000000000000",
+            _ => DOCKER_CAPS,
+        };
+        assert_eq!(value, want, "{line}: {}", run.said);
     }
     let no_new_privs = out.lines().find(|l| l.starts_with("NoNewPrivs:"));
     assert_eq!(
@@ -123,6 +136,75 @@ async fn the_job_holds_no_capability_and_cannot_gain_privileges() {
         run.said
     );
     assert!(out.lines().any(|l| l == "core=0"), "{}", run.said);
+}
+
+/// Proves root of the job's namespace is still no more than the namespace's: it cannot mount
+/// (no `CAP_SYS_ADMIN`), make a real device node (`mknod` of a block device, though it holds
+/// `CAP_MKNOD`), change the host's clock or reach a file whose owner the namespace does not
+/// map (the image's busybox, owned by the host's root, reads as 65534: `chown` of it is
+/// refused though the job holds `CAP_CHOWN`, and `chmod` too, though it holds `CAP_FOWNER`).
+#[tokio::test]
+#[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
+async fn root_of_the_namespace_still_cannot_do_what_the_isolation_forbids() {
+    let cell = Cell::new("forbidden");
+    let run = cell
+        .sh(
+            "forbidden",
+            "exec 2>&1; mount -t tmpfs none /tmp; echo mount=$?; mknod /tmp/blk b 7 0; \
+             echo mknod=$?; mknod /tmp/fifo p; echo mkfifo=$?; date -s '2001-01-01'; \
+             echo clock=$?; chown 5 /bin/busybox; echo chown=$?; chmod 000 /bin/busybox; \
+             echo chmod=$?; /bin/busybox true; echo still=$?",
+        )
+        .await;
+    let out = run.out();
+    for (step, refused) in [
+        ("mount", true),
+        ("mknod", true),
+        ("mkfifo", false),
+        ("clock", true),
+        ("chown", true),
+        ("chmod", true),
+    ] {
+        let line = out
+            .lines()
+            .find_map(|l| l.strip_prefix(step)?.strip_prefix('='))
+            .unwrap_or("missing");
+        assert_eq!(line != "0", refused, "{step}={line}: {}", run.said);
+    }
+    assert!(out.lines().any(|l| l == "still=0"), "{}", run.said);
+}
+
+/// Proves everything the job writes belongs to the container's root, as in Docker: the
+/// exec root's overlay upper (`/work`), `/root`, and the tmpfs mounts (`/tmp`, `/var/tmp`,
+/// `/run`) are uid and gid 0 inside, and the job makes a file in each and the file is its
+/// own.
+#[tokio::test]
+#[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
+async fn what_the_job_writes_belongs_to_the_containers_root() {
+    let cell = Cell::new("owners");
+    let run = cell
+        .sh(
+            "owners",
+            "stat -c '%n %u:%g' /work /root /tmp /var/tmp /run; \
+             for d in /work /root /tmp /var/tmp /run; do echo x > $d/f && \
+             stat -c '%n %u:%g' $d/f; done",
+        )
+        .await;
+    let out = run.out();
+    for line in [
+        "/work 0:0",
+        "/root 0:0",
+        "/tmp 0:0",
+        "/var/tmp 0:0",
+        "/run 0:0",
+        "/work/f 0:0",
+        "/root/f 0:0",
+        "/tmp/f 0:0",
+        "/var/tmp/f 0:0",
+        "/run/f 0:0",
+    ] {
+        assert!(out.lines().any(|l| l == line), "{line}: {}", run.said);
+    }
 }
 
 /// Catches a job running without the seccomp filter: the kernel reports mode 2 (filter) for

@@ -111,6 +111,7 @@ pub(super) fn container_spec(
         mounted_root: None,
         // The job's init waits for the listener of each of its host ports.
         listen_ports: run.host_ports.iter().map(HostPort::job_port).collect(),
+        user: String::new(),
     }
 }
 
@@ -186,6 +187,7 @@ pub(super) fn adopted_spec(
         devices: Vec::new(),
         mounted_root: None,
         listen_ports: Vec::new(),
+        user: String::new(),
     }
 }
 

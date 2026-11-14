@@ -3,14 +3,18 @@
 //! the seccomp filter are listed here, from the containers/common release below, and
 //! pinned.
 //!
-//! - **Capabilities:** a job holds none: all five sets of its `process.capabilities` are
-//!   empty (`podman run --cap-drop ALL`), and its seccomp filter is resolved for that
-//!   empty set. The eleven of containers.conf's `default_capabilities` of
-//!   containers/common v0.57.4 in [`CAPABILITIES`] are what a helper container holds
-//!   (`helper`): it runs the daemon's own give and unpack modes, which need to change
-//!   owners. They are capabilities of the container's own user namespace, whose ids
-//!   are the daemon user's subordinate ids: they give its root nothing over an inode the
-//!   daemon user owns, since that user is not mapped.
+//! - **Capabilities:** a job holds Docker's default set ([`JOB_CAPABILITIES`], fourteen),
+//!   in its bounding, permitted and effective sets, as a container Docker runs rootless
+//!   holds it; its inheritable and ambient sets are empty. A job that runs as a non-root
+//!   image `User` holds them in its bounding set alone, and so gains none. They are
+//!   capabilities of the container's own user namespace, whose ids are the daemon user's
+//!   subordinate ids: they give its root nothing over an inode the daemon user owns, since
+//!   that user is not mapped, and nothing over a file whose owner the namespace does not map
+//!   (it reads as 65534). `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and the rest stay out, and
+//!   `noNewPrivileges` stays on. The seccomp filter is resolved for this set. The eleven of
+//!   containers.conf's `default_capabilities` of containers/common v0.57.4 in
+//!   [`CAPABILITIES`] are what a helper container holds (`helper`): it runs the daemon's
+//!   own give and unpack modes, which need to change owners.
 //! - **Masked and read-only paths:** `DefaultMaskedPaths` and `DefaultReadOnlyPaths` of
 //!   the same release ([`MASKED_PATHS`], [`READONLY_PATHS`]).
 //! - **Seccomp:** the same release's `pkg/seccomp/seccomp.json`, kept as
@@ -25,9 +29,9 @@
 //!   (see their `comment` in the profile).
 //!   The pinned profile allows `clone`, `clone3`, `mount`, `unshare` and (without
 //!   `CAP_SYS_ADMIN`) refuses `setns` whatever the capability set, so what stops a job
-//!   from making a user namespace of its own is the kernel, not the filter. Resolved for
-//!   no capability, the one entry that changes is `chroot`: allowed with `CAP_SYS_CHROOT`,
-//!   refused without.
+//!   from making a user namespace of its own is the kernel, not the filter. Resolved for a
+//!   job's set, the entries that change from an empty set are those the profile gates on
+//!   the set's capabilities (`chroot` with `CAP_SYS_CHROOT`, among them).
 //! - **Also set:** `oom_score_adj` 0, a private cgroup namespace, `/sys/fs/cgroup`
 //!   read-only, `RLIMIT_CORE` 0 and `noNewPrivileges` (`spec`; the last is also true for a
 //!   helper container, `helper`).
@@ -59,6 +63,36 @@ pub(crate) const CAPABILITIES: [&str; 11] = [
     "CAP_SETUID",
     "CAP_SYS_CHROOT",
 ];
+
+/// The capabilities every job's container holds: Docker's default set (`CAP_` names, as OCI
+/// writes them), which is [`CAPABILITIES`] and `CAP_MKNOD`, `CAP_NET_RAW` and
+/// `CAP_AUDIT_WRITE`. In a user namespace the kernel gives none of them reach past the
+/// namespace: no real device node can be made (and mounts are `nodev`), a raw socket is
+/// the job's own network namespace's, and the audit log is not the namespace's to write.
+pub(crate) const JOB_CAPABILITIES: [&str; 14] = [
+    "CAP_AUDIT_WRITE",
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_MKNOD",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_RAW",
+    "CAP_SETFCAP",
+    "CAP_SETGID",
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_CHROOT",
+];
+
+/// [`JOB_CAPABILITIES`] as the typed set `oci-spec` takes.
+pub(crate) fn held_job_capabilities() -> HashSet<Capability> {
+    JOB_CAPABILITIES
+        .iter()
+        .filter_map(|name| capability(name))
+        .collect()
+}
 
 /// [`CAPABILITIES`] as the typed set `oci-spec` takes. A name it does not know would be
 /// left out, so the unit tests count the set.

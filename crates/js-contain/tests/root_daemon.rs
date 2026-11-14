@@ -211,7 +211,7 @@ async fn run_container(label: &str, runtime: &Path) -> Run {
 
     // The lease directories. What a helper container gives a rootless daemon, a root daemon
     // does itself: the lease belongs to the job user; the directories the job writes
-    // belong to the id the job runs as (subordinate id 1000 of the range).
+    // belong to the id the job runs as (the first subordinate id of the range, container root).
     let lease = scratch.join("lease1");
     mkdir(&lease, 0o755);
     lchown(&lease, Some(uid), Some(gid)).unwrap();
@@ -255,6 +255,7 @@ async fn run_container(label: &str, runtime: &Path) -> Run {
         devices: Vec::new(),
         mounted_root: None,
         listen_ports: Vec::new(),
+        user: String::new(),
     };
     oci.create(&spec).await.unwrap();
     let (out_path, err_path) = (stdout_path(&lease), stderr_path(&lease));
@@ -290,7 +291,7 @@ fn userns_restriction() -> String {
 /// B: a root daemon starts a job container with the real, distribution `crun` as the job
 /// user, and the container's user namespace maps onto the job user's subordinate range,
 /// not root's: inside, id 0 is the first id of that range, the process is the
-/// unprivileged id 1000 with no capability, and the files `crun` made for the lease belong
+/// container root with Docker's default capabilities of its namespace, and the files `crun` made for the lease belong
 /// to the job user. The CI job runs it with the AppArmor restriction on, so it also shows
 /// the distribution's `crun` profile letting the job user create the namespace.
 #[tokio::test]
@@ -329,14 +330,14 @@ async fn a_root_daemon_runs_a_container_mapped_onto_the_job_users_subordinate_id
         run.said
     );
     assert_eq!(
-        lines[1], "1000",
-        "the job is the unprivileged id: {}",
+        lines[1], "0",
+        "the job is container root, as in Docker: {}",
         run.said
     );
-    assert_eq!(lines[2], "1000", "{}", run.said);
+    assert_eq!(lines[2], "0", "{}", run.said);
     assert!(
-        lines[3].ends_with("0000000000000000"),
-        "no capability: {}",
+        lines[3].ends_with("00000000a80425fb"),
+        "Docker's default capabilities of the namespace: {}",
         run.said
     );
     // crun ran as the job user: its log belongs to that user (root made the lease

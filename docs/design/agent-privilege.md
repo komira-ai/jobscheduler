@@ -265,7 +265,7 @@ the AppArmor control below. The first proves:
 
 - the user namespace maps container ids `0..65536` onto the **job user's** subordinate range
   (`/proc/self/uid_map` inside reads `0 <first id of that range> 65536`, one line, root unmapped),
-  the job is the unprivileged id 1000 with no capability (`CapEff` zero), and the files `crun`
+  the job is container root (uid and gid 0 of its namespace, unprivileged on the host) with Docker's default capabilities of the namespace (`CapEff` `00000000a80425fb`), and the files `crun`
   makes for the lease belong to the job user;
 - `Oci::new` accepts a root-owned scratch root of mode `0711` and refuses a `0700` one
   (`NotSearchable`); and a root daemon without the new `OciConfig::job_user` is refused explicitly
@@ -366,7 +366,7 @@ under B-as-built `crun` runs as the non-root job user, and the restriction does 
 **Residual risk: one identity for all jobs.** Every job runs as the same host user with the same
 subordinate id range. Two host uids are involved. The files `hand_over` gives away (the run directory and
 its files) are owned by the **job user's own uid** (`OciConfig::job_user`), and the container's processes
-run as **`sub_uid + 1000`** of the job user's range (container id 1000, the `ACTION_ID`), a different host
+run as **`sub_uid`**, the first id of the job user's range (container id 0, the `ACTION_ID`; the job's root, as in Docker), a different host
 uid that exists in no password file. Both are the same for every job, so `hand_over` and the `0500`
 mode protect a run's files from other host users, but not from another concurrent job that escapes its mount
 namespace: that job has the same host uids. What bounds the damage then is the path a job would have to guess:

@@ -76,6 +76,7 @@ pub mod mounts;
 mod pin;
 pub(crate) mod spec;
 pub mod supervise;
+pub(crate) mod user;
 pub mod words;
 
 #[cfg(test)]
@@ -96,6 +97,8 @@ mod pin_tests;
 mod rootfs_spec_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod user_tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -349,6 +352,9 @@ pub enum JobError {
     /// The bundle's configuration could not be built or written.
     #[error(transparent)]
     Spec(#[from] spec::SpecError),
+    /// The image's `User` cannot be resolved to the ids the job runs as.
+    #[error(transparent)]
+    User(#[from] user::UserError),
     /// `crun` failed, in its own words.
     #[error("{0}")]
     Crun(String),

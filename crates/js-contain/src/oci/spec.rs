@@ -16,8 +16,11 @@ use oci_spec::runtime::{
 };
 
 use super::devices;
-use super::hardening::{MASKED_PATHS, READONLY_PATHS, SeccompError, seccomp};
-use crate::container::{ACTION_ID, ContainerSpec, HostMount, Isolation};
+use super::hardening::{
+    JOB_CAPABILITIES, MASKED_PATHS, READONLY_PATHS, SeccompError, held_job_capabilities, seccomp,
+};
+use super::user::Identity;
+use crate::container::{ContainerSpec, HostMount, Isolation};
 use crate::subids::DaemonIds;
 
 /// The OCI version the file declares (what `crun spec` writes).
@@ -142,6 +145,8 @@ pub(crate) struct Placement<'a> {
     /// Whole seconds the init waits for a default route in the container's network
     /// namespace before it starts the job; 0 for not waiting.
     pub route_wait_secs: u64,
+    /// The ids the job's process runs as: container root unless the image names a `User`.
+    pub identity: Identity,
 }
 
 /// The job's tmpfs at `destination` (`/tmp`, `/var/tmp`, `/run`), of `size_mib`, that holds no program (`noexec`), no set-uid
@@ -327,13 +332,13 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | Isolation                                | `config.json`                                     |
 /// |------------------------------------------|---------------------------------------------------|
 /// | no network                               | a new network namespace, nothing configured (crun brings `lo` up) |
-/// | no id of the daemon user, not root       | `uidMappings`/`gidMappings` container `0..65536` to the daemon user's first subordinate range; `process.user` 1000:1000 |
+/// | no id of the daemon user, the job is container root | `uidMappings`/`gidMappings` container `0..65536` to the daemon user's first subordinate range; `process.user` 0:0, or the image's `User` |
 /// | only the Command's environment           | `process.env` is the Command's variables only      |
 /// | the Command's argv and directory         | `process.args`, `process.cwd`                      |
 /// | the lease cgroup, `memory.oom.group=1`   | `cgroupsPath` a child of the lease cgroup, `unified` `memory.oom.group`       |
 /// | a pids limit                             | `resources.pids.limit`                             |
 /// | `nofile`, `nproc` ulimits, no core dump  | `process.rlimits` (`RLIMIT_CORE` 0)                |
-/// | no capability                            | the five `process.capabilities` sets, empty; the seccomp filter resolved for none |
+/// | only Docker's default capabilities, in the namespace | `process.capabilities`: the fourteen in bounding, permitted and effective (bounding alone for a non-root `User`), inheritable and ambient empty; the seccomp filter resolved for them |
 /// | no new privileges                        | `process.noNewPrivileges` true                     |
 /// | `/dev/shm` size, `/tmp` size, no programs in `/tmp` | the tmpfs `size=`; `/tmp` also `noexec`  |
 /// | the run's scratch, the job's mounts, files | `spec.mounts`: recursive binds, `nosuid`, `nodev`, `noexec` when asked |
@@ -368,13 +373,18 @@ pub(crate) fn action_config(
     for node in &spec.devices {
         normalized("device path", &node.path, "/dev/")?;
     }
-    // All five sets empty, written out: `crun` gives a process with no `capabilities`
-    // object its own default set.
+    // Docker's default set in the bounding, permitted and effective sets of a root job; a job
+    // that runs as another user holds it in its bounding set alone (the kernel clears the
+    // rest at its first exec as that user, and nothing is ambient). Every set is written
+    // out: `crun` gives a process with no `capabilities` object its own default set.
+    let held = held_job_capabilities();
+    let root = placement.identity.uid == 0;
+    let own = if root { held.clone() } else { HashSet::new() };
     let capabilities = built(
         LinuxCapabilitiesBuilder::default()
-            .bounding(HashSet::new())
-            .effective(HashSet::new())
-            .permitted(HashSet::new())
+            .bounding(held)
+            .effective(own.clone())
+            .permitted(own)
             .inheritable(HashSet::new())
             .ambient(HashSet::new())
             .build(),
@@ -388,7 +398,11 @@ pub(crate) fn action_config(
         ProcessBuilder::default()
             .terminal(false)
             .user(built(
-                UserBuilder::default().uid(ACTION_ID).gid(ACTION_ID).build(),
+                UserBuilder::default()
+                    .uid(placement.identity.uid)
+                    .gid(placement.identity.gid)
+                    .additional_gids(placement.identity.additional_gids.clone())
+                    .build(),
             ))
             .args(init_argv(
                 placement.init_dest,
@@ -426,7 +440,7 @@ pub(crate) fn action_config(
         .namespaces(namespaces())
         .cgroups_path(PathBuf::from(format!("{}/ctr", placement.cgroup)))
         .resources(built(resources.build()))
-        .seccomp(seccomp(placement.arch, &[])?)
+        .seccomp(seccomp(placement.arch, &JOB_CAPABILITIES)?)
         .masked_paths(strings(&MASKED_PATHS))
         .readonly_paths(strings(&READONLY_PATHS));
     if given {
@@ -502,6 +516,7 @@ mod tests {
             init: Path::new("/scratch/oci-bin/js-init"),
             init_dest: "/dev/js-init",
             route_wait_secs: 0,
+            identity: Identity::root(),
         };
         let config = action_config(spec, &placement).expect("config");
         serde_json::from_slice(&render(&config).expect("render")).expect("json")
@@ -542,6 +557,7 @@ mod tests {
                 init: Path::new("/scratch/oci-bin/js-init"),
                 init_dest: "/dev/js-init",
                 route_wait_secs: 0,
+                identity: Identity::root(),
             };
             render(&action_config(&spec(), &placement).expect("config")).expect("render")
         };
@@ -592,6 +608,7 @@ mod tests {
             init: Path::new("/scratch/oci-bin/js-init"),
             init_dest,
             route_wait_secs: 0,
+            identity: Identity::root(),
         };
         let config = action_config(spec, &placement)?;
         Ok(serde_json::from_slice(&render(&config).expect("render")).expect("json"))
@@ -657,14 +674,17 @@ mod tests {
         assert_eq!(config_of(&spec)["process"]["cwd"], "/job/root/pkg/sub");
     }
 
-    /// Catches the job running as root (a mode-000 file would be readable, a
-    /// directory it does not own writable), and as an id its namespace does not map
-    /// (the container would not start): the process is uid and gid 1000, and the
-    /// mappings that hold id 1000 are the only ones, from container id 0.
+    /// Proves the job runs as container root, uid and gid 0, as in a container Docker runs
+    /// rootless: it is root of its namespace only, which maps container ids from 0 to the
+    /// daemon user's subordinate range and not the daemon user (`process.user` has no
+    /// supplementary group for a job with no `User`).
     #[test]
-    fn the_action_runs_as_an_unprivileged_id_its_namespace_maps() {
+    fn the_action_runs_as_container_root_in_a_namespace_that_maps_it_to_a_subordinate_id() {
         let config = config_of(&spec());
-        assert_eq!(config["process"]["user"], json!({"uid": 1000, "gid": 1000}));
+        assert_eq!(
+            config["process"]["user"],
+            json!({"uid": 0, "gid": 0, "additionalGids": []})
+        );
         for (key, host) in [("uidMappings", 100_000), ("gidMappings", 200_000)] {
             let maps = config["linux"][key].as_array().expect(key);
             assert_eq!(maps.len(), 1, "{key}");

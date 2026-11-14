@@ -315,14 +315,14 @@ fn an_assembly_that_cannot_be_made_says_why() {
     assert!(text.starts_with("list a clone: "), "{text}");
 }
 
-/// Catches a mount's source checked with the ids of the job user, which runs `crun` and is
-/// not mapped in the job's namespace, instead of the job's own: a source of mode `0700`
-/// owned by the job's identity, as a provider presents a writable tree (decision LR5 of
-/// `docs/design/job-rootfs.md`), is one the job can use and the job user cannot search.
-/// With the three identities apart, the read-only and the read-write mount's sources are
-/// each searched once, in spec order, as the job's identity and never as another.
+/// Proves a mount's source is checked with the ids of the container's root, the ids the job
+/// runs as, and not those of the job user, which runs `crun` and is not mapped in the job's
+/// namespace: a source of mode `0700` owned by the container's root, as a provider presents a
+/// writable tree (decision LR5 of `docs/design/job-rootfs.md`), is one the job can use and
+/// the job user cannot search. With the two identities apart, the read-only and the
+/// read-write mount's sources are each searched once, in spec order, as the root.
 #[test]
-fn a_mounts_source_is_searched_as_the_job_not_the_job_user() {
+fn a_mounts_source_is_searched_as_the_containers_root_not_the_job_user() {
     let bench = Bench::new("assemble-search-ids");
     let data = bench.host("data", &[]);
     let out = bench.host("out", &[]);
@@ -335,13 +335,41 @@ fn a_mounts_source_is_searched_as_the_job_not_the_job_user() {
         ],
     );
     let (uid, gid) = own();
-    let job = (uid.wrapping_add(1000), gid.wrapping_add(1000));
+    let root = (uid.wrapping_add(1000), gid.wrapping_add(1000));
     plan.owners = Owners {
-        root: own(),
-        job,
+        root,
         user: (uid.wrapping_add(2000), gid.wrapping_add(2000)),
     };
     let paths = Paths::default();
     assemble(&Mounts::under(bench.dir.path()), &paths, &plan).expect("assembled");
-    assert_eq!(*paths.searched.lock().expect("searched"), [job, job]);
+    assert_eq!(*paths.searched.lock().expect("searched"), [root, root]);
+}
+
+/// Proves the writable layer of a layered root belongs to the container's root and the work
+/// directory to the job user, as in Docker's overlay: the job, root of its namespace, makes
+/// files at the top of its root (`mkdir /.kbf-run` of a tree job), and the daemon user's
+/// `crun` can still use the work directory. The layer is mode 0755.
+#[test]
+fn the_roots_writable_layer_is_the_containers_root() {
+    let bench = Bench::new("assemble-root-owner");
+    let image = bench.dir.path().join("store/image");
+    fs::create_dir_all(&image).expect("an image tree");
+    let base = bench.host("base", &[]);
+    let mut plan = bench.plan(Some(image), (vec![Lower::Source], vec![base]), Vec::new());
+    let (uid, gid) = own();
+    let root = (uid.wrapping_add(1000), gid.wrapping_add(1000));
+    let user = (uid.wrapping_add(2000), gid.wrapping_add(2000));
+    plan.owners = Owners { root, user };
+    let paths = Paths {
+        given: Some(Default::default()),
+        ..Paths::default()
+    };
+    assemble(&Mounts::under(bench.dir.path()), &paths, &plan).expect("assembled");
+    let given = paths.given.expect("recording").into_inner().expect("given");
+    assert_eq!(
+        given,
+        [("rootfs-upper".into(), root), ("rootfs-work".into(), user)]
+    );
+    let mode = |path: &Path| fs::metadata(path).expect("made").permissions().mode() & 0o777;
+    assert_eq!(mode(&bench.lease.join("rootfs-upper")), 0o755);
 }

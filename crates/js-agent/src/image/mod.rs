@@ -14,9 +14,11 @@
 //!   the entrypoint and replace the image's `CMD`. `WORKDIR` is read
 //!   ([`ImageConfig::working_dir`]) but not applied, because js-contain's working directory
 //!   is relative to the overlay at its `exec_root`, not to the image's `/`;
-//! - the image's `USER` is not read. A job runs as the id its runtime gives it (the slot's
-//!   user; js-contain runs every job as one fixed unprivileged id), whatever user the
-//!   image names, so an image cannot choose to run as root or as another job's id.
+//! - the image's `User` is read and handed to the container ([`ImageConfig::apply`]), as
+//!   Docker runs it: a job runs as container root, uid and gid 0 of its user namespace, unless
+//!   the image names a user, which js-contain resolves in the image's own `/etc/passwd` and
+//!   `/etc/group`. The namespace maps every id to the job user's subordinate range, so
+//!   either way the job is unprivileged on the host, and an image cannot choose a host id.
 
 mod config;
 pub mod pull;

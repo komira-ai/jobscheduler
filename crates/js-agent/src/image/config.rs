@@ -21,8 +21,8 @@ pub enum ConfigError {
     #[error("the image config has an Env entry that is not NAME=value")]
     Env,
     /// A string of the config (an `Env` entry, an `Entrypoint` or `Cmd` word, the
-    /// `WorkingDir`) with a NUL byte, which no program argument or path can hold.
-    #[error("the image config has a NUL byte in its Env, Entrypoint, Cmd or WorkingDir")]
+    /// `WorkingDir`, the `User`) with a NUL byte, which no program argument or path can hold.
+    #[error("the image config has a NUL byte in its Env, Entrypoint, Cmd, WorkingDir or User")]
     Nul,
     /// A `WorkingDir` with a `..` part.
     #[error("the image config has a WorkingDir with a '..' part: {0:?}")]
@@ -53,19 +53,19 @@ pub fn config_path(dir: &std::path::Path, digest: &str) -> std::path::PathBuf {
 
 /// What the image config says about running the image, as a job uses it.
 ///
-/// The image's `USER` is deliberately absent: it is never read, so no config can name a
-/// user the job would run as (see the [module](super) documentation).
+/// The image's `User` is kept as written and handed to the container, which resolves it in
+/// the image's own files as Docker does (see the [module](super) documentation).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageConfig {
     entrypoint: Vec<String>,
     cmd: Vec<String>,
     env: Vec<(String, String)>,
     working_directory: String,
+    user: String,
     layers: usize,
 }
 
-/// The JSON of a config, as far as it is read. Unknown fields (`User` among them) are
-/// not read.
+/// The JSON of a config, as far as it is read. Unknown fields are not read.
 #[derive(Deserialize)]
 struct Document {
     config: Option<Process>,
@@ -79,6 +79,7 @@ struct Process {
     cmd: Option<Vec<String>>,
     env: Option<Vec<String>>,
     working_dir: Option<String>,
+    user: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -99,11 +100,12 @@ impl ImageConfig {
             serde_json::from_slice(bytes).map_err(|e| ConfigError::Malformed(e.to_string()))?;
         let process = document.config.unwrap_or_default();
         let working_dir = process.working_dir.clone().unwrap_or_default();
+        let user = process.user.clone().unwrap_or_default();
         let nul = [&process.entrypoint, &process.cmd, &process.env]
             .into_iter()
             .flatten()
             .flatten()
-            .chain([&working_dir])
+            .chain([&working_dir, &user])
             .any(|text| text.contains('\0'));
         if nul {
             return Err(ConfigError::Nul);
@@ -127,6 +129,7 @@ impl ImageConfig {
             cmd: process.cmd.unwrap_or_default(),
             env,
             working_directory: absolute(&working_dir)?,
+            user,
             layers: document.rootfs.diff_ids.len(),
         })
     }
@@ -191,7 +194,9 @@ impl ImageConfig {
     /// The command is the entrypoint followed by `args`; when `args` is empty the image's
     /// `CMD` follows it instead (a run that names no flags runs the image as it was
     /// built), and when the image has no entrypoint `args` is the command. The
-    /// environment is the image's, in its order, with a `PATH` added when it has none.
+    /// environment is the image's, in its order, with a `PATH` added when it has none. The
+    /// image's `User` becomes [`ContainerSpec::user`], which js-contain resolves: none runs
+    /// the job as container root, as Docker does.
     ///
     /// # Errors
     /// [`ConfigError::NoCommand`] when nothing names a program.
@@ -207,6 +212,7 @@ impl ImageConfig {
         }
         spec.argv = argv;
         spec.env.clone_from(&self.env);
+        spec.user.clone_from(&self.user);
         Ok(())
     }
 }

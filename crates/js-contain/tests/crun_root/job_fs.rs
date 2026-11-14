@@ -291,6 +291,46 @@ async fn a_root_of_layers_reads_through_and_keeps_its_writes() {
     assert!(root.join("layer-a/data/dir-a/f").is_file() && root.join("layer-b/data/b").is_file());
 }
 
+/// Proves a job makes files and directories at the top of a layered root, as it does in a
+/// Docker container: it runs as container root, which owns the root's writable layer, so
+/// `/x` and `/.kbf-run` (what a tree job's task tool makes first) are made, belong to
+/// the container's root inside and to the first subordinate id on the host, and land in the
+/// upper and in no layer.
+#[tokio::test]
+#[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
+async fn a_job_makes_files_at_the_top_of_a_layered_root() {
+    let cell = Cell::new("top");
+    let job = cell.job_ids();
+    assert_eq!(job, (cell.ids.sub_uid, cell.ids.sub_gid));
+    let root = host_root(&cell);
+    owned_dir(&root.join("layer-a/data"), job);
+    let image = cell
+        .store()
+        .join(cell.image.digest.trim_start_matches("sha256:"))
+        .join("rootfs");
+    let script = "echo x > /x && mkdir /.kbf-run && stat -c '%n %u:%g' / /x /.kbf-run";
+    let mut lease = cell.lease("top", &["/bin/sh", "-c", script], Shape::default());
+    let mut mounts = Mounts::new(&cell, &lease);
+    let read_only = Attributes {
+        read_only: true,
+        no_exec: false,
+    };
+    let base = mounts.clone(0, &root, "layer-a", "", read_only);
+    lease.spec.mounted_root = Some(mounts.root(&cell, vec![base, image]));
+    let ran = run(&cell, &lease).await;
+    assert_eq!(ran.out(), "/ 0:0\n/x 0:0\n/.kbf-run 0:0\n", "{}", ran.said);
+    let upper = lease.spec.dir.join("rootfs/upper");
+    for name in ["x", ".kbf-run"] {
+        let made = fs::symlink_metadata(upper.join(name)).expect(name);
+        assert_eq!((made.uid(), made.gid()), job, "{name}");
+    }
+    assert!(
+        !root.join("layer-a/x").exists(),
+        "the write reached a layer"
+    );
+    mounts.unmount_lease();
+}
+
 /// Catches a read-only mount the job can write, a read-write mount whose writes do not
 /// reach the host, and a copy-on-write mount at `/work` whose writes do, or that leaves the
 /// exec root's own overlay over it: the write to the read-only mount fails "Read-only file
@@ -366,7 +406,7 @@ async fn each_mode_writes_where_it_says() {
 
 /// Catches a source presented as a provider of writable trees presents it (decision LR5 of
 /// `docs/design/job-rootfs.md`: mode 0700 and owned by the job's own identity, the host ids
-/// `sub_uid + 1000`, which the job user that runs `crun` is not) that `crun` cannot bind in
+/// `sub_uid`, which the job user that runs `crun` is not) that `crun` cannot bind in
 /// the job's namespace, or that the job cannot use once bound: the job reads the read-write
 /// mount's file and writes a new one, which is on the host owned by the job's identity, and
 /// changes a file of the copy-on-write mount, whose change is in its upper while the host's
