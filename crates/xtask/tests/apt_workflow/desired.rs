@@ -59,10 +59,10 @@ pub const SET_DESIRED: &str = "komira-ai/hostkeeper/.github/workflows/set-desire
 /// The revision of the CI client the workflow pins: the commit of hostkeeper's release
 /// [`CLIENT_RELEASE`], whose hkctl makes the call. Moving it moves the `job_workflow_ref` of the
 /// coordinator's allow-list entry, so it is a reviewed change here.
-pub const CLIENT_COMMIT: &str = "cc1f624d8a01439a2468a2bde0773b49351739b3";
+pub const CLIENT_COMMIT: &str = "30141591c292d8881ce5bc16c9d0b3ba7fcfdca1";
 
 /// The hostkeeper release of [`CLIENT_COMMIT`], whose hkctl makes the call.
-pub const CLIENT_RELEASE: &str = "0.1.312";
+pub const CLIENT_RELEASE: &str = "0.1.317";
 
 /// The host group the version is set in: the six Linux build nodes. Naming it makes the call one
 /// deployment to that group, not one to each group that lists js-agent.
