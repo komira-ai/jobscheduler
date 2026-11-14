@@ -171,6 +171,9 @@ fn named(error: &ClientError, credential_key: &str) -> String {
 /// be made answers every call with the reason it could not.
 pub struct MachineLease {
     client: Result<HttpLease, String>,
+    /// The bearer is the token file's and not a host credential of the state root: the
+    /// server then refuses the own-host routes when the token is the pool's shared one.
+    token_file: bool,
 }
 
 impl MachineLease {
@@ -196,9 +199,11 @@ impl MachineLease {
         own_host_id: &dyn Fn() -> Result<String, String>,
         limit: RequestLimit,
     ) -> Self {
-        Self {
-            client: Self::open(params, root, own_host_id, limit),
-        }
+        let (client, token_file) = match Self::open(params, root, own_host_id, limit) {
+            Ok((client, key)) => (Ok(client), key == TOKEN_FILE_KEY),
+            Err(why) => (Err(why), false),
+        };
+        Self { client, token_file }
     }
 
     fn open(
@@ -206,7 +211,7 @@ impl MachineLease {
         root: Result<&Root, &RootError>,
         own_host_id: &dyn Fn() -> Result<String, String>,
         limit: RequestLimit,
-    ) -> Result<HttpLease, String> {
+    ) -> Result<(HttpLease, &'static str), String> {
         let server = params
             .server
             .as_deref()
@@ -218,12 +223,16 @@ impl MachineLease {
         HostId::new(&id).map_err(|why| format!("--host-id: {why}"))?;
         let (credential, key) = credential(params, root)?;
         HttpLease::connect(server, &credential, params.ca_cert.as_deref(), &id, limit)
+            .map(|client| (client, key))
             .map_err(|why| named(&why, key))
     }
 
     /// A connection that could not be made, for the reason `why`.
     fn failed(why: String) -> Self {
-        Self { client: Err(why) }
+        Self {
+            client: Err(why),
+            token_file: false,
+        }
     }
 
     fn client(&self) -> Result<&HttpLease, LeaseError> {
@@ -231,19 +240,38 @@ impl MachineLease {
             .as_ref()
             .map_err(|why| LeaseError::Unreachable(why.clone()))
     }
+
+    /// `result`, with the refusal `host-credential-required` of a call made with the token file
+    /// (there is no host credential in the state root) told with its cause.
+    fn named<T>(&self, result: Result<T, LeaseError>) -> Result<T, LeaseError> {
+        match result {
+            Err(LeaseError::Refused(code))
+                if self.token_file && code == HOST_CREDENTIAL_REQUIRED =>
+            {
+                Err(LeaseError::Refused(format!("{code}: {NO_HOST_CREDENTIAL}")))
+            }
+            other => other,
+        }
+    }
 }
+
+/// The server's refusal of a call to the own-host routes made with the pool's shared token.
+const HOST_CREDENTIAL_REQUIRED: &str = "host-credential-required";
+
+/// What the hook adds to that refusal when it sent the token file for want of a host credential.
+const NO_HOST_CREDENTIAL: &str = "no host credential in the state root: this host enrolled with the shared pool token; re-enroll with a join token (docs/runbooks/farm-node-enroll.md)";
 
 impl Lease for MachineLease {
     fn cordon(&self, lease_secs: u64) -> Result<Cordoned, LeaseError> {
-        self.client()?.cordon(lease_secs)
+        self.named(self.client()?.cordon(lease_secs))
     }
 
     fn uncordon(&self) -> Result<Uncordoned, LeaseError> {
-        self.client()?.uncordon()
+        self.named(self.client()?.uncordon())
     }
 
     fn host(&self) -> Result<HostReading, LeaseError> {
-        self.client()?.host()
+        self.named(self.client()?.host())
     }
 }
 

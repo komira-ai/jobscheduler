@@ -430,7 +430,15 @@ fn a_lease_made_from_the_params_reaches_the_server_and_the_join_token_is_not_a_h
         },
         Err("unused"),
     );
-    assert!(matches!(lease.host(), Err(LeaseError::Refused(_))));
+    let Err(LeaseError::Refused(why)) = lease.host() else {
+        panic!("the pool token is refused on the host's own routes");
+    };
+    assert!(
+        why.starts_with("host-credential-required: no host credential"),
+        "{why}"
+    );
+    assert!(why.contains("shared pool token"), "{why}");
+    assert!(why.contains("docs/runbooks/farm-node-enroll.md"), "{why}");
 }
 
 #[test]
