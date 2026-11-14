@@ -53,11 +53,12 @@ pub(crate) enum Lower {
 /// Who owns what the assembly makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Owners {
-    /// The container's root (the job user's first subordinate ids): a layered root's
-    /// writable layer and the targets made in it.
+    /// The container's root (the job user's first subordinate ids): the targets made in a
+    /// layered root's writable layer.
     pub(crate) root: (u32, u32),
-    /// The job's own identity in the container: a copy-on-write mount's writable layer
-    /// and the targets made in it, and the ids each mount's clone must be searchable by.
+    /// The job's own identity in the container: a layered root's writable layer (its top
+    /// directory, so the job can make files at the top of its root) and a copy-on-write
+    /// mount's writable layer and the targets made in it, and the ids each mount's clone must be searchable by.
     pub(crate) job: (u32, u32),
     /// The job user, which runs `crun`: the overlays' work directories.
     pub(crate) user: (u32, u32),
@@ -214,7 +215,7 @@ fn mount_root(
     lowers.reverse();
     lowers.extend(plan.image.clone());
     let (upper, work) = (plan.lease.join(ROOT_UPPER), plan.lease.join(ROOT_WORK));
-    make_layer_dir((&plan.lease, ROOT_UPPER), 0o755, plan.owners.root, paths)
+    make_layer_dir((&plan.lease, ROOT_UPPER), 0o755, plan.owners.job, paths)
         .map_err(failed("make the root's layer"))?;
     make_layer_dir((&plan.lease, ROOT_WORK), 0o700, plan.owners.user, paths)
         .map_err(failed("make the root's work"))?;

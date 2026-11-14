@@ -648,8 +648,9 @@ mount -t overlay overlay <mounts>/<lease>/rootfs \
 - The mount is made in the agent's mount namespace, as root, so `userxattr` is not given: whiteouts in the upper are the
   kernel's character devices. `crun` then puts the job in its user namespace over a root it did not make, which is how
   a daemon-made overlay and a mapped container work together.
-- The upper's root directory is made owned by the container's root (the job user's first subordinate id) and mode 0755,
-  as an image's root is, so the job sees `/` owned by root.
+- The upper's root directory is made owned by the job's identity in the container (uid and gid 1000) and mode 0755, so
+  the job can make files at the top of its root: `kbf-task` of a tree job makes `/.kbf-run` there, and with a root-owned
+  `/` that `mkdir` failed with `EACCES`. The targets the agent makes in the root stay owned by the container's root.
 - The root is now writable where its modes allow the job (uid 1000 in the container) to write. `/tmp`, `/var/tmp` and
   `/run` stay tmpfs, `/root` stays the run's home, `/scratch` stays the run's scratch: nothing moves for a program
   that writes where it did.
