@@ -136,6 +136,9 @@ impl MountCalls for Mounts {
 /// Where a held read says it began, and the word it waits for.
 pub(super) type Gate = (Mutex<Sender<()>>, Mutex<Receiver<()>>);
 
+/// The gives a recording [`Paths`] was asked for: each name and the ids it was to get.
+pub(super) type Gives = Vec<(std::ffi::OsString, (u32, u32))>;
+
 /// The reads of host paths: the kernel's, but held when there is a gate, and answering as
 /// `search` and `answer` say.
 #[derive(Debug, Default)]
@@ -148,6 +151,9 @@ pub(super) struct Paths {
     pub(super) searched: Mutex<Vec<(u32, u32)>>,
     /// A check of a source: this error, or the kernel's answer.
     pub(super) answer: Option<i32>,
+    /// Gives only record: each name and the ids it was to be given, in the order asked, and
+    /// nothing is changed on the disk; the kernel's gives when this is `None`.
+    pub(super) given: Option<Mutex<Gives>>,
 }
 
 impl Paths {
@@ -198,6 +204,10 @@ impl PathCalls for Paths {
         name: &std::ffi::OsStr,
         ids: (u32, u32),
     ) -> io::Result<()> {
+        if let Some(given) = &self.given {
+            given.lock().expect("given").push((name.to_owned(), ids));
+            return Ok(());
+        }
         Kernel.give_at(dir, name, ids)
     }
 }

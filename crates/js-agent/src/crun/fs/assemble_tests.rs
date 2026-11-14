@@ -345,3 +345,37 @@ fn a_mounts_source_is_searched_as_the_job_not_the_job_user() {
     assemble(&Mounts::under(bench.dir.path()), &paths, &plan).expect("assembled");
     assert_eq!(*paths.searched.lock().expect("searched"), [job, job]);
 }
+
+/// Catches the writable layer of a layered root given to the container's root: the job runs
+/// as its own identity, so a root it does not own refuses it every file it makes at the top
+/// of its root (`mkdir /.kbf-run`, which `kbf-task` of a tree job does first, fails with
+/// `EACCES`). With the three identities apart, the root's layer is given to the job's
+/// identity at mode 0755, and the work directory to the job user.
+#[test]
+fn the_roots_writable_layer_is_the_jobs_own() {
+    let bench = Bench::new("assemble-root-owner");
+    let image = bench.dir.path().join("store/image");
+    fs::create_dir_all(&image).expect("an image tree");
+    let base = bench.host("base", &[]);
+    let mut plan = bench.plan(Some(image), (vec![Lower::Source], vec![base]), Vec::new());
+    let (uid, gid) = own();
+    let job = (uid.wrapping_add(1000), gid.wrapping_add(1000));
+    let user = (uid.wrapping_add(2000), gid.wrapping_add(2000));
+    plan.owners = Owners {
+        root: (uid.wrapping_add(3000), gid.wrapping_add(3000)),
+        job,
+        user,
+    };
+    let paths = Paths {
+        given: Some(Default::default()),
+        ..Paths::default()
+    };
+    assemble(&Mounts::under(bench.dir.path()), &paths, &plan).expect("assembled");
+    let given = paths.given.expect("recording").into_inner().expect("given");
+    assert_eq!(
+        given,
+        [("rootfs-upper".into(), job), ("rootfs-work".into(), user)]
+    );
+    let mode = |path: &Path| fs::metadata(path).expect("made").permissions().mode() & 0o777;
+    assert_eq!(mode(&bench.lease.join("rootfs-upper")), 0o755);
+}
