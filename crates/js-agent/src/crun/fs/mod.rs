@@ -160,7 +160,8 @@ impl std::fmt::Debug for Fs {
 }
 
 impl Fs {
-    /// Makes the directory of the runs' mounts (mode `0711`) and a private mount of its own
+    /// Makes the directory of the runs' mounts and its parent (mode `0711`, the parent too when
+    /// another part of the agent made it closed: nothing below it is searchable otherwise) and a private mount of its own
     /// (bound onto itself only when it is not one already: an agent that restarts finds its
     /// own, with its adopted runs' mounts below it), opens every root, and starts the pool.
     ///
@@ -172,12 +173,7 @@ impl Fs {
             dir: dir.clone(),
             why,
         };
-        list::make_dir(&dir)
-            .and_then(|()| {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o711))
-            })
-            .map_err(|why| failed(why.to_string()))?;
+        list::make_searchable(&dir).map_err(|why| failed(why.to_string()))?;
         make_private_dir(settings.calls.as_ref(), &dir).map_err(|why| failed(why.to_string()))?;
         let mut held = BTreeMap::new();
         for (name, path) in settings.roots.named() {
