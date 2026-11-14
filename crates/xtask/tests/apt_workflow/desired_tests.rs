@@ -3,7 +3,7 @@
 //! calls the run.
 
 use super::desired::{
-    AUDIENCE, CHECK, CLIENT_COMMIT, CLIENT_RELEASE, COORDINATOR_VARS, DESIRED_IF, FILE,
+    AUDIENCE, CHECK, CLIENT_COMMIT, CLIENT_RELEASE, COORDINATOR_VARS, DESIRED_IF, FILE, HOST_GROUP,
     SET_DESIRED, SET_IF, caller_problems, coordinator_problems, desired_problems, with_wanted,
 };
 use super::support::{in_job, text_of, workflows};
@@ -196,21 +196,21 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     // A revision that is not the release the inputs name.
     (
         "set-desired",
-        "set-desired.yml@318bcc93c9bcd009d40597c45227278742acc622",
+        "set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
         "set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47",
         "set-desired: `uses` is not",
     ),
     (
         "set-desired",
-        " # v0.1.242",
+        " # v0.1.317",
         " # v0.1.44",
-        "set-desired: the pin's comment names Some(\"0.1.44\"), not v0.1.242",
+        "set-desired: the pin's comment names Some(\"0.1.44\"), not v0.1.317",
     ),
     (
         "set-desired",
-        " # v0.1.242",
+        " # v0.1.317",
         "",
-        "set-desired: the pin's comment names None, not v0.1.242",
+        "set-desired: the pin's comment names None, not v0.1.317",
     ),
     (
         "set-desired",
@@ -251,22 +251,28 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "      wait: false\n      max_polls: 180\n",
         "set-desired: with.max_polls is not an input it gives",
     ),
-    // A host group names where the package goes; the reusable workflow has no such input yet.
+    // The call names no host group, or another: it would set each group that lists js-agent.
     (
         "set-desired",
-        "      wait: false\n",
-        "      wait: false\n      host_group: lab\n",
-        "set-desired: with.host_group is not an input it gives",
+        "      host_group: all-in-one\n",
+        "",
+        "set-desired: with.host_group is None, not \"all-in-one\"",
     ),
     (
         "set-desired",
-        "hostkeeper_version: 0.1.242",
+        "host_group: all-in-one",
+        "host_group: mac",
+        "set-desired: with.host_group is Some(\"mac\"), not \"all-in-one\"",
+    ),
+    (
+        "set-desired",
+        "hostkeeper_version: 0.1.317",
         "hostkeeper_version: 0.1.241",
-        "set-desired: with.hostkeeper_version is Some(\"0.1.241\"), not \"0.1.242\"",
+        "set-desired: with.hostkeeper_version is Some(\"0.1.241\"), not \"0.1.317\"",
     ),
     (
         "set-desired",
-        "hostkeeper_commit: 318bcc93c9bcd009d40597c45227278742acc622",
+        "hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
         "hostkeeper_commit: 0123456789abcdef0123456789abcdef01234567",
         "set-desired: with.hostkeeper_commit",
     ),
@@ -451,10 +457,11 @@ fn the_check_runs_the_verb_and_the_call_pins_the_client_hostkeeper_releases_with
     assert!(wanted.contains(&("hostkeeper_commit", CLIENT_COMMIT)));
     assert!(wanted.contains(&("hostkeeper_version", CLIENT_RELEASE)));
     assert!(wanted.contains(&("service", "js-agent")));
+    assert!(wanted.contains(&("host_group", HOST_GROUP)));
     assert!(
         !wanted
             .iter()
-            .any(|(k, _)| matches!(*k, "package_digest" | "release_index" | "host_group"))
+            .any(|(k, _)| matches!(*k, "package_digest" | "release_index"))
     );
 }
 

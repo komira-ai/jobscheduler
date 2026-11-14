@@ -59,10 +59,14 @@ pub const SET_DESIRED: &str = "komira-ai/hostkeeper/.github/workflows/set-desire
 /// The revision of the CI client the workflow pins: the commit of hostkeeper's release
 /// [`CLIENT_RELEASE`], whose hkctl makes the call. Moving it moves the `job_workflow_ref` of the
 /// coordinator's allow-list entry, so it is a reviewed change here.
-pub const CLIENT_COMMIT: &str = "318bcc93c9bcd009d40597c45227278742acc622";
+pub const CLIENT_COMMIT: &str = "30141591c292d8881ce5bc16c9d0b3ba7fcfdca1";
 
 /// The hostkeeper release of [`CLIENT_COMMIT`], whose hkctl makes the call.
-pub const CLIENT_RELEASE: &str = "0.1.242";
+pub const CLIENT_RELEASE: &str = "0.1.317";
+
+/// The host group the version is set in: the six Linux build nodes. Naming it makes the call one
+/// deployment to that group, not one to each group that lists js-agent.
+pub const HOST_GROUP: &str = "all-in-one";
 
 /// The audience of the job's OIDC token, which the coordinator's allow-list entry names.
 pub const AUDIENCE: &str = "jobscheduler-hostkeeper-desired";
@@ -197,9 +201,10 @@ fn check_problems(check: Option<&Node>) -> Vec<String> {
 }
 
 /// What each input of hostkeeper's workflow must be, and no other input is given.
-pub fn with_wanted() -> [(&'static str, &'static str); 14] {
+pub fn with_wanted() -> [(&'static str, &'static str); 15] {
     [
         ("service", "js-agent"),
+        ("host_group", HOST_GROUP),
         ("version", "${{ needs.check.outputs.package-version }}"),
         ("targets", "${{ needs.check.outputs.targets }}"),
         ("hostkeeper_version", CLIENT_RELEASE),

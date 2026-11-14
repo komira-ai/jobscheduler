@@ -460,17 +460,18 @@ issuer = "https://token.actions.githubusercontent.com"
 audience = "jobscheduler-hostkeeper-desired"
 repository_id = "<gh api repos/komira-ai/jobscheduler --jq .id>"
 repository = "komira-ai/jobscheduler"
-job_workflow_ref = ["komira-ai/hostkeeper/.github/workflows/set-desired.yml@318bcc93c9bcd009d40597c45227278742acc622"]
+job_workflow_ref = ["komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1"]
 refs = ["refs/heads/main"]
 event_names = ["workflow_run", "workflow_dispatch"]
 runner_environment = "github-hosted"
 services = ["js-agent"]
+host_groups = ["all-in-one"]
 ```
 
 `job_workflow_ref` is hostkeeper's `set-desired.yml` at the commit this repository pins, so moving
 the pin (a reviewed change of the `uses:` line, `hostkeeper_version` and `hostkeeper_commit`
-together) moves the entry. The coordinator's rollout file needs a `[[service]]` entry for
-`js-agent`, and each host the `komira-stable` repository entry.
+together) moves the entry. The call names the host group `all-in-one` (the `host_group` input), which must list
+`js-agent`; each host needs the `komira-stable` repository entry. A group of Macs is a second call, with its own `host_group`, once that group exists.
 
 ### macOS
 
