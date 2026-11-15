@@ -88,6 +88,38 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok((placed, allocation))
     }
 
+    /// [`JobStore::place_with`] that also reserves `host`: the same transaction writes the
+    /// host's reservation row (`hostbook/<host>`) at the version `seen` says the placement's
+    /// picture of the host was read at ([`JobStore::host_books`]; `None` when the host had no
+    /// row then). A placement on the host that committed since, by this server or another,
+    /// wrote the row, so this one is [`JobStoreError::Stale`] and the job stays queued: two
+    /// placements decided from one picture never both book the host. Frees need no such row, as
+    /// a free only makes room.
+    ///
+    /// Returns the job, the allocation and the version the host's row has now: the
+    /// row is the last write of the transaction, so it is the commit's revision, and the
+    /// caller's picture of the host is current again as far as its own placement goes.
+    ///
+    /// # Errors
+    /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the host's row is not at
+    /// `seen`.
+    pub fn place_reserving(
+        &self,
+        id: &JobId,
+        host: HostId,
+        booked: Booked,
+        placement: Placement,
+        seen: Option<Version>,
+    ) -> Result<(JobRecord, AllocationRecord, Version), JobStoreError> {
+        let book = keys::hostbook(&host);
+        let (txn, placed, allocation) = self.placement_txn(id, host, booked, placement)?;
+        let txn = self.without_mark(txn, id)?;
+        let cond = seen.map_or(Cond::Absent, Cond::Version);
+        let txn = txn.put(book, allocation.allocation_id.to_string(), cond);
+        let commit = self.commit(id, txn)?;
+        Ok((placed, allocation, Version(commit.revision.0)))
+    }
+
     /// The transaction that places the queued job `id` on `host` as [`JobStore::place`]
     /// describes, with `placement` written beside the booking, and the job and allocation it
     /// writes.

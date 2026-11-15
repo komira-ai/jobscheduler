@@ -108,6 +108,7 @@ use js_registry::{HostState, HostView, WholeNodeConfig};
 use js_sched::ceiling::within_ceiling;
 use js_sched::queue_status::{self, Outcome};
 use js_sched::{Event, Prediction, ProviderRank, Request};
+use js_state::Version;
 use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WorkKey};
 use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
@@ -680,6 +681,10 @@ impl SchedPlacer {
     ) -> Result<Vec<JobId>, JobStoreError> {
         let tables = self.tables(jobs)?;
         let (live, queued, marks) = (&tables.live, &tables.queued, &tables.marks);
+        // Each placement reserves its host at the version this picture read it at, and the
+        // version it leaves is the picture's from then on: a placement made since by another
+        // server, which this pass has not read, fails the commit and leaves the job queued.
+        let mut books = tables.books.clone();
         let now = self.now();
         let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
@@ -733,7 +738,8 @@ impl SchedPlacer {
                 WholeJobStep::Unmark(job) => drop(emptying.remove(job)),
                 WholeJobStep::Commit { .. } => {}
             }
-            match self.write_step(jobs, &step, hosts.whole, (starts, metrics), &mut noted) {
+            let sinks = (starts, metrics);
+            match self.write_step(jobs, (&step, hosts.whole), sinks, (&mut noted, &mut books)) {
                 Ok(job) => placed.extend(job),
                 Err(error) => {
                     warn!(?step, %error, "a write for a whole-host job was not committed; the job stays queued");
@@ -744,8 +750,10 @@ impl SchedPlacer {
         let (decided, waiting) = self.engine().walk_jobs(queued, hosts.open, now);
         for (job, host, booked, mut placement) in decided {
             placement.queue = noted.placed(&job, &host);
-            match jobs.place_with(&job, host.clone(), booked, placement) {
-                Ok((record, _)) => {
+            let seen = books.get(&host).copied();
+            match jobs.place_reserving(&job, host.clone(), booked, placement, seen) {
+                Ok((record, _, version)) => {
+                    drop(books.insert(host.clone(), version));
                     told(&record, &host, (starts, metrics));
                     placed.push(job);
                 }
@@ -790,10 +798,9 @@ impl SchedPlacer {
     fn write_step<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
-        step: &WholeJobStep,
-        settings: Option<&WholeNodeConfig>,
+        (step, settings): (&WholeJobStep, Option<&WholeNodeConfig>),
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
-        noted: &mut Noted,
+        (noted, books): (&mut Noted, &mut BTreeMap<HostId, Version>),
     ) -> Result<Option<JobId>, JobStoreError> {
         match step {
             WholeJobStep::Mark(mark) => {
@@ -812,9 +819,14 @@ impl SchedPlacer {
                     wall_limit_secs: None,
                     queue: noted.placed(job, host),
                 };
-                let placed = jobs.place_with(job, host.clone(), Booked::WholeHost, placement);
+                let seen = books.get(host).copied();
+                let placed =
+                    jobs.place_reserving(job, host.clone(), Booked::WholeHost, placement, seen);
                 let (record, allocation) = match placed {
-                    Ok(placed) => placed,
+                    Ok((record, allocation, version)) => {
+                        drop(books.insert(host.clone(), version));
+                        (record, allocation)
+                    }
                     Err(error) => {
                         self.engine().whole_job_failed(job);
                         noted.unwritten(job);
