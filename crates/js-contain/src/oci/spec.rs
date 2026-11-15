@@ -158,7 +158,8 @@ fn tmp(destination: &str, size_mib: u64) -> Mount {
 }
 
 /// The mounts of a job: the standard ones of `crun spec --rootless`, the `hosts`, `hostname` and `resolv.conf` files,
-/// the exec-root overlay (or the host mount at the exec root in its place), the shared
+/// the exec-root overlay (or the host mount at the exec root in its place; a job with a mounted
+/// root has no overlay, its root's own writable upper covering `/work`), the shared
 /// trees read-only inside it, `/tmp`, [`WRITABLE`], and the host mounts last (each a bind,
 /// recursive unless the mount says not, `nosuid` and `nodev`, read-only or read-write as
 /// asked, `noexec` when asked).
@@ -206,11 +207,12 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
         bind(&spec.dir.join("etc/resolv.conf"), "/etc/resolv.conf", &open),
     ];
     // A host mount at the exec root (a copy-on-write mount of the caller's) takes the
-    // overlay's place; the other host mounts come last, in order.
+    // overlay's place. A job whose root the caller mounted (layers) gets no overlay: an
+    // empty one over `exec_root` would hide that root's own files there; the other host mounts come last, in order.
     let at_exec_root = spec.mounts.iter().position(|m| m.target == spec.exec_root);
     if let Some(at) = at_exec_root {
         mounts.push(host_bind(&spec.mounts[at]));
-    } else {
+    } else if spec.mounted_root.is_none() {
         let overlay = format!(
             "lowerdir={},upperdir={},workdir={},{OVERLAY_OPTIONS}",
             spec.input_root.display(),
@@ -340,7 +342,7 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | the booked GPUs' nodes, no other device  | `linux.devices`; `resources.devices` denies all, allows each node (only with devices) |
 /// | the kernel's default OOM score           | `process.oomScoreAdj`                              |
 /// | hostname `localhost`                     | `hostname`                                         |
-/// | the input root, writes in `upper`        | an `overlay` mount at `exec_root`, or the host mount there |
+/// | the input root, writes in `upper`        | an `overlay` mount at `exec_root`, or the host mount there; none for a mounted root |
 /// | a root of layers the caller mounted      | `root.path` that root, not read-only               |
 ///
 /// No memory or CPU limit is set here: the lease cgroup carries them
