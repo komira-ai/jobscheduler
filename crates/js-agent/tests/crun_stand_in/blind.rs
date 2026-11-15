@@ -2,13 +2,15 @@
 //! the agent can read, so a running run whose group the agent cannot name leaves the host
 //! unchecked.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
+use std::rc::Rc;
 
 use js_agent::lifecycle::taint::reason;
 use js_agent::lifecycle::{
-    Capacity, CheckFinding, CheckHook, Clock, Config, Finished, Lifecycle, MountRoots, Prepared,
-    Runtime, ScratchRoot, StateRoot, code,
+    Capacity, CheckFinding, CheckHook, Clock, Config, DEFAULT_SETTLE, Finished, Lifecycle,
+    MountRoots, Prepared, Runtime, ScratchRoot, StateRoot, code,
 };
 use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, Taint};
 
@@ -22,11 +24,13 @@ impl CheckHook for Pass {
     }
 }
 
-struct Still;
+/// A clock that moves only when the test moves it.
+#[derive(Clone)]
+struct Manual(Rc<Cell<u64>>);
 
-impl Clock for Still {
+impl Clock for Manual {
     fn now_ms(&self) -> u64 {
-        0
+        self.0.get()
     }
 }
 
@@ -69,10 +73,10 @@ fn job(node: &Node, run_id: &str) -> JobSpec {
 
 /// Proves the wiring of the blind-runtime taint to `CrunRuntime`: a run that holds (it never
 /// ends by itself) whose container cgroup the stand-in never makes is seen by the lifecycle
-/// while it runs, and the host is tainted as unchecked for that run at the second step that
-/// finds it so (the first alone taints nothing), as for a start the agent cannot see. Catches a
-/// crun runtime that does not say it places its runs in cgroups (a run no one can sample
-/// would pass unnoticed).
+/// while it runs, and the host is tainted as unchecked for that run by the first step a
+/// settle wait after the first sighting (the first sighting alone taints nothing), as for a
+/// start the agent cannot see. Catches a crun runtime that does not say it places its runs in
+/// cgroups (a run no one can sample would pass unnoticed).
 #[test]
 fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
     let node = Node::new("blind-group");
@@ -104,9 +108,14 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
     let probe = runtime.stage(&node.spec("r1-hold")).expect("staged");
     runtime.remove(&probe).expect("removed");
     node.pipe(&probe.0);
-    let (mut life, _) =
-        Lifecycle::adopt(config, Box::new(runtime), Box::new(Pass), Box::new(Still))
-            .expect("adopts");
+    let clock = Manual(Rc::new(Cell::new(0)));
+    let (mut life, _) = Lifecycle::adopt(
+        config,
+        Box::new(runtime),
+        Box::new(Pass),
+        Box::new(clock.clone()),
+    )
+    .expect("adopts");
     let start = |spec| HeartbeatReply {
         commands: vec![Command::Start(Box::new(spec))],
         ..HeartbeatReply::default()
@@ -118,6 +127,8 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
         !life.is_tainted(),
         "one sighting of a run with no group is not blindness; step: {first:?}"
     );
+    // The settle wait after the first sighting: the second look comes that long after it.
+    clock.0.set(DEFAULT_SETTLE.as_millis().try_into().expect("small"));
     let stepped = life.step();
     assert_eq!(
         life.pending_taint(),
