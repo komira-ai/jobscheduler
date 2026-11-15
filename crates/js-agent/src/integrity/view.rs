@@ -141,6 +141,9 @@ pub mod input {
     pub const WATCH: &str = "watch";
 }
 
+/// A change to the host, made when the checks wait ([`FakeHost::at_settle`]).
+type Change = Box<dyn FnOnce(&FakeHost)>;
+
 #[derive(Default)]
 struct FakeState {
     processes: Vec<Process>,
@@ -155,7 +158,7 @@ struct FakeState {
     /// The waits the checks asked for, in order.
     settled: Vec<Duration>,
     /// What happens to the host the next time the checks wait.
-    at_settle: Vec<Box<dyn FnOnce(&FakeHost)>>,
+    at_settle: Vec<Change>,
 }
 
 /// A host in memory: a test changes it between the baseline and the check, the way a job
