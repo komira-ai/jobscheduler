@@ -75,7 +75,7 @@ pub(crate) fn spawn(args: &[OsString], stderr: Stdio) -> (Guard, Lines) {
     let mut child = Guard(
         Command::new(PROGRAM)
             .args(&args[1..])
-            .args(["--tick", "1h"])
+            .args(["--tick", "1h", "--drain-hold", "0s"])
             .stdout(Stdio::piped())
             .stderr(stderr)
             .spawn()

@@ -253,3 +253,44 @@ async fn a_server_its_store_has_not_fenced_is_not_fenced() {
     assert!(waited);
     assert!(!shared.is_fenced());
 }
+
+/// Whether `running.hold()` returns before an always-ready future does (a hold that is not
+/// held), without any clock: the first branch is polled first.
+async fn hold_returns_at_once(running: &Running) -> bool {
+    tokio::select! {
+        biased;
+        () = running.hold() => true,
+        () = std::future::ready(()) => false,
+    }
+}
+
+/// Asserts that a stop on a termination signal is held: `hold` makes the readiness route say
+/// `draining` at once and then does not return (the default hold of 15 s is far from over),
+/// so the listeners are still open. It catches a stop that closes at the signal, and a
+/// readiness route that keeps saying `ready` while the server waits to stop.
+#[tokio::test]
+async fn a_termination_is_held_with_the_readiness_route_draining() {
+    let (running, _jobs, _id, _dir) = started("hold_signal").await;
+    assert_eq!(running.gate.phase(), crate::ready::Phase::Ready);
+    assert!(!hold_returns_at_once(&running).await);
+    assert_eq!(running.gate.phase(), crate::ready::Phase::Draining);
+    running.shutdown().await.unwrap();
+}
+
+/// Asserts that a server that lost the store's writer lock, and one whose store has a newer
+/// writer, are not held before their stop: `hold` returns at once for each. It catches a
+/// server that stays up for the hold after it can write nothing.
+#[tokio::test]
+async fn a_stop_after_a_lost_lock_or_a_fence_is_not_held() {
+    let (running, _jobs, _id, _dir) = started("hold_lost").await;
+    let lost = LockLost::from(StoreError::Failed("the lock's session is gone".to_owned()));
+    running.lock_watch.lose(lost);
+    assert!(hold_returns_at_once(&running).await);
+    let _ = running.shutdown().await;
+
+    let (running, _jobs, _id, _dir) = started("hold_fenced").await;
+    let fenced = JobStoreError::Store(StoreError::Fenced);
+    assert!(running.shared.agents().fence.note(&fenced));
+    assert!(hold_returns_at_once(&running).await);
+    let _ = running.shutdown().await;
+}

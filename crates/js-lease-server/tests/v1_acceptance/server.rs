@@ -127,6 +127,9 @@ impl Files {
             // call.
             "--tick",
             "1h",
+            // No hold on SIGTERM: a case that stops the server waits for nothing.
+            "--drain-hold",
+            "0s",
         ]
         .map(str::to_owned)
         .into();

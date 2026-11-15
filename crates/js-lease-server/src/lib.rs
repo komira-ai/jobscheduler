@@ -60,6 +60,7 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
+//! | `--drain-hold` | how long after SIGTERM or ctrl-c the server keeps serving, its readiness route already answering 503 `draining`, before the stop begins, `15s`; `0s` stops at once. A stop because the store's writer lock was lost or the store has a newer writer is not held |
 //! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given; not used with `--store`, which keeps them in the store. Needs agent registration to have anything to keep. Not with `--usage-off` |
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
@@ -99,7 +100,7 @@
 //! # connection itself); allow_sqlite_store (false): refused as true without store
 //! # store_unreachable_after ("60s"): the flag's name, default and rules
 //! # tick, handshake_timeout, header_timeout, read_timeout,
-//! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
+//! # write_timeout, drain_timeout, drain_hold, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
 //! # max_lease_wall: the ceiling on the wall time of the work a host takes; none by default,
@@ -648,7 +649,8 @@
 //! at every tick of its [`Ticker`] (a timer of `--tick` in production); `/healthz` answers
 //! 503 once the loop has stopped, or while the store paths have failed for
 //! `--store-unreachable-after`. On SIGTERM or ctrl-c the server (with `--ready-listen`, its
-//! readiness route answering 503 `draining` from now on) stops accepting, gives the
+//! readiness route answering 503 `draining` from now on) keeps serving for `--drain-hold`
+//! (`15s`), so a proxy that polls the route takes it out of rotation first, then stops accepting, gives the
 //! requests in flight `--drain-timeout` to finish (a connection still open then is cut),
 //! ticks once more and exits 0. A second signal while it drains is not needed: the drain is
 //! bounded. A SIGTERM or ctrl-c that arrives before the start is done (with or without
