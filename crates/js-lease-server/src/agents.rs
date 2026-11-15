@@ -250,7 +250,7 @@ fn placed_in(
     let placer = placer(max_lease_wall, cpu_slack, memory, clock);
     let registry = Registry::new(pool, clock.clone(), placer.clone());
     let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
-    let usage = usage.build(clock, limits, kept.map(ServerStore::store))?;
+    let (usage, usage_in_job_store) = usage.build(clock, limits, kept.map(ServerStore::store))?;
     // The one job store of the server, when the job service is on. It is opened
     // before the bindings are put back: a host a host job tainted whose binding lost
     // the taint (a crash between the placement and the binding's write) gets it from
@@ -285,7 +285,7 @@ fn placed_in(
         jobs,
         job_feed,
         job_state,
-        usage_in_job_store: kept.is_some(),
+        usage_in_job_store,
         placer: Some(placer.clone()),
         unclean: Mutex::default(),
         logs,
