@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 /// A process, as the process table shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +114,15 @@ pub trait HostView {
     ///
     /// It cannot be read.
     fn file(&self, path: &str) -> Result<String, String>;
+
+    /// Lets the host go on for `wait` before the checks look at it again (they look twice at
+    /// what they would call a job's leftover process: see [`Integrity::with_settle`]). The
+    /// default does not wait.
+    ///
+    /// [`Integrity::with_settle`]: super::Integrity::with_settle
+    fn settle(&self, wait: Duration) {
+        let _ = wait;
+    }
 }
 
 /// The inputs of a [`FakeHost`], for [`FakeHost::fail`].
@@ -142,6 +152,10 @@ struct FakeState {
     links: BTreeMap<String, String>,
     files: BTreeMap<String, String>,
     failing: BTreeSet<&'static str>,
+    /// The waits the checks asked for, in order.
+    settled: Vec<Duration>,
+    /// What happens to the host the next time the checks wait.
+    at_settle: Vec<Box<dyn FnOnce(&FakeHost)>>,
 }
 
 /// A host in memory: a test changes it between the baseline and the check, the way a job
@@ -304,6 +318,17 @@ impl FakeHost {
         self.state.borrow_mut().failing.remove(which);
     }
 
+    /// `change` happens to the host the next time the checks wait for it to settle, as a
+    /// process of the host's that was there for a moment ends, or one starts.
+    pub fn at_settle(&self, change: impl FnOnce(&FakeHost) + 'static) {
+        self.state.borrow_mut().at_settle.push(Box::new(change));
+    }
+
+    /// The waits the checks have asked for so far, in order.
+    pub fn settled(&self) -> Vec<Duration> {
+        self.state.borrow().settled.clone()
+    }
+
     /// Whether the input `which` works: the reason it does not, if a test broke it.
     fn works(&self, which: &'static str) -> Result<(), String> {
         match self.state.borrow().failing.contains(which) {
@@ -354,6 +379,17 @@ impl HostView for FakeHost {
     fn file(&self, path: &str) -> Result<String, String> {
         let text = self.state.borrow().files.get(path).cloned();
         text.ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn settle(&self, wait: Duration) {
+        let changes = {
+            let mut state = self.state.borrow_mut();
+            state.settled.push(wait);
+            std::mem::take(&mut state.at_settle)
+        };
+        for change in changes {
+            change(self);
+        }
     }
 }
 

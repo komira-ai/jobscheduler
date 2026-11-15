@@ -122,6 +122,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
             arch: "x86_64".to_owned(),
         },
         watch: Vec::new(),
+        settle: js_agent::lifecycle::DEFAULT_SETTLE,
         machine: Arc::new(machine.clone()),
         step_every,
         usage: None,

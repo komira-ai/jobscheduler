@@ -14,6 +14,7 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -246,6 +247,10 @@ impl HostView for ProcHost {
 
     fn file(&self, path: &str) -> Result<String, String> {
         self.files.read(path)
+    }
+
+    fn settle(&self, wait: Duration) {
+        std::thread::sleep(wait);
     }
 }
 

@@ -238,6 +238,7 @@ mod quota_flags;
 mod run_files;
 mod runtime;
 mod scratch;
+mod settle;
 mod silence;
 pub mod taint;
 
@@ -277,6 +278,7 @@ pub use runtime::{
     RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, check_run_env, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
+pub use settle::{DEFAULT_SETTLE, MAX_SETTLE_MS, settle};
 pub use silence::{
     Contact, DEFAULT_SILENCE_STOP, MAX_SILENCE_STOP_SECS, SILENCE_STOP_GRACE_RATIO, fits_grace,
     silence_stop,
@@ -508,6 +510,8 @@ pub struct Local {
     pub state: Option<StateRoot>,
     /// The `--watch-dir` flags, canonicalised, sorted, each once.
     pub watch: Vec<PathBuf>,
+    /// `--settle-ms`, or [`DEFAULT_SETTLE`].
+    pub settle: Duration,
     /// `--stop-grace`, or [`DEFAULT_STOP_GRACE`].
     pub stop_grace: Duration,
     /// `--drain-wait`, or the stop grace.
@@ -721,6 +725,10 @@ impl Local {
                 "--silence-stop: needs --container-bin or --native-helper-socket".to_owned(),
             );
         }
+        if container.is_none() && cli.settle_ms.is_some() {
+            return Err("--settle-ms: needs --container-bin".to_owned());
+        }
+        let settle = settle::settle(cli.settle_ms)?;
         let silence_stop = silence::silence_stop(cli.silence_stop)?;
         silence::fits_grace(silence_stop, js_agent_wire::DEFAULT_GRACE_MS, stop_grace)?;
         if let Some(state) = &state {
@@ -793,6 +801,7 @@ impl Local {
             container,
             native,
             state,
+            settle,
             stop_grace,
             drain_wait,
             image_allow: image_allow(&cli.image_allow)?,

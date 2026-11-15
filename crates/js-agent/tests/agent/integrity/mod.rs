@@ -9,6 +9,7 @@ mod mapped;
 mod noise;
 mod proc;
 mod rules;
+mod settle;
 
 use std::path::PathBuf;
 
