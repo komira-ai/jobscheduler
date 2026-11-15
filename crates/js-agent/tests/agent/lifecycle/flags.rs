@@ -7,9 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    DEFAULT_SETTLE, DEFAULT_SILENCE_STOP, DEFAULT_STOP_GRACE, HOST_JOBS_NEED_CRUN,
-    MAX_SETTLE_MS, MAX_SILENCE_STOP_SECS, SILENCE_STOP_GRACE_RATIO, fits_grace, settle,
-    silence_stop,
+    DEFAULT_SETTLE, DEFAULT_SILENCE_STOP, DEFAULT_STOP_GRACE, HOST_JOBS_NEED_CRUN, MAX_SETTLE_MS,
+    MAX_SILENCE_STOP_SECS, SILENCE_STOP_GRACE_RATIO, fits_grace, settle, silence_stop,
 };
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, RETRY_AFTER_CAP};
 use js_oci::Allow;
