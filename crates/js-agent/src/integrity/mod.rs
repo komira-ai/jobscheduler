@@ -781,8 +781,8 @@ impl Integrity {
                         .filter(|_| own == Some(stray.uid))
                         .map_or(String::new(), |slot| format!(" (leftover of slot {slot})"));
                     format!(
-                        "pid {} of user {} is running after job {}{slot}",
-                        stray.pid, stray.uid, job.run_id
+                        "pid {} ({}, state {}, cgroup {}) of user {} is running after job {}{slot}",
+                        stray.pid, stray.comm, stray.state, stray.cgroup, stray.uid, job.run_id
                     )
                 }),
             ),
@@ -790,8 +790,8 @@ impl Integrity {
                 code::DAEMONISED_CHILD,
                 daemonised.map(|stray| {
                     format!(
-                        "pid {} was left behind by job {} (parent init)",
-                        stray.pid, job.run_id
+                        "pid {} ({}, state {}, cgroup {}) was left behind by job {} (parent init)",
+                        stray.pid, stray.comm, stray.state, stray.cgroup, job.run_id
                     )
                 }),
             ),

@@ -21,6 +21,12 @@ pub struct Process {
     /// The control groups of the process, as one line of text. A container's processes are
     /// in a group whose path holds the container's id.
     pub cgroup: String,
+    /// The command name the kernel keeps (`comm`, at most 15 bytes), which says what the
+    /// process is when a finding names it.
+    pub comm: String,
+    /// The state letter of `/proc/<pid>/stat` (`S` sleeping, `R` running, `Z` zombie
+    /// waiting to be reaped, ...).
+    pub state: char,
 }
 
 impl Process {
@@ -181,6 +187,8 @@ impl FakeHost {
                     uid: 0,
                     start: 1,
                     cgroup: "0::/init.scope".to_owned(),
+                    comm: "init".to_owned(),
+                    state: 'S',
                 },
                 Process {
                     pid: 100,
@@ -188,6 +196,8 @@ impl FakeHost {
                     uid: 1000,
                     start: 50,
                     cgroup: "0::/system.slice/agent.service".to_owned(),
+                    comm: "js-agent".to_owned(),
+                    state: 'S',
                 },
             ];
             state.mounts = vec![

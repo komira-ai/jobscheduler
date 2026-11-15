@@ -272,6 +272,17 @@ fn parse_process(pid: u32, stat: &str, status: &str, cgroup: &str) -> Option<Pro
         .find_map(|line| line.strip_prefix("Uid:"))
         .and_then(|ids| ids.split_whitespace().next())
         .and_then(|id| id.parse().ok());
+    // The name is between the first `(` and the last `)`; the state letter follows it.
+    let comm = stat
+        .find('(')
+        .zip(stat.rfind(')'))
+        .and_then(|(open, close)| stat.get(open + 1..close))
+        .unwrap_or("")
+        .to_owned();
+    let state = fields
+        .first()
+        .and_then(|field| field.chars().next())
+        .unwrap_or('?');
     ppid.zip(start)
         .zip(uid)
         .map(|((ppid, start), uid)| Process {
@@ -280,6 +291,8 @@ fn parse_process(pid: u32, stat: &str, status: &str, cgroup: &str) -> Option<Pro
             uid,
             start,
             cgroup: cgroup.split_whitespace().collect::<Vec<_>>().join(" "),
+            comm,
+            state,
         })
 }
 

@@ -29,7 +29,7 @@ fn daemonised_child() {
         (
             true,
             code::DAEMONISED_CHILD,
-            "daemonised-child: pid 300 was left behind by job r1 (parent init)".to_owned()
+            "daemonised-child: pid 300 (stray, state S, cgroup 0::/) was left behind by job r1 (parent init)".to_owned()
         )
     );
 
@@ -78,7 +78,7 @@ fn process_as_job_user_after_end() {
         (
             true,
             code::PROCESS_AS_JOB_USER,
-            "process-as-job-user: pid 401 of user 65534 is running after job r1".to_owned()
+            "process-as-job-user: pid 401 (stray, state S, cgroup 0::/machine.slice/libpod-9e1.scope) of user 65534 is running after job r1".to_owned()
         )
     );
 

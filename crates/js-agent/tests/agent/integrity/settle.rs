@@ -12,7 +12,7 @@ use js_agent::integrity::{
 };
 use js_agent::lifecycle::CheckFinding;
 
-use super::{JOB_USERS, after, mount, process, said, started};
+use super::{JOB_USERS, after, mount, process, process_named, said, started};
 
 /// The wait of these tests.
 const WAIT: Duration = Duration::from_millis(300);
@@ -40,7 +40,7 @@ fn a_process_that_is_gone_after_the_wait_is_not_a_leftover_and_one_that_stays_is
         (
             true,
             code::DAEMONISED_CHILD,
-            "daemonised-child: pid 300 was left behind by job r1 (parent init)".to_owned()
+            "daemonised-child: pid 300 (stray, state S, cgroup 0::/init.scope) was left behind by job r1 (parent init)".to_owned()
         )
     );
     assert_eq!(host.settled(), [WAIT]);
@@ -83,7 +83,7 @@ fn a_process_that_starts_during_the_wait_is_judged_by_the_next_check() {
         (
             true,
             code::DAEMONISED_CHILD,
-            "daemonised-child: pid 303 was left behind by job r2 (parent init)".to_owned()
+            "daemonised-child: pid 303 (stray, state S, cgroup 0::/init.scope) was left behind by job r2 (parent init)".to_owned()
         )
     );
     assert_eq!(host.settled(), [WAIT, WAIT]);
@@ -180,4 +180,37 @@ fn a_view_with_no_wait_of_its_own_still_looks_twice() {
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(found.code(), code::DAEMONISED_CHILD);
     assert!(host.settled().is_empty());
+}
+
+/// Asserts that a process still in the control group of the job's own container, which the
+/// runtime removed a moment ago (the group is torn down after the pid namespace's processes
+/// are gone, so the process table still shows the container's last processes), is not a
+/// leftover when it is gone after the wait, and that one that stays is a `daemonised-child`
+/// whose finding names its command, state and control group, so that the next incident says
+/// what the process was. It catches a finished job's own container read as an escape at the
+/// moment it ends, and a finding that names only a pid.
+#[test]
+fn a_process_of_the_jobs_own_removed_container_is_judged_after_the_wait_and_named() {
+    let own = "0::/machine.slice/libpod-own.scope";
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]).with_settle(WAIT);
+    host.start_process(process_named(process(310, 1, 0, 910, own), "js-init", 'Z'));
+    host.at_settle(|host| host.end_process(310));
+    assert!(after(&mut checks, "r1").is_ok());
+    assert_eq!(host.settled(), [WAIT]);
+
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]).with_settle(WAIT);
+    host.start_process(process_named(process(311, 1, 0, 911, own), "sleep", 'S'));
+    let found = after(&mut checks, "r2").unwrap_err();
+    assert_eq!(
+        said(&found),
+        (
+            true,
+            code::DAEMONISED_CHILD,
+            "daemonised-child: pid 311 (sleep, state S, cgroup 0::/machine.slice/libpod-own.scope) \
+             was left behind by job r2 (parent init)"
+                .to_owned()
+        )
+    );
 }
