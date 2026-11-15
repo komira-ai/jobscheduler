@@ -128,7 +128,8 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
         "one sighting of a run with no group is not blindness; step: {first:?}"
     );
     // The settle wait after the first sighting: the second look comes that long after it.
-    clock.0.set(DEFAULT_SETTLE.as_millis().try_into().expect("small"));
+    let wait: u64 = DEFAULT_SETTLE.as_millis().try_into().expect("small");
+    clock.0.set(wait);
     let stepped = life.step();
     assert_eq!(
         life.pending_taint(),

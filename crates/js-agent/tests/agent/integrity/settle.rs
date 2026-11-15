@@ -3,12 +3,16 @@
 //! the one after the wait. The host is the in-memory fake, and the wait is a call it records,
 //! not time that passes.
 
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::Duration;
 
-use js_agent::integrity::{FakeHost, HostView, ProcHost, code, input};
+use js_agent::integrity::{
+    FakeHost, HostView, Integrity, Mount, ProcHost, Process, Watched, code, input,
+};
 use js_agent::lifecycle::CheckFinding;
 
-use super::{after, mount, process, said, started};
+use super::{JOB_USERS, after, mount, process, said, started};
 
 /// The wait of these tests.
 const WAIT: Duration = Duration::from_millis(300);
@@ -124,4 +128,56 @@ fn the_checks_wait_only_for_a_process_and_only_when_given_a_wait() {
 #[test]
 fn the_machines_view_waits_when_asked() {
     ProcHost::system().settle(Duration::from_millis(1));
+}
+
+/// A host view that has no wait of its own: everything is the fake host's but the wait.
+struct NoWait(FakeHost);
+
+impl HostView for NoWait {
+    fn processes(&self) -> Result<Vec<Process>, String> {
+        self.0.processes()
+    }
+
+    fn mounts(&self) -> Result<Vec<Mount>, String> {
+        self.0.mounts()
+    }
+
+    fn users(&self) -> Result<BTreeSet<String>, String> {
+        self.0.users()
+    }
+
+    fn groups(&self) -> Result<BTreeSet<String>, String> {
+        self.0.groups()
+    }
+
+    fn modules(&self) -> Result<BTreeSet<String>, String> {
+        self.0.modules()
+    }
+
+    fn watched(&self, dir: &Path) -> Result<Watched, String> {
+        self.0.watched(dir)
+    }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        self.0.link(path)
+    }
+
+    fn file(&self, path: &str) -> Result<String, String> {
+        self.0.file(path)
+    }
+}
+
+/// Asserts that a view that does not wait still gets the second look at once: a process that
+/// is there at both looks is a finding, and the wait it was asked for is not recorded
+/// anywhere. It catches a second look that depends on the view's wait doing something.
+#[test]
+fn a_view_with_no_wait_of_its_own_still_looks_twice() {
+    let host = FakeHost::quiet();
+    let mut checks = Integrity::start(Box::new(NoWait(host.clone())), JOB_USERS, vec![])
+        .unwrap()
+        .with_settle(WAIT);
+    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    let found = after(&mut checks, "r1").unwrap_err();
+    assert_eq!(found.code(), code::DAEMONISED_CHILD);
+    assert!(host.settled().is_empty());
 }
