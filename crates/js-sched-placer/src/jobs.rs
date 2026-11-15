@@ -753,7 +753,7 @@ impl SchedPlacer {
             let seen = books.get(&host).copied();
             match jobs.place_reserving(&job, host.clone(), booked, placement, seen) {
                 Ok((record, _, version)) => {
-                    drop(books.insert(host.clone(), version));
+                    books.insert(host.clone(), version);
                     told(&record, &host, (starts, metrics));
                     placed.push(job);
                 }
@@ -824,7 +824,7 @@ impl SchedPlacer {
                     jobs.place_reserving(job, host.clone(), Booked::WholeHost, placement, seen);
                 let (record, allocation) = match placed {
                     Ok((record, allocation, version)) => {
-                        drop(books.insert(host.clone(), version));
+                        books.insert(host.clone(), version);
                         (record, allocation)
                     }
                     Err(error) => {

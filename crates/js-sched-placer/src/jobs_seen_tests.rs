@@ -388,6 +388,13 @@ fn a_placement_from_a_picture_another_server_changed_does_not_book_the_host() {
         "host a is booked beyond its cores"
     );
     rig.ran(&only_a, &[]);
-    assert_eq!(state(&late), JobState::Queued, "late was placed with no room");
-    assert_eq!(rig.tables.jobs.booked_on(&host("a")).unwrap().allocations, 1);
+    assert_eq!(
+        state(&late),
+        JobState::Queued,
+        "late was placed with no room"
+    );
+    assert_eq!(
+        rig.tables.jobs.booked_on(&host("a")).unwrap().allocations,
+        1
+    );
 }

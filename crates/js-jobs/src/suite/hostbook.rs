@@ -28,7 +28,10 @@ pub fn a_reserving_placement_loses_to_one_made_after_its_picture<B: Backend>(bac
     );
     let host_a = host("host-a");
     let picture = rig.jobs.host_books().expect("reads");
-    assert!(picture.is_empty(), "{name}: a host never placed on has a row");
+    assert!(
+        picture.is_empty(),
+        "{name}: a host never placed on has a row"
+    );
 
     let (_, _, v1) = rig
         .other()
@@ -90,13 +93,7 @@ pub fn a_reserving_placement_loses_to_one_made_after_its_picture<B: Backend>(bac
 
     let (_, _, elsewhere) = rig
         .jobs
-        .place_reserving(
-            &fourth,
-            host("host-b"),
-            share(),
-            Placement::default(),
-            None,
-        )
+        .place_reserving(&fourth, host("host-b"), share(), Placement::default(), None)
         .expect("another host's row is not in the way");
     assert_eq!(
         rig.jobs.host_books().expect("reads"),
