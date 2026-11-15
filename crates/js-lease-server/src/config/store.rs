@@ -11,6 +11,7 @@
 //! does not parse is refused by kind ("does not parse"), never by the parser's text.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use js_state::WriterTarget;
 use js_state::postgres::{ConfigError, PostgresConfig};
@@ -53,9 +54,23 @@ impl StoreNames {
     }
 }
 
+/// The injected clock of a store setting, with a `Debug` that does not print it.
+#[derive(Clone, Default)]
+pub(crate) struct StoreClock(pub(crate) Option<Arc<dyn js_state::Clock>>);
+
+impl std::fmt::Debug for StoreClock {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(if self.0.is_some() { "injected" } else { "own" })
+    }
+}
+
 /// The store the setting names, with the names its refusals use.
 #[derive(Debug)]
 pub(crate) struct StoreSetting {
+    /// The clock the store stamps its rows with, when a simulation injects one
+    /// ([`crate::Config::with_job_sources`]); `None` is the store's own (the system's on
+    /// SQLite, the database's on Postgres).
+    pub(crate) clock: StoreClock,
     /// The database or the SQLite file. Its `Debug` leaves the password out.
     pub(crate) target: WriterTarget,
     /// `--store` or `server.store`.
@@ -117,7 +132,11 @@ fn parse(
     } else {
         return Err(shape());
     };
-    Ok(StoreSetting { target, names })
+    Ok(StoreSetting {
+        clock: StoreClock::default(),
+        target,
+        names,
+    })
 }
 
 /// The store the content `bytes` of the store file `path` names, read for the update hook:
@@ -188,6 +207,16 @@ mod tests {
             assert!(shown.starts_with("Postgres(PostgresConfig {"), "{text:?}");
             assert!(!format!("{setting:?}").contains("pw-0123"), "{text:?}");
         }
+    }
+
+    /// Asserts that a store setting reads as using its own clock until a simulation injects
+    /// one, and that the `Debug` of either names the case without printing the clock.
+    #[test]
+    fn the_store_clock_is_its_own_until_one_is_injected() {
+        let mut setting = read("postgres://js@db.example.org/js", false).unwrap();
+        assert!(format!("{setting:?}").contains("clock: own"));
+        setting.clock = StoreClock(Some(Arc::new(js_state::ManualClock::default())));
+        assert!(format!("{setting:?}").contains("clock: injected"));
     }
 
     /// Asserts that a file of another shape is refused by what it must hold, without its
