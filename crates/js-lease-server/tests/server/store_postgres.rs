@@ -549,6 +549,7 @@ fn the_job_store_in_postgres_is_stamped_with_the_clock_it_is_given() {
     let config = config(args).unwrap().with_job_sources(clock, ids);
     let runtime = Runtime::new().unwrap();
     let h = runtime.block_on(Harness::over(scratch, config));
+    runtime.block_on(job_agent(&h, &per_job_hello("burst-1")));
     let made = runtime.block_on(submit(&h, "stamped-1"));
     assert_eq!(made.status, 201, "{}", made.body);
     assert_eq!(made.json()["job"]["times"]["queuedAtMs"], "42000");
