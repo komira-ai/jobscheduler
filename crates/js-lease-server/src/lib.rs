@@ -60,7 +60,7 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
-//! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given. Needs agent registration to have anything to keep. Not with `--usage-off` |
+//! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given; not used with `--store`, which keeps them in the store. Needs agent registration to have anything to keep. Not with `--usage-off` |
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //! | `--history-retention-days <n>` | how many days the record of each ended allocation is kept in the usage file, `90`; the daily prune removes older ones, and a record that ended exactly that long ago is kept; `0` is refused. Not a cap on tenants or cost (`docs/usage-store.md`) |
@@ -356,9 +356,10 @@
 //! and `/v1/pools` are other routes than the server's of those names, so the two cannot
 //! share a port while both exist.
 //!
-//! The job store is a SQLite file beside the state file, `<state file>.jobs`, owner-only: the
-//! single-node development backend. It moves into the shared store with the server's other
-//! state. The server opens it once and holds that one handle: the job service and the
+//! The job store is in the state store when `--store` is given (the first start over it
+//! begins with no jobs, and a `.jobs` file of an earlier start is left unread); without
+//! it, a SQLite file beside the state file, `<state file>.jobs`, owner-only: the
+//! single-node development backend. The server opens it once and holds that one handle: the job service and the
 //! per-job heartbeat both read it. Without `--job-listen` no store is opened and no file is
 //! made.
 //!
@@ -617,8 +618,8 @@
 //! [`Running::usage_counters`]). A beat the registry refuses (unknown host, stale epoch,
 //! wrong session) records nothing. The seam types and [`NoUsage`] are public so that a
 //! test or an embedding program can supply its own sink ([`Config::with_usage_sink`]).
-//! Without a sink of its own the server records into the SQLite file `--usage-db` names
-//! (beside the state file by default): node minutes are written by the flush, and the
+//! Without a sink of its own the server records into the state store when `--store` is
+//! given, else into the SQLite file `--usage-db` names (beside the state file by default): node minutes are written by the flush, and the
 //! profiles an earlier release learned are kept under `--profile-store-bytes` and read by
 //! `GET /v1/usage/keys/{key}`; a file that cannot be opened refuses the start.
 //! `--usage-off` leaves the usage side out altogether. No lease is held, so a result a

@@ -23,8 +23,12 @@
 //! What the store keeps: the host bindings, with their taints and cordons, and the join
 //! tokens' digests ([`crate::host_keys`]), and the scaler's records and the hosts the
 //! registry refused to remove (`acquires/scaler/records`, `acquires/scaler/unremoved`), read
-//! once at start after the lock is taken. The job store and the usage
-//! database are where they are without the setting.
+//! once at start after the lock is taken, and, with the job service on, the job store (jobs,
+//! allocations, marks, taints and the change feed) and, with usage on, the usage rows
+//! (node minutes, profiles, the history of ended allocations). Without the setting the job
+//! store is the SQLite file `<state file>.jobs` and the usage the file `usage.db`; with it
+//! neither file is made, opened or read, and a pair left by an earlier start stays where it
+//! is, unread.
 //!
 //! The first start over a store imports the four files a server without the setting keeps
 //! beside the state file (`.agents`, `.joins`, `.scaler`, `.scaler.unremoved`) once, right

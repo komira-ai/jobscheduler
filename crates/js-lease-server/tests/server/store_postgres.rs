@@ -21,8 +21,9 @@ use rustix::process::{Pid, Signal, kill_process};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
-use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, post, session};
+use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, job_host_args, post, session};
 use crate::binary::{address_in, launch, spawn};
+use crate::jobs_support::{job_agent, job_of, per_job_hello, submit};
 use crate::joins::{code, hello, minted};
 use crate::ready_listen::{WAITING, with_ready};
 use crate::store_support::{
@@ -472,6 +473,53 @@ fn the_files_are_imported_once_over_postgres() {
     assert_eq!(revision(&url), before, "the restart wrote nothing");
     let store = h.running.store().expect("the server holds the store");
     assert!(store.get("hosts/binding/burst-9").unwrap().is_some());
+    drop(store);
+    let Harness { running, .. } = h;
+    let _ = runtime.block_on(running.shutdown());
+}
+
+/// Asserts that with a Postgres store the job store lives in it: a job submitted to the first
+/// server is rows `job/` of the store and is read back by the server of the restart, and
+/// neither a `.jobs` file nor a `usage.db` is made beside the state file. It catches a job
+/// store that is still a local SQLite file when the server has a shared store, which a second
+/// instance could not see.
+#[test]
+fn the_job_store_is_in_postgres_and_survives_a_restart() {
+    let database = test_database();
+    let url = database.url();
+    let flags = |scratch: &Scratch| {
+        let mut args = job_host_args(scratch);
+        args.extend(["--store".into(), store_file(scratch, &url).into_os_string()]);
+        args
+    };
+    let scratch = Scratch::new("store_pg_jobs");
+    let args = flags(&scratch);
+    let runtime = Runtime::new().unwrap();
+    let h = runtime.block_on(async {
+        let first = Harness::with(scratch, args).await;
+        job_agent(&first, &per_job_hello("burst-1")).await;
+        let made = submit(&first, "kept-1").await;
+        assert_eq!(made.status, 201, "{}", made.body);
+        let Harness {
+            running, scratch, ..
+        } = first;
+        running.shutdown().await.unwrap();
+        let resumed = replace(flags(&scratch), "--boot", "resume");
+        Harness::with(scratch, resumed).await
+    });
+    let read = runtime.block_on(job_of(&h, "kept-1"));
+    assert_eq!(read.status, 200, "{}", read.body);
+    let store = h.running.store().expect("the server holds the store");
+    let keys: Vec<String> = store
+        .scan_prefix("job/")
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(keys, ["job/kept-1"]);
+    for file in ["leases.toml.jobs", "usage.db"] {
+        assert!(!h.scratch.path(file).exists(), "{file}");
+    }
     drop(store);
     let Harness { running, .. } = h;
     let _ = runtime.block_on(running.shutdown());

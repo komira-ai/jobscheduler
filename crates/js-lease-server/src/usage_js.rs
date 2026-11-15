@@ -62,14 +62,25 @@ pub(crate) struct StoreSetup {
     pub(crate) names: NameMap,
 }
 
-/// The sink over the SQLite file `setup` names. A file that cannot be opened (another
-/// process holds it, a network filesystem, not a state store) is a refused start naming
-/// `--usage-db`.
-pub(crate) fn open(setup: &StoreSetup, today: u64) -> Result<Arc<dyn UsageSink>, StartupError> {
-    let clock = Arc::new(SystemClock::default());
-    let store = SqliteStore::open(&setup.db, clock, Options::default())
-        .map_err(StartupError::because("--usage-db"))?;
-    sink_over(Arc::new(store), setup, today)
+/// The sink over the state store `kept` when there is one (the usage rows are keys of the
+/// store the rest of the server's state is in), else over the SQLite file `setup` names. A
+/// file that cannot be opened (another process holds it, a network filesystem, not a state
+/// store) is a refused start naming `--usage-db`.
+pub(crate) fn open(
+    setup: &StoreSetup,
+    kept: Option<Arc<dyn Store>>,
+    today: u64,
+) -> Result<Arc<dyn UsageSink>, StartupError> {
+    let store = match kept {
+        Some(store) => store,
+        None => {
+            let clock = Arc::new(SystemClock::default());
+            let file = SqliteStore::open(&setup.db, clock, Options::default())
+                .map_err(StartupError::because("--usage-db"))?;
+            Arc::new(file)
+        }
+    };
+    sink_over(store, setup, today)
 }
 
 /// The sink over an opened `store`; a store whose profiles cannot be read is a refused

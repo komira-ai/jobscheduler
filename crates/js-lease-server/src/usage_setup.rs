@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use js_state::Store;
 use js_types::Clock;
 
 use crate::clock::SharedClock;
@@ -47,11 +48,13 @@ impl UsageSetup {
     }
 
     /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
-    /// A usage file that will not open is a refused start naming `--usage-db`.
+    /// With a state store `kept` the usage rows are rows of it and no file is opened; else a
+    /// usage file that will not open is a refused start naming `--usage-db`.
     pub(crate) fn build(
         self,
         clock: &SharedClock,
         limits: HostLimits,
+        kept: Option<Arc<dyn Store>>,
     ) -> Result<Option<Arc<Usage>>, StartupError> {
         let Some(db) = self.db else {
             return Ok(None);
@@ -65,7 +68,7 @@ impl UsageSetup {
                     history_retention_days: self.history_retention_days,
                     names: no_names(),
                 };
-                usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
+                usage_js::open(&setup, kept, clock.now().millis() / MILLIS_PER_DAY)?
             }
         };
         let usage = Usage::new(sink, clock.clone(), limits);
