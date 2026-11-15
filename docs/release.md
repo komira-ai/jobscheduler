@@ -327,8 +327,7 @@ everything after the image in `docker run` is the server's flags: either the fla
   nothing about the writer lock.
 
 **Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
-`/readyz` 503 `draining` at once and keeps serving for `--drain-hold` (`15s` by default; `0s` stops at
-once), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed; then it stops
+`/readyz` 503 `draining` at once and keeps serving for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed; then it stops
 accepting, gives the requests in flight `--drain-timeout` (`10s` by default) to finish, cuts what is
 still open, ticks once more and exits 0. Give the engine a stop timeout longer than `--drain-hold`
 plus `--drain-timeout` plus that last tick, for example `docker stop --time 40` with the defaults, so the engine's `SIGKILL` never cuts the drain. A

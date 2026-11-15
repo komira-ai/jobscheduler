@@ -60,7 +60,7 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
-//! | `--drain-hold` | how long after SIGTERM or ctrl-c the server keeps serving, its readiness route already answering 503 `draining`, before the stop begins, `15s`; `0s` stops at once. A stop because the store's writer lock was lost or the store has a newer writer is not held |
+//! | `--drain-hold` | how long after SIGTERM or ctrl-c the server keeps serving, its readiness route already answering 503 `draining`, before the stop begins, `15s`, at least `1ms`. A stop because the store's writer lock was lost or the store has a newer writer is not held |
 //! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given; not used with `--store`, which keeps them in the store. Needs agent registration to have anything to keep. Not with `--usage-off` |
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |

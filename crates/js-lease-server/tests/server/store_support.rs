@@ -96,7 +96,7 @@ pub fn launch_ticking(args: &[OsString], tick: &str) -> (Guard, SocketAddr) {
     let mut child = Guard(
         Command::new(PROGRAM)
             .args(&args[1..])
-            .args(["--tick", tick, "--drain-hold", "0s"])
+            .args(["--tick", tick, "--drain-hold", "1ms"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

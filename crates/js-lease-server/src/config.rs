@@ -226,7 +226,7 @@ pub struct Cli {
     pub drain_timeout: Duration,
     /// How long after a termination signal the server keeps serving, with its readiness
     /// route already answering 503, so that a proxy that polls readiness takes it out of
-    /// rotation before its listeners close; `0s` stops at once.
+    /// rotation before its listeners close. At least 1ms, as every duration is.
     #[arg(long, default_value = "15s", value_parser = parse_duration)]
     pub drain_hold: Duration,
     /// The file the per-minute usage of the nodes and the learned cost curves are kept
