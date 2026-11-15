@@ -130,6 +130,31 @@ fn a_run_that_ends_after_one_look_with_no_group_is_not_blind() {
     assert_eq!(h.life.pending_taint(), None);
 }
 
+/// Asserts that a run that has ended but whose end the runtime holds (a failed run whose
+/// cloned sources are still being checked: `poll` says running, the group is gone) taints
+/// nothing however many steps the hold lasts. It catches a host tainted as unchecked by a run
+/// that ended, because the held end was read as a running run with no group twice.
+#[test]
+fn a_run_that_ended_and_whose_end_is_held_is_never_blind() {
+    let mut h = Harness::new("held-end-no-cgroup");
+    h.fake.promise_cgroups(true);
+    h.fake.hold_end("r1", true);
+    h.start(job("r1"));
+    h.fake.exit("r1", 1);
+    for _ in 0..4 {
+        let events = names(&h.life.step());
+        assert!(
+            !events.iter().any(|event| event.starts_with("tainted")),
+            "{events:?}"
+        );
+    }
+    assert!(!h.life.is_tainted());
+    assert_eq!(h.life.pending_taint(), None);
+    h.fake.hold_end("r1", false);
+    h.life.step();
+    assert!(!h.life.is_tainted());
+}
+
 /// Asserts that a runtime that does not place its containers in readable groups (the
 /// default: the engines, which may run with no `--actions-cgroup`) is not tainted for a run
 /// with no group. It catches a taint that would hit every run of every such agent.

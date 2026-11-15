@@ -58,7 +58,15 @@ impl Lifecycle {
                 // find it so. A run seen only after it ended has no group to look at
                 // (`cgroup` says `None` for it), and one that ended between the poll and the
                 // look is read as ended by the next step: neither is blindness.
-                if runtime.places_in_cgroup() && job.cgroup.is_none() && !job.blind_told {
+                //
+                // A run whose end the runtime holds (a failed run whose sources are being
+                // checked) has ended, though `poll` says running: its group is gone, and no
+                // number of steps makes that blindness.
+                if runtime.places_in_cgroup()
+                    && job.cgroup.is_none()
+                    && !job.blind_told
+                    && !runtime.ends_held(&id)
+                {
                     job.cgroup = runtime.cgroup(&id);
                     // The first sighting is not enough: a run that ended a moment ago has
                     // no group left, and is still read as running until its end is read
