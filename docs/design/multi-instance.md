@@ -65,10 +65,11 @@ instance more special than another, and a deploy, a crash or a Postgres failover
 1. **Postgres rows are the source of truth for everything durable; memory is a cache rebuildable from the database.** A cache is refreshed by
    `LISTEN/NOTIFY` as a wake-up and by a version poll as the guarantee; writes carry a precondition and retry on conflict.
 2. **Every decision is a transaction that is correct for any number of concurrent runners.** The tools, in order of preference: a unique key
-   (`Cond::Absent`); a conditional update on a version column (`Cond::Version`); a row lock (`SELECT ... FOR UPDATE`) held for the one
-   transaction; `FOR UPDATE SKIP LOCKED` to claim work so runners do not wait on each other; `SERIALIZABLE` with retry for the few
-   read-many-write-few transactions where a lock set cannot be named (reconcile, settle). No decision relies on a role, a lease or a count of
-   instances.
+   (`Cond::Absent`); a conditional update on a version column (`Cond::Version`); the store's head lock, which every writing transaction takes
+   first and which makes the writes of one transaction a unit no other writer interleaves with; `FOR UPDATE SKIP LOCKED` on the few rows taken
+   before the head lock so runners do not wait on each other (the placement pool row); and a retry of the whole transaction on a deadlock or
+   serialization failure. One lock order for all of them (pool row, head lock, other rows in key order) is in "The placement transaction". No
+   decision relies on a role, a lease or a count of instances.
 3. **Postgres is the central dependency, and the design says so.** When it is unreachable, instances make no decisions and answer `503`
    (section "Fail closed"). There is no memory-first fallback that keeps deciding on a stale picture.
 4. **Session is local, presence is shared.** The agent's session (secret digest, epoch counter, in-flight listing) lives in the instance that
@@ -205,9 +206,13 @@ presence/<host> = {
   clock today (`agent_api.rs`, `store_time(placing.clock.now())`) keep doing so for per-session values that only the owner reads, but no value
   that one instance compares against another instance's value may come from a process clock. The refresh is coarse, so "last heard" can be
   older than the truth by up to `presence_refresh` plus a commit; grace is sized for that.
-- **Heartbeat ordering.** Out-of-order heartbeats (a delayed one overtaken by a newer one across a flip) are ordered by the existing
-  `sent_unix` the agent already sends, with a guard: the owner applies a heartbeat only if its `sent_unix` is greater than the one recorded in
-  the row's `last_sent_unix` (an additive field written in the presence transaction), and ignores an older one. No proto change.
+- **Heartbeat ordering is by session, not by a send time.** A delayed heartbeat overtaken by a newer one across a flip needs no timestamp guard.
+  Within one session, one agent sends its beats one at a time over one connection, so they arrive in order. Across sessions, a beat carries the
+  session secret and epoch of the session it belongs to: the old owner applies it only while it still holds that session, and its presence write
+  is conditional on the row's version at that epoch (see "Stale session"), so a beat from a superseded session is answered `403 session-mismatch`
+  and writes nothing. No heartbeat field is added and the agent is unchanged. (An earlier draft ordered beats by a `sent_unix` and a
+  `last_sent_unix` guard. The `Heartbeat` wire struct has no send-time field, so that would be a wire change that old agents do not send, and a
+  guard on an agent clock that steps back would ignore every beat until the clock passed the old value. It is dropped; see "Review findings".)
 - **Session-scoped bookkeeping** (unclean hosts, last committed listing session, the first-listing test) belongs to the session, so it stays with
   the owner. The one bit the other instances need, "the last listing was clean", is a field of the presence row. A hello on a new instance starts
   a new session and a new first-listing test there. What that test may end is narrowed; see "First listing after a flip".
@@ -239,50 +244,87 @@ twice, never over-commit a host, and never place a second job beside an `isolati
 
 ### The placement transaction
 
-One transaction places up to `place_batch` jobs (tunable, default 8) for one pool. Steps, each a statement of the Postgres store's new locked
-transaction (see "Store primitives"); on any step's failure the whole transaction rolls back and nothing is placed.
+One transaction places up to `place_batch` jobs (tunable, default 8) for one pool. It is built on a **lock order that every transaction in the
+store follows, stated once here because the rest of the section depends on it**:
 
-1. **Claim the pool.** `SELECT ... FROM placement_pool WHERE pool = $p FOR UPDATE SKIP LOCKED`. If another pass holds the row, this pass gets
-   no row and stops: that pass is deciding for the same pool and re-reads the queue before it ends (step 7), so skipping loses nothing the other
-   will not see. The pool row is a mutex that any instance can take, held for one transaction (a few milliseconds); it is not a role and nothing
-   is elected. It exists to keep the queue order and whole-host marks a single sequence per pool; the safety of the later steps does not rest on
-   it (see "Why each lock").
-2. **Claim the jobs in queue order.** `SELECT ... FROM job WHERE pool = $p AND state = 'queued' ORDER BY queue_key LIMIT $place_window FOR
-   UPDATE SKIP LOCKED` (`place_window`, default 32). A job row held by another transaction (a cancel, an expiry, a submit that is still
-   committing a change) is skipped and tried at the next pass; it is never waited for and never placed from a stale read.
-3. **Read the fleet.** One read of `presence/` for the pool and one of `hostbook/` for its hosts (both plain reads inside the transaction), and the
-   marks and taints rows the engine needs. This is the picture; it is discarded at the end of the transaction.
-4. **Choose** with the existing placement engine (pure, over those rows). It returns, for each job it can place, the host and the resources.
-5. **Reserve host capacity by conditional update.** For each chosen host, in a fixed order (host id), lock and check the row:
-   `UPDATE hostbook SET booked = booked + $req, version = version + 1 WHERE host = $h AND version = $v AND booked + $req <= shape`
-   (in the store's terms `Cond::Version` on `hostbook/<host>` plus the fit check on every field of `Resources`). Zero rows updated means the
-   host changed since step 3 (a free by its owner, another pass): the transaction re-reads that one host and re-chooses once, or places nothing for
-   that job. A free and a placement on one host therefore serialise on this one row, whichever instances run them.
-6. **Write the placement.** Each placed job: `Cond::Version` of the job row from step 2 (queued to placed), the new allocation row
-   (`Cond::Absent`), the job's mark row (`Cond::Absent`), the hostbook update of step 5, and for an `isolation=host` job the taint field of the
-   host's binding row (`Cond::Version`; see "Taint hand-off"). All in this one transaction.
-7. **Commit, then loop.** `COMMIT`, then `NOTIFY js_wake, 'alloc:<host>'` for each host placed on (sent by the store at commit, so it is delivered
-   only if the placement committed). If the pass placed anything it runs again at once for the same pool and stops when a pass places nothing, so
-   it drains the queue and re-reads after its last placement. If step 1 found the pool locked, the pass re-arms itself once after
-   `place_retry` (default 100 ms), so a submit that committed just after the holder's last read is not missed until the sweep.
+> **Order: (1) pool row, only for a placement pass, taken `SKIP LOCKED` and never waited for; (2) the head lock (`LOCK TABLE head`, then
+> `SELECT head FOR UPDATE`), which is how the store opens every writing transaction today (`postgres/tx.rs`: "a writer locks it first and holds
+> the lock to its commit"); (3) every other row, in key order.** No transaction takes a lock of an earlier class after one of a later class.
+
+Consequences, each checked by the model (`LockOrder`, below):
+
+- Only a placement pass takes the pool row, and it takes it before the head lock. Every other writer (a free, a cancel, a presence write, a
+  settle) starts at the head lock. So no cycle exists: a pass waits on nothing it holds, and a writer never waits for a pass's pool row.
+- Once a transaction holds the head lock, no other writer is running. Row locks of class (3) are therefore never contended between writers,
+  and `FOR UPDATE SKIP LOCKED` on them would never skip. They are taken (`SELECT ... FOR UPDATE`) only to make the rows read the rows written, as
+  the store's `locked_txn` does; no step of this design relies on a skip of a class (3) row. `SKIP LOCKED` is used where it can skip: the pool
+  row, and the due-duty claims of "Periodic work".
+- A deadlock or serialization failure (`40P01`, `40001`) is not expected. If the server reports one anyway, the store's transaction helper
+  retries the whole transaction after a jittered backoff, up to `txn_retry_max` (default 5), then answers the caller a retryable error. Every
+  statement of the design carries a precondition, so a retry is safe.
+- **What runs outside the head lock.** The head lock is a global commit point, so the pass holds it only for the writes. Reading the fleet and
+  running the placement engine (CPU) happen *before* it, while the pass holds the pool row but not the head lock, as plain reads. A plain read
+  may be a little stale or mutually inconsistent; that is safe because the writes after the head lock are all conditional on the versions that
+  were read (steps 5 and 6), so a stale picture fails a condition and places nothing wrong.
+
+Steps. Each is a statement or group of statements; on a failed condition of one job the pass rolls back to that job's savepoint and leaves the
+job queued, and any other failure rolls the whole transaction back and places nothing.
+
+1. **Claim the pool** (class 1). `SELECT ... FROM placement_pool WHERE pool = $p FOR UPDATE SKIP LOCKED`. If another pass holds the row, this
+   pass gets no row and stops: that pass is deciding for the same pool and re-reads the queue before it ends (step 8), so skipping loses nothing
+   it will not see. The pool row is a mutex any instance can take, held for the pass (read, choose, write: about 7r plus engine time, see
+   "Latency budget"); it is not a role and nothing is elected. It exists to keep the queue order and whole-host marks one sequence per pool and to
+   keep two passes from computing the same answer; the safety of the later steps does not rest on it.
+2. **Read the queue** (plain read, no row lock). The next `place_window` (default 32) queued jobs of the pool in queue order, each with its row
+   version.
+3. **Read the fleet** (plain reads). `presence/` for the pool, `hostbook/` for its hosts, the marks, taints and the bindings the engine needs, each
+   with its version, and the `hostbook` gate row (below). This is the picture; it is discarded at the end of the pass.
+4. **Choose** with the existing placement engine (pure, over those rows, CPU only, no lock but the pool row). It returns, for each job it can
+   place, the host and the resources.
+5. **Take the head lock** (class 2) and check the gate: one read of the `hostbook` gate row (see "`hostbook` is a derived cache"); if it does not
+   say the rows are exact for the store's current `writer_generation`, the pass places nothing and runs the reconcile first.
+6. **Reserve and write, per job, in (host, job) key order** (class 3; locks taken `FOR UPDATE` to pin what is checked):
+   - `hostbook/<host>`: `Cond::Version` as read in step 3 plus the fit check on every field of `Resources`
+     (`UPDATE hostbook SET booked = booked + $req, version = version + 1 WHERE host = $h AND version = $v AND booked + $req <= shape`);
+   - `presence/<host>`: `Cond::Version` as read, so a host that was cordoned, drained, released or taken over since step 3 is not placed on;
+   - the job row: `Cond::Version` (queued to placed); the allocation row and the job's mark row: `Cond::Absent`;
+   - for an `isolation=host` job, the taint field of the host's binding row (`Cond::Version`; see "Taint hand-off").
+   A failed condition means the picture changed (a free by the owner, another pass, a cancel): that job's savepoint rolls back and it stays
+   queued; the pass loops (step 8) and re-reads. Because the head lock excludes every other writer, "changed" can only mean changed before
+   step 5, and one re-read is enough.
+7. **Commit.** `COMMIT` releases the head lock and the pool row. `NOTIFY js_wake, 'alloc:<host>'` for each host placed on is sent at commit, so
+   it is delivered only if the placement committed.
+8. **Loop.** If the pass placed anything or lost a condition, it runs again at once for the same pool and stops when a pass places nothing, so it
+   drains the queue and re-reads after its last placement. If step 1 found the pool locked, the pass re-arms itself once after `place_retry`
+   (default 100 ms), so a submit that committed just after the holder's last read is not missed until the sweep.
 
 **Why each lock.** The guarantees stack so that no single lock is load-bearing.
 
 | Guarantee | Held by | What if that one were missing |
 |---|---|---|
-| A job is placed once | The job row's `FOR UPDATE SKIP LOCKED` and the `Cond::Version` queued to placed; the allocation and mark rows are `Cond::Absent` | Two passes that both read the job queued: the second's version condition fails, it rolls back. |
-| A host is never over-committed | The conditional update on `hostbook/<host>` (version and fit) | Two passes with room in their own picture: the second's update matches no row, it re-reads. |
-| Queue order and whole-host marks are one sequence per pool | The pool row lock | Two passes could each mark a different host for one whole-host job. The marks are `Cond::Absent` per job, so both cannot mark one job; at worst the engine's picture is stale and the job places a pass later. Order, not safety. |
-| No second job beside an `isolation=host` job | The taint written on the binding in the same transaction, checked by the engine from the binding row read in step 3, and the binding's `Cond::Version` in step 6 | Two passes both placing `isolation=host` jobs on one host: the second's binding condition fails. |
+| No deadlock | The lock order above: pool row, then head, then rows in key order; the pool row is never waited for | A pass holding a host row while waiting for the head lock, against a free already inside its head-first transaction that updates the same host row, would deadlock. The order forbids it: the pass takes no row lock before the head lock. |
+| A job is placed once | The `Cond::Version` queued to placed on the job row, the allocation and mark rows being `Cond::Absent`, all after the head lock | Two passes that both read the job queued: the second's version condition fails, it rolls back that job. |
+| A host is never over-committed | The conditional update on `hostbook/<host>` (version and fit), and the `presence/<host>` version | Two passes with room in their own picture: the second's update matches no row, it re-reads. |
+| Queue order and whole-host marks are one sequence per pool | The pool row | Two passes could each mark a different host for one whole-host job. The marks are `Cond::Absent` per job, so both cannot mark one job; at worst the picture is stale and the job places a pass later. Order, not safety. |
+| No second job beside an `isolation=host` job | The taint written on the binding in the same transaction, read by the engine from the binding in step 3, and the binding's `Cond::Version` in step 6 | Two passes both placing `isolation=host` jobs on one host: the second's binding condition fails. |
+| A job being changed is not placed from a stale read | The job row's `Cond::Version` | A cancel or expiry that committed after step 2 fails the condition; the job is not placed. |
 
-**Parallelism.** Different pools place at once. Within a pool, passes serialise on the pool row, but the hold is one transaction (below), and
-the global commit point of the store (see "Latency budget") already serialises every commit; the pool row costs nothing beyond it. A pass
-that skips because the pool is locked costs one round trip.
+**Parallelism.** Different pools place at once up to the head lock, which serialises their short write phases. Within a pool, passes serialise on
+the pool row. A pass that skips because the pool is locked costs one round trip. The heartbeat's presence write waits only for the head lock, which
+is held for the write phase (about 3r, see the budget), not for the read phase or the engine's compute.
+
+**Rejected: take the head lock first and run the whole pass inside it** (the other consistent lock order). It is also deadlock-free, but the
+head lock would then span the reads of `presence/` and `hostbook/`, the engine's CPU and the writes, and every heartbeat's presence write and every
+free would queue behind a pass whose time grows with the fleet and the queue. It also makes the pool row dead code: every transaction is
+serialised, so `SKIP LOCKED` never skips. The chosen order keeps the long part outside the commit point.
+
+**Rejected: take row locks (pool, jobs, `hostbook`, binding) first and the head lock last, as the commit of the store does.** It deadlocks with
+any head-first transaction that touches a host row the pass already locked (a free by the owner against a pass that placed on the same host), and
+the loser is chosen by the server at random.
 
 **Rejected: claim only jobs by `SKIP LOCKED`, with no pool row.** It lets two passes place different jobs of one pool at once, which is safe for
-capacity and double placement but breaks the single queue order: pass B could place job 5 while pass A, holding job 1, was about to need the
-host B uses for a whole-host mark. Fairness is a stated property of the queue, so the pool row stays. The job row claim is kept because it
-makes a pass never wait on, or place from a stale read of, a job that is being changed.
+capacity and double placement but breaks the single queue order: pass B could place job 5 while pass A, holding job 1, was about to need the host
+B uses for a whole-host mark. Fairness is a stated property of the queue, so the pool row stays.
 
 ### `hostbook` is a derived cache of the allocation rows
 
@@ -298,12 +340,29 @@ gains a field that `booked` lacks). Its job is to be a single row whose version 
   retries. The cost is a CAS retry on hosts that are both being freed and placed, not a new lock.
 - **Absent is not zero.** A placement never creates `hostbook/<host>` from an empty picture: a host with live allocations and no row would
   otherwise read as zero booked and be overbooked by the first placement. A host with no `hostbook` row is not placeable until reconciled.
-- **Reconcile is per row, by anyone.** It is a `SERIALIZABLE` transaction (retried on serialization failure) that reads the host's allocation
-  rows and writes `{booked = sum}` by `Cond::Absent` (a missing row, version 1) or `Cond::Version` (a row that differs, logged, metric
-  `hostbook_repaired`). Two instances reconciling one host conflict and one wins with the same value. It is run (a) by a pass that finds a host
-  with no row, for that host, at once; (b) by the periodic row `reconcile` (below), over every host, so old data (no rows) and a rollback followed
-  by a roll-forward, where the previous release placed and freed without maintaining the row, are repaired within `reconcile_every` (default 5
-  min); and (c) after a placement `Conflict` that a re-read does not explain.
+- **Present is not exact either: the gate.** A row can exist and be wrong. The case: the new release is rolled back to a release that places and
+  frees without maintaining `hostbook`, which places on host `h` and leaves `hostbook/h` saying `booked = 2` while the allocations say 6; the new
+  release is rolled forward and the first pass would win the CAS on the stale version, because the old release never moved it. A periodic
+  repair every `reconcile_every` is too late for that, so the row is tagged and a gate stands before the first pass:
+  - **A gate row** `hostbook/_gate = {verified_generation}` records the store's `writer_generation` (the existing row, which the previous release
+    bumps at every start and the new release only reads, never bumps) at which every `hostbook` row was last made exact. Any start of the
+    previous release changes `writer_generation`, so the gate is stale after it, and cannot be fooled by a rollback that ran for one second.
+  - **Every placement transaction reads the gate after the head lock (step 5) and places nothing unless `verified_generation` equals the current
+    `writer_generation`.** The previous release running beside the new one (a rollback overlapping, below) therefore also stops the new
+    release's placement at once.
+  - **Start-up gate.** An instance at start, before its placement passes are enabled, reads the gate. If it is stale or absent, it runs the full
+    reconcile (every host, one transaction per host, below) and then writes the gate by `Cond::Version` to the current `writer_generation`. An
+    instance that finds the gate current starts its passes at once. Two instances reconciling at once both reach the same values, and the gate
+    write is a CAS, so one wins and the other finds it current.
+  - **Row tag.** Each `hostbook` row also carries `writer = <protocol revision>` of the transaction that last wrote it; a row whose `writer` is
+    below the reader's is reconciled on first touch, so a later change of the booking rule has the same gate.
+  - Test: `rollback_then_roll_forward_does_not_overcommit` (previous release fixture places on `h`, new release starts, asserts no pass places
+    before the gate is current, then that `booked` equals the allocations and a placement beyond the shape is refused).
+- **Reconcile is per row, by anyone.** It is a `locked_txn` (head lock first, so no writer runs while it reads; no `SERIALIZABLE` needed) that
+  reads the host's allocation rows and writes `{booked = sum}` by `Cond::Absent` (a missing row, version 1) or `Cond::Version` (a row that
+  differs, logged, metric `hostbook_repaired`). It is run (a) by the start-up gate, over every host; (b) by a pass that finds a host with no row, for
+  that host, at once; (c) by the periodic row `reconcile` (below), over every host, as a backstop for a bug, not for rollback; and (d) after a
+  placement `Conflict` that a re-read does not explain.
 
 ### Taint hand-off
 
@@ -350,7 +409,7 @@ The per-process write counter is replaced by the store's committed head revision
 `job_store/feed_trim.rs`). A submit at A moves the head; any instance's poll sees it. A pass is triggered by (1) a NOTIFY `js_wake` with
 `submit:<pool>` (sent by `SubmitJob` and by cancel), (2) a NOTIFY on capacity change (`cap:<pool>`, sent by the transaction that frees an allocation or
 changes a host's presence, cordon or shape), (3) the head poll noticing the head moved, and (4) the periodic placement sweep (below). Every instance
-LISTENs and wakes; all of them try, and the pool row lock makes one go first and the others stop in one round trip. Cost of the poll: one `SELECT rev
+LISTENs and wakes; all of them try, and the pool row (`SKIP LOCKED`) lets one go first and the others stop in one round trip. Cost of the poll: one `SELECT rev
 FROM head` every `head_poll` (default 500 ms) per instance.
 
 ### Scaler and cloud calls
@@ -358,12 +417,13 @@ FROM head` every `head_poll` (default 500 ms) per instance.
 The scaler makes cloud calls (instance creation, spend) that are not store commits, so a second runner must not make a second machine.
 
 - **Intent rows, written by unique key.** The decision "pool P wants one more machine" is a transaction that inserts `acquires/scaler/<pool>/<n>`
-  with `Cond::Absent`, where `<n>` is the next ordinal after the highest existing row for the pool, inside a `SERIALIZABLE` transaction that reads
-  the queue's unmet demand and the existing intent rows. Two instances deciding at once pick the same `<n>`; one insert wins and the other
+  with `Cond::Absent`, where `<n>` is the next ordinal after the highest existing row for the pool, inside a `locked_txn` (head lock first, so no
+  writer runs while it reads) that reads the queue's unmet demand and the existing intent rows. Two instances deciding at once pick the same `<n>`; one insert wins and the other
   sees the row and decides nothing.
 - **Claimed per row.** An intent row has `state` (planned, called, ready, failed, retired), `claimed_by` and `claim_until`. An instance claims a
   planned row, or one whose `claim_until` has passed by the database clock, with `UPDATE ... SET claimed_by = $me, claim_until = now() + $ttl
-  WHERE key = $k AND (state = 'planned' OR claim_until < now()) RETURNING ...` (`FOR UPDATE SKIP LOCKED` when claiming from the table), then
+  WHERE key = $k AND version = $v AND (state = 'planned' OR claim_until < now()) RETURNING ...` (a `Cond::Version` update inside a head-first
+  transaction, so exactly one claimant's update matches), then
   makes the call and writes `called` with the provider's id. `ttl` defaults to 60 s.
 - **The provider call carries the row key as its idempotency token** (client token). Two claimants (a claim that expired while the first was slow)
   produce one machine, because the provider returns the first call's result for the same token. A provider call that cannot take an
@@ -379,15 +439,18 @@ expiry and expire-prepares), `retention` (retention sweep), `settle` (absent hos
 
 - **Claim.** Every instance, every `sweep_poll` (default 5 s), runs one statement for the due duties:
   `UPDATE periodic SET next_run = now() + period, claimed_by = $me, version = version + 1 WHERE next_run <= now() AND min_protocol <= $mine
-  RETURNING duty` (in the store, `Store::claim_due` with `FOR UPDATE SKIP LOCKED`). Only the instance whose update matched the row runs the
+  RETURNING duty` (in the store, `Store::claim_due`: one statement on the `periodic` table, a leaf lock that takes no other lock after it, and
+  the table is outside the change feed, so it does not take the head lock; two instances' statements serialise on the row and the second matches
+  nothing). Only the instance whose update matched the row runs the
   duty for that period; the others get no row. A duty therefore runs at most once per period no matter how many instances exist.
 - **A dead claimant loses one period, not the duty.** The row was advanced at claim time, so if the claimant dies mid-run the duty next runs
   at the next period, on whichever instance claims it. Every duty is written so that a run is idempotent and may be cut off at any point
   (the existing sweeps are batches with `Cond::Version`). The periods are short (5 s to 5 min) against what the duties guard (retention in hours),
   so one lost period is invisible; `expire` and `settle` use 5 s.
-- **Per-row work inside a duty is claimed per row.** `expire` selects due jobs `FOR UPDATE SKIP LOCKED LIMIT $batch`; `settle` selects candidate
-  `presence/` rows `FOR UPDATE SKIP LOCKED`. Two instances that both entered the same duty (a claim raced a period boundary) split the rows and
-  never process one twice, and each row's own transaction carries the `Cond::Version` that makes a repeat harmless anyway.
+- **Per-row work inside a duty is a head-first transaction per row.** `expire` reads a batch of due jobs and `settle` a batch of candidate
+  `presence/` rows as plain reads (`LIMIT $batch`), then ends each row in its own `locked_txn` with the row's `Cond::Version`. Two instances that
+  both entered the same duty (a claim raced a period boundary) may both read a row; the second's version condition fails and it moves on, so a
+  row is processed once. `SKIP LOCKED` is not used here: after the head lock it would never skip, and before it a plain read needs none.
 - **Absent-host settlement** is judged from the presence row (a missing row, or `last_heard_ms` older than grace plus retention by the database
   clock), never from one instance's local view. The "silence ends nothing" rule is unchanged. **The settle transaction carries `Cond::Version` on
   `presence/<host>` at the version it judged** and on the `hostbook/<host>` it releases. A host that re-hellos between the read and the commit
@@ -429,8 +492,11 @@ The `Store` trait today gives optimistic commits: reads outside, `Cond` checks a
 three additions, each additive and implemented by the Postgres store and the fake (the SQLite store, which has one process, implements them
 trivially):
 
-- **`locked_txn`**: a closure run inside one Postgres transaction that may `get_for_update(key)` and `list_for_update(prefix, limit,
-  skip_locked)` before it writes, so the rows read are the rows locked.
+- **`locked_txn`**: a closure run inside one Postgres transaction that takes the head lock first, like every writing transaction of the store
+  today, and then may `get_for_update(key)` and `list_for_update(prefix, limit)` in key order before it writes, so the rows read are the rows
+  locked and no other writer runs between. It also offers `pre_claim(pool)`, the one lock allowed before the head lock: a `SKIP LOCKED` take of a
+  `placement_pool` row, held to the end of the transaction. Taking any other row lock before the head lock is not expressible through it. A
+  deadlock or serialization failure retries the closure (`txn_retry_max`). The order is stated in "The placement transaction".
 - **`claim_due(prefix, owner, now)`**: the periodic claim statement above, returning the duties this call advanced.
 - **`notify(channel, payload)` and `listen(channel)`**: `NOTIFY` is issued at commit of the transaction that asked for it, and `listen` delivers on
   a dedicated connection; a dropped connection reconnects and then forces one head poll.
@@ -512,7 +578,8 @@ holder" for prepare, cutover, verify and rollback (`docs/lease-server-update.md`
 - The updater hook's checks become "new instance ready and old instance drained"; `lease-server-update.md` and `release.md` ("One writer per
   store") are rewritten. This is its own PR: it touches packaging and the hook.
 - While the old release still runs the old protocol (one writer, fencing on `writer_generation`), a new-release instance must not start beside
-  it. The rollout order below keeps replicas at 1 and updates stop-first until every instance runs the new release.
+  it, and the same holds for the rollback to it. The first rollout to the leaderless release, and any rollback past it, are stop-first with one
+  instance (a deploy gap); only updates between leaderless releases overlap two (see "Compatibility", release rollback).
 
 ## Sequence diagrams
 
@@ -575,10 +642,11 @@ sequenceDiagram
     B-->>C: job id
     PG-->>P1: NOTIFY submit:pool
     PG-->>P2: NOTIFY submit:pool
-    P1->>PG: txn: pool row FOR UPDATE SKIP LOCKED (got it)
-    P2->>PG: txn: pool row FOR UPDATE SKIP LOCKED (no row, stop; re-arm place_retry)
-    P1->>PG: claim jobs (FOR UPDATE SKIP LOCKED), read presence, hostbook
-    P1->>PG: CAS hostbook/h (Version, fit), CAS job, put alloc, mark, taint on binding if isolation=host, COMMIT, NOTIFY alloc:h
+    P1->>PG: BEGIN, pool row FOR UPDATE SKIP LOCKED (got it; no head lock yet)
+    P2->>PG: BEGIN, pool row FOR UPDATE SKIP LOCKED (no row, stop; re-arm place_retry)
+    P1->>PG: plain reads: queue, presence, hostbook, gate (versions noted); engine chooses (CPU, no head lock)
+    P1->>PG: LOCK head, check gate, then CAS hostbook/h (Version, fit), CAS presence/h, CAS job, put alloc, mark, taint on binding if isolation=host
+    P1->>PG: COMMIT (releases head and pool row), NOTIFY alloc:h
     PG-->>O: NOTIFY alloc:h (refreshes O's cache early)
     P2->>PG: after place_retry: pool row, queue empty, stop
     Ag->>O: heartbeat
@@ -594,15 +662,38 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant P as instance A (pass)
+    participant P as instance A (pass, holds pool row)
     participant O as instance O (owner of h)
     participant PG as Postgres
-    P->>PG: read hostbook/h (version 7, 2 cpu free)
-    O->>PG: txn: free_allocation, hostbook/h Version 7 to 8 (more free), COMMIT
+    P->>PG: plain read hostbook/h (version 7, 2 cpu free), engine chooses h
+    O->>PG: BEGIN, LOCK head (got it first)
+    O->>PG: free_allocation, hostbook/h Version 7 to 8 (more free), COMMIT (releases head)
+    P->>PG: LOCK head (waits for O, then got it), check gate
     P->>PG: CAS hostbook/h Version 7 to 8 (+ 2 cpu)
-    PG-->>P: Conflict (version is 8)
-    P->>PG: re-read hostbook/h (version 8, 4 cpu free), re-choose
-    P->>PG: CAS hostbook/h Version 8 to 9, place, COMMIT
+    PG-->>P: Conflict (version is 8), savepoint of that job rolled back
+    P->>PG: COMMIT (nothing placed), release head, re-read hostbook/h (version 8, 4 cpu free), re-choose
+    P->>PG: LOCK head, CAS hostbook/h Version 8 to 9, place, COMMIT
+```
+
+The free and the pass never hold a lock the other waits on: the free holds the head lock and the host row, the pass holds only the pool row until
+it asks for the head lock, and nobody asks for a row lock before the head lock. There is no deadlock to retry.
+
+### Rollback then roll-forward, `hostbook` gate
+
+```mermaid
+sequenceDiagram
+    participant N as new release (instance)
+    participant PG as Postgres
+    participant Old as previous single-writer release
+    Note over N,PG: gate: verified_generation = 12, hostbook/h booked=2
+    N->>Old: stop-first rollback (instance stops, then old starts)
+    Old->>PG: bump writer_generation to 13
+    Old->>PG: place on h (booked is really 6), no hostbook write
+    Old->>PG: stops (stop-first), then the new release starts
+    N->>PG: start: read gate (12) against writer_generation (13): stale
+    N->>PG: reconcile every host (head lock first): hostbook/h booked=6
+    N->>PG: CAS gate to verified_generation = 13
+    N->>PG: first placement pass: gate current, hostbook/h exact, no over-commit
 ```
 
 ### Periodic duty claimed per row
@@ -661,8 +752,10 @@ sequenceDiagram
 
 Every commit is one transaction: `LOCK TABLE head`, `SELECT head FOR UPDATE`, `now()`, the writes, the head update, `COMMIT`
 (`postgres/tx.rs`). That is a **global commit serialisation point**: a writer queues on the table lock, so the rate of all writes in the system,
-not each instance's, is what the budget bounds. Reads are plain selects and do not take it. The row locks of this design are taken inside that
-transaction, so their hold time is bounded by it; the counts below are round trips (r) and rows locked per operation. The time of one round
+not each instance's, is what the budget bounds. Reads are plain selects and do not take it. Every row lock of this design but one is taken after the head lock, inside that transaction, so
+their hold time is bounded by it; the one exception is the placement pool row, taken before it (lock order in "The placement transaction"). The
+head lock is therefore the scarce resource, and a pass is built to hold it only for its writes. The counts below are round trips (r), rows locked
+and, for the placement rows, the head-lock hold and the pool-row hold separately. The time of one round
 trip is not measured here: this document uses r = 1 ms to 2 ms (Postgres on the same machine or overlay, inferred) and PR 8 measures it.
 
 | Operation | Postgres round trips | Rows locked, hold time | Notes |
@@ -677,12 +770,13 @@ trip is not measured here: this document uses r = 1 ms to 2 ms (Postgres on the 
 | GetJob, GetResult, ListJobs, GetLogs (no follow) | 1 read, or 1 list | none | Read only, any instance. |
 | GetLogs follow | 1 read per wake | none | Plus object-store read; bounded by `max_follow` per instance. |
 | CordonHost / UncordonHost | 1 read + 1 write txn (binding, presence, NOTIFY `cap:pool`) | binding and presence rows | Applies at the owner's next heartbeat; wakes placement. |
-| Placement pass, nothing to place | 1 (pool row, lost or empty queue) to 3 (pool row, queue, nothing placeable) | pool row for the transaction, about 3r | Skipped instance: 1r. |
-| Placement transaction, one job | about 6: pool row, queue claim, `presence/` list, `hostbook/` list, write (job, alloc, mark, hostbook, binding if taint), commit | 1 pool row, up to `place_window` (32) job rows, 1 hostbook row per chosen host, 1 binding row if `isolation=host`; hold about 6r = 6 ms to 12 ms | Measured count of statements is by design; PR 5 measures the hold. |
-| Placement transaction, 8 jobs on 3 hosts | about 6 plus 1 per extra hostbook row | up to 8 job rows plus 3 hostbook rows; hold about 8r | One transaction places the batch, amortising the fixed 5 statements. |
-| Drain a queue of 100 jobs | 13 batches, about 8r each | pool row per batch | About 100 r to 200 r, 0.1 s to 0.2 s inferred. |
-| Periodic claim | 1 statement per instance per 5 s | duty row for the statement, 1r | Matches no row when nothing is due. |
-| Duty run (`expire`, `settle`, ...) | 1 select with `SKIP LOCKED` per batch + 1 write txn per batch | the batch's rows, about 2r per batch | Idempotent; cut-off safe. |
+| Placement pass, nothing to place | 1 (pool row, lost) to 3 (pool row, queue, nothing placeable) | pool row for the pass, about 3r; no head lock | Skipped instance: 1r. A pass that places nothing never takes the head lock. |
+| Placement transaction, one job | about 8: `BEGIN` + pool row (1), queue read (1), `presence/` + `hostbook/` + gate reads (1), engine (CPU, no round trip), head lock + gate check (1), writes for the job (job, alloc, mark, hostbook, presence check, binding if taint; 1 to 2 statements), commit (1) | pool row for the whole pass, about 7r plus engine time (8 ms to 16 ms plus engine, inferred). **Head lock for the write phase only: lock, gate check, writes, commit, about 3r (3 ms to 6 ms).** Rows locked after the head lock: 1 hostbook, 1 presence, 1 job, 1 binding if `isolation=host`. | Reads and the engine's compute are outside the head lock, so a heartbeat's presence write queues behind at most about 3r, not the pass's compute. PR 5 measures both holds with 10, 50 and 100 hosts. |
+| Placement transaction, 8 jobs on 3 hosts | about 9 | pool row about 9r plus engine time; head lock about 4r (one more statement group per extra host row, one commit) | One transaction places the batch, amortising the fixed statements. |
+| Placement transaction that loses a condition | as above, plus 1 re-read and a second write phase | head lock about 3r again | The losing job's savepoint rolls back; no deadlock retry is expected. |
+| Drain a queue of 100 jobs | 13 batches, about 9r each | pool row per batch; head lock about 4r per batch | About 120 r, 0.12 s to 0.24 s inferred, of which about 50 r hold the head lock. |
+| Periodic claim | 1 statement per instance per 5 s | duty row for the statement, 1r; no head lock | Matches no row when nothing is due. |
+| Duty run (`expire`, `settle`, ...) | 1 plain read per batch + 1 head-first write txn per row (or per small group) | head lock and the row's rows for the commit, about 2r per row | Idempotent; cut-off safe. |
 | Wake listener | 0 per notice; 1 reconnect and 1 head read after a dropped connection | none | One dedicated connection per instance. |
 | Change poll (each instance) | 1 `SELECT rev FROM head` per `head_poll` | none | 2 reads per second per instance. |
 | Usage minute rows | 0 extra (in the presence transaction) | rows of the minutes completed | A few rows per write. |
@@ -691,7 +785,7 @@ trip is not measured here: this document uses r = 1 ms to 2 ms (Postgres on the 
 
 | Path | Time | Made of |
 |---|---|---|
-| Submit to a placement committed | about 15 ms to 30 ms with NOTIFY; up to about 530 ms by the head poll if NOTIFY is lost; up to about 5 s if both are lost (placement sweep) | commit of the submit (about 2r), NOTIFY delivery (about 1r), the pass (about 8r). |
+| Submit to a placement committed | about 15 ms to 35 ms with NOTIFY (engine compute not included); up to about 530 ms by the head poll if NOTIFY is lost; up to about 5 s if both are lost (placement sweep) | commit of the submit (about 2r), NOTIFY delivery (about 1r), the pass (about 8r). |
 | Submit to start command at the agent | mean about 2.5 s, up to about 5.05 s with NOTIFY; up to about 5.55 s with only the poll; up to about 10 s with only the sweep | the placement above, then the wait for the owner's next heartbeat (uniform on 0 to 5 s; the owner sees the placement in that beat's own read, so a missed notice adds nothing). An owner that placed the job itself answers the next beat the same way. |
 | Placement made by instance A, owner O learns | at the next heartbeat; the cache is warm within about 5 ms of the commit with NOTIFY, within 500 ms by the poll | the beat's read of `hostbook/<host>` is what the start depends on. |
 | Capacity freed to the next queued job placed | about 15 ms to 30 ms with NOTIFY `cap:pool`; up to about 530 ms by the poll | the freeing transaction notifies; a pass runs. |
@@ -742,6 +836,9 @@ Properties (each is a spec invariant and a named Rust test):
 | `AgentConverges` | An agent that flips between instances reaches a session in one hello after any 409 or 403 and never sees a 401 for a credential the store holds. The model includes the `host-live` rule (same credential and `instance` takes over; different is refused inside grace), so the property fails if a flip can be refused. |
 | `FlipServedBounded` | Liveness: a host whose agent flips, or whose owner drains or dies, is served again within one hello after its next request, with no wait on `last_heard`. |
 | `NoStaleCommit` | A session superseded by another owner's presence CAS commits no listing and no free. |
+| `LockOrder` | Every transaction of the model takes locks in the one order (pool row, head lock, other rows in key order), each statement a step; no interleaving reaches a deadlock, and a pass never holds a row lock while waiting for the head lock. The check also fails if a transaction is written in the other order, so it is a gate with a negative case. |
+| `HostbookGate` | After a step of the previous release that places or frees without writing `hostbook` (a rollback), no new-release pass places until the gate is current and every row is exact; a roll-forward then a placement beyond the shape is refused. |
+| `RollbackOrder` | A rollback to the single-writer release never has an old and a new instance running together (stop-first); an update between leaderless releases may. |
 | `HostbookExact` | After every free path (confirm, end, lose, expiry, cancel, settle) and after reconcile, `hostbook.booked` equals the sum of the host's live allocations, for every field of `Resources`; a host with no row is not placed on. |
 | `TaintHandOff` | A host with a live `isolation=host` allocation never takes another allocation, whichever instance places and whichever owns the host; the binding carries the taint before the `taint/` row can be deleted. |
 | `OwnerSeesPlacement` | A placement committed at any instance is in the owner's reply to the heartbeat that follows the commit, with NOTIFY switched off. |
@@ -750,7 +847,7 @@ Properties (each is a spec invariant and a named Rust test):
 | `StartingNotLost` | A `Starting` job is never made `Lost` by a first listing alone; only by `start_confirm` elapsing. |
 | `MixedVersion` | With one instance at N and one at N+1, every other property holds, N keeps fields it does not know, and N never claims a duty whose `min_protocol` exceeds its own. |
 
-Where each runs: Rust enumeration in CI (PR 5) for `OneUse`, `NoLostBinding`, `EpochMonotonic`, `PlaceOnce`, `NoOverbook`, `QueueOrder`,
+Where each runs: Rust enumeration in CI (PR 5) for `OneUse`, `NoLostBinding`, `EpochMonotonic`, `PlaceOnce`, `NoOverbook`, `LockOrder`, `HostbookGate`, `RollbackOrder`, `QueueOrder`,
 `PeriodicOnce`, `IntentOnce`, `NoFreeOfLiveHost`, `FailClosed`, `AgentConverges`, `FlipServedBounded`, `NoStaleCommit`, `HostbookExact`,
 `TaintHandOff`, `OwnerSeesPlacement`, `SettleSafe`, `StartingNotLost` and `MixedVersion`; TLA only (author-run, results in the PR): the
 3-instance claim interleavings with unbounded retries, and `DrainReleases` over partial drains. The Rust model uses the real identity,
@@ -759,38 +856,49 @@ presence, placement, periodic and settle code, so a change to one of them is che
 Actions the spec and the enumeration both include: hello (same agent, different agent, token), heartbeat, presence refresh, owner drain with
 release, owner crash, listing commit with first-listing test, free paths, placement passes (each statement a step, including `isolation=host`
 and a pass skipped by `SKIP LOCKED`), reconcile, settle, periodic claim and claimant death, scaler intent insert and claim with an expiring
-claim, NOTIFY delivered, lost and duplicated, Postgres unreachable and back, change-feed trim with `StaleCursor`, and a rollback then
-roll-forward between steps.
+claim, NOTIFY delivered, lost and duplicated, Postgres unreachable and back, change-feed trim with `StaleCursor`, a rollback then
+roll-forward between steps (the previous release placing and freeing without writing `hostbook`, `writer_generation` bumped), and a server-reported
+deadlock or serialization failure with its retry.
 
 Scenarios to enumerate: two passes at once on one pool, and on two pools sharing a host; a placement racing a free on one host; a placement
 racing a cancel of the same job; an `isolation=host` placement racing another placement on the same host from the other instance; a periodic duty
 claimed at a period boundary by both instances; a claimant dying mid-duty; a scaler claim expiring mid-call; two hellos for one token; an agent
 flipping A to B to A; a flip that follows a `JobStart` the agent never saw; a cordon at A against a heartbeat at B; a settle racing a re-hello;
-Postgres unreachable across the grace and recovery; N and N+1 together; a rollback to the previous release between steps. The exact PlusCal is
+Postgres unreachable across the grace and recovery; N and N+1 together; a rollback to the previous release between steps, with and without overlap. The exact PlusCal is
 written in PR 0b and reviewed before any later PR lands.
 
 ## Compatibility and failure modes (B8)
 
 All format changes are additive: new optional rows under new prefixes (`presence/`, `hostbook/`, `periodic/`, `placement_pool/`, `idx/backfilled`,
-intent rows under the existing `acquires/scaler/`), new optional fields (`used_by` on a join token, `taint` on a binding, `last_sent_unix` and
-`agent_instance` on presence, whole-host state on an allocation) in existing values that keep unknown fields, and one additive hello capability
-(`start-idempotent`). Nothing is renumbered, renamed, removed or newly required, and no version floor is raised.
+intent rows under the existing `acquires/scaler/`), new optional fields (`used_by` on a join token, `taint` on a binding, `agent_instance` on presence, `writer` on a hostbook row, whole-host state on an allocation) in existing values that keep unknown fields, the row
+`hostbook/_gate`, and one additive hello capability (`start-idempotent`). Nothing is renumbered, renamed, removed or newly required, and no version floor is raised.
 
 - **Previous release on new data**: a test starts the previous release's server over a store holding presence, hostbook, periodic and `used_by`
   data and checks that it serves, reads the bindings, and does not delete the new rows. A new-prefix row is outside the old `save()`'s sweep. The test is
   named in PR 1 and PR 2 (below) and runs the previous release from the release fixtures as the existing skew tests do
   (`crates/js-agent/tests/agent/skew`).
 - **New release on old data**: a test starts the new release over a store written only by the previous release (no presence, no hostbook, no
-  periodic rows) and checks that it serves, creates the periodic rows, places no work on a host until its `hostbook` is reconciled from the
-  allocation rows, and then places work.
-- **Both on one store** (the previous single-writer release beside a new one) is not supported: an old-release instance beside a new one would
-  fence it on `writer_generation` and run the sweeping `save()`. The rollout keeps one instance until the old release is gone, and the rollback path
-  below returns to one instance first.
+  periodic rows) and checks that it serves, creates the periodic rows, places no work until the start-up gate has reconciled `hostbook` from the
+  allocation rows (and any `hostbook` row that exists is reconciled too, since the previous release never wrote it), and then places work.
+- **Both on one store** (the previous single-writer release beside a new one) is not supported, in either direction, and the doc says which
+  updates may overlap (next bullet). An old-release process beside a new one would bump `writer_generation`, fence the other and run the
+  sweeping `save()`, which deletes every `hosts/` key it does not hold: that wipes the bindings and taints the new instance wrote. The new
+  release never bumps `writer_generation`; it only reads it as the `hostbook` gate (see "`hostbook` is a derived cache"), so an old process
+  that starts beside it stops its placement at once, but cannot be stopped from deleting `hosts/` keys. It must not be started.
 - **Job store on Postgres**: row formats are the SQLite store's, written through the same `Store` trait. The previous release reads only a
   SQLite file; rollback therefore runs on an exported file (see "Cutover"), not on the old file as it was left.
-- **Release rollback is a service update**, like any other: the previous release is deployed by the same start-first update. Migrations the new
-  release applies must be ones the previous release tolerates (additive rows and fields only, above), so a rollback never needs a database
-  restore, and a later roll-forward repairs `hostbook` by reconcile.
+- **Release rollback is a service update, and the update's order depends on its target.** Migrations the new release applies are ones the
+  previous release tolerates (additive rows and fields only, above), so a rollback never needs a database restore. The order:
+  - **Rollback to a leaderless release** (any release that has this document's protocol, whatever its revision): the same start-first update,
+    two instances overlapping up to the stop grace. The two are the pair `(N, N+1)` of "Mixed-version instances" in reverse, which the model
+    covers.
+  - **Rollback to a release before the first leaderless one** (the single-writer release): **stop-first, with a deploy gap**. The service
+    update sets stop order stop-first and the one instance stops before the old release starts, so the old process never runs beside a new
+    one. This is the only update that has a gap, and it is the cost of the single-writer release's design (above). The updater hook chooses the
+    order from the target release's `protocol` revision in its manifest and defaults to stop-first when the manifest does not say, so a missing
+    value cannot start the unsafe overlap. Past cutover step 2 the same rollback also runs the export first (see "Cutover").
+  - **Roll-forward after a rollback to the single-writer release** is the stop-first update in the other direction (the old process must be gone
+    before a new instance starts); the new instance finds the `hostbook` gate stale (`writer_generation` moved) and reconciles before it places.
 
 ### Mixed-version instances (release N and N+1 together)
 
@@ -847,9 +955,10 @@ release and is reversible.
      once any job has run.
 3. **Leaderless placement, periodic rows, `hostbook` and the taint-on-binding change, still one instance.** The one instance runs every pass and
    duty by the same claims; it reconciles `hostbook` from the allocation rows. Rollback: previous release, after the export of step 2 if it is a
-   rollback past step 2; a later roll-forward reconciles `hostbook` again, which is why reconcile is periodic.
-4. **Start-first updates (two instances during an update only)**, after readiness and the updater hook are changed. From here an update never
-   has zero serving instances.
+   rollback past step 2; a later roll-forward finds the `hostbook` gate stale and reconciles every host before its first pass ("`hostbook` is a derived cache"), so the
+   old release's placements cannot be over-committed against. This rollback is stop-first.
+4. **Start-first updates (two instances during an update only)**, after readiness and the updater hook are changed. From here an update
+   between leaderless releases never has zero serving instances. Rollback past step 3 stays stop-first (above).
 5. **Edge proxy health check, drain and connection max age.** Verified on one test deploy before relying on it.
 6. **Scaler intents** last: the scaler is not active on the live deployment (one static pool, no machine provider), so it blocks nothing.
 
@@ -870,11 +979,11 @@ Each is one subject, with its tests and the docs it changes in the same PR.
 | 3 | jobscheduler | Job store on the Postgres store; copy tool with dry run; head revision replaces `written()`; job and allocation row cache fed by the change feed and `js_wake`; backfill out of open | The cutover step 2 binary; SQLite rows copied; measures reads per beat and the backfill time on a copy of the live data. |
 | 3b | jobscheduler | `js export-sqlite` and the copy-then-export round-trip test | Makes cutover step 2 reversible; lands before the cutover window. |
 | 5a | jobscheduler (js-agent) | Agent `JobStart` idempotent on the allocation id; hello capability `start-idempotent` | Lands and is rolled to hosts before PR 5 turns on the `Starting` rule. |
-| 4 | jobscheduler | `presence/<host>` rows; epoch CAS; the same-agent takeover rule in `registry.rs` and the release mark on drain; stale-session CAS on listing commits; heartbeat ordering guard; usage minute rows in the presence transaction; host listing, admission and cordon read presence | Amends design section 10.2 and the `HostLive` rule; presence-write budget tests. |
-| 5 | jobscheduler | Placement without a leader: the placement transaction (pool row, job claim, `hostbook` reservation, taint on the binding), the one allocation write helper, reconcile, NOTIFY wake and the beat's `hostbook` read, whole-host state on the allocation row, the `Starting` rule and `start_confirm` | The core of the protocol; the exhaustive Rust interleaving test, including `n_and_n_plus_1_together`, lands here. May be split along those lines if it is too large (P7). |
+| 4 | jobscheduler | `presence/<host>` rows; epoch CAS; the same-agent takeover rule in `registry.rs` and the release mark on drain; stale-session CAS on listing commits; stale-session CAS on beats (no heartbeat field added); usage minute rows in the presence transaction; host listing, admission and cordon read presence | Amends design section 10.2 and the `HostLive` rule; presence-write budget tests. |
+| 5 | jobscheduler | Placement without a leader: the placement transaction in the one lock order (pool row, then head lock, reads and engine before it), the `hostbook` reservation, the `hostbook` gate with its start-up reconcile, the taint on the binding, the one allocation write helper, reconcile, NOTIFY wake and the beat's `hostbook` read, whole-host state on the allocation row, the `Starting` rule and `start_confirm` | The core of the protocol; the exhaustive Rust interleaving test, including `n_and_n_plus_1_together`, lands here. May be split along those lines if it is too large (P7). |
 | 5b | jobscheduler | Periodic rows and per-row claims: `expire`, `retention`, `settle` with presence preconditions and `settle_quiet`, `taint-repair`, `feed-trim`, `reconcile`, `idx-backfill`, `placement-sweep`; `min_protocol` | The tick is replaced; no instance runs a duty by role. |
 | 6 | jobscheduler | Usage on Postgres: minute rows by owner | Moves `usage.db`. |
-| 7 | jobscheduler | Readiness without the lock; drain; connection max age; updater hook and docs rewritten | Packaging and `lease-server-update.md`. |
+| 7 | jobscheduler | Readiness without the lock; drain; connection max age; updater hook (start-first between leaderless releases, stop-first to the single-writer release or when the manifest has no `protocol`) and docs rewritten | Packaging and `lease-server-update.md`. |
 | 8 | deployment repository | Stack: start-first update overlapping two instances; edge proxy health check; the host-mode and VIP decisions recorded | After PR 7 is released; measures commit latency with one and two instances. |
 | 9 | jobscheduler | Scaler: intent rows by unique key, claimed per row, provider token from the row key | Last; off on the live deployment. |
 | 10 | jobscheduler | Rewrite design section 13 question 1 and 10.2 "One writer" to the chosen design; remove the question | Docs only. |
@@ -898,6 +1007,18 @@ not listed, so the numbering has a gap there.
 | 10 | Rolling updates run N and N+1 on one store | Accepted. "Mixed-version instances", `min_protocol` on duty rows, `n_and_n_plus_1_together`, and the `StaleCursor` reload. |
 | 11 | Model check incomplete, a gate that has not run | Accepted. Properties and actions added, with which are run in CI and which are author-run; the spec is stated as not yet written or run. TLC counts are a record, not a CI comparison. |
 
+### Second round (after the leaderless revision)
+
+A second critic reviewed the leaderless text. Four findings, all raised against this document, answered below. Finding 2 is accepted in its
+facts and changes an owner-listed recommendation, which is why it is also an open question.
+
+| # | Finding | Response |
+|---|---|---|
+| 1 | The order of the head lock and the row locks is not stated, and both orders break (row-locks-first deadlocks with a head-first free; head-first makes `SKIP LOCKED` and the pool row dead code and puts the engine's compute inside the global lock) | Accepted. "The placement transaction" now states one order: pool row (`SKIP LOCKED`, only a pass takes it), then the head lock, then other rows in key order, and reads and the engine run before the head lock as plain reads validated by versions afterwards. Both rejected orders are written up with the reason. The Why-each-lock table, parallelism text, the latency rows (pool-row hold and head-lock hold given separately), the diagrams and the model (`LockOrder`, with a negative case) follow. The critic's case 2 is right for the existing store: after the head lock `SKIP LOCKED` on any other row never skips, so the doc stopped using it there (duty batches, scaler claims) and keeps it for the one lock taken before the head lock. A deadlock the server reports anyway is retried by the store helper (`txn_retry_max`). The head-lock hold is inferred (3r to 4r), not measured; PR 5 measures it. |
+| 2 | Heartbeat ordering relies on `sent_unix`, which does not exist | Accepted in fact: no `sent_unix` exists in this checkout, and `Heartbeat` (`js-agent-wire/src/heartbeat.rs`) has no send-time field. The owner's recommendation named an existing field with a guard and no proto change; the premise was wrong. Within the owner's intent (no proto change, no agent change) the guard is dropped, and ordering is by session: one connection per session orders beats, and across sessions the session secret, epoch and the CAS on the presence row reject a superseded beat (see "Presence"). Adding a timestamp field instead would be a wire change that old agents do not send and, as an agent wall-clock value, would ignore every beat after a clock step back; it is not proposed. Open question 2 asks the owner to confirm the change. |
+| 3 | A stale `hostbook` row after rollback then roll-forward over-commits a host until the periodic reconcile | Accepted. The remedy is both of the critic's options in a form that costs no new writer: a `hostbook/_gate` row records the `writer_generation` at which every row was last exact (the previous release bumps it at every start, the new one only reads it), every placement transaction checks it after the head lock, and an instance reconciles every host before it enables its first pass if the gate is stale. Rows also carry a `writer` tag for later rule changes. The periodic reconcile stays as a backstop only. Test `rollback_then_roll_forward_does_not_overcommit`; properties `HostbookGate`. |
+| 4 | Release rollback is described two contradictory ways | Accepted. "Compatibility": a rollback to a leaderless release overlaps two instances (start-first), a rollback to the single-writer release is stop-first with a deploy gap, and the updater hook picks the order from the target's `protocol` and defaults to stop-first. The owner's "release rollback as a service update" stays; only the order of that update depends on the target. Property `RollbackOrder`. The remark that the old process's `save()` wipes `hosts/` keys is kept as the reason. |
+
 ## Open questions for the project owner
 
 Decided by the owner and built into the design above, so not questions: Postgres as the single source of truth with no leader; the database as
@@ -906,8 +1027,7 @@ the central dependency, failing closed; one instance in steady state, two only w
 Postgres-to-SQLite export for rollback; a hello with the same credential and agent instance takes the host over at once; the loss of one unflushed
 usage buffer on instance death is acceptable (here reduced by writing usage with the presence refresh); no coordinator orders while the database is
 unreachable; zero staleness for deny rows and revoked tokens; the initial-admin file stays on the shared volume for now; `fleet_hosts` unlogged
-only if measurement shows WAL cost; release rollback as a service update with migrations the previous release tolerates; heartbeat ordering by
-the existing `sent_unix` with a guard, no proto change.
+only if measurement shows WAL cost; release rollback as a service update with migrations the previous release tolerates (the update's order depends on the target, see "Compatibility").
 
 Still open:
 
@@ -922,3 +1042,15 @@ Still open:
      stop grace plus a start on every update, retrying. Fine if Macs tolerate a short reconnect, which their bootstrap already does.
    Recommended: A, because it is the only one that serves through an update and it reuses what the edge already does; C as the fallback if Macs
    cannot send SNI. Not measured here: which Macs send SNI today.
+
+2. **Heartbeat ordering: the existing `sent_unix` does not exist.** The recommendation was to order beats by the `sent_unix` the agent already
+   sends, with a guard and no proto change. `Heartbeat` has no send-time field. Options:
+   - **A. Order by session, add nothing (this document).** One connection orders beats within a session; the session secret, epoch and the CAS on
+     `presence/<host>` reject a beat from a superseded session. No wire change, no agent change, nothing silently off for old agents, and no guard
+     that a clock step could turn into ignored heartbeats.
+   - **B. Add a send-sequence field to `Heartbeat`.** A per-session counter (not a wall clock) reset by hello; additive on the wire, but old
+     agents do not send it so the guard is off for them, and it protects only a case A already covers.
+   - **C. Add an agent wall-clock `sent_unix`.** Rejected: a clock step back (NTP correction, VM restore) makes the owner ignore every beat until
+     the clock passes the old value, the host looks silent and is settled after grace plus retention.
+   Recommended: A. Not measured: whether any path delivers a beat of a superseded session to a current owner; the model's `NoStaleCommit` and
+   `AgentConverges` check that it cannot commit.
