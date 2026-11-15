@@ -539,7 +539,10 @@ fn the_job_store_in_postgres_is_stamped_with_the_clock_it_is_given() {
     let url = database.url();
     let scratch = Scratch::new("store_pg_jobs_clock");
     let mut args = job_host_args(&scratch);
-    args.extend(["--store".into(), store_file(&scratch, &url).into_os_string()]);
+    args.extend([
+        "--store".into(),
+        store_file(&scratch, &url).into_os_string(),
+    ]);
     let clock = Arc::new(ManualClock::default());
     clock.advance(Duration::from_secs(42));
     let ids = Arc::new(ScriptedIds::new([7; 16], []));
