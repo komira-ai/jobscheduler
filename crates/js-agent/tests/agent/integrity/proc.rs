@@ -50,6 +50,13 @@ impl FileReader for Host {
     fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
         Err(format!("{}: not recorded", path.display()))
     }
+
+    fn facts(&self, path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
+        Err(std::io::Error::other(format!(
+            "{}: not recorded",
+            path.display()
+        )))
+    }
 }
 
 impl DirLister for Host {

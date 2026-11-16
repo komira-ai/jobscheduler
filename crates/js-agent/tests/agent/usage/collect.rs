@@ -39,6 +39,10 @@ impl FileReader for Shared {
     fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
         self.0.borrow().is_tmpfs(path)
     }
+
+    fn facts(&self, path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
+        self.0.borrow().facts(path)
+    }
 }
 
 /// A clock the test sets.

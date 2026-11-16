@@ -274,7 +274,7 @@ fn busy(
 }
 
 /// What the unit manager says of a unit, in the three ways that matter here.
-pub(super) enum Life {
+pub(crate) enum Life {
     /// `active`.
     Up,
     /// `activating`, `reloading` and the like: on its way up, or waiting to restart.
@@ -285,7 +285,7 @@ pub(super) enum Life {
     Down,
 }
 
-pub(super) fn life(state: &UnitState) -> Life {
+pub(crate) fn life(state: &UnitState) -> Life {
     match state.active.as_str() {
         "active" => Life::Up,
         "inactive" | "failed" => Life::Down,

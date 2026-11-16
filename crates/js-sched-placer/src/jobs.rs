@@ -117,6 +117,7 @@ use super::whole_jobs::{WholeJobStep, WholeJobs};
 use super::{Engine, Placed, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
+use crate::sizes::{bounds_of, day_of};
 
 /// The network level a job's policy asks for.
 pub fn job_network(policy: NetworkPolicy) -> JobNetwork {
@@ -386,7 +387,10 @@ impl Engine {
         if hold {
             self.sched.hold_matches();
         }
-        let walkers: Vec<Walker> = queued.iter().filter_map(walker).collect();
+        self.sizes.set_bounds(bounds_of(self.capacities()));
+        let day = day_of(now);
+        let sized = queued.iter().map(|job| self.sizes.sized(job, day));
+        let walkers: Vec<Walker> = sized.filter_map(|job| walker(&job)).collect();
         let usable: Vec<BTreeSet<&HostId>> = walkers
             .iter()
             .map(|walker| {
@@ -490,6 +494,7 @@ impl Engine {
             Some((lease, host)) => {
                 let placed = Placed { lease, operation };
                 self.hold_job(&walker.job, &host, walker.host_ports.clone(), placed);
+                self.sizes.placed(&walker.job, walker.booked);
                 Some(host)
             }
             None => {
@@ -685,6 +690,7 @@ impl SchedPlacer {
     ) -> Result<Vec<JobId>, JobStoreError> {
         let tables = self.tables(jobs)?;
         let (live, queued, marks) = (&tables.live, &tables.queued, &tables.marks);
+        self.learn_freed(jobs, live);
         let now = self.now();
         let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();

@@ -177,7 +177,7 @@ fn the_unit_expands_with_a_flags_file_to_a_command_line_the_agent_parses() {
         cli.instance_file.as_deref(),
         Some(Path::new("/etc/js-agent/instance"))
     );
-    assert_eq!(cli.host_id.as_deref(), Some("node-5"));
+    assert_eq!(cli.host.host_id.as_deref(), Some("node-5"));
     assert!(js_agent::crun_host::flags(&cli).is_ok());
 }
 

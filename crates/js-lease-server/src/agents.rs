@@ -269,6 +269,7 @@ fn placed_in(
                 &job_sources,
             )?;
             restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
+            let _ = crate::job_sizes::learn(&placer, &opened.jobs);
             (Some(opened.jobs), Some(opened.feed), Some(opened.store))
         }
         None => (None, None, None),
