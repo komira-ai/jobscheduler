@@ -503,7 +503,12 @@ impl Rig {
             "capabilities": { "per-job": "true", "arch": "x86_64" },
             "phase": "serving",
         });
-        let body = Bytes::from(serde_json::to_vec(&hello).unwrap());
+        self.hello_body_result(&hello).await
+    }
+
+    /// The route's answer to the hello `hello`, as sent.
+    pub(crate) async fn hello_body_result(&self, hello: &serde_json::Value) -> Result<(), Refused> {
+        let body = Bytes::from(serde_json::to_vec(hello).unwrap());
         serve_hello(&self.agents, self.who.clone(), None, Ok(body), &|| ())
             .await
             .map(drop)
@@ -552,7 +557,7 @@ impl Rig {
     }
 
     /// The shape the rig's hosts announce: eight cores, 16 GiB and the pool's GPUs.
-    fn shape(&self) -> serde_json::Value {
+    pub(crate) fn shape(&self) -> serde_json::Value {
         let mut shape = json!({
             "cpu_millis": 8000,
             "memory_bytes": 17179869184u64,

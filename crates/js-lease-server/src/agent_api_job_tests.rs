@@ -428,6 +428,32 @@ async fn a_heartbeat_of_a_host_this_server_holds_no_connection_for_is_refused() 
     );
 }
 
+// A hello that fails validation (a label the agent may not set) is refused 400 before the
+// registry or the store is asked, and the host's next valid hello is admitted. It catches a hello
+// that reaches the registry unchecked, and a refusal that leaves the host unable to say hello
+// again.
+#[tokio::test]
+async fn a_hello_that_fails_validation_is_refused_before_anything_is_written() {
+    let rig = rig("hello_invalid", true);
+    let hello = serde_json::json!({
+        "host_id": "host-a",
+        "pool": "burst",
+        "agent_version": "0.1.0",
+        "shape": rig.shape(),
+        "capabilities": { "per-job": "true", "arch": "x86_64" },
+        "labels": { "jobscheduler.dev/owner": "agent" },
+        "phase": "serving",
+    });
+    let refused = rig.hello_body_result(&hello).await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (400, "reserved-label")
+    );
+    rig.hello_result("host-a")
+        .await
+        .expect("the next valid hello is admitted");
+}
+
 // A store that cannot write the connection refuses the hello with 503 `state-write-failed`, so
 // the agent says hello again, and a store that cannot read the row refuses the heartbeat as a
 // failed write, not as a mismatch. It catches a host welcomed by a server that cannot serve it.
