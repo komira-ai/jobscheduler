@@ -665,6 +665,22 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         })
     }
 
+    /// The version of every host's reservation row ([`JobStore::place_reserving`]), by host.
+    /// A pass reads it before the allocations it decides from, so that a placement made
+    /// after the read, by anyone, fails the pass's own placement on that host.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Store`].
+    pub fn host_books(&self) -> Result<BTreeMap<HostId, Version>, JobStoreError> {
+        let rows = self.store.scan_prefix(keys::HOSTBOOK)?;
+        // A key whose host part is not a host id is not one of this build's rows: left out.
+        let books = rows.into_iter().filter_map(|(key, row)| {
+            let host = HostId::new(key.trim_start_matches(keys::HOSTBOOK));
+            host.ok().map(|host| (host, row.version))
+        });
+        Ok(books.collect())
+    }
+
     /// What the live (booked and releasing) allocations on `host` book, summed. It reads
     /// the rows of the host's on-host entries and the allocation rows this build cannot read.
     ///

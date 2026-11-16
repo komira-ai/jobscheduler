@@ -40,6 +40,7 @@ use js_jobs::{
     AllocationRecord, IdSource, JobId, JobRecord, JobStore, JobStoreError, MarkRecord, Written,
 };
 use js_registry::WholeNodeConfig;
+use js_state::Version;
 use js_types::HostId;
 
 use super::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics};
@@ -70,6 +71,9 @@ pub(crate) struct Tables {
     pub(crate) queued: Vec<JobRecord>,
     /// Every mark ([`JobStore::marks`]).
     pub(crate) marks: Vec<MarkRecord>,
+    /// The version of each host's reservation row ([`JobStore::host_books`]), read before the
+    /// allocations, so a placement made after them is not in the picture and fails a commit.
+    pub(crate) books: BTreeMap<HostId, Version>,
 }
 
 /// The job tables a pass read, with where the job store's writes stood before the read.
@@ -175,7 +179,11 @@ impl SchedPlacer {
             return Ok(Arc::clone(tables));
         }
         *kept = None;
+        // The versions first: a placement that lands between the two reads is in the
+        // allocations but not in the versions, which only makes the pass lose a commit.
+        let books = jobs.host_books()?;
         let tables = Arc::new(Tables {
+            books,
             live: jobs.live_allocations()?,
             queued: jobs.queued()?,
             marks: jobs.marks()?,
