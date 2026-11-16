@@ -532,6 +532,8 @@ fn the_checks_keep_the_range_the_runtime_opened_with() {
         uid,
         start: 900,
         cgroup: "0::/machine.slice/libpod-9e1.scope".to_owned(),
+        comm: "leftover".to_owned(),
+        state: 'S',
     };
     edited.start_process(leftover(730, 900_005));
     let clean = js_agent::lifecycle::Finished {

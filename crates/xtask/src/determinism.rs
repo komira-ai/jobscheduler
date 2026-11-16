@@ -736,6 +736,13 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the crun runtime's wall clock, the default of its Seams; the cell's real agents run the in-memory runtime",
     },
     Allowed {
+        file: "crates/js-agent/src/lifecycle/machine/clear.rs",
+        item: "Lifecycle::finish_taint_clear",
+        token: Token::SystemTimeNow,
+        sites: 1,
+        reason: "the time in the name of the kept taint marker (`taint.json.cleared-<unix seconds>`, as an operator's clear names it); no decision reads it",
+    },
+    Allowed {
         file: "crates/js-agent/src/native/mod.rs",
         item: "system_clock",
         token: Token::SystemTimeNow,

@@ -10,6 +10,9 @@ use js_agent_wire::Taint;
 
 use super::{Harness, job, names};
 
+/// The wait of a lifecycle that was not given one: `DEFAULT_SETTLE`, one second.
+const SETTLE_MS: u64 = 1000;
+
 /// The taint of a run the agent could not see.
 fn blind(run_id: &str) -> Taint {
     Taint {
@@ -35,6 +38,7 @@ fn a_run_whose_group_was_never_seen_taints_the_host() {
         "one sighting is not blindness: {first:?}"
     );
     assert!(!h.life.is_tainted());
+    h.clock.advance(SETTLE_MS);
     let events = names(&h.life.step());
     assert!(
         events.contains(&"tainted r1 unchecked".to_owned()),
@@ -163,6 +167,73 @@ fn a_runtime_with_no_groups_of_its_own_is_never_blind_for_lack_of_one() {
     let mut h = Harness::new("no-cgroup-promise");
     h.start(job("r1"));
     h.fake.exit("r1", 0);
+    h.life.step();
+    assert!(!h.life.is_tainted());
+    assert_eq!(h.life.pending_taint(), None);
+}
+
+/// Asserts that steps that follow one another with no time between them are not blindness:
+/// a run seen running with no group at ten steps in a row at one instant taints nothing, one
+/// millisecond short of the wait still taints nothing, and the step at the wait taints once.
+/// It catches a blindness rule that counts steps: the worker steps again at once after every
+/// order, so a burst of starts made the host "blind" to a run that had only just ended.
+#[test]
+fn steps_with_no_time_between_them_are_not_blindness() {
+    let mut h = Harness::new("blind-steps-at-once");
+    h.fake.promise_cgroups(true);
+    h.start(job("r1"));
+    for _ in 0..10 {
+        let events = names(&h.life.step());
+        assert!(
+            !events.iter().any(|event| event.starts_with("tainted")),
+            "{events:?}"
+        );
+    }
+    h.clock.advance(SETTLE_MS - 1);
+    h.life.step();
+    assert!(!h.life.is_tainted(), "a millisecond short of the wait");
+    h.clock.advance(1);
+    let events = names(&h.life.step());
+    assert!(
+        events.contains(&"tainted r1 unchecked".to_owned()),
+        "{events:?}"
+    );
+    assert_eq!(h.life.pending_taint(), Some(blind("r1")));
+}
+
+/// Asserts that the wait is the one the lifecycle was given (`--settle-ms`): with five
+/// seconds, four seconds after the first sighting taint nothing and five do. It catches a
+/// wait that is a constant of the code.
+#[test]
+fn the_blindness_wait_is_the_one_given() {
+    let mut h = Harness::new("blind-wait-given");
+    h.life = h.life.with_blind_wait(std::time::Duration::from_secs(5));
+    h.fake.promise_cgroups(true);
+    h.start(job("r1"));
+    h.life.step();
+    h.clock.advance(4_999);
+    h.life.step();
+    assert!(!h.life.is_tainted());
+    h.clock.advance(1);
+    h.life.step();
+    assert!(h.life.is_tainted());
+}
+
+/// Asserts that a run that ends within the wait taints nothing however many steps saw it
+/// without a group: it is the ended run of a container that exited at once, read as running
+/// until its end is read. It catches the taint of the host on the one-second-old run that was
+/// done before the agent could name its group.
+#[test]
+fn a_run_that_ends_within_the_wait_is_not_blind_however_often_it_was_seen() {
+    let mut h = Harness::new("ends-within-wait");
+    h.fake.promise_cgroups(true);
+    h.start(job("r1"));
+    for _ in 0..5 {
+        h.life.step();
+    }
+    h.clock.advance(SETTLE_MS - 1);
+    h.fake.exit("r1", 0);
+    h.life.step();
     h.life.step();
     assert!(!h.life.is_tainted());
     assert_eq!(h.life.pending_taint(), None);
