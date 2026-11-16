@@ -109,6 +109,7 @@ fn check_heartbeat_changes_nothing() {
     let expected = HeartbeatCheck {
         host: host("a"),
         taint: Some(report("residue")),
+        cleared: false,
     };
     assert_eq!(check, expected);
     assert_eq!(snapshot(&fx), before);

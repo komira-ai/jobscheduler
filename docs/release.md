@@ -327,10 +327,10 @@ everything after the image in `docker run` is the server's flags: either the fla
   nothing about a lock: a Postgres store has none.
 
 **Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
-`/readyz` 503 `draining` at once, stops accepting, gives the requests in flight `--drain-timeout`
-(`10s` by default) to finish, cuts what is still open, ticks once more and exits 0. Give the engine a
-stop timeout longer than `--drain-timeout` plus that last tick, for example
-`docker stop --time 30` with the default drain, so the engine's `SIGKILL` never cuts the drain. A
+`/readyz` 503 `draining` at once and keeps serving for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed; then it stops
+accepting, gives the requests in flight `--drain-timeout` (`10s` by default) to finish, cuts what is
+still open, ticks once more and exits 0. Give the engine a stop timeout longer than `--drain-hold`
+plus `--drain-timeout` plus that last tick, for example `docker stop --time 40` with the defaults, so the engine's `SIGKILL` never cuts the drain. A
 signal while the server waits for the lock or starts ends it at once with status 0, without taking
 the lock.
 

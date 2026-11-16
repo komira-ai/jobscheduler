@@ -96,3 +96,26 @@ async fn an_orderly_shutdown_runs_a_final_tick() {
     let ended = JobState::FailedToStart(StartFailure::NoCapacity);
     assert_eq!(jobs.get_job(&id).unwrap().unwrap().state, ended);
 }
+
+/// Whether `running.hold()` returns before an always-ready future does (a hold that is not
+/// held), without any clock: the first branch is polled first.
+async fn hold_returns_at_once(running: &Running) -> bool {
+    tokio::select! {
+        biased;
+        () = running.hold() => true,
+        () = std::future::ready(()) => false,
+    }
+}
+
+/// Asserts that a stop on a termination signal is held: `hold` makes the readiness route say
+/// `draining` at once and then does not return (the default hold of 15 s is far from over),
+/// so the listeners are still open. It catches a stop that closes at the signal, and a
+/// readiness route that keeps saying `ready` while the server waits to stop.
+#[tokio::test]
+async fn a_termination_is_held_with_the_readiness_route_draining() {
+    let (running, _jobs, _id, _dir) = started("hold_signal").await;
+    assert_eq!(running.gate.phase(), crate::ready::Phase::Ready);
+    assert!(!hold_returns_at_once(&running).await);
+    assert_eq!(running.gate.phase(), crate::ready::Phase::Draining);
+    running.shutdown().await.unwrap();
+}

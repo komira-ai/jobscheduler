@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use js_agent_wire::{Heartbeat, Hello, InstanceIdentity};
+use js_agent_wire::{Heartbeat, Hello, InstanceIdentity, Taint};
 use js_elastic::HostName;
 use js_registry::{Binding, Cordoned, Credential, OsSessions, Registry, Uncordoned};
 use js_types::Clock;
@@ -62,7 +62,7 @@ pub(crate) struct Agents {
     pub(crate) limiter: HelloLimiter,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
-    store: BindingStore,
+    pub(crate) store: BindingStore,
     /// The gate every change of the bindings and of the join tokens' uses goes through, held
     /// from the change's commit until the registry has taken it (or its undo is committed): a
     /// hello, the taint of a heartbeat, a cordon or its lift, and the save of each tick. So
@@ -532,11 +532,12 @@ impl Agents {
         Ok(())
     }
 
-    /// Makes the taint `heartbeat` would record durable before the registry records it
-    /// ([`Registry::check_heartbeat`]): the host's binding with the taint is committed under
-    /// [`Agents::host_writes`], whose guard is returned for the caller to hold until the
-    /// registry has recorded the beat. Nothing when the beat would record no taint, or the
-    /// registry refuses it (the beat is then refused the same).
+    /// Makes the taint `heartbeat` would record, or the clearing of the host's taint it
+    /// reports, durable before the registry records it
+    /// ([`Registry::check_heartbeat`]): the host's binding with the taint (none for a clear)
+    /// is committed under [`Agents::host_writes`], whose guard is returned for the caller to
+    /// hold until the registry has recorded the beat. Nothing when the beat would record no
+    /// taint and clear none, or the registry refuses it (the beat is then refused the same).
     ///
     /// # Errors
     ///
@@ -550,13 +551,31 @@ impl Agents {
         let Ok(check) = self.registry.check_heartbeat(heartbeat, who) else {
             return Ok(None);
         };
-        let Some(taint) = check.taint else {
+        if check.taint.is_none() && !check.cleared {
             return Ok(None);
-        };
+        }
         let gate = self.host_writes.lock().await;
-        self.keep(&check.host, |bound| bound.with_taint(Some(taint)))
-            .await?;
+        self.keep_taint(&check.host, check.taint).await?;
         Ok(Some(gate))
+    }
+
+    /// Commits the binding of `host` with `taint` (none for a clear), when the registry holds
+    /// one, as [`Agents::keep`] does, but only if the store still holds the taint the registry
+    /// holds ([`BindingStore::commit_taint`]): a taint another server reported or cleared is
+    /// refused, not overwritten. The caller holds [`Agents::host_writes`].
+    async fn keep_taint(self: &Arc<Self>, host: &HostId, taint: Option<Taint>) -> io::Result<()> {
+        let held = self.registry.bindings().remove(host);
+        let expected = held.as_ref().and_then(|bound| bound.taint().cloned());
+        let change = held.map(|bound| self.store.change(host, bound.with_taint(taint)));
+        let this = Arc::clone(self);
+        let change = blocking(move || {
+            let commit = |change| this.store.commit_taint(change, expected.as_ref());
+            change.as_ref().map_or(Ok(()), commit)?;
+            Ok::<_, io::Error>(change)
+        })
+        .await?;
+        change.iter().for_each(|change| self.store.applied(change));
+        Ok(())
     }
 
     /// Cordons `host` for `lease` (see [`Registry::cordon`]). With the store the cordon is

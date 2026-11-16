@@ -190,3 +190,81 @@ async fn a_start_refused_as_host_tainted_taints_the_host_and_is_written() {
     let text = fs::read_to_string(agent_file(&h)).unwrap();
     assert!(text.contains("taint_reason = \"host-tainted\""), "{text}");
 }
+
+/// Asserts the clear end to end, with the bindings in files and in the store: a tainted host
+/// that reports its taint cleared is acknowledged, `GET /v1/hosts` shows no taint, the
+/// bindings hold none, a job is refused while it is tainted and starts on it after the clear (the only host),
+/// and after a restart it is not put back tainted (the clear survived). A cleared report of
+/// a taint other than the held one changes nothing. It catches a server that forgets the
+/// taint in memory only (a restart would bring it back), one that clears a taint the report
+/// does not name, and one that never lets a host out of a taint.
+#[tokio::test]
+async fn a_taint_the_agent_reports_cleared_ends_and_stays_ended() {
+    for kept in Kept::BOTH {
+        a_taint_reported_cleared_ends_in(kept).await;
+    }
+}
+
+async fn a_taint_reported_cleared_ends_in(kept: Kept) {
+    let first = placing_server("host_taint_cleared", kept).await;
+    let me = job_agent(&first, &cpu_hello("burst-1")).await;
+    let held = json!({ "reason": "residue", "run_id": "run-1-1", "check": "daemonised-child" });
+    let reply = beat_with(&first, &me, json!({ "taint": held })).await;
+    assert_eq!(reply["taint_ack"], true);
+    let refused = submit_body(&first, &JobBody::new("before-clear").json()).await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+
+    let other = json!({ "reason": "residue", "run_id": "run-1-2", "check": "daemonised-child" });
+    let reply = beat_with(&first, &me, json!({ "taint_cleared": other })).await;
+    assert_eq!(reply["taint_cleared_ack"], true);
+    assert_eq!(reply["taint_ack"], false);
+    assert_eq!(entry(&hosts(&first).await, "burst-1")["taint"], held);
+
+    let reply = beat_with(&first, &me, json!({ "taint_cleared": held })).await;
+    assert_eq!(reply["taint_cleared_ack"], true);
+    assert_eq!(entry(&hosts(&first).await, "burst-1").get("taint"), None);
+    let text = kept_bindings(&first);
+    assert_eq!(text.matches("taint_reason").count(), 0, "{text}");
+    submit_job(&first, "after-clear").await;
+    first.ticks.step().await;
+    let reply = beat_with(&first, &me, json!({})).await;
+    let (starts, _) = commands(&reply);
+    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    assert_eq!(jobs, ["after-clear"], "{reply}");
+
+    let h = restarted_placing(first).await;
+    let listing = hosts(&h).await;
+    assert!(
+        listing["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|host| host.get("taint").is_none()),
+        "{listing}"
+    );
+}
+
+/// Asserts that a clear that cannot be written is not acknowledged: the beat's reply has no
+/// `taint_cleared_ack` (the agent reports the clear again), and once the file can be written
+/// the next report is acknowledged and the file holds no taint. It catches an agent told it
+/// is cleared by a server that a restart would taint again.
+#[tokio::test]
+async fn a_clear_is_not_acknowledged_before_it_can_be_written() {
+    let h = placing_server("host_taint_clear_write", Kept::Files).await;
+    let me = job_agent(&h, &cpu_hello("burst-1")).await;
+    let held = json!({ "reason": "residue" });
+    beat_with(&h, &me, json!({ "taint": held })).await;
+    let blocker = h.scratch.path("leases.toml.agents.tmp");
+    fs::create_dir(&blocker).unwrap();
+
+    let reply = beat_with(&h, &me, json!({ "taint_cleared": held })).await;
+    assert_eq!(reply.get("taint_cleared_ack"), None, "{reply}");
+    assert_eq!(reply["taint_ack"], false);
+
+    fs::remove_dir(&blocker).unwrap();
+    h.ticks.step().await;
+    let reply = beat_with(&h, &me, json!({ "taint_cleared": held })).await;
+    assert_eq!(reply["taint_cleared_ack"], true);
+    let text = fs::read_to_string(agent_file(&h)).unwrap();
+    assert!(!text.contains("taint_reason"), "{text}");
+}

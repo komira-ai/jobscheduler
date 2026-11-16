@@ -60,6 +60,7 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
+//! | `--drain-hold` | how long after SIGTERM or ctrl-c the server keeps serving, its readiness route already answering 503 `draining`, before the stop begins, `15s`, at least `1ms` |
 //! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given; not used with `--store`, which keeps them in the store. Needs agent registration to have anything to keep. Not with `--usage-off` |
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
@@ -99,7 +100,7 @@
 //! # connection itself); allow_sqlite_store (false): refused as true without store
 //! # store_unreachable_after ("60s"): the flag's name, default and rules
 //! # tick, handshake_timeout, header_timeout, read_timeout,
-//! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
+//! # write_timeout, drain_timeout, drain_hold, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
 //! # max_lease_wall: the ceiling on the wall time of the work a host takes; none by default,
@@ -481,7 +482,7 @@
 //! | request | answers |
 //! |---|---|
 //! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted` (with `"reason"`: `below-floor`, the host's shape, labels or capabilities do not meet the pool's; `quota-default-unfit`, the pool names `scratch-quota` and the host's scratch default is absent, zero or above the pool's `disk_bytes`; or `quota-without-pool-disk`, the host enforces a scratch quota and the pool books no disk and does not name `scratch-quota`; a server logs the refusal with the host id, the code and the reason), `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable`, or `state-write-failed` when, with a store setting, the host's binding could not be committed |
-//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack}` (see "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
+//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack, taint_cleared_ack?}` (see "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
 //! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; body optional, `{"lease_secs": n}` (default 300, cut to 3600); 400 `invalid-cordon`; 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
 //! | `POST /v1/hosts/{id}:uncordon` | as the cordon, with no body: 200 the host, plus `lifted`; 200 also when it was not cordoned |
 //! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, mark?, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}`; `mark` is `reserved`, `held`, `draining` or `releasing` as in the `mark` of `GET /v1/hosts`, and absent for a host that is not set aside (a host is idle when `lease` is absent, `leases` is 0, `releasing` is false and `mark` is absent) |
@@ -547,12 +548,21 @@
 //! toward `max_machines`, is never forgotten for being silent, and keeps its taint across its own
 //! hello and a server restart (the `.agents` file or the store holds it, see "Restart"). The runs
 //! it already holds finish: their stops are sent, their results are acknowledged, and the budget
-//! returns when the host stops listing them. Nothing clears a taint: an operator stops the server
-//! and removes the `taint_` keys of the host's entry in the `.agents` file (or of its value in the
-//! store). A job with host isolation taints its host when its placement commits (reason `host-job`,
-//! `run_id` the job's id; `docs/runbooks/host-jobs.md`), and its own start is still sent.
+//! returns when the host stops listing them. A taint ends in one way: the agent's own heartbeat
+//! reports it cleared (`taint_cleared`: the agent re-checked an idle host twice, see its
+//! `--taint-recheck-ms`). The server clears the host's taint when `taint_cleared` equals the
+//! taint it holds, field for field, commits the binding without it first (as for a report), and
+//! answers `taint_cleared_ack: true` (not `taint_ack`, which answers a taint report, so that a late acknowledgement of the report cannot end the agent's taint before the server has heard of the clear), so the agent stops sending it; a cleared report of any other
+//! taint (a host job's, say) changes nothing and is acknowledged all the same. A start refused
+//! `host-tainted` in the beat that reports the clear taints nothing: those results predate it.
+//! Otherwise an operator stops the server and removes the `taint_` keys of the host's entry in the
+//! `.agents` file (or of its value in the store). A job with host isolation taints its host when
+//! its placement commits (reason `host-job`, `run_id` the job's id; `docs/runbooks/host-jobs.md`),
+//! and its own start is still sent. An agent that cleared a taint stays tainted for the server
+//! until it is acknowledged, so a server that does not know the field (an older release) leaves
+//! the agent tainted: roll the servers out before the agents.
 //!
-//! **Not built.** Clearing a taint, several pools, a deny list of host ids.
+//! **Not built.** Several pools, a deny list of host ids.
 //!
 //! # Limits
 //!
@@ -652,7 +662,8 @@
 //! at every tick of its [`Ticker`] (a timer of `--tick` in production); `/healthz` answers
 //! 503 once the loop has stopped, or while the store paths have failed for
 //! `--store-unreachable-after`. On SIGTERM or ctrl-c the server (with `--ready-listen`, its
-//! readiness route answering 503 `draining` from now on) stops accepting, gives the
+//! readiness route answering 503 `draining` from now on) keeps serving for `--drain-hold`
+//! (`15s`), so a proxy that polls the route takes it out of rotation first, then stops accepting, gives the
 //! requests in flight `--drain-timeout` to finish (a connection still open then is cut),
 //! ticks once more and exits 0. A second signal while it drains is not needed: the drain is
 //! bounded. A SIGTERM or ctrl-c that arrives before the start is done (with or without

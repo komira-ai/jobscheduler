@@ -78,7 +78,10 @@
 //!   server sends everything again.
 //! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
 //!   session clears it from a reply to a heartbeat that did not, so the worker never
-//!   marks as told a taint the server was not told.
+//!   marks as told a taint the server was not told. A `taint_cleared_ack` counts only when the
+//!   heartbeat it answers carried the cleared taint, for the same reason: the acknowledgement
+//!   of a taint report that was in flight when the agent began to clear it must not end the
+//!   taint before the server has heard of the clear.
 //! - Every welcome and every reply the session accepts (decoded, after a success) is
 //!   contact: the session stamps it on the worker's clock ([`Worker::heard`]) before it
 //!   hands the reply over, so a reply the worker had no room for counts too. The worker's
@@ -463,6 +466,9 @@ pub struct Session<'a> {
     store: Option<&'a dyn CredentialStore>,
     /// The last heartbeat sent carried the taint: only an answer to it can acknowledge it.
     carried: bool,
+    /// The last heartbeat sent carried the cleared taint: only an answer to it can acknowledge
+    /// the clear.
+    carried_clear: bool,
     /// The worker's queue had no reader when a reply was handed to it.
     worker_gone: bool,
     /// Where the free scratch disk is read from, when the agent has a volume to read.
@@ -496,6 +502,7 @@ impl<'a> Session<'a> {
             usage: None,
             store: None,
             carried: false,
+            carried_clear: false,
             worker_gone: false,
             disk: None,
             told: None,
@@ -669,6 +676,7 @@ impl<'a> Session<'a> {
         let published = self.jobs.as_ref().map(|jobs| jobs.worker.snapshot());
         let snapshot = published.unwrap_or_default();
         self.carried = snapshot.taint.is_some();
+        self.carried_clear = snapshot.taint_cleared.is_some();
         snapshot
     }
 
@@ -718,6 +726,7 @@ impl<'a> Session<'a> {
             held: jobs.held,
             results: jobs.results,
             taint: jobs.taint,
+            taint_cleared: jobs.taint_cleared,
             exclusive_ready: lease.ready,
             exclusive_refused: lease.refused,
             load,
@@ -891,6 +900,7 @@ impl<'a> Session<'a> {
         };
         let reply = HeartbeatReply {
             taint_ack: reply.taint_ack & self.carried,
+            taint_cleared_ack: reply.taint_cleared_ack & self.carried_clear,
             ..reply
         };
         match reply == HeartbeatReply::default() {

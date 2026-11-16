@@ -36,7 +36,8 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   sent only by an agent started with `--identity-source aws` or `gce`, absent otherwise; no server reads it yet).
 - `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `host_credential`. Over HTTP the welcome is
   bare (200) and a refusal is the API's `{"error", "supported", "field"}` body; `HelloReply` is the transport-neutral form.
-- `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `exclusive_ready`,
+- `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `taint_cleared` (the taint the agent
+  cleared itself, until `taint_ack`; `docs/design/taint-self-clearing.md`), `exclusive_ready`,
   `exclusive_refused`, `load` (`NodeLoad`, telemetry: a malformed one reads as absent), `disk_gib`, and the per-job lists `jobs`
   (`HeldJob`, each with its `JobResult`) and `retired_jobs`.
 - `HeartbeatReply`: `commands`, `result_acks` (`ResultAck`), `taint_ack`, `exclusive`, and the per-job lists `job_acks`
