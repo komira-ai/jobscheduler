@@ -162,6 +162,7 @@ where
     a_store_an_earlier_build_wrote_reads_its_whole_queue_after_an_open(backend);
     a_queued_job_stays_under_the_active_space_an_earlier_build_reads(backend);
     every_write_moves_the_written_mark_and_no_read_does(backend);
+    another_job_stores_write_moves_the_written_mark_where_the_store_tells_its_head(backend);
     marks_are_additive_to_an_existing_store(backend);
     a_mark_round_trips_with_its_exclusions_and_made(backend);
     a_mark_keeps_a_later_builds_field_only_on_its_host(backend);
@@ -294,6 +295,7 @@ macro_rules! job_store_tests {
             a_store_an_earlier_build_wrote_reads_its_whole_queue_after_an_open,
             a_queued_job_stays_under_the_active_space_an_earlier_build_reads,
             every_write_moves_the_written_mark_and_no_read_does,
+            another_job_stores_write_moves_the_written_mark_where_the_store_tells_its_head,
             marks_are_additive_to_an_existing_store,
             a_mark_round_trips_with_its_exclusions_and_made,
             a_mark_keeps_a_later_builds_field_only_on_its_host,

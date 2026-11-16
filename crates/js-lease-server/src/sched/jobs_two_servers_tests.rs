@@ -57,9 +57,11 @@ fn serve(placer: &SchedPlacer, jobs: &ServerJobs, rounds: usize) {
 
 /// Two servers whose registries both hold the hosts `host-a` and `host-b` (8 cores each) place
 /// 24 one-core jobs queued in the one store, from two threads, at once. Every placed job is on
-/// one host and has one allocation, no host books more than its 8 cores, and what is left
-/// queued is queued. It catches two servers that place one job twice (each from its own picture
-/// of the queue), and two servers that each give a host its last cores.
+/// one host and has one allocation, no host books more than its 8 cores, the 16 cores are all
+/// booked once each server has read what the other wrote, and what is left queued is queued. It
+/// catches two servers that place one job twice (each from its own picture of the queue), two
+/// servers that each give a host its last cores, and a server that never sees what the other
+/// wrote (its cached tables), which leaves cores unbooked while jobs wait.
 #[test]
 fn two_servers_place_each_job_once_and_never_book_a_host_past_its_cores() {
     let database = test_database();
@@ -77,6 +79,10 @@ fn two_servers_place_each_job_once_and_never_book_a_host_past_its_cores() {
         scope.spawn(|| serve(&placer_a, &first, 6));
         scope.spawn(|| serve(&placer_b, &second, 6));
     });
+    // Each server reads again what the other wrote, so the passes that follow fill what is
+    // left: nothing waits for a write of the server's own.
+    serve(&placer_a, &first, 2);
+    serve(&placer_b, &second, 2);
 
     let mut per_host: BTreeMap<String, u64> = BTreeMap::new();
     let mut placed = 0;
@@ -95,7 +101,10 @@ fn two_servers_place_each_job_once_and_never_book_a_host_past_its_cores() {
             other => panic!("{id} is {other:?}"),
         }
     }
-    assert!(placed > 0, "nothing was placed");
+    assert_eq!(
+        placed, 16,
+        "every core of the two hosts is booked, and no more"
+    );
     for name in ["host-a", "host-b"] {
         let booking = first.booked_on(&host(name)).unwrap();
         assert!(booking.cpu_millis <= 8000, "{name} books {booking:?}");
