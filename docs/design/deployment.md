@@ -127,9 +127,10 @@ job tables and the bindings in a database, with conditional writes (the `js-stat
 - **Restart.** A restart reads both files and takes a new term; nothing is rebuilt from elsewhere. Soft state is rebuilt by the agents:
   the facts of each host (5.13) come back at the next hello.
 - **The state database.** The Postgres store a server is given (`--store`, `server.store`: a file holding the connection URL)
-  holds the writer lock and the writer generation, the host bindings and join-token digests, and the scaler's records and hosts to
-  remove. The server takes the lock before it reads anything else and holds it for its life, and its
-  first start over an empty store imports the files that kept that state, once. The role, the
+  holds the host bindings and join-token digests, and the scaler's records and hosts to remove. It has no writer lock and no
+  writer generation: any number of servers open it and serve at once, each decision a transaction that holds for all of them, so
+  an update may start the new server before it stops the old one. The first start over an empty store imports the files that
+  kept that state, once. The role, the
   URL file, backups, restores and the checks after a restore are in the
   [state-database runbook](../runbooks/state-database.md).
 - **Loss of the volume** is a loss of the jobs. With `--boot resume` the pod refuses to start where a records file is required and missing; an operator restores the
