@@ -34,6 +34,7 @@ mod steps_cleanup;
 mod steps_cutover;
 mod steps_cutover_cordon;
 mod steps_cutover_launchd;
+mod steps_helper;
 mod steps_prepare;
 mod steps_prepare_cordon;
 mod steps_prepare_supersede;

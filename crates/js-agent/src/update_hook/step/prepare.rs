@@ -210,7 +210,7 @@ pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
 /// The staged agent runs and is the version the order names; if it lists its runtimes, the
 /// required one (`crun` for the Linux unit, `native` for the Mac one) is among them.
 fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
-    let binary = agent_in(&params.staged_release);
+    let binary = agent_in(env.manager, &params.staged_release);
     let printed = env
         .runner
         .run(&binary.to_string_lossy(), &["--version"])

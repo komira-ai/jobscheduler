@@ -16,6 +16,7 @@ fn settings() -> Settings {
     Settings {
         state_dir: PathBuf::from("/var/lib/js-agent-update"),
         unit: UNIT.to_owned(),
+        helper_unit: None,
         runtime: "crun".to_owned(),
         timeouts: Timeouts {
             prepare: 3900,

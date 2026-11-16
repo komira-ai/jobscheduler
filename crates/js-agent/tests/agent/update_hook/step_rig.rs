@@ -16,8 +16,9 @@ use js_agent::CommandRunner;
 use js_agent::lifecycle::StateRoot;
 use js_agent::update_hook::step::{self, Env, TokenFacts, TokenFn};
 use js_agent::update_hook::{
-    Clock, Cordoned, DirStat, Done, Gate, HostReading, Lease, LeaseError, Link, Manager, Params,
-    PortError, Ports, Record, SYSTEMCTL, StateView, Uncordoned, UnitState, Units, UpdateInfo,
+    Clock, Cordoned, DirStat, Done, Gate, HostReading, LAUNCHCTL, Lease, LeaseError, Link, Manager,
+    Params, PortError, Ports, Record, SYSTEMCTL, StateView, Uncordoned, UnitState, Units,
+    UpdateInfo, agent_in,
 };
 use js_agent_wire::Taint;
 use js_testkit::dir::TestDir;
@@ -28,6 +29,8 @@ use super::fakes::{START_MS, World};
 pub const UNIT: &str = "js-agent-crun.service";
 /// The launchd label of the agent on a Mac: the service's name, as hostkeeper requires.
 pub const MAC_UNIT: &str = "js-agent";
+/// The launchd label of the agent's root helper on a Mac.
+pub const MAC_HELPER: &str = "js-agent.session";
 pub const HOST: &str = "burst-1";
 pub const LEASE_SECS: u64 = 300;
 pub const MAX_SECS: u64 = 17_355;
@@ -133,16 +136,28 @@ impl Rig {
     /// The same update on a Mac: the launchd label for the unit, the params naming the
     /// `native` runtime, and an agent whose hello says `sandbox-exec`.
     pub fn mac(name: &str) -> Rig {
-        Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT))
+        Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), false)
+    }
+
+    /// The same update on a Mac whose package carries a root helper job: the releases are
+    /// native package trees (`tree/`), each with the plists of the agent and of the helper, and
+    /// the params name the helper.
+    pub fn mac_with_helper(name: &str) -> Rig {
+        Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), true)
+    }
+
+    /// The first install on a Mac whose package carries a helper job.
+    pub fn mac_first_install_with_helper(name: &str) -> Rig {
+        Rig::build_for(name, false, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), true)
     }
 
     /// The first install on a Mac.
     pub fn mac_first_install(name: &str) -> Rig {
-        Rig::build_for(name, false, LEASE_SECS, MAX_SECS, Some(MAC_UNIT))
+        Rig::build_for(name, false, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), false)
     }
 
     fn build(name: &str, previous: bool, lease_secs: u64, max_secs: u64) -> Rig {
-        Rig::build_for(name, previous, lease_secs, max_secs, None)
+        Rig::build_for(name, previous, lease_secs, max_secs, None, false)
     }
 
     fn build_for(
@@ -151,6 +166,7 @@ impl Rig {
         lease_secs: u64,
         max_secs: u64,
         mac: Option<&str>,
+        helper: bool,
     ) -> Rig {
         let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
         let root = tmp.path().to_owned();
@@ -163,15 +179,29 @@ impl Rig {
         let unit = mac.unwrap_or(UNIT);
         let text = if mac.is_some() { PLIST_TEXT } else { UNIT_TEXT };
         for release in [&staged, &old] {
-            fs::create_dir_all(release.join("bin")).unwrap();
-            fs::create_dir_all(release.join("units")).unwrap();
-            fs::write(release.join("units").join(manager.file_name(unit)), text).unwrap();
+            if helper {
+                let jobs = release.join("tree/Library/LaunchDaemons");
+                fs::create_dir_all(&jobs).unwrap();
+                fs::write(jobs.join(manager.file_name(unit)), text).unwrap();
+                fs::write(jobs.join(manager.file_name(MAC_HELPER)), text).unwrap();
+            } else {
+                fs::create_dir_all(release.join("bin")).unwrap();
+                fs::create_dir_all(release.join("units")).unwrap();
+                fs::write(release.join("units").join(manager.file_name(unit)), text).unwrap();
+            }
         }
-        fs::write(staged.join("bin/js-agent"), BINARY).unwrap();
+        let binary = agent_in(manager, &staged);
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(binary, BINARY).unwrap();
         fs::create_dir_all(root.join("state")).unwrap();
         let runtime = if mac.is_some() { "native" } else { "crun" };
         let token = root.join("token");
         fs::write(&token, "tok-0123456789\n").unwrap();
+        let helper_line = if helper {
+            format!("helper_unit = \"{MAC_HELPER}\"\n")
+        } else {
+            String::new()
+        };
         let previous = if previous {
             format!(
                 "\"updater.previous_release\" = \"{}\"\n\"updater.previous_version\" = \"1.3.0\"\n",
@@ -186,7 +216,7 @@ impl Rig {
             concat!(
                 "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n{release_link}",
                 "drain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n",
-                "unit = \"{unit}\"\nstate_dir = \"{root}/state\"\nruntime = \"{runtime}\"\n",
+                "unit = \"{unit}\"\n{helper_line}state_dir = \"{root}/state\"\nruntime = \"{runtime}\"\n",
                 "flags_file = \"{root}/flags\"\ntoken_file = \"{token}\"\n",
                 "state_root = \"{root}/world/state\"\n",
                 "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\n",
@@ -205,6 +235,7 @@ impl Rig {
             previous = previous,
             release_link = release_link,
             unit = unit,
+            helper_line = helper_line,
             root = root.display(),
             runtime = runtime,
             token = token.display(),
@@ -585,7 +616,11 @@ impl Units for Spy<'_> {
 
     fn stop_no_block(&self, unit: &str) -> Result<(), PortError> {
         self.act(format!("units.stop({unit})"));
-        self.port_check("stop")?;
+        self.port_check(if unit == MAC_HELPER {
+            "stop-helper"
+        } else {
+            "stop"
+        })?;
         match *self.stop_leaves.borrow() {
             Some((active, sub)) => {
                 self.world.seed_unit(unit, active, sub);
@@ -597,6 +632,12 @@ impl Units for Spy<'_> {
 
     fn start(&self, unit: &str) -> Result<(), PortError> {
         self.act(format!("units.start({unit})"));
+        if unit == MAC_HELPER {
+            // The helper says no hello: it only runs (or does not, when the test says so).
+            self.port_check("start")?;
+            self.world.seed_unit(unit, "active", "running");
+            return Ok(());
+        }
         let leaves = *self.start_leaves.borrow();
         if let Some((active, sub)) = leaves {
             self.world.seed_unit(unit, active, sub);
@@ -691,6 +732,16 @@ impl Clock for Spy<'_> {
 impl CommandRunner for Spy<'_> {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         self.push(format!("run({program} {})", args.join(" ")));
+        if program == LAUNCHCTL {
+            // Only the helper's bootstrap is run through the runner: the plist is the file the
+            // release carries, and the job is loaded (not yet running) when it is bootstrapped.
+            let plist = args.last().copied().unwrap_or("");
+            self.act(format!("launchctl.bootstrap({plist})"));
+            if self.fail.borrow().contains("bootstrap") {
+                return Err("bootstrap is down".to_owned());
+            }
+            return Ok(String::new());
+        }
         if program == SYSTEMCTL {
             return self
                 .tasks

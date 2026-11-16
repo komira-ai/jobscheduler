@@ -19,7 +19,7 @@ use js_testkit::dir::TestDir;
 use super::unit_conformance::{Exit, Launchctl, Service, Then, plist_of};
 use crate::support::FakeCommands;
 
-const LABEL: &str = "com.komira.js-agent";
+const LABEL: &str = "js-agent";
 
 fn print_line(label: &str) -> String {
     format!("{LAUNCHCTL} print system/{label}")
@@ -35,7 +35,7 @@ fn world() -> Launchctl {
 fn show_prints_the_service_of_the_system_domain_and_reads_its_state() {
     let tool = FakeCommands::default().with(
         &print_line(LABEL),
-        Ok("system/com.komira.js-agent = {\n\tstate = running\n}\n"),
+        Ok("system/js-agent = {\n\tstate = running\n}\n"),
     );
     let state = LaunchUnits::new(&tool).show(LABEL).unwrap();
     assert_eq!(

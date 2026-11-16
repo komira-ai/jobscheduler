@@ -27,6 +27,9 @@
 //!    `DelegateSubgroup` layout starts from an empty cgroup (`KillMode=process` leaves strays
 //!    behind); a cgroup still busy at the same bound ends `unit_not_empty`, class environment.
 //!    launchd's `bootout` already empties the job;
+//!    With a `helper_unit` in the params (a Mac package's root helper, see `helper`), the helper
+//!    is booted out after the agent is down and bootstrapped from the staged release's tree
+//!    and started before the agent's start is marked;
 //! 5. the record gets `link_moved` (kept under its name: the link was moved by the updater and
 //!    this is the mark that the start is next, and for a first install the commit), then
 //!    `start_issued`, then the unit is started and waited for. A start that fails is the
@@ -52,6 +55,7 @@ use crate::update_hook::{
     Params, Reason, Record, Report, START_WAIT_SECS, SYSTEMCTL, UnitState,
 };
 
+use super::helper;
 use super::prepare::{ask_secs, place, refuse_host, renew};
 use super::{Env, failure, lease_failure, open_state, save, success};
 
@@ -132,6 +136,12 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         }
     }
     mark_link_moved(env, held, record)?;
+    // The helper starts before the agent, which dials it; a rerun that finds the start issued
+    // has done this already.
+    if !record.start_issued {
+        let staged = record.update.staged.clone();
+        helper::replace(env, held, record, params, &staged)?;
+    }
     start(env, held, record, params)?;
     Ok(success())
 }
@@ -507,25 +517,36 @@ pub(super) fn bring_up(
     params: &Params,
 ) -> Result<(), Done> {
     let unit = record.update.unit.clone();
-    let state = show(env, &unit, Reason::StartFailed)?;
+    bring_up_unit(env, held, record, params, &unit)
+}
+
+/// [`bring_up`] for the unit `unit`, which is the agent's or its helper's.
+pub(super) fn bring_up_unit(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+    unit: &str,
+) -> Result<(), Done> {
+    let state = show(env, unit, Reason::StartFailed)?;
     if matches!(life(&state), Life::Down | Life::Stopping) {
         env.ports.point();
-        env.ports.units.start(&unit).map_err(|why| {
-            start_failure(env, &unit, format!("cannot start {unit}: {why}"), false)
+        env.ports.units.start(unit).map_err(|why| {
+            start_failure(env, unit, format!("cannot start {unit}: {why}"), false)
         })?;
     }
     let bound_ms = START_WAIT_SECS * 1000;
     let began = env.ports.clock.now_ms();
     let mut seen_crash = false;
     loop {
-        let state = show(env, &unit, Reason::StartFailed)?;
+        let state = show(env, unit, Reason::StartFailed)?;
         seen_crash |= state.crashed();
         match life(&state) {
             Life::Up => return Ok(()),
             Life::Down | Life::Stopping => {
                 return Err(start_failure(
                     env,
-                    &unit,
+                    unit,
                     format!("{unit} is {} after it was started", state.active),
                     seen_crash,
                 ));
@@ -535,7 +556,7 @@ pub(super) fn bring_up(
         if env.ports.clock.now_ms().saturating_sub(began) >= bound_ms {
             return Err(start_failure(
                 env,
-                &unit,
+                unit,
                 format!("{unit} is still {} after {START_WAIT_SECS} s", state.active),
                 seen_crash,
             ));

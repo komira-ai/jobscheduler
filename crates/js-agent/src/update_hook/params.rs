@@ -9,6 +9,9 @@
 //! - `unit`, `state_dir`, `runtime` and the five `*_timeout_secs` and `verify_deadline_secs`:
 //!   the [`Settings`] (the unit the hook manages, its record's directory, the runtime the agent
 //!   must have, and the updater's bound on each step);
+//! - `helper_unit` (optional, launchd only): the label of the agent's root helper job, which the
+//!   package's release tree carries as `tree/Library/LaunchDaemons/<helper_unit>.plist`; the hook
+//!   boots it out and bootstraps it again with each agent start (a file name: no `/`);
 //! - `release_link`: hostkeeper's `current` link of the package, which the hook only reads;
 //! - `flags_file`: the host's own agent flags (the file `js-agent --flags-file` reads), where
 //!   the hook finds the lease server, the certificate to trust and the host id;
@@ -85,6 +88,9 @@ pub const FLAGS_FILE_KEY: &str = "flags_file";
 
 /// The key of the unit the hook manages.
 pub const UNIT_KEY: &str = "unit";
+
+/// The key of the launchd job of the agent's root helper (optional).
+pub const HELPER_UNIT_KEY: &str = "helper_unit";
 
 /// The key of the directory of the hook record.
 pub const STATE_DIR_KEY: &str = "state_dir";
@@ -185,6 +191,10 @@ pub enum ParamsError {
     /// `unit` is empty.
     #[error("params key {0:?} must not be empty")]
     Empty(String),
+    /// `helper_unit` is not a plain file name: it becomes part of the path of the helper's plist
+    /// in the release tree.
+    #[error("params key {0:?} must be a plain file name: not empty, not . or .., no /")]
+    NotFileName(String),
     /// `runtime` is not one of the runtimes an agent has.
     #[error("runtime {0:?} is not one of crun, docker, native")]
     UnknownRuntime(String),
@@ -332,6 +342,13 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
     if unit.is_empty() {
         return Err(ParamsError::Empty(UNIT_KEY.to_owned()));
     }
+    let helper_unit = string_of(table, HELPER_UNIT_KEY)?;
+    if helper_unit
+        .as_deref()
+        .is_some_and(|name| matches!(name, "" | "." | "..") || name.contains('/'))
+    {
+        return Err(ParamsError::NotFileName(HELPER_UNIT_KEY.to_owned()));
+    }
     let runtime = string_of(table, RUNTIME_KEY)?.ok_or(ParamsError::Missing(RUNTIME_KEY))?;
     if !RUNTIMES.contains(&runtime.as_str()) {
         return Err(ParamsError::UnknownRuntime(runtime));
@@ -356,6 +373,7 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
     Ok(Settings {
         state_dir,
         unit,
+        helper_unit,
         runtime,
         timeouts,
         verify_deadline_secs,
