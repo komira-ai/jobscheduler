@@ -22,6 +22,13 @@ pub const MARK: &str = "mark/";
 /// `idx/` space names it.
 pub const TAINT: &str = "taint/";
 
+/// `hostbook/<host>`: the reservation row of a host. Every placement made through
+/// [`crate::JobStore::place_claimed`] writes it in the transaction that places the job, at the
+/// version that transaction read, so a reader that works from a picture of the host sees it
+/// move. Its value is the allocation id of the last placement and means nothing else: the
+/// allocation rows decide what is booked.
+pub const HOSTBOOK: &str = "hostbook/";
+
 /// `meta/jobs/schema`: the schema version of the job, allocation and mark rows, four bytes,
 /// big-endian, written once by the first store to open.
 pub const SCHEMA: &str = "meta/jobs/schema";
@@ -48,6 +55,12 @@ pub fn mark(id: &JobId) -> String {
 #[must_use]
 pub fn taint(host: &HostId) -> String {
     format!("{TAINT}{host}")
+}
+
+/// The key of the reservation row of `host`.
+#[must_use]
+pub fn hostbook(host: &HostId) -> String {
+    format!("{HOSTBOOK}{host}")
 }
 
 /// `idx/`: the secondary key spaces. Each entry is a key with an empty value, written in the

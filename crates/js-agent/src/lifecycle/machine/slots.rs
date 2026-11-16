@@ -86,6 +86,12 @@ impl Slots {
         self.quarantined.insert(slot);
     }
 
+    /// Brings `slot` back into use: the host was found clean again after the check that
+    /// quarantined it (see `clear`). A slot that was not quarantined is left as it is.
+    pub fn unquarantine(&mut self, slot: u32) {
+        self.quarantined.remove(&slot);
+    }
+
     /// Parks `slot`: no run takes it until [`Slots::unpark`]. A quarantined slot stays
     /// quarantined.
     pub fn park(&mut self, slot: u32) {

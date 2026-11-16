@@ -310,38 +310,22 @@ async fn an_agent_without_job_listing_gets_todays_reply() {
     assert_eq!(serde_json::to_string(&reply).unwrap(), today);
 }
 
-/// A commit the store answers with `Fenced` (this process is no longer its writer) is a 503
-/// `state-fenced`, not a 500, writes nothing, and from then on every heartbeat, a host without
-/// the per-job capability included, is refused the same way before the store is touched. It
-/// catches a fenced store taken for a failed commit that the next heartbeat retries, and a
-/// server that goes on serving agents after it.
+/// A commit the store fails is a 500 `state-write-failed`, writes nothing, and the next
+/// heartbeat, which the store answers, is served: the failure is not remembered. It catches
+/// a failed commit that ends the server's serving of agents.
 #[tokio::test]
-async fn a_fenced_store_refuses_every_heartbeat_after_it() {
-    let mut rig = rig("fenced_heartbeat", true);
+async fn a_failed_listing_commit_is_a_500_and_the_next_heartbeat_is_served() {
+    let mut rig = rig("failed_heartbeat", true);
     rig.register("host-a", true);
-    rig.register("host-b", false);
     let mut agent = FakeAgent::new("host-a");
     let id = rig.place("job-a", "host-a");
     agent.take(&rig.beat(&agent).await.unwrap());
-    rig.store.fail_with(js_state::StoreError::Fenced);
     rig.store.fail_next();
     let refused = rig.beat(&agent).await.unwrap_err();
     assert_eq!(
         (refused.status.as_u16(), refused.error),
-        (503, "state-fenced")
+        (500, "state-write-failed")
     );
-    assert!(rig.agents.fence.is_tripped());
     assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
-
-    // The store would answer now; the refusal does not depend on it.
-    let before = rig.commits();
-    for host in ["host-a", "host-b"] {
-        let refused = rig.beat(&FakeAgent::new(host)).await.unwrap_err();
-        assert_eq!(
-            (refused.status.as_u16(), refused.error),
-            (503, "state-fenced")
-        );
-    }
-    assert_eq!(rig.commits(), before);
-    assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
+    assert!(rig.beat(&agent).await.is_ok());
 }

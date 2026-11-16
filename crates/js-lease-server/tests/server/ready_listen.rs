@@ -13,7 +13,7 @@ use std::process::Stdio;
 use js_lease_server::{
     Config, Running, SharedClock, StartupError, channel_ticker, start, start_waiting,
 };
-use js_state::{WriterLock, WriterTarget};
+use js_state::WriterLock;
 use js_types::ManualClock;
 use rustix::process::{Pid, Signal, kill_process};
 use tokio::net::TcpStream;
@@ -146,7 +146,7 @@ async fn a_ready_address_in_use_is_refused_naming_the_flag() {
     );
     let flag = config(args.clone()).unwrap();
     assert_eq!(refused(started(flag).await).0, "--ready-listen");
-    let target = WriterTarget::Sqlite(sqlite_db(&scratch));
+    let target = sqlite_db(&scratch);
     drop(WriterLock::acquire(&target).expect("the refused start left the lock free"));
     let mut bind_first = config(args).unwrap();
     assert_eq!(
@@ -240,6 +240,27 @@ async fn the_route_is_ready_while_serving_and_draining_from_the_stop_until_it_cl
     assert!(TcpStream::connect(ready).await.is_err());
 }
 
+/// Asserts a server over a SQLite store with the route on, whose file lock is free: it opens the
+/// store at its first try, without waiting, and serves, the route answering 200 `ready`, and its
+/// lock is held until it stops. It is the start of the harness the other tests use (a ticker the
+/// test steps), over a store and a route together. It catches a start that waits on a lock
+/// nothing holds, and one that leaves the lock free while serving.
+#[tokio::test]
+async fn a_route_over_a_free_store_lock_serves_at_once_and_holds_the_lock() {
+    let scratch = Scratch::new("ready_listen_free_lock");
+    let target = sqlite_db(&scratch);
+    let mut config = config(waiting_args(&scratch)).unwrap();
+    let ready = config.bind_ready().unwrap().unwrap();
+    let h = crate::support::Harness::over(scratch, config).await;
+    assert_eq!(readyz(ready).await, (200, "ready".to_owned()));
+    assert!(
+        WriterLock::acquire(&target).is_err(),
+        "the running server holds the lock"
+    );
+    h.running.shutdown().await.unwrap();
+    drop(WriterLock::acquire(&target).expect("the stopped server let the lock go"));
+}
+
 /// Asserts a server that waits: while another holder has the store's writer lock the route
 /// answers 503 with the waiting body, the store is not opened, the state file not made and
 /// the wait is logged once however many tries it takes; when the holder lets go and the
@@ -250,7 +271,7 @@ async fn the_route_is_ready_while_serving_and_draining_from_the_stop_until_it_cl
 async fn a_server_waits_for_a_held_lock_and_serves_when_it_is_released() {
     let scratch = Scratch::new("ready_listen_wait");
     let logs = LogCapture::start();
-    let target = WriterTarget::Sqlite(sqlite_db(&scratch));
+    let target = sqlite_db(&scratch);
     let held = WriterLock::acquire(&target).unwrap();
     let mut config = config(waiting_args(&scratch)).unwrap();
     let ready = config.bind_ready().unwrap().unwrap();
@@ -289,7 +310,7 @@ async fn a_server_waits_for_a_held_lock_and_serves_when_it_is_released() {
 #[tokio::test]
 async fn a_waiting_server_binds_no_other_listener_until_it_has_the_lock() {
     let scratch = Scratch::new("ready_listen_order");
-    let target = WriterTarget::Sqlite(sqlite_db(&scratch));
+    let target = sqlite_db(&scratch);
     let held = WriterLock::acquire(&target).unwrap();
     let listen = taken_address();
     let at = listen.local_addr().unwrap().to_string();
@@ -347,7 +368,7 @@ async fn a_lock_that_cannot_be_tried_is_refused_not_waited_for() {
 #[tokio::test]
 async fn without_a_route_a_held_lock_refuses_the_start_at_once() {
     let scratch = Scratch::new("ready_listen_off");
-    let target = WriterTarget::Sqlite(sqlite_db(&scratch));
+    let target = sqlite_db(&scratch);
     let _held = WriterLock::acquire(&target).unwrap();
     let config = config(store_args(
         &scratch,
@@ -404,7 +425,7 @@ async fn a_second_server_with_a_route_waits_for_the_first_and_takes_over() {
 #[tokio::test]
 async fn sigterm_to_a_waiting_server_exits_0_without_the_lock() {
     let scratch = Scratch::new("ready_proc_term_waiting");
-    let target = WriterTarget::Sqlite(sqlite_db(&scratch));
+    let target = sqlite_db(&scratch);
     let held = WriterLock::acquire(&target).unwrap();
     let (mut child, lines) = spawn(&waiting_args(&scratch), Stdio::null());
     let ready = address_in(&lines.next(), "ready on ");

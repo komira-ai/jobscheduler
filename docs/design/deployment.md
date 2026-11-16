@@ -80,8 +80,8 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
 - **Resources.** Requests of 250m CPU and 256 MiB of memory, a memory limit equal to the request and no CPU limit (a CPU limit throttles
   the tick). These are starting values, not measurements: the table is held in memory and written whole, so the memory follows the lease
   count, and the first deployment records the real numbers.
-- **Shutdown.** `terminationGracePeriodSeconds` exceeds `--drain-timeout` (merged, default 10 s) by the length of a tick. On `SIGTERM` the
-  server stops accepting, answers the requests in flight and exits; the state is durable before every answer, so nothing waits to be
+- **Shutdown.** `terminationGracePeriodSeconds` exceeds `--drain-hold` (default 15 s) plus `--drain-timeout` (merged, default 10 s) by the length of a tick. On `SIGTERM` the
+  server answers `/readyz` 503 at once, keeps serving for `--drain-hold`, then stops accepting, answers the requests in flight and exits; the state is durable before every answer, so nothing waits to be
   flushed.
 - **PodDisruptionBudget.** With one replica, any voluntary eviction is an outage. `minAvailable: 1` makes an automated node drain (a node
   upgrade, a scale-down) wait for a person, who deletes the pod at a moment of their choosing, not one in the middle of a whole-node
@@ -92,7 +92,7 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
 
 Today the state of the service is files on local disk, beside each other, named after `--state-file`: the **binding file** (`<state file>.agents`, which credential and instance each
 registered host id was admitted with, and the taint and the cordon it holds), the **job store** (`<state file>.jobs`, a SQLite file
-holding every job and allocation, opened when the job service is on), and their lock files. The server no longer has a **lease file**: it never opens, locks, reads, writes or deletes one. A lease file left by an earlier release is ignored and stays as it was, so a rollback to that release reads it as it was left (its table and the term it takes are those of the file, not of anything the newer server did). `--boot initialise` and `--boot resume` are still accepted; they decide whether this is the first start and whether the records files are required, and `--boot resume` without a lease file starts. The six crash-safety rules below were written for the lease file. The atomic replace (1), the single writer (3) and the additive reading (6) still hold for the binding file; rules 2, 4 and 5 went with the lease table:
+holding every job and allocation, opened when the job service is on and there is no `--store`; with `--store` it is rows of the Postgres store and no file is made), and their lock files. The server no longer has a **lease file**: it never opens, locks, reads, writes or deletes one. A lease file left by an earlier release is ignored and stays as it was, so a rollback to that release reads it as it was left (its table and the term it takes are those of the file, not of anything the newer server did). `--boot initialise` and `--boot resume` are still accepted; they decide whether this is the first start and whether the records files are required, and `--boot resume` without a lease file starts. The six crash-safety rules below were written for the lease file. The atomic replace (1), the single writer (3) and the additive reading (6) still hold for the binding file; rules 2, 4 and 5 went with the lease table:
 
 1. **Atomic replace.** A change is written to a temporary file next to the target, fsynced, renamed over it, and the directory is
    fsynced, so a reader sees the old file or the new one and a crash loses neither.

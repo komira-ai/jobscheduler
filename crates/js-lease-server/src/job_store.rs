@@ -10,12 +10,18 @@
 //!
 //! # The backend
 //!
-//! The store is a `js-state` SQLite file beside the state file, `<state file>.jobs`: the
-//! single-node development backend. It moves into the shared store when the server's state
-//! does. The file is the server user's and owner-only (mode 0600), as the agent side's files
-//! beside it are: it holds the jobs' specs, which may carry secrets. A file already there is
-//! kept and made owner-only. SQLite's own files beside it (`-wal`, `-shm`) take the file's
-//! mode, and the store's lock (`.lock`) is owner-only too.
+//! With a state store (`--store`, `server.store`) the tables are rows of that store, the one
+//! the host bindings and the join tokens are in, so Postgres is the one place the server's
+//! state is. A file `<state file>.jobs` of an earlier start without the setting is not read
+//! or changed: the first start over the store begins with an empty job store, and the file
+//! stays where it was as a backup.
+//!
+//! Without a state store the backend is a `js-state` SQLite file beside the state file,
+//! `<state file>.jobs`: the single-node development backend. The file is the server user's
+//! and owner-only (mode 0600), as the agent side's files beside it are: it holds the jobs'
+//! specs, which may carry secrets. A file already there is kept and made owner-only.
+//! SQLite's own files beside it (`-wal`, `-shm`) take the file's mode, and the store's lock
+//! (`.lock`) is owner-only too.
 
 use std::fs::{OpenOptions, Permissions};
 use std::io;
@@ -119,8 +125,9 @@ pub(crate) struct Opened {
 /// The suffix of the job store's file, after the state file's name.
 pub(crate) const SUFFIX: &str = ".jobs";
 
-/// Opens the job store beside the state file `state_file`, as `setup` says, on the clock and
-/// id source of `sources`, and raises its
+/// Opens the job store in the state store `kept` when there is one, else in a file beside
+/// the state file `state_file`, as `setup` says, on the clock and id source of `sources`, and
+/// raises its
 /// deadlines for this boot in one transaction ([`JobStore::raise_at_boot`]) before the server
 /// ticks or serves; the same transaction replaces the file contents a row of an ended job
 /// still holds (one an earlier build ended) by their digests. A file that
@@ -128,19 +135,18 @@ pub(crate) const SUFFIX: &str = ".jobs";
 /// process holding it, a file that is not a state store) is a refused start naming the flag
 /// of the job service's address.
 pub(crate) fn open(
-    state_file: &Path,
+    (state_file, kept): (&Path, Option<Arc<dyn Store>>),
     setup: JobStoreSetup,
     sources: &JobSources,
 ) -> Result<Opened, StartupError> {
-    let path = state_path(state_file, SUFFIX);
-    if let Err(err) = owner_only(&path) {
-        let reason = format!("{}: {err}", path.display());
-        return Err(StartupError::new(setup.flag, reason));
-    }
-    let clock = Arc::clone(&sources.clock);
-    let store = SqliteStore::open(&path, clock, Options::default())
-        .map_err(StartupError::because(setup.flag))?;
-    let store: Arc<dyn Store> = Arc::new(store);
+    let (store, home) = match kept {
+        Some(store) => (store, "the state store".to_owned()),
+        None => {
+            let path = state_path(state_file, SUFFIX);
+            let store = open_file(&path, setup, sources)?;
+            (store, path.display().to_string())
+        }
+    };
     let boot = store.now();
     let feed = FeedTrim::new(Arc::clone(&store), setup.feed_retention);
     let jobs = JobStore::new(Arc::new(Arc::clone(&store)), sources.ids.clone())
@@ -151,7 +157,7 @@ pub(crate) fn open(
     let raised = jobs
         .raise_at_boot(boot)
         .map_err(StartupError::because(setup.flag))?;
-    info!(file = %path.display(), raised, "the job store is open");
+    info!(home, raised, "the job store is open");
     Ok(Opened {
         jobs: Arc::new(
             jobs.with_retention(setup.retention)
@@ -160,6 +166,22 @@ pub(crate) fn open(
         feed,
         store,
     })
+}
+
+/// Opens the SQLite file at `path`, made owner-only first, as the job store's backend.
+fn open_file(
+    path: &Path,
+    setup: JobStoreSetup,
+    sources: &JobSources,
+) -> Result<Arc<dyn Store>, StartupError> {
+    if let Err(err) = owner_only(path) {
+        let reason = format!("{}: {err}", path.display());
+        return Err(StartupError::new(setup.flag, reason));
+    }
+    let clock = Arc::clone(&sources.clock);
+    let store = SqliteStore::open(path, clock, Options::default())
+        .map_err(StartupError::because(setup.flag))?;
+    Ok(Arc::new(store))
 }
 
 /// Makes the file at `path` (creating it empty when it is missing) owner-only.
@@ -203,7 +225,7 @@ mod tests {
     fn the_store_is_opened_once_beside_the_state_file_with_its_retention() {
         let dir = scratch("opened");
         let state = dir.path().join("leases.toml");
-        let jobs = open(&state, setup(259_200), &JobSources::default())
+        let jobs = open((&state, None), setup(259_200), &JobSources::default())
             .unwrap()
             .jobs;
         assert!(dir.path().join("leases.toml.jobs").is_file());
@@ -212,7 +234,7 @@ mod tests {
             jobs.allocation_retention(),
             setup(259_200).allocation_retention
         );
-        let second = open(&state, setup(259_200), &JobSources::default())
+        let second = open((&state, None), setup(259_200), &JobSources::default())
             .err()
             .unwrap();
         assert_eq!(second.flag(), "--job-listen");
@@ -227,7 +249,7 @@ mod tests {
     fn opening_the_store_raises_the_deadlines_for_the_boot() {
         let dir = scratch("boot");
         let state = dir.path().join("leases.toml");
-        let jobs = open(&state, setup(60), &JobSources::default())
+        let jobs = open((&state, None), setup(60), &JobSources::default())
             .unwrap()
             .jobs;
         let id = js_jobs::JobId::parse("job-q").unwrap();
@@ -241,13 +263,13 @@ mod tests {
         assert_eq!(queued.deadline_floor, None);
         drop(jobs);
         let floor = |jobs: &ServerJobs| jobs.get_job(&id).unwrap().unwrap().deadline_floor;
-        let reopened = open(&state, setup(60), &JobSources::default())
+        let reopened = open((&state, None), setup(60), &JobSources::default())
             .unwrap()
             .jobs;
         let first = floor(&reopened).unwrap();
         assert!(first >= queued.submitted_at.saturating_add(js_jobs::BOOT_GRACE));
         drop(reopened);
-        let again = open(&state, setup(60), &JobSources::default())
+        let again = open((&state, None), setup(60), &JobSources::default())
             .unwrap()
             .jobs;
         assert!(floor(&again).unwrap() >= first);
@@ -260,7 +282,7 @@ mod tests {
         let dir = scratch("directory");
         let state = dir.path().join("leases.toml");
         std::fs::create_dir(dir.path().join("leases.toml.jobs")).unwrap();
-        let refused = open(&state, setup(60), &JobSources::default())
+        let refused = open((&state, None), setup(60), &JobSources::default())
             .err()
             .unwrap();
         assert_eq!(refused.flag(), "--job-listen");
@@ -279,7 +301,7 @@ mod tests {
             b"this is not a SQLite database, and it is long enough",
         )
         .unwrap();
-        let refused = open(&state, setup(60), &JobSources::default())
+        let refused = open((&state, None), setup(60), &JobSources::default())
             .err()
             .unwrap();
         assert_eq!(refused.flag(), "--job-listen");

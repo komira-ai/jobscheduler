@@ -1,20 +1,18 @@
 # Releasing js-lease-server, js, js-agent, js-bundle, js-mdm and the Mac host tools
 
 Releases are continuous. Nobody tags, and nothing is run by hand: every push to `main` that
-changes code that ships is released as the next version, after the jobs of `ci` other than `macos` have passed on it.
+changes code that ships is released as the next version, after the jobs of `ci` have passed on it.
 
 ## What happens on each merge to main
 
 1. `ci` runs on the push, as for any push, and the `release` workflow (`.github/workflows/release.yml`)
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
-2. `ci-passed` waits for the jobs of the `ci` run of that commit, all but the one named `macos` (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
-   and passes when every other job succeeded or was skipped, even while `macos` is still queued or after it failed.
-   If any other job failed, was cancelled or timed out, the release fails with an error naming those jobs and the `ci`
+2. `ci-passed` waits for the jobs of the `ci` run of that commit (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
+   and passes when every job succeeded or was skipped.
+   If any job failed, was cancelled or timed out, the release fails with an error naming those jobs and the `ci`
    run, and nothing is released. It holds `actions: read` and nothing else, and checks out no code.
-   A release therefore does not wait for macOS `ci`: that job queues for hours on the hosted macOS runners, so
-   main's own macOS run is the backstop (a failure there is fixed forward), and the release's own `aarch64-apple-darwin`
-   build still runs on a Mac (below).
+   `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a).
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
 4. The `artifacts` job calls `.github/workflows/artifacts.yml` with that version; its jobs run in
@@ -37,7 +35,9 @@ changes code that ships is released as the next version, after the jobs of `ci` 
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
    commit), uploads the archives, the Debian packages, the images, their bundles and `SHA256SUMS` to
    it, and publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a
-   Debian package or an image without its bundle.
+   Debian package or an image without its bundle. It leaves the macOS archives (`*-aarch64-apple-darwin.tar.gz`) out: step 6a adds them.
+
+6a. The beta stage, the platforms other than Linux x86_64, runs after `artifacts` and beside `publish` and everything after it (nothing of the Linux files, the Debian packages, the apt repository, `gamma` or the control-plane deploy waits for it). On the hosted `macos-15` runners it runs three jobs, each calling a workflow that holds `contents: read` and no secret: `beta-macos` (`beta.yml`: the workspace's tests on Apple silicon, all but the Linux-only crates js-contain, js-host-step and js-mdm), `beta-macos-pkg` (`js-agent-macos-pkg.yml`: the unsigned installer package of the agent, built and read back, kept as a workflow artifact for seven days) and `beta-macos-probe` (`macos-probe.yml`: what the native runtime relies on, probed on the runner). When the three and `publish` succeeded, `promote-macos` (`contents: write` alone, no repository code) adds the macOS archives to the published release; an archive the release already has must equal this run's byte for byte and is kept. `SHA256SUMS` lists them from the start, so until they are added `sha256sum -c --ignore-missing SHA256SUMS` is the check. A beta job that fails leaves the release without the macOS archives and the run red; fix forward, then re-run the failed jobs and `promote-macos` adds them. Following the owner's rule, a pull request runs none of this (`cargo test -p xtask --test pr_linux_only`): a pull request that changes `release.yml` runs `plan` as a dry run on Linux x86_64 and builds nothing, since `artifacts.yml`'s build matrix names the arm64 and macOS runners.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
@@ -309,7 +309,7 @@ everything after the image in `docker run` is the server's flags: either the fla
 
 | What | Mode in the container | Why |
 |---|---|---|
-| the directory of `--state-file` | read-write, owned by `65532` | the server writes `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and, unless `--usage-db` puts it elsewhere, `usage.db` beside them. This is the state that must outlive the container |
+| the directory of `--state-file` | read-write, owned by `65532` | the server writes `<path>.agents`, `<path>.joins`, `<path>.scaler`, and, without `--store`, `<path>.jobs` and, unless `--usage-db` puts it elsewhere, `usage.db` beside them (with `--store` the job store and the usage rows are in the database). This is the state that must outlive the container |
 | `--usage-db`'s directory, when it is not that one | read-write, owned by `65532` | the usage file |
 | `--token-file`, `--client-token` files, `--agent-token-file`, `--store`, `--tls-key` | read-only, owned by `65532`, mode 0600 or 0400 | the server refuses a secret file that is not owner-only. For `--tls-key` a symbolic link, as secret mounts make, is followed and the file it leads to is checked |
 | `--agent-pool-config` or `--config`, `--tls-cert` | read-only | |
@@ -318,29 +318,32 @@ everything after the image in `docker run` is the server's flags: either the fla
 **Readiness and health.** Two routes answer two questions:
 
 - `GET /readyz` on `--ready-listen`: 503 `waiting for the store's writer lock` while another process
-  holds it, 503 `starting` until every listener serves, 200 `ready`, then 503 `draining` from SIGTERM
+  holds a SQLite store's file lock (a Postgres store has none), 503 `starting` until every listener serves, 200 `ready`, then 503 `draining` from SIGTERM
   until the process exits. Route traffic to a container only while it answers 200. With
-  `--ready-listen` and a store, a server whose store's writer lock is held waits for it instead of
-  exiting, so a replacement can be started before the old process has let the lock go.
+  `--ready-listen` and a SQLite store, a server whose store's file lock is held waits for it instead of
+  exiting. Over Postgres a replacement is started before the old process stops and both serve.
 - `GET /healthz` on `--listen`: 200 `ok` while the tick loop runs; 503 `tick loop stopped`, or 503
   `store unreachable` once the store paths have failed for `--store-unreachable-after`. It says
-  nothing about the writer lock.
+  nothing about a lock: a Postgres store has none.
 
 **Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
-`/readyz` 503 `draining` at once, stops accepting, gives the requests in flight `--drain-timeout`
-(`10s` by default) to finish, cuts what is still open, ticks once more and exits 0. Give the engine a
-stop timeout longer than `--drain-timeout` plus that last tick, for example
-`docker stop --time 30` with the default drain, so the engine's `SIGKILL` never cuts the drain. A
+`/readyz` 503 `draining` at once and keeps serving for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed; then it stops
+accepting, gives the requests in flight `--drain-timeout` (`10s` by default) to finish, cuts what is
+still open, ticks once more and exits 0. Give the engine a stop timeout longer than `--drain-hold`
+plus `--drain-timeout` plus that last tick, for example `docker stop --time 40` with the defaults, so the engine's `SIGKILL` never cuts the drain. A
 signal while the server waits for the lock or starts ends it at once with status 0, without taking
 the lock.
 
 **Exit status.** 0 after a stop. 2 when the start is refused: a bad flag or file, the store
-unreachable, or (without `--ready-listen`) another process holding the store's writer lock. Do not
+unreachable, or (without `--ready-listen`, on SQLite) another process holding the store's file lock. Do not
 restart a container in a loop on 2: the same flags are refused again. 1 when the server stops on its
-own while running, such as when it loses the store's writer lock.
+own while running.
 
-**One writer per store.** Two servers never serve one store at once: the writer lock lets one in.
-With `--ready-listen`, a second server waits and answers 503 until the first lets the lock go.
+**Servers per store.** Over Postgres any number of servers serve one store at once (one in steady state,
+two while an update starts the new server before it stops the old): none is the leader, and the store's
+transactions keep them from placing one job twice or over-booking a host. A SQLite store is written by one
+process: its file lock lets one in, and with `--ready-listen` a second server waits and answers 503 until the
+first lets the lock go.
 
 An example, with the server on the host's network, its state in `/var/lib/js-lease-server` and its
 flags in a file under `/etc/js-lease-server`, run by the image ID `docker load` printed (the manifest's digest on an engine with the containerd image store):
@@ -560,11 +563,12 @@ until it is set.
   counts from.
 - **Branch protection for `main`**: require a pull request. A push to `main` that passes `ci` is a
   release, so whoever can push to `main` can cut one. The workflow does not depend on this, but the
-  guarantee that a release is a reviewed change does. Its required status checks include the two
-  macOS checks every pull request runs, `macos` (ci.yml) and `js-agent-macos-pkg`
-  (js-agent-macos-pkg.yml), so a change that breaks the Mac build or package cannot merge;
-  `tools/held/required-checks/require_macos_checks.sh` adds them (a dry run by default,
-  `--apply` to change the protection).
+  guarantee that a release is a reviewed change does. Its required status checks name Linux x86_64
+  checks only. `macos` (ci.yml) and `js-agent-macos-pkg` (js-agent-macos-pkg.yml) were required
+  while every pull request ran them; no pull request runs them now (they are the beta stage of the
+  release, step 6a), so remove them from the required checks, or every pull request waits for a
+  check that never reports. A change that breaks the Mac build or package is found by the beta
+  stage after the merge and fixed forward.
 - **The environments `apt-publish` and `apt-signing`**, restricted to `main`, with the variables and
   secrets [The apt repository](#the-apt-repository) lists. Until they exist every apt job passes
   doing nothing, and the release ends with the GitHub release published and no package in the
@@ -711,7 +715,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | The run was green but released nothing | `plan` printed why | a later release exists past the commit, or nothing that ships changed. Nothing to do. |
 | "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files and signs them again; `publish` compares each against the release and keeps them, and keeps the release's bundles without comparing them (each signing writes new bytes for the same file). If a file differs the run fails and nothing is changed. |
 
-Runs that wait: a release run starts with its push and waits for the jobs of `ci` but `macos`; if one fails there, the run fails
+Runs that wait: a release run starts with its push and waits for the jobs of `ci`; if one fails there, the run fails
 at `ci-passed` (red, with the `ci` run's link and the failed jobs) and the change is released by the next push that passes
 `ci` and ships code. Re-run the failed jobs after re-running `ci`, if the commit should release itself.
 

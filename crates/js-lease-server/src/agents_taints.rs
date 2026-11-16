@@ -51,13 +51,9 @@ impl Agents {
             .collect();
         let this = Arc::clone(self);
         let dropped = blocking(move || {
-            let dropped = this
-                .jobs
+            this.jobs
                 .as_ref()
-                .map_or(Ok(()), |jobs| jobs.drop_taints(&kept));
-            dropped.inspect_err(|error| {
-                this.fence.note(error);
-            })
+                .map_or(Ok(()), |jobs| jobs.drop_taints(&kept))
         })
         .await;
         if let Err(error) = dropped {

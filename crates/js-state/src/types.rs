@@ -210,12 +210,6 @@ pub enum StoreError {
     /// The backend could not complete the call; the text says why.
     #[error("state store failure: {0}")]
     Failed(String),
-    /// This handle is no longer the store's writer. Nothing was written; no retry on this
-    /// handle can succeed. A Postgres store opened for the writer lock's holder
-    /// (`postgres::PostgresStore::fenced`) returns it from a commit once another process has
-    /// taken the lock.
-    #[error("state store fenced: this handle is no longer the writer")]
-    Fenced,
     /// The connection to the store was gone, and so was the one new connection the call was
     /// run again on (or the call was a transaction already under way, which is not run
     /// again). A later call can succeed once the store is back. A read wrote nothing. A write

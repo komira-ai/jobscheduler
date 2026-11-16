@@ -5,17 +5,19 @@
 //! the placer on a clock that stands still.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_jobs::interfere::Read;
-use js_jobs::{JobId, JobStoreError};
+use js_jobs::{
+    Booked, JobId, JobState, JobStore, JobStoreError, Needs, NewJob, Placement, RandomIds,
+};
 use js_registry::{Placer, WholeNodeConfig};
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, ManualClock, Timestamp};
 
 use super::super::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics};
-use super::super::rig::{Tables, candidate, host, settings};
+use super::super::rig::{Tables, candidate, host, settings, spec_of};
 use crate::engine::Settings;
 use crate::place::SchedPlacer;
 
@@ -198,6 +200,7 @@ fn each_input_of_a_pass_brings_the_next_one_back() {
             ceiling,
             host_jobs: true,
             rank: None,
+            capacity: None,
         },
     );
     rig.ran(&offered, &[]);
@@ -331,4 +334,76 @@ fn only_a_call_that_changes_the_engine_counts() {
         rig.placer.host_up(&host("c"), &candidate("c", &[]).shape);
     });
     counted("a removed host", 1, &|| rig.placer.host_gone(&host("c")));
+}
+
+/// Asserts that a placement decided from a picture of the tables that another server has
+/// since changed does not book the host twice. Two servers share one job store; the first
+/// has read the tables with job `late` queued and nothing on host `a`, and the second then
+/// places job `early` (all 8 cores) on `a`. The first's pass, which is told by its own count
+/// of writes that nothing changed and so decides from that picture, tries to place `late` on
+/// `a` too: the host's live allocations, read in the placement's own transaction, leave no room
+/// (the host has 8 cores), so `late` stays queued and `a` books `early` alone. It catches a
+/// placement that does not check its host's capacity in its own transaction, which books `a`
+/// for 16 cores.
+#[test]
+fn a_placement_from_a_picture_another_server_changed_does_not_book_the_host() {
+    let rig = Rig::new();
+    let nowhere = Offered {
+        open: BTreeMap::new(),
+        ..Offered::both()
+    };
+    let mut only_a = Offered::both();
+    only_a.open.remove(&host("b"));
+    // The host's capacity: the 8 cores and the memory it was told of.
+    let capacity = js_jobs::Capacity {
+        cpu_millis: 8000,
+        memory_bytes: 8 << 30,
+        disk_bytes: 0,
+        accelerators: 0,
+    };
+    only_a.open.get_mut(&host("a")).unwrap().capacity = Some(capacity);
+    rig.queue_whole_cores("late");
+    // The first pass writes the job's queue status; the second reads the tables as they
+    // stand after that write and writes nothing, so what it read is current for this server.
+    rig.ran(&nowhere, &[]);
+    rig.ran(&nowhere, &[]);
+
+    let cores = js_types::Resources::new(8000, 1 << 30, 0, None).unwrap();
+    let other = JobStore::new(Arc::clone(&rig.tables.store), RandomIds).unwrap();
+    let early = NewJob {
+        id: Some(JobId::parse("early").unwrap()),
+        spec: spec_of(Needs::Shape(cores), 600),
+        priority: 0,
+        client: None,
+    };
+    let early = other.insert_queued(early).unwrap().record;
+    let booked = Booked::Shape {
+        cpu_millis: 8000,
+        memory_bytes: 1 << 30,
+        disk_bytes: 0,
+        accelerators: 0,
+    };
+    let placed = other.place_claimed(&early.id, &host("a"), booked, &Placement::default(), None);
+    placed.unwrap();
+
+    rig.ran(&only_a, &[]);
+    let late = JobId::parse("late").unwrap();
+    let state = |id: &JobId| rig.tables.jobs.get_job(id).unwrap().unwrap().state;
+    assert_eq!(state(&late), JobState::Queued, "the stale placement stood");
+    let booking = rig.tables.jobs.booked_on(&host("a")).unwrap();
+    assert_eq!(
+        (booking.cpu_millis, booking.allocations),
+        (8000, 1),
+        "host a is booked beyond its cores"
+    );
+    rig.ran(&only_a, &[]);
+    assert_eq!(
+        state(&late),
+        JobState::Queued,
+        "late was placed with no room"
+    );
+    assert_eq!(
+        rig.tables.jobs.booked_on(&host("a")).unwrap().allocations,
+        1
+    );
 }

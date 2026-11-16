@@ -68,6 +68,9 @@ pub(super) struct Statements {
     pub claim: Statement,
     /// The same without `SKIP LOCKED` (the claim flaw).
     pub claim_waiting: Statement,
+    /// `$1` keys, `$2` now: the live rows of those keys, locked, skipping rows another
+    /// transaction holds.
+    pub claim_keys: Statement,
 }
 
 impl Statements {
@@ -131,6 +134,12 @@ impl Statements {
             )?,
             claim: client.prepare(&claim(" SKIP LOCKED"))?,
             claim_waiting: client.prepare(&claim(""))?,
+            claim_keys: client.prepare(
+                "SELECT key, value, version, expires_us FROM kv \
+                 WHERE key = ANY($1::text[]) \
+                 AND (expires_us IS NULL OR expires_us > $2) \
+                 ORDER BY key FOR UPDATE SKIP LOCKED",
+            )?,
         })
     }
 }

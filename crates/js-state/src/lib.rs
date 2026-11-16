@@ -22,11 +22,9 @@
 //! so an older build that takes generations is refused by the store and none is started
 //! beside the sharing frontends.
 //!
-//! **One writer**: [`WriterLock`] is the lock the active writer of a store holds for its
-//! life, on either backend ([`WriterTarget`]): an advisory lock on Postgres, the state
-//! file's lock on SQLite. On Postgres taking it also takes a new [`WriterGeneration`], which
-//! the holder's store checks in every commit, so a writer that lost the lock commits nothing
-//! once another has taken it.
+//! **One writer, SQLite only**: [`WriterLock`] is the lock the one writer of a SQLite state
+//! file holds for its life. A Postgres store has no writer lock and no writer generation: any
+//! number of processes write it at once, and each commit is correct on its own.
 //!
 //! With the `postgres` feature, [`postgres`] is the Postgres backend.
 //!
@@ -59,14 +57,12 @@ use std::time::Duration;
 
 pub use clock::{Clock, ManualClock, StoreTime, SystemClock};
 pub use shared::{GENERATION, SHARED_WRITERS, share};
-pub use store::Store;
+pub use store::{Claim, Store, TxnRead};
 pub use types::{
     Change, Changes, Commit, CommitStats, Cond, Conflict, Direction, Event, Op, ResumeToken,
     Revision, ScanPage, ScanRange, StoreError, Txn, Version, Versioned,
 };
-pub use writer::{
-    LockHolder, LockRefused, LockState, ProbeFailed, WriterGeneration, WriterLock, WriterTarget,
-};
+pub use writer::{LockHolder, LockRefused, LockState, ProbeFailed, WriterLock, WriterTarget};
 
 /// The longest a write may wait for the group it commits with (target 5 ms).
 pub const GROUP_COMMIT_WINDOW: Duration = Duration::from_millis(5);

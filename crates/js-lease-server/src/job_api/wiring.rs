@@ -83,8 +83,11 @@ pub(crate) fn from_server(
         // A state given no status of its pools has no elastic pool: the status of none.
         None => Arc::new(Status::new(None, None, Vec::new(), agents.clock.clone())),
     };
+    // The sink's ended bookings are listed from the usage sink, unless it keeps them in the
+    // very store the job history below reads, which would list every row twice.
     let history = state
         .usage()
+        .filter(|_| !agents.usage_in_job_store)
         .map(|usage| Arc::new(SinkHistory(usage.sink())) as Arc<dyn History>);
     // The job store's records of jobs' allocations, in the state store under its tables.
     let job_history = agents
@@ -97,7 +100,6 @@ pub(crate) fn from_server(
         api.with_read(read)
             .with_submit(submit)
             .with_fleet(fleet)
-            .with_fence(agents.fence.clone())
             .with_logs(logs),
     )
 }

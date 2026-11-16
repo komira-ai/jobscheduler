@@ -14,7 +14,7 @@ mod calls;
 mod debs;
 mod images;
 
-use calls::{CALLED, CALLERS, calls};
+use calls::{CALLERS, calls};
 
 /// The text of `.github/workflows/<file>`.
 fn read_workflow(file: &str) -> String {
@@ -66,9 +66,9 @@ fn job<'a>(jobs: &'a [(String, Vec<String>)], name: &str) -> &'a [String] {
 }
 
 /// Asserts, in both files, that every action and called workflow `uses:` names a full 40-digit
-/// commit SHA with its version in a comment (the one local call, the release's `artifacts` job,
-/// excepted), that the top level grants nothing, and that every job runs on a GitHub-hosted
-/// runner image of a pinned version, or is one of the release's two calls ([`CALLERS`]).
+/// commit SHA with its version in a comment (the local calls of the release's jobs,
+/// [`CALLERS`], excepted), that the top level grants nothing, and that every job runs on a
+/// GitHub-hosted runner image of a pinned version, or is one of the release's calls.
 #[test]
 fn actions_are_pinned_and_the_top_grants_nothing() {
     for (file, text, least) in [
@@ -79,8 +79,14 @@ fn actions_are_pinned_and_the_top_grants_nothing() {
         for line in text.lines().filter(|l| {
             l.trim_start().starts_with("- uses:") || l.trim_start().starts_with("uses:")
         }) {
-            if line.trim() == CALLED {
+            if line.trim().starts_with("uses: ./.github/workflows/") {
                 assert_eq!(file, "release.yml", "{line}");
+                assert!(
+                    CALLERS
+                        .iter()
+                        .any(|(_, called)| line.trim() == format!("uses: {called}")),
+                    "{line}"
+                );
                 continue;
             }
             uses += 1;
@@ -119,7 +125,7 @@ fn actions_are_pinned_and_the_top_grants_nothing() {
 }
 
 /// Asserts that a push to main is the only trigger that releases (the other is a pull
-/// request, the dry run), that the run's commit is its own `github.sha`, and that every job
+/// request, whose dry run is `plan` alone and builds nothing), that the run's commit is its own `github.sha`, and that every job
 /// that publishes or deploys, and the wait and the plan, tests for a push to main of its own
 /// condition; the call of artifacts.yml follows `plan`'s output (its jobs that attest test for
 /// a push to main themselves: `artifacts::attest_and_verify_run_only_for_a_push_to_main`).
@@ -138,8 +144,8 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     );
     assert!(text.contains("\n  COMMIT: ${{ github.sha }}\n"));
     assert!(!text.contains("workflow_run."));
-    // The dry run still builds: with the wait skipped, the call of artifacts.yml (its build and
-    // sums) runs on the plan's word alone.
+    // The dry run builds nothing: the call of artifacts.yml (its build matrix names arm64 and
+    // macOS runners, which no pull request starts) runs for a push, on the plan's word.
     let all = jobs(&text);
     let ifs: Vec<&String> = job(&all, "artifacts")
         .iter()
@@ -148,7 +154,7 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     assert_eq!(ifs.len(), 1);
     assert_eq!(
         ifs[0].as_str(),
-        "    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' }}"
+        "    if: ${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}"
     );
     let push = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
     let jobs = jobs(&text);
@@ -160,6 +166,10 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         "gamma",
         "cp-deploy-digest",
         "cp-deploy",
+        "beta-macos",
+        "beta-macos-pkg",
+        "beta-macos-probe",
+        "promote-macos",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -190,8 +200,9 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
 
 /// Asserts the wait for `ci`: a job with exactly `actions: read` and nothing else, no
 /// checkout (no repository code runs in it), a four-hour limit, a poll every 120 s of the
-/// `ci` run of this commit's push and of its jobs, `macos` excluded by name, and a failure
-/// naming the run and the jobs for any other job that did not succeed or skip.
+/// `ci` run of this commit's push and of its jobs (all of them: ci.yml has no macOS job, the
+/// platforms other than Linux x86_64 are the release's beta stage), and a failure naming the
+/// run and the jobs for any job that did not succeed or skip.
 #[test]
 fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     let text = workflow();
@@ -212,30 +223,30 @@ fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     assert!(wait.contains(
         "      if [ -z \"$run\" ]; then\n              echo \"no ci run for $COMMIT yet\""
     ));
-    // The jobs of that run's latest attempt are read from the jobs API, and the job named
-    // `macos` (by name, and only it) is left out of the count; of the others, a finished
-    // one counts as bad unless it succeeded or was skipped, and one not finished is pending.
+    // The jobs of that run's latest attempt are read from the jobs API, none left out of the
+    // count; a finished one counts as bad unless it succeeded or was skipped, and one not
+    // finished is pending.
     assert!(wait.contains("actions/runs/$id/jobs?per_page=100&filter=latest"));
-    assert!(wait.contains(r#"[.jobs[] | select(.name != "macos")]"#));
-    assert_eq!(wait.matches(r#""macos""#).count(), 1, "{wait}");
+    assert!(wait.contains(r#"--jq '.jobs | "\(length) "#));
+    assert!(!wait.contains("macos"), "{wait}");
     assert!(wait.contains(r#"select(.status != "completed")"#));
     assert!(wait.contains(r#"select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped") | "\(.name)=\(.conclusion)""#));
     // Any other job that failed, was cancelled or timed out fails the release at once,
     // naming the jobs and the run, before the pass is considered.
     assert!(wait.contains("              if [ -n \"$bad\" ]; then\n                echo \"::error::ci did not pass for $COMMIT: $bad, $url; nothing is released\"\n                exit 1\n              fi\n"));
-    // All the other jobs finished and none bad passes (exit 0), even while `macos` is
-    // queued or after it failed; the pass comes after the failure check.
-    assert!(wait.contains("              if [ \"$total\" -gt 0 ] && [ \"$pending\" -eq 0 ]; then\n                echo \"ci passed (all jobs but macos): $url\"\n                exit 0\n              fi\n"));
+    // All the jobs finished and none bad passes (exit 0); the pass comes after the failure
+    // check.
+    assert!(wait.contains("              if [ \"$total\" -gt 0 ] && [ \"$pending\" -eq 0 ]; then\n                echo \"ci passed: $url\"\n                exit 0\n              fi\n"));
     assert!(
         wait.find("if [ -n \"$bad\" ]").expect("bad check") < wait.find("exit 0").expect("pass"),
         "{wait}"
     );
-    // A finished run with no job besides `macos` is an error, not a pass.
-    assert!(wait.contains("              if [ \"$status\" = completed ]; then\n                echo \"::error::ci did not pass for $COMMIT: no job besides macos in the run, $url; nothing is released\"\n                exit 1\n              fi\n"));
+    // A finished run with no job is an error, not a pass.
+    assert!(wait.contains("              if [ \"$status\" = completed ]; then\n                echo \"::error::ci did not pass for $COMMIT: no job in the run, $url; nothing is released\"\n                exit 1\n              fi\n"));
     // Otherwise the wait goes on, two minutes at a time.
-    assert!(wait.contains(
-        "echo \"ci is $status: $url ($pending of $total jobs but macos still to finish)\"\n"
-    ));
+    assert!(
+        wait.contains("echo \"ci is $status: $url ($pending of $total jobs still to finish)\"\n")
+    );
     assert!(wait.contains("            sleep 120\n          done"));
     // Ten failed reads in a row (of the runs or of the jobs) fail the job; a good read
     // starts the count again.
@@ -287,17 +298,17 @@ fn the_release_jobs_need_the_plans_release_and_no_status_function() {
     }
 }
 
-/// Asserts that only `publish` holds `contents: write`, and that it checks the latest
-/// release tag is a proper ancestor of the commit before the publishing call.
+/// Asserts that only `publish` and `promote-macos` hold `contents: write`, and that `publish`
+/// checks the latest release tag is a proper ancestor of the commit before the publishing call.
 #[test]
-fn only_publish_holds_contents_write_and_checks_the_tag_order() {
+fn only_publish_and_the_macos_promotion_hold_contents_write_and_publish_checks_the_tag_order() {
     let text = workflow();
     let holders: Vec<String> = jobs(&text)
         .into_iter()
         .filter(|(_, lines)| lines.iter().any(|l| l.trim() == "contents: write"))
         .map(|(name, _)| name)
         .collect();
-    assert_eq!(holders, ["publish"]);
+    assert_eq!(holders, ["publish", "promote-macos"]);
     let jobs = jobs(&text);
     let publish = job(&jobs, "publish").join("\n");
     let compare = publish

@@ -26,17 +26,18 @@ use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
 
 use js_agent_wire::Taint;
-use js_jobs::{HOST_JOB_TAINT, JobId};
+use js_jobs::{Capacity, HOST_JOB_TAINT, JobId};
 use js_registry::{Registry, WholeNodeConfig};
 use js_sched::ceiling::ceiling_of;
 use js_types::Clock;
-use js_types::HostId;
+use js_types::{HostId, Shape};
 use tracing::warn;
 
 use super::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics, open_to_jobs};
 use super::rank::rank;
 use crate::admit::reports_host_jobs;
 use crate::agents::Agents;
+use crate::config::CpuSlack;
 use crate::metrics::PassSink;
 
 /// The [`JobStarts`] of the server's pass: a start is built from the job table on the host's
@@ -73,6 +74,21 @@ enum Pass {
     IfChanged,
 }
 
+/// What a host of `shape` can book: the shape the pool books for it, with the CPU slack the
+/// placement engine allows on its cores, which is the most the engine places on it. The
+/// capacity is the bound a placement is held to in its own transaction against the
+/// allocations the store holds, so it must not be tighter than what the engine allows.
+fn capacity_of(shape: &Shape, slack: CpuSlack) -> Capacity {
+    let resources = shape.resources();
+    let cpu = u128::from(resources.cpu_millis()) * (1000 + u128::from(slack.permille())) / 1000;
+    Capacity {
+        cpu_millis: u64::try_from(cpu).unwrap_or(u64::MAX),
+        memory_bytes: resources.memory_bytes(),
+        disk_bytes: resources.disk_bytes(),
+        accelerators: resources.gpus(),
+    }
+}
+
 impl Agents {
     /// The whole-node rules a whole-host job's prepare runs under: the pool's settings, or,
     /// for a pool that has none, the defaults of a dedicated pool of one host, as a lease's
@@ -90,8 +106,7 @@ impl Agents {
     /// places no job). The hosts that said hello to this server (those the registry
     /// holds a claim of) and the pool's whole-node settings go with them: a queued job that
     /// books the whole host is marked, placed and prepared only under those settings. A failed
-    /// read of the tables is logged; the next pass reads them again, unless the store said it
-    /// has a newer writer, which trips the fence ([`crate::fence`]).
+    /// read of the tables is logged; the next pass reads them again.
     ///
     /// A host is offered to a job with host isolation only when its hello reported
     /// `host-jobs`. Each host such a job was placed on is tainted in the registry
@@ -148,6 +163,7 @@ impl Agents {
                 ceiling: capabilities.map(ceiling_of).unwrap_or_default(),
                 host_jobs: capabilities.is_some_and(reports_host_jobs),
                 rank: Some(ranked),
+                capacity: Some(capacity_of(&view.shape, self.cpu_slack)),
             };
             Some((view.id, offer))
         });
@@ -167,7 +183,6 @@ impl Agents {
             Pass::IfChanged => placer.place_jobs_if_changed(jobs, &hosts, sinks).map(drop),
         };
         if let Err(error) = placed {
-            self.fence.note(&error);
             warn!(%error, "the queued jobs could not be read; the next pass places them");
         }
         let hosts = starts.hosts.into_inner();
@@ -190,3 +205,7 @@ mod taint_tests;
 #[cfg(test)]
 #[path = "jobs_cost_tests.rs"]
 mod cost_tests;
+
+#[cfg(test)]
+#[path = "jobs_two_servers_tests.rs"]
+mod two_servers_tests;

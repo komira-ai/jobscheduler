@@ -64,6 +64,7 @@
 //! | `alloc/<id>` | the [`AllocationRecord`] of the job `<id>`: one allocation per job at a time, found from its job without a scan |
 //! | `mark/<id>` | the [`MarkRecord`] of the queued whole-host job `<id>`: one mark per job at a time, found from its job without a scan; a store written before marks has none and opens unchanged |
 //! | `taint/<host>` | the [`HostTaint`] a host-isolation job's placement put on `<host>` (reason [`HOST_JOB_TAINT`]): the job that placed there; written in the placement's transaction, deleted by [`JobStore::drop_taints`] once the caller holds the taint elsewhere and by nothing else (the retention tick does not read it), listed whole by [`JobStore::host_taints`]; a store written before taints has none and opens unchanged |
+//! | `hostbook/<host>` | the reservation row of `<host>`: the allocation id of the last placement made with [`JobStore::place_reserving`], whose version is what a placement's picture of the host is checked against; an earlier build has none, and a host with none is placed on as one whose row is absent |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
 //! | `idx/job/queued/<id>` | empty: the job is queued (it is under `idx/job/active/` too); a store an earlier build wrote has none until a build that names them opens it |
@@ -106,6 +107,7 @@
 //! | [`JobStore::insert_queued`] | put `job/<id>` if absent |
 //! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked, with the job's declared host ports); for a host-isolation job ([`Isolation::Host`]) also put `taint/<host>` if absent, so a host already tainted makes the placement [`JobStoreError::Stale`] |
 //! | [`JobStore::place_with`] | as [`JobStore::place`], with the allocation's prepare deadline (the store's time now plus [`Placement::prepare_timeout`]) and wall limit, and delete `mark/<id>` at its version, or check it absent |
+//! | [`JobStore::place_reserving`] | as [`JobStore::place_with`], and put `hostbook/<host>` if absent or at the version the caller's picture of the host was read at ([`JobStore::host_books`]), so a placement made since, by this server or another, makes it stale |
 //! | [`JobStore::drop_taints`] | delete each `taint/<host>` it is given, whatever it holds, in one transaction; nothing for no hosts |
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
@@ -169,9 +171,9 @@ pub use ids::{
 };
 pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{
-    AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, Exclusion,
-    FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint, Isolation, JobFiles, JobRecord, JobSpec,
-    JobState, MarkRecord, Needs, NetworkPolicy, StartFailure,
+    AllocationRecord, AllocationStep, Booked, Capacity, Constraints, DeclaredPort, EndReason,
+    Exclusion, FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint, Isolation, JobFiles, JobRecord,
+    JobSpec, JobState, MarkRecord, Needs, NetworkPolicy, StartFailure,
 };
 pub use result::{
     BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,

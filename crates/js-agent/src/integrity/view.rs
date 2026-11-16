@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 /// A process, as the process table shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +21,12 @@ pub struct Process {
     /// The control groups of the process, as one line of text. A container's processes are
     /// in a group whose path holds the container's id.
     pub cgroup: String,
+    /// The command name the kernel keeps (`comm`, at most 15 bytes), which says what the
+    /// process is when a finding names it.
+    pub comm: String,
+    /// The state letter of `/proc/<pid>/stat` (`S` sleeping, `R` running, `Z` zombie
+    /// waiting to be reaped, ...).
+    pub state: char,
 }
 
 impl Process {
@@ -113,6 +120,15 @@ pub trait HostView {
     ///
     /// It cannot be read.
     fn file(&self, path: &str) -> Result<String, String>;
+
+    /// Lets the host go on for `wait` before the checks look at it again (they look twice at
+    /// what they would call a job's leftover process: see [`Integrity::with_settle`]). The
+    /// default does not wait.
+    ///
+    /// [`Integrity::with_settle`]: super::Integrity::with_settle
+    fn settle(&self, wait: Duration) {
+        let _ = wait;
+    }
 }
 
 /// The inputs of a [`FakeHost`], for [`FakeHost::fail`].
@@ -131,6 +147,9 @@ pub mod input {
     pub const WATCH: &str = "watch";
 }
 
+/// A change to the host, made when the checks wait ([`FakeHost::at_settle`]).
+type Change = Box<dyn FnOnce(&FakeHost)>;
+
 #[derive(Default)]
 struct FakeState {
     processes: Vec<Process>,
@@ -142,6 +161,10 @@ struct FakeState {
     links: BTreeMap<String, String>,
     files: BTreeMap<String, String>,
     failing: BTreeSet<&'static str>,
+    /// The waits the checks asked for, in order.
+    settled: Vec<Duration>,
+    /// What happens to the host the next time the checks wait.
+    at_settle: Vec<Change>,
 }
 
 /// A host in memory: a test changes it between the baseline and the check, the way a job
@@ -164,6 +187,8 @@ impl FakeHost {
                     uid: 0,
                     start: 1,
                     cgroup: "0::/init.scope".to_owned(),
+                    comm: "init".to_owned(),
+                    state: 'S',
                 },
                 Process {
                     pid: 100,
@@ -171,6 +196,8 @@ impl FakeHost {
                     uid: 1000,
                     start: 50,
                     cgroup: "0::/system.slice/agent.service".to_owned(),
+                    comm: "js-agent".to_owned(),
+                    state: 'S',
                 },
             ];
             state.mounts = vec![
@@ -304,6 +331,17 @@ impl FakeHost {
         self.state.borrow_mut().failing.remove(which);
     }
 
+    /// `change` happens to the host the next time the checks wait for it to settle, as a
+    /// process of the host's that was there for a moment ends, or one starts.
+    pub fn at_settle(&self, change: impl FnOnce(&FakeHost) + 'static) {
+        self.state.borrow_mut().at_settle.push(Box::new(change));
+    }
+
+    /// The waits the checks have asked for so far, in order.
+    pub fn settled(&self) -> Vec<Duration> {
+        self.state.borrow().settled.clone()
+    }
+
     /// Whether the input `which` works: the reason it does not, if a test broke it.
     fn works(&self, which: &'static str) -> Result<(), String> {
         match self.state.borrow().failing.contains(which) {
@@ -354,6 +392,17 @@ impl HostView for FakeHost {
     fn file(&self, path: &str) -> Result<String, String> {
         let text = self.state.borrow().files.get(path).cloned();
         text.ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn settle(&self, wait: Duration) {
+        let changes = {
+            let mut state = self.state.borrow_mut();
+            state.settled.push(wait);
+            std::mem::take(&mut state.at_settle)
+        };
+        for change in changes {
+            change(self);
+        }
     }
 }
 

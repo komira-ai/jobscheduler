@@ -135,7 +135,7 @@ impl SqliteStore {
     }
 
     /// [`SqliteStore::open`] under a writer lock already taken on this file
-    /// ([`WriterLock::acquire`] with [`crate::WriterTarget::Sqlite`]). The store adopts the
+    /// ([`WriterLock::acquire`] on this file's path). The store adopts the
     /// held `flock` instead of taking a second one (which [`SqliteStore::open`] does, and
     /// which is refused with [`SqliteError::Locked`] while the writer lock is held, in this
     /// process as in any other), and keeps it until it is dropped: the file is locked from
@@ -144,8 +144,7 @@ impl SqliteStore {
     /// it the lock and the open were given. Bumps the epoch.
     ///
     /// # Errors
-    /// [`SqliteError::NotThisFilesLock`] when `lock` was taken on another state file or on a
-    /// Postgres store; otherwise as [`SqliteStore::open`]. The lock is released on any error.
+    /// [`SqliteError::NotThisFilesLock`] when `lock` was taken on another state file; otherwise as [`SqliteStore::open`]. The lock is released on any error.
     pub fn open_locked(
         path: &Path,
         lock: WriterLock,

@@ -9,9 +9,9 @@ use std::sync::{Arc, mpsc};
 
 use js_state::postgres::{
     ConfigError, ExtensionPool, OpenError, PostgresConfig, PostgresStore, TestDatabase, TlsError,
-    TlsMode, Unreached, reach, schema, test_database,
+    TlsMode, Unreached, reach, schema, serving, test_database,
 };
-use js_state::{LockRefused, Store, StoreError, WriterLock, WriterTarget};
+use js_state::{Store, StoreError};
 use js_testkit::dir::TestDir;
 use postgres::config::Host;
 use rcgen::{
@@ -249,8 +249,8 @@ fn verify_full_refuses_a_certificate_for_another_name_and_takes_the_matching_one
     assert_eq!(reach(&config), Ok(()));
     assert_eq!(schema::current(&config), Ok(schema::latest()));
     schema::apply(&config, &schema::embedded(), schema::latest()).expect("the runner connects");
-    let lock = WriterLock::acquire(&WriterTarget::Postgres(Box::new(config)));
-    assert!(lock.is_ok(), "{lock:?}");
+    let serving = serving::probe(&config);
+    assert!(serving.is_ok(), "{serving:?}");
 }
 
 // Catches `verify-ca` that checks the name (it would refuse a server whose certificate names
@@ -297,8 +297,8 @@ fn require_refuses_a_server_without_tls_and_prefer_connects_plain() {
         ))
     );
     assert_eq!(
-        WriterLock::acquire(&WriterTarget::Postgres(Box::new(required.clone()))).err(),
-        Some(LockRefused::Failed(TlsError::NotOffered.to_string()))
+        serving::probe(&required),
+        Err(TlsError::NotOffered.to_string())
     );
     assert_eq!(
         ExtensionPool::open(&required).err(),

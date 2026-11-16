@@ -6,8 +6,8 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_state::{
-    Changes, Commit, CommitStats, Conflict, Revision, ScanPage, ScanRange, Store, StoreError,
-    StoreTime, Txn, Versioned,
+    Changes, Claim, Commit, CommitStats, Conflict, Revision, ScanPage, ScanRange, Store,
+    StoreError, StoreTime, Txn, TxnRead, Versioned,
 };
 
 /// The text of the [`StoreError::Failed`] a failed commit answers.
@@ -33,6 +33,27 @@ pub struct Interfere<S> {
     /// What each read that reached the wrapped store asked for, in order, since the last
     /// [`Interfere::take_reads`].
     reads: Mutex<Vec<Read>>,
+    /// What the decisions of [`Store::claim_decide`] read, in order, since the last
+    /// [`Interfere::take_claim_reads`]; apart from `reads`, which the passes' own reads are.
+    claim_reads: Arc<Mutex<Vec<Read>>>,
+}
+
+/// The reads of a claimed decision, logged as they are made.
+struct LoggedRead<'a> {
+    read: &'a mut dyn TxnRead,
+    log: &'a Mutex<Vec<Read>>,
+}
+
+impl TxnRead for LoggedRead<'_> {
+    fn get(&mut self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        lock(self.log).push(Read::Get(key.to_owned()));
+        self.read.get(key)
+    }
+
+    fn scan_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        lock(self.log).push(Read::Scan(prefix.to_owned()));
+        self.read.scan_prefix(prefix)
+    }
 }
 
 /// One read a store was asked for: the key of a get, or the prefix of a scan.
@@ -59,6 +80,7 @@ impl<S: Store> Interfere<S> {
             before: Mutex::new(None),
             error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
             reads: Mutex::new(Vec::new()),
+            claim_reads: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -93,7 +115,7 @@ impl<S: Store> Interfere<S> {
 
     /// Makes every commit or read that fails from now on, as [`Interfere::fail_after`] and
     /// [`Interfere::fail_read_after`] say, answer `error` instead of [`StoreError::Failed`]:
-    /// a test of how a caller reacts to [`StoreError::Fenced`], which no retry answers.
+    /// a test of how a caller reacts to a particular failure, such as [`StoreError::Disconnected`].
     pub fn fail_with(&self, error: StoreError) {
         *lock(&self.error) = error;
     }
@@ -109,6 +131,11 @@ impl<S: Store> Interfere<S> {
     /// [`Interfere::fail_read_after`] never reached it and is not logged.
     pub fn take_reads(&self) -> Vec<Read> {
         std::mem::take(&mut *lock(&self.reads))
+    }
+
+    /// What the decisions of claimed commits read since the last call, in order.
+    pub fn take_claim_reads(&self) -> Vec<Read> {
+        std::mem::take(&mut *lock(&self.claim_reads))
     }
 
     /// Logs `read` once it passed [`Interfere::fail_read_after`].
@@ -144,6 +171,26 @@ impl<S: Store> Store for Interfere<S> {
         }
         self.countdown(&self.fail_at)?;
         self.inner.apply_batch(batch)
+    }
+
+    fn head(&self) -> Result<Option<Revision>, StoreError> {
+        self.inner.head()
+    }
+
+    fn claim_decide(
+        &self,
+        claim: &[String],
+        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
+    ) -> Result<Claim, StoreError> {
+        // A decided commit is a commit: the hook and the failure countdown of commits apply.
+        let hook = lock(&self.before).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.countdown(&self.fail_at)?;
+        let log = &self.claim_reads;
+        self.inner
+            .claim_decide(claim, &mut |read| decide(&mut LoggedRead { read, log }))
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
@@ -294,16 +341,48 @@ mod tests {
         assert_eq!(store.take_reads(), []);
     }
 
+    // Catches a head that is not the inner store's: it moves with a commit, and a decision made
+    // through the wrapper (which counts as a commit for the hook and the failure countdown) is
+    // the inner store's.
+    #[test]
+    fn the_head_and_a_claimed_decision_are_the_inner_stores() {
+        use js_state::Claim;
+        let store = wrapped();
+        let before = store.head().expect("answers");
+        put(&store, "q").expect("commits");
+        assert_ne!(
+            store.head().expect("answers"),
+            before,
+            "a commit moves the head"
+        );
+        let claim = ["q".to_owned()];
+        let placed = store
+            .claim_decide(&claim, &mut |_| {
+                Some(Txn::new().put("p", "1", Cond::Absent))
+            })
+            .expect("answers");
+        assert!(matches!(placed, Claim::Committed(_)), "{placed:?}");
+        store.fail_next();
+        let failed = store.claim_decide(&claim, &mut |_| None);
+        assert_eq!(failed, Err(StoreError::Failed(INJECTED.to_owned())));
+    }
+
     // Catches an injected error that is not the one told: a failed commit and a failed read
     // each answer the error `fail_with` set, and the default stays `Failed` until then.
     #[test]
     fn a_failed_call_answers_the_error_it_was_told() {
         let store = wrapped();
-        store.fail_with(StoreError::Fenced);
+        store.fail_with(StoreError::Disconnected("gone".to_owned()));
         store.fail_next();
-        assert_eq!(put(&store, "a"), Err(StoreError::Fenced));
+        assert_eq!(
+            put(&store, "a"),
+            Err(StoreError::Disconnected("gone".to_owned()))
+        );
         store.fail_read_after(0);
-        assert_eq!(store.get("a"), Err(StoreError::Fenced));
+        assert_eq!(
+            store.get("a"),
+            Err(StoreError::Disconnected("gone".to_owned()))
+        );
         put(&store, "b").expect("nothing is failing now");
     }
 

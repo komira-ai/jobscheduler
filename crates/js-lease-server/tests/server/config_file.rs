@@ -166,7 +166,7 @@ async fn every_key_of_the_server_table_is_read() {
     let extra = "listen = \"127.0.0.1:0\"\ntick = \"3s\"\n\
                  max_connections = 7\nhandshake_timeout = \"3s\"\nheader_timeout = \"4s\"\n\
                  read_timeout = \"5s\"\nwrite_timeout = \"6s\"\nmax_requests = 9\n\
-                 drain_timeout = \"7s\"\nadvertise_url = \"http://localhost:7300\"";
+                 drain_timeout = \"7s\"\ndrain_hold = \"8s\"\nadvertise_url = \"http://localhost:7300\"";
     let pool = PoolText::joined("hosts");
     let config = load(&scratch, &file(&server(&scratch, extra), &[&pool])).unwrap();
     assert_eq!(config.tick_period(), Duration::from_secs(3));
@@ -180,6 +180,7 @@ async fn every_key_of_the_server_table_is_read() {
         write_timeout: secs(6),
         max_requests: 9,
         drain_timeout: secs(7),
+        drain_hold: secs(8),
     };
     assert_eq!(config.limits(), wanted);
     let h = Harness::over(scratch, config).await;

@@ -1,21 +1,18 @@
 //! What the store tests share: the store file, the program run to its end, and, for the
-//! Postgres tests, the backend that holds the writer lock.
+//! Postgres tests, what they read of the database.
 
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use js_state::postgres::{PostgresConfig, PostgresStore, WRITER_LOCK_KEY};
+use js_state::postgres::{PostgresConfig, PostgresStore};
 use js_state::{Revision, Store};
 use postgres::{Client, NoTls};
 use rustix::process::{Pid, Signal, kill_process};
 
-use crate::binary::Guard;
 use crate::support::{Scratch, base_args};
 
 pub const PROGRAM: &str = env!("CARGO_BIN_EXE_js-lease-server");
@@ -90,35 +87,6 @@ pub fn run_to_end(args: &[OsString]) -> Ended {
     }
 }
 
-/// Starts the program on `args` with ticks every `tick`, standard error piped, and returns
-/// it with the address it printed.
-pub fn launch_ticking(args: &[OsString], tick: &str) -> (Guard, SocketAddr) {
-    let mut child = Guard(
-        Command::new(PROGRAM)
-            .args(&args[1..])
-            .args(["--tick", tick])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    let stdout = child.0.stdout.take().unwrap();
-    let (first, line) = mpsc::channel();
-    thread::spawn(move || {
-        let mut text = String::new();
-        let _ = BufReader::new(stdout).read_line(&mut text);
-        let _ = first.send(text);
-    });
-    let line = line.recv_timeout(LIMIT).unwrap();
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap()
-        .parse()
-        .unwrap();
-    (child, addr)
-}
-
 /// A loopback address that is taken while the listener lives: a server told to bind it
 /// would be refused naming its listen flag.
 pub fn taken_address() -> std::net::TcpListener {
@@ -147,40 +115,9 @@ pub fn assert_unquoted(url: &str, printed: &str) {
     assert!(!printed.contains(&password), "the password in {printed}");
 }
 
-/// The backend that holds the writer lock in the database `url` names, read from
-/// `pg_locks` (a single-`bigint` advisory key is split into `classid`, its high 32 bits, and
-/// `objid`, its low 32 bits, with `objsubid` 1). Call it outside an async runtime.
-pub fn holder(url: &str) -> Option<i32> {
-    let mut admin = Client::connect(url, NoTls).unwrap();
-    admin
-        .query_opt(
-            "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted \
-             AND objsubid = 1 \
-             AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
-             AND ((classid::bigint << 32) | objid::bigint) = $1",
-            &[&WRITER_LOCK_KEY],
-        )
-        .unwrap()
-        .map(|row| row.get(0))
-}
-
-/// Ends the session that holds the writer lock in the database `url` names, and returns
-/// once its backend has exited (so the lock is gone on the server). Call it outside an async
-/// runtime.
-pub fn end_the_holder(url: &str) {
-    let pid = holder(url).expect("a session holds the writer lock");
-    let mut admin = Client::connect(url, NoTls).unwrap();
-    let ended: bool = admin
-        .query_one("SELECT pg_terminate_backend($1, 60000)", &[&pid])
-        .unwrap()
-        .get(0);
-    assert!(ended, "the holder's backend ended");
-    assert_eq!(holder(url), None, "the lock is free");
-}
-
 /// Makes the database `url` names acknowledge commits it has not flushed
-/// (`synchronous_commit` off for every new session), which a store refuses to open on, while
-/// the writer lock is still taken. Call it outside an async runtime.
+/// (`synchronous_commit` off for every new session), which a store refuses to open on. Call it
+/// outside an async runtime.
 pub fn unflushed(url: &str) {
     let mut admin = Client::connect(url, NoTls).unwrap();
     let name: String = admin
@@ -195,7 +132,7 @@ pub fn unflushed(url: &str) {
 }
 
 /// How far the store in the database `url` has been written: the cursor after every change
-/// in its feed, read on a store of the test's own (which takes no writer lock).
+/// in its feed, read on a store of the test's own.
 pub fn revision(url: &str) -> Revision {
     let store = PostgresStore::open(&PostgresConfig::parse(url).unwrap()).unwrap();
     store.changes(Revision::ZERO, 100_000).unwrap().cursor

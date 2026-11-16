@@ -19,36 +19,40 @@ fn fake() -> Arc<dyn Store> {
     ))
 }
 
-/// A store that fails every call with `StoreError::Fenced`.
+/// A store that fails every call with [`refused`].
 struct Refusing;
+
+fn refused() -> StoreError {
+    StoreError::Failed("refused".to_owned())
+}
 
 impl Store for Refusing {
     fn apply_batch(&self, _batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn get(&self, _key: &str) -> Result<Option<Versioned>, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn scan_range(&self, _scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn changes(&self, _after: Revision, _limit: usize) -> Result<Changes, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn trim_feed(&self, _before: Revision) -> Result<u64, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn reap_expired(&self) -> Result<usize, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn commit_stats(&self) -> CommitStats {
@@ -132,7 +136,7 @@ fn a_write_the_store_fails_is_recorded_and_the_error_passes_through() {
     let err = recording
         .txn(Txn::new().put("mine", "v", Cond::Any))
         .unwrap_err();
-    assert_eq!(err, StoreError::Fenced);
+    assert_eq!(err, refused());
     assert_eq!(recording.writes(), [write("mine", WriteKind::Put, false)]);
 }
 
@@ -194,4 +198,41 @@ fn everything_else_is_forwarded_and_not_recorded() {
         })
     );
     assert_eq!(recording.writes(), Vec::new());
+}
+
+// A decision committed through the recording store is recorded as a committed write of each key it
+// writes, one that conflicts as a write that did not commit, and one that declines is not
+// recorded; the head is the inner store's. It catches a claim that bypasses the record.
+#[test]
+fn a_decided_transaction_is_recorded_as_it_committed_or_conflicted() {
+    use js_state::Claim;
+    let recording = RecordingStore::new(fake());
+    recording
+        .txn(Txn::new().put("q", "queued", Cond::Any))
+        .unwrap()
+        .unwrap();
+    let claim = ["q".to_owned()];
+    let placed = recording
+        .claim_decide(&claim, &mut |_| {
+            Some(Txn::new().put("p", "1", Cond::Absent))
+        })
+        .unwrap();
+    assert!(matches!(placed, Claim::Committed(_)), "{placed:?}");
+    let conflicted = recording
+        .claim_decide(&claim, &mut |_| {
+            Some(Txn::new().put("p", "2", Cond::Absent))
+        })
+        .unwrap();
+    assert!(matches!(conflicted, Claim::Conflict(_)), "{conflicted:?}");
+    let declined = recording.claim_decide(&claim, &mut |_| None).unwrap();
+    assert_eq!(declined, Claim::Declined);
+    assert_eq!(
+        recording.writes(),
+        [
+            write("q", WriteKind::Put, true),
+            write("p", WriteKind::Put, true),
+            write("p", WriteKind::Put, false),
+        ]
+    );
+    assert!(recording.head().unwrap().is_some());
 }

@@ -166,6 +166,8 @@ async fn first_boot_on_an_empty_store_imports_the_four_files_once() {
         unused.as_str(),
         used.as_str(),
         IMPORTED,
+        // The job store's schema marker: the job store is in this store.
+        "meta/jobs/schema",
     ];
     let mut expected: Vec<String> = expected.iter().map(|key| key.to_string()).collect();
     expected.sort();

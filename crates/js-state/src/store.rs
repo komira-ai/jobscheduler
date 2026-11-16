@@ -6,8 +6,8 @@ use std::ops::Bound;
 
 use crate::clock::StoreTime;
 use crate::types::{
-    Changes, Commit, CommitStats, Conflict, ResumeToken, Revision, ScanPage, ScanRange, StoreError,
-    Txn, Versioned,
+    Changes, Commit, CommitStats, Cond, Conflict, ResumeToken, Revision, ScanPage, ScanRange,
+    StoreError, Txn, Versioned,
 };
 
 /// A durable, ordered key-value store with transactions, counters, time-to-live keys and
@@ -120,6 +120,101 @@ pub trait Store: Send + Sync {
         // A backend returns one result per transaction; an empty answer is its bug.
         Ok(self.apply_batch(vec![txn])?.swap_remove(0))
     }
+
+    /// The committed head revision: every revision at or below it has committed. `None` for a
+    /// store that cannot say, which is one only this process writes (its own writes are what a
+    /// caller counts then). A caller that cached what it read compares two readings: equal
+    /// heads say no transaction committed between them, whoever made it.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails.
+    fn head(&self) -> Result<Option<Revision>, StoreError> {
+        Ok(None)
+    }
+
+    /// Decides one transaction on rows it has locked, and commits it, in one store
+    /// transaction. The rows named by `claim` are locked first (`FOR UPDATE SKIP LOCKED` on
+    /// Postgres): a transaction that holds one of them, or a key that holds no live row, makes
+    /// the call [`Claim::Held`] and does nothing, so two callers that claim one row never
+    /// wait for each other and only one of them decides. Then `decide` is called with a view
+    /// that reads the store as the transaction sees it, which no other writer changes until it
+    /// ends: it returns the transaction to commit, or `None` to decline. What it read is what
+    /// the commit finds, so a decision that rests on a scan of a prefix (the rows booked on
+    /// a host) is made on the rows as they are when it commits.
+    ///
+    /// The provided implementation is for a store one process writes: it reads without
+    /// locking and puts a [`Cond::Version`] check on each claimed row at the version it read, so
+    /// the decision is only as exact as the claimed rows.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails; nothing is committed then.
+    fn claim_decide(
+        &self,
+        claim: &[String],
+        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
+    ) -> Result<Claim, StoreError> {
+        let mut checks = Vec::with_capacity(claim.len());
+        for key in claim {
+            match self.get(key)? {
+                Some(row) => checks.push((key.clone(), row.version)),
+                None => return Ok(Claim::Held),
+            }
+        }
+        let mut view = Plain(self);
+        let Some(mut txn) = decide(&mut view) else {
+            return Ok(Claim::Declined);
+        };
+        for (key, version) in checks {
+            txn = txn.check(key, Cond::Version(version));
+        }
+        Ok(match self.txn(txn)? {
+            Ok(commit) => Claim::Committed(commit),
+            Err(conflict) => Claim::Conflict(conflict),
+        })
+    }
+}
+
+/// What a decision of [`Store::claim_decide`] reads: the store as the claiming transaction
+/// sees it.
+pub trait TxnRead {
+    /// The live row at `key`.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails.
+    fn get(&mut self, key: &str) -> Result<Option<Versioned>, StoreError>;
+
+    /// The live rows whose keys start with `prefix`, in key order.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails.
+    fn scan_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError>;
+}
+
+/// What [`Store::claim_decide`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// A claimed key holds no live row, or another transaction holds its row: nothing was
+    /// decided and nothing was written.
+    Held,
+    /// The decision returned no transaction: nothing was written.
+    Declined,
+    /// A precondition of the decided transaction failed: nothing was written.
+    Conflict(Conflict),
+    /// The decided transaction committed.
+    Committed(Commit),
+}
+
+/// A plain store as a [`TxnRead`]: each read is the store's own.
+struct Plain<'a, S: ?Sized>(&'a S);
+
+impl<S: Store + ?Sized> TxnRead for Plain<'_, S> {
+    fn get(&mut self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        self.0.get(key)
+    }
+
+    fn scan_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.0.scan_prefix(prefix)
+    }
 }
 
 /// A shared handle to any store is a store: every call goes to the store it holds. A type
@@ -164,6 +259,18 @@ impl Store for std::sync::Arc<dyn Store> {
 
     fn txn(&self, txn: Txn) -> Result<Result<Commit, Conflict>, StoreError> {
         (**self).txn(txn)
+    }
+
+    fn head(&self) -> Result<Option<Revision>, StoreError> {
+        (**self).head()
+    }
+
+    fn claim_decide(
+        &self,
+        claim: &[String],
+        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
+    ) -> Result<Claim, StoreError> {
+        (**self).claim_decide(claim, decide)
     }
 }
 
