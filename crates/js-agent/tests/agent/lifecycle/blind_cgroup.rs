@@ -4,8 +4,8 @@
 //! engines) is not tainted for lacking one. The runtime is the in-memory fake; the end of a
 //! run is a call the test makes, not a wait.
 
-use js_agent::lifecycle::{Event, code};
 use js_agent::lifecycle::taint::reason;
+use js_agent::lifecycle::{Event, code};
 use js_agent_wire::Taint;
 
 use super::{Harness, job, names};

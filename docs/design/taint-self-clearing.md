@@ -39,19 +39,21 @@ state the host really holds and a re-check that sees no difference does not prov
 - **Which taints.** `clearable` (js-agent, `lifecycle/taint.rs`) is an allow-list: reason `residue` with check
   `process-as-job-user` or `daemonised-child`, and reason `unchecked` with an input the checks could not read
   (`processes-unreadable`, `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`,
-  `watch-unreadable`, `watch-over-bound`) or `cgroup-not-found`. Everything else stays: `cleanup-failed`, `check-owed`, `host-job`,
-  `marker-unreadable`, a residue of a mount, user, group, module or watched directory, and `unchecked` with
-  `host-not-visible` (that taint says the agent cannot see the host its jobs run on; a re-check of what the agent can
-  see does not show that it now can). `cgroup-not-found` is the crun runtime's own blindness and is different: a run the
-  runtime reports running whose container group (`<lease cgroup>/ctr`) does not exist a settle wait (`--settle-ms`) after
-  the agent first saw it. The run is running from the moment its supervisor says it is ready, before crun has made the
-  container, so a slow creation on a loaded node, or a crun that failed before making the group and whose end is read
-  late, shows this way. The post-job checks do not depend on that group (they judge processes by user, parent and
-  cgroup against the baseline taken before the job, and mounts, users, groups, modules and watched directories), so what
-  such a job leaves is found by them and by a re-check, and the taint clears after two clean re-checks of an idle host.
-  It is a new value of the open `check` string; `host-not-visible` keeps its meaning. A taint that cannot clear, sealed beside one that can (the marker keeps the first),
-  keeps the host tainted for the life of the process; after a restart the same sources seal again (a host job taken over,
-  owed checks, a container that cannot be removed), so the pin is rebuilt.
+  `watch-unreadable`, `watch-over-bound`) or `cgroup-not-found`. Everything else stays: `cleanup-failed`,
+  `check-owed`, `host-job`, `marker-unreadable`, a residue of a mount, user, group, module or watched directory, and
+  `unchecked` with `host-not-visible` (that taint says the agent cannot see the host its jobs run on; a re-check of
+  what the agent can see does not show that it now can). `cgroup-not-found` is the crun runtime's own blindness and is
+  different: a run the runtime reports running whose container group (`<lease cgroup>/ctr`) does not exist a settle
+  wait (`--settle-ms`) after the agent first saw it. The run is running from the moment its supervisor says it is
+  ready, before crun has made the container, so a slow creation on a loaded node, or a crun that failed before making
+  the group and whose end is read late, shows this way. The post-job checks do not depend on that group (they judge
+  processes by user, parent and cgroup against the baseline taken before the job, and mounts, users, groups, modules
+  and watched directories), so what such a job leaves is found by them and by a re-check, and the taint clears after
+  two clean re-checks of an idle host. It is a new value of the open `check` string; `host-not-visible` keeps its
+  meaning. The same code is also a finding that names the run and the settle wait. A taint that cannot clear, sealed
+  beside one that can (the marker keeps the first), keeps the host tainted for the life of the process; after a
+  restart the same sources seal again (a host job taken over, owed checks, a container that cannot be removed), so
+  the pin is rebuilt.
 - **After a restart.** A taint read from the marker at start clears only when it is a residue of a process
   (`process-as-job-user` or `daemonised-child`). The re-check compares with the baseline taken at start, which already holds
   a process the tainting job left (the pre-job baseline is not persisted), so for such a taint the re-check also applies two
