@@ -4,20 +4,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// The uid and gid a job runs as inside its container: a fixed unprivileged id, as an
-/// job runs on a worker that does not give it root. Rootless, the namespace maps
-/// container ids `0..65536` to the daemon user's subordinate range, so this id is
-/// subordinate id 1000 of that range, and permission checks are real: a mode-0 file is
-/// refused, a directory the job does not own cannot be written.
-pub const ACTION_ID: u32 = 1000;
+/// The container id of the job's root: the uid and gid a job runs as inside its container
+/// unless its image names a `User` ([`ContainerSpec::user`]), and the owner of everything the
+/// job writes (the root's writable layer, the run's scratch directory, the home directory,
+/// the tmpfs mounts), as in a container Docker runs rootless or with `userns-remap`.
+/// The namespace maps container ids `0..65536` to the daemon user's subordinate range, so
+/// this id is the first subordinate id of that range: root inside the namespace and nothing
+/// on the host. The capabilities it holds are those of the namespace only, and a file whose
+/// owner the namespace does not map is not its to override.
+pub const ACTION_ID: u32 = 0;
 
 /// The owner, in the setup namespace ([`crate::oci::Mapping::Setup`]), of a lease's overlay
-/// directories while its container may run: [`ACTION_ID`] there, which is
-/// `ACTION_ID + 1` (the setup namespace maps the daemon user to 0 and the range from 1).
-/// The container cannot write under a directory whose owner it does not map, or does not
-/// run as, so without this the job could write nothing under the exec root (the
-/// overlay refuses with `EACCES`).
-pub const CONTAINER_OWNER: &str = "1001:1001";
+/// directories while its container may run: the container's root, [`ACTION_ID`] there, which
+/// is `ACTION_ID + 1` (the setup namespace maps the daemon user to 0 and the range from 1).
+/// The container cannot write under a directory whose owner it does not map, so without
+/// this the job could write nothing under the exec root (the overlay refuses with `EACCES`).
+pub const CONTAINER_OWNER: &str = "1:1";
 
 /// The owner, in the same namespace, of the overlay directories once the container has
 /// stopped: id 0 there is the daemon's own user, so the driver reads every output (an
@@ -94,7 +96,7 @@ pub fn own_nproc_hard_limit() -> u64 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
     /// Namespaces of its own, the image's root read-only, a user namespace onto the job
-    /// user's subordinate range, no capability: every job but a host job.
+    /// user's subordinate range, Docker's default capabilities in it: every job but a host job.
     #[default]
     Contained,
     /// The host's own namespaces (pid, network, mount, IPC, UTS, cgroup; no user namespace),
@@ -164,6 +166,11 @@ pub struct ContainerSpec {
     /// the job's host ports. Empty for none, and the init does not wait. A host container
     /// ([`Isolation::Host`]) has none.
     pub listen_ports: Vec<u16>,
+    /// The image config's `User`, as written (`""` for none): `uid`, `name`, `uid:gid` or
+    /// `name:group`, with a name looked up in the image's own `/etc/passwd` and `/etc/group`,
+    /// as Docker does. Empty runs the job as container root ([`ACTION_ID`]). A host
+    /// container ignores it.
+    pub user: String,
 }
 
 /// A character device of the host, given to a container at the same path, as the host's
@@ -299,6 +306,7 @@ pub(crate) mod tests {
             ],
             devices: Vec::new(),
             listen_ports: Vec::new(),
+            user: String::new(),
         }
     }
 }

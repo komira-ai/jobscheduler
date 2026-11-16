@@ -385,7 +385,7 @@ message IdMapping {
 | `Mount.image` | the image's flattened tree, as an image layer is (LR4); mode `READ_ONLY` or `COPY_ON_WRITE` (the store's tree is shared, so `READ_WRITE` is refused at submit); `sub_path` allowed | `mount-image` | the tree in the image store, pinned for the lease, bound as a host path's clone is (4.4) | refused `mount-source-unsupported-here` until the Mac has an image store |
 | `PORT_PROTOCOL_UDP` | a host port by datagram; unique per (protocol, job port); `--host-port` stays TCP's, and UDP gets an entry form of its own (`udp/PORT`), so an operator who allowed a TCP port has not allowed UDP | `host-port-udp` | a UDP socket the agent holds in the job's namespace, relaying each peer's datagrams to the host port and back (4.5) | a Seatbelt `network*` grant of the port, as TCP |
 | `host_sockets` | at most 16; `host_path` must be a socket beneath an operator's `--host-socket` prefix (after links); a path socket, not an abstract one; `target` as a mount's, at most 107 bytes (a socket address's path), and in one namespace with the mount targets: no two equal, and none below a read-only mount that does not hold it | `host-sockets` | 4.5: the socket resolved and cloned as a host path is, but a socket instead of a directory, then bound at the target | a link at the target in `exec/`, and a Seatbelt grant to connect to that socket (5.4) |
-| `Mount.id_mapping` | `host_uid`/`host_gid` mapped to the job's user (uid and gid 1000 in the container); the ids are bounded by an operator's `--map-id UID:GID`, repeatable; any source, every mode | `mount-idmap` | the clone of 4.2 step 3 made an id-mapped mount (`mount_setattr` with `MOUNT_ATTR_IDMAP` and a user namespace that maps `host_uid` to the job's container identity), done before it is attached; reported only where the kernel and the source's file system support id-mapped mounts (FUSE from 6.12; overlay lowers per kernel) | refused `mount-idmap-unsupported-here`: Seatbelt has no ownership mapping |
+| `Mount.id_mapping` | `host_uid`/`host_gid` mapped to the job's user (the container's root, uid and gid 0, or the image's `User`); the ids are bounded by an operator's `--map-id UID:GID`, repeatable; any source, every mode | `mount-idmap` | the clone of 4.2 step 3 made an id-mapped mount (`mount_setattr` with `MOUNT_ATTR_IDMAP` and a user namespace that maps `host_uid` to the job's container identity), done before it is attached; reported only where the kernel and the source's file system support id-mapped mounts (FUSE from 6.12; overlay lowers per kernel) | refused `mount-idmap-unsupported-here`: Seatbelt has no ownership mapping |
 | `HostToContainer` propagation | a later `MOUNT_PROPAGATION_RECEIVE`: mounts the host makes below the source after the start appear in the job; never the other way | `mount-propagation-receive` | the clone made a slave of its source instead of private | refused: a link has no propagation |
 
 A host socket is a message of its own rather than a third kind of `Mount.source`, though Docker and Kubernetes say it
@@ -617,7 +617,7 @@ unless a safe wrapper exists by then.
 `crun` runs as the job user and binds the sources of the mounts itself, in the job's user namespace, where the job user's
 own ids are not mapped and the job's are: `<mounts>` and every directory below it are mode 0711, owned by root, so any
 id passes them. For each mount source, at assembly, the agent checks with `faccessat` under the job's own ids (the host
-ids `sub_uid + 1000`, `Oci::container_ids`) that the clone's root can be searched; a source the job cannot reach is
+ids `sub_uid`, the container's root, `Oci::container_ids`) that the clone's root can be searched; a source the job cannot reach is
 `input-unavailable` at the start, rather than a `crun` error or a mount the job cannot use. The job user's ids would be
 the wrong test: a source of mode 0700 owned by the job's identity, as a provider presents a writable tree (LR5), is one
 `crun` binds and the job uses, and the job user cannot search it. Layers need no such check, since the agent mounts
@@ -650,10 +650,12 @@ mount -t overlay overlay <mounts>/<lease>/rootfs \
 - The mount is made in the agent's mount namespace, as root, so `userxattr` is not given: whiteouts in the upper are the
   kernel's character devices. `crun` then puts the job in its user namespace over a root it did not make, which is how
   a daemon-made overlay and a mapped container work together.
-- The upper's root directory is made owned by the job's identity in the container (uid and gid 1000) and mode 0755, so
-  the job can make files at the top of its root: `kbf-task` of a tree job makes `/.kbf-run` there, and with a root-owned
-  `/` that `mkdir` failed with `EACCES`. The targets the agent makes in the root stay owned by the container's root.
-- The root is now writable where its modes allow the job (uid 1000 in the container) to write. `/tmp`, `/var/tmp` and
+- The upper's root directory is made owned by the container's root (the job user's first subordinate id) and mode 0755,
+  as the upper of a Docker container's overlay is. The job runs as that root (4.3.1), so it owns `/` and can make files
+  at the top of its root: `kbf-task` of a tree job makes `/.kbf-run` there. What a lower layer holds keeps the owner it
+  has: a file the layers present as owned by an id the namespace maps reads as that id, and one owned by an id outside
+  the map reads as 65534, as it does in Docker with `userns-remap`.
+- The root is now writable where the job (container root, or the image's `User`) may write by its modes. `/tmp`, `/var/tmp` and
   `/run` stay tmpfs, `/root` stays the run's home, `/scratch` stays the run's scratch: nothing moves for a program
   that writes where it did.
 
@@ -671,6 +673,35 @@ cover them with a second); then it makes it private, whether it made it or found
 baseline (4.6).
 
 A job without `layers` keeps today's root exactly: the image's tree, read-only, no agent mount.
+
+### 4.3.1 Who the job runs as: the Docker model
+
+The owner's decision (2026-11-14) is that a container job runs as Docker runs a container: "I think owned by root doesn't
+make sense. That's not how overlayfs works? Like we should just do what docker does." What that is here (rootless or
+`userns-remap` Docker):
+
+- **The process** is uid and gid 0 of the job's user namespace, which maps container ids `0..65536` to the job user's
+  subordinate range, so it is root of the namespace and an unprivileged id on the host (`sub_uid` and up). If the image
+  config names a `User` (`uid`, `uid:gid`, `name`, `name:group`), the job runs as that instead, a name being looked up in
+  the image's own `/etc/passwd` and `/etc/group` as Docker does (`crates/js-contain/src/oci/user.rs`); an id the
+  namespace does not map, or a name the image does not list, fails the start.
+- **The capabilities** are Docker's default set, in the namespace only: CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL,
+  SETGID, SETUID, SETPCAP, NET_BIND_SERVICE, NET_RAW, SYS_CHROOT, MKNOD, AUDIT_WRITE and SETFCAP, in the bounding,
+  permitted and effective sets (the bounding set alone for a non-root `User`). The seccomp filter is resolved for that
+  set, as Docker's default profile is. They reach nothing outside the namespace: a file whose owner the namespace does
+  not map is not the job's to change (the kernel checks the inode's ids against the namespace), a real device node
+  cannot be made by a user namespace, and `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` are not in the set.
+- **What stays** from the isolation table, unchanged: `noNewPrivileges`, a new network namespace with loopback only
+  unless the job is wired, `nosuid` and `nodev` on every mount, the read-only image root, the cgroup limits, the masked
+  and read-only paths, the device cgroup (every device denied but the booked GPUs, `m` denied for them too), the
+  `RLIMIT_CORE` of 0.
+- **The owner of what the job writes** is the container's root, the host id `sub_uid` (`Oci::container_ids`): the
+  root's writable layer, the copy-on-write mounts' layers, the run's scratch directory, the files directory, the home
+  directory and, as the kernel makes them for a mount made by the root of the namespace, the tmpfs mounts. The
+  work directories of the overlays stay the job user's, which runs `crun`. Read-only layers keep their mapping.
+- **A provider of trees** (`tierstore fs`) presents writable trees owned by `sub_uid:sub_gid`, no longer `sub_uid + 1000`
+  (the runbook says it); the agent still never changes a host path's owner (LR5). An image `User` other than root writes
+  where its modes allow, as in Docker: the directories above are the container's root's and mode 0755.
 
 ### 4.4 Mounts
 
@@ -696,7 +727,7 @@ What the job sees through a lower, compared with a tree in its scratch (the over
 lower fails `EXDEV` (`redirect_dir=off`; GNU `mv` then copies), renaming a file works. Writing over a lower directory
 needs the job to have write permission on it as the lower presents it: a host path whose files are owned by an id the
 job's mapping does not hold reads as owned by 65534, which the job cannot write into. A provider of trees a job will
-write over presents them owned by the job's container identity (the host uid `sub_uid + 1000`, `Oci::container_ids`;
+write over presents them owned by the container's root, which the job runs as (the host uid `sub_uid`, `Oci::container_ids`;
 for `tierstore fs`, its `fs.owner`, as `docs/runbooks/fuse-layers-and-mounts.md` says);
 the agent does not change ownership (decision LR5), until the designed `id_mapping` option of 2.4 is built.
 

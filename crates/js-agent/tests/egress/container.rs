@@ -178,6 +178,7 @@ impl ContainerHost {
             devices: Vec::new(),
             mounted_root: None,
             listen_ports: Vec::new(),
+            user: String::new(),
         }
     }
 

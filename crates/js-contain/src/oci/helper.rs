@@ -5,7 +5,7 @@
 //! inside a user namespace that maps both the daemon user and the subordinate range.
 //! A helper is that namespace: container id 0 is the daemon user, container ids
 //! `1..=65536` are the subordinate range ([`DaemonIds::setup_mappings`]), so a job's
-//! user (uid 1000, host subordinate id 1000) is helper id 1001, the `1001:1001` it is given directories as.
+//! user (container root, host subordinate id 0 of the range) is helper id 1, the `1:1` it is given directories as.
 //! `crun` creates it; AppArmor's grant for user namespaces is `crun`'s own profile,
 //! so the daemon needs no profile of its own.
 //!

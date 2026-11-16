@@ -10,11 +10,16 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::spec::{Placement, SpecError, action_config, render};
+use super::user::Identity;
 use crate::container::tests::spec;
 use crate::container::{ContainerSpec, DeviceNode, HostMount, NPROC_HIGH};
 use crate::subids::DaemonIds;
 
 fn config_with(spec: &ContainerSpec) -> Result<Value, SpecError> {
+    config_as(spec, Identity::root())
+}
+
+fn config_as(spec: &ContainerSpec, identity: Identity) -> Result<Value, SpecError> {
     let ids = DaemonIds {
         uid: 990,
         gid: 991,
@@ -30,6 +35,7 @@ fn config_with(spec: &ContainerSpec) -> Result<Value, SpecError> {
         init: Path::new("/scratch/oci-bin/js-init"),
         init_dest: "/dev/js-init",
         route_wait_secs: 0,
+        identity,
     };
     let config = action_config(spec, &placement)?;
     Ok(serde_json::from_slice(&render(&config).expect("render")).expect("json"))
@@ -57,11 +63,31 @@ fn mount_at<'a>(config: &'a Value, destination: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no mount at {destination}"))
 }
 
-/// Catches a job that keeps a capability (podman ran every job with `--cap-drop ALL`): all
-/// five sets of `process.capabilities` are present and empty, so `crun` has nothing to
-/// fall back to a default for.
+/// The names of Docker's default capability set, sorted.
+const DOCKER_DEFAULT: [&str; 14] = [
+    "CAP_AUDIT_WRITE",
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_MKNOD",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_RAW",
+    "CAP_SETFCAP",
+    "CAP_SETGID",
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_CHROOT",
+];
+
+/// Proves a job that runs as container root holds exactly Docker's default capability set
+/// (CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, SETGID, SETUID, SETPCAP, NET_BIND_SERVICE,
+/// NET_RAW, SYS_CHROOT, MKNOD, AUDIT_WRITE, SETFCAP) in its bounding, permitted and
+/// effective sets, and nothing inheritable or ambient; all five sets are written out, so
+/// `crun` has no default to fall back to.
 #[test]
-fn every_capability_set_is_empty() {
+fn a_root_job_holds_dockers_default_capabilities() {
     let config = config();
     let sets = config["process"]["capabilities"].as_object().expect("sets");
     let mut names: Vec<&str> = sets.keys().map(String::as_str).collect();
@@ -76,9 +102,34 @@ fn every_capability_set_is_empty() {
             "permitted"
         ]
     );
-    for (name, set) in sets {
-        assert_eq!(set, &json!([]), "{name}");
+    for name in ["bounding", "effective", "permitted"] {
+        assert_eq!(sets[name], json!(DOCKER_DEFAULT), "{name}");
     }
+    for name in ["inheritable", "ambient"] {
+        assert_eq!(sets[name], json!([]), "{name}");
+    }
+}
+
+/// Proves a job that runs as an image's non-root `User` holds Docker's set in its bounding
+/// set alone: nothing effective, permitted, inheritable or ambient, so it gains no
+/// capability by being in a namespace where root has them.
+#[test]
+fn a_non_root_job_holds_the_set_in_its_bounding_set_alone() {
+    let who = Identity {
+        uid: 1000,
+        gid: 1001,
+        additional_gids: vec![50, 44],
+    };
+    let config = config_as(&spec(), who).expect("config");
+    let sets = &config["process"]["capabilities"];
+    assert_eq!(sets["bounding"], json!(DOCKER_DEFAULT));
+    for name in ["effective", "permitted", "inheritable", "ambient"] {
+        assert_eq!(sets[name], json!([]), "{name}");
+    }
+    assert_eq!(
+        config["process"]["user"],
+        json!({"uid": 1000, "gid": 1001, "additionalGids": [50, 44]})
+    );
 }
 
 /// Catches a job that can gain privilege through a set-uid or file-capability program
@@ -227,11 +278,10 @@ fn host_mount_targets_must_be_normalized_absolute_paths() {
     }
 }
 
-/// Catches the filter still resolved for the old capability set: with none held,
-/// `chroot` (allowed only for `CAP_SYS_CHROOT`) is refused with an errno, as under
-/// podman's `--cap-drop ALL`, and is not also allowed by another entry.
+/// Proves the filter is resolved for the job's set, as Docker's default profile is: the
+/// job holds `CAP_SYS_CHROOT`, so `chroot` is allowed and no entry refuses it.
 #[test]
-fn the_seccomp_filter_is_resolved_for_no_capabilities() {
+fn the_seccomp_filter_is_resolved_for_the_jobs_capabilities() {
     let config = config();
     let calls = config["linux"]["seccomp"]["syscalls"]
         .as_array()
@@ -247,7 +297,7 @@ fn the_seccomp_filter_is_resolved_for_no_capabilities() {
             .filter_map(|c| c["action"].as_str())
             .collect()
     };
-    assert_eq!(action_of("chroot"), ["SCMP_ACT_ERRNO"]);
+    assert_eq!(action_of("chroot"), ["SCMP_ACT_ALLOW"]);
 }
 
 /// Catches the default process limit left where one job's forks could fail another's
@@ -414,18 +464,18 @@ fn a_device_path_outside_dev_is_refused() {
     }
 }
 
-/// Proves the GPU's nodes give the job no capability: with devices, every capability set is
-/// still empty and new privileges are still refused, so a job cannot remount what it is given
-/// (`CAP_SYS_ADMIN`) or make another node (`CAP_MKNOD`). Catches device support that widens
-/// the capability set.
+/// Proves the GPU's nodes change no capability: with devices the sets are Docker's default
+/// ones still, and new privileges are still refused. A job cannot remount what it is given
+/// (`CAP_SYS_ADMIN` is not held), and `CAP_MKNOD` makes no node a real device in a user
+/// namespace: the device cgroup (`a_container_given_devices_gets_their_nodes_and_rules_that_allow_only_them`)
+/// denies `m` for every device.
 #[test]
-fn a_container_given_devices_still_holds_no_capability() {
+fn a_container_given_devices_holds_the_same_capabilities() {
     let config = config_with(&gpu_job()).expect("config");
-    let sets = config["process"]["capabilities"].as_object().expect("sets");
-    assert_eq!(sets.len(), 5);
-    for (name, set) in sets {
-        assert_eq!(set, &json!([]), "{name}");
-    }
+    let sets = &config["process"]["capabilities"];
+    assert_eq!(sets["bounding"], json!(DOCKER_DEFAULT));
+    assert_eq!(sets["effective"], json!(DOCKER_DEFAULT));
+    assert!(!DOCKER_DEFAULT.contains(&"CAP_SYS_ADMIN"));
     assert_eq!(config["process"]["noNewPrivileges"], true);
 }
 

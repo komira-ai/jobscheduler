@@ -5,13 +5,13 @@
 //! 1. each opened host path (the layers' first, then the mounts') cloned private, `nosuid`
 //!    and `nodev` (read-only for a layer and a read-only mount, `noexec` when the mount asks)
 //!    at `<mounts>/<lease>/src/<i>`, and each mount's clone checked to be searchable by the
-//!    job's own identity (the host ids the job runs as), which must use it: `crun` binds it in
+//!    container's root (the host ids the job runs as), which must use it: `crun` binds it in
 //!    the job's user namespace, where the job user's own ids are not mapped;
 //! 2. with layers, the root: an overlay at `<mounts>/<lease>/rootfs` of the layers (top
 //!    first) over the image's tree, with its writable layer `rootfs-upper` (owned by the
-//!    container's root, mode `0755`) in the lease directory;
+//!    container's root, mode `0755`, as Docker's is) in the lease directory;
 //! 3. each copy-on-write mount an overlay of its clone at `<mounts>/<lease>/cow/<i>`, its
-//!    writable layer `cow/<i>/upper` (owned by the job's own identity) in the lease
+//!    writable layer `cow/<i>/upper` (owned by the container's root) in the lease
 //!    directory;
 //! 4. the targets: made in the root's writable layer (through the root, so the layers' links
 //!    are read as the job reads them), or in the writable layer of the copy-on-write mount
@@ -53,13 +53,11 @@ pub(crate) enum Lower {
 /// Who owns what the assembly makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Owners {
-    /// The container's root (the job user's first subordinate ids): the targets made in a
-    /// layered root's writable layer.
+    /// The container's root (the job user's first subordinate ids), which the job runs as
+    /// unless its image names a `User`, as Docker's container root owns what it writes: a
+    /// layered root's writable layer, a copy-on-write mount's writable layer, the targets
+    /// made in them, and the ids each mount's clone must be searchable by.
     pub(crate) root: (u32, u32),
-    /// The job's own identity in the container: a layered root's writable layer (its top
-    /// directory, so the job can make files at the top of its root) and a copy-on-write
-    /// mount's writable layer and the targets made in it, and the ids each mount's clone must be searchable by.
-    pub(crate) job: (u32, u32),
     /// The job user, which runs `crun`: the overlays' work directories.
     pub(crate) user: (u32, u32),
 }
@@ -150,7 +148,7 @@ pub(crate) fn assemble(
     }
     for (j, mount) in plan.mounts.iter().enumerate() {
         paths
-            .search_as(&src(host_layers + j), plan.owners.job)
+            .search_as(&src(host_layers + j), plan.owners.root)
             .map_err(|why| {
                 let why = format!("the job cannot reach the source of {}: {why}", mount.target);
                 refused(refusal::INPUT_UNAVAILABLE, why)
@@ -215,7 +213,7 @@ fn mount_root(
     lowers.reverse();
     lowers.extend(plan.image.clone());
     let (upper, work) = (plan.lease.join(ROOT_UPPER), plan.lease.join(ROOT_WORK));
-    make_layer_dir((&plan.lease, ROOT_UPPER), 0o755, plan.owners.job, paths)
+    make_layer_dir((&plan.lease, ROOT_UPPER), 0o755, plan.owners.root, paths)
         .map_err(failed("make the root's layer"))?;
     make_layer_dir((&plan.lease, ROOT_WORK), 0o700, plan.owners.user, paths)
         .map_err(failed("make the root's work"))?;
@@ -232,7 +230,7 @@ fn mount_root(
 }
 
 /// Mounts the copy-on-write mount whose clone is source `i` at `<mounts>/<lease>/cow/<i>`,
-/// under a writable layer owned by the job's identity, `noexec` when asked.
+/// under a writable layer owned by the container's root, `noexec` when asked.
 fn mount_copy(
     (calls, paths): (&dyn MountCalls, &dyn PathCalls),
     plan: &Plan,
@@ -241,7 +239,7 @@ fn mount_copy(
 ) -> Result<(), Unassembled> {
     let layers = plan.lease.join(COW).join(i.to_string());
     let (upper, work) = (layers.join("upper"), layers.join("work"));
-    make_layer_dir((&layers, "upper"), 0o755, plan.owners.job, paths)
+    make_layer_dir((&layers, "upper"), 0o755, plan.owners.root, paths)
         .map_err(failed("make a mount's layer"))?;
     make_layer_dir((&layers, "work"), 0o700, plan.owners.user, paths)
         .map_err(failed("make a mount's work"))?;
@@ -275,7 +273,7 @@ fn make_targets(
                 let i = (host_layers + k).to_string();
                 let (tree, owner) = match other.mode {
                     MountMode::ReadOnly => (plan.dir.join("src").join(i), None),
-                    MountMode::CopyOnWrite => (plan.dir.join(COW).join(i), Some(plan.owners.job)),
+                    MountMode::CopyOnWrite => (plan.dir.join(COW).join(i), Some(plan.owners.root)),
                     MountMode::ReadWrite => continue,
                 };
                 (tree, other.target.as_str(), owner)

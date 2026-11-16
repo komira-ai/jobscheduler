@@ -71,7 +71,7 @@
       ],
       "defaultAction": "SCMP_ACT_ERRNO",
       "defaultErrnoRet": 38,
-      "syscalls": "26 entries"
+      "syscalls": "23 entries"
     },
     "uidMappings": [
       {
@@ -309,10 +309,55 @@
     ],
     "capabilities": {
       "ambient": [],
-      "bounding": [],
-      "effective": [],
+      "bounding": [
+        "CAP_AUDIT_WRITE",
+        "CAP_CHOWN",
+        "CAP_DAC_OVERRIDE",
+        "CAP_FOWNER",
+        "CAP_FSETID",
+        "CAP_KILL",
+        "CAP_MKNOD",
+        "CAP_NET_BIND_SERVICE",
+        "CAP_NET_RAW",
+        "CAP_SETFCAP",
+        "CAP_SETGID",
+        "CAP_SETPCAP",
+        "CAP_SETUID",
+        "CAP_SYS_CHROOT"
+      ],
+      "effective": [
+        "CAP_AUDIT_WRITE",
+        "CAP_CHOWN",
+        "CAP_DAC_OVERRIDE",
+        "CAP_FOWNER",
+        "CAP_FSETID",
+        "CAP_KILL",
+        "CAP_MKNOD",
+        "CAP_NET_BIND_SERVICE",
+        "CAP_NET_RAW",
+        "CAP_SETFCAP",
+        "CAP_SETGID",
+        "CAP_SETPCAP",
+        "CAP_SETUID",
+        "CAP_SYS_CHROOT"
+      ],
       "inheritable": [],
-      "permitted": []
+      "permitted": [
+        "CAP_AUDIT_WRITE",
+        "CAP_CHOWN",
+        "CAP_DAC_OVERRIDE",
+        "CAP_FOWNER",
+        "CAP_FSETID",
+        "CAP_KILL",
+        "CAP_MKNOD",
+        "CAP_NET_BIND_SERVICE",
+        "CAP_NET_RAW",
+        "CAP_SETFCAP",
+        "CAP_SETGID",
+        "CAP_SETPCAP",
+        "CAP_SETUID",
+        "CAP_SYS_CHROOT"
+      ]
     },
     "cwd": "/job/root/pkg",
     "env": [
@@ -341,8 +386,9 @@
     ],
     "terminal": false,
     "user": {
-      "gid": 1000,
-      "uid": 1000
+      "additionalGids": [],
+      "gid": 0,
+      "uid": 0
     }
   },
   "root": {

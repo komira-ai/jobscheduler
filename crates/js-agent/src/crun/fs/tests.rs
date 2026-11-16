@@ -249,7 +249,6 @@ pub(super) fn host_layer(path: &Path) -> Layer {
 pub(super) fn owners() -> Owners {
     Owners {
         root: own(),
-        job: own(),
         user: own(),
     }
 }

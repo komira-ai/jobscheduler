@@ -517,8 +517,8 @@ fn names_a_container(units: &[&str]) -> bool {
 /// therefore not found here: the runtime's own call ends it, not the post-job checks.
 ///
 /// The invariant behind the exemption: code a job controls never runs as the job user (the
-/// uid of the agent's helpers and of `crun`) on the host. It runs at `sub_uid + 1000`, in a
-/// user namespace, with no capabilities, so it cannot place a process in `actions/helpers`
+/// uid of the agent's helpers and of `crun`) on the host. It runs as container root (`sub_uid`), in a
+/// user namespace whose capabilities reach nothing outside it, so it cannot place a process in `actions/helpers`
 /// or write a cgroup there.
 fn runners_helper(units: &[&str]) -> bool {
     let inside_a_lease = |unit: &&str| *unit == "ctr" || is_lease_group(unit);

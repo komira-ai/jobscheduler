@@ -421,7 +421,7 @@ capability at the agent's next start; the unit orders the agent after `tierstore
 this design adds no re-probe (TI7).
 
 The probe also compares `fs.owner` with the host uid the job's action runs as: the job user's first subordinate id plus
-`ACTION_ID` (1000, `crates/js-contain/src/container.rs:12`; the sum is `Oci::container_ids`,
+`ACTION_ID` (0, the container's root, `crates/js-contain/src/container.rs`; the sum is `Oci::container_ids`,
 `crates/js-contain/src/oci/lease.rs`). A mismatch is a deployment mistake that would make every copy-up fail inside the
 container (overlayfs cannot copy up a file whose owner is not mapped in the container's user namespace), so the
 capability is not reported and the warning names both ids. The check runs once, at start, as B20 asks.
@@ -616,7 +616,7 @@ Two cases the baseline alone does not cover, both new here:
   (`integrity/mod.rs:531`, the host's own mounts, today the network namespaces and `/run/user/<uid>`) gains one entry:
   `point` equal to the configured `--tierstore-fs` and `fstype` equal to `fuse.tierstore`. The function takes the
   configured path, as a field of the check. A FUSE mount anywhere else, or another type at that point, is still a
-  finding. A job cannot make this mount: its container has no `/dev/fuse` and no capabilities.
+  finding. A job cannot make this mount: its container has no `/dev/fuse` and holds no `CAP_SYS_ADMIN`.
 - **The type and source must be stable** across instances `a` and `b` and across releases, or each hand-over would be
   a new mount. Section 12 asks tierstore to fix them as `fuse.tierstore` and `tierstore`.
 

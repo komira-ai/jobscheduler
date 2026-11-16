@@ -46,6 +46,7 @@ pub fn spec() -> ContainerSpec {
         devices: Vec::new(),
         mounted_root: None,
         listen_ports: Vec::new(),
+        user: String::new(),
     }
 }
 
@@ -184,28 +185,33 @@ fn a_nul_byte_in_the_process_settings_is_refused() {
         r#"{"Entrypoint":["/bin/a\u0000b"]}"#,
         r#"{"Cmd":["x","\u0000"]}"#,
         r#"{"WorkingDir":"/a\u0000b"}"#,
+        r#"{"User":"a\u0000b"}"#,
     ] {
         let refused = ImageConfig::parse(config_json(process, 1).as_bytes()).expect_err(process);
         assert_eq!(refused, ConfigError::Nul, "{process}");
     }
 }
 
-/// The image's `USER` is not read: a config that names root, an id or a user that does not
-/// exist parses to the same thing as one that names none, so nothing of it can reach the
-/// container (a job runs as the id its runtime gives it, the slot's).
+/// The image's `User` reaches the container spec as written, for js-contain to resolve in
+/// the image's own files, as Docker runs it: each form of it is kept whole, a config that
+/// names none leaves the spec's user empty (container root), and a run whose spec held a user
+/// has it replaced by the image's.
 #[test]
-fn the_image_user_is_ignored() {
+fn the_image_user_reaches_the_container_as_written() {
     let base = r#""Entrypoint":["/t"],"WorkingDir":"/w""#;
-    let none = parse(&format!("{{{base}}}"));
-    for user in ["root", "0:0", "nobody:nogroup", "4242"] {
-        let named = parse(&format!(r#"{{{base},"User":"{user}"}}"#));
-        assert_eq!(named, none, "{user}");
+    for user in ["root", "0:0", "nobody:nogroup", "4242", "app:staff"] {
         let mut made = spec();
-        named.apply(&[], &mut made).expect("applies");
-        let mut plain = spec();
-        none.apply(&[], &mut plain).expect("applies");
-        assert_eq!(made, plain, "{user}");
+        parse(&format!(r#"{{{base},"User":"{user}"}}"#))
+            .apply(&[], &mut made)
+            .expect("applies");
+        assert_eq!(made.user, user);
     }
+    let mut made = spec();
+    made.user = "left-over".to_owned();
+    parse(&format!("{{{base}}}"))
+        .apply(&[], &mut made)
+        .expect("applies");
+    assert_eq!(made.user, "");
 }
 
 /// A config that lists another number of layers than its manifest is refused; one that

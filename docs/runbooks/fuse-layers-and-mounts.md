@@ -22,29 +22,31 @@ Examples use `jsjob` as the job user, `e2e` as the pool, and `<work>`, a directo
 
 ## 1. The rule this run depends on: `fs.owner` is the job's host uid (LR5)
 
-**The tree's `fs.owner` must be the host ids a job runs as: `sub_uid + 1000` and `sub_gid + 1000`, where `sub_uid` and
-`sub_gid` are the first ids of the job user's subordinate ranges.** On this node that is
-`fs.owner = "<sub_uid + 1000>:<sub_gid + 1000>"` in `tierstore fs`'s `[fs]` table.
+**The tree's `fs.owner` must be the host ids a job runs as: `sub_uid` and `sub_gid`, the first ids of the job user's
+subordinate ranges, which are the host ids of the container's root.** On this node that is
+`fs.owner = "<sub_uid>:<sub_gid>"` in `tierstore fs`'s `[fs]` table. (Before the job ran as the container's root, as
+Docker's does, this was `sub_uid + 1000`: a node whose `fs.owner` still names that must change it, and restart
+`tierstore fs`, when it takes this agent.)
 
 Why, in the order a job meets it:
 
-- A job runs as id 1000 of its own user namespace, which the agent maps to the job user's subordinate range (id 0 to
-  `sub_uid`, id 1000 to `sub_uid + 1000`; `Oci::container_ids`, `crates/js-contain/src/oci/lease.rs`). The job user's
-  own uid is not mapped in that namespace.
+- A job runs as id 0 of its own user namespace (as in a Docker container, unless its image names a `User`), which the
+  agent maps to the job user's subordinate range (id 0 to `sub_uid`; `Oci::container_ids`,
+  `crates/js-contain/src/oci/lease.rs`). The job user's own uid is not mapped in that namespace.
 - `tierstore fs` presents every file and directory of a tree, and every directory and file of its put directory, as
   owned by `fs.owner`, and it mounts with `default_permissions`, so the kernel checks those modes against the caller's
   host ids. A tree's directories are 0755 and its files 0644 (0755 when executable); a put directory is 0700.
 - An overlay (the layered root and a copy-on-write mount) lets a job write over a lower directory only where the job
-  has write permission on it as the lower presents it. Owned by `sub_uid + 1000`, the tree's directories are the job's,
+  has write permission on it as the lower presents it. Owned by `sub_uid`, the tree's directories are the job's,
   so it can create, change and delete in them (each change copied up). Owned by anyone else, they read as owned by
   65534 inside the job, and every write below them fails `EACCES`.
-- A put directory is mode 0700. Only its owner (or root) can create a file in it. Owned by `sub_uid + 1000`, it is the
+- A put directory is mode 0700. Only its owner (or root) can create a file in it. Owned by `sub_uid`, it is the
   job's; owned by anyone else, the job cannot write its outputs.
 - The agent checks, at assembly, that each mount's source can be searched by the job's ids (`job-rootfs.md` 4.2).
-  `crun` binds the source inside the job's user namespace, where `sub_uid + 1000` is mapped. **CI**
-  (`crun::fs::assemble_tests::a_mounts_source_is_searched_as_the_job_not_the_job_user` in `js-agent`;
+  `crun` binds the source inside the job's user namespace, where `sub_uid` is mapped. **CI**
+  (`crun::fs::assemble_tests::a_mounts_source_is_searched_as_the_containers_root_not_the_job_user` in `js-agent`;
   `job_fs::a_private_source_owned_by_the_job_is_bound_and_written` in `js-contain`'s `crun_root` suite, where a
-  read-write and a copy-on-write mount of a 0700 directory owned by `sub_uid + 1000` are bound and written by the job).
+  read-write and a copy-on-write mount of a 0700 directory owned by `sub_uid` are bound and written by the job).
 
 The agent never changes the ownership of a host path (decision LR5), and it has no id-mapped mounts yet (build item 14
 of `job-rootfs.md`). So the provider presents the ids, and one `tierstore fs` serves the jobs of one job user.
@@ -59,7 +61,7 @@ grep '^jsjob:' /etc/subuid /etc/subgid
 /etc/subgid:296608:65536
 ```
 
-Here `fs.owner = "297608:297608"`. While a job runs, `stat -c '%u:%g'` of its scratch directory
+Here `fs.owner = "296608:296608"`. While a job runs, `stat -c '%u:%g'` of its scratch directory
 (`/var/lib/js-agent/scratch/runs/<run>`) prints the same pair.
 
 ## 2. What you need
@@ -97,7 +99,7 @@ stage_dir = "/var/cache/tierstore/put-stage"
 
 `fill_socket` and `cache_path` are the node tierstore's `local_cache.fill_socket` and `local_cache.path`. The mount is
 at `/run/tierstore/fs` (the default `fs.mountpoint`), with `allow_other`, which tierstore always sets: the agent reads
-the trees as root, and the job reads and writes as `sub_uid + 1000`. The unit starts only when its marker `/var/lib/tierstore/run-fs-a` exists, which nothing writes yet: create it, start the
+the trees as root, and the job reads and writes as `sub_uid`. The unit starts only when its marker `/var/lib/tierstore/run-fs-a` exists, which nothing writes yet: create it, start the
 unit (`systemctl start tierstore-fs@a`), and
 check that `systemctl status tierstore-fs@a` says it is running and that its journal names the mode
 (`tierstore fs: kernel offers ... mode=...`).
@@ -281,7 +283,7 @@ in CI measures it.
 
 | What you see | What it means |
 |---|---|
-| `js job get` shows `job.state: failed-to-start` and `job.start_failure: input-unavailable`, and the agent's refusal reads `the job cannot reach the source of /out: Permission denied (os error 13)` | `fs.owner` is not `sub_uid + 1000:sub_gid + 1000` (section 1) |
+| `js job get` shows `job.state: failed-to-start` and `job.start_failure: input-unavailable`, and the agent's refusal reads `the job cannot reach the source of /out: Permission denied (os error 13)` | `fs.owner` is not `sub_uid:sub_gid` (section 1; a node that still has `sub_uid + 1000` from before the job ran as the container's root) |
 | The job's write under `/e2e` or `/work` fails `Permission denied` | the same: the tree's directories are not the job's |
 | `job.start_failure: agent-refused`, detail `input-not-allowed` | a host path is under no root, or the read-write mount is under `--mount-root-ro` |
 | `mv: can't rename '/out/result.part': I/O error` or `Device or resource busy` | the upload did not finish within `fs.put.commit_deadline_secs`; the file stays staged, and the same `mv` may be tried again while the job runs |

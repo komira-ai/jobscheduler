@@ -363,9 +363,9 @@ fn a_run_is_given_its_nodes_as_they_are_when_it_starts() {
 /// run's own mounts, with exactly `bind` (not recursive: no mount below the driver directory
 /// on the host, writable or not, reaches the job), `ro`, `nosuid` and `nodev`; that its
 /// variables are set, the one the image also sets taking the operator's value; and that the
-/// container keeps its empty capability set and `noNewPrivileges`, so it cannot remount the
+/// container holds no `CAP_SYS_ADMIN` and keeps `noNewPrivileges`, so it cannot remount the
 /// driver writable. Catches a writable or recursive driver mount, one without `nosuid` or
-/// `nodev`, a variable the image hides, and GPU support that hands the job a capability.
+/// `nodev`, a variable the image hides, and GPU support that hands the job `CAP_SYS_ADMIN`.
 #[test]
 fn the_mounts_are_read_only_and_the_job_cannot_remount() {
     let node = Node::new("gpu-mounts");
@@ -408,7 +408,8 @@ fn the_mounts_are_read_only_and_the_job_cannot_remount() {
     let sets = config["process"]["capabilities"].as_object().expect("sets");
     assert_eq!(sets.len(), 5);
     for (name, set) in sets {
-        assert_eq!(set, &json!([]), "{name}");
+        let held = set.as_array().expect("a set");
+        assert!(!held.contains(&json!("CAP_SYS_ADMIN")), "{name}");
     }
     assert_eq!(config["process"]["noNewPrivileges"], true);
     runtime.remove(&id).expect("removed");

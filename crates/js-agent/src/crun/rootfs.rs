@@ -123,8 +123,7 @@ impl CrunRuntime {
     /// assembly; nothing for a run whose assembly was asked for, or that is not prepared.
     fn ask_assembly(&mut self, run_id: &str) -> Result<(), String> {
         let owners = Owners {
-            root: self.subordinate_ids(),
-            job: self.oci.container_ids(),
+            root: self.oci.container_ids(),
             user: self.oci.job_ids(),
         };
         let Self {

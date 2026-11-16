@@ -25,7 +25,7 @@ fn as_capable_job(pid: u32, program: &str, args: &[&str]) -> (bool, String) {
 
 /// Asserts control A. A job in a real container tries, one after the other, to take its
 /// interfaces down, flush its routes, add an address, add a route to the metadata address and
-/// switch IPv6 on: with no capability every attempt fails. Then the same attempts are made
+/// switch IPv6 on: without `CAP_NET_ADMIN` (not in Docker's default set, which a job holds) every attempt fails. Then the same attempts are made
 /// with every capability of the job's own user namespace (entering it from the host), and
 /// they succeed: the job's own namespace is its to reconfigure. What that buys it is
 /// nothing: the rules live in the host's initial network namespace, where the job's

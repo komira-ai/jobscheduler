@@ -213,6 +213,12 @@ impl Oci {
             init: &self.init,
             init_dest: &self.init_dest,
             route_wait_secs,
+            // The image's own files name the user (small reads, through the root the job
+            // sees: a layered root's overlay, else the image's tree).
+            identity: super::user::resolve(
+                &spec.user,
+                spec.mounted_root.as_deref().unwrap_or(rootfs),
+            )?,
         };
         // A rootless daemon cannot give a job a process limit above its own hard one.
         let mut job = spec.clone();

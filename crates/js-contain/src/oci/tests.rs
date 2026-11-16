@@ -916,6 +916,62 @@ async fn the_bundle_names_the_init_where_the_config_says() {
     assert!(!text.contains("/dev/js-init"), "{text}");
 }
 
+/// Proves the image's `User` reaches the bundle as the ids its own files name: over a root with
+/// a passwd and a group file, `app` is written to `config.json` as uid 1000, gid 1001 and
+/// the groups that list it, and a job whose spec names no user is written as 0:0.
+#[tokio::test]
+async fn the_bundle_runs_the_job_as_the_images_user() {
+    let dir = scratch("image-user");
+    let oci = start(&config(&dir, true), &dir.join("scratch")).expect("started");
+    let root = dir.join("image-root");
+    std::fs::create_dir_all(root.join("etc")).expect("etc");
+    std::fs::write(
+        root.join("etc/passwd"),
+        "app:x:1000:1001::/home/app:/bin/sh\n",
+    )
+    .expect("passwd");
+    std::fs::write(root.join("etc/group"), "staff:x:50:app\n").expect("group");
+    let mut spec = crate::container::tests::spec();
+    spec.mounted_root = Some(root);
+    let user_of = |spec: &crate::container::ContainerSpec| -> serde_json::Value {
+        let text = std::fs::read_to_string(spec.dir.join("bundle/config.json")).expect("config");
+        serde_json::from_str::<serde_json::Value>(&text).expect("json")["process"]["user"].clone()
+    };
+    spec.dir = dir.join("lease-root");
+    oci.create(&spec).await.expect("bundle");
+    assert_eq!(
+        user_of(&spec),
+        serde_json::json!({"uid": 0, "gid": 0, "additionalGids": []})
+    );
+    spec.dir = dir.join("lease-app");
+    spec.user = "app".to_owned();
+    oci.create(&spec).await.expect("bundle");
+    assert_eq!(
+        user_of(&spec),
+        serde_json::json!({"uid": 1000, "gid": 1001, "additionalGids": [50]})
+    );
+}
+
+/// Proves a job whose image names a user its files do not list is not made: the error names
+/// the user and no `config.json` is written.
+#[tokio::test]
+async fn a_user_the_image_does_not_list_fails_the_bundle() {
+    let dir = scratch("image-user-missing");
+    let oci = start(&config(&dir, true), &dir.join("scratch")).expect("started");
+    let root = dir.join("image-root");
+    std::fs::create_dir_all(root.join("etc")).expect("etc");
+    let mut spec = crate::container::tests::spec();
+    spec.mounted_root = Some(root);
+    spec.dir = dir.join("lease");
+    spec.user = "ghost".to_owned();
+    let why = oci.create(&spec).await.expect_err("refused").to_string();
+    assert_eq!(
+        why,
+        "the image's User names \"ghost\", which the image's /etc/passwd does not list"
+    );
+    assert!(!spec.dir.join("bundle/config.json").exists());
+}
+
 /// A root daemon names the job user: the containers map that user's subordinate range, not
 /// the daemon's, and a user with no range is refused. It catches a daemon that maps its own
 /// ids when told to run the containers as another user.
@@ -1037,7 +1093,8 @@ fn a_lease_names_its_directories_and_who_owns_them() {
         rustix::process::getgid().as_raw(),
     );
     assert_eq!(oci.job_ids(), (uid, gid));
-    assert_eq!(oci.container_ids(), (101_000, 201_000));
+    // The container's root: the first subordinate ids, as the job (root) writes them.
+    assert_eq!(oci.container_ids(), (100_000, 200_000));
     // No job user is configured, so nothing is dropped to for the keeper either.
     assert!(oci.job_drop().is_none());
 }
@@ -1178,7 +1235,7 @@ fn config_default(dir: &Path) -> OciConfig {
 /// (none), refusing a system call a job's network path needs: the calls an allow-listed job
 /// makes to open a socket, connect, send, receive and ask the socket about itself are all
 /// in an allow entry. (What stops a job from reconfiguring the network is the kernel and the
-/// empty capability set, not this filter: see `a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace` in the
+/// namespace's capability set (no `CAP_NET_ADMIN`), not this filter: see `a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace` in the
 /// agent's egress tests.)
 #[test]
 fn the_seccomp_profile_resolved_for_a_job_allows_the_calls_of_a_network_client() {

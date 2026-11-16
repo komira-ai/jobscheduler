@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use super::host_spec::HOST_CAPABILITIES;
 use super::spec::{Placement, SpecError, action_config, render};
+use super::user::Identity;
 use crate::container::tests::spec as contained;
 use crate::container::{ContainerSpec, DeviceNode, HostMount, Isolation, SharedMount};
 use crate::subids::DaemonIds;
@@ -40,6 +41,7 @@ fn config_with(spec: &ContainerSpec) -> Result<Value, SpecError> {
         init: Path::new("/scratch/oci-bin/js-init"),
         init_dest: "/dev/js-init",
         route_wait_secs: 7,
+        identity: Identity::root(),
     };
     let config = action_config(spec, &placement)?;
     Ok(serde_json::from_slice(&render(&config).expect("render")).expect("json"))
@@ -252,6 +254,7 @@ fn a_host_containers_exec_root_and_init_must_be_normalized() {
         init: Path::new("oci-bin/js-init"),
         init_dest: "/dev/js-init",
         route_wait_secs: 0,
+        identity: Identity::root(),
     };
     let why = action_config(&host(), &placement).expect_err("relative init");
     assert!(why.to_string().starts_with("init path "), "{why}");
