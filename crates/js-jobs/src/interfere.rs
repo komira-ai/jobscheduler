@@ -33,6 +33,27 @@ pub struct Interfere<S> {
     /// What each read that reached the wrapped store asked for, in order, since the last
     /// [`Interfere::take_reads`].
     reads: Mutex<Vec<Read>>,
+    /// What the decisions of [`Store::claim_decide`] read, in order, since the last
+    /// [`Interfere::take_claim_reads`]; apart from `reads`, which the passes' own reads are.
+    claim_reads: Arc<Mutex<Vec<Read>>>,
+}
+
+/// The reads of a claimed decision, logged as they are made.
+struct LoggedRead<'a> {
+    read: &'a mut dyn TxnRead,
+    log: &'a Mutex<Vec<Read>>,
+}
+
+impl TxnRead for LoggedRead<'_> {
+    fn get(&mut self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        lock(self.log).push(Read::Get(key.to_owned()));
+        self.read.get(key)
+    }
+
+    fn scan_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        lock(self.log).push(Read::Scan(prefix.to_owned()));
+        self.read.scan_prefix(prefix)
+    }
 }
 
 /// One read a store was asked for: the key of a get, or the prefix of a scan.
@@ -59,6 +80,7 @@ impl<S: Store> Interfere<S> {
             before: Mutex::new(None),
             error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
             reads: Mutex::new(Vec::new()),
+            claim_reads: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -111,6 +133,11 @@ impl<S: Store> Interfere<S> {
         std::mem::take(&mut *lock(&self.reads))
     }
 
+    /// What the decisions of claimed commits read since the last call, in order.
+    pub fn take_claim_reads(&self) -> Vec<Read> {
+        std::mem::take(&mut *lock(&self.claim_reads))
+    }
+
     /// Logs `read` once it passed [`Interfere::fail_read_after`].
     fn log(&self, read: Read) -> Result<(), StoreError> {
         self.countdown(&self.fail_read_at)?;
@@ -161,7 +188,9 @@ impl<S: Store> Store for Interfere<S> {
             hook();
         }
         self.countdown(&self.fail_at)?;
-        self.inner.claim_decide(claim, decide)
+        let log = &self.claim_reads;
+        self.inner
+            .claim_decide(claim, &mut |read| decide(&mut LoggedRead { read, log }))
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
