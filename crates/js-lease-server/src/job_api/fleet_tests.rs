@@ -488,9 +488,11 @@ async fn a_cleared_taint_is_gone_from_the_listing_the_file_and_placement() {
 }
 
 /// Asserts that a clear of a host the registry does not hold (one that never said hello, or
-/// an id no host can have) is `NOT_FOUND` `unknown-host`, and that a clear of a host with no
-/// taint answers `cleared` false: both write nothing. It catches an unknown host answered as
-/// cleared and a clean host's clear that writes the bindings.
+/// an id no host can have) is `NOT_FOUND` `unknown-host` and writes nothing, and that a clear
+/// of a host with no taint answers `cleared` false and leaves no taint in the bindings (it
+/// saves bindings that were never saved, which is the retry of an earlier failed save). It
+/// catches an unknown host answered as cleared or written, and a clean host's clear that
+/// writes a taint.
 #[tokio::test]
 async fn clearing_an_unknown_host_is_not_found_and_a_clean_host_writes_nothing() {
     let unknown = (Code::NotFound, UNKNOWN_HOST.to_owned());
@@ -499,10 +501,12 @@ async fn clearing_an_unknown_host_is_not_found_and_a_clean_host_writes_nothing()
     for host in ["h9", "Not A Host!", ""] {
         assert_eq!(refused(clear_taint(&s.api, host).await), unknown);
     }
+    assert_eq!(s.bindings_file(), None);
     let clean = clear_taint(&s.api, "h1").await.unwrap();
     assert!(!clean.cleared);
     assert_eq!(clean.cleared_reason, "");
-    assert_eq!(s.bindings_file(), None);
+    let saved = s.bindings_file().unwrap_or_default();
+    assert!(!saved.contains("taint"), "{saved}");
     assert_eq!(s.shared.agent_errors(), 0);
 }
 

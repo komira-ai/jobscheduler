@@ -158,9 +158,15 @@ fn a_clearable_taint_that_appears_while_the_previous_agent_is_awaited_does_not_h
                     })
                     .unwrap();
             }
+            // The previous agent says hello after the taint appeared, so the wait passes a
+            // guard with the taint on the host before it ends.
+            if ticks == base + 3 {
+                spy.world.hello("1.3.0").unwrap();
+            }
         });
         let done = spy.rollback(&rig);
         assert_eq!(done.outcome, Outcome::Success, "{reason}/{check}: {done:?}");
+        assert_eq!(rig.world.ticks() - base, 3, "{reason}/{check}");
         assert_eq!(done.report.reason, None, "{reason}/{check}");
         assert_restored(&rig);
     }

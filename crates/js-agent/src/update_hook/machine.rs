@@ -542,7 +542,7 @@ mod tests {
 
     use js_client::ClientError;
 
-    use super::{CommandRunner, launch_units, named};
+    use super::{CommandRunner, Root, StateView, Taint, launch_units, named};
     use crate::update_hook::{LAUNCHCTL, Units};
 
     /// A `launchctl` that shows every service running, and notes each command it is given.
@@ -619,5 +619,21 @@ mod tests {
             why: "is wrong".to_owned(),
         };
         assert_eq!(named(&error, "token_file"), "--other: is wrong");
+    }
+
+    /// Asserts that a state root that is not there (a first install) holds no taint, re-checks
+    /// none, and owes no check. It catches an absent root read as tainted, or as one whose
+    /// taint a restart re-checks, which would let the hook go on over a taint it never read.
+    #[test]
+    fn an_absent_state_root_holds_no_taint_rechecks_none_and_owes_nothing() {
+        let root = Root::Absent;
+        let taint = Taint {
+            reason: "residue".to_owned(),
+            run_id: None,
+            check: Some("daemonised-child".to_owned()),
+        };
+        assert_eq!(root.taint(), None);
+        assert!(!root.restored_rechecks(&taint));
+        assert_eq!(root.owed().unwrap(), Vec::<String>::new());
     }
 }
