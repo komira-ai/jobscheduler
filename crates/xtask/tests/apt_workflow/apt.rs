@@ -31,6 +31,7 @@
 //! - The verbs of the apt channel are run by the jobs of their kind alone, and the promotion
 //!   (`stable`) waits for `check-apt` and runs only when it succeeded.
 
+use super::pkg_upload::{PKG_JOB, VERB as PKG_VERB};
 use super::support::{at, entries, entry, job, mentions, names, permissions, steps, text};
 use super::yaml::Node;
 
@@ -329,9 +330,10 @@ pub fn is_role_job(name: &str) -> bool {
 }
 
 /// The jobs besides the apt jobs that may hold `id-token: write` in `release.yml`: the call of
-/// artifacts.yml, whose jobs sign, the gamma step, and the call of docker-swarm-updater's deploy
+/// artifacts.yml, whose jobs sign, `pkg-upload` (the macOS package's upload, which assumes the
+/// role of the apt jobs: `pkg_upload.rs` holds its shape), the gamma step, and the call of docker-swarm-updater's deploy
 /// workflow, which asks for a token for each request to the deploy front.
-const TOKEN_HOLDERS: [&str; 3] = ["artifacts", "gamma", "cp-deploy"];
+const TOKEN_HOLDERS: [&str; 4] = ["artifacts", "pkg-upload", "gamma", "cp-deploy"];
 
 /// The verb each kind of job runs, and no other kind: the index job of the suite `testing` merges
 /// the release's packages (`apt index`), the one of `stable` promotes the entries testing lists
@@ -391,28 +393,35 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
                 "{name}: names APT_GPG_, the signing key, which only the apt index jobs may"
             ));
         }
-        if !is_role_job(name) && mentions(found, "APT_PUBLISH_ROLE_ARN") {
+        let holds_role = is_role_job(name) || name == PKG_JOB;
+        if !holds_role && mentions(found, "APT_PUBLISH_ROLE_ARN") {
             problems.push(format!(
                 "{name}: names APT_PUBLISH_ROLE_ARN, which only the apt jobs that read and write may"
             ));
         }
-        if !is_role_job(name) && runs(found, "xtask channels assume") {
+        if !holds_role && runs(found, "xtask channels assume") {
             problems.push(format!(
                 "{name}: runs `xtask channels assume...`, which only the apt jobs that read and write may"
             ));
         }
-        if !is_role_job(name) && !TOKEN_HOLDERS.contains(&name) && holds_token(found) {
+        if !holds_role && !TOKEN_HOLDERS.contains(&name) && holds_token(found) {
             problems.push(format!(
-                "{name}: holds `id-token: write`; only artifacts, gamma, cp-deploy and the apt jobs that read and write may"
+                "{name}: holds `id-token: write`; only artifacts, pkg-upload, gamma, cp-deploy and the apt jobs that read and write may"
+            ));
+        }
+        if name != PKG_JOB && runs(found, PKG_VERB) {
+            problems.push(format!(
+                "{name}: runs `{PKG_VERB}...`, which only pkg-upload may"
             ));
         }
         if own.is_none()
+            && name != PKG_JOB
             && entry(found, "environment")
                 .and_then(Node::as_str)
                 .is_some_and(|e| e == "apt-publish" || e == "apt-signing")
         {
             problems.push(format!(
-                "{name}: names the environment apt-publish or apt-signing, which only the apt jobs may"
+                "{name}: names the environment apt-publish or apt-signing, which only the apt jobs and pkg-upload may"
             ));
         }
         for (word, other, suite) in VERBS {

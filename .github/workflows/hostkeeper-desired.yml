@@ -13,7 +13,7 @@
 #   (its tag without the v), an older one included (a rollback).
 #
 # It is OFF until the repository variable JS_AGENT_SETS_DESIRED is `true`, exactly: unset, or
-# anything else, both jobs are skipped (their job-level `if:`), whichever way it started. Its
+# anything else, every job is skipped (their job-level `if:`), whichever way it started. Its
 # other settings are repository variables too; none is a secret:
 #  - HOSTKEEPER_COORDINATOR_URL      the coordinator's private listener, https://<host>[:<port>],
 #                                    by the name it has on the tailnet and in its certificate;
@@ -33,8 +33,12 @@
 # The call names the service and the host group all-in-one (the six Linux build nodes): one deployment
 # to that group (hostkeeper docs/design/hostgroups.md, section 2.1). Which hosts are ordered the package is
 # the group's: the coordinator's host group lists js-agent, and the allow-list entry must admit the group.
+# A second call names the host group mac-build (the Macs) with the same version and targets, when the
+# release has a macOS package: the entry for `macos-arm64` (installer `macos-pkg`) is in the targets
+# beside the Linux ones, and a Linux host is never ordered it. The allow-list entry must admit mac-build
+# too.
 #
-# Two jobs:
+# Three jobs:
 #  - check        holds no token that writes. `cargo xtask release desired` (crates/xtask,
 #                 src/release/desired.rs) decides the release (`--version` by hand,
 #                 `--after-run` after a run of release.yml; one of the two is empty) and hands on
@@ -44,7 +48,12 @@
 #                 It hands on the package version and the release's targets: one `apt` entry of
 #                 the host repository `komira-stable` per platform, with the manifest of
 #                 js-agent's update hook (hostkeeper's native entries carry the manifest in the
-#                 call, not in the package).
+#                 call, not in the package). With `--pkg-url` it also looks for the release's
+#                 signed macOS package in the package repository (`pkg/jobscheduler/<version>/`,
+#                 which release.yml's `pkg-upload` writes): when its SHA256SUMS is there and lists
+#                 the package it adds the `macos-arm64` entry and hands on `set-mac=true`; when
+#                 there is none (a release before this one, or one whose package was not signed)
+#                 `set-mac=false` and the targets are the Linux ones alone.
 #  - set-desired  needs check, and is hostkeeper's reusable workflow (the CI client), pinned below
 #                 with the hostkeeper release whose hkctl makes the call, the revision
 #                 hostkeeper's own release.yml pins (komira-ai/hostkeeper,
@@ -57,6 +66,10 @@
 #                 coordinator's update plan rolls the version out stage by stage, longer than a
 #                 job should hold this workflow's group. The job ends once the coordinator stored
 #                 the version (`reason` `not_waited`).
+#  - set-desired-mac  needs check and set-desired, runs only when `check` said `set-mac=true`, and
+#                 is the same reusable workflow at the same pin, for the host group mac-build with
+#                 the same version and targets (a version set again with other targets is refused
+#                 by the coordinator, so the Macs are given the targets the Linux nodes were).
 #
 # One run at a time of each way in, never cancelled: the runs after a release share the group
 # `hostkeeper-desired-release`, where a newer waiting run replaces an older one (each derives the
@@ -96,6 +109,7 @@ jobs:
       actions: read
     outputs:
       set: ${{ steps.desired.outputs.set }}
+      set-mac: ${{ steps.desired.outputs.set-mac }}
       package-version: ${{ steps.desired.outputs.package-version }}
       targets: ${{ steps.desired.outputs.targets }}
     steps:
@@ -113,7 +127,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           RUN_ID: ${{ github.event.workflow_run.id }}
-        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+          PKG_URL: https://packages.komira.ai/pkg/jobscheduler
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --pkg-url "$PKG_URL" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
 
   set-desired:
     needs: [check]
@@ -125,6 +140,30 @@ jobs:
     with:
       service: js-agent
       host_group: all-in-one
+      version: ${{ needs.check.outputs.package-version }}
+      targets: ${{ needs.check.outputs.targets }}
+      hostkeeper_version: 0.1.317
+      hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
+      coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
+      coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
+      audience: jobscheduler-hostkeeper-desired
+      wait: false
+      join_tailnet: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}
+      tailnet_client_id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
+      tailnet_audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
+      tailnet_coordinator: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}
+      tailnet_tag: ${{ vars.HOSTKEEPER_TAILNET_TAG }}
+
+  set-desired-mac:
+    needs: [check, set-desired]
+    if: ${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' && needs.check.outputs.set-mac == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1 # v0.1.317
+    with:
+      service: js-agent
+      host_group: mac-build
       version: ${{ needs.check.outputs.package-version }}
       targets: ${{ needs.check.outputs.targets }}
       hostkeeper_version: 0.1.317

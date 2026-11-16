@@ -53,11 +53,13 @@
 # repository, gamma and the control-plane deploy. The beta stage, the platforms other than Linux
 # x86_64, runs beside publish and the jobs after it, not before them: after `artifacts`, the
 # jobs `beta-macos` (beta.yml: the workspace's tests on Apple silicon), `beta-macos-pkg`
-# (js-agent-macos-pkg.yml: the unsigned installer package) and `beta-macos-probe`
-# (macos-probe.yml) run on the hosted macOS runners, and `promote-macos` adds the macOS
-# archives (`*-aarch64-apple-darwin.tar.gz`) to the published release when all three and
-# `publish` succeeded. `publish` leaves those archives out, and nothing else waits for the beta
-# stage: not the Linux assets, the .debs, the apt repository, gamma or the control-plane deploy.
+# (js-agent-macos-pkg.yml: the installer package of js-agent, built and signed) and
+# `beta-macos-probe` (macos-probe.yml) run on the hosted macOS runners, and `promote-macos` adds
+# the macOS archives (`*-aarch64-apple-darwin.tar.gz`) to the published release when all three
+# and `publish` succeeded. `pkg-upload` then puts the signed package in the package repository
+# (`pkg/jobscheduler/<version>/`), where hostkeeper-desired.yml finds it. `publish` leaves the
+# archives out, and nothing else waits for the beta stage: not the Linux assets, the .debs, the
+# apt repository, gamma or the control-plane deploy.
 # A pull request runs none of it. The tag is made first of those: `publish`
 # makes a draft release, uploads the files built, attested and verified, and publishes it in one
 # call, which creates the tag. A failed run leaves no tag. A re-run of a failed run continues the
@@ -93,14 +95,14 @@
 # repository variables CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are set (docs/release.md,
 # "The control-plane deploy").
 #
-# Permissions are per job. Only `artifacts`, `gamma`, `cp-deploy` and the apt read and write jobs
-# hold id-token write here, and `artifacts` also attestations write, only because a called workflow
+# Permissions are per job. Only `artifacts`, `pkg-upload`, `gamma`, `cp-deploy` and the apt read
+# and write jobs hold id-token write here, and `artifacts` also attestations write, only because a called workflow
 # can hold no more than its calling job grants: in artifacts.yml only `attest` holds them. Only
 # `publish` holds contents write. No job that holds a token or the signing key checks out or
 # compiles this repository's code (the one job that compiles any is docker-swarm-updater's deploy
 # job, which `cp-deploy` calls: it builds the updater's own client from the commit it is pinned
 # at): `attest` and `publish` run only pinned actions, `sha256sum`, `cmp`, `cp` and
-# `gh`; `gamma`, `cp-deploy-digest` and the apt read, index and write jobs run the `xtask` binary
+# `gh`; `gamma`, `cp-deploy-digest`, `pkg-upload` and the apt read, index and write jobs run the `xtask` binary
 # that the permissionless `deploy-tool` job built (so no build script ever sees a token, the token
 # service's address or the key), after the pinned actions. The apt read and write jobs hold no
 # key, and the index jobs no token. A test
@@ -423,8 +425,9 @@ jobs:
   # The beta stage: the platforms other than Linux x86_64, on the hosted macOS runners, after
   # `artifacts` and in parallel with `publish` and everything after it (none of those needs
   # these jobs). A push to main only; a pull request runs none of them. Each job calls a
-  # workflow that holds `contents: read` alone and names no secret (`js-agent-macos-pkg.yml`'s
-  # `sign` job is for a manual run and its `if:` skips it here).
+  # workflow that holds `contents: read` alone. None of them is given a secret: the package's
+  # `sign` job, which this call asks for (`sign: true`, on a push to main), takes the secrets
+  # of its own environment `pkg-signing`, and skips itself with a notice when they are not set.
   beta-macos:
     needs: [plan, artifacts]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
@@ -438,6 +441,9 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/js-agent-macos-pkg.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      sign: true
 
   beta-macos-probe:
     needs: [plan, artifacts]
@@ -491,8 +497,61 @@ jobs:
             fi
           done
 
-  # Builds the `xtask` binary that gamma, cp-deploy-digest and every apt read, index and write job
-  # run. A job of its own so that the build, whose scripts run code from the locked dependency
+  # Puts the signed js-agent package of macOS in the package repository, under
+  # `pkg/jobscheduler/<version>/` (the one prefix the publish role may write there), after the
+  # three beta jobs and `publish` passed (`promote-macos` needs all of them). hostkeeper-desired.yml
+  # then adds the package to the release's targets when its SHA256SUMS is there. Like the apt jobs
+  # it runs the `xtask` of `deploy-tool` with the role of the environment `apt-publish`, compiles
+  # nothing, ends green and writes nothing without the settings of that environment (`channels
+  # gate`), and runs for a push to main only. A release whose package was not signed (the
+  # `pkg-signing` environment is not set up) uploads nothing.
+  pkg-upload:
+    needs: [plan, deploy-tool, promote-macos]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deploy-tool
+          path: tool
+      - name: Make the tool executable
+        run: chmod +x tool/xtask
+      - name: Gate on the settings of the package repository (a job without them does nothing and ends green)
+        id: gate
+        env:
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+        run: tool/xtask channels gate --label pkg-upload --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: signed
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        continue-on-error: true
+        with:
+          name: js-agent-macos-pkg-signed
+          path: pkg
+      - name: Say that the package was not signed
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.signed.outcome != 'success' }}
+        run: echo "::notice::no signed macOS package in this run (the pkg-signing environment is not set up), so nothing is uploaded"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.signed.outcome == 'success' }}
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: tool/xtask channels assume --role-arn "$ROLE_ARN" --session-name "jobscheduler-pkg-upload-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
+      - name: Upload the package, then its SHA256SUMS (a version already there must be the same bytes)
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.signed.outcome == 'success' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+        run: tool/xtask channels pkg upload --dir pkg --version "$VERSION" --bucket "$APT_BUCKET" --work "$RUNNER_TEMP/pkg-work"
+
+  # Builds the `xtask` binary that gamma, cp-deploy-digest, pkg-upload and every apt read, index
+  # and write job run. A job of its own so that the build, whose scripts run code from the locked dependency
   # set, is in no job that holds id-token write or the signing key.
   deploy-tool:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}

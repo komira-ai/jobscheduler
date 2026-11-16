@@ -1,88 +1,67 @@
 # js-agent on a Mac
 
-A signed installer package (`js-agent-<version>-macos-arm64.pkg`, identifier
-`com.komira.js-agent`) that lays down the agent, its root helper and the install-time tool,
-and the plists of the two LaunchDaemons that run them. It is a hostkeeper `macos-pkg`
-service: hostkeeper downloads it from the release's desired state, checks its digest, and
-installs it. The package runs no script (no preinstall, no postinstall), so installing it
-changes nothing but its files.
-
+A signed installer package (`js-agent-<version>-aarch64-apple-darwin.pkg`) that lays down the
+agent, its root helper and the install-time tool, installs two LaunchDaemons and loads them.
 It is built by `.github/workflows/js-agent-macos-pkg.yml` and read back by
 `cargo xtask pkg check-macos`; `cargo xtask pkg stage-macos` is the one place that lists
 what the package holds (`crates/xtask/src/macpkg.rs`).
 
 ## What is installed
 
-| path | mode |
+| path | |
 |---|---|
-| `/Library/Application Support/js-agent/bin/{js-agent,js-mac-session,js-mac-provision}` | 0755 |
-| `/Library/Application Support/js-agent/LICENSE` | 0644 |
-| `/Library/Application Support/js-agent/log/` | 0755, empty; launchd writes the daemons' logs here |
-| `/Library/Application Support/js-agent/update/` | 0700, empty; the update hook's state directory |
-| `/Library/LaunchDaemons/js-agent.plist` | 0644 |
-| `/Library/LaunchDaemons/js-agent.session.plist` | 0644 |
+| `/usr/local/js-agent/releases/<version>/{js-agent,js-mac-session,js-mac-provision,LICENSE}` | one release directory |
+| `/usr/local/js-agent/link/` | empty; `postinstall` makes `current` in it, once |
+| `/usr/local/js-agent/share/` | the two plists, as templates |
+| `/Library/Logs/js-agent/` | the daemons' logs |
+| `/var/db/js-agent-update/` | the update hook's state directory, root's, mode 0700 |
 
-Everything is owned by root:wheel. The programs are the package's own files; there is no
-release directory and no link of the package's own. The release that hostkeeper keeps is
-the package's tree under `/var/lib/hostkeeper/packages/js-agent/current`, which is what
-the update hook's `release_link` names.
+Both daemons run their program through `/usr/local/js-agent/link/current`.
 
 ## The daemons
 
-`js-agent.session` (the root helper) and `js-agent` are described by flags only
-(`js-mac-provision agent-plist`, `js-mac-provision session-plist --daemon-requirement <req>`;
-the goldens are in `crates/js-mac-provision/tests/golden`). Both plists are complete as
-shipped: nothing in them is a placeholder.
-
-- The agent's plist names `--flags-file /etc/js-agent/flags` and `--token-file
-  /etc/js-agent/token`, and the fixed state root, scratch root and helper socket. The host's
-  own values (`--server`, `--pool`, `--native-network` and the `--native-pf-*` flags) are in
-  `/etc/js-agent/flags`, which a per-group configuration package installs. The plist carries
-  no server and no pool.
-- The helper's plist holds its caller to `cdhash H"<40 hex>"`, the code directory hash of
-  the `js-agent` binary of the same package. The workflow reads the hash from the built
-  binary on the Mac (the linker signs arm64 binaries ad hoc) and gives it to
-  `session-plist --daemon-requirement`. The helper needs no flags file, and its socket group
-  is `_jsagent`.
+`com.komira.js-mac-session` (the root helper) and `com.komira.js-agent` are described by flags
+only (`js-mac-provision agent-plist`, `js-mac-provision session-plist`; the goldens are in
+`crates/js-mac-provision/tests/golden`). The package ships them with placeholders for the
+values of a host (the lease server, the helper's caller requirement and socket group), which
+the programs refuse at start.
 
 Neither runs at load. `KeepAlive` holds each while `/etc/js-agent/token` exists, so the
-daemons start when the host is given its join token, and launchd starts one again after
-every exit, at most once in 30 seconds (`ThrottleInterval`). A refusal is read from
-`/Library/Application Support/js-agent/log/js-agent.err.log`.
+package loads them at install time and they start when the host is given its join token.
+`ThrottleInterval` is 30 seconds: a refusal is retried every 30 seconds and is read from
+`/Library/Logs/js-agent/js-agent.err.log`.
 
-## What hostkeeper does
+## What `postinstall` does
 
-For the service `js-agent` of the release's desired state for the group, hostkeeper
-installs the package with the system installer, then runs the update hook, `/Library/Application
-Support/js-agent/bin/js-agent update-hook`, with the params of the manifest: the unit
-`js-agent`, the helper unit `js-agent.session`, the state directory above, the release link
-under `/var/lib/hostkeeper/packages/js-agent`, the flags and token files and the state root.
-The hook cordons and drains the agent; on a Mac the cutover, and the rollback, then replace
-the helper's daemon and the agent's from the release tree with `launchctl` while the agent
-is stopped, the helper before the agent. A rollback restores the previous release if the agent does not
-come back. Nothing in the package does any of this at install time.
+The script only runs `js-mac-provision postinstall --version <v> --volume "$3"` from the release
+it installed (`crates/js-mac-provision/src/postinstall.rs`). That makes the release link if
+there is none, installs a plist if it is not installed (an upgrade never overwrites the one
+the operator edited), and runs `launchctl bootstrap` for a daemon that is not loaded. It
+never stops, restarts or kills anything: a new release takes effect when the update hook
+restarts the agent. Nothing is loaded when the volume is not `/`.
 
 ## Signing
 
-The workflow has two jobs. `build` runs in the beta stage of the release (`release.yml` calls
-the workflow on a push to main) and by hand, never on a pull request; it builds the package
-unsigned, checks it and uploads it, and names no secret: no code of a branch can see a signing
-key. `sign` runs only on main, in the environment `pkg-signing`. It takes the checked package
-from `build`, imports the installer certificate into a temporary keychain, finds the
-"Developer ID Installer" identity there by its SHA-1, signs with `productsign --timestamp`,
-checks the signed package again and writes `SHA256SUMS` for it. It does not notarize. When the
-environment or its secrets are not set up it prints a notice and skips every step after the
-first, and the run succeeds.
+The workflow has two jobs. `build` runs in the beta stage of the release (`release.yml` calls the workflow on
+a push to main) and by hand, never on a pull request; it builds the package unsigned, checks it and writes `SHA256SUMS`, and names no secret: no
+code of a branch can see a signing key. `sign` runs only on main: by hand, or in the release's call, which asks for it
+(`sign: true`), in the environment `pkg-signing`. It does not build: it takes the checked package and the checker from
+`build`, checks the package again, signs it with `productsign --timestamp`, checks it again and sums it. Nothing is
+notarized: hostkeeper reads the package's signature and the signer's certificate, which each Mac lists. When the
+environment or its secrets are not set up it prints a notice and skips every step after the first, and the run succeeds;
+the release then has no signed package and uploads none.
 
 `pkg-signing` is created by a repository administrator, with a rule that only main may
 deploy to it and with these secrets as environment secrets (none is in the tree):
 
-- `MACOS_INSTALLER_P12`: the "Developer ID Installer" certificate and key, a PKCS#12 file, base64.
+- `MACOS_INSTALLER_P12`: the "Developer ID Installer" certificate and key, a .p12 file, base64.
 - `MACOS_INSTALLER_P12_PASSWORD`: its password.
 
-No certificate name and no team id is written in the tree: the identity is found in the
-temporary keychain by its hash. Each secret is named only in the environment of the step
-that needs it.
+The identity is found in the temporary keychain the key is imported into, by its SHA-1: no name or team id is written
+in the workflow. Each secret is named only in the environment of the step that needs it. The key is imported for
+`productsign` alone. The password reaches `security import` as an argument, on a
+runner that exists for this job alone. The version typed for a manual run is checked as
+MAJOR.MINOR.PATCH before it is used in a file name.
 
 ## Privacy grants (TCC)
 
@@ -148,13 +127,19 @@ Known limits:
 
 ## Not done yet
 
-- The update hook's `launchctl` form (`bootout`, `bootstrap`, `kickstart -k`, `print`) has
-  run against a fake of `launchctl` only, never against a real launchd: what `launchctl print`
-  prints of a daemon that crashed (its `last exit code`), the time a `bootstrap` takes to start
-  the daemon, and `bootout` waiting out the agent's `ExitTimeOut` are read from the manual and
-  from what the fake says, not from a Mac. `kickstart -k` runs a daemon whatever its `KeepAlive`
-  condition says, so the port refuses it while `/etc/js-agent/token` is absent.
-- The package is not notarized.
+- The package is a workflow artifact for seven days, not a release asset: `artifacts.yml` (which
+  `release.yml` calls) lists the release's assets by name and attests `*.tar.gz` and the
+  Linux `.deb` files. It carries no update declaration, and nothing in it moves `link/current`.
+  There is no native Mac package for hostkeeper yet, so a Mac's agent is not updated by hostkeeper.
+- The update hook (`js-agent update-hook`) runs its five steps on a Mac as hostkeeper's hook, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
+  `print`) and `runtime = "native"` in the `[params]` a Mac's hostkeeper entry would carry, over the lease server's own-host routes
+  and the agent's state root, which the params name beside the release link (`state_root`,
+  `token_file`; the server comes from the flags file). The
+  port has run against a fake of `launchctl` only, never against a real launchd: what
+  `launchctl print` prints of a daemon that crashed (its `last exit code`), the time a
+  `bootstrap` takes to start the daemon, and `bootout` waiting out the agent's `ExitTimeOut`
+  are read from the manual and from what the fake says, not from a Mac. `kickstart -k` runs a
+  daemon whatever its `KeepAlive` condition says, so the port refuses it while
+  `/etc/js-agent/token` is absent.
 - The agent's state and scratch directories (`/var/db/js-agent/{state,scratch}`, on separate
-  volumes, as the agent requires), `/etc/js-agent/flags`, the join token and the helper's
-  socket group are host setup, not the package's.
+  volumes, as the agent requires) and the helper's socket group are host setup.

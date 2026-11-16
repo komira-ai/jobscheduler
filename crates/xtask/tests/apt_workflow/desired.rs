@@ -9,20 +9,25 @@
 //!   `version`;
 //! - its concurrency is not [`GROUP`] with `cancel-in-progress: false` (a run by hand is never
 //!   replaced by the completion of a release run while it waits, nor any run cancelled);
-//! - its jobs are not `check` and `set-desired`; `check`'s `if:` is not [`DESIRED_IF`] (the
-//!   repository variable is the gate, at the job level, only `main` runs it, and a release run is
-//!   acted on only when it succeeded, on `main` of this repository) or `set-desired`'s is not
-//!   [`SET_IF`] (the same gate, and `check` said `set=true`);
+//! - its jobs are not `check`, `set-desired` and `set-desired-mac`; `check`'s `if:` is not
+//!   [`DESIRED_IF`] (the repository variable is the gate, at the job level, only `main` runs it,
+//!   and a release run is acted on only when it succeeded, on `main` of this repository),
+//!   `set-desired`'s is not [`SET_IF`] (the same gate, and `check` said `set=true`) or
+//!   `set-desired-mac`'s is not [`SET_MAC_IF`] (that, and `check` said `set-mac=true`);
 //! - `check` needs a job, holds other than `actions: read` and `contents: read`, does not run
 //!   [`CHECK`] as its step `desired` with `VERSION` and `RUN_ID` read from the input and from the
-//!   run that started it, or does not hand on that step's three outputs;
-//! - `set-desired` needs anything but `check`, is not hostkeeper's reusable workflow
+//!   run that started it and `PKG_URL` the package repository's address ([`PKG_URL`]), or does
+//!   not hand on that step's four outputs;
+//! - `set-desired` needs anything but `check` (and `set-desired-mac` anything but `check` and
+//!   `set-desired`, so the Macs are set after the Linux nodes), is not hostkeeper's reusable
+//!   workflow
 //!   ([`SET_DESIRED`]) pinned to [`CLIENT_COMMIT`] with the comment `# v`[`CLIENT_RELEASE`],
 //!   holds other than `contents: read` and `id-token: write`, or its inputs are not exactly those
-//!   [`with_wanted`] gives, no more: the service, what `check` handed on, the hostkeeper release
-//!   the pin names, the coordinator's two repository variables, the audience, `wait: false`, and
-//!   the tailnet's inputs from their repository variables. There is no `host_group` input (the
-//!   reusable workflow has none yet: the coordinator's placement of the service picks the hosts).
+//!   [`with_wanted`] gives, no more: the service, the host group ([`HOST_GROUP`] for
+//!   `set-desired`, [`HOST_GROUP_MAC`] for `set-desired-mac`), what `check` handed on (the same
+//!   version and targets to both), the hostkeeper release the pin names, the coordinator's two
+//!   repository variables, the audience, `wait: false`, and the tailnet's inputs from their
+//!   repository variables.
 //!
 //! [`coordinator_problems`] refuses a workflow that reads a coordinator setting other than
 //! hostkeeper's two variables ([`COORDINATOR_VARS`]) and the tailnet's name: the version is set
@@ -47,11 +52,20 @@ pub const GROUP: &str =
 /// The `if:` of `set-desired`: the gate again, and `check` chose a release.
 pub const SET_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}";
 
+/// The `if:` of `set-desired-mac`: the gate again, `check` chose a release, and that release has a
+/// signed macOS package in the package repository (`set-mac`).
+pub const SET_MAC_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' && needs.check.outputs.set-mac == 'true' }}";
+
 /// The command of the step `desired` of `check`.
-pub const CHECK: &str = "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"$VERSION\" --after-run \"$RUN_ID\" --dir \"$RUNNER_TEMP/desired\" --output \"$GITHUB_OUTPUT\"";
+pub const CHECK: &str = "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"$VERSION\" --after-run \"$RUN_ID\" --pkg-url \"$PKG_URL\" --dir \"$RUNNER_TEMP/desired\" --output \"$GITHUB_OUTPUT\"";
+
+/// The base of the package repository's public address of the macOS packages
+/// (`<base>/<version>/SHA256SUMS` and the package), read by `--pkg-url`. A release before the
+/// package repository had one has no such directory, and `check` hands on `set-mac=false`.
+pub const PKG_URL: &str = "https://packages.komira.ai/pkg/jobscheduler";
 
 /// The outputs `check` hands on, each its step `desired`'s.
-pub const OUTPUTS: [&str; 3] = ["set", "package-version", "targets"];
+pub const OUTPUTS: [&str; 4] = ["set", "set-mac", "package-version", "targets"];
 
 /// hostkeeper's reusable workflow that sets the desired version (the CI client).
 pub const SET_DESIRED: &str = "komira-ai/hostkeeper/.github/workflows/set-desired.yml";
@@ -67,6 +81,9 @@ pub const CLIENT_RELEASE: &str = "0.1.317";
 /// The host group the version is set in: the six Linux build nodes. Naming it makes the call one
 /// deployment to that group, not one to each group that lists js-agent.
 pub const HOST_GROUP: &str = "all-in-one";
+
+/// The host group of the Macs, which `set-desired-mac` sets after the Linux nodes.
+pub const HOST_GROUP_MAC: &str = "mac-build";
 
 /// The audience of the job's OIDC token, which the coordinator's allow-list entry names.
 pub const AUDIENCE: &str = "jobscheduler-hostkeeper-desired";
@@ -138,17 +155,36 @@ pub fn desired_problems(text: &str) -> Vec<String> {
     let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
     let mut found: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
     found.sort_unstable();
-    if found != ["check", "set-desired"] {
-        problems.push(format!("jobs are {found:?}, not check and set-desired"));
+    if found != ["check", "set-desired", "set-desired-mac"] {
+        problems.push(format!(
+            "jobs are {found:?}, not check, set-desired and set-desired-mac"
+        ));
     }
-    for (name, want) in [("check", DESIRED_IF), ("set-desired", SET_IF)] {
+    for (name, want) in [
+        ("check", DESIRED_IF),
+        ("set-desired", SET_IF),
+        ("set-desired-mac", SET_MAC_IF),
+    ] {
         let condition = job(jobs, name).and_then(|j| at(j, &["if"]));
         if condition != Some(want) {
             problems.push(format!("{name}: `if` is {condition:?}, not {want}"));
         }
     }
     problems.extend(check_problems(job(jobs, "check")));
-    problems.extend(set_desired_problems(text, job(jobs, "set-desired")));
+    problems.extend(set_desired_problems(
+        text,
+        "set-desired",
+        HOST_GROUP,
+        &["check"],
+        job(jobs, "set-desired"),
+    ));
+    problems.extend(set_desired_problems(
+        text,
+        "set-desired-mac",
+        HOST_GROUP_MAC,
+        &["check", "set-desired"],
+        job(jobs, "set-desired-mac"),
+    ));
     problems
 }
 
@@ -174,6 +210,7 @@ fn check_problems(check: Option<&Node>) -> Vec<String> {
         ("VERSION", "${{ inputs.version }}"),
         ("RUN_ID", "${{ github.event.workflow_run.id }}"),
         ("GH_TOKEN", "${{ github.token }}"),
+        ("PKG_URL", PKG_URL),
     ] {
         if desired.and_then(|s| at(s, &["env", var])) != Some(want) {
             problems.push(format!(
@@ -200,11 +237,12 @@ fn check_problems(check: Option<&Node>) -> Vec<String> {
     problems
 }
 
-/// What each input of hostkeeper's workflow must be, and no other input is given.
-pub fn with_wanted() -> [(&'static str, &'static str); 15] {
+/// What each input of hostkeeper's workflow must be for the host group `host_group`, and no other
+/// input is given.
+pub fn with_wanted(host_group: &str) -> [(&str, &str); 15] {
     [
         ("service", "js-agent"),
-        ("host_group", HOST_GROUP),
+        ("host_group", host_group),
         ("version", "${{ needs.check.outputs.package-version }}"),
         ("targets", "${{ needs.check.outputs.targets }}"),
         ("hostkeeper_version", CLIENT_RELEASE),
@@ -233,24 +271,31 @@ pub fn with_wanted() -> [(&'static str, &'static str); 15] {
     ]
 }
 
-/// One line per way the job `set-desired` is not hostkeeper's workflow, called with the release
-/// `check` handed on.
-fn set_desired_problems(text: &str, job: Option<&Node>) -> Vec<String> {
+/// One line per way the job `name` (`set-desired` or `set-desired-mac`) is not hostkeeper's
+/// workflow, called for the host group `host_group` with the release `check` handed on, after
+/// the jobs `after`.
+fn set_desired_problems(
+    text: &str,
+    name: &str,
+    host_group: &str,
+    after: &[&str],
+    job: Option<&Node>,
+) -> Vec<String> {
     let mut problems = Vec::new();
     let needs = names(job.and_then(|j| entry(j, "needs")));
-    if needs != ["check"] {
-        problems.push(format!("set-desired: needs are {needs:?}, not [\"check\"]"));
+    if needs != after {
+        problems.push(format!("{name}: needs are {needs:?}, not {after:?}"));
     }
     let held = permissions(job);
     if held != ["contents: read", "id-token: write"] {
         problems.push(format!(
-            "set-desired: permissions are {held:?}, not contents: read and id-token: write"
+            "{name}: permissions are {held:?}, not contents: read and id-token: write"
         ));
     }
     let uses = job.and_then(|j| entry(j, "uses"));
     let want = format!("{SET_DESIRED}@{CLIENT_COMMIT}");
     if uses.and_then(Node::as_str) != Some(want.as_str()) {
-        problems.push(format!("set-desired: `uses` is not {want}"));
+        problems.push(format!("{name}: `uses` is not {want}"));
     }
     // The version comment of the pin, on the line of `uses:`.
     let release = uses
@@ -259,24 +304,23 @@ fn set_desired_problems(text: &str, job: Option<&Node>) -> Vec<String> {
         .map(|(_, version)| version.trim_end());
     if release != Some(CLIENT_RELEASE) {
         problems.push(format!(
-            "set-desired: the pin's comment names {release:?}, not v{CLIENT_RELEASE}"
+            "{name}: the pin's comment names {release:?}, not v{CLIENT_RELEASE}"
         ));
     }
-    let wanted = with_wanted();
+    let wanted = with_wanted(host_group);
     for (key, want) in wanted {
         let got = job.and_then(|j| at(j, &["with", key]));
         if got != Some(want) {
-            problems.push(format!("set-desired: with.{key} is {got:?}, not {want:?}"));
+            problems.push(format!("{name}: with.{key} is {got:?}, not {want:?}"));
         }
     }
-    // No other input: not `host_group`, which the reusable workflow does not take yet, not
-    // `package_digest`, which the client refuses beside the targets, and not `max_polls`, which
-    // only a wait reads.
+    // No other input: not `package_digest`, which the client refuses beside the targets, and not
+    // `max_polls`, which only a wait reads.
     let given = job.and_then(|j| entry(j, "with")).map_or(&[][..], entries);
     for (key, _) in given {
         let key = key.as_str().unwrap_or_default();
         if !wanted.iter().any(|(k, _)| *k == key) {
-            problems.push(format!("set-desired: with.{key} is not an input it gives"));
+            problems.push(format!("{name}: with.{key} is not an input it gives"));
         }
     }
     problems

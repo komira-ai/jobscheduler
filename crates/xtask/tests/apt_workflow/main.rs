@@ -5,6 +5,9 @@
 //! ([`yaml`], `saphyr-parser` events) and each shown to name every defect introduced into a workflow
 //! that is otherwise clean (the `*_tests` modules, one table of defects each).
 //!
+//! The job `pkg-upload` of `release.yml` ([`pkg_upload`]), which publishes the signed macOS
+//! package of js-agent where `hostkeeper-desired.yml` finds it, is held the same way.
+//!
 //! The rules that read the files as text (pinned actions, permissions per job, only artifacts.yml
 //! signs, the gamma step) are `tests/release_workflow`.
 
@@ -16,6 +19,8 @@ mod cp_deploy;
 mod cp_deploy_tests;
 mod desired;
 mod desired_tests;
+mod pkg_upload;
+mod pkg_upload_tests;
 mod support;
 mod yaml;
 mod yaml_tests;

@@ -411,19 +411,19 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "plan",
         "    permissions:\n      contents: read\n",
         "    permissions:\n      contents: read\n      id-token: write\n",
-        "plan: holds `id-token: write`; only artifacts, gamma, cp-deploy and the apt jobs that read and write may",
+        "plan: holds `id-token: write`; only artifacts, pkg-upload, gamma, cp-deploy and the apt jobs that read and write may",
     ),
     (
         "publish",
         "    permissions:\n      contents: write\n",
         "    permissions:\n      contents: write\n      id-token: write\n",
-        "publish: holds `id-token: write`; only artifacts, gamma, cp-deploy and the apt jobs that read and write may",
+        "publish: holds `id-token: write`; only artifacts, pkg-upload, gamma, cp-deploy and the apt jobs that read and write may",
     ),
     (
         "gamma",
         "    timeout-minutes: 150\n",
         "    timeout-minutes: 150\n    environment: apt-publish\n",
-        "gamma: names the environment apt-publish or apt-signing, which only the apt jobs may",
+        "gamma: names the environment apt-publish or apt-signing, which only the apt jobs and pkg-upload may",
     ),
     (
         "deploy-tool",
