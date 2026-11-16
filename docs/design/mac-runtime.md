@@ -1,0 +1,74 @@
+# The macOS runtime: where it lives and what macOS enforces
+
+Status: proposed. The macOS sandbox stays `js-agent`'s macOS backend, in this workspace. It is the pool of reused users, the `js-mac-session` root helper, the Seatbelt profile per run and pf per uid. It does not become a separate repository or a standalone OCI runtime: no one else would use it, and its only caller is the agent. This document fixes three things: the one interface both backends implement, the crate boundaries, and what macOS can and cannot enforce for each part of a job. It ends with the change that does need building, memory and CPU limits.
+
+## What changes
+
+Nothing in this document changes behaviour by itself. Jobs, the wire, placement and the Mac package stay as they are. Section 4 proposes the one behaviour change: today a Mac job is held to no memory or CPU limit, and the agent reports no usage for it. After section 4's steps, a run that goes over its memory cap is killed and reported as a memory kill, as on Linux, and the agent reports what each run uses.
+
+## 1. One runtime interface
+
+The interface exists: `trait Runtime` (`crates/js-agent/src/lifecycle/runtime.rs`). The lifecycle drives every backend through it, with `create_and_start`, `poll`, `stop`, `remove`, `list_labelled` and the defaulted checks.
+- On Linux, `CrunRuntime` (`crates/js-agent/src/crun`) implements it through `js-contain` and crun.
+- On macOS, `NativeRuntime` (`crates/js-agent/src/native`) implements it through the helper.
+
+A separate change makes the backend a compile-time choice by target OS. Nothing more is needed at the interface: no second trait, no OCI bundle for macOS, no runtime binary between the agent and the helper.
+
+## 2. Crate boundaries
+
+The four macOS parts are one feature, the macOS backend. They are split where the process, the privilege or the purity changes, not by topic:
+
+| Part | What it is | Why it stands alone | Change |
+|---|---|---|---|
+| `js-agent/src/native` | The `Runtime` implementation: run directory, input copies, cwd, env, outputs, logs, journal, the calls to the helper | It is built from the lifecycle's types (`RunSpec`, `Status`, `Found`). Moving it out would mean moving the trait and those types to a lower crate for no other caller. | none |
+| `js-mac-pool` | The Seatbelt profile builder and the Xcode catalog | It is a pure crate (R4): no clock, sockets or process starts, so its profile text and goldens are tested on Linux in every pull request | none |
+| `js-mac-session` | The root helper: the user pool and its ledger, starting a program as a pool user, `kill-uid`, the reset, plus the VM user, image set-up and the leak scan | It is a separate process with root, behind a socket that checks its caller's code signature. The agent's process holds no right to create users or kill other uids. | none |
+| `js-mac-provision` | The pf anchor (render, install, check), the two LaunchDaemon plists and the package postinstall | It runs at install and at boot (the pf LaunchDaemon), before and beside the agent | none |
+
+No crate needs to merge or split.
+
+`disclaim` (the TCC-disclaiming start, `docs/design/spawn-disclaim.md`) stays a module of `js-mac-session`. The agent and `js-mac-provision` already use it from there.
+
+## 3. What macOS gives us
+
+macOS has no namespaces and no cgroups. Each part of a job maps to the primitive below.
+- **"Enforced today"** means the native runtime uses the primitive now.
+- **"Check"** names what checks the claim. It is either an asserted `js-mac-probe` probe, which runs on the beta stage's macOS runner ("new" marks one that section 4 adds), or a root test that an operator runs on a provisioned Mac.
+
+These facts were not re-checked on current macOS releases beyond those checks.
+
+| Job field (OCI name) | macOS primitive | Enforced today | Check |
+|---|---|---|---|
+| process isolation (`linux.namespaces`) | A separate uid per run, from the pool of reused users, reset after every run. Seatbelt's `process-info` deny does not hide other users' processes from `ps`. | yes, the uid | root test `native_isolation` (two runs on one uid) |
+| file access | Seatbelt (`sandbox-exec`). Reads are open except the read denies; writes are allowed only in the run's home. Endpoint Security could watch or authorise file events too, but it needs an entitlement Apple grants per developer, so it is not used. | yes | `sandbox/deny-write-outside`, `sandbox/deny-write-private-tmp` |
+| `root`, layers | No overlay or bind mounts. The options are `clonefile` (same APFS volume, copy-on-write) and a per-run disk image. Layers are refused (`rootfs-unsupported-here`, `docs/design/job-rootfs.md` 5.1). | refused | `fs/clonefile-*` |
+| `mounts` | Copies into the run's `exec/`, write-denied by the profile (`files.rs`). Links are designed in `job-rootfs.md` 5.2. | yes, read-only | `sandbox/control-write-input` |
+| network | pf rules matching the pool's uids (TCP and UDP only; DNS through `mDNSResponder` is outside pf), plus Seatbelt for `off` and `loopback`. Loopback is shared by every user of the host. | yes | `net/off-refuses-loopback`, `net/loopback-allows-loopback`; pf by root test `pf_as_root` |
+| `rlimits`: `RLIMIT_NPROC` | Counted per uid, so per run | yes (`--native-max-processes`, agent-wide) | new: `limits/nproc-per-uid` |
+| `rlimits`: `RLIMIT_FSIZE` | Per process | yes (`--native-max-file-mib`, agent-wide) | new: `limits/fsize` |
+| memory (`resources.memory`) | No cgroup. `setrlimit` accepts `RLIMIT_AS`, `RLIMIT_RSS` and `RLIMIT_DATA` but macOS does not enforce them. Jetsam limits are a private interface. What remains is reading each process's footprint (`proc_pid_rusage`, `ri_phys_footprint`) and killing the uid. | **no** | `proc/rusage-own-child` today; new: `limits/as-not-enforced`; `proc/rusage-other-processes`, an info probe today, becomes asserted and reads a process of another uid |
+| CPU (`resources.cpu`) | No quota. `taskpolicy`, `setpriority` and the QoS classes change priority only. `RLIMIT_CPU` ends one process after a number of CPU seconds; it is not a rate. | **no** | new: `limits/cpu-seconds` |
+| disk | No per-user quota on an APFS volume. A per-run disk image of fixed size would cap a run. Disk caps are not required here. | no | none |
+| VMs | Virtualization.framework, with at most 2 macOS guests per host under Apple's licence (the VM path, `js-vmm`). Apple's Containerization runs Linux containers, each in a small VM, on macOS 26: Linux guests only, so it does not run macOS jobs. | the VM path | none |
+
+## 4. Memory and CPU limits
+
+**Today.** The scheduler books each Mac job's memory and CPU against the host, so bookings bound how many jobs share a Mac. Nothing holds a job to its booking. The native runtime ignores `memory_bytes` and `cpu_millis`, and the agent reports no usage for a native run (`NO_NATIVE_USAGE`, `crates/js-agent/src/worker.rs`).
+
+**Memory: a cap enforced by sampling.**
+- The helper samples each live run every 2 seconds. It already lists a uid's processes for `kill-uid`, and here it sums their `ri_phys_footprint`.
+- The cap is the Linux build-host policy, `booking × 1.5 + 512 MiB`. The function that computes it, `memory_max` in `crates/js-contain/src/cgroup.rs`, moves to a crate both targets build, so the two platforms cannot drift apart.
+- A run over its cap is ended with `kill-uid`. `poll` reports it as `Exit { oom_killed: true }`, the result a Linux OOM kill gives.
+- Between samples a run can overshoot. So this is a cap a run cannot hold for longer than one interval, not a hard ceiling. The host's backstop stays `memory_schedulable_percent`, as on Linux.
+- The run's `memory_bytes` reaches the helper in the `run` request as a new optional field, `memory_cap_bytes`. A previous release's helper refuses an unknown field (`deny_unknown_fields`), so the agent falls back as it does for `stop`: on the helper's refusal it sets `old_helper` and runs without a cap. This is additive (B8). The wire goldens (`crates/js-mac-session/tests/wire_golden.rs`) pin the new field, and a test runs the new agent against a helper that refuses it.
+
+**CPU: measured, not limited.** macOS cannot hold a uid to a CPU share. CPU stays compressible, as Linux treats it (`cpu.weight`, never `cpu.max`): the bookings bound the jobs, and nothing throttles one.
+- The same sample adds each run's CPU time (`ri_user_time` and `ri_system_time` of its processes, converted with `mach_timebase_info`, plus the CPU time of its exited children, which the helper keeps from their exits).
+- Memory and CPU go into the heartbeat as a Linux run's usage does. Rightsizing from history then works on Macs as on Linux.
+
+**Steps, each shippable:**
+1. The new asserted probes of section 3, in `js-mac-probe`.
+2. Usage: the helper's sample and a `usage` verb, the agent's heartbeat from it, and `NO_NATIVE_USAGE` removed.
+3. The memory cap: `memory_cap_bytes`, the kill, and the `oom_killed` report.
+
+Each step is tested on Linux against the helper's fake host (`Host` in `js-mac-session`), and on the beta stage's macOS runner.
