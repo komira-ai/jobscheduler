@@ -653,7 +653,7 @@ mod tests {
         let end = start + source[start..].find("\n}\n").expect("their end");
         let mut long = None;
         let mut fields = BTreeSet::new();
-        for line in source[start..end].lines().map(str::trim) {
+        for line in source[start..end].lines().skip(1).map(str::trim) {
             if let Some(rest) = line.strip_prefix("#[arg(long = \"") {
                 long = rest.split('"').next().map(str::to_owned);
             } else if let Some(rest) = line.strip_prefix("pub ") {

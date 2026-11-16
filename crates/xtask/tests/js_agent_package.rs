@@ -11,9 +11,11 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use js_agent::Cli;
+#[cfg(target_os = "linux")]
 use js_agent::lifecycle::DEFAULT_STOP_GRACE;
 
 const UNIT: &str = "packaging/js-agent/js-agent.service";
@@ -77,6 +79,7 @@ fn unit_value(key: &str) -> String {
     found[0].clone()
 }
 
+#[cfg(target_os = "linux")]
 /// The words of the unit's `ExecStart`.
 fn exec_words() -> Vec<String> {
     unit_value("ExecStart")
@@ -94,10 +97,12 @@ fn agent_cli() -> Cli {
         .unwrap_or_else(|e| panic!("ExecStart is not a command line of js-agent: {e}"))
 }
 
+#[cfg(target_os = "linux")]
 fn seconds(text: &str) -> u64 {
     text.parse().unwrap_or_else(|e| panic!("{text}: {e}"))
 }
 
+#[cfg(target_os = "linux")]
 /// The lines of the tmpfiles file, each split into its fields: type, path, mode, owner,
 /// group, age.
 fn tmpfiles() -> Vec<Vec<String>> {
