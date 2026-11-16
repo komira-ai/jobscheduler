@@ -105,15 +105,20 @@ in the job store is put back on the binding at the next start, so that clear fol
 
 ## The update hook
 
-hostkeeper keeps a halt that a hook raised standing across new desired versions until an operator clears it, and the halt is
-group-wide. The js-agent update hook (`prepare`, `cutover`, `verify` and `rollback`) therefore does not halt for a taint the
-agent may clear itself: `crate::lifecycle::taint::clearable` says which (a residue of a process, or a check that could not read
-its input). The step goes on as for a clean host; the taint stays in the marker, the restarted agent restores it, and its own
-re-checks clear it. A halt there would keep the release that carries the clearing from reaching the host, so one tainted host
-would stop every release of the group. A taint the agent cannot clear (`cleanup-failed`, `check-owed`, `host-job`, a residue of
-a mount, user, group, module or watched directory, a check that found a change of host state, a taint with no check named) still
-halts the hook with reason `tainted` (76), and so does an `owed-*` record. The success line names no taint: the report has a
-detail on success only for a changed unit, and a second detail would need a format change.
+hostkeeper keeps a halt that a hook raised standing across new desired versions until an operator
+clears it, and the halt is group-wide. The js-agent update hook (`prepare`, `cutover`, `verify` and
+`rollback`) therefore does not halt for a taint the agent may clear itself:
+`crate::lifecycle::taint::clearable` says which (a residue of a process, or a check that could not
+read its input). The step goes on as for a clean host; the taint stays in the marker, the restarted
+agent restores it, and its own re-checks clear it. A halt there would keep the release that carries
+the clearing from reaching the host, so one tainted host would stop every release of the group. A
+taint the agent cannot clear (`cleanup-failed`, `check-owed`, `host-job`, a residue of a mount,
+user, group, module or watched directory, a check that found a change of host state, a taint with no
+check named) still halts the hook with reason `tainted` (76), and so does an `owed-*` record. The
+success line names no taint: the report has a detail on success only for a changed unit, and a
+second detail would need a format change. A rollback onto a release that predates self-clearing
+leaves such a taint standing, and that agent refuses starts until an operator clears it; that is
+accepted, because a halt would stop every release of the group.
 
 ## Left out on purpose
 

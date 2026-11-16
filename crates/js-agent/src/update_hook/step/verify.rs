@@ -20,7 +20,8 @@
 //!
 //! Before it starts: a record with `start_issued` and the release link on the staged release
 //! (`state_invalid` otherwise, nothing read of the lease server). A taint the agent cannot
-//! clear itself, or an `owed-*` record, halts (76), at every look. At each look the unit is read with `show`: `failed`,
+//! clear itself, or an `owed-*` record, halts (76), at every look. At each look the unit is read
+//! with `show`: `failed`,
 //! `inactive`, `deactivating` or a restart pending (`auto-restart`) ends the step at once as a
 //! `start_failed` of the release: the binary ran and died.
 //!
@@ -30,7 +31,8 @@
 //! class environment, and says nothing of the release.
 //!
 //! A rerun with `verify_ok` set succeeds without a look of the unit or the lease server (a
-//! taint the agent cannot clear, or an `owed-*` record, still halts it); without it, it observes again.
+//! taint the agent cannot clear, or an `owed-*` record, still halts it); without it, it observes
+//! again.
 
 use std::time::Duration;
 

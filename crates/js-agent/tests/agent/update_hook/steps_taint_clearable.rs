@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use js_agent::update_hook::{Clock, Done, Outcome, Reason};
 
+use super::rollback_entries::{assert_restored, link_moved, start};
 use super::step_rig::{Rig, Spy, running};
 
 /// Taints the agent clears itself: (reason, check).
@@ -117,16 +118,47 @@ fn a_taint_the_agent_cannot_clear_still_halts_verify() {
     }
 }
 
-/// Catches a `rollback` that halts a host for a taint its own agent clears.
+/// Catches a `rollback` that halts a host for a taint its own agent clears: it must go on as
+/// for a clean host, restore the previous release and lift the cordon.
 #[test]
 fn a_clearable_taint_does_not_halt_rollback() {
     for (n, (reason, check)) in CLEARABLE.into_iter().enumerate() {
-        let rig = running(Rig::new(&format!("hook-clearable-rollback-{n}")));
+        let rig = link_moved(&format!("hook-clearable-rollback-{n}"));
         rig.taint_with(reason, Some(check));
-        rig.updater_links_previous();
-        let done = Spy::new(&rig).rollback(&rig);
-        assert_ne!(done.outcome, Outcome::Halt, "{reason}/{check}: {done:?}");
-        assert_ne!(done.report.reason, Some(Reason::Tainted), "{reason}/{check}");
+        let spy = Spy::new(&rig);
+        let done = spy.rollback(&rig);
+        assert_eq!(done.outcome, Outcome::Success, "{reason}/{check}: {done:?}");
+        assert_eq!(done.report.reason, None, "{reason}/{check}");
+        assert_eq!(spy.act_names(), [start()], "{reason}/{check}");
+        assert_restored(&rig);
+    }
+}
+
+/// Catches a `rollback` that halts at a later guard, while it waits for the previous agent,
+/// over a taint that appears there and that the agent clears.
+#[test]
+fn a_clearable_taint_that_appears_while_the_previous_agent_is_awaited_does_not_halt() {
+    for (n, (reason, check)) in CLEARABLE.into_iter().enumerate() {
+        let rig = link_moved(&format!("hook-clearable-rollback-mid-{n}"));
+        let spy = Spy::new(&rig);
+        *spy.start_leaves.borrow_mut() = Some(("active", "running"));
+        let base = rig.world.ticks();
+        spy.on_pause(move |spy, ticks| {
+            if ticks == base + 2 {
+                spy.world
+                    .state_root()
+                    .write(&js_agent_wire::Taint {
+                        reason: reason.to_owned(),
+                        run_id: None,
+                        check: Some(check.to_owned()),
+                    })
+                    .unwrap();
+            }
+        });
+        let done = spy.rollback(&rig);
+        assert_eq!(done.outcome, Outcome::Success, "{reason}/{check}: {done:?}");
+        assert_eq!(done.report.reason, None, "{reason}/{check}");
+        assert_restored(&rig);
     }
 }
 

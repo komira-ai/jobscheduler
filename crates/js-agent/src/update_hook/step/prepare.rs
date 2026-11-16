@@ -33,12 +33,11 @@
 
 use std::time::Duration;
 
+use crate::lifecycle::taint::clearable;
 use crate::update_hook::{
     Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, PlanError, Reason, Record,
     Report, UnitRestart, UpdateInfo, agent_in, plan,
 };
-
-use crate::lifecycle::taint::clearable;
 
 use super::supersede::{judge, set_aside};
 use super::{Env, check, failure, lease_failure, open_unchecked, save, success};
