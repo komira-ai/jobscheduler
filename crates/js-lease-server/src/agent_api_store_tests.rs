@@ -841,7 +841,8 @@ async fn two_servers_do_not_overwrite_each_others_taint() {
 /// another server rewrote between the read and the commit (the write is conditional on the
 /// version read), a binding the
 /// store no longer holds (another server dropped it) and a read that fails are errors that
-/// write nothing, and a value that is not a binding is an error naming its key. It catches a
+/// write nothing, and a value that is not JSON of a binding is an error naming its key, and a binding with a
+/// bad credential is the error a file entry gives. It catches a
 /// commit that puts the taint over a binding it could not read.
 #[tokio::test]
 async fn a_taint_commit_refuses_what_it_cannot_read() {
@@ -881,6 +882,14 @@ async fn a_taint_commit_refuses_what_it_cannot_read() {
     assert_eq!(
         damaged.to_string(),
         "hosts/binding/host-a does not hold this key's fields"
+    );
+
+    let odd = Txn::new().put(name, r#"{"version":1,"credential":"zz"}"#, Cond::Any);
+    rig.store.inner().txn(odd).unwrap().unwrap();
+    let odd = rig.agents.store.commit_taint(&change, None).unwrap_err();
+    assert_eq!(
+        odd.to_string(),
+        "a credential is not 64 lower-case hex digits"
     );
 
     let gone = Txn::new().delete(name, Cond::Any);
