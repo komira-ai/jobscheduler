@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! js-agent cordon --server <url> (--state-root <dir> | --token-file <file>) --for <duration>
-//!     [--lease-secs <n>] [--host-id <id>] [--ca-cert <file>]
+//!     [--lease-secs <n>] [--host-id <id> | --host-id-from-facts <file>] [--ca-cert <file>]
 //! ```
 //!
 //! An operator's measurement needs a node that no lease lands on for an hour or two. The
@@ -59,6 +59,7 @@ use clap::Parser;
 use js_client::ClientError;
 use js_types::HostId;
 
+use crate::cli::host_id_of;
 use crate::own_host::{HttpLease, Lease, RequestLimit};
 
 use crate::{
@@ -158,8 +159,16 @@ fn begin(args: &[OsString], host: &Host<'_>) -> Result<(Args, String, Box<dyn Le
         Err(e) if e.use_stderr() => return Err(Early::Usage(e.to_string())),
         Err(help) => return Err(Early::Help(help.to_string())),
     };
-    let id = match &parsed.host_id {
-        Some(id) => id.clone(),
+    let euid = rustix::process::geteuid().as_raw();
+    let named = host_id_of(
+        parsed.host_id.as_deref(),
+        parsed.host_id_from_facts.as_deref(),
+        euid,
+        &|path| host.files.facts(path),
+    )
+    .map_err(|why| Early::Usage(why.to_string()))?;
+    let id = match named {
+        Some(id) => id,
         None => machine_id(&host.platform, host.commands, host.files)
             .map(|machine| host_id(&machine))
             .map_err(|why| {

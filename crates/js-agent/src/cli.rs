@@ -12,6 +12,11 @@ use crate::platform::LONG_VERSION;
 #[cfg(target_os = "linux")]
 use crate::platform::MACOS_ONLY as OTHER_PLATFORM;
 
+mod host_id;
+
+pub(crate) use host_id::host_id_of;
+pub use host_id::{FactsError, HostIdFlags, resolve_host_id};
+
 /// The flags of `js-agent`.
 #[derive(Debug, Parser)]
 #[command(
@@ -65,13 +70,9 @@ pub struct Cli {
     /// The pool this host asks to join.
     #[arg(long, value_name = "NAME")]
     pub pool: String,
-    /// The id this host registers under. By default a salted hash of the machine id
-    /// (`/etc/machine-id`, or the platform UUID on a Mac), never the machine id itself. With
-    /// the crun runtime one agent may hold a host id: the claim is a lock file in the
-    /// directory above `--scratch-root`, so agents that share a host id must share that
-    /// directory to be refused.
-    #[arg(long, value_name = "ID")]
-    pub host_id: Option<String>,
+    /// The id this host registers under (`--host-id`, or `--host-id-from-facts`).
+    #[command(flatten)]
+    pub host: HostIdFlags,
     /// A label to put on the host, as `key=value`. May be given more than once; a key
     /// given twice takes its last value.
     #[arg(long = "label", value_name = "KEY=VALUE", value_parser = key_value)]

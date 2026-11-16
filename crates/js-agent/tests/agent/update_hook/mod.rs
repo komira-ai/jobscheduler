@@ -5,6 +5,7 @@
 //! the rules the record is held to are pure of the steps and tested here on their own.
 
 mod args;
+mod config_hook;
 mod conformance;
 mod conformance_runs;
 mod fake_bin;

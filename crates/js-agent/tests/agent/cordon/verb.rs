@@ -463,3 +463,75 @@ fn the_entry_point_answers_the_verb_and_reports_signal_handlers_that_cannot_be_s
     );
     assert!(out.is_empty());
 }
+
+/// A facts file of hostkeeper's daemon, as a root-owned file.
+fn facts_file(text: &str) -> js_agent::flags_file::FileFacts {
+    js_agent::flags_file::FileFacts {
+        regular: true,
+        mode: 0o644,
+        uid: 0,
+        bytes: text.as_bytes().to_vec(),
+    }
+}
+
+/// Asserts that `--host-id-from-facts` cordons the host the facts file's `host_id` names, the
+/// id an agent started with the same flag registers under. It catches a cordon verb that keeps
+/// the machine-id default for such a host, and so cordons a host the agent is not.
+#[test]
+fn the_facts_file_names_the_host_to_cordon() {
+    let mut host = linux_host();
+    host.files = host.files.with_facts(
+        "/facts.json",
+        facts_file(r#"{"schema":1,"host_id":"web-04","host_group":"web"}"#),
+    );
+    let more = [
+        "--server",
+        "http://127.0.0.1:1",
+        "--token-file",
+        "/t",
+        "--host-id-from-facts",
+        "/facts.json",
+        "--for",
+        "1m",
+    ];
+    let lease = FakeLease::new();
+    lease.set(|state| state.id = "web-04".to_owned());
+    let ran = drive(&more, &host, &lease, &mut FakePace::new());
+    assert_eq!(ran.status, code(0), "{}", ran.err);
+    assert_eq!(ran.seen[0].host, "web-04");
+}
+
+/// Asserts that a facts file that cannot be used, and `--host-id` given beside
+/// `--host-id-from-facts`, end the verb with status 2, the reason on standard error and no
+/// connection made. It catches a refused file that falls back to the machine-id default, and a
+/// pair of flags where one silently wins.
+#[test]
+fn a_facts_file_that_cannot_be_used_or_a_second_id_flag_is_a_usage_error() {
+    let mut host = linux_host();
+    host.files = host.files.with_facts(
+        "/facts.json",
+        facts_file(r#"{"schema":2,"host_id":"web-04"}"#),
+    );
+    let refused = [
+        "--server",
+        "http://127.0.0.1:1",
+        "--token-file",
+        "/t",
+        "--host-id-from-facts",
+        "/facts.json",
+        "--for",
+        "1m",
+    ];
+    let ran = drive(&refused, &host, &FakeLease::new(), &mut FakePace::new());
+    assert_eq!(ran.status, code(2));
+    assert_eq!(
+        ran.err,
+        "js-agent cordon: --host-id-from-facts /facts.json: schema 2, this agent reads 1\n"
+    );
+    assert!(ran.seen.is_empty());
+    let both = with(&["--host-id-from-facts", "/facts.json", "--for", "1m"]);
+    let ran = drive(&both, &host, &FakeLease::new(), &mut FakePace::new());
+    assert_eq!(ran.status, code(2));
+    assert!(ran.err.contains("cannot be used with"), "{}", ran.err);
+    assert!(ran.seen.is_empty());
+}

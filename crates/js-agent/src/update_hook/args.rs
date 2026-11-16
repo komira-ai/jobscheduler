@@ -33,11 +33,11 @@ const BARE_WORDS: [&str; 6] = [
     "uninstall",
 ];
 
-/// Whether `word`, the first argument after the program name, selects the hook: the verb, or
-/// a step word given bare.
+/// Whether `word`, the first argument after the program name, selects the hook: the verb, a
+/// step word given bare, or the verb of the config package's hook (`config-hook`).
 #[must_use]
 pub fn is_hook_word(word: &OsStr) -> bool {
-    word == VERB || BARE_WORDS.iter().any(|step| word == *step)
+    word == VERB || word == super::config::VERB || BARE_WORDS.iter().any(|step| word == *step)
 }
 
 /// Why a command line was refused.

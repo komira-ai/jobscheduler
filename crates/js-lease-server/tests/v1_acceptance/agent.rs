@@ -141,6 +141,13 @@ impl FileReader for Files {
         Ok(if path.starts_with(&self.state) { 8 } else { 7 })
     }
 
+    fn facts(&self, path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{}: no facts file in this test", path.display()),
+        ))
+    }
+
     fn is_tmpfs(&self, _path: &Path) -> Result<bool, String> {
         Ok(false)
     }

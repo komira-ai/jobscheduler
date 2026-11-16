@@ -488,6 +488,10 @@ impl FileReader for SharedFiles {
     fn is_tmpfs(&self, _path: &Path) -> Result<bool, String> {
         Err("no file systems here".to_owned())
     }
+
+    fn facts(&self, _path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
+        Err(std::io::Error::other("no facts here"))
+    }
 }
 
 impl FakeMachine {

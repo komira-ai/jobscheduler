@@ -53,7 +53,7 @@
 //! | `--token-file <path>` | required unless `--state-root` holds a usable `host-credential` file: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
 //! | `--ca-cert <path>` | optional for `https://`: the PEM file with the certificate to trust, and then only that is trusted. Without it the public roots bundled in the agent (`webpki-roots`, pinned by `Cargo.lock`) are trusted, so a publicly trusted endpoint works with no certificate pushed; the platform's roots are never read. Ignored for `http://` |
 //! | `--pool <name>` | required: the pool to join |
-//! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
+//! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id; `--host-id-from-facts <path>` takes it from the `host_id` of hostkeeper's facts file instead (not with `--host-id`; a file that cannot be used stops the agent) |
 //! | `--label k=v` | a label on the host; repeatable |
 //! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle`, `bundle-root`, `per-job`, `host-jobs`, `layered-rootfs`, `egress`, `egress-ports`, `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
@@ -339,7 +339,7 @@ use clap::Parser;
 
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 use bundle::{Admission, BundleHost, Settings as BundleSettings, SystemHost};
-pub use cli::Cli;
+pub use cli::{Cli, FactsError, HostIdFlags, resolve_host_id};
 pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
 pub use facts::{

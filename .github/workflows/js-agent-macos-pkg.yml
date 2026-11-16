@@ -92,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir inputs
-          target/release/js-mac-provision agent-plist --server SET-THE-SERVER --pool default > inputs/agent.plist
+          target/release/js-mac-provision agent-plist --flags-file /etc/js-agent/flags > inputs/agent.plist
           target/release/js-mac-provision session-plist --daemon-requirement SET-THE-DAEMON-REQUIREMENT --socket-group SET-THE-SOCKET-GROUP > inputs/session.plist
           plutil -lint inputs/agent.plist inputs/session.plist
           cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --out stage

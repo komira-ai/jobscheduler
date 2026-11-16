@@ -38,7 +38,7 @@ use js_types::HostId;
 use js_update_hook::peek;
 
 use crate::CredentialFile;
-use crate::cli::Cli;
+use crate::cli::{Cli, resolve_host_id};
 use crate::facts::{
     CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, host_id, machine_id,
 };
@@ -284,10 +284,29 @@ impl Lease for MachineLease {
 /// agent's (the server and the pool are required, as for the agent). The text starts with the
 /// params key, `flags_file`.
 fn connect_of(params: &Params, machine: &Machine<'_>) -> Result<ConnectParams, String> {
+    connect_with(
+        &params.flags_file,
+        &params.state_root,
+        &params.token_file,
+        machine,
+    )
+}
+
+/// [`connect_of`] for the three params a hook of another package names the same way: the flags
+/// file, the agent's state root and the token file (see `config`).
+///
+/// # Errors
+/// As [`connect_of`].
+pub(super) fn connect_with(
+    flags_file: &Path,
+    state_root: &Path,
+    token_file: &Path,
+    machine: &Machine<'_>,
+) -> Result<ConnectParams, String> {
     let args = vec![
         "js-agent".into(),
         flags_file::FLAG.into(),
-        params.flags_file.clone().into_os_string(),
+        flags_file.as_os_str().to_owned(),
     ];
     let words = flags_file::expand_with(args, machine.euid, machine.flags)
         .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))?;
@@ -300,12 +319,14 @@ fn connect_of(params: &Params, machine: &Machine<'_>) -> Result<ConnectParams, S
             .collect();
         format!("{FLAGS_FILE_KEY}: {}", reason.join(" "))
     })?;
+    let host_id = resolve_host_id(&cli, machine.euid, machine.flags)
+        .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))?;
     Ok(ConnectParams {
         server: Some(cli.server),
-        state_root: Some(params.state_root.clone()),
-        token_file: Some(params.token_file.clone()),
+        state_root: Some(state_root.to_owned()),
+        token_file: Some(token_file.to_owned()),
         ca_cert: cli.ca_cert,
-        host_id: cli.host_id,
+        host_id,
     })
 }
 
@@ -424,7 +445,7 @@ impl StateView for Root {
 
 /// The unit manager of this platform: on a Mac, [`launch_units`], gated on `token_file`.
 #[cfg(target_os = "macos")]
-fn platform_units<'a>(
+pub(super) fn platform_units<'a>(
     commands: &'a SystemCommands,
     stop: &'a StopRunner,
     token_file: &'a Path,
@@ -433,7 +454,7 @@ fn platform_units<'a>(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_units<'a>(
+pub(super) fn platform_units<'a>(
     commands: &'a SystemCommands,
     _stop: &'a StopRunner,
     _token_file: &'a Path,
