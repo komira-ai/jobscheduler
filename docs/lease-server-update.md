@@ -17,7 +17,7 @@ What a restart keeps is what the server keeps on disk; what it holds only in mem
 the process. At this release:
 
 - **Kept:** the files beside the state file (cordons, taints, registered hosts, the
-  scaler's records), the job store (`<state file>.jobs`, with `--job-listen`) and the usage file.
+  scaler's records), the job store (`<state file>.jobs`, with `--job-listen`) and the usage file; with `--store` the job store and the usage rows are in the database, not in files.
   A lease file left by an earlier release is neither read nor written, and stays as it was.
 - **Lost:** nothing that the server holds only in memory is a run: it has none. A host of an
   older agent that lists a run after the restart is told to cancel it.

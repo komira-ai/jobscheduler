@@ -12,24 +12,28 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
 
+use js_jobs::ScriptedIds;
 use js_lease_server::{LockLost, RecordsFile, UnremovedFile};
 use js_scaler::Records;
 use js_state::postgres::{PostgresConfig, TestDatabase, test_database};
-use js_state::{Cond, Store, StoreError, Txn, WriterLock, WriterTarget};
+use js_state::{Cond, ManualClock, Store, StoreError, Txn, WriterLock, WriterTarget};
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
-use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, post, session};
+use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, job_host_args, post, session};
 use crate::binary::{address_in, launch, spawn};
+use crate::jobs_support::{job_agent, job_of, per_job_hello, submit};
 use crate::joins::{code, hello, minted};
 use crate::ready_listen::{WAITING, with_ready};
 use crate::store_support::{
     LIMIT, assert_unquoted, end_the_holder, holder, launch_ticking, revision, run_to_end,
     store_args, store_file, taken_address, unflushed, with_userinfo,
 };
-use crate::support::{Harness, Scratch, TOKEN, replace, request};
+use crate::support::{Harness, Scratch, TOKEN, config, replace, request};
 
 /// A role no test server has and a password for it: neither may ever be printed.
 const ROLE: &str = "js_store_no_such_role";
@@ -473,6 +477,82 @@ fn the_files_are_imported_once_over_postgres() {
     let store = h.running.store().expect("the server holds the store");
     assert!(store.get("hosts/binding/burst-9").unwrap().is_some());
     drop(store);
+    let Harness { running, .. } = h;
+    let _ = runtime.block_on(running.shutdown());
+}
+
+/// Asserts that with a Postgres store the job store lives in it: a job submitted to the first
+/// server is rows `job/` of the store and is read back by the server of the restart, and
+/// neither a `.jobs` file nor a `usage.db` is made beside the state file. It catches a job
+/// store that is still a local SQLite file when the server has a shared store, which a second
+/// instance could not see.
+#[test]
+fn the_job_store_is_in_postgres_and_survives_a_restart() {
+    let database = test_database();
+    let url = database.url();
+    let flags = |scratch: &Scratch| {
+        let mut args = job_host_args(scratch);
+        args.extend(["--store".into(), store_file(scratch, &url).into_os_string()]);
+        args
+    };
+    let scratch = Scratch::new("store_pg_jobs");
+    let args = flags(&scratch);
+    let runtime = Runtime::new().unwrap();
+    let h = runtime.block_on(async {
+        let first = Harness::with(scratch, args).await;
+        job_agent(&first, &per_job_hello("burst-1")).await;
+        let made = submit(&first, "kept-1").await;
+        assert_eq!(made.status, 201, "{}", made.body);
+        let Harness {
+            running, scratch, ..
+        } = first;
+        running.shutdown().await.unwrap();
+        let resumed = replace(flags(&scratch), "--boot", "resume");
+        Harness::with(scratch, resumed).await
+    });
+    let read = runtime.block_on(job_of(&h, "kept-1"));
+    assert_eq!(read.status, 200, "{}", read.body);
+    let store = h.running.store().expect("the server holds the store");
+    let keys: Vec<String> = store
+        .scan_prefix("job/")
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(keys, ["job/kept-1"]);
+    for file in ["leases.toml.jobs", "usage.db"] {
+        assert!(!h.scratch.path(file).exists(), "{file}");
+    }
+    drop(store);
+    let Harness { running, .. } = h;
+    let _ = runtime.block_on(running.shutdown());
+}
+
+/// Asserts that a server over a Postgres store whose job tables are given a clock (as a
+/// simulation does) stamps the rows of the job store in Postgres with that clock: a job
+/// submitted with the clock at 42 s is reported queued at 42000 ms, and is the row `job/` of
+/// the store. It catches a Postgres store that stamps with the database's clock whatever the
+/// server was given, which a simulation could not drive.
+#[test]
+fn the_job_store_in_postgres_is_stamped_with_the_clock_it_is_given() {
+    let database = test_database();
+    let url = database.url();
+    let scratch = Scratch::new("store_pg_jobs_clock");
+    let mut args = job_host_args(&scratch);
+    args.extend([
+        "--store".into(),
+        store_file(&scratch, &url).into_os_string(),
+    ]);
+    let clock = Arc::new(ManualClock::default());
+    clock.advance(Duration::from_secs(42));
+    let ids = Arc::new(ScriptedIds::new([7; 16], []));
+    let config = config(args).unwrap().with_job_sources(clock, ids);
+    let runtime = Runtime::new().unwrap();
+    let h = runtime.block_on(Harness::over(scratch, config));
+    runtime.block_on(job_agent(&h, &per_job_hello("burst-1")));
+    let made = runtime.block_on(submit(&h, "stamped-1"));
+    assert_eq!(made.status, 201, "{}", made.body);
+    assert_eq!(made.json()["job"]["times"]["queuedAtMs"], "42000");
     let Harness { running, .. } = h;
     let _ = runtime.block_on(running.shutdown());
 }

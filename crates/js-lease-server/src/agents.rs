@@ -87,6 +87,9 @@ pub(crate) struct Agents {
     /// The state store under the job tables, held with them: `GetUsage` reads the
     /// `usage/ended/` row each free of a job's allocation writes there.
     pub(crate) job_state: Option<Arc<dyn js_state::Store>>,
+    /// Whether the usage sink keeps its rows in the same state store as the job tables, so
+    /// that the ended bookings it would list are the rows `job_state` lists already.
+    pub(crate) usage_in_job_store: bool,
     /// The registry's placer, which also places the queued jobs when the job tables are
     /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
     /// one, which places no job.
@@ -247,7 +250,7 @@ fn placed_in(
     let placer = placer(max_lease_wall, cpu_slack, memory, clock);
     let registry = Registry::new(pool, clock.clone(), placer.clone());
     let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
-    let usage = usage.build(clock, limits)?;
+    let (usage, usage_in_job_store) = usage.build(clock, limits, kept.map(ServerStore::store))?;
     // The one job store of the server, when the job service is on. It is opened
     // before the bindings are put back: a host a host job tainted whose binding lost
     // the taint (a crash between the placement and the binding's write) gets it from
@@ -255,7 +258,11 @@ fn placed_in(
     // that cannot be read does.
     let (jobs, job_feed, job_state) = match jobs {
         Some(setup) => {
-            let opened = job_store::open(state_file, setup, &job_sources)?;
+            let opened = job_store::open(
+                (state_file, kept.map(ServerStore::store)),
+                setup,
+                &job_sources,
+            )?;
             restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
             (Some(opened.jobs), Some(opened.feed), Some(opened.store))
         }
@@ -278,6 +285,7 @@ fn placed_in(
         jobs,
         job_feed,
         job_state,
+        usage_in_job_store,
         placer: Some(placer.clone()),
         unclean: Mutex::default(),
         logs,
@@ -329,6 +337,7 @@ impl Agents {
             jobs: None,
             job_feed: None,
             job_state: None,
+            usage_in_job_store: false,
             placer: None,
             unclean: Mutex::default(),
             logs: None,

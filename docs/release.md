@@ -309,7 +309,7 @@ everything after the image in `docker run` is the server's flags: either the fla
 
 | What | Mode in the container | Why |
 |---|---|---|
-| the directory of `--state-file` | read-write, owned by `65532` | the server writes `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and, unless `--usage-db` puts it elsewhere, `usage.db` beside them. This is the state that must outlive the container |
+| the directory of `--state-file` | read-write, owned by `65532` | the server writes `<path>.agents`, `<path>.joins`, `<path>.scaler`, and, without `--store`, `<path>.jobs` and, unless `--usage-db` puts it elsewhere, `usage.db` beside them (with `--store` the job store and the usage rows are in the database). This is the state that must outlive the container |
 | `--usage-db`'s directory, when it is not that one | read-write, owned by `65532` | the usage file |
 | `--token-file`, `--client-token` files, `--agent-token-file`, `--store`, `--tls-key` | read-only, owned by `65532`, mode 0600 or 0400 | the server refuses a secret file that is not owner-only. For `--tls-key` a symbolic link, as secret mounts make, is followed and the file it leads to is checked |
 | `--agent-pool-config` or `--config`, `--tls-cert` | read-only | |

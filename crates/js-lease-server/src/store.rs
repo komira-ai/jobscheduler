@@ -23,8 +23,12 @@
 //! What the store keeps: the host bindings, with their taints and cordons, and the join
 //! tokens' digests ([`crate::host_keys`]), and the scaler's records and the hosts the
 //! registry refused to remove (`acquires/scaler/records`, `acquires/scaler/unremoved`), read
-//! once at start after the lock is taken. The job store and the usage
-//! database are where they are without the setting.
+//! once at start after the lock is taken, and, with the job service on, the job store (jobs,
+//! allocations, marks, taints and the change feed) and, with usage on, the usage rows
+//! (node minutes, profiles, the history of ended allocations). Without the setting the job
+//! store is the SQLite file `<state file>.jobs` and the usage the file `usage.db`; with it
+//! neither file is made, opened or read, and a pair left by an earlier start stays where it
+//! is, unread.
 //!
 //! The first start over a store imports the four files a server without the setting keeps
 //! beside the state file (`.agents`, `.joins`, `.scaler`, `.scaler.unremoved`) once, right
@@ -37,7 +41,7 @@ use std::sync::Arc;
 
 use js_state::postgres::PostgresStore;
 use js_state::sqlite::{Options, SqliteStore};
-use js_state::{LockRefused, Store, StoreError, SystemClock, WriterLock, WriterTarget};
+use js_state::{Clock, LockRefused, Store, StoreError, SystemClock, WriterLock, WriterTarget};
 use tokio::sync::{Mutex, oneshot, watch};
 use tracing::{error, info};
 
@@ -109,11 +113,20 @@ impl ServerStore {
 
     /// Opens the store of `setting` under `lock`, which was taken on its target.
     fn open_locked(setting: StoreSetting, lock: WriterLock) -> Result<Self, StartupError> {
-        let StoreSetting { target, names } = setting;
+        let StoreSetting {
+            clock,
+            target,
+            names,
+        } = setting;
+        let clock = clock.0;
         let refused = |err: String| names.refuse(format!("the store could not be opened: {err}"));
         let (store, lock): (Arc<dyn Store>, _) = match target {
             WriterTarget::Postgres(config) => {
                 let store = PostgresStore::open(&config).map_err(|err| refused(err.to_string()))?;
+                let store = match clock {
+                    Some(clock) => store.with_clock(clock),
+                    None => store,
+                };
                 // Every commit checks the store still holds the generation this lock took
                 // (always one on Postgres), so none succeeds once another process took it.
                 let store = lock
@@ -123,7 +136,7 @@ impl ServerStore {
                 (Arc::new(store), Some(Mutex::new(lock)))
             }
             WriterTarget::Sqlite(file) => {
-                let store = open_sqlite(&file, lock).map_err(refused)?;
+                let store = open_sqlite(&file, lock, clock).map_err(refused)?;
                 (Arc::new(store), None)
             }
         };
@@ -175,7 +188,11 @@ impl ServerStore {
 }
 
 /// Opens the SQLite store at `file` under `lock`, made owner-only first.
-fn open_sqlite(file: &Path, lock: WriterLock) -> Result<SqliteStore, String> {
+fn open_sqlite(
+    file: &Path,
+    lock: WriterLock,
+    clock: Option<Arc<dyn Clock>>,
+) -> Result<SqliteStore, String> {
     let made = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -184,7 +201,7 @@ fn open_sqlite(file: &Path, lock: WriterLock) -> Result<SqliteStore, String> {
         .open(file)
         .and_then(|opened| opened.set_permissions(Permissions::from_mode(0o600)));
     made.map_err(|err| format!("{}: {err}", file.display()))?;
-    let clock = Arc::new(SystemClock::default());
+    let clock = clock.unwrap_or_else(|| Arc::new(SystemClock::default()));
     SqliteStore::open_locked(file, lock, clock, Options::default()).map_err(|err| err.to_string())
 }
 

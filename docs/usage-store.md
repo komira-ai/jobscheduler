@@ -1,6 +1,6 @@
 # The usage store
 
-The server keeps what it measured and what it learned in one `js-state` store: the SQLite file `--usage-db` names (`usage.db` beside the state file unless given). `js-usage` owns the rows; the server opens the store and hands it to them. A server without agent registration, or with `--usage-off` (`server.usage_off`), runs without one. These key spaces live there:
+The server keeps what it measured and what it learned in one `js-state` store: the state store when the server has one (`--store`: the usage rows are keys of that database, and no file is made), else the SQLite file `--usage-db` names (`usage.db` beside the state file unless given). `js-usage` owns the rows; the server opens the store and hands it to them. A server without agent registration, or with `--usage-off` (`server.usage_off`), runs without one. These key spaces live there:
 
 | prefix | one row per | written | kept |
 |---|---|---|---|

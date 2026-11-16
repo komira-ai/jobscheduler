@@ -8,8 +8,8 @@ so.
 
 | Store | What it holds | Opened when |
 |---|---|---|
-| The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | The writer lock (a session-level advisory lock) and the writer generation (one row of `writer_generation`). With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) and the digests of the join tokens and host credentials (`hosts/join/<digest>`); with an elastic pool, the scaler's records (`acquires/scaler/records`) and the hosts to remove (`acquires/scaler/unremoved`); and the marker of the first start's import (`meta/server-state-imported`); all in the `kv` table. | The setting is given. The server takes the lock before it reads anything else and before it binds a listener. |
-| The job store, `<state file>.jobs` (SQLite, owner-only) | Every job and every allocation. | The job service is on (`--job-listen`, `server.job_listen`). |
+| The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | The writer lock (a session-level advisory lock) and the writer generation (one row of `writer_generation`). With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) and the digests of the join tokens and host credentials (`hosts/join/<digest>`); with an elastic pool, the scaler's records (`acquires/scaler/records`) and the hosts to remove (`acquires/scaler/unremoved`); and the marker of the first start's import (`meta/server-state-imported`); with the job service on, every job, allocation, mark, taint and the change feed (`job/`, `alloc/`, `mark/`, `taint/`, `idx/` and the feed rows; schema marker `meta/jobs/schema`); with usage on, the usage rows (`usage/`); all in the `kv` table. | The setting is given. The server takes the lock before it reads anything else and before it binds a listener. |
+| The job store, `<state file>.jobs` (SQLite, owner-only), only without a store setting | Every job and every allocation. With a store setting the file is not made, opened or read; one an earlier start left stays where it was, as a backup. | The job service is on (`--job-listen`, `server.job_listen`) and there is no store setting. |
 | The binding file (`<state file>.agents`) | Which credential and instance each registered host was admitted with. There is no lease file: the server never opens one, and a lease file left by an earlier release stays as it was. | Always (the binding file, and `<state file>.joins`, with agent registration and no store setting). |
 
 Two limits of the code as built shape everything below:
@@ -17,7 +17,7 @@ Two limits of the code as built shape everything below:
 - **The store holds the server's host state.** With agent registration or an elastic pool, the server keeps its host
   bindings, join tokens, scaler records and hosts to remove in the store. Its first start over an empty store imports
   `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` once (`docs/design/configuration.md`, "The first start"), and
-  leaves them in place; they are stale from then on. The job store, `<state file>.jobs`, stays a file.
+  leaves them in place; they are stale from then on. The job store and the usage rows are in the store too, from their first start over it, with no jobs: nothing in `<state file>.jobs` or `usage.db` is copied (cutover: drain the farm, deploy, start; the files stay as a backup).
 - **The server creates no schema.** The schema is created and migrated by the installer, which is not in this repository. A database
   without the schema is refused when the lock is taken: `--store: the store's writer lock could not be taken: the state schema has no
   writer generation table (it is older than version 2): run the installer to bring it forward`.
@@ -101,7 +101,9 @@ Record the writer generation beside the dump. A restore needs it (step 4):
 SELECT generation FROM kbf_state.writer_generation;
 ```
 
-**The job store.** Stop the server cleanly (`SIGTERM`), then copy `<state file>.jobs` while no process holds it. A clean stop leaves
+**The job store, with a store setting,** is in the Postgres dump above; there is no file to copy.
+
+**The job store, without a store setting.** Stop the server cleanly (`SIGTERM`), then copy `<state file>.jobs` while no process holds it. A clean stop leaves
 no `<state file>.jobs-wal` beside it; if one is there (the server was killed), start and stop the server once before copying. No command in this repository copies it
 while the server runs: the library has an online backup (`js_state::sqlite::backup`, which the restore test uses), but no verb calls it.
 A file taken while the server runs, by any tool other than SQLite's own backup, is not a backup.
@@ -135,7 +137,7 @@ Keep the file mode: the job store and the binding file hold job specs and creden
 
    The generation fences commits: a store opened by a lock checks, in every commit, that the generation is still the one its lock took.
    A generation that went back could match one a stale process still holds.
-5. **Restore the job store.** Delete `<state file>.jobs-wal` and `<state file>.jobs-shm` if they are there (an old write-ahead log
+5. **Restore the job store (only without a store setting; with one the restore in step 3 restored it).** Delete `<state file>.jobs-wal` and `<state file>.jobs-shm` if they are there (an old write-ahead log
    would otherwise be replayed onto the restored file), copy the backup to `<state file>.jobs`, and make it the server user's with mode
    0600. The server makes the file owner-only again when it opens it.
 6. **Restore the binding file.** There is no term to set: the server issues no `(term, sequence)` id, and a lease file in the restored directory is ignored.

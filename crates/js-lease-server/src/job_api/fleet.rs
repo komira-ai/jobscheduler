@@ -16,7 +16,9 @@
 //! - [`Pools`], over the status of the pools ([`PoolStatus`]): what `GET /v1/pools` writes,
 //!   mapped here field by field, so nothing but the fields named below leaves the server.
 //! - [`History`], twice: over the usage sink ([`SinkHistory`]), the ended bookings of leases
-//!   under `usage/ended/`, absent when the server runs with `--usage-off`; and over the state
+//!   under `usage/ended/`, absent when the server runs with `--usage-off` and when the sink
+//!   keeps them in the job store's own state store (`--store`), where the next source lists
+//!   them; and over the state
 //!   store under the job tables ([`StoreHistory`]), the rows under the same keys that each
 //!   free of a job's allocation writes. `GetUsage` lists both as one listing (`fleet_usage.rs`),
 //!   and answers an empty page when the server holds neither.
