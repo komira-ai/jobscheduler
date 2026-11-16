@@ -932,9 +932,9 @@ version-pair check) follows. All are in [design/extraction-steps-d.md](design/ex
 
 ## 15. Decisions
 
-The full text of every decision, D1 to D66, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
+The full text of every decision, D1 to D67, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
 D35. Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to
-D66 with no gaps; D26 (no recommendation yet) is open. A superseded decision says by which.
+D67 with no gaps; D26 (no recommendation yet) is open. A superseded decision says by which.
 
 - D1 home of the code (settled: this repository). D2 wire strategy (a new package with negotiation). D3 durable leases across an agent
   restart (not in v1). D4 sizing rule and ladder. D5 ucdk role. D6 fence. D7 memory booking for non-kbf classes. D8 validation run id and
@@ -973,6 +973,7 @@ D66 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   D51 host jobs only in a whole-node lease. D52 the lease clock starts at the token. D53 measurement is the consumer's. D54 typed readiness refusals, own cap. D55 reservations persist. Text in [design/whole-node.md](design/whole-node.md).
 - D56 to D61 hosts that run many jobs, spot hosts, price and capacity data, several clouds (D56 amends D7). D62 to D65 the swap at the machine cap (launch the biggest, drain the smallest to finish its jobs within a grace; evictions charge no budget) and scale-down. Text in [design/hosts.md](design/hosts.md).
 - D66 a job's file system is assembled generically: layers, mounts of a source with named options, and host loopback ports (host sockets designed), each a kind Docker, the OCI runtime or Kubernetes has, bounded by the host's mount roots, `--image-allow` and `--host-port`; supersedes the tree inputs design. Text in [design/job-rootfs.md](design/job-rootfs.md).
+- D67 a layer or a mount may name a node-local provider by name with an opaque ref; the agent calls it to prepare the tree at assignment, for its directory while the container is readied, and to release it at the end; amends D66 and job-rootfs LR6, LR12, LR18, LR22 (for the owner's review). Text in [design/mount-providers.md](design/mount-providers.md).
 
 ## 16. Risks
 

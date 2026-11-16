@@ -1,8 +1,8 @@
-# Decisions D1 to D66
+# Decisions D1 to D67
 
 Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and D35 in full.
 Section numbers refer to design.md. Each decision has options and a recommendation. None is final until the owner answers, except where
-marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
+marked settled. The ids run D1 to D67 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -330,3 +330,10 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   stated as the lifecycle a client can rely on. Supersedes the tree inputs design
   ([tree-inputs.md](tree-inputs.md)); its merged wire is retired additively. Details and the decisions under it (LR1 to LR22):
   [job-rootfs.md](job-rootfs.md).
+
+- **D67. A layer or a mount may name a node-local provider; the agent asks it at assignment** (amends D66, LR6, LR12, LR18 and LR22).
+  A job's layer or mount may be `{provider, ref}`: a provider the host's operator names (`--mount-provider NAME=SOCKET`) and bytes only
+  that provider reads. The agent of the host the job is placed on calls the provider's `Prepare(ref)` as soon as it has admitted the
+  start, `Mount` for the directory while it readies the container, and `Release` after the job's file system is taken
+  apart, over a local protocol jobscheduler defines; a provider name is a capability placement requires. jobscheduler reads nothing of
+  the ref and stays no storage system's client. Design for the owner's review; text in [mount-providers.md](mount-providers.md).

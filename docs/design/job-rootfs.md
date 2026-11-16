@@ -5,7 +5,9 @@ public API and the server, item 4, the mounts in `js-contain`, item 5, the `crun
 ports on `crun`, are built.** It replaces `docs/design/tree-inputs.md` and its build
 items: jobscheduler does not know that a node-local cache exists, let alone which one. What tree-inputs.md asked of
 jobscheduler is met here by things any container runtime offers (layers, mounts, and access to a host port or socket),
-and the pieces of its wire that already merged (komira-ai/jobscheduler#842) are retired additively (section 6).
+and the pieces of its wire that already merged (komira-ai/jobscheduler#842) are retired additively (section 6). A layer or a
+mount that names a node-local provider, which the agent asks at assignment, is designed in [mount-providers.md](mount-providers.md)
+(D67, for the owner's review), which amends LR6, LR12, LR18, LR22 and section 7.4.
 
 **What changes for a user.** Today a job's file system is one image, read-only, with an empty writable `/work` in which
 it runs (section 1). After this design a job can also say, as it would to Docker:
@@ -124,6 +126,7 @@ Ours follows the same split: a source (a `oneof`) and how it appears (target, mo
 | A host port forwarded into the job | `-p HOST:CONTAINER/PROTO` | none (the runtime's network) | `ports[].hostPort`, `containerPort`, `protocol` | `JobSpec.ports` (`PortForward`, exists) | exists |
 | A service on the host's loopback, from the job | `--network host`, or `host-gateway` with a route | none | `hostNetwork: true` | `JobSpec.host_ports` (`HostPort`: host port, job port, protocol) | now, TCP; UDP designed, later |
 | A volume the runtime keeps between jobs | `type=volume` (named) | none | `persistentVolumeClaim`, `csi`, `ephemeral` | **no** | never: see below |
+| A tree a node-local driver makes for the run | a volume plugin's `Mount` | none | `csi` (node plugin) | `Layer.provider`, `Mount.provider` (`ProviderSource`) | designed ([mount-providers.md](mount-providers.md), D67) |
 | A network or device file system | `type=volume` with a driver (`nfs`, `cifs`) | `type: nfs`, ... | `nfs`, `iscsi`, `csi`, ... | **no** | never: see below |
 | Id-mapped ownership | daemon-wide `userns-remap` | `uidMappings`, `gidMappings`, `idmap` | `hostUsers: false` | `Mount.id_mapping` (`IdMapping`) | designed (2.4), later (LR5) |
 | Free option strings | `volume-opt` | `options` | a volume's `mountOptions` | **no**: named fields only (LR18) | never |
@@ -923,7 +926,8 @@ weakened assertion over a gap (T7), and the PR says so.
 
 **Migration note.** No deployment uses tree inputs. A client that planned to send `JobSpec.trees` (tree-inputs.md 2.4,
 never built) sends instead a `COPY_ON_WRITE` mount of the provider's directory for the tree at `/work`, or a `READ_ONLY`
-mount at `/work/<dest>`; it asks its provider to fetch ahead when the job is placed (section 7); and it reads
+mount at `/work/<dest>`; it asks its provider to fetch ahead when the job is placed (section 7), or names a provider
+source ([mount-providers.md](mount-providers.md)); and it reads
 `START_FAILURE_CODE_INPUT_UNAVAILABLE` and `RESULT_REASON_INPUT_FAILED` where tree-inputs.md had `tree-unavailable` and
 `INPUT_FAILED`. The fallback `TreeUnavailable::JobStages` has no successor: a client that wants to stage inputs itself
 when the host path is missing submits a job without the mount.
@@ -972,7 +976,8 @@ moment the program runs. `times.started_at_ms - times.placed_at_ms` is how long 
    right after the placement's commit. So the hook of 7.3 can warm or fetch ahead, but it cannot be relied on to make a
    path exist in time: a host path whose root must exist exists before the submit, or the start fails
    `input-unavailable` (section 8). Beyond the roots it opens, the agent reads nothing of a host path: every other
-   read is the job's, during `RUNNING`.
+   read is the job's, during `RUNNING`. For a provider source the agent asks the provider as soon as it has the start
+   ([mount-providers.md](mount-providers.md)), which is the moment this rule names.
 5. **Creating is bounded.** The pool's start timeout (900 s by default, `crates/js-lease-server/src/job_expiry.rs`)
    counts from placement; a job not `RUNNING` by then ends `FAILED_TO_START` with `START_TIMEOUT`. A whole-host job is
    bounded by its host's prepare deadline while `PLACED`, and by the start timeout counted from that deadline once
@@ -992,11 +997,13 @@ A client that prepares something on the job's host does it at the first read tha
 the job's correctness: the job may still fail to start, be cancelled, or (rule 1) move to another host, on which the
 client prepares again. If the preparation is late, or fails, the job still reads every file it needs, on first read,
 through whatever file system is there. A client that wants the moment sooner reads more often while the job is `QUEUED`
-or `PLACED`; this design adds no watch (decision LR12).
+or `PLACED`; this design adds no watch (decision LR12). A provider source replaces this hook with the agent's own call at
+assignment ([mount-providers.md](mount-providers.md)); the guarantees above are unchanged.
 
 ### 7.4 Where the time goes
 
-**No special fetch.** The agent never asks a provider for anything. A host path is a directory; the agent opens its
+**No special fetch.** The agent never asks a provider for anything, except for a provider source
+([mount-providers.md](mount-providers.md), D67). A host path is a directory; the agent opens its
 root (4.2) and, at the overlay's mount, the kernel looks up the lowers' roots; every other read is the job's, when the
 job makes it, through the kernel, to whatever file system is there. On a node with a lazy file system, that file system
 fetches on first read; jobscheduler neither knows nor needs to.
@@ -1307,7 +1314,8 @@ Each is decided here; the owner may overturn any.
   the additive option that lifts this where the host supports it, behind its own capability and an operator's
   `--map-id` list; it never chowns a file.
 - **LR6. The allow-lists are checked by the agent, not advertised.** Prefix lists do not fit a capability value, and a
-  pool's hosts share a configuration; a mismatch is a configuration mistake with a named refusal (2.6).
+  pool's hosts share a configuration; a mismatch is a configuration mistake with a named refusal (2.6). A provider's
+  name is the exception (D67): placement must find a host that has it, so it is a capability.
 - **LR7. Every host path is resolved with `openat2` beneath its root and used through a clone** (4.2), so no path text
   is read twice and none reaches a mount option.
 - **LR8. Host ports are a listener the agent holds in the job's namespace**, not a firewall exception or a process in
@@ -1324,6 +1332,7 @@ Each is decided here; the owner may overturn any.
   preparing. Section 7 states, as rules a client can rely on, what the existing states promise: forward only (with the
   whole-host requeue as the one way back), a read may miss a state, the host is known from `PLACED`, inputs are first
   touched on that host while creating.
+  For a provider source the agent's own call at assignment replaces a client's hook (D67).
 - **LR13. The tree wire is retired additively; only the never-reported capability key is removed** (section 6).
 - **LR14. `input-unavailable` is a public start failure code of its own; a refused allow-list is not.** The first is
   the host's state and worth a retry elsewhere; the second is a configuration mistake, named in the detail.
@@ -1338,7 +1347,8 @@ Each is decided here; the owner may overturn any.
 - **LR18. Options are named fields with defaults, never a list of option strings.** Each is validated at submit and
   means the same on every runtime; `nosuid` and `nodev` are not options, since no job may clear them, and `no_exec` is
   one, since a job may want it and no job is harmed by it. A field whose only value would be "on" for good is not added;
-  propagation and protocol have one value now and a designed second (2.4), which is why they exist.
+  propagation and protocol have one value now and a designed second (2.4), which is why they exist. A provider
+  source's ref (D67) is not an option: jobscheduler never reads it, and its size is bounded.
 - **LR19. Propagation is private, and the field exists now.** Private is what 4.2 makes and what a lazy provider's tree
   needs; naming it lets a receiving value be added later (2.4) without a second field. Sharing a job's mounts with the
   host is refused for good.
@@ -1354,7 +1364,8 @@ Each is decided here; the owner may overturn any.
   interface** (2.1). Each is something Docker, the OCI runtime or Kubernetes has; each would make jobscheduler a storage
   client or the owner of state between jobs, or would give a job options no one validates. A provider mounts such
   things on the host, and a job names the directory. Path expressions and facts about the job as files are deferred,
-  not refused; id mapping is a designed option (LR5).
+  not refused; id mapping is a designed option (LR5). A provider source (D67) is neither: the agent makes three local
+  calls and keeps nothing past the run ([mount-providers.md](mount-providers.md) section 9).
 
 ## 13. Open questions
 
