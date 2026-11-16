@@ -62,7 +62,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_registry::{Binding, Credential};
-use js_state::Store;
+use js_state::{Cond, Store, Txn};
 use js_types::HostId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -439,6 +439,57 @@ impl BindingStore {
             Keeper::File(_) => Ok(()),
             Keeper::Store(store) => host_keys::commit(&**store, writes),
         }
+    }
+
+    /// Commits `change`, which changes the host's taint, only when the store still holds the
+    /// binding with the taint `expected` (the taint this server's registry holds for the
+    /// host) and the binding is as it was read: the write is conditional on the version just
+    /// read, so a write of another server between the read and the commit is refused, and a
+    /// taint another server reported or cleared is never overwritten by a report or a clear
+    /// made on what this server saw before. Nothing in file mode (the one server is the
+    /// file's only writer), and nothing to commit is a success.
+    ///
+    /// # Errors
+    ///
+    /// The store failed or refused the write, or holds a different taint than `expected`:
+    /// nothing was written, and the heartbeat is answered with an error so that the agent
+    /// reports again.
+    pub(crate) fn commit_taint(&self, change: &Change, expected: Option<&Taint>) -> io::Result<()> {
+        let Keeper::Store(store) = &self.keeper else {
+            return Ok(());
+        };
+        if change.writes.is_empty() {
+            return Ok(());
+        }
+        let name = key(&change.host);
+        let row = store
+            .get(&name)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other(format!("{name} is not in the store")))?;
+        let stored: Stored = host_keys::decode(&name, &row.value).map_err(io::Error::other)?;
+        let (_, binding, _) = stored
+            .into_binding(change.host.to_string())
+            .map_err(io::Error::other)?;
+        if binding.taint() != expected {
+            return Err(io::Error::other(format!(
+                "{name} holds another taint than this server's: another server changed it"
+            )));
+        }
+        let txn = change
+            .writes
+            .iter()
+            .fold(Txn::new(), |txn, (written, value)| {
+                let cond = if *written == name {
+                    Cond::Version(row.version)
+                } else {
+                    Cond::Any
+                };
+                match value {
+                    Some(value) => txn.put(written.clone(), value.clone(), cond),
+                    None => txn.delete(written.clone(), cond),
+                }
+            });
+        host_keys::committed(store.txn(txn))
     }
 
     /// Holds `change` as the store holds it once its writes are committed. Nothing in file

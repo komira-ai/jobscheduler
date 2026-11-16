@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::Path as FilePath;
 
-use js_agent_wire::InstanceIdentity;
+use js_agent_wire::{InstanceIdentity, Taint};
 use js_jobs::interfere::{INJECTED, Interfere};
 use js_registry::{Binding, PoolConfig, Registry, SequentialSessions};
 use js_state::fake::{Fake, Flaw};
@@ -179,6 +179,39 @@ impl Rig {
         let body = Ok(Bytes::from(beat.to_string()));
         let reply = super::heartbeat(agents, Extension(who.clone()), one_time, body).await;
         reply.map(|Json(reply)| reply)
+    }
+
+    /// The heartbeat of `host` that reports `held` as cleared and `taint` as new, as `beat`
+    /// reports a taint.
+    async fn beat_clearing(
+        &self,
+        host: &str,
+        welcome: &Welcome,
+        (held, taint): (Value, Value),
+    ) -> Result<HeartbeatReply, Refused> {
+        let beat = json!({
+            "host_id": host,
+            "epoch": welcome.epoch,
+            "session": welcome.session,
+            "phase": "serving",
+            "taint": taint,
+            "taint_cleared": held,
+        });
+        let agents = State(Arc::clone(&self.agents));
+        let body = Ok(Bytes::from(beat.to_string()));
+        let reply = super::heartbeat(agents, Extension(self.pool.clone()), None, body).await;
+        reply.map(|Json(reply)| reply)
+    }
+
+    /// A second server over the store of `first`, started as a server starts, reading what
+    /// the store holds.
+    fn second(first: &Rig, name: &str) -> Rig {
+        let root = FilePath::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_api_store");
+        over(
+            TestDir::under(root, name),
+            Arc::clone(&first.store),
+            first.clock.clone(),
+        )
     }
 
     /// The value the store holds at `key` as JSON, read past the wrapper; `null` when the key
@@ -744,4 +777,118 @@ fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
     let random = Box::new(SequentialSessions::new());
     let failed = JoinTokens::in_store(store, clock, random).err().unwrap();
     assert!(failed.contains(js_jobs::interfere::INJECTED), "{failed}");
+}
+
+/// Asserts that two servers over one store cannot lose a taint write to each other. Both
+/// hold the host with no taint. The second is told taint `a` and commits it. The first, which
+/// still holds none, is then told taint `b`: it is refused 503 `state-write-failed`, the
+/// store keeps `a` and the first holds none (a report must not overwrite or revive a taint
+/// the store holds). The first server then has the taint cleared and `b` stored (as the
+/// first's own beat would leave it); the second, which still holds `a`, is told `a` is
+/// cleared: refused the same way, the store keeps `b`, the second still holds `a` and nothing
+/// is acknowledged (a clear must not erase a newer taint). It catches the host binding's
+/// unconditional write, which let either lose.
+#[tokio::test]
+async fn two_servers_do_not_overwrite_each_others_taint() {
+    let first = rig("two_first");
+    let welcome = first.pooled("host-a", "burst").await.unwrap();
+    let second = Rig::second(&first, "two_second");
+    let second_welcome = second.pooled("host-a", "burst").await.unwrap();
+    let a = json!({ "reason": "residue", "check": "daemonised-child", "run_id": "r1" });
+    let b = json!({ "reason": "residue", "check": "process-as-job-user", "run_id": "r2" });
+
+    let reply = second.beat((&second.pool, None), "host-a", &second_welcome, a.clone());
+    assert!(reply.await.unwrap().taint_ack);
+    assert_eq!(first.binding("host-a")["taint_run_id"], "r1");
+    let commits = first.commits();
+    let late = first.beat((&first.pool, None), "host-a", &welcome, b.clone());
+    let late = late
+        .await
+        .expect_err("the store holds a taint the server does not");
+    assert_eq!(
+        (late.status.as_u16(), late.error),
+        (503, "state-write-failed")
+    );
+    assert_eq!(first.commits(), commits, "nothing was written");
+    assert_eq!(first.binding("host-a")["taint_run_id"], "r1");
+    assert!(first.held("host-a").unwrap().taint().is_none());
+
+    let newer = first.binding("host-a");
+    let mut newer = newer.as_object().unwrap().clone();
+    newer.insert("taint_run_id".to_owned(), json!("r2"));
+    newer.insert("taint_check".to_owned(), json!("process-as-job-user"));
+    let put = Txn::new().put(
+        "hosts/binding/host-a",
+        Value::Object(newer).to_string(),
+        Cond::Any,
+    );
+    first.store.inner().txn(put).unwrap().unwrap();
+    let commits = first.commits();
+    let stale = second.beat_clearing("host-a", &second_welcome, (a, Value::Null));
+    let stale = stale.await.expect_err("the store holds a newer taint");
+    assert_eq!(
+        (stale.status.as_u16(), stale.error),
+        (503, "state-write-failed")
+    );
+    assert_eq!(first.commits(), commits, "nothing was written");
+    assert_eq!(first.binding("host-a")["taint_run_id"], "r2");
+    let held = second.held("host-a").unwrap();
+    assert_eq!(held.taint().unwrap().run_id.as_deref(), Some("r1"));
+    drop(b);
+}
+
+/// Asserts that a taint commit refuses what it cannot check against the store: a binding
+/// another server rewrote between the read and the commit (the write is conditional on the
+/// version read), a binding the
+/// store no longer holds (another server dropped it) and a read that fails are errors that
+/// write nothing, and a value that is not a binding is an error naming its key. It catches a
+/// commit that puts the taint over a binding it could not read.
+#[tokio::test]
+async fn a_taint_commit_refuses_what_it_cannot_read() {
+    let rig = rig("unreadable");
+    rig.pooled("host-a", "burst").await.unwrap();
+    let host = HostId::new("host-a").unwrap();
+    let taint = Taint {
+        reason: "residue".to_owned(),
+        run_id: None,
+        check: Some("daemonised-child".to_owned()),
+    };
+    let held = rig.held("host-a").unwrap();
+    let change = rig.agents.store.change(&host, held.with_taint(Some(taint)));
+    let name = "hosts/binding/host-a";
+
+    rig.store.fail_read_after(0);
+    let failed = rig.agents.store.commit_taint(&change, None).unwrap_err();
+    assert!(failed.to_string().contains(INJECTED), "{failed}");
+
+    let row = rig.store.inner().get(name).unwrap().unwrap();
+    let other = rig.store.inner();
+    let (value, version) = (row.value.clone(), row.version);
+    rig.store.before_next(move || {
+        let bump = Txn::new().put(name, value, Cond::Version(version));
+        other.txn(bump).unwrap().unwrap();
+    });
+    let raced = rig.agents.store.commit_taint(&change, None).unwrap_err();
+    assert_eq!(
+        raced.to_string(),
+        "the store refused the write of hosts/binding/host-a"
+    );
+    assert_eq!(rig.binding("host-a")["taint_reason"], Value::Null);
+
+    let garbage = Txn::new().put(name, "not json", Cond::Any);
+    rig.store.inner().txn(garbage).unwrap().unwrap();
+    let damaged = rig.agents.store.commit_taint(&change, None).unwrap_err();
+    assert_eq!(
+        damaged.to_string(),
+        "hosts/binding/host-a does not hold this key's fields"
+    );
+
+    let gone = Txn::new().delete(name, Cond::Any);
+    rig.store.inner().txn(gone).unwrap().unwrap();
+    let missing = rig.agents.store.commit_taint(&change, None).unwrap_err();
+    assert_eq!(
+        missing.to_string(),
+        "hosts/binding/host-a is not in the store"
+    );
+    assert_eq!(rig.binding("host-a"), Value::Null, "nothing was written");
 }

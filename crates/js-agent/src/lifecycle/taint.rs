@@ -68,6 +68,10 @@
 //! after they were seen. So such a taint clears itself, by the rules of
 //! `docs/design/taint-self-clearing.md`:
 //!
+//! 0. Only a taint made in this process clears: one found in the marker at start was judged
+//!    against another process's baseline, and this process's baseline already holds what the
+//!    job left, so its re-checks would pass with the residue still there. It stays until an
+//!    operator moves the marker aside.
 //! 1. Only a taint [`clearable`] says so: reason [`reason::RESIDUE`] with the check
 //!    `process-as-job-user` or `daemonised-child`, or reason [`reason::UNCHECKED`] with a
 //!    check that could not read its input (`*-unreadable`, `watch-over-bound`). Never
@@ -374,7 +378,9 @@ pub(super) struct TaintState {
     taint: Option<Taint>,
     persisted: bool,
     acked: bool,
-    /// A taint the agent never clears was sealed beside the first one: the host stays
+    /// A taint the agent never clears: one sealed beside the first, or one read from the
+    /// marker at start (the baseline of this process was taken with whatever the job left
+    /// on the host, so a re-check cannot tell it from the host's own). The host stays
     /// tainted whatever the re-checks say.
     pinned: bool,
     /// The clean re-checks in a row.
@@ -387,15 +393,17 @@ pub(super) struct TaintState {
 }
 
 impl TaintState {
-    /// The state on record in `root`: tainted when a marker is there.
+    /// The state on record in `root`: tainted when a marker is there. A taint read from the
+    /// marker is pinned: the baseline this process took already holds what the job left, so
+    /// a re-check passes with a residue process still present.
     pub(super) fn load(root: StateRoot) -> Self {
         let taint = root.read();
         Self {
             persisted: taint.is_some(),
+            pinned: taint.is_some(),
             taint,
             root,
             acked: false,
-            pinned: false,
             clean: 0,
             due: None,
             clearing: false,

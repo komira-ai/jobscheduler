@@ -523,6 +523,21 @@ fn a_restart_before_the_acknowledgement_starts_over() {
     assert_eq!(cleared_copies(&h), Vec::<String>::new());
 }
 
+/// Asserts that a taint restored from the marker never clears, even with the process still
+/// present at every re-check: the restarted agent's baseline holds that process, so its
+/// re-checks pass; no re-check runs, the host stays tainted and nothing is reported cleared.
+/// It catches a restart that lets two clean re-checks clear a taint whose residue is still
+/// there.
+#[test]
+fn a_restored_taint_never_clears_with_its_process_still_present() {
+    let mut h = tainted_by("restored", residue());
+    ack(&mut h);
+    h.restart().unwrap();
+    assert!(h.life.is_tainted());
+    stays_tainted(&mut h, 5);
+    assert_eq!(cleared_copies(&h), Vec::<String>::new());
+}
+
 /// Asserts that a clear that cannot be finished leaves the host tainted and says so: the
 /// record that the blocked run's checks were owed cannot be removed (a directory stands in
 /// its place), the acknowledgement yields a `taint-clear-failed` finding, the clear is still

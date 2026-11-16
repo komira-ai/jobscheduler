@@ -45,6 +45,11 @@ state the host really holds and a re-check that sees no difference does not prov
   see does not show that it now can). A taint that cannot clear, sealed beside one that can (the marker keeps the first),
   keeps the host tainted for the life of the process; after a restart the same sources seal again (a host job taken over,
   owed checks, a container that cannot be removed), so the pin is rebuilt.
+- **Not after a restart.** A taint read from the marker at start is pinned for the life of
+  the process. The re-check compares with the baseline taken at start, which already holds a
+  process the tainting job left (the pre-job baseline is not persisted), so two clean re-checks would
+  clear a taint whose process is still there. A restarted agent keeps its restored taint until an
+  operator moves the marker aside. Not measured: how often an agent restarts with a taint.
 - **Idle.** Every run is over; a run whose checks found the taint (`Blocked`) counts as over, since its container and
   scratch directory are gone and it would otherwise hold the host busy for good.
 - **The wait.** `--taint-recheck-ms`, default 60000 (a minute outlasts a service manager's fork of a unit and the
@@ -71,6 +76,15 @@ acknowledged all the same (`taint_cleared_ack`), so the agent stops sending it. 
 clear taints nothing (those results were made before the clear); a taint the agent makes again is reported in `taint`
 and stands. A server that does not know the field does not acknowledge, so the agent stays tainted: roll the servers
 out before the agents.
+
+A taint report or clear is a compare-and-set on the stored binding, not a blind put: the
+server reads the binding, refuses (503 `state-write-failed`, nothing recorded, the agent reports
+again) when the taint it holds for the host differs from the taint the store holds, and writes
+with the version it read, so a write of another server in between is refused too. Two servers
+over one store (the two of a start-first update) therefore cannot erase each other's newer
+taint with a clear, or revive a cleared taint with a report. Left stuck on purpose, and
+visible as `state-write-failed`: a server whose memory differs from the store keeps refusing
+until it restarts and reads the store.
 
 ## Left out on purpose
 
