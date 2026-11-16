@@ -1,86 +1,86 @@
-//! The store the server's state is kept in (`--store`, `server.store`), opened under its
-//! writer lock, and the loss of that lock.
+//! The store the server's state is kept in (`--store`, `server.store`).
 //!
-//! The server takes the store's writer lock ([`WriterLock::acquire`]) first thing at start:
-//! before it reads anything from the store, and before it binds a listener (the readiness
-//! listener of `--ready-listen` excepted, which is bound before the lock so that it can say
-//! the server waits for it). The lock is tried once: when another process holds it the start
-//! is refused with one line naming the lock, and nothing else is done. With `--ready-listen`
-//! the server instead tries again at each tick of its retry ticker for as long as the lock
-//! is held ([`ServerStore::open_waiting`]); a failure to try the lock at all is refused
-//! either way. The server then holds the lock for its life.
-//!
-//! - **Postgres**: the lock is a session-level advisory lock on a connection of its own.
-//!   Every tick asks that session first ([`ServerStore::check`]); when the session is gone,
-//!   so is the lock, and the tick does nothing more: the server stops serving, does not tick
-//!   again, writes nothing more, and the process exits 1 ([`LockLost`]). Taking the lock also
-//!   takes the store's next writer generation, and the store is opened fenced by it
-//!   ([`PostgresStore::fenced`]): once another process takes the lock, every commit of this
-//!   one is refused, between ticks too.
-//! - **SQLite**: the store holds the `flock` beside its file from before its open to its end
-//!   ([`SqliteStore::open_locked`]), so a lock this process holds cannot be lost to another.
+//! - **Postgres**: any number of servers open the same database and serve at once. The server
+//!   takes no lock and no generation: every decision it makes is a transaction of the store
+//!   whose preconditions hold for however many servers run it (the job store's versioned rows,
+//!   its placement reservation, the periodic claims), so a second server that starts, a server
+//!   that stops and one that is replaced beside it need no hand-over.
+//! - **SQLite**: one process writes the file. The server takes the `flock` beside it first
+//!   thing at start, before it reads anything from the store and before it binds a listener
+//!   (the readiness listener of `--ready-listen` excepted, which is bound before the lock so
+//!   that it can say the server waits for it). The lock is tried once: when another process
+//!   holds it the start is refused with one line naming the lock, and nothing else is done.
+//!   With `--ready-listen` the server instead tries again at each tick of its retry ticker for
+//!   as long as the lock is held ([`ServerStore::open_waiting`]). The store holds the lock from
+//!   before its open to its end ([`SqliteStore::open_locked`]).
 //!
 //! What the store keeps: the host bindings, with their taints and cordons, and the join
 //! tokens' digests ([`crate::host_keys`]), and the scaler's records and the hosts the
 //! registry refused to remove (`acquires/scaler/records`, `acquires/scaler/unremoved`), read
-//! once at start after the lock is taken, and, with the job service on, the job store (jobs,
-//! allocations, marks, taints and the change feed) and, with usage on, the usage rows
-//! (node minutes, profiles, the history of ended allocations). Without the setting the job
-//! store is the SQLite file `<state file>.jobs` and the usage the file `usage.db`; with it
-//! neither file is made, opened or read, and a pair left by an earlier start stays where it
-//! is, unread.
+//! once at start, and, with the job service on, the job store (jobs, allocations, marks,
+//! taints and the change feed) and, with usage on, the usage rows (node minutes, profiles,
+//! the history of ended allocations). Without the setting the job store is the SQLite file
+//! `<state file>.jobs` and the usage the file `usage.db`; with it neither file is made, opened
+//! or read, and a pair left by an earlier start stays where it is, unread.
 //!
 //! The first start over a store imports the four files a server without the setting keeps
-//! beside the state file (`.agents`, `.joins`, `.scaler`, `.scaler.unremoved`) once, right
-//! after the lock is taken and before anything is read from the store ([`ServerStore::import`]).
+//! beside the state file (`.agents`, `.joins`, `.scaler`, `.scaler.unremoved`) once, before
+//! anything is read from the store ([`ServerStore::import`]).
 
 use std::fs::{OpenOptions, Permissions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
-use js_state::postgres::PostgresStore;
+use js_state::postgres::{PostgresConfig, PostgresStore, reach};
 use js_state::sqlite::{Options, SqliteStore};
-use js_state::{Clock, LockRefused, Store, StoreError, SystemClock, WriterLock, WriterTarget};
-use tokio::sync::{Mutex, oneshot, watch};
-use tracing::{error, info};
+use js_state::{Clock, LockRefused, Store, SystemClock, WriterLock, WriterTarget};
+use tracing::info;
 
-use crate::config::{StoreNames, StoreSetting};
+use crate::config::{StoreClock, StoreNames, StoreSetting};
 use crate::error::StartupError;
 use crate::ticker::{Tick, Ticker};
-use crate::util::{blocking, or_pending};
+use crate::util::blocking;
 
 mod import;
 
-/// The store, opened under the writer lock the server holds for its life.
+/// The store the server keeps its state in, open.
 pub(crate) struct ServerStore {
     /// The store, for the parts of the server that keep their state in it.
     store: Arc<dyn Store>,
-    /// The writer lock on Postgres, asked at every tick. `None` on SQLite, whose store holds
-    /// the lock itself.
-    lock: Option<Mutex<WriterLock>>,
     /// `--store` or `server.store`, for the refusals.
     names: StoreNames,
+    /// Whether the store holds a file lock (SQLite) for as long as it is open.
+    locked: bool,
 }
 
 impl ServerStore {
-    /// Takes the writer lock of the store `setting` names, then opens the store under it. A
-    /// SQLite file is made owner-only first, as the server's other files are.
+    /// Opens the store of `setting`. A SQLite file is locked first (a lock another process
+    /// holds refuses the start) and made owner-only, as the server's other files are.
     ///
     /// # Errors
     ///
-    /// A refusal naming the setting: another process holds the lock, the lock could not be
-    /// tried, or the store could not be opened. None repeats the connection URL.
+    /// A refusal naming the setting: another process holds the SQLite file's lock, the lock
+    /// could not be tried, or the store could not be opened. None repeats the connection URL.
     pub(crate) fn open(setting: StoreSetting) -> Result<Self, StartupError> {
-        let lock = WriterLock::acquire(&setting.target)
-            .map_err(|refused| setting.names.refuse(refused))?;
-        Self::open_locked(setting, lock)
+        let StoreSetting {
+            clock,
+            target,
+            names,
+        } = setting;
+        match target {
+            WriterTarget::Sqlite(file) => {
+                let lock = WriterLock::acquire(&file).map_err(|refused| names.refuse(refused))?;
+                Self::sqlite(&file, lock, clock, names)
+            }
+            WriterTarget::Postgres(config) => Self::postgres(&config, clock, names),
+        }
     }
 
-    /// [`ServerStore::open`] for a server that waits: while another process holds the
-    /// writer lock, logs once that the server waits and tries again at each tick of
-    /// `retry`, finishing the tick when the attempt it asked for is done. The tries and the
-    /// open run off the runtime's threads.
+    /// [`ServerStore::open`] for a server that waits: while another process holds the SQLite
+    /// file's lock, logs once that the server waits and tries again at each tick of `retry`,
+    /// finishing the tick when the attempt it asked for is done. The tries and the open run
+    /// off the runtime's threads. A Postgres store has no lock to wait for.
     ///
     /// # Errors
     ///
@@ -90,58 +90,63 @@ impl ServerStore {
         setting: StoreSetting,
         mut retry: R,
     ) -> Result<Self, StartupError> {
-        let mut asked: Option<Tick> = None;
-        let mut waiting = false;
-        let lock = loop {
-            let target = setting.target.clone();
-            let tried = blocking(move || WriterLock::acquire(&target)).await;
-            asked.take().into_iter().for_each(Tick::finish);
-            match tried {
-                Ok(lock) => break lock,
-                Err(LockRefused::Held) => {
-                    if !waiting {
-                        info!("waiting for the store's writer lock");
-                        waiting = true;
-                    }
-                    asked = Some(retry.next().await);
-                }
-                Err(refused) => return Err(setting.names.refuse(refused)),
-            }
-        };
-        blocking(move || Self::open_locked(setting, lock)).await
-    }
-
-    /// Opens the store of `setting` under `lock`, which was taken on its target.
-    fn open_locked(setting: StoreSetting, lock: WriterLock) -> Result<Self, StartupError> {
         let StoreSetting {
             clock,
             target,
             names,
         } = setting;
-        let clock = clock.0;
-        let refused = |err: String| names.refuse(format!("the store could not be opened: {err}"));
-        let (store, lock): (Arc<dyn Store>, _) = match target {
-            WriterTarget::Postgres(config) => {
-                let store = PostgresStore::open(&config).map_err(|err| refused(err.to_string()))?;
-                let store = match clock {
-                    Some(clock) => store.with_clock(clock),
-                    None => store,
-                };
-                // Every commit checks the store still holds the generation this lock took
-                // (always one on Postgres), so none succeeds once another process took it.
-                let store = lock
-                    .generation()
-                    .into_iter()
-                    .fold(store, PostgresStore::fenced);
-                (Arc::new(store), Some(Mutex::new(lock)))
-            }
+        match target {
             WriterTarget::Sqlite(file) => {
-                let store = open_sqlite(&file, lock, clock).map_err(refused)?;
-                (Arc::new(store), None)
+                let lock = wait_for_lock(&file, names, &mut retry).await?;
+                blocking(move || Self::sqlite(&file, lock, clock, names)).await
             }
+            WriterTarget::Postgres(config) => {
+                blocking(move || Self::postgres(&config, clock, names)).await
+            }
+        }
+    }
+
+    /// The SQLite file `file`, opened under its lock.
+    fn sqlite(
+        file: &Path,
+        lock: WriterLock,
+        clock: StoreClock,
+        names: StoreNames,
+    ) -> Result<Self, StartupError> {
+        let store = open_sqlite(file, lock, clock.0).map_err(|err| opened(names, err))?;
+        info!("the store is open and its file lock is held");
+        Ok(Self {
+            store: Arc::new(store),
+            names,
+            locked: true,
+        })
+    }
+
+    /// The Postgres database `config` names.
+    fn postgres(
+        config: &PostgresConfig,
+        clock: StoreClock,
+        names: StoreNames,
+    ) -> Result<Self, StartupError> {
+        // The login first: a refusal of it is told by what to do about it, since the server's
+        // own words quote the role and the database.
+        reach(config).map_err(|err| opened(names, err.to_string()))?;
+        let store = PostgresStore::open(config).map_err(|err| opened(names, err.to_string()))?;
+        let store = match clock.0 {
+            Some(clock) => store.with_clock(clock),
+            None => store,
         };
-        info!("the store is open and its writer lock is held");
-        Ok(Self { store, lock, names })
+        info!("the store is open");
+        Ok(Self {
+            store: Arc::new(store),
+            names,
+            locked: false,
+        })
+    }
+
+    /// Whether the store holds a file lock for as long as it is open (SQLite).
+    pub(crate) fn is_locked(&self) -> bool {
+        self.locked
     }
 
     /// The first start's import of the files beside the state file at `state_file`, once,
@@ -168,22 +173,37 @@ impl ServerStore {
         self.names.refuse(reason)
     }
 
-    /// Whether the writer lock is still held: on Postgres a trivial query on the lock's own
-    /// session, on SQLite always.
-    ///
-    /// # Errors
-    ///
-    /// The lock is lost: its session is gone, or the query failed.
-    pub(crate) async fn check(&self) -> Result<(), LockLost> {
-        let Some(lock) = &self.lock else {
-            return Ok(());
-        };
-        lock.lock().await.check().map_err(LockLost::from)
-    }
-
     /// The store, shared.
     pub(crate) fn store(&self) -> Arc<dyn Store> {
         Arc::clone(&self.store)
+    }
+}
+
+/// Takes the lock of the SQLite file `file`, logging once that it waits and trying again at
+/// each tick of `retry` while another process holds it, finishing the tick when the attempt
+/// it asked for is done.
+async fn wait_for_lock<R: Ticker>(
+    file: &Path,
+    names: StoreNames,
+    retry: &mut R,
+) -> Result<WriterLock, StartupError> {
+    let mut asked: Option<Tick> = None;
+    let mut waiting = false;
+    loop {
+        let target = file.to_path_buf();
+        let tried = blocking(move || WriterLock::acquire(&target)).await;
+        asked.take().into_iter().for_each(Tick::finish);
+        match tried {
+            Ok(lock) => return Ok(lock),
+            Err(LockRefused::Held) => {
+                if !waiting {
+                    info!("waiting for the store's writer lock");
+                    waiting = true;
+                }
+                asked = Some(retry.next().await);
+            }
+            Err(refused) => return Err(names.refuse(refused)),
+        }
     }
 }
 
@@ -205,67 +225,7 @@ fn open_sqlite(
     SqliteStore::open_locked(file, lock, clock, Options::default()).map_err(|err| err.to_string())
 }
 
-/// The store's writer lock was lost while the server ran, so the server stopped: it serves
-/// nothing more, ticks no more and writes nothing more, and the process exits 1.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("the store's writer lock was lost, so the server stopped: {reason}")]
-pub struct LockLost {
-    reason: String,
-}
-
-impl From<StoreError> for LockLost {
-    fn from(err: StoreError) -> Self {
-        Self {
-            reason: err.to_string(),
-        }
-    }
-}
-
-/// Where the loss of the writer lock is announced: the tick that finds it says so here, and
-/// the listeners, [`crate::Running::lock_lost`] and the shutdown read it.
-#[derive(Clone)]
-pub(crate) struct LockWatch {
-    lost: watch::Sender<Option<LockLost>>,
-}
-
-impl LockWatch {
-    pub(crate) fn new() -> Self {
-        Self {
-            lost: watch::Sender::new(None),
-        }
-    }
-
-    /// Announces the loss, logged once at error level.
-    pub(crate) fn lose(&self, lost: LockLost) {
-        error!(%lost, "stopping: the server serves, ticks and writes nothing more");
-        self.lost.send_replace(Some(lost));
-    }
-
-    /// The loss, once announced.
-    pub(crate) fn lost(&self) -> Option<LockLost> {
-        self.lost.borrow().clone()
-    }
-
-    /// Completes when the loss is announced, with the loss. (The watch holds the sender, so
-    /// the wait ends only with a loss.)
-    pub(crate) async fn wait(&self) -> LockLost {
-        let mut lost = self.lost.subscribe();
-        let seen = lost.wait_for(Option::is_some).await.ok();
-        or_pending(seen.and_then(|seen| seen.clone())).await
-    }
-
-    /// A stop signal for a listener that fires at `stopped` (or when its sender is dropped)
-    /// or at the loss, whichever comes first: after a loss the server serves nothing more.
-    pub(crate) fn or_stopped(&self, stopped: oneshot::Receiver<()>) -> oneshot::Receiver<()> {
-        let (stop, either) = oneshot::channel();
-        let watch = self.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = stopped => {}
-                _ = watch.wait() => {}
-            }
-            let _ = stop.send(());
-        });
-        either
-    }
+/// The refusal of the start for a store that could not be opened: `err` says why.
+fn opened(names: StoreNames, err: String) -> StartupError {
+    names.refuse(format!("the store could not be opened: {err}"))
 }

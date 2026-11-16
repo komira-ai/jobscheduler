@@ -93,7 +93,7 @@ impl<S: Store> Interfere<S> {
 
     /// Makes every commit or read that fails from now on, as [`Interfere::fail_after`] and
     /// [`Interfere::fail_read_after`] say, answer `error` instead of [`StoreError::Failed`]:
-    /// a test of how a caller reacts to [`StoreError::Fenced`], which no retry answers.
+    /// a test of how a caller reacts to a particular failure, such as [`StoreError::Disconnected`].
     pub fn fail_with(&self, error: StoreError) {
         *lock(&self.error) = error;
     }
@@ -299,11 +299,17 @@ mod tests {
     #[test]
     fn a_failed_call_answers_the_error_it_was_told() {
         let store = wrapped();
-        store.fail_with(StoreError::Fenced);
+        store.fail_with(StoreError::Disconnected("gone".to_owned()));
         store.fail_next();
-        assert_eq!(put(&store, "a"), Err(StoreError::Fenced));
+        assert_eq!(
+            put(&store, "a"),
+            Err(StoreError::Disconnected("gone".to_owned()))
+        );
         store.fail_read_after(0);
-        assert_eq!(store.get("a"), Err(StoreError::Fenced));
+        assert_eq!(
+            store.get("a"),
+            Err(StoreError::Disconnected("gone".to_owned()))
+        );
         put(&store, "b").expect("nothing is failing now");
     }
 

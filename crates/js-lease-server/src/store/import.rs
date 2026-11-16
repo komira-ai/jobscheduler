@@ -1,7 +1,7 @@
 //! The first start over a store: the files a server without the setting keeps beside the
 //! state file, imported once.
 //!
-//! Right after the writer lock is taken, and before anything else is read from the store, a
+//! Right after the store is opened, and before anything else is read from the store, a
 //! start looks for the marker `meta/server-state-imported`. Without it, and with nothing in
 //! the store under `hosts/` or `acquires/`, it reads `<state file>.agents`, `.joins`, `.scaler`
 //! and `.scaler.unremoved` with the readers a start without the setting uses (a missing file is
@@ -326,8 +326,8 @@ mod tests {
         let store = Arc::new(self::store());
         let server = ServerStore {
             store: store.clone(),
-            lock: None,
             names: StoreNames::Flags,
+            locked: false,
         };
         store.fail_read_after(0);
         let refused = server.import(&path, false).unwrap_err().to_string();

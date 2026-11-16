@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use js_lease_server::{Cli, Config, OwnerOnlyFiles, StartupError, run};
 use js_state::sqlite::{Options, SqliteStore};
-use js_state::{Revision, Store, SystemClock, WriterLock, WriterTarget};
+use js_state::{Revision, Store, SystemClock, WriterLock};
 use rustix::process::{Pid, Signal, kill_process};
 
 use crate::agents_support::agent_args;
@@ -283,7 +283,7 @@ async fn a_sqlite_store_that_cannot_be_opened_is_refused() {
             .starts_with(&format!("the store could not be opened: {db}: ")),
         "{refused}"
     );
-    let free = WriterLock::acquire(&WriterTarget::Sqlite(sqlite_db(&scratch)));
+    let free = WriterLock::acquire(&sqlite_db(&scratch));
     assert!(free.is_ok(), "the refused start released the lock");
     drop(free);
 
@@ -301,7 +301,7 @@ async fn a_sqlite_store_that_cannot_be_opened_is_refused() {
             .starts_with("the store could not be opened: "),
         "{refused}"
     );
-    let free = WriterLock::acquire(&WriterTarget::Sqlite(sqlite_db(&scratch)));
+    let free = WriterLock::acquire(&sqlite_db(&scratch));
     assert!(free.is_ok(), "the refused start released the lock");
 }
 

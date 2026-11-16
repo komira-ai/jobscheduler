@@ -100,7 +100,6 @@ pub(crate) fn from_server(
         api.with_read(read)
             .with_submit(submit)
             .with_fleet(fleet)
-            .with_fence(agents.fence.clone())
             .with_logs(logs),
     )
 }

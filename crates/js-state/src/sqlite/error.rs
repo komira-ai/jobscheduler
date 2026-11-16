@@ -48,7 +48,7 @@ pub enum SqliteError {
         links: u64,
     },
     /// [`super::SqliteStore::open_locked`] was given a writer lock that is not this
-    /// file's: one taken on another state file, or on a Postgres store.
+    /// file's: one taken on another state file.
     #[error(
         "state file {}: the writer lock given is not this file's lock ({})",
         path.display(),

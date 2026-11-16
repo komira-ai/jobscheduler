@@ -432,7 +432,6 @@ fn each_store_error_has_its_kind_and_others_have_none() {
             FailureKind::Disconnected,
         ),
         (StoreError::Failed("disk".to_owned()), FailureKind::Failed),
-        (StoreError::Fenced, FailureKind::Fenced),
         (
             StoreError::StaleCursor {
                 after: Revision(1),
@@ -449,7 +448,6 @@ fn each_store_error_has_its_kind_and_others_have_none() {
     for (kind, name) in [
         (FailureKind::Disconnected, "disconnected"),
         (FailureKind::Failed, "failed"),
-        (FailureKind::Fenced, "fenced"),
         (FailureKind::StaleCursor, "stale_cursor"),
     ] {
         assert_eq!(kind.name(), name);
@@ -464,11 +462,7 @@ fn each_store_error_has_its_kind_and_others_have_none() {
 fn the_page_rows_show_every_field_and_each_lock_state() {
     let clock = ManualClock::new(Timestamp::from_millis(START_MS));
     let health = health_on(&clock);
-    for (lock, name) in [
-        (LockState::None, "none"),
-        (LockState::Held, "held"),
-        (LockState::Lost, "lost"),
-    ] {
+    for (lock, name) in [(LockState::None, "none"), (LockState::Held, "held")] {
         health.set_lock(lock);
         let view = health.view();
         assert_eq!(serde_json::to_value(view.lock).unwrap(), name);
@@ -484,16 +478,16 @@ fn the_page_rows_show_every_field_and_each_lock_state() {
             row("last error", "none"),
             row("last ok", "none"),
             row("latency", "none"),
-            row("lock", "lost"),
+            row("lock", "held"),
             row("unreachable", "false"),
         ]
     );
     health.record(TickStore {
-        pass: Some(Pass::Failed(FailureKind::Fenced)),
+        pass: Some(Pass::Failed(FailureKind::Failed)),
     });
     let rows = rows(&health.view());
     assert_eq!(rows[1], row("failing since", &format!("{START_MS} ms")));
-    assert_eq!(rows[2], row("last error", "fenced"));
+    assert_eq!(rows[2], row("last error", "failed"));
 }
 
 /// Asserts the window's settings: 60 s unless given, the flag's default spelling and the

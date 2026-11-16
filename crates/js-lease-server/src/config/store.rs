@@ -77,6 +77,14 @@ pub(crate) struct StoreSetting {
     pub(crate) names: StoreNames,
 }
 
+impl StoreSetting {
+    /// Whether opening the store takes a file lock another process can hold (a SQLite file),
+    /// which the start waits for under `--ready-listen`.
+    pub(crate) fn is_locked(&self) -> bool {
+        matches!(self.target, WriterTarget::Sqlite(_))
+    }
+}
+
 /// The store `--store` names, read as `--token-file` is (owner-only); `None` without the
 /// flag. `--allow-sqlite-store` without `--store` is refused: it would do nothing.
 pub(super) fn from_flags(cli: &Cli) -> Result<Option<StoreSetting>, StartupError> {

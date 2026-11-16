@@ -8,7 +8,7 @@ so.
 
 | Store | What it holds | Opened when |
 |---|---|---|
-| The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | The writer lock (a session-level advisory lock) and the writer generation (one row of `writer_generation`). With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) and the digests of the join tokens and host credentials (`hosts/join/<digest>`); with an elastic pool, the scaler's records (`acquires/scaler/records`) and the hosts to remove (`acquires/scaler/unremoved`); and the marker of the first start's import (`meta/server-state-imported`); with the job service on, every job, allocation, mark, taint and the change feed (`job/`, `alloc/`, `mark/`, `taint/`, `idx/` and the feed rows; schema marker `meta/jobs/schema`); with usage on, the usage rows (`usage/`); all in the `kv` table. | The setting is given. The server takes the lock before it reads anything else and before it binds a listener. |
+| The Postgres store (`--store <file>` or `server.store`; schema `kbf_state`) | No lock and no generation: any number of servers write it at once. (The table `writer_generation` from schema version 2 stays in the schema and is not read or written.) With agent registration, the host bindings (`hosts/binding/<host id>`, with each host's taint and cordon) and the digests of the join tokens and host credentials (`hosts/join/<digest>`); with an elastic pool, the scaler's records (`acquires/scaler/records`) and the hosts to remove (`acquires/scaler/unremoved`); and the marker of the first start's import (`meta/server-state-imported`); with the job service on, every job, allocation, mark, taint and the change feed (`job/`, `alloc/`, `mark/`, `taint/`, `idx/` and the feed rows; schema marker `meta/jobs/schema`); with usage on, the usage rows (`usage/`); all in the `kv` table. | The setting is given. The server opens it before it reads anything else and before it binds a listener. |
 | The job store, `<state file>.jobs` (SQLite, owner-only), only without a store setting | Every job and every allocation. With a store setting the file is not made, opened or read; one an earlier start left stays where it was, as a backup. | The job service is on (`--job-listen`, `server.job_listen`) and there is no store setting. |
 | The binding file (`<state file>.agents`) | Which credential and instance each registered host was admitted with. There is no lease file: the server never opens one, and a lease file left by an earlier release stays as it was. | Always (the binding file, and `<state file>.joins`, with agent registration and no store setting). |
 
@@ -19,8 +19,7 @@ Two limits of the code as built shape everything below:
   `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` once (`docs/design/configuration.md`, "The first start"), and
   leaves them in place; they are stale from then on. The job store and the usage rows are in the store too, from their first start over it, with no jobs: nothing in `<state file>.jobs` or `usage.db` is copied (cutover: drain the farm, deploy, start; the files stay as a backup).
 - **The server creates no schema.** The schema is created and migrated by the installer, which is not in this repository. A database
-  without the schema is refused when the lock is taken: `--store: the store's writer lock could not be taken: the state schema has no
-  writer generation table (it is older than version 2): run the installer to bring it forward`.
+  without the schema is refused at start: `--store: the store could not be opened: ...`, with the reason.
 
 ## 1. A least-rights role
 
@@ -36,20 +35,17 @@ REVOKE ALL ON DATABASE <database> FROM PUBLIC;
 GRANT CONNECT ON DATABASE <database> TO js_lease_server;
 GRANT USAGE ON SCHEMA kbf_state TO js_lease_server;
 GRANT SELECT, INSERT, UPDATE, DELETE ON kbf_state.kv, kbf_state.feed, kbf_state.counters TO js_lease_server;
-GRANT SELECT, UPDATE ON kbf_state.head, kbf_state.writer_generation TO js_lease_server;
+GRANT SELECT, UPDATE ON kbf_state.head TO js_lease_server;
 GRANT SELECT ON kbf_state.schema_version TO js_lease_server;
 GRANT USAGE ON SEQUENCE kbf_state.rev_seq TO js_lease_server;
 ```
 
 Why each grant is there:
 
-- `UPDATE` on `writer_generation`: taking the lock runs `UPDATE writer_generation SET generation = generation + 1`, and every commit
-  reads the row `FOR SHARE`, which needs `UPDATE` too.
 - `UPDATE` on `head`: a commit locks it (`SELECT ... FOR UPDATE`, `LOCK TABLE head IN SHARE UPDATE EXCLUSIVE MODE`) and moves it.
 - `SELECT` on `schema_version`: the first connection checks that the schema's version is one this build supports.
 - `USAGE` on `rev_seq`: each commit takes its revision with `nextval('rev_seq')`.
-- The advisory lock (`pg_try_advisory_lock`) needs no grant. It is scoped to the database, so two schemas in one database share one
-  writer lock.
+- The server takes no advisory lock.
 
 No grant gives `CREATE`, ownership or superuser. A server running as this role cannot change the schema; only the installer, as the
 owner, can.
@@ -95,12 +91,6 @@ meanwhile:
 pg_dump --format=custom --schema=kbf_state --file=<backup dir>/state-<n>.dump '<owner URL>'
 ```
 
-Record the writer generation beside the dump. A restore needs it (step 4):
-
-```sql
-SELECT generation FROM kbf_state.writer_generation;
-```
-
 **The job store, with a store setting,** is in the Postgres dump above; there is no file to copy.
 
 **The job store, without a store setting.** Stop the server cleanly (`SIGTERM`), then copy `<state file>.jobs` while no process holds it. A clean stop leaves
@@ -117,47 +107,32 @@ Keep the file mode: the job store and the binding file hold job specs and creden
 
 ## 4. Restoring a backup
 
-1. **Stop every server on the store.** `pg_restore --clean` takes locks the running server's commits wait on, and a server that kept
-   running after a restore would hold a lock on the restored database while its generation no longer matches.
-2. **Read the generation before the restore**, if the database is still readable, and keep the larger of it and the one recorded with
-   the dump.
-3. **Restore the Postgres store** as the schema's owner. `--clean` drops the schema's objects and creates them again from the dump, with
+1. **Stop every server on the store.** `pg_restore --clean` takes locks the running servers' commits wait on, and a server that kept
+   running through a restore would write into the restored database from its own picture of the old one.
+2. **Restore the Postgres store** as the schema's owner. `--clean` drops the schema's objects and creates them again from the dump, with
    their grants:
 
    ```sh
    pg_restore --clean --if-exists --single-transaction --exit-on-error --dbname='<owner URL>' <backup dir>/state-<n>.dump
    ```
 
-4. **Raise the generation again.** The dump holds the generation it was taken at, which is below the ones the lost boots took. Set it
-   back up, to at least the value kept in step 2:
-
-   ```sql
-   UPDATE kbf_state.writer_generation SET generation = greatest(generation, <kept generation>) RETURNING generation;
-   ```
-
-   The generation fences commits: a store opened by a lock checks, in every commit, that the generation is still the one its lock took.
-   A generation that went back could match one a stale process still holds.
-5. **Restore the job store (only without a store setting; with one the restore in step 3 restored it).** Delete `<state file>.jobs-wal` and `<state file>.jobs-shm` if they are there (an old write-ahead log
+3. **Restore the job store (only without a store setting; with one the restore in step 2 restored it).** Delete `<state file>.jobs-wal` and `<state file>.jobs-shm` if they are there (an old write-ahead log
    would otherwise be replayed onto the restored file), copy the backup to `<state file>.jobs`, and make it the server user's with mode
    0600. The server makes the file owner-only again when it opens it.
-6. **Restore the binding file.** There is no term to set: the server issues no `(term, sequence)` id, and a lease file in the restored directory is ignored.
-7. **Start the server** with `--boot resume`.
+4. **Restore the binding file.** There is no term to set: the server issues no `(term, sequence)` id, and a lease file in the restored directory is ignored.
+5. **Start the server** with `--boot resume`.
 
 ## 5. After the restore
 
 What the server does by itself, and what to check:
 
-- **The start.** With a Postgres store the log says `the store is open and its writer lock is held` once. A second process is refused
-  with `--store: another process holds the store's writer lock` and exits 2, unless it was started with `--ready-listen`: then it logs
-  `waiting for the store's writer lock` once, tries again every second and takes the lock when the holder lets go. Its readiness route
-  (`GET /readyz` on the `--ready-listen` address) answers 503 `waiting for the store's writer lock` until then, 503 `starting` while
-  it binds its listeners, 200 `ready` while it serves, and 503 `draining` from SIGTERM until it exits. A SIGTERM while it waits ends
-  it with status 0, the lock not taken.
-- **`/healthz` is not a lock check.** It answers 200 while the tick loop runs and says nothing about the writer lock: a server that has
-  not taken the lock has not started, and one that loses it stops serving and ticking (its listeners close, so `/healthz` is refused
-  rather than answered), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. Do not read a 200 as "this server holds the
-  lock"; read the readiness route of a server started with `--ready-listen` (200 `ready` only while it holds the lock and serves), the
-  log line, or the lock in `pg_locks` (an advisory lock held by a session whose `application_name` is `js-lease-server`).
+- **The start.** With a Postgres store the log says `the store is open` once, and the server serves at once, whatever other servers
+  run on the store: there is no lock to take and none to wait for, so `GET /readyz` on the `--ready-listen` address answers 503
+  `starting` while it binds its listeners, 200 `ready` while it serves, and 503 `draining` from SIGTERM until it exits. (A SQLite store
+  is the exception: its file lock refuses a second process, or, with `--ready-listen`, is waited for, with 503 `waiting for the
+  store's writer lock`.)
+- **`/healthz`** answers 200 while the tick loop runs and the store answers. Two servers on one store both answer 200; which one placed
+  a job is in the job's own record.
 - **Agents come back.** Their first heartbeat is answered 409 `unknown-host`; they say hello again and list the jobs they hold.
 - **Jobs the restored store does not know are stopped.** A host that lists a job the restored job store has no live allocation for on
   that host (one accepted after the backup) is told to stop it, on every heartbeat while it lists the job; the job's result is

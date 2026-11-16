@@ -1,10 +1,8 @@
 //! Starting the server, running it, and stopping it.
 
-use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +18,8 @@ use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
 use crate::clock::SharedClock;
 use crate::config::{
-    BootMode, Config, JobListen, Limits, LiveClients, MetricsListen, ReadyListen, TlsFiles, Token,
+    BootMode, Config, JobListen, Limits, LiveClients, MetricsListen, ReadyListen, StoreSetting,
+    TlsFiles, Token,
 };
 use crate::error::StartupError;
 use crate::file::Launch;
@@ -32,7 +31,7 @@ use crate::pool::{Pool, Setup};
 use crate::ready::{self, Gate, Phase};
 use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
-use crate::store::{LockLost, LockWatch, ServerStore};
+use crate::store::ServerStore;
 use crate::store_health::{LockState, StoreHealth};
 use crate::ticker::{IntervalTicker, Tick, Ticker};
 use crate::tls;
@@ -59,8 +58,6 @@ pub struct Running {
     _checking: Checking,
     scaler: Option<Scaler>,
     tls: Option<tls::Tls>,
-    /// Where the tick announces the loss of the store's writer lock.
-    lock_watch: LockWatch,
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
@@ -135,7 +132,7 @@ pub async fn start<T: Ticker>(
     start_with_checks(config, clock, ticker, checks).await
 }
 
-/// How often a server that waits for the store's writer lock (`--ready-listen`) tries it
+/// How often a server that waits for a SQLite store's file lock (`--ready-listen`) tries it
 /// again.
 const LOCK_RETRY: Duration = Duration::from_secs(1);
 
@@ -154,14 +151,14 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     start_waiting(config, clock, ticker, checks, retry).await
 }
 
-/// [`start_with_checks`] with the ticker of the retries of the writer lock given too. With
-/// `--ready-listen` (`server.ready_listen`) the readiness listener is bound first, before
-/// the store's writer lock; while another process holds the lock the start waits, logging
-/// once that it does and trying again at each tick of `retry`, and the tick is finished
-/// when the attempt it asked for is done, so a test steps the retries as it steps the
-/// server's tick. A lock that cannot be tried at all still refuses the start. Without
-/// `--ready-listen` the lock is tried once and a held lock refuses the start, and `retry`
-/// is dropped.
+/// [`start_with_checks`] with the ticker of the retries of a SQLite store's file lock given
+/// too. With `--ready-listen` (`server.ready_listen`) the readiness listener is bound first,
+/// before the lock; while another process holds the lock the start waits, logging once that
+/// it does and trying again at each tick of `retry`, and the tick is finished when the
+/// attempt it asked for is done, so a test steps the retries as it steps the server's tick.
+/// A lock that cannot be tried at all still refuses the start. Without `--ready-listen` the
+/// lock is tried once and a held lock refuses the start, and `retry` is dropped. A Postgres
+/// store has no lock: it opens at once.
 pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
     mut config: Config,
     clock: SharedClock,
@@ -172,13 +169,13 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
     let logs = config.logs().sink();
     let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
     // The readiness listener answers before anything else is done, so a supervisor sees the
-    // server wait for the lock. It says so only when there is a lock to wait for.
-    let lock_watch = LockWatch::new();
-    let first = match config.store {
-        Some(_) => Phase::Waiting,
-        None => Phase::Starting,
+    // server wait for a SQLite store's file lock. It says so only when there is one to wait
+    // for.
+    let first = match config.store.as_ref().is_some_and(StoreSetting::is_locked) {
+        true => Phase::Waiting,
+        false => Phase::Starting,
     };
-    let gate = Gate::new(lock_watch.clone(), first);
+    let gate = Gate::new(first);
     let ready = match config.ready_listen {
         Some(at) => {
             let bound = config.ready_bound.take();
@@ -186,8 +183,8 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         }
         None => None,
     };
-    // The store's writer lock before anything else (design 6.7, step 1): before the store is
-    // read and before any listener but the readiness one.
+    // The store before anything else (design 6.7, step 1): a SQLite file's lock is taken
+    // before the store is read and before any listener but the readiness one.
     let store = match (config.store.take(), &ready) {
         (Some(setting), Some(_)) => Some(ServerStore::open_waiting(setting, retry).await?),
         (Some(setting), None) => Some(ServerStore::open(setting)?),
@@ -232,7 +229,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
     );
     let limits = listeners.limits;
     let split = agent_listener.is_some();
-    // Every listener stops at its own stop or at the loss of the store's writer lock.
+    // Every listener stops at its own stop.
     let (stop, stopped) = oneshot::channel::<()>();
     let slots = Arc::new(Slots::new(limits.max_connections));
     let serving = serve(
@@ -241,20 +238,13 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         router(shared.clone(), !split),
         limits,
         slots.clone(),
-        lock_watch.or_stopped(stopped),
+        stopped,
     );
     let agent = agent_listener.map(|(listener, addr)| {
         let (stop, stopped) = oneshot::channel::<()>();
         let slots = Arc::new(Slots::new(limits.max_connections));
         let app = agent_router(&shared);
-        let serving = serve(
-            listener,
-            acceptor,
-            app,
-            limits,
-            slots,
-            lock_watch.or_stopped(stopped),
-        );
+        let serving = serve(listener, acceptor, app, limits, slots, stopped);
         info!(%addr, "listening for agents");
         Port {
             addr,
@@ -274,7 +264,6 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
             let (stop, stopped) = oneshot::channel::<()>();
             let slots = Arc::new(Slots::new(limits.max_connections));
             let app = job_api::port(api, clients);
-            let stopped = lock_watch.or_stopped(stopped);
             let serving = serve_both(listener, job_acceptor, app, limits, slots, stopped);
             info!(%addr, tls = served_tls, "listening for the job service");
             Port {
@@ -292,7 +281,6 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
                 let (stop, stopped) = oneshot::channel::<()>();
                 let slots = Arc::new(Slots::new(limits.max_connections));
                 let app = metrics::router(shared.clone(), recorder);
-                let stopped = lock_watch.or_stopped(stopped);
                 let serving = serve(listener, None, app, limits, slots, stopped);
                 info!(%addr, "serving the metrics");
                 Port {
@@ -305,9 +293,8 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         shared.clone(),
         ticker,
         scaler.clone().map(|scaler| (scaler, cached)),
-        lock_watch.clone(),
     ));
-    let ticking = Ticking(tokio::spawn(until_fenced(shared.clone(), ticking)));
+    let ticking = Ticking(tokio::spawn(ticking));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     gate.set(Phase::Ready);
     Ok(Running {
@@ -325,7 +312,6 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         _checking: checking,
         scaler,
         tls,
-        lock_watch,
     })
 }
 
@@ -358,7 +344,7 @@ pub(crate) struct Prepared {
     status: bool,
     admit: Admit,
     cached: Cached,
-    /// The store, opened under its writer lock, when the configuration names one.
+    /// The store, when the configuration names one.
     store: Option<ServerStore>,
     /// The health of the store paths, which the tick records and `/healthz` reads.
     store_health: StoreHealth,
@@ -375,7 +361,7 @@ pub(crate) struct Opened {
 }
 
 /// The first half of a start, everything before a listener is bound: with the store the
-/// caller opened under its writer lock (`store`, `None` when the configuration names none),
+/// caller opened (`store`, `None` when the configuration names none),
 /// puts the agent side together and builds the elastic pool and its scaler
 /// (which marks the machines its records show as being released). Binds nothing and spawns
 /// nothing. No lease file is read: a lease file of an earlier release at the state file's
@@ -480,9 +466,9 @@ pub(crate) fn prepare(
         Some(sink) => store_health.with_sink(Arc::clone(sink), alert_repeat),
         None => store_health,
     };
-    store_health.set_lock(match &store {
-        Some(_) => LockState::Held,
-        None => LockState::None,
+    store_health.set_lock(match store.as_ref().is_some_and(ServerStore::is_locked) {
+        true => LockState::Held,
+        false => LockState::None,
     });
     if let (Some(scaler), Some(sink)) = (&scaler, alerts) {
         scaler.set_sink(sink, alert_repeat);
@@ -607,8 +593,7 @@ impl Drop for Alive {
 
 /// Ticks the server at every tick of `ticker`, and hands each tick to the scaler of the
 /// elastic pool when the server has one, with the cache of its provider's catalog, forever;
-/// the caller aborts it, or drops it once the state store says this process is no longer its
-/// writer ([`until_fenced`]). The scaler ticks on a task of its own (a provider's slow call must
+/// the caller aborts it. The scaler ticks on a task of its own (a provider's slow call must
 /// not hold back the job pass): at each tick it first fetches the catalogs that are due
 /// ([`Cached::refresh`]) and then runs its own tick, so a tick is finished when the server's
 /// tick, the fetch and the scaler are done, or at once when the scaler is still busy with an
@@ -618,29 +603,15 @@ impl Drop for Alive {
 /// answers that the server is not ticking, and the supervisor of the process must restart
 /// it. The records are on disk before any call they describe, so a restart launches nothing
 /// twice.
-///
-/// With a store, each tick first asks whether the store's writer lock is still held. A tick
-/// that finds it lost announces the loss on `lock_watch` (which stops the listeners), does
-/// nothing else, and ends the loop: no tick of the table or the scaler follows.
 async fn tick_loop<T: Ticker>(
     shared: Arc<Shared>,
     mut ticker: T,
     scaler: Option<(Scaler, Cached)>,
-    lock_watch: LockWatch,
 ) {
     let _alive = Alive(shared.clone());
     let side = scaler.map(|(scaler, cached)| ScalerLoop::spawn(shared.clone(), scaler, cached));
     loop {
         let tick = ticker.next().await;
-        if let Err(lost) = shared.check_store().await {
-            let health = shared.store_health();
-            health
-                .iter()
-                .for_each(|health| health.set_lock(LockState::Lost));
-            lock_watch.lose(lost);
-            tick.finish();
-            return;
-        }
         tick_once(&shared, side.as_ref(), tick).await;
     }
 }
@@ -690,35 +661,6 @@ impl Drop for ScalerLoop {
     fn drop(&mut self) {
         self.task.abort();
     }
-}
-
-/// Why a server whose state store has a newer writer stops with an error.
-pub(crate) const FENCED: &str =
-    "the state store has a newer writer, so this server may no longer write to it";
-
-/// Completes when `signalled` does (a termination signal), or, logging one error line, when
-/// the state store says this process is no longer its writer: the server cannot write again,
-/// so the caller stops it ([`Running::shutdown`], which then answers an error) and the process
-/// exits with a failure for a restart to open a new handle.
-pub(crate) async fn stop_or_fence(
-    running: &Running,
-    signalled: impl Future<Output = io::Result<()>>,
-) -> io::Result<()> {
-    tokio::select! {
-        biased;
-        () = running.fenced() => {
-            error!("the state store has a newer writer: this server can write no more and is stopping");
-            Ok(())
-        }
-        stopped = signalled => stopped,
-    }
-}
-
-/// Runs `ticking` (the tick loop) until the state store says this process is no longer its
-/// writer, when it is dropped: a tick under way is cut at its next wait, nothing is begun
-/// after it, and the loop's guards run ([`Alive`] marks `/healthz`, the scaler's task ends).
-async fn until_fenced(shared: Arc<Shared>, ticking: Pin<Box<dyn Future<Output = ()> + Send>>) {
-    tokio::select! { biased; () = shared.fenced() => {}, () = ticking => {} }
 }
 
 /// The tick that ends a shutdown, and the usage side's last flush.
@@ -797,15 +739,7 @@ impl Running {
         self.scaler.as_ref()
     }
 
-    /// Completes when the server stopped on its own because a tick found the store's writer
-    /// lock lost (`--store`): it then serves, ticks and writes nothing more, and
-    /// [`Running::shutdown`] answers the loss. It never completes without a store, or while
-    /// the lock is held.
-    pub async fn lock_lost(&self) -> LockLost {
-        self.lock_watch.wait().await
-    }
-
-    /// The store the server holds under its writer lock (`--store`, `server.store`), shared;
+    /// The store the server keeps its state in (`--store`, `server.store`), shared;
     /// `None` without a store setting.
     pub fn store(&self) -> Option<Arc<dyn js_state::Store>> {
         self.shared.server_store().map(ServerStore::store)
@@ -843,26 +777,11 @@ impl Running {
         self.slots.waits()
     }
 
-    /// Completes when the state store has said this process is no longer its writer, which
-    /// the server cannot go on from: the caller stops it ([`Running::shutdown`], which then
-    /// answers an error) and exits with a failure. Never completes for a server without
-    /// agents or without the job service, which have no state store.
-    pub async fn fenced(&self) {
-        self.shared.fenced().await;
-    }
-
     /// Stops the server: no new connections, the requests in flight finish (those still
     /// open after `--drain-timeout` are cut), and the server is ticked once more (so a job
     /// that ran out of time is ended before the process ends).
     ///
     /// It is an error when the serving task failed.
-    ///
-    /// After the store's writer lock was lost ([`Running::lock_lost`]) there is no last tick
-    /// (nothing more is written) and the error is the loss.
-    ///
-    /// When the state store has said this process is no longer its writer, the last tick is
-    /// not run (it would write the job tables of a server that no longer owns them) and the
-    /// stop is an error that says so.
     ///
     /// The readiness route (`--ready-listen`) answers 503 `draining` from the start of the stop,
     /// and its listener is closed last, after the last tick.
@@ -890,17 +809,11 @@ impl Running {
         }
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
-        if let Some(lost) = self.lock_watch.lost() {
-            return served.and(Err(io::Error::other(lost)));
-        }
-        if self.shared.is_fenced() {
-            return served.and(Err(io::Error::other(FENCED)));
-        }
         final_tick(&self.shared).await;
         served
     }
 }
 
 #[cfg(test)]
-#[path = "server_fence_tests.rs"]
-mod fence_tests;
+#[path = "server_shutdown_tests.rs"]
+mod shutdown_tests;

@@ -92,7 +92,6 @@ use crate::admit::{reports_host_jobs, reports_layered_rootfs};
 use crate::agent_state::Change;
 use crate::agents::{Agents, Session};
 use crate::api::{BODY_LIMIT, bearer};
-use crate::fence::STATE_FENCED;
 use crate::host_keys::Writes;
 use crate::job_loss;
 use crate::job_pass::store_time;
@@ -344,9 +343,6 @@ async fn heartbeat(
     one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
-    // Before anything is read or recorded: a server whose store has a newer writer writes
-    // nothing at all.
-    refuse_when_fenced(&agents)?;
     let heartbeat: Heartbeat = decode(
         &read(body, refusal::INVALID_HEARTBEAT)?,
         refusal::INVALID_HEARTBEAT,
@@ -458,8 +454,7 @@ struct PerJobHost {
 /// host. The whole-host jobs placed on the host are served first ([`job_whole::serve`]: a
 /// ready report, a refusal, a cancel, a hello), then the listing is committed and the reply
 /// built ([`per_job::serve`]). The store is read and written on the pool for blocking calls.
-/// A failed read or commit is a 500 `state-write-failed`, except a store that says it has a
-/// newer writer, which is a 503 `state-fenced` and trips the fence. A host a refused prepare
+/// A failed read or commit is a 500 `state-write-failed`. A host a refused prepare
 /// tainted is written to the state file before the reply.
 ///
 /// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
@@ -581,22 +576,14 @@ async fn serve_jobs(
         (host, Err(error)) => {
             agents.meter().sink().store_write_failed();
             warn!(%host, %error, "a heartbeat's job listing could not be committed");
-            Err(match agents.fence.note(&error) {
-                true => fenced(),
-                false => Refused::new(StatusCode::INTERNAL_SERVER_ERROR, STATE_WRITE_FAILED),
-            })
+            Err(Refused::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                STATE_WRITE_FAILED,
+            ))
         }
     }
 }
 
-/// The answer to a heartbeat once the state store has a newer writer: 503 `state-fenced`.
-/// The server writes nothing more and is about to exit, so the agent retries against whatever
-/// replaces it.
-fn fenced() -> Refused {
-    Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_FENCED)
-}
-
-/// [`fenced`] when the fence has tripped, else nothing.
 /// The registry's reply to `heartbeat`, with the taint it brings committed first
 /// ([`Agents::durable_taint`]) and the commit's guard held until the registry has recorded
 /// the beat. One refusal for a failed commit and the registry's own, so that the heartbeat
@@ -617,13 +604,6 @@ async fn beat_durably(
     let reply = agents.registry.heartbeat(heartbeat, who);
     drop(taint);
     reply.map_err(Refused::from)
-}
-
-fn refuse_when_fenced(agents: &Agents) -> Result<(), Refused> {
-    match agents.fence.is_tripped() {
-        true => Err(fenced()),
-        false => Ok(()),
-    }
 }
 
 /// The body of a request, or the refusal for a body that is over the cap (413) or could

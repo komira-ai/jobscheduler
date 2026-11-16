@@ -35,7 +35,6 @@ use crate::agent_tokens::AgentTokens;
 use crate::clock::SharedClock;
 use crate::config::{AgentSetup, placer, split};
 use crate::error::StartupError;
-use crate::fence::Fence;
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{self, FeedTrim, ServerJobs};
@@ -110,9 +109,6 @@ pub(crate) struct Agents {
     /// Where the job side's events are counted ([`crate::metrics`]); set once, at start, when
     /// the server serves its metrics, and counting nothing until then.
     meter: OnceLock<Meter>,
-    /// Trips when the state store says this process is no longer its writer
-    /// ([`crate::fence`]): the tick ends, heartbeats are refused and the process exits.
-    pub(crate) fence: Fence,
     /// The gate of the server's pass over the queued jobs ([`Agents::place_jobs`]): one pass
     /// at a time, from its read of the open hosts to its last taint.
     pub(crate) placing: Mutex<()>,
@@ -292,7 +288,6 @@ fn placed_in(
         job_limits,
         listed_sessions: Mutex::default(),
         meter: OnceLock::new(),
-        fence: Fence::new(),
         placing: Mutex::default(),
         providers,
     };
@@ -344,7 +339,6 @@ impl Agents {
             job_limits: JobLimits::default(),
             listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
-            fence: Fence::new(),
             placing: Mutex::default(),
             providers,
         }

@@ -6,6 +6,18 @@ agent's. The hook is the service's side of the updater's contract: the updater (
 runs one step per process, reads the exit status and the last line of standard output, and decides
 what runs next. This page says what the server's hook does, what it needs, and how it fails.
 
+## The "writer lock" of this page
+
+A SQLite store has a writer lock: the `flock` beside its file, which the one process that writes it
+holds. A Postgres store has none: any number of servers write it at once, so there is nothing to
+take, and nothing in a commit checks a generation. Where this page says the hook reads "the holder
+of the writer lock" of a Postgres store, it reads the oldest session of a process connected to the
+database under the server's application name (`js-lease-server`, from `pg_stat_activity`, without a
+lock): nobody when no server is connected, `<pid>@<backend start>` otherwise. That is what this
+hook's stop-first update needs, an install that runs one server. An update that starts the new server
+before it stops the old (two servers over one store for a while) is not this hook's: the servers need
+no hand-over, and it is the deploy's (a swarm's) start-first update.
+
 ## What an update does
 
 An update restarts the server in place. There is no cordon of any host, no drain and no standby:

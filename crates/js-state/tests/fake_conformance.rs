@@ -226,10 +226,6 @@ fn errors_say_what_failed() {
     let failure = js_state::StoreError::Failed("disk full".to_owned());
     assert_eq!(failure.to_string(), "state store failure: disk full");
     assert_eq!(
-        js_state::StoreError::Fenced.to_string(),
-        "state store fenced: this handle is no longer the writer"
-    );
-    assert_eq!(
         js_state::StoreError::Disconnected("connection closed".to_owned()).to_string(),
         "state store connection lost: connection closed"
     );
