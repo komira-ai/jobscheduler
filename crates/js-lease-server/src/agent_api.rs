@@ -92,6 +92,7 @@ use crate::admit::{reports_host_jobs, reports_layered_rootfs};
 use crate::agent_state::Change;
 use crate::agents::{Agents, Session};
 use crate::api::{BODY_LIMIT, bearer};
+use crate::connection::Unconnected;
 use crate::host_keys::Writes;
 use crate::job_loss;
 use crate::job_pass::store_time;
@@ -261,6 +262,20 @@ async fn serve_hello(
             return Err(Refused::of(&refusal));
         }
     };
+    // The connection of a host that lists jobs, before the host is told it is admitted: a server
+    // that cannot write it must not serve the host, and the agent says hello again.
+    let opened = {
+        let (host, agents, epoch) = (host.clone(), Arc::clone(agents), welcome.epoch);
+        let hello = hello.clone();
+        blocking(move || agents.open_connection(&host, &hello, epoch)).await
+    };
+    if let Err(error) = opened {
+        warn!(%error, host = %hello.host_id, "agent hello refused: the connection could not be written");
+        return Err(Refused::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            STATE_WRITE_FAILED,
+        ));
+    }
     drop(gate);
     let credential_issued = issued.is_some();
     welcome.host_credential = issued;
@@ -436,6 +451,14 @@ async fn add_jobs(
     Ok(())
 }
 
+/// Why a heartbeat's job listing was not served.
+enum Unserved {
+    /// A newer connection of the host replaced this server's ([`crate::connection`]).
+    Superseded,
+    /// The store failed.
+    Failed(js_jobs::JobStoreError),
+}
+
 /// What the registry holds of a host that reported the `per-job` capability, as
 /// [`serve_jobs`] reads it.
 struct PerJobHost {
@@ -501,12 +524,26 @@ async fn serve_jobs(
     let host_jobs = reports_host_jobs(claim.capabilities());
     let layered_rootfs = reports_layered_rootfs(claim.capabilities());
     let jobs = Arc::clone(jobs);
+    let connecting = Arc::clone(agents);
     let listed = heartbeat.jobs.clone();
     let retired = heartbeat.retired_jobs.clone();
     let (phase, ready) = (heartbeat.phase, heartbeat.exclusive_ready.clone());
     let refused = heartbeat.exclusive_refused.clone();
     let placing = Arc::clone(agents);
     let served = blocking(move || {
+        // The writes of this beat are the host's connection's: made through a store that checks
+        // that no newer connection of the host has been taken since, so a beat that reaches
+        // this server after the host said hello to another writes nothing.
+        let view = match connecting.connected_jobs(&jobs, &host) {
+            Ok(view) => view,
+            Err(Unconnected::Superseded) => {
+                return (host, Err(Unserved::Superseded), Vec::new());
+            }
+            Err(Unconnected::Failed(error)) => {
+                let failed = Unserved::Failed(error.into());
+                return (host, Err(failed), Vec::new());
+            }
+        };
         let metrics = placing.meter().sink();
         let context = per_job::BeatContext {
             host: &host,
@@ -526,7 +563,7 @@ async fn serve_jobs(
             .chain(retired.iter().map(String::as_str))
             .collect();
         let lost = match first {
-            true => job_loss::lose_unlisted(&jobs, &host, &held, metrics).map(drop),
+            true => job_loss::lose_unlisted(&view, &host, &held, metrics).map(drop),
             false => Ok(()),
         };
         // A whole-host job the host prepares for is moved before the listing is committed
@@ -543,12 +580,19 @@ async fn serve_jobs(
         let now = store_time(placing.clock.now().millis());
         let rules = placing.whole_rules();
         let taint = |host: &HostId| placing.registry.taint_after_prepare(host);
-        let serve = |()| job_whole::serve(&jobs, &beat, (&rules, now), (metrics, &taint));
+        let serve = |()| job_whole::serve(&view, &beat, (&rules, now), (metrics, &taint));
         let whole = lost.and_then(serve);
         let served = whole.and_then(|taint_changed| {
-            let served = per_job::serve(&jobs, &context, &listed, &retired, room);
+            let served = per_job::serve(&view, &context, &listed, &retired, room);
             served.map(|served| (served, taint_changed))
         });
+        // An operation that failed after a newer connection was taken failed because of it.
+        let served = served.map_err(
+            |error| match connecting.connection_superseded(&jobs, &host) {
+                true => Unserved::Superseded,
+                false => Unserved::Failed(error),
+            },
+        );
         // Whether the listing was clean is noted before the pass, so a host that lists a job
         // it holds no live allocation for takes no start until it lists only its own (design
         // section 8, row 37).
@@ -573,7 +617,11 @@ async fn serve_jobs(
             }
             Ok(Some(served))
         }
-        (host, Err(error)) => {
+        (host, Err(Unserved::Superseded)) => {
+            info!(%host, "a heartbeat of a connection a newer hello replaced was refused");
+            Err(Refused::of(&Refusal::SessionMismatch))
+        }
+        (host, Err(Unserved::Failed(error))) => {
             agents.meter().sink().store_write_failed();
             warn!(%host, %error, "a heartbeat's job listing could not be committed");
             Err(Refused::new(

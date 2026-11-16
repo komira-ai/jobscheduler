@@ -675,6 +675,7 @@ mod catalogs;
 mod checks;
 mod clock;
 mod config;
+mod connection;
 mod cordon;
 mod error;
 mod file;

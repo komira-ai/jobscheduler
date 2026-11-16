@@ -387,6 +387,8 @@ fn rig_on(
     (clock, shared): (Arc<StoreClock>, SharedClock),
     extra: Extra,
 ) -> Rig {
+    // The log lines of the paths a test takes are worked out, so the arguments of each are run.
+    crate::api::rig::process_sink();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_api_jobs");
     let dir = TestDir::under(root, name);
     let (class, gpus) = match extra.whole.is_some() {
@@ -490,6 +492,23 @@ impl Rig {
         self.register_with(host, capabilities);
     }
 
+    /// The route's answer to the hello of `host`, an agent that reports the `per-job`
+    /// capability.
+    pub(crate) async fn hello_result(&self, host: &str) -> Result<(), Refused> {
+        let hello = json!({
+            "host_id": host,
+            "pool": "burst",
+            "agent_version": "0.1.0",
+            "shape": self.shape(),
+            "capabilities": { "per-job": "true", "arch": "x86_64" },
+            "phase": "serving",
+        });
+        let body = Bytes::from(serde_json::to_vec(&hello).unwrap());
+        serve_hello(&self.agents, self.who.clone(), None, Ok(body), &|| ())
+            .await
+            .map(drop)
+    }
+
     /// Registers `host` past the route, as an agent that reports the `per-job` capability, the
     /// `container` exec mode (a job with layers records it) and `layered-rootfs` as `value`.
     pub(crate) fn register_layered_rootfs(&mut self, host: &str, value: &str) {
@@ -571,6 +590,10 @@ impl Rig {
         }))
         .unwrap();
         let welcome = self.agents.registry.hello(&hello, &self.who).unwrap();
+        let id = js_types::HostId::new(host).unwrap();
+        self.agents
+            .open_connection(&id, &hello, welcome.epoch)
+            .unwrap();
         self.sessions
             .insert(host.to_owned(), (welcome.epoch, welcome.session));
     }

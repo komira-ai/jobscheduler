@@ -112,6 +112,9 @@ pub(crate) struct Agents {
     /// For each host, the session whose job listing was last committed: a listing of another
     /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
     listed_sessions: Mutex<BTreeMap<HostId, Session>>,
+    /// For each host that speaks the per-job messages, the connection this server holds
+    /// ([`crate::connection`]): the version of the host's connection row its hello wrote.
+    pub(crate) connections: Mutex<BTreeMap<HostId, js_state::Version>>,
     /// Where the job side's events are counted ([`crate::metrics`]); set once, at start, when
     /// the server serves its metrics, and counting nothing until then.
     meter: OnceLock<Meter>,
@@ -295,6 +298,7 @@ fn placed_in(
         cpu_slack,
         duty_period_ms: AtomicU64::new(0),
         listed_sessions: Mutex::default(),
+        connections: Mutex::default(),
         meter: OnceLock::new(),
         placing: Mutex::default(),
         providers,
@@ -361,6 +365,7 @@ impl Agents {
             cpu_slack: CpuSlack::default(),
             duty_period_ms: AtomicU64::new(0),
             listed_sessions: Mutex::default(),
+            connections: Mutex::default(),
             meter: OnceLock::new(),
             placing: Mutex::default(),
             providers,

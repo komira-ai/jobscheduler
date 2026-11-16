@@ -5,6 +5,7 @@
 use js_agent_wire::{Ack, HeldState, Outcome};
 use js_jobs::{AllocationStep, EndReason, JobId, JobState, ResultReason, StartFailure};
 use js_proto::v1;
+use js_state::Store;
 
 use super::job_rig::{FakeAgent, rig, starts, stops};
 use crate::per_job::NO_EXIT_CODE;
@@ -328,4 +329,143 @@ async fn a_failed_listing_commit_is_a_500_and_the_next_heartbeat_is_served() {
     );
     assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
     assert!(rig.beat(&agent).await.is_ok());
+}
+
+/// Another server's hello of a host: the connection row of the host rewritten, as the other
+/// server's hello does, so the connection this server holds is no longer the newest.
+fn another_server_takes(rig: &super::job_rig::Rig, host: &str) {
+    let take = js_state::Txn::new().put(format!("node/{host}"), "9", js_state::Cond::Any);
+    rig.store
+        .txn(take)
+        .expect("reachable")
+        .expect("an unconditional put commits");
+}
+
+// A hello of a host that lists jobs writes its connection row, with the registry's epoch, and
+// the server keeps the version that write got as its connection's id; a host that lists no jobs
+// has none. It catches a hello that leaves no connection to check a heartbeat against.
+#[tokio::test]
+async fn a_hello_of_a_host_that_lists_jobs_writes_its_connection() {
+    let mut rig = rig("connection_hello", true);
+    rig.register("host-a", true);
+    rig.register("host-b", false);
+    let row = rig
+        .store
+        .get("node/host-a")
+        .unwrap()
+        .expect("the connection row");
+    assert_eq!(row.value, b"1", "the registry's epoch is recorded");
+    let held = rig.agents.connections.lock().unwrap().clone();
+    let a = js_types::HostId::new("host-a").unwrap();
+    assert_eq!(held.get(&a), Some(&row.version));
+    assert!(
+        rig.store.get("node/host-b").unwrap().is_none(),
+        "a host that lists no jobs has none"
+    );
+    assert_eq!(held.len(), 1);
+}
+
+// A heartbeat that reaches this server after the host said hello to another is answered 403
+// `session-mismatch` (the agent says hello again), writes nothing, and leaves the job as the
+// newer connection will find it. It catches a server that goes on committing a host's listing
+// from a connection a newer hello replaced.
+#[tokio::test]
+async fn a_heartbeat_after_a_newer_hello_elsewhere_is_refused_and_writes_nothing() {
+    let mut rig = rig("connection_replaced", true);
+    rig.register("host-a", true);
+    let mut agent = FakeAgent::new("host-a");
+    let id = rig.place("job-a", "host-a");
+    agent.take(&rig.beat(&agent).await.unwrap());
+    another_server_takes(&rig, "host-a");
+    let (before, states) = (rig.commits(), rig.states(&id));
+    let refused = rig.beat(&agent).await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (403, "session-mismatch")
+    );
+    assert_eq!(rig.commits(), before, "a refused beat wrote");
+    assert_eq!(rig.states(&id), states);
+}
+
+// A newer connection taken between the heartbeat's check and its commit is caught by the commit
+// itself: the listing's write carries the check, conflicts and writes nothing, and the beat is
+// answered `session-mismatch`, not `state-write-failed`. It catches a check made only before the
+// writes, which leaves a window for a stale listing.
+#[tokio::test]
+async fn a_connection_taken_between_the_check_and_the_commit_stops_the_commit() {
+    let mut rig = rig("connection_race", true);
+    rig.register("host-a", true);
+    let mut agent = FakeAgent::new("host-a");
+    let id = rig.place("job-a", "host-a");
+    agent.take(&rig.beat(&agent).await.unwrap());
+    let states = rig.states(&id);
+    let inner = rig.store.inner();
+    rig.store.before_next(move || {
+        let take = js_state::Txn::new().put("node/host-a", "9", js_state::Cond::Any);
+        inner.txn(take).expect("reachable").expect("commits");
+    });
+    let refused = rig.beat(&agent).await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (403, "session-mismatch")
+    );
+    assert_eq!(rig.states(&id), states);
+}
+
+// A host this server holds no connection for (it has no record of a hello of it) is refused the
+// same way, so a server never writes for a host it did not welcome. It catches a heartbeat served
+// with no connection behind it.
+#[tokio::test]
+async fn a_heartbeat_of_a_host_this_server_holds_no_connection_for_is_refused() {
+    let mut rig = rig("connection_none", true);
+    rig.register("host-a", true);
+    let agent = FakeAgent::new("host-a");
+    rig.agents.connections.lock().unwrap().clear();
+    let refused = rig.beat(&agent).await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (403, "session-mismatch")
+    );
+}
+
+// A store that cannot write the connection refuses the hello with 503 `state-write-failed`, so
+// the agent says hello again, and a store that cannot read the row refuses the heartbeat as a
+// failed write, not as a mismatch. It catches a host welcomed by a server that cannot serve it.
+#[tokio::test]
+async fn a_store_that_fails_the_connection_refuses_the_hello_and_the_beat() {
+    let mut rig = rig("connection_fails", true);
+    rig.store.fail_next();
+    let refused = rig.hello_result("host-a").await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (503, "state-write-failed")
+    );
+    rig.register("host-b", true);
+    let agent = FakeAgent::new("host-b");
+    rig.store.fail_read_after(0);
+    let failed = rig.beat(&agent).await.unwrap_err();
+    assert_eq!(
+        (failed.status.as_u16(), failed.error),
+        (500, "state-write-failed")
+    );
+}
+
+// A hello whose connection row another server's hello rewrites between its read and its write
+// loses the connection: the hello is refused 503 `state-write-failed` (the agent says hello
+// again) and this server keeps no connection for the host. It catches a hello that welcomes a
+// host over a connection a newer hello already holds.
+#[tokio::test]
+async fn a_hello_that_loses_the_connection_to_a_newer_one_is_refused() {
+    let rig = rig("connection_lost_race", true);
+    let inner = rig.store.inner();
+    rig.store.before_next(move || {
+        let take = js_state::Txn::new().put("node/host-a", "9", js_state::Cond::Any);
+        inner.txn(take).expect("reachable").expect("commits");
+    });
+    let refused = rig.hello_result("host-a").await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (503, "state-write-failed")
+    );
+    assert!(rig.agents.connections.lock().unwrap().is_empty());
 }

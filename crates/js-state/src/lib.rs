@@ -38,6 +38,7 @@
 // variants and functions are undocumented. Remove this once they are documented.
 #![allow(missing_docs)]
 
+mod checked;
 pub mod clock;
 #[cfg(any(test, feature = "test-support"))]
 pub mod conformance;
@@ -55,6 +56,7 @@ mod writer;
 
 use std::time::Duration;
 
+pub use checked::Checked;
 pub use clock::{Clock, ManualClock, StoreTime, SystemClock};
 pub use shared::{GENERATION, SHARED_WRITERS, share};
 pub use store::{Claim, Store, TxnRead};

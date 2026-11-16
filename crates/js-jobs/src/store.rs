@@ -99,7 +99,7 @@ pub struct JobStore<S, I = RandomIds> {
     instance: u64,
     /// How many writes this job store has sent to the store since it was made, whatever each
     /// answered ([`JobStore::written`]).
-    writes: AtomicU64,
+    writes: Arc<AtomicU64>,
     /// How long an ended job is kept: applied when a job ends.
     retention: Retention,
     /// How long a freed allocation's row is kept after its free: applied by the tick.
@@ -251,12 +251,39 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             ids,
             schema,
             instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
-            writes: AtomicU64::new(0),
+            writes: Arc::new(AtomicU64::new(0)),
             retention: Retention::DEFAULT,
             allocation_retention: Retention::ALLOCATION_DEFAULT,
         };
         jobs.backfill_indexes()?;
         Ok(jobs)
+    }
+
+    /// The tables of this job store seen through `store`, another handle of the state store (a
+    /// [`js_state::Checked`] one, whose writes also check a key, say), with this one's ids,
+    /// schema and retentions. Nothing is read or written: the view is as open as this store is.
+    /// Its writes are counted with this store's ([`JobStore::written`]): a view is the same
+    /// tables, so a write through either moves where the writes of both stand.
+    #[must_use]
+    pub fn over<T: Store>(&self, store: Arc<T>) -> JobStore<T, I>
+    where
+        I: Clone,
+    {
+        JobStore {
+            store,
+            ids: self.ids.clone(),
+            schema: self.schema,
+            instance: self.instance,
+            writes: Arc::clone(&self.writes),
+            retention: self.retention,
+            allocation_retention: self.allocation_retention,
+        }
+    }
+
+    /// The state store the tables are over, shared.
+    #[must_use]
+    pub fn store(&self) -> &Arc<S> {
+        &self.store
     }
 
     /// The same job store keeping each job that ends from now on for `retention` after its

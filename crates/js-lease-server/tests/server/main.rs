@@ -92,5 +92,6 @@ mod tailnet;
 mod ticks;
 mod tls;
 mod tls_reload;
+mod two_servers;
 mod usage;
 mod usage_support;
