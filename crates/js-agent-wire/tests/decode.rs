@@ -183,6 +183,7 @@ fn unknown_fields_ignored_everywhere() {
             ack: Ack::Accepted,
         }],
         taint_ack: true,
+        taint_cleared_ack: false,
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),

@@ -156,6 +156,7 @@ fn beat(host: &str, results: Vec<RunResult>) -> Heartbeat {
         held: Vec::new(),
         results,
         taint: None,
+        taint_cleared: None,
         exclusive_ready: None,
         exclusive_refused: None,
         load: None,

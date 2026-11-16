@@ -58,6 +58,8 @@ pub struct Running {
     _checking: Checking,
     scaler: Option<Scaler>,
     tls: Option<tls::Tls>,
+    /// How long [`Running::hold`] keeps serving (`--drain-hold`).
+    drain_hold: Duration,
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
@@ -312,6 +314,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         _checking: checking,
         scaler,
         tls,
+        drain_hold: limits.drain_hold,
     })
 }
 
@@ -775,6 +778,15 @@ impl Running {
     /// connection open at the cap, without waiting for something not to happen.
     pub fn accept_waits(&self) -> u64 {
         self.slots.waits()
+    }
+
+    /// The first half of a stop on a termination signal: the readiness route
+    /// (`--ready-listen`) answers 503 `draining` at once, and the server keeps serving and
+    /// ticking for `--drain-hold`, so a proxy that polls readiness takes it out of rotation
+    /// while requests still succeed. [`Running::shutdown`] is the second half.
+    pub async fn hold(&self) {
+        self.gate.drain();
+        tokio::time::sleep(self.drain_hold).await;
     }
 
     /// Stops the server: no new connections, the requests in flight finish (those still

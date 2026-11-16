@@ -9,6 +9,7 @@ mod mapped;
 mod noise;
 mod proc;
 mod rules;
+mod settle;
 
 use std::path::PathBuf;
 
@@ -75,6 +76,17 @@ pub fn process(pid: u32, ppid: u32, uid: u32, start: u64, cgroup: &str) -> Proce
         uid,
         start,
         cgroup: cgroup.to_owned(),
+        comm: "stray".to_owned(),
+        state: 'S',
+    }
+}
+
+/// A process with the command name `comm` in the state `state`.
+pub fn process_named(base: Process, comm: &str, state: char) -> Process {
+    Process {
+        comm: comm.to_owned(),
+        state,
+        ..base
     }
 }
 

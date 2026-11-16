@@ -37,6 +37,7 @@ mod scratch;
 pub mod silence;
 mod slots;
 mod taint;
+mod taint_clear;
 mod taint_idle;
 
 use std::collections::BTreeSet;

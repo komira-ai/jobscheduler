@@ -344,6 +344,7 @@ fn connection_limits_are_flags() {
             "--handshake-timeout=3",
             "--header-timeout=2m",
             "--drain-timeout=1h",
+            "--drain-hold=2m",
         ],
     );
     let cli = js_lease_server::Cli::try_parse_from(args).unwrap();
@@ -351,6 +352,7 @@ fn connection_limits_are_flags() {
     assert_eq!(cli.handshake_timeout.as_secs(), 3);
     assert_eq!(cli.header_timeout.as_secs(), 120);
     assert_eq!(cli.drain_timeout.as_secs(), 3600);
+    assert_eq!(cli.drain_hold.as_secs(), 120);
 }
 
 /// Asserts that a lease file of the previous release whose term is the last one (a file the
@@ -456,4 +458,17 @@ async fn a_server_on_a_listener_the_caller_bound_leaves_the_port_with_the_caller
     let client = std::net::TcpStream::connect(addr).unwrap();
     let (served, _) = kept.accept().unwrap();
     drop((client, served));
+}
+
+/// Asserts that the time a termination signal is served through before the stop is 15 s
+/// unless `--drain-hold` gives another, as a flag and as the default of the connection
+/// limits. It catches a default that drops the hold, which takes a server out of rotation
+/// only when its listeners close.
+#[test]
+fn the_drain_hold_is_fifteen_seconds_unless_given() {
+    let scratch = Scratch::new("drain_hold_default");
+    let cli = js_lease_server::Cli::try_parse_from(args_with(&scratch, &[])).unwrap();
+    assert_eq!(cli.drain_hold.as_secs(), 15);
+    let config = js_lease_server::Config::from_cli(cli).unwrap();
+    assert_eq!(config.limits().drain_hold.as_secs(), 15);
 }

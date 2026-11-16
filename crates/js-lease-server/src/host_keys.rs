@@ -43,7 +43,8 @@ pub(crate) fn commit(store: &dyn Store, writes: Writes) -> io::Result<()> {
 }
 
 /// The transaction of `writes`. The server is the store's one writer, under its lock, so
-/// no write has a precondition.
+/// no write has a precondition, but a taint's: that is read and written conditionally
+/// ([`crate::agent_state::BindingStore::commit_taint`]), so a second server cannot lose it.
 fn transaction(writes: Writes) -> Txn {
     writes
         .into_iter()
