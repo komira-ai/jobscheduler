@@ -26,6 +26,8 @@ pub struct Interfere<S> {
     fail_at: Mutex<Option<usize>>,
     /// How many reads (gets and scans) pass before one fails; `None`: none fails.
     fail_read_at: Mutex<Option<usize>>,
+    /// Whether the next head read fails ([`Interfere::fail_next_head`]).
+    fail_head: Mutex<bool>,
     before: Mutex<Option<Hook>>,
     /// The error a failed commit or read answers; [`StoreError::Failed`] with [`INJECTED`]
     /// until [`Interfere::fail_with`] says another.
@@ -77,6 +79,7 @@ impl<S: Store> Interfere<S> {
             inner: Arc::new(inner),
             fail_at: Mutex::new(None),
             fail_read_at: Mutex::new(None),
+            fail_head: Mutex::new(false),
             before: Mutex::new(None),
             error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
             reads: Mutex::new(Vec::new()),
@@ -106,6 +109,13 @@ impl<S: Store> Interfere<S> {
     /// next one with [`StoreError::Failed`] before it reaches the wrapped store.
     pub fn fail_read_after(&self, reads: usize) {
         *lock(&self.fail_read_at) = Some(reads);
+    }
+
+    /// Fails the next read of the store's head ([`Store::head`]) with [`StoreError::Failed`],
+    /// or the error [`Interfere::fail_with`] set, before it reaches the wrapped store; the head
+    /// reads after it pass. Head reads are not counted by [`Interfere::fail_read_after`].
+    pub fn fail_next_head(&self) {
+        *lock(&self.fail_head) = true;
     }
 
     /// Fails the next commit ([`Interfere::fail_after`] of 0).
@@ -174,6 +184,9 @@ impl<S: Store> Store for Interfere<S> {
     }
 
     fn head(&self) -> Result<Option<Revision>, StoreError> {
+        if std::mem::take(&mut *lock(&self.fail_head)) {
+            return Err(lock(&self.error).clone());
+        }
         self.inner.head()
     }
 
@@ -291,6 +304,27 @@ mod tests {
             .map(|(key, _)| key)
             .collect();
         assert_eq!(keys, ["a", "c"]);
+    }
+
+    // Catches a head failure that is not the error set, fails more than the next head read, or
+    // reaches the wrapped store's head anyway.
+    #[test]
+    fn the_next_head_read_fails_and_only_it() {
+        let store = wrapped();
+        put(&store, "a").expect("commits");
+        assert_eq!(store.head(), Ok(Some(Revision(1))));
+        store.fail_next_head();
+        assert_eq!(store.head(), Err(StoreError::Failed(INJECTED.to_owned())));
+        assert_eq!(
+            store.head(),
+            Ok(Some(Revision(1))),
+            "only the next head read fails"
+        );
+        assert_eq!(
+            store.take_reads(),
+            Vec::<Read>::new(),
+            "a head read is not a logged read"
+        );
     }
 
     // Catches a read failure that hits the wrong read, more than one, or a commit.
