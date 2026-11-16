@@ -440,6 +440,13 @@ async fn a_store_that_fails_the_connection_refuses_the_hello_and_the_beat() {
         (refused.status.as_u16(), refused.error),
         (503, "state-write-failed")
     );
+    rig.store.fail_read_after(0);
+    let refused = rig.hello_result("host-c").await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (503, "state-write-failed"),
+        "a failed read of the connection row"
+    );
     rig.register("host-b", true);
     let agent = FakeAgent::new("host-b");
     rig.store.fail_read_after(0);
