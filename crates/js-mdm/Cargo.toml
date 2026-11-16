@@ -14,6 +14,7 @@ name = "js-mdm"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
 flate2.workspace = true
 getrandom = { workspace = true, features = ["std"] }
@@ -21,6 +22,7 @@ hex.workspace = true
 js-host-step = { path = "../js-host-step" }
 js-mdm-core = { path = "../js-mdm-core" }
 rustls.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 thiserror.workspace = true

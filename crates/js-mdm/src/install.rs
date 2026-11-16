@@ -108,7 +108,7 @@ pub fn run_uninstall(
     Ok(execute(&p, mode, env.host, out)?)
 }
 
-fn root_only(host: &dyn Host, verb: &'static str) -> Result<(), MdmError> {
+pub(crate) fn root_only(host: &dyn Host, verb: &'static str) -> Result<(), MdmError> {
     match host.euid() {
         0 => Ok(()),
         euid => Err(MdmError::NeedsRoot { verb, euid }),

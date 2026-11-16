@@ -24,7 +24,7 @@ mod host;
 mod plan;
 mod real;
 
-pub use host::{Cmd, Host, Kind, Meta, Output};
+pub use host::{Cmd, Host, Kind, Meta, Output, check_ancestry, check_owner_mode, parse_listeners};
 pub use plan::{Account, ExecError, Mode, Plan, Planner, Step, UnitVerb, execute, ids};
 pub use real::RealHost;
 
