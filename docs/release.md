@@ -437,14 +437,13 @@ there is no `macos-arm64` entry and the Linux targets are what they were. The se
 the fleet: the coordinator rolls the version out by its own plan.
 
 **Which hosts.** Every deployment of hostkeeper targets a host group (hostkeeper's
-`docs/design/hostgroups.md`), and the group a call names is an input of `set-desired.yml` that
-hostkeeper has not built yet (HostGroups, HG7). Until it is, the call names only the service, and the
-coordinator's current placement decides the hosts: its rollout file's `[[service]]` entry for
-`js-agent` (its roles) and the hosts assigned the service. When HG7 lands, the call gains the
-`host_group` input and the coordinator's allow-list entry its `host_groups`.
+`docs/design/hostgroups.md`), which the call names with the `host_group` input of `set-desired.yml`:
+the job `set-desired` names `all-in-one`, the Linux build nodes, and the job `set-desired-mac` names
+`mac-build`, the Macs, with the same version and targets, only when the release has a macOS package
+(`set-mac=true`, below). Which hosts of a group are ordered the package is the group's.
 
 **It is off by default.** Until the repository variable `JS_AGENT_SETS_DESIRED` is `true`, exactly,
-both jobs are skipped. Its other settings are repository variables, none of them secret:
+every job is skipped. Its other settings are repository variables, none of them secret:
 
 | Variable | Meaning |
 |---|---|
@@ -470,13 +469,13 @@ refs = ["refs/heads/main"]
 event_names = ["workflow_run", "workflow_dispatch"]
 runner_environment = "github-hosted"
 services = ["js-agent"]
-host_groups = ["all-in-one"]
+host_groups = ["all-in-one", "mac-build"]
 ```
 
 `job_workflow_ref` is hostkeeper's `set-desired.yml` at the commit this repository pins, so moving
 the pin (a reviewed change of the `uses:` line, `hostkeeper_version` and `hostkeeper_commit`
 together) moves the entry. The call names the host group `all-in-one` (the `host_group` input), which must list
-`js-agent`; each host needs the `komira-stable` repository entry. A group of Macs is a second call, with its own `host_group`, once that group exists.
+`js-agent`; each host needs the `komira-stable` repository entry. The Macs' call names the host group `mac-build`, which must list `js-agent` too.
 
 ### macOS
 
