@@ -224,6 +224,11 @@ pub struct Cli {
     /// How long a stop waits for the requests in flight before it cuts what is left.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub drain_timeout: Duration,
+    /// How long after a termination signal the server keeps serving, with its readiness
+    /// route already answering 503, so that a proxy that polls readiness takes it out of
+    /// rotation before its listeners close. At least 1ms, as every duration is.
+    #[arg(long, default_value = "15s", value_parser = parse_duration)]
+    pub drain_hold: Duration,
     /// The file the per-minute usage of the nodes and the learned cost curves are kept
     /// in. Beside `--state-file`, as `usage.db`, unless given. Only agent registration
     /// reports usage.
@@ -308,6 +313,8 @@ pub struct Limits {
     pub max_requests: u32,
     /// How long a stop waits for requests in flight.
     pub drain_timeout: Duration,
+    /// How long a termination signal is served through before the stop begins.
+    pub drain_hold: Duration,
 }
 
 impl Default for Limits {
@@ -320,6 +327,7 @@ impl Default for Limits {
             write_timeout: Duration::from_secs(10),
             max_requests: 100,
             drain_timeout: Duration::from_secs(10),
+            drain_hold: Duration::from_secs(15),
         }
     }
 }
@@ -334,6 +342,7 @@ impl From<&Cli> for Limits {
             write_timeout: cli.write_timeout,
             max_requests: cli.max_requests,
             drain_timeout: cli.drain_timeout,
+            drain_hold: cli.drain_hold,
         }
     }
 }

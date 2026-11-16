@@ -295,6 +295,7 @@ fn heartbeat_reply_wire_form() {
             ack: Ack::UnknownLease,
         }],
         taint_ack: true,
+        taint_cleared_ack: false,
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
@@ -515,4 +516,59 @@ fn job_result_with_input_failure_wire_form() {
     };
     let text = serde_json::to_value(&clean).unwrap();
     assert!(text.get("input_failure").is_none(), "{text}");
+}
+
+/// Asserts the exact JSON of a heartbeat that reports a taint cleared (an agent whose host
+/// passed its re-checks), that the field is left out when it is None, and that a body from
+/// before the field decodes with it None. It catches a renamed field, a field sent when it
+/// is None, and a required new field, which would refuse every deployed agent.
+#[test]
+fn taint_cleared_wire_form() {
+    let cleared = Heartbeat {
+        taint: None,
+        taint_cleared: Some(Taint {
+            reason: "residue".into(),
+            run_id: Some("run-1".into()),
+            check: Some("daemonised-child".into()),
+        }),
+        results: Vec::new(),
+        held: Vec::new(),
+        ..heartbeat()
+    };
+    assert_eq!(
+        serde_json::to_string(&cleared).unwrap(),
+        concat!(
+            r#"{"host_id":"mac-01","epoch":3,"session":"s3cret-0","phase":"draining","#,
+            r#""held":[],"results":[],"taint_cleared":"#,
+            r#"{"reason":"residue","run_id":"run-1","check":"daemonised-child"}}"#
+        )
+    );
+    assert_eq!(cleared.validate(), Ok(()));
+    let plain = serde_json::to_value(heartbeat()).unwrap();
+    assert!(plain.get("taint_cleared").is_none());
+    let beat: Heartbeat = serde_json::from_value(plain).unwrap();
+    assert_eq!(beat.taint_cleared, None);
+}
+
+/// Asserts the exact JSON of a reply that acknowledges a cleared taint, that the field is left
+/// out when false, and that a reply from before the field decodes with it false. It catches a
+/// renamed field, a `false` sent to every agent, and a required new field.
+#[test]
+fn taint_cleared_ack_wire_form() {
+    let reply = HeartbeatReply {
+        taint_cleared_ack: true,
+        ..HeartbeatReply::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&reply).unwrap(),
+        r#"{"commands":[],"result_acks":[],"taint_ack":false,"taint_cleared_ack":true}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&HeartbeatReply::default()).unwrap(),
+        r#"{"commands":[],"result_acks":[],"taint_ack":false}"#
+    );
+    let old: HeartbeatReply =
+        serde_json::from_value(json!({"commands": [], "result_acks": [], "taint_ack": true}))
+            .unwrap();
+    assert!(old.taint_ack && !old.taint_cleared_ack);
 }

@@ -218,6 +218,48 @@ fn an_acknowledgement_of_a_heartbeat_with_no_taint_counts_for_nothing() {
     assert_eq!(sent[2].1["taint"]["reason"], "cleanup-failed");
 }
 
+/// Asserts that a worker that reports a taint cleared has it in the heartbeat as
+/// `taint_cleared` and as nothing else: the body carries the cleared taint, no `taint`, and
+/// the heartbeat of a worker that has none carries neither. It catches a session that
+/// drops the cleared taint, which would leave the server tainted for good, and one that
+/// sends the clear as a taint.
+#[test]
+fn a_taint_cleared_is_carried_in_the_heartbeat_as_cleared() {
+    let machine = FakeMachine::new();
+    let dir = Scratch::new("jobs-session-cleared");
+    let gone = rescue(&dir, &machine);
+    let cleared = js_agent_wire::Taint {
+        reason: "residue".to_owned(),
+        run_id: Some("r1".to_owned()),
+        check: Some("daemonised-child".to_owned()),
+    };
+    let snapshot = Snapshot {
+        taint_cleared: Some(cleared),
+        ..Snapshot::default()
+    };
+    let worker = Worker::orphaned(machine.clock.clone(), snapshot, gone);
+    let (mut script, sent) = Script::new(vec![welcome(1), beat_ok()]);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    session.tick();
+    session.tick();
+    let sent = sent.borrow();
+    assert_eq!(
+        sent[1].1["taint_cleared"],
+        json!({ "reason": "residue", "run_id": "r1", "check": "daemonised-child" })
+    );
+    assert!(sent[1].1.get("taint").is_none(), "{}", sent[1].1);
+
+    let machine = FakeMachine::new();
+    let dir = Scratch::new("jobs-session-not-cleared");
+    let gone = rescue(&dir, &machine);
+    let worker = Worker::orphaned(machine.clock.clone(), Snapshot::default(), gone);
+    let (mut script, sent) = Script::new(vec![welcome(1), beat_ok()]);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    session.tick();
+    session.tick();
+    assert!(sent.borrow()[1].1.get("taint_cleared").is_none());
+}
+
 /// Asserts that a reply the busy worker has no room for is dropped and noted (`Busy`) and
 /// that the session does not wait: with the worker inside a call that does not return, the
 /// replies fill the queue and the next one is noted, in the same tick that took it. It
