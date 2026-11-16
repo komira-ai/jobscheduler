@@ -499,7 +499,7 @@ generated paragraph above.
   server all the same. A host the registry does not hold is `NOT_FOUND` `unknown-host`. The
   call does not reach the agent: an agent whose marker still holds the taint refuses the next
   start `host-tainted`, which the server takes as the host's taint again, so the operator
-  moves the agent's `taint.json` and its `owed-*` records aside first, or lets the agent clear
+  moves the agent's `taint.json`, `taint.pinned` and its `owed-*` records aside first, or lets the agent clear
   the taint itself ([design/taint-self-clearing.md](design/taint-self-clearing.md)).
 - `ListPools` and `ListProviders` read the status `GET /v1/pools` writes: per elastic pool its
   name, kind, state, reasons, memory, machine count and last tick; per pool's provider its

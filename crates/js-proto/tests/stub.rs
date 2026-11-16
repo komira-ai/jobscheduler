@@ -530,7 +530,7 @@ fn code<T>(reply: Result<Response<T>, Status>) -> Code {
     reply.map(|_| ()).expect_err("the call fails").code()
 }
 
-/// Asserts that each of the 12 methods carries its request to the stub's own handler with
+/// Asserts that each of the 13 methods carries its request to the stub's own handler with
 /// every field intact, and carries that handler's answer back with every field intact.
 /// Catches a field dropped on the way and a method wired to another method's handler.
 #[tokio::test]

@@ -665,6 +665,10 @@ impl StateView for Spy<'_> {
         StateView::taint(&self.state)
     }
 
+    fn restored_rechecks(&self, taint: &Taint) -> bool {
+        StateView::restored_rechecks(&self.state, taint)
+    }
+
     fn owed(&self) -> Result<Vec<String>, PortError> {
         if self.fail.borrow().contains("owed") {
             return Err(PortError::Io("the state root cannot be listed".to_owned()));

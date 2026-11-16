@@ -152,7 +152,7 @@
 //!   cleanup where it is, the container included; one that cannot be removed holds the
 //!   slot. **A restart or a `SIGTERM` inside the cleanup window therefore taints the host
 //!   at the next start**, and the agent never clears that taint (see below); an operator's
-//!   clear must remove the `owed-*` records as well as `taint.json`, or the next start
+//!   clear must remove the `owed-*` records and `taint.pinned` as well as `taint.json`, or the next start
 //!   taints the host again (see [`taint`]).
 //! - **A taint a check judged clears itself.** A taint of a process a job left, or of an
 //!   input the checks could not read, is re-checked while the host is idle (every run over,

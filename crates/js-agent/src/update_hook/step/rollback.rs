@@ -4,10 +4,11 @@
 //! point goes on from there and makes no act twice.
 //!
 //! In this order, each before anything is changed:
-//! 1. the lock, the record and the params agree; a taint the agent cannot clear itself, or an
+//! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check, or an
 //!    `owed-*` record, halts (76), here and again before each phase below (an agent with such a
 //!    taint refuses every start, the old release included, so nothing is gained by going on; a
-//!    taint it can clear does not halt the step; if the previous release is one that predates
+//!    taint it will re-check, a residue of a process the pin file does not name, does not halt the
+//!    step; if the previous release is one that predates
 //!    self-clearing, such a taint stays standing and that agent refuses starts until an operator
 //!    clears it, which is accepted because a halt would stop every release of the group). A rollback with no
 //!    record has nothing to undo: it has finished before, or `prepare` never wrote one;

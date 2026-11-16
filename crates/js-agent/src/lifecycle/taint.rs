@@ -18,7 +18,8 @@
 //!   apart and the server's acknowledgement of the clear (see "A taint that clears itself").
 //!   The marker is then renamed to `taint.json.cleared-<unix seconds>`, never removed: the
 //!   file is kept as an operator's clear keeps it. Every other taint ends only when an
-//!   operator reimages the host, or moves the file by hand.
+//!   operator reimages the host, or moves the file by hand (with `taint.pinned` and the
+//!   `owed-*` records).
 //! - **It is read when the agent starts**, so a tainted agent that restarts is still
 //!   tainted. A marker that exists but cannot be read or understood taints the host with the
 //!   reason [`reason::MARKER_UNREADABLE`]: a file that is there is never taken for an absent
@@ -40,6 +41,22 @@
 //!   container engine's data root and the layers of its containers are not compared at
 //!   all. The disk of its own is the operator's to provide.
 //!
+//! # The pin file
+//!
+//! The marker keeps the first taint only, so a non-clearable taint sealed after a clearable
+//! first one pins the host in memory and nothing in the marker says so. A restart would then
+//! read the restorable residue, take a baseline that already holds the new state, and clear a
+//! host that holds a real change. So when the pin happens, [`PIN_FILE`] (`taint.pinned`) is
+//! written beside the marker (once the marker is on disk): the marker's taint, serialised as
+//! the marker is and written as atomically and durably. [`StateRoot::restored_rechecks`]
+//! reads it when the agent starts: a restored residue is pinned when the pin file names the
+//! same taint, field for field, or cannot be read; a pin file that names another taint is a
+//! stale one of a taint an operator cleared, and is ignored. The agent never removes the pin
+//! file (it never clears while pinned). A failed write is a finding
+//! (`taint-write-failed`) like a marker's, the pin stands in memory, and the write is tried
+//! again at the next step. An operator who clears a pinned taint by hand moves `taint.pinned`
+//! aside with `taint.json` and the `owed-*` records.
+//!
 //! The state root holds one more kind of file: `owed-<run id>`, the record that a job's
 //! post-job checks are owed (see [`StateRoot::owe`]). It is written, synced, before the
 //! first step of the job's cleanup and removed once the checks have run; one found when the
@@ -54,7 +71,7 @@
 //! left behind before the new baseline was taken. The agent never clears that taint: no
 //! re-check can show that what the job left was not already part of the baseline. A clear
 //! (the agent's or an operator's) **must remove the `owed-*` records as well as
-//! `taint.json`**: clearing the marker alone leaves the records, and the very next start
+//! `taint.json`** (and move `taint.pinned` aside): clearing the marker alone leaves the records, and the very next start
 //! taints the host again. The agent's clear removes the records of the runs it frees from
 //! `Blocked` (their checks found the taint), which are the only ones a clearable taint can
 //! leave.
@@ -73,7 +90,8 @@
 //!    baseline, and this process's baseline already holds what the job left, so its
 //!    re-checks also apply two rules that need no baseline: a process whose uid is in the job
 //!    users' range, and one whose parent is `init` in a control group a job can be in, are
-//!    findings even when the baseline holds them (the agent's own process aside). Every other
+//!    findings even when the baseline holds them (the agent's own process aside). A residue
+//!    the pin file names is pinned too (see "The pin file"). Every other
 //!    restored taint (`unchecked` of any kind, `cleanup-failed`, `check-owed`, `host-job`,
 //!    `marker-unreadable`, a mount, user, group, module or watched-directory change) stays
 //!    until an operator moves the marker aside, as does a restored taint beside which a
@@ -87,7 +105,7 @@
 //!    (a re-check does not show that the agent now sees the host), nor a mount, user, group,
 //!    module or watched-directory change: state the host really holds. A non-clearable taint
 //!    sealed *after* a clearable one (the first stays in the marker) keeps the host from
-//!    clearing for the life of the process.
+//!    clearing for the life of the process, and, by the pin file, for every process after.
 //! 2. The host is idle: no run is held but `Blocked` or `Freed` ones (their container and
 //!    scratch are gone), and no container the agent could not remove.
 //! 3. A full check (every check of the table, with the settle wait, against the baseline
@@ -132,6 +150,14 @@ pub const MARKER_FILE: &str = "taint.json";
 
 /// The temporary file the marker is written through, renamed over [`MARKER_FILE`].
 pub const MARKER_TEMP_FILE: &str = "taint.json.tmp";
+
+/// The name of the pin file in the state root: the taint the marker held when the agent
+/// sealed a taint beside it that no re-check can clear. See "The pin file" in the module
+/// documentation.
+pub const PIN_FILE: &str = "taint.pinned";
+
+/// The temporary file the pin file is written through, renamed over [`PIN_FILE`].
+pub const PIN_TEMP_FILE: &str = "taint.pinned.tmp";
 
 /// The start of the name a cleared marker is kept under: `taint.json.cleared-<unix seconds>`,
 /// the name an operator's clear uses.
@@ -233,7 +259,48 @@ impl StateRoot {
     /// Any step failed. The marker is then what it was before, or the new one: never a
     /// part of it.
     pub fn write(&self, taint: &Taint) -> io::Result<()> {
-        let temp = self.path.join(MARKER_TEMP_FILE);
+        self.write_named(MARKER_TEMP_FILE, MARKER_FILE, taint)
+    }
+
+    /// Writes `taint` as the pin file ([`PIN_FILE`]), the way the marker is written: the
+    /// pin says the marker's taint is pinned, and holds that taint as the marker holds it.
+    ///
+    /// # Errors
+    ///
+    /// Any step failed. The pin file is then what it was before, or the new one.
+    pub fn write_pin(&self, taint: &Taint) -> io::Result<()> {
+        self.write_named(PIN_TEMP_FILE, PIN_FILE, taint)
+    }
+
+    /// Whether a taint read from the marker is one a restarted agent re-checks: a residue of
+    /// a process ([`restorable`]) that the pin file does not name. A pin file that names
+    /// another taint is a stale one (of a taint an operator cleared) and says nothing; one
+    /// that cannot be read, or is not a taint, pins, as a marker that cannot be read taints.
+    /// This is the one decision the agent's start (`TaintState::load`) and the update hook share.
+    pub fn restored_rechecks(&self, taint: &Taint) -> bool {
+        restorable(taint) && !self.pins(taint)
+    }
+
+    /// Whether the pin file is there and names `taint`, or cannot be read.
+    fn pins(&self, taint: &Taint) -> bool {
+        let text = File::open(self.path.join(PIN_FILE)).and_then(|file| {
+            let mut text = String::new();
+            file.take(MARKER_MAX)
+                .read_to_string(&mut text)
+                .map(|_| text)
+        });
+        match text {
+            Err(why) if why.kind() == io::ErrorKind::NotFound => false,
+            Err(_) => true,
+            Ok(text) => serde_json::from_str::<Taint>(&text)
+                .ok()
+                .is_none_or(|named| named == *taint),
+        }
+    }
+
+    /// Writes `taint` to `name` through `temp`: synced, renamed, and the directory synced.
+    fn write_named(&self, temp: &str, name: &str, taint: &Taint) -> io::Result<()> {
+        let temp = self.path.join(temp);
         serde_json::to_vec(taint)
             .map_err(io::Error::other)
             .and_then(|body| {
@@ -245,7 +312,7 @@ impl StateRoot {
                     .open(&temp)
                     .and_then(|mut file| file.write_all(&body).and_then(|()| file.sync_all()))
             })
-            .and_then(|()| fs::rename(&temp, self.marker_path()))
+            .and_then(|()| fs::rename(&temp, self.path.join(name)))
             .and_then(|()| self.sync())
     }
 }
@@ -370,7 +437,9 @@ pub fn clearable(taint: &Taint) -> bool {
 /// (`process-as-job-user`, `daemonised-child`), which a re-check judges without the baseline
 /// (see [`CheckHook::run_restored`](super::CheckHook::run_restored)). Every other restored
 /// taint stays pinned: a re-check of the restart baseline cannot speak for it.
-fn restorable(taint: &Taint) -> bool {
+///
+/// The pin file ([`PIN_FILE`]) can still pin it: see [`StateRoot::restored_rechecks`].
+pub fn restorable(taint: &Taint) -> bool {
     taint.reason == reason::RESIDUE && clearable(taint)
 }
 
@@ -401,6 +470,9 @@ pub(super) struct TaintState {
     /// marker at start that [`restorable`] does not allow to be re-checked. The host stays
     /// tainted whatever the re-checks say.
     pinned: bool,
+    /// The pin file records the pin, or needs not (the pin was found at start): no write of
+    /// it is owed.
+    pin_recorded: bool,
     /// The taint was read from the marker at start and may be re-checked (see [`restorable`]):
     /// its re-checks also judge what the restart baseline cannot clear.
     restored: bool,
@@ -415,15 +487,19 @@ pub(super) struct TaintState {
 
 impl TaintState {
     /// The state on record in `root`: tainted when a marker is there. A taint read from the
-    /// marker is pinned, unless it is a residue of a process ([`restorable`]): that one is
-    /// re-checked, with the re-check that needs no baseline, because the baseline this
-    /// process took already holds what the job left.
+    /// marker is pinned, unless it is a residue of a process ([`restorable`]) that the pin
+    /// file does not name ([`StateRoot::restored_rechecks`]): that one is re-checked, with
+    /// the re-check that needs no baseline, because the baseline this process took already
+    /// holds what the job left.
     pub(super) fn load(root: StateRoot) -> Self {
         let taint = root.read();
-        let restored = taint.as_ref().is_some_and(restorable);
+        let restored = taint
+            .as_ref()
+            .is_some_and(|taint| root.restored_rechecks(taint));
         Self {
             persisted: taint.is_some(),
             pinned: taint.is_some() && !restored,
+            pin_recorded: true,
             restored,
             taint,
             root,
@@ -535,6 +611,7 @@ impl TaintState {
             // The marker keeps the first taint, and the host now has more than it says: it
             // is not cleared by a re-check, and a clear that waits for the server stops.
             self.pinned = true;
+            self.pin_recorded = false;
             self.clearing = false;
         }
         let written = self.persist();
@@ -544,20 +621,38 @@ impl TaintState {
         written
     }
 
-    /// Writes the marker when the host is tainted and the marker does not hold it yet.
+    /// Writes the marker when the host is tainted and the marker does not hold it yet, and
+    /// then the pin file when the host is pinned in memory and the file does not record it.
     ///
     /// # Errors
     ///
-    /// The marker could not be written.
+    /// The marker or the pin file could not be written (the marker's error first). The
+    /// host stays tainted, and pinned if it was, in memory; the write is tried again at the
+    /// next call.
     pub(super) fn persist(&mut self) -> io::Result<()> {
-        match (&self.taint, self.persisted) {
+        let marker = match (&self.taint, self.persisted) {
             (Some(taint), false) => {
                 let written = self.root.write(taint);
                 self.persisted = written.is_ok();
                 written
             }
             _ => Ok(()),
-        }
+        };
+        let pin = match (
+            &self.taint,
+            self.persisted && self.pinned && !self.pin_recorded,
+        ) {
+            (Some(taint), true) => {
+                let written = self
+                    .root
+                    .write_pin(taint)
+                    .map_err(|why| io::Error::new(why.kind(), format!("{PIN_FILE}: {why}")));
+                self.pin_recorded = written.is_ok();
+                written
+            }
+            _ => Ok(()),
+        };
+        marker.and(pin)
     }
 }
 

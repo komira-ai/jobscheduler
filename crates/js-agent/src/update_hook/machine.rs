@@ -428,6 +428,13 @@ impl StateView for Root {
         }
     }
 
+    fn restored_rechecks(&self, taint: &Taint) -> bool {
+        match self {
+            Root::Open(root) => StateView::restored_rechecks(root, taint),
+            Root::Absent => false,
+        }
+    }
+
     fn owed(&self) -> Result<Vec<String>, PortError> {
         match self {
             Root::Open(root) => StateView::owed(root),

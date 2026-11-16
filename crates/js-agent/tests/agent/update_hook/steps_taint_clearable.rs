@@ -1,6 +1,7 @@
-//! A taint the agent can clear itself does not halt `prepare`, `cutover`, `verify` or
-//! `rollback`: the step goes on as for a clean host and the restarted agent's own re-checks
-//! clear the taint. A taint it cannot clear, and an owed check, still halt (76).
+//! A taint the restarted agent re-checks (a residue of a process the pin file does not name)
+//! does not halt `prepare`, `cutover`, `verify` or `rollback`: the step goes on as for a clean
+//! host and the restarted agent's own re-checks clear the taint. Any other taint, an unchecked
+//! one included, a residue the pin file names, and an owed check, still halt (76).
 
 use std::time::Duration;
 
@@ -9,18 +10,21 @@ use js_agent::update_hook::{Clock, Done, Outcome, Reason};
 use super::rollback_entries::{assert_restored, link_moved, start};
 use super::step_rig::{Rig, Spy, running};
 
-/// Taints the agent clears itself: (reason, check).
-const CLEARABLE: [(&str, &str); 3] = [
+/// Taints the restarted agent re-checks and clears itself: (reason, check).
+const CLEARABLE: [(&str, &str); 2] = [
     ("residue", "daemonised-child"),
     ("residue", "process-as-job-user"),
-    ("unchecked", "processes-unreadable"),
 ];
 
-/// Taints the agent never clears itself: (reason, check).
-const NOT_CLEARABLE: [(&str, Option<&str>); 5] = [
+/// Taints the restarted agent does not re-check: (reason, check). The unchecked ones are
+/// restored pinned, so a halt-free hook would leave the host tainted for good.
+const NOT_CLEARABLE: [(&str, Option<&str>); 8] = [
     ("cleanup-failed", None),
     ("residue", Some("new-mount")),
     ("unchecked", Some("host-not-visible")),
+    ("unchecked", Some("processes-unreadable")),
+    ("unchecked", Some("watch-over-bound")),
+    ("unchecked", Some("cgroup-not-found")),
     ("residue", None),
     ("host-job", None),
 ];
@@ -185,4 +189,35 @@ fn an_owed_check_halts_even_under_a_clearable_taint() {
     let done = Spy::new(&rig).prepare(&rig);
     assert_eq!(done.outcome, Outcome::Halt, "{done:?}");
     assert_eq!(done.report.reason, Some(Reason::OwedCheck));
+}
+
+/// Writes the pin file of `rig`'s state root for the taint of `reason` and `check`.
+fn pin(rig: &Rig, reason: &str, check: &str) {
+    rig.state_root()
+        .write_pin(&js_agent_wire::Taint {
+            reason: reason.to_owned(),
+            run_id: None,
+            check: Some(check.to_owned()),
+        })
+        .unwrap();
+}
+
+/// Catches a `prepare` that goes on over a residue the pin file names, which the restarted
+/// agent restores pinned and never clears, and one that lets a pin file of another taint
+/// (the stale file of an operator's clear) halt a host whose taint the agent re-checks.
+#[test]
+fn a_residue_the_pin_file_names_halts_prepare_and_another_does_not() {
+    let rig = Rig::new("hook-pinned-prepare");
+    rig.taint_with("residue", Some("daemonised-child"));
+    pin(&rig, "residue", "daemonised-child");
+    let spy = Spy::new(&rig);
+    let done = spy.prepare(&rig);
+    halted_tainted(&done, "pinned residue");
+    assert_eq!(spy.log(), Vec::<String>::new());
+
+    let rig = Rig::new("hook-stale-pin-prepare");
+    rig.taint_with("residue", Some("daemonised-child"));
+    pin(&rig, "residue", "process-as-job-user");
+    let done = Spy::new(&rig).prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
 }

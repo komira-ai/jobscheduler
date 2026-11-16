@@ -141,7 +141,8 @@ taint changes nothing; only the provider path below, or an operator, ends it.
 | `default` (registered) | The host id enters the tainted set and any hello from it is refused with a constant code, even with a valid join credential, until an operator reimages the machine and clears the id. Clearing also drops the binding of the id to its first credential (5.8). |
 
 A tainted host id cannot rejoin: it is checked at admission before the credential. The tainted set survives a scheduler restart (it is in
-the binding file), and an operator's clear (`ClearHostTaint`) is the only way out.
+the binding file), and a taint ends by the agent's own acknowledged clear
+([taint-self-clearing.md](taint-self-clearing.md)) or by the operator's clear (`ClearHostTaint`, after moving the agent's marker aside).
 
 **Replacement is bounded.** A replacement is an acquire like any other: it follows `max_step`, `cooldown` and `max_machines`, and a pool
 whose hosts keep tainting (a bad job class) raises an alert after `max_taints_in_a_row` replacements without a clean job between them,

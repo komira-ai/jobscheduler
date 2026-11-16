@@ -11,8 +11,10 @@
 //!    is first written (5), and named in the detail of the step's last line. The state
 //!    directory is made, mode 0700, when it is not there: hostkeeper makes none, so a first
 //!    install finds none;
-//! 2. a taint the agent cannot clear itself, or an `owed-*` record, halts (76); a taint it can
-//!    clear (see [`clearable`]) does not, and the step goes on as for a clean host;
+//! 2. a taint the restarted agent will not re-check, or an `owed-*` record, halts (76); a taint
+//!    it will re-check (a residue of a process the pin file does not name, see
+//!    [`restored_rechecks`](crate::update_hook::StateView::restored_rechecks)) does not, and the
+//!    step goes on as for a clean host;
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
 //!    release, see [`agent_in`]) `--version` names the target version (1), and the staged release
 //!    carries the unit the hook manages (`bad_artifact` otherwise);
@@ -33,7 +35,6 @@
 
 use std::time::Duration;
 
-use crate::lifecycle::taint::clearable;
 use crate::update_hook::{
     Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, PlanError, Reason, Record,
     Report, UnitRestart, UpdateInfo, agent_in, plan,
@@ -181,13 +182,19 @@ fn bad_artifact(why: impl ToString) -> Done {
     failure(Reason::BadArtifact, why.to_string())
 }
 
-/// A taint the agent cannot clear itself, or an owed check, halts: no version can repair it.
-/// A taint the agent may clear ([`clearable`]: a residue of a process, or a check that could
-/// not read its input) does not: the marker stays, the restarted agent restores it, and its
-/// own re-checks clear it, so a halt would only keep the release that carries that clearing
-/// from reaching the host.
+/// A taint the restarted agent will not re-check, or an owed check, halts: no version can repair
+/// it. A taint it will re-check does not: a residue of a process (`process-as-job-user`,
+/// `daemonised-child`) that the state root's pin file does not name. The marker stays, the
+/// restarted agent restores it, and its own re-checks clear it, so a halt would only keep the
+/// release that carries that clearing from reaching the host. Every unchecked taint
+/// (`*-unreadable`, `watch-over-bound`, `cgroup-not-found`) still halts, because a restart
+/// restores it pinned, as does a residue the pin file names.
 pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
-    if let Some(taint) = env.ports.state.taint().filter(|taint| !clearable(taint)) {
+    let state = env.ports.state;
+    if let Some(taint) = state
+        .taint()
+        .filter(|taint| !state.restored_rechecks(taint))
+    {
         return Err(Done {
             outcome: Outcome::Halt,
             report: Report::failure(

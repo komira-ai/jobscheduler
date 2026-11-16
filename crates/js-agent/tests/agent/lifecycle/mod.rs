@@ -39,6 +39,7 @@ mod slots;
 mod taint;
 mod taint_clear;
 mod taint_idle;
+mod taint_pin;
 
 use std::collections::BTreeSet;
 use std::fs;
