@@ -14,7 +14,9 @@ use super::{Lifecycle, MAX_JOBS, SLOTS, Slots};
 use crate::lifecycle::quota::QuotaHealth;
 use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status};
 use crate::lifecycle::taint::{TaintState, reason};
-use crate::lifecycle::{CheckHook, Clock, Config, DEFAULT_SETTLE, Event, Finding, code, label};
+use crate::lifecycle::{
+    CheckHook, Clock, Config, DEFAULT_SETTLE, DEFAULT_TAINT_RECHECK, Event, Finding, code, label,
+};
 
 /// The taint of a record of owed checks: the run it names, or the check code when the
 /// records could not be listed.
@@ -99,6 +101,7 @@ impl Lifecycle {
             answered: Vec::new(),
             silence: None,
             blind_wait: DEFAULT_SETTLE,
+            taint_recheck: DEFAULT_TAINT_RECHECK,
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);

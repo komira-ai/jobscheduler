@@ -65,6 +65,13 @@ pub mod code {
     pub const HOST_NOT_VISIBLE: &str = "host-not-visible";
     /// The taint marker could not be written. The host is tainted in memory all the same.
     pub const TAINT_WRITE_FAILED: &str = "taint-write-failed";
+    /// A taint cleared itself: the host passed two re-checks while idle, the server
+    /// acknowledged the clear, and the marker is kept as `taint.json.cleared-<time>`.
+    pub const TAINT_CLEARED: &str = "taint-cleared";
+    /// The clear of a taint could not be finished (a record of owed checks could not be
+    /// removed, or the marker could not be renamed). The host stays tainted and the clear is
+    /// tried again at the next acknowledgement.
+    pub const TAINT_CLEAR_FAILED: &str = "taint-clear-failed";
     /// The record that a job's checks are owed could not be written or removed. While it
     /// cannot be written the job's container is not removed; while it cannot be removed
     /// the job's slot is not freed.

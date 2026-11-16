@@ -11,8 +11,14 @@
 //!   same directory, the file is synced, renamed over the marker, and the directory is
 //!   synced. A crash leaves the old state or the new one, never half a marker, and a
 //!   marker the agent reports is a marker that survives a power cut.
-//! - **No code deletes it.** The agent has no path that removes or empties the marker. Only
-//!   an operator who reimages the host, or removes the file by hand, ends a taint.
+//! - **The agent deletes it in one case only: a taint that cleared itself.** A taint whose
+//!   reason is [`reason::RESIDUE`] or [`reason::UNCHECKED`] and whose check is one of a
+//!   process or of a check that could not read its input (see [`clearable`]) is re-checked
+//!   while the host is idle, and clears after two clean re-checks `--taint-recheck-ms`
+//!   apart and the server's acknowledgement of the clear (see "A taint that clears itself").
+//!   The marker is then renamed to `taint.json.cleared-<unix seconds>`, never removed: the
+//!   file is kept as an operator's clear keeps it. Every other taint ends only when an
+//!   operator reimages the host, or moves the file by hand.
 //! - **It is read when the agent starts**, so a tainted agent that restarts is still
 //!   tainted. A marker that exists but cannot be read or understood taints the host with the
 //!   reason [`reason::MARKER_UNREADABLE`]: a file that is there is never taken for an absent
@@ -45,10 +51,44 @@
 //! it holds a container removal and the checks. An agent that is stopped, restarted or
 //! killed in it, a stop on `SIGTERM` included, leaves the record behind, and the next
 //! process finds it and taints the host (`check-owed`): the agent cannot tell what the job
-//! left behind before the new baseline was taken. Nothing clears that taint yet. When a
-//! flow to clear a taint is added, it **must remove the `owed-*` records as well as
+//! left behind before the new baseline was taken. The agent never clears that taint: no
+//! re-check can show that what the job left was not already part of the baseline. A clear
+//! (the agent's or an operator's) **must remove the `owed-*` records as well as
 //! `taint.json`**: clearing the marker alone leaves the records, and the very next start
-//! taints the host again.
+//! taints the host again. The agent's clear removes the records of the runs it frees from
+//! `Blocked` (their checks found the taint), which are the only ones a clearable taint can
+//! leave.
+//!
+//! # A taint that clears itself
+//!
+//! A host that is tainted for what a check *judged* (a process that was not there at the
+//! baseline and that outlived the job's container and the settle wait, or a check that
+//! could not read its input) may have been tainted for a moment of the host's own: on
+//! 2026-11-15 every build node was out of service for processes that were gone seconds
+//! after they were seen. So such a taint clears itself, by the rules of
+//! `docs/design/taint-self-clearing.md`:
+//!
+//! 1. Only a taint [`clearable`] says so: reason [`reason::RESIDUE`] with the check
+//!    `process-as-job-user` or `daemonised-child`, or reason [`reason::UNCHECKED`] with a
+//!    check that could not read its input (`*-unreadable`, `watch-over-bound`). Never
+//!    `cleanup-failed`, `check-owed`, `host-job`, `marker-unreadable`, `host-not-visible`
+//!    (a re-check does not show that the agent now sees the host), nor a mount, user, group,
+//!    module or watched-directory change: state the host really holds. A non-clearable taint
+//!    sealed *after* a clearable one (the first stays in the marker) keeps the host from
+//!    clearing for the life of the process.
+//! 2. The host is idle: no run is held but `Blocked` or `Freed` ones (their container and
+//!    scratch are gone), and no container the agent could not remove.
+//! 3. A full check (every check of the table, with the settle wait, against the baseline
+//!    taken before the tainting job) passes, and passes again at least `--taint-recheck-ms`
+//!    after. The first re-check is due one interval after the agent first sees the taint
+//!    clearable and idle; a re-check that finds anything, or a host that is not idle, starts
+//!    the count again. A process still present at a re-check keeps the host tainted.
+//! 4. The agent then reports the cleared taint (`taint_cleared` in the heartbeat) until the
+//!    server acknowledges it (`taint_cleared_ack`), and stays tainted until then, so that the server and the agent
+//!    agree and a restart before the acknowledgement finds the marker and starts over. On
+//!    the acknowledgement it removes the `owed-*` records of its `Blocked` runs, renames the
+//!    marker to `taint.json.cleared-<unix seconds>`, frees those runs and their slots, and
+//!    logs the clear as a finding (`taint-cleared`) naming the taint and the two checks.
 //!
 //! # What the lifecycle does with it
 //!
@@ -67,17 +107,34 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use js_agent_wire::Taint;
 
 use super::Event;
 use super::scratch::private_dir;
+use crate::integrity::code as check;
 
 /// The name of the marker file in the state root.
 pub const MARKER_FILE: &str = "taint.json";
 
 /// The temporary file the marker is written through, renamed over [`MARKER_FILE`].
 pub const MARKER_TEMP_FILE: &str = "taint.json.tmp";
+
+/// The start of the name a cleared marker is kept under: `taint.json.cleared-<unix seconds>`,
+/// the name an operator's clear uses.
+pub const CLEARED_PREFIX: &str = "taint.json.cleared-";
+
+/// The wait between two re-checks of a taint that may clear itself when `--taint-recheck-ms`
+/// is not given: a minute, long enough to outlast a host's own churn at the end of a job and
+/// short enough that a node is back in service within minutes.
+pub const DEFAULT_TAINT_RECHECK: Duration = Duration::from_secs(60);
+
+/// The most milliseconds `--taint-recheck-ms` takes: an hour.
+pub const MAX_TAINT_RECHECK_MS: u64 = 3_600_000;
+
+/// The clean re-checks in a row that clear a taint.
+const CLEAN_RECHECKS: u32 = 2;
 
 /// The most bytes of a marker that are read. A real marker is a few hundred bytes.
 const MARKER_MAX: u64 = 4096;
@@ -182,6 +239,21 @@ impl StateRoot {
 }
 
 impl StateRoot {
+    /// Keeps the marker under the name of a cleared one, `taint.json.cleared-<stamp>`,
+    /// and makes the rename durable. A marker that is not there is already kept.
+    ///
+    /// # Errors
+    ///
+    /// The rename or the sync of the directory failed.
+    pub fn keep_cleared(&self, stamp: u64) -> io::Result<()> {
+        let kept = self.path.join(format!("{CLEARED_PREFIX}{stamp}"));
+        match fs::rename(self.marker_path(), kept) {
+            Ok(()) => self.sync(),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(why) => Err(why),
+        }
+    }
+
     /// The record of the checks owed by `run_id`.
     fn owed_path(&self, run_id: &str) -> PathBuf {
         self.path.join(format!("{OWED_PREFIX}{run_id}"))
@@ -258,13 +330,60 @@ fn unreadable() -> Taint {
     }
 }
 
-/// What the lifecycle keeps of the taint: the taint, whether the marker holds it, and
-/// whether the server has acknowledged the report.
+/// Whether `taint` is one the agent may clear itself (see "A taint that clears itself"): a
+/// residue of a process, or a check that could not read its input. Anything else is state
+/// the host really holds, or a taint a re-check cannot speak for.
+pub fn clearable(taint: &Taint) -> bool {
+    let code = taint.check.as_deref().unwrap_or_default();
+    match taint.reason.as_str() {
+        reason::RESIDUE => [check::PROCESS_AS_JOB_USER, check::DAEMONISED_CHILD].contains(&code),
+        reason::UNCHECKED => [
+            check::PROCESSES_UNREADABLE,
+            check::MOUNTS_UNREADABLE,
+            check::USERS_UNREADABLE,
+            check::GROUPS_UNREADABLE,
+            check::MODULES_UNREADABLE,
+            check::WATCH_UNREADABLE,
+            check::WATCH_OVER_BOUND,
+        ]
+        .contains(&code),
+        _ => false,
+    }
+}
+
+/// The wait between re-checks `--taint-recheck-ms` gave, or [`DEFAULT_TAINT_RECHECK`].
+///
+/// # Errors
+///
+/// The text names the flag: the value is 0 or above [`MAX_TAINT_RECHECK_MS`].
+pub fn recheck_every(given: Option<u64>) -> Result<Duration, String> {
+    match given {
+        None => Ok(DEFAULT_TAINT_RECHECK),
+        Some(0) => Err("--taint-recheck-ms: at least 1".to_owned()),
+        Some(ms) if ms > MAX_TAINT_RECHECK_MS => Err(format!(
+            "--taint-recheck-ms: at most {MAX_TAINT_RECHECK_MS}"
+        )),
+        Some(ms) => Ok(Duration::from_millis(ms)),
+    }
+}
+
+/// What the lifecycle keeps of the taint: the taint, whether the marker holds it, whether
+/// the server has acknowledged the report, and how far the host is from clearing it.
 pub(super) struct TaintState {
     root: StateRoot,
     taint: Option<Taint>,
     persisted: bool,
     acked: bool,
+    /// A taint the agent never clears was sealed beside the first one: the host stays
+    /// tainted whatever the re-checks say.
+    pinned: bool,
+    /// The clean re-checks in a row.
+    clean: u32,
+    /// When the next re-check is due, on the lifecycle's clock; none until the taint is
+    /// first seen clearable and idle.
+    due: Option<u64>,
+    /// The re-checks passed and the clear is reported until the server acknowledges it.
+    clearing: bool,
 }
 
 impl TaintState {
@@ -276,6 +395,10 @@ impl TaintState {
             taint,
             root,
             acked: false,
+            pinned: false,
+            clean: 0,
+            due: None,
+            clearing: false,
         }
     }
 
@@ -293,7 +416,61 @@ impl TaintState {
     /// host forget a taint the server was told of. Until the marker is written the host is
     /// tainted in memory, refuses starts and frees no slot.
     pub(super) fn pending(&self) -> Option<Taint> {
-        self.taint.clone().filter(|_| self.persisted && !self.acked)
+        let reporting = self.persisted && !self.acked && !self.clearing;
+        self.taint.clone().filter(|_| reporting)
+    }
+
+    /// The taint the next heartbeat reports cleared: the taint, from the second clean
+    /// re-check until the server acknowledges the clear.
+    pub(super) fn pending_clear(&self) -> Option<Taint> {
+        self.taint.clone().filter(|_| self.clearing)
+    }
+
+    /// Whether the agent may re-check this taint at all: it is clearable, the marker holds
+    /// it, no non-clearable taint was sealed beside it, and the clear is not reported yet.
+    pub(super) fn rechecks(&self) -> bool {
+        let clearable = self.taint.as_ref().is_some_and(clearable);
+        clearable && self.persisted && !self.pinned && !self.clearing
+    }
+
+    /// The host is not idle, or a re-check found something: the count starts again.
+    pub(super) fn restart_rechecks(&mut self) {
+        self.clean = 0;
+        self.due = None;
+    }
+
+    /// Whether a re-check is due at `now` (milliseconds on the lifecycle's clock). The first
+    /// call after the count started again only sets the time of the first re-check, `every`
+    /// from `now`.
+    pub(super) fn recheck_due(&mut self, now: u64, every: Duration) -> bool {
+        let due = *self.due.get_or_insert_with(|| after(now, every));
+        now >= due
+    }
+
+    /// Notes a re-check at `now` and whether it passed. Returns whether it was the second
+    /// clean one in a row, which makes the taint report its clear.
+    pub(super) fn rechecked(&mut self, passed: bool, now: u64, every: Duration) -> bool {
+        self.due = Some(after(now, every));
+        self.clean = if passed { self.clean + 1 } else { 0 };
+        self.clearing = self.clean >= CLEAN_RECHECKS;
+        self.clearing
+    }
+
+    /// Ends the taint: the marker is kept as `taint.json.cleared-<stamp>` and the state is
+    /// that of a host that was never tainted.
+    ///
+    /// # Errors
+    ///
+    /// The marker could not be renamed. The taint stays, and the clear is still reported.
+    pub(super) fn clear(&mut self, stamp: u64) -> io::Result<()> {
+        self.root.keep_cleared(stamp)?;
+        self.taint = None;
+        self.persisted = false;
+        self.acked = false;
+        self.pinned = false;
+        self.clearing = false;
+        self.restart_rechecks();
+        Ok(())
     }
 
     /// Notes the server's acknowledgement. One that arrives while there is no taint to
@@ -315,6 +492,11 @@ impl TaintState {
         let first = self.taint.is_none();
         if first {
             self.taint = Some(taint.clone());
+        } else if !clearable(&taint) {
+            // The marker keeps the first taint, and the host now has more than it says: it
+            // is not cleared by a re-check, and a clear that waits for the server stops.
+            self.pinned = true;
+            self.clearing = false;
         }
         let written = self.persist();
         if first {
@@ -338,4 +520,9 @@ impl TaintState {
             _ => Ok(()),
         }
     }
+}
+
+/// `now` and `every` added, in milliseconds.
+fn after(now: u64, every: Duration) -> u64 {
+    now.saturating_add(u64::try_from(every.as_millis()).unwrap_or(u64::MAX))
 }

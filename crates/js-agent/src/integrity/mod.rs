@@ -15,7 +15,10 @@
 //! could not remove; see [`CheckHook::idle`]): what changed between jobs is the host's, not
 //! a job's. So the baseline is the host as it was after the last job that left nothing, or
 //! when the job started on an idle host. A check that finds something leaves it alone (the
-//! host is tainted for good, and every later job is compared with the last clean state).
+//! host is tainted, and every later check is compared with the last clean state). The
+//! re-checks of a taint that may clear itself (see [`crate::lifecycle::taint`]) are these
+//! same checks, run on an idle host with nothing live: one that passes takes the baseline
+//! again, as after any job that leaves nothing.
 //!
 //! # What is checked
 //!

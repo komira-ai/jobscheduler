@@ -1,0 +1,139 @@
+//! A taint that clears itself (`docs/design/taint-self-clearing.md`; the rules are in
+//! [`taint`](crate::lifecycle::taint)): the re-checks of an idle host, and the clear when the
+//! server has acknowledged the report of it.
+//!
+//! [`Lifecycle::step`] asks for a re-check on every tick; one runs only when the taint is
+//! clearable, the host is idle and `--taint-recheck-ms` has passed since the last. The
+//! second clean one in a row makes the taint report its clear (`taint_cleared`, see
+//! [`Lifecycle::pending_taint_clear`]); the reply that acknowledges it ends the taint.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::Lifecycle;
+use super::job::{Job, Stage};
+use crate::lifecycle::taint::CLEARED_PREFIX;
+use crate::lifecycle::{Event, Finding, Finished, code};
+
+/// The run id the re-checks are given.
+const RECHECK_RUN: &str = "taint-recheck";
+
+impl Lifecycle {
+    /// The same lifecycle, with `every` as the wait between the re-checks of a taint that may
+    /// clear itself: `--taint-recheck-ms`. The default is
+    /// [`DEFAULT_TAINT_RECHECK`](crate::lifecycle::taint::DEFAULT_TAINT_RECHECK).
+    #[must_use]
+    pub fn with_taint_recheck(self, every: std::time::Duration) -> Self {
+        Self {
+            taint_recheck: every,
+            ..self
+        }
+    }
+
+    /// The taint the next heartbeat must carry in `taint_cleared`: set from the second clean
+    /// re-check until the server acknowledges the clear with `taint_cleared_ack`. The host is still
+    /// tainted until then.
+    pub fn pending_taint_clear(&self) -> Option<js_agent_wire::Taint> {
+        self.taint.pending_clear()
+    }
+
+    /// Whether no run is held but those whose checks found the taint (`Blocked`) or that are
+    /// over (`Freed`), whose container and scratch directory are gone. A container the agent
+    /// could not remove is not a run, but it has tainted the host as `cleanup-failed` when it
+    /// was found, which no re-check clears ([`TaintState::rechecks`](crate::lifecycle::taint)).
+    fn host_idle(&self) -> bool {
+        let over = |job: &Job| matches!(job.stage, Stage::Blocked | Stage::Freed);
+        self.jobs.iter().all(over)
+    }
+
+    /// Re-checks a taint that may clear itself, when the host is idle and a re-check is due.
+    /// The check is the post-job one with nothing live, against the baseline taken before
+    /// the job that tainted the host.
+    pub(super) fn recheck_taint(&mut self) {
+        if !self.taint.rechecks() {
+            return;
+        }
+        if !self.host_idle() {
+            self.taint.restart_rechecks();
+            return;
+        }
+        let now = self.clock.now_ms();
+        if !self.taint.recheck_due(now, self.taint_recheck) {
+            return;
+        }
+        let verdict = self.checks.run(&Finished {
+            run_id: RECHECK_RUN,
+            live: &[],
+            slot: None,
+            live_slots: &[],
+            held_mounts: &[],
+        });
+        let now = self.clock.now_ms();
+        self.taint
+            .rechecked(verdict.is_ok(), now, self.taint_recheck);
+    }
+
+    /// Ends the taint when `acked` (a reply's `taint_cleared_ack`) answers the report of its clear:
+    /// the records of the owed checks of the `Blocked` runs go, the marker is kept as
+    /// `taint.json.cleared-<unix seconds>`, those runs and their slots are freed, and the
+    /// clear is a finding. A failure is a finding too and leaves everything as it was: the
+    /// clear is reported again, and the next acknowledgement tries again.
+    pub(super) fn finish_taint_clear(&mut self, acked: bool, events: &mut Vec<Event>) {
+        let Some(held) = self.taint.pending_clear().filter(|_| acked) else {
+            return;
+        };
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cleared = self
+            .release_blocked()
+            .and_then(|()| self.taint.clear(stamp));
+        let (code, message) = match cleared {
+            Ok(()) => (
+                code::TAINT_CLEARED,
+                format!(
+                    "the host is clean again: the re-checks passed twice, {} ms apart, with nothing \
+                     running (reason {}, check {}, run {}); the marker is kept as {CLEARED_PREFIX}{stamp}",
+                    self.taint_recheck.as_millis(),
+                    held.reason,
+                    held.check.as_deref().unwrap_or("-"),
+                    held.run_id.as_deref().unwrap_or("-"),
+                ),
+            ),
+            Err(why) => (code::TAINT_CLEAR_FAILED, why.to_string()),
+        };
+        events.push(Event::Finding(Finding {
+            run_id: None,
+            code,
+            message,
+        }));
+    }
+
+    /// Frees the runs whose checks found the taint: the record that their checks were owed
+    /// goes (a restart would taint the host again for it), the run is freed and its slot
+    /// comes back.
+    ///
+    /// # Errors
+    ///
+    /// A record could not be removed; no run is freed.
+    fn release_blocked(&mut self) -> std::io::Result<()> {
+        let blocked: Vec<&str> = self
+            .jobs
+            .iter()
+            .filter(|job| job.stage == Stage::Blocked)
+            .map(|job| job.run_id.as_str())
+            .collect();
+        blocked
+            .into_iter()
+            .try_for_each(|run_id| self.config.state.settle(run_id))?;
+        for job in &mut self.jobs {
+            if job.stage == Stage::Blocked {
+                job.stage = Stage::Freed;
+                job.slot
+                    .iter()
+                    .for_each(|slot| self.slots.unquarantine(*slot));
+            }
+        }
+        Ok(())
+    }
+}

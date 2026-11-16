@@ -151,9 +151,18 @@
 //!   of the baseline the new process took. A record that cannot be written holds the
 //!   cleanup where it is, the container included; one that cannot be removed holds the
 //!   slot. **A restart or a `SIGTERM` inside the cleanup window therefore taints the host
-//!   at the next start**, and until a flow to clear a taint exists nothing ends it; that
-//!   flow must remove the `owed-*` records as well as `taint.json`, or the next start
+//!   at the next start**, and the agent never clears that taint (see below); an operator's
+//!   clear must remove the `owed-*` records as well as `taint.json`, or the next start
 //!   taints the host again (see [`taint`]).
+//! - **A taint a check judged clears itself.** A taint of a process a job left, or of an
+//!   input the checks could not read, is re-checked while the host is idle (every run over,
+//!   `Blocked` ones included): two clean full checks `--taint-recheck-ms` apart make the
+//!   agent report the clear (`taint_cleared`), and the server's acknowledgement (`taint_cleared_ack`) ends the
+//!   taint, frees the blocked runs and their slots, and keeps the marker as
+//!   `taint.json.cleared-<time>`. A process still there keeps the host tainted; a failed
+//!   removal, owed checks, a host job and a change of mounts, users, groups, modules or a
+//!   watched directory are never cleared by the agent. See [`taint`] for the rules and
+//!   `docs/design/taint-self-clearing.md` for the reasons.
 //! - **A `host-tainted` refusal is final for that `Start`, and the host's.** The run did
 //!   not start on this host and will not; the server must not send it to this host again
 //!   (see `refusal::HOST_TAINTED`), and must treat a `Start` refused with it as the host's
@@ -168,10 +177,12 @@
 //!
 //! # What this change does not do
 //!
-//! - **A blocked run never leaves.** A check that finds something, or cannot run, leaves
-//!   the run `Blocked`: its slot stays booked, it counts toward the runs the agent holds
-//!   and is listed as `exited_unacked` for as long as the agent lives. Nothing clears a
-//!   taint yet: the host is reimaged, which is the clear flow's to add.
+//! - **A blocked run leaves only with a taint that clears.** A check that finds something,
+//!   or cannot run, leaves the run `Blocked`: its slot stays booked, it counts toward the
+//!   runs the agent holds and is listed as `exited_unacked` for as long as the taint stands.
+//!   When a taint that clears itself ends, its blocked runs are freed and their slots come
+//!   back; for any other taint the host is reimaged (or the marker moved by hand and the
+//!   agent restarted).
 //! - **Mount roots are read-write.** A root is whatever directory the operator names, and
 //!   a job's `ro` flag is the message's. A root that is read-only for every job is a later
 //!   flag. A job that holds a read-write mount can write in its root, so it can swap a
@@ -283,7 +294,9 @@ pub use silence::{
     Contact, DEFAULT_SILENCE_STOP, MAX_SILENCE_STOP_SECS, SILENCE_STOP_GRACE_RATIO, fits_grace,
     silence_stop,
 };
-pub use taint::{MARKER_FILE, StateRoot};
+pub use taint::{
+    DEFAULT_TAINT_RECHECK, MARKER_FILE, MAX_TAINT_RECHECK_MS, StateRoot, clearable, recheck_every,
+};
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only
 /// subtracts two readings, so the origin does not matter and a change of the wall clock
@@ -512,6 +525,8 @@ pub struct Local {
     pub watch: Vec<PathBuf>,
     /// `--settle-ms`, or [`DEFAULT_SETTLE`].
     pub settle: Duration,
+    /// `--taint-recheck-ms`, or [`DEFAULT_TAINT_RECHECK`].
+    pub taint_recheck: Duration,
     /// `--stop-grace`, or [`DEFAULT_STOP_GRACE`].
     pub stop_grace: Duration,
     /// `--drain-wait`, or the stop grace.
@@ -729,6 +744,10 @@ impl Local {
             return Err("--settle-ms: needs --container-bin".to_owned());
         }
         let settle = settle::settle(cli.settle_ms)?;
+        if container.is_none() && cli.taint_recheck_ms.is_some() {
+            return Err("--taint-recheck-ms: needs --container-bin".to_owned());
+        }
+        let taint_recheck = taint::recheck_every(cli.taint_recheck_ms)?;
         let silence_stop = silence::silence_stop(cli.silence_stop)?;
         silence::fits_grace(silence_stop, js_agent_wire::DEFAULT_GRACE_MS, stop_grace)?;
         if let Some(state) = &state {
@@ -802,6 +821,7 @@ impl Local {
             native,
             state,
             settle,
+            taint_recheck,
             stop_grace,
             drain_wait,
             image_allow: image_allow(&cli.image_allow)?,

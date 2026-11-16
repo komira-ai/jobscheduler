@@ -7,6 +7,7 @@
 
 mod adopt;
 mod cleanup;
+mod clear;
 mod exclusive;
 mod held;
 mod job;
@@ -123,6 +124,9 @@ pub struct Lifecycle {
     /// How long a run must be seen with no control group before the host counts as blind
     /// to it ([`Lifecycle::with_blind_wait`]).
     blind_wait: Duration,
+    /// The wait between the re-checks of a taint that may clear itself
+    /// ([`Lifecycle::with_taint_recheck`]).
+    taint_recheck: Duration,
 }
 
 impl Lifecycle {
@@ -191,6 +195,7 @@ impl Lifecycle {
             self.acknowledge_retired(&reply.retired_acks);
         }
         self.taint.ack(reply.taint_ack);
+        self.finish_taint_clear(reply.taint_cleared_ack, &mut events);
         self.sweep();
         self.persist_held(&mut events);
         events
@@ -204,7 +209,8 @@ impl Lifecycle {
         self.taint.pending()
     }
 
-    /// Whether the host is tainted, acknowledged or not.
+    /// Whether the host is tainted, acknowledged or not. It is until the clear of a taint
+    /// that clears itself has been acknowledged ([`Lifecycle::pending_taint_clear`]).
     pub fn is_tainted(&self) -> bool {
         self.taint.is_tainted()
     }
@@ -226,6 +232,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
+        self.recheck_taint();
         self.retry_parked(&mut events);
         self.watch_quota(&mut events);
         self.fit_log_tails_to_beat(&mut events);
