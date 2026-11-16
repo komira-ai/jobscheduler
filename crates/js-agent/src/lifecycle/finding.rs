@@ -6,7 +6,7 @@ pub const CHECK_DETAIL_MAX: usize = 256;
 /// What a post-job check reports when the host is not known to be clean: a short code the
 /// check owns, and a detail cut to [`CHECK_DETAIL_MAX`] bytes so that a check cannot fill
 /// the agent's memory or its log with the output of a program. The code becomes the code
-/// of the run's [`Finding`], so it is one finding for each code of a run.
+/// of the run's [`super::Finding`], so it is one finding for each code of a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckFinding {
     /// The run left something behind on the host.

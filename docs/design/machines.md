@@ -114,7 +114,7 @@ last known clean (at agent start, and after each job that passed). This list is 
 and none is removed without a decision:
 
 - *stray processes*: any process started during the job that is outside the job's cgroup or still alive after the container is gone
-  (including a daemonised child), and any process running as the job's user after the job ends;
+  (including a daemonised child, when it is in a group a job can be in: see taint-self-clearing.md, A process outside the groups a job can be in), and any process running as the job's user after the job ends;
 - *host changes*: a file created or changed outside the allowed roots (the agent's scratch, cache and output roots), compared by a bounded
   listing and digest of a configured watch list of directories; the set of mounts (`/proc/self/mountinfo`) against the baseline; the user
   and group database against the baseline; the loaded kernel modules (`/proc/modules`) against the baseline;

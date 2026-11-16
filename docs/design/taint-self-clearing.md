@@ -139,7 +139,9 @@ capabilities. So a process with parent `init` outside the agent's own group and 
 a job's, and `daemonised-child` no longer judges it. The groups a job can be in are the agent's own group and below it, a
 group that names a container (an engine's group, or the actions tree), and, as before, a process with no unified path (judged
 conservatively). `process-as-job-user` is unchanged: a uid of the job users' range is a job's wherever the process is. The
-same predicate is rule (b) of the re-check of a restored taint. Code: `job_can_be_in` in `integrity/mod.rs`.
+same predicate is rule (b) of the re-check of a restored taint. That rule has no exemption for a helper of the agent that is
+itself a child of `init` in the agent's group: such a process, other than the agent's own, keeps a restored taint until it
+ends. Code: `job_can_be_in` in `integrity/mod.rs`.
 
 ## Left out on purpose
 

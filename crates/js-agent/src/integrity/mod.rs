@@ -23,7 +23,8 @@
 //! exempts no process, because this process took it with whatever the tainting job left. A
 //! process of the job users' range, and a process whose parent is `init` in a group a job
 //! can be in, are findings even if the baseline holds them (the agent's own process, read from
-//! `/proc/self/stat` when the agent starts, is never one).
+//! `/proc/self/stat` when the agent starts, is never one). A helper of the agent that is a
+//! child of `init` in the agent's group keeps a restored taint until it ends.
 //!
 //! # What is checked
 //!
@@ -761,7 +762,7 @@ impl Integrity {
     /// of the first look that are still there are judged; the second look is the host that
     /// is compared. A process that starts during the wait is judged by the next check, and
     /// is not in the baseline this one may take. `restored` is the re-check of a taint read
-    /// from the marker at start (see [`Integrity::compare`]).
+    /// from the marker at start (see `Integrity::compare`).
     fn look(
         &self,
         job: &Finished<'_>,

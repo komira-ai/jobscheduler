@@ -366,9 +366,7 @@ pub fn clearable(taint: &Taint) -> bool {
 /// (see [`CheckHook::run_restored`](super::CheckHook::run_restored)). Every other restored
 /// taint stays pinned: a re-check of the restart baseline cannot speak for it.
 fn restorable(taint: &Taint) -> bool {
-    let code = taint.check.as_deref().unwrap_or_default();
-    taint.reason == reason::RESIDUE
-        && [check::PROCESS_AS_JOB_USER, check::DAEMONISED_CHILD].contains(&code)
+    taint.reason == reason::RESIDUE && clearable(taint)
 }
 
 /// The wait between re-checks `--taint-recheck-ms` gave, or [`DEFAULT_TAINT_RECHECK`].
