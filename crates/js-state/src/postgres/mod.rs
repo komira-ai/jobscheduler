@@ -100,7 +100,7 @@ use tx::{Level, Row, Tx, micros};
 use conn::{Dial, DialError, connection_lost};
 
 use crate::clock::{Clock, StoreTime};
-use crate::store::{Span, Store, page_of};
+use crate::store::{Claim, Span, Store, TxnRead, page_of};
 use crate::{
     Change, Changes, Commit, CommitStats, Conflict, Direction, Event, Revision, ScanPage,
     ScanRange, StoreError, Txn, Version, Versioned,
@@ -765,7 +765,93 @@ impl PostgresStore {
     }
 }
 
+/// The reads a decision of [`PostgresStore::claim_decide`] makes inside its transaction. A
+/// failed read is kept, not returned through the decision (which returns a transaction), and
+/// fails the call after it.
+struct TxReads<'a, 'p> {
+    tx: &'a mut Tx<'p>,
+    failed: Option<postgres::Error>,
+}
+
+impl TxReads<'_, '_> {
+    fn answer<T>(&mut self, read: Result<T, postgres::Error>) -> Result<T, StoreError> {
+        read.map_err(|err| {
+            let said = StoreError::Failed(describe(&err));
+            self.failed = Some(err);
+            said
+        })
+    }
+}
+
+impl TxnRead for TxReads<'_, '_> {
+    fn get(&mut self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        let row = self.tx.read(key);
+        self.answer(row).map(|row| row.as_ref().map(versioned))
+    }
+
+    fn scan_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        let rows = self.tx.read_prefix(prefix);
+        self.answer(rows).map(|rows| {
+            rows.into_iter()
+                .map(|(key, row)| (key, versioned(&row)))
+                .collect()
+        })
+    }
+}
+
+impl PostgresStore {
+    fn claim_decide_in(
+        &self,
+        claim: &[String],
+        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
+    ) -> Result<Claim, Fail> {
+        let mut tx = self.start(Level::ReadCommitted)?;
+        let locked = tx.lock_keys(claim)?;
+        if locked.len() != claim.len() {
+            return Ok(Claim::Held);
+        }
+        let mut reads = TxReads {
+            tx: &mut tx,
+            failed: None,
+        };
+        let decided = decide(&mut reads);
+        if let Some(err) = reads.failed {
+            return Err(Fail::Pg(err));
+        }
+        let Some(txn) = decided else {
+            return Ok(Claim::Declined);
+        };
+        match tx.apply(&txn)? {
+            Err(conflict) => Ok(Claim::Conflict(conflict)),
+            Ok(commit) => {
+                let wrote = u64::from(tx.dirty());
+                tx.commit()?;
+                self.syncs.fetch_add(wrote, Ordering::Relaxed);
+                self.txns.fetch_add(1, Ordering::Relaxed);
+                Ok(Claim::Committed(commit))
+            }
+        }
+    }
+}
+
 impl Store for PostgresStore {
+    fn head(&self) -> Result<Option<Revision>, StoreError> {
+        if self.flaw == Flaw::SequenceRevisions {
+            return Ok(None);
+        }
+        let head: i64 = self.read(|s| Ok(s.client.query_one(&s.st.head_read, &[])?.get(0)))?;
+        Ok(Some(Revision(u64::try_from(head).unwrap_or(0))))
+    }
+
+    fn claim_decide(
+        &self,
+        claim: &[String],
+        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
+    ) -> Result<Claim, StoreError> {
+        self.claim_decide_in(claim, decide)
+            .map_err(Fail::into_store)
+    }
+
     fn apply_batch(&self, batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
         if batch.is_empty() {
             return Ok(Vec::new());
