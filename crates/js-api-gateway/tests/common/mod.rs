@@ -18,14 +18,14 @@ use js_proto::v1::{
     Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
 };
 use js_proto::v1::{
-    CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse, Constraints,
-    CordonHostRequest, CordonHostResponse, ExecMode, GetJobRequest, GetJobResponse, GetLogsRequest,
-    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse, Job,
-    JobFile, JobResult, JobSpec, JobState, JobTimes, ListHostsRequest, ListHostsResponse,
-    ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, LogGap, LogStream, Needs, NetworkLevel, PortForward, ResourceUsage,
-    ResultReason, StartFailureCode, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse,
+    CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
+    Constraints, CordonHostRequest, CordonHostResponse, ExecMode, GetJobRequest, GetJobResponse,
+    GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest,
+    GetUsageResponse, Job, JobFile, JobResult, JobSpec, JobState, JobTimes, ListHostsRequest,
+    ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse,
+    ListProvidersRequest, ListProvidersResponse, LogGap, LogStream, Needs, NetworkLevel,
+    PortForward, ResourceUsage, ResultReason, StartFailureCode, SubmitJobRequest,
+    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};

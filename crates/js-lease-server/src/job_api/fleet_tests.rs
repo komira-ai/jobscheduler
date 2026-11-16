@@ -515,7 +515,10 @@ async fn clearing_an_unknown_host_is_not_found_and_a_clean_host_writes_nothing()
 async fn an_unsaved_clear_is_unavailable_with_its_own_code_but_holds() {
     let s = server("taint-unsaved");
     s.register("h1");
-    assert!(s.registry.taint_host(&HostId::new("h1").unwrap(), residue()));
+    assert!(
+        s.registry
+            .taint_host(&HostId::new("h1").unwrap(), residue())
+    );
     let blocker = s.dir.path().join("bindings.tmp");
     std::fs::create_dir(&blocker).unwrap();
     let unsaved = (Code::Unavailable, TAINT_UNSAVED.to_owned());

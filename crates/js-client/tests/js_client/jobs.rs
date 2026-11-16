@@ -9,8 +9,8 @@ use std::time::Duration;
 use js_client::jobs::{Dialer, JobClient, JobError};
 use js_proto::v1::{
     CancelJobRequest, ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetLogsRequest,
-    GetResultRequest, GetUsageRequest, JobSpec, ListHostsRequest, ListJobsRequest, ListPoolsRequest,
-    ListProvidersRequest, Needs, SubmitJobRequest, UncordonHostRequest,
+    GetResultRequest, GetUsageRequest, JobSpec, ListHostsRequest, ListJobsRequest,
+    ListPoolsRequest, ListProvidersRequest, Needs, SubmitJobRequest, UncordonHostRequest,
 };
 use prost::Message as _;
 use tonic::Code;
