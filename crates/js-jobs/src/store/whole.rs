@@ -423,3 +423,48 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok((allocation, version))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use js_state::{StoreError, TxnRead, Versioned};
+
+    use super::*;
+    use crate::ids::RandomIds;
+
+    /// A view of a store that holds no row.
+    struct Empty;
+
+    impl TxnRead for Empty {
+        fn get(&mut self, _key: &str) -> Result<Option<Versioned>, StoreError> {
+            Ok(None)
+        }
+
+        fn scan_prefix(&mut self, _prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Asserts that a decision made on a view that holds no row for the job says the job is
+    /// not found, writing nothing. (The store claims the row before it decides, so a store
+    /// never shows this; the decision does not rest on that.) It catches a decision that
+    /// invents a job.
+    #[test]
+    fn a_decision_on_a_view_without_the_job_says_it_is_not_found() {
+        let store = Arc::new(js_state::fake::Fake::with_flaw(
+            Arc::new(js_state::ManualClock::default()),
+            js_state::fake::Flaw::None,
+        ));
+        let jobs = JobStore::new(store, RandomIds).expect("opens");
+        let id = JobId::parse("ghost").expect("an id");
+        let host = HostId::new("host-a").expect("a host");
+        let decided = jobs.decide_placement(
+            &mut Empty,
+            &id,
+            (&host, Booked::WholeHost, &Placement::default()),
+            None,
+        );
+        assert_eq!(decided.err(), Some(JobStoreError::NotFound { id }));
+    }
+}

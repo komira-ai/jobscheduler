@@ -100,6 +100,7 @@ where
     a_job_another_writer_placed_is_not_placed_again(backend);
     a_claimed_placement_moves_the_hosts_reservation_row(backend);
     a_claimed_placement_of_a_missing_job_is_stale(backend);
+    a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read(backend);
     end_and_free_is_one_commit(backend);
     requeue_loses_to_a_change_of_either_row(backend);
     a_move_that_loses_its_job_version_is_stale(backend);
@@ -233,6 +234,7 @@ macro_rules! job_store_tests {
             a_job_another_writer_placed_is_not_placed_again,
             a_claimed_placement_moves_the_hosts_reservation_row,
             a_claimed_placement_of_a_missing_job_is_stale,
+            a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read,
             end_and_free_is_one_commit,
             requeue_loses_to_a_change_of_either_row,
             a_move_that_loses_its_job_version_is_stale,
