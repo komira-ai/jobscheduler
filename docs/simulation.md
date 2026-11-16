@@ -809,13 +809,15 @@ Postgres. Beside rows 33 and 34 above it covers section 6.7's restart recovery o
 store (`a_restart_over_the_store_keeps_every_host_binding`: every host seated
 once again under its id, a token used before the restart refused as used after it, an
 unused one still admitting its host, nothing launched twice) and its first step, the
-writer lock
-(`a_second_server_over_the_same_store_is_refused_while_the_first_holds_the_lock`: a
-second server refused with the line that names the lock while the first runs
-undisturbed, and started once the first is stopped). What becomes of the runs in flight
+second server
+(`a_second_server_is_refused_over_sqlite_and_starts_beside_the_first_over_postgres`: over
+SQLite a second server refused with the line that names the file lock while the first runs
+undisturbed, over Postgres, which has no lock, started beside it, and over both started once
+the first is stopped). What becomes of the runs in flight
 at the restart is not asserted (row 3 is Open). With the feature it also holds the stand-in
 to Postgres: `the_sqlite_and_postgres_stores_give_the_same_trace_hash` compares the trace
-hashes of a fixed list of scenarios and seeds over the two stores.
+hashes of a fixed list of scenarios and seeds over the two stores (the second server's
+scenario is not in the list: the two stores differ there by design).
 
 The elastic family (`tests/elastic.rs`) covers no row of section 8 yet: row 16 (a scaler
 tick skipped while the last is busy) needs a slow provider; the crash after a launch of row
