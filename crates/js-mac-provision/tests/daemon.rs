@@ -2,18 +2,18 @@
 //! rules every one of them keeps.
 
 use js_mac_provision::daemon::{
-    AGENT_LABEL, Daemon, GATE, LOG_DIR, RELEASE_LINK, SESSION_LABEL, THROTTLE_SECS,
+    AGENT_LABEL, BIN_DIR, Daemon, FLAGS_FILE, GATE, LOG_DIR, SESSION_LABEL, THROTTLE_SECS,
 };
 
 const AGENT_GOLDEN: &str = include_str!("golden/agent.plist");
 const SESSION_GOLDEN: &str = include_str!("golden/session.plist");
 
 fn agent() -> Daemon {
-    Daemon::agent("https://leases.example:7300", "mac")
+    Daemon::agent()
 }
 
 fn session() -> Daemon {
-    Daemon::session("cdhash H\"abc\" & x", "_jsagent")
+    Daemon::session("cdhash H\"abc\" & x")
 }
 
 #[test]
@@ -28,16 +28,28 @@ fn the_helpers_plist_is_the_golden_file_with_xml_characters_escaped() {
 
 #[test]
 fn the_labels_are_fixed() {
-    assert_eq!(agent().label, "com.komira.js-agent");
-    assert_eq!(session().label, "com.komira.js-mac-session");
-    assert_eq!(AGENT_LABEL, "com.komira.js-agent");
-    assert_eq!(SESSION_LABEL, "com.komira.js-mac-session");
+    assert_eq!(agent().label, "js-agent");
+    assert_eq!(session().label, "js-agent.session");
+    assert_eq!(AGENT_LABEL, "js-agent");
+    assert_eq!(SESSION_LABEL, "js-agent.session");
 }
 
 #[test]
-fn both_programs_run_through_the_release_link_the_update_hook_moves() {
+fn both_programs_are_the_packages_own_files() {
     for (daemon, name) in [(agent(), "js-agent"), (session(), "js-mac-session")] {
-        assert_eq!(daemon.program, format!("{RELEASE_LINK}/{name}"));
+        assert_eq!(daemon.program, format!("{BIN_DIR}/{name}"));
+    }
+    assert_eq!(BIN_DIR, "/Library/Application Support/js-agent/bin");
+}
+
+#[test]
+fn the_agents_host_flags_come_from_the_flags_file_not_the_plist() {
+    let text = agent().render();
+    assert!(text.contains(&format!(
+        "<string>--flags-file</string>\n\t\t<string>{FLAGS_FILE}</string>"
+    )));
+    for flag in ["--server", "--pool", "SET-THE-SERVER"] {
+        assert!(!text.contains(flag), "{flag}");
     }
 }
 

@@ -6,31 +6,32 @@
 //! `ConditionPathExists`: the package can load the daemons at install time, and they start
 //! when a host is configured. launchd then starts a daemon again after every exit, a clean
 //! one included (the agent exits 0 after it has drained), at most once in
-//! [`THROTTLE_SECS`]. Both programs are reached through [`RELEASE_LINK`], which the update
-//! hook moves, so a daemon runs the release that is linked when launchd starts it.
+//! [`THROTTLE_SECS`]. The programs are the package's own files under [`BIN_DIR`]; the
+//! agent's host-specific flags (server, pool, network mode) are read from [`FLAGS_FILE`],
+//! which a per-group configuration package installs.
 
 use std::fmt::Write as _;
 
 use crate::launchd::escape;
 
 /// The label of the agent's daemon, and the name of its plist without `.plist`.
-pub const AGENT_LABEL: &str = "com.komira.js-agent";
+pub const AGENT_LABEL: &str = "js-agent";
 /// The label of the root helper's daemon.
-pub const SESSION_LABEL: &str = "com.komira.js-mac-session";
-/// Everything the package installs lies under this directory.
-pub const PREFIX: &str = "/usr/local/js-agent";
-/// The release link the update hook moves; the daemons run their programs through it.
-pub const RELEASE_LINK: &str = "/usr/local/js-agent/link/current";
-/// The directory of the releases.
-pub const RELEASES_DIR: &str = "/usr/local/js-agent/releases";
-/// The directory the package keeps the plists it installs from.
-pub const SHARE_DIR: &str = "/usr/local/js-agent/share";
+pub const SESSION_LABEL: &str = "js-agent.session";
+/// Everything the package installs, apart from the plists, lies under this directory.
+pub const PREFIX: &str = "/Library/Application Support/js-agent";
+/// The directory of the package's programs.
+pub const BIN_DIR: &str = "/Library/Application Support/js-agent/bin";
+/// Where the daemons write their output.
+pub const LOG_DIR: &str = "/Library/Application Support/js-agent/log";
+/// The update hook's state directory.
+pub const UPDATE_DIR: &str = "/Library/Application Support/js-agent/update";
 /// Where launchd reads the daemons from.
 pub const LAUNCH_DAEMONS_DIR: &str = "/Library/LaunchDaemons";
-/// Where the daemons write their output.
-pub const LOG_DIR: &str = "/Library/Logs/js-agent";
 /// The path whose existence lets the daemons run.
 pub const GATE: &str = "/etc/js-agent/token";
+/// The file of the agent's host-specific flags, which a configuration package installs.
+pub const FLAGS_FILE: &str = "/etc/js-agent/flags";
 /// Seconds launchd gives the agent to exit after SIGTERM before it kills it (`ExitTimeOut`): the
 /// unit's `TimeoutStopSec`, the drain the agent's default flags ask for, 10 + 10 + 30 s, with room
 /// for the engine calls. `launchctl bootout` returns when the agent has exited, so whatever stops
@@ -38,10 +39,10 @@ pub const GATE: &str = "/etc/js-agent/token";
 pub const AGENT_EXIT_TIMEOUT_SECS: u32 = 120;
 /// Seconds launchd waits between two starts of a daemon.
 pub const THROTTLE_SECS: u32 = 30;
-/// The `--server` of a plist nobody has configured; the agent refuses it.
-pub const UNSET_SERVER: &str = "SET-THE-SERVER";
 /// The helper's socket, which the agent dials.
 pub const SESSION_SOCKET: &str = "/var/run/js-mac-session/socket";
+/// The group that may reach the helper's socket.
+pub const SOCKET_GROUP: &str = "_jsagent";
 
 /// A LaunchDaemon.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,17 +60,15 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// The agent's daemon for `server` and `pool`, with the exit timeout
-    /// [`AGENT_EXIT_TIMEOUT_SECS`].
+    /// The agent's daemon, with the exit timeout [`AGENT_EXIT_TIMEOUT_SECS`]. The host's own
+    /// flags are in [`FLAGS_FILE`].
     #[must_use]
-    pub fn agent(server: &str, pool: &str) -> Daemon {
+    pub fn agent() -> Daemon {
         let words = [
-            "--server",
-            server,
+            "--flags-file",
+            FLAGS_FILE,
             "--token-file",
             GATE,
-            "--pool",
-            pool,
             "--state-root",
             "/var/db/js-agent/state",
             "--scratch-root",
@@ -79,22 +78,22 @@ impl Daemon {
         ];
         Daemon {
             label: AGENT_LABEL.to_owned(),
-            program: format!("{RELEASE_LINK}/js-agent"),
+            program: format!("{BIN_DIR}/js-agent"),
             args: words.iter().map(|w| (*w).to_owned()).collect(),
             exit_timeout_secs: AGENT_EXIT_TIMEOUT_SECS,
             log_stem: "js-agent".to_owned(),
         }
     }
 
-    /// The root helper's daemon: its own socket, state directory and uid range, never the
+    /// The root helper's daemon, holding its caller to `daemon_requirement`: its own socket, state directory and uid range, never the
     /// defaults of another helper on the Mac.
     #[must_use]
-    pub fn session(daemon_requirement: &str, socket_group: &str) -> Daemon {
+    pub fn session(daemon_requirement: &str) -> Daemon {
         let words = [
             "--socket",
             SESSION_SOCKET,
             "--socket-group",
-            socket_group,
+            SOCKET_GROUP,
             "--state-dir",
             "/var/db/js-mac-session",
             "--uid-range",
@@ -106,7 +105,7 @@ impl Daemon {
         ];
         Daemon {
             label: SESSION_LABEL.to_owned(),
-            program: format!("{RELEASE_LINK}/js-mac-session"),
+            program: format!("{BIN_DIR}/js-mac-session"),
             args: words.iter().map(|w| (*w).to_owned()).collect(),
             exit_timeout_secs: 20,
             log_stem: "js-mac-session".to_owned(),

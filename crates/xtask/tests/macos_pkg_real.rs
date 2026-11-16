@@ -72,8 +72,6 @@ fn build(out: &Path, product: &Path) {
         &[
             "--root",
             out.join("root").to_str().unwrap(),
-            "--scripts",
-            out.join("scripts").to_str().unwrap(),
             "--identifier",
             IDENTIFIER,
             "--version",
@@ -120,29 +118,70 @@ fn the_package_pkgbuild_makes_from_the_staged_directory_is_the_package() {
 fn a_file_added_to_the_payload_after_staging_is_refused() {
     let (dir, args) = staged("macpkg-real-extra");
     stage(&args).unwrap();
-    let extra = args.out.join("root/usr/local/js-agent/extra");
+    let extra = args
+        .out
+        .join("root/Library/Application Support/js-agent/extra");
     std::fs::write(&extra, "x").unwrap();
     std::fs::set_permissions(&extra, std::fs::Permissions::from_mode(0o644)).unwrap();
     let product = dir.path().join("js-agent.pkg");
     build(&args.out, &product);
     match check(&check_args(&product)) {
         Err(Error::Refused(found)) => {
-            assert_eq!(found, ["not part of the package: usr/local/js-agent/extra"]);
+            assert_eq!(
+                found,
+                ["not part of the package: Library/Application Support/js-agent/extra"]
+            );
         }
         other => panic!("{other:?}"),
     }
 }
 
 #[test]
-fn a_package_whose_postinstall_was_changed_after_staging_is_refused() {
+fn a_package_built_with_a_script_is_refused() {
     let (dir, args) = staged("macpkg-real-script");
     stage(&args).unwrap();
-    std::fs::write(args.out.join("scripts/postinstall"), "#!/bin/sh\nexit 0\n").unwrap();
+    let scripts = args.out.join("scripts");
+    std::fs::create_dir(&scripts).unwrap();
+    std::fs::write(scripts.join("postinstall"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(
+        scripts.join("postinstall"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     let product = dir.path().join("js-agent.pkg");
-    build(&args.out, &product);
+    let component = args.out.join("component.pkg");
+    tool(
+        "pkgbuild",
+        &[
+            "--root",
+            args.out.join("root").to_str().unwrap(),
+            "--scripts",
+            scripts.to_str().unwrap(),
+            "--identifier",
+            IDENTIFIER,
+            "--version",
+            VERSION,
+            "--install-location",
+            "/",
+            "--ownership",
+            "recommended",
+            component.to_str().unwrap(),
+        ],
+    );
+    tool(
+        "productbuild",
+        &[
+            "--package",
+            component.to_str().unwrap(),
+            product.to_str().unwrap(),
+        ],
+    );
     match check(&check_args(&product)) {
         Err(Error::Refused(found)) => {
-            assert_eq!(found, ["postinstall is not the script of version 1.2.3"]);
+            assert_eq!(
+                found,
+                ["the package holds scripts, and must hold none: [\"postinstall\"]"]
+            );
         }
         other => panic!("{other:?}"),
     }

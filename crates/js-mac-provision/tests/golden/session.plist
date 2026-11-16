@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.komira.js-mac-session</string>
+	<string>js-agent.session</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/js-agent/link/current/js-mac-session</string>
+		<string>/Library/Application Support/js-agent/bin/js-mac-session</string>
 		<string>--socket</string>
 		<string>/var/run/js-mac-session/socket</string>
 		<string>--socket-group</string>
@@ -37,8 +37,8 @@
 	<key>ExitTimeOut</key>
 	<integer>20</integer>
 	<key>StandardOutPath</key>
-	<string>/Library/Logs/js-agent/js-mac-session.log</string>
+	<string>/Library/Application Support/js-agent/log/js-mac-session.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Library/Logs/js-agent/js-mac-session.err.log</string>
+	<string>/Library/Application Support/js-agent/log/js-mac-session.err.log</string>
 </dict>
 </plist>

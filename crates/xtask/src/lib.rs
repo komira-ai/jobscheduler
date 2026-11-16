@@ -55,7 +55,7 @@
 //!   repository at `packages.komira.ai/apt` (suite `testing`, then `stable` once the install check
 //!   passed), and the check that the package installs from `testing` in a clean Ubuntu system.
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
-//!   payload and scripts, laid down for `pkgbuild`, and the built package read back with
+//!   payload (it has no script), laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
 //! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--job-port <n>] [--ready-timeout <s>]` ([`site_demo`]):
 //!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:
