@@ -192,7 +192,7 @@ async fn a_start_refused_as_host_tainted_taints_the_host_and_is_written() {
 
 /// Asserts the clear end to end, with the bindings in files and in the store: a tainted host
 /// that reports its taint cleared is acknowledged, `GET /v1/hosts` shows no taint, the
-/// bindings hold none, a job is refused while it is tainted and starts on it after the clear (the only host),
+/// bindings hold none, a job submitted while it is tainted is queued and starts on it only after the clear (the only host),
 /// and after a restart it is not put back tainted (the clear survived). A cleared report of
 /// a taint other than the held one changes nothing. It catches a server that forgets the
 /// taint in memory only (a restart would bring it back), one that clears a taint the report
@@ -210,8 +210,8 @@ async fn a_taint_reported_cleared_ends_in(kept: Kept) {
     let held = json!({ "reason": "residue", "run_id": "run-1-1", "check": "daemonised-child" });
     let reply = beat_with(&first, &me, json!({ "taint": held })).await;
     assert_eq!(reply["taint_ack"], true);
-    let refused = submit_body(&first, &JobBody::new("before-clear").json()).await;
-    assert_eq!(refused.status, 422, "{}", refused.body);
+    let queued = submit_body(&first, &JobBody::new("before-clear").json()).await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
 
     let other = json!({ "reason": "residue", "run_id": "run-1-2", "check": "daemonised-child" });
     let reply = beat_with(&first, &me, json!({ "taint_cleared": other })).await;
@@ -228,8 +228,9 @@ async fn a_taint_reported_cleared_ends_in(kept: Kept) {
     first.ticks.step().await;
     let reply = beat_with(&first, &me, json!({})).await;
     let (starts, _) = commands(&reply);
-    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
-    assert_eq!(jobs, ["after-clear"], "{reply}");
+    let mut jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    jobs.sort_unstable();
+    assert_eq!(jobs, ["after-clear", "before-clear"], "{reply}");
 
     let h = restarted_placing(first).await;
     let listing = hosts(&h).await;
