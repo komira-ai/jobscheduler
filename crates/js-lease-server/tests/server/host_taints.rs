@@ -109,11 +109,13 @@ async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
 }
 
 /// Asserts that a taint outlives a restart: two tainted hosts are put back awaiting with
-/// their taint, a job submitted after their agents say hello again is refused 422
-/// `no-capable-host` (no host is clean) and recorded nowhere, and the taint is still kept
+/// their taint, a job submitted after their agents say hello again is accepted 201 and
+/// recorded queued (a taint ends, so the job waits for a host to clear; no host is clean to
+/// place it on), and the taint is still kept
 /// (in the state file, or in the store's host bindings). It runs with the bindings in files
 /// and in the store, and in the store it also asserts that no `.agents` file is written. It
-/// catches a restart that makes a host clean, and a store that loses a taint.
+/// catches a restart that makes a host clean, a store that loses a taint, and an admission that
+/// refuses a job with `no-capable-host` while every host is tainted.
 #[tokio::test]
 async fn a_taint_survives_a_restart() {
     for kept in Kept::BOTH {
@@ -138,12 +140,9 @@ async fn a_taint_survives_a_restart_in(kept: Kept) {
     }
     job_agent(&h, &cpu_hello("burst-1")).await;
     job_agent(&h, &cpu_hello("burst-2")).await;
-    let refused = submit_body(&h, &JobBody::new("taint-restart").json()).await;
-    assert_eq!(
-        (refused.status, refused.json()),
-        (422, json!({ "error": "no-capable-host" }))
-    );
-    assert_eq!(job_of(&h, "taint-restart").await.status, 404);
+    let accepted = submit_body(&h, &JobBody::new("taint-restart").json()).await;
+    assert_eq!(accepted.status, 201, "{}", accepted.body);
+    assert_eq!(job_of(&h, "taint-restart").await.status, 200);
     let text = kept_bindings(&h);
     assert_eq!(text.matches("taint_reason").count(), 2, "{text}");
     for id in ["burst-1", "burst-2"] {

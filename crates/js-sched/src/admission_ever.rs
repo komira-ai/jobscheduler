@@ -64,8 +64,10 @@ pub struct HostView {
     /// Its presence and work. Every state is capable: a busy, lost or cordoned host could
     /// serve the request once it is free, heard again or uncordoned.
     pub state: HostState,
-    /// Whether it is tainted. A taint ends only when a person reimages the host, so a
-    /// tainted host is never capable.
+    /// Whether it is tainted. A taint ends: an agent clears a residue taint itself after two
+    /// clean re-checks and an operator moves the marker aside, so a tainted host could serve
+    /// the request once it is cleared, as a busy, lost or cordoned one could once it is free,
+    /// heard again or uncordoned. It is capable; the placer places nothing on it meanwhile.
     pub tainted: bool,
     /// Whether it is draining: leaving the pool, so never capable.
     pub draining: bool,
@@ -158,12 +160,12 @@ impl ProviderView {
 /// host in `hosts` admits it ([`Path::CapableHost`]); otherwise a provider of `providers`
 /// that may offer a machine for it ([`Path::MayOffer`]); otherwise it is refused.
 ///
-/// A host is capable when it is neither tainted nor draining, what the pool books of it holds
+/// A host is capable when it is not draining (a tainted host is capable: a taint ends), what the pool books of it holds
 /// `req`'s resources, and its facts satisfy `req`'s `os`, `arch`, `isa_level`, `disk-gib`,
 /// `exec` and `layered-rootfs` (as [`Shape::satisfies`] compares them), and the network ceiling its facts advertise
 /// ([`ceiling_of`]) covers `req`'s network level and host ports ([`within_ceiling`]; a host that
 /// advertises none has the level `none` and no port). Whether it is busy, lost or cordoned does not
-/// matter. A provider may offer only if it forwards host ports when `req` declares any; its level
+/// matter, nor whether it is tainted. A provider may offer only if it forwards host ports when `req` declares any; its level
 /// is not checked. A pool with no provider that launches admits only through a capable host.
 pub fn can_ever_serve(
     req: &Requirements,
@@ -175,7 +177,7 @@ pub fn can_ever_serve(
         let shape = Shape::new(host.total.clone(), host.facts.clone());
         let ceiling = ceiling_of(&host.facts);
         let within = within_ceiling(&ceiling, req.network, &req.host_ports).is_ok();
-        !host.tainted & !host.draining & shape.satisfies(&req.resources, &required) & within
+        !host.draining & shape.satisfies(&req.resources, &required) & within
     });
     let offered = providers.iter().any(|provider| provider.may_offer(req));
     match (capable, offered) {
