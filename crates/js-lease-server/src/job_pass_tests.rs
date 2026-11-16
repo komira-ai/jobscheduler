@@ -698,6 +698,42 @@ fn a_job_pass_reads_no_wall_clock() {
     assert_eq!((near, far), (want, want));
 }
 
+// A server that removed a host from its registry runs the pass in a period another server has
+// claimed, because only its own pass reads the host absent and settles the removal. The claim is
+// taken by another job store over the same tables, so without this the removal would wait for a
+// period this server won. It asserts the host's job lost and the removal settled in the claimed
+// period, and that a server with no removal still leaves a claimed period alone. Catches a
+// server that skips the pass of its removals and so starves the host's jobs.
+#[tokio::test]
+async fn a_server_with_a_removed_host_runs_the_pass_in_a_period_another_claimed() {
+    let mut rig = clocked_rig("pass_removed_claimed", true, NEVER);
+    rig.agents.set_duty_period(MINUTE);
+    rig.register("host-a", true);
+    let mut a = FakeAgent::new("host-a");
+    let on_a = started(&rig, &mut a, "job-a", true).await;
+    let placer = rig.agents.placer.clone().unwrap();
+    let claim = |rig: &Rig| {
+        rig.jobs
+            .claim_duty("job-pass", store_time(now_ms(rig)), MINUTE)
+            .unwrap()
+    };
+    assert!(claim(&rig), "another server claims the period");
+    assert_eq!(rig.agents.job_pass(), None, "nothing is owed: left to it");
+
+    let host_a = HostId::new("host-a").unwrap();
+    let registry = &rig.agents.registry;
+    registry.drain(&host_a).unwrap();
+    registry.release_host(&host_a).unwrap();
+    registry.remove(&host_a).unwrap();
+    assert!(placer.gone().contains_key(&host_a));
+    assert!(matches!(
+        rig.agents.job_pass(),
+        Some(crate::store_health::Pass::Ran(_))
+    ));
+    assert_eq!(rig.states(&on_a), (JobState::Lost, AllocationStep::Freed));
+    assert!(placer.gone().is_empty(), "the removal is settled");
+}
+
 // Catches a host the registry removed (the provider read it gone) not read absent by the
 // server's own tick, a removal kept after its allocations are settled, and a host that said
 // hello again before the tick still read absent. A host merely silent is read unknown and
