@@ -65,6 +65,37 @@ Each is named only in the environment of the step that needs it. The key is impo
 runner that exists for this job alone. The version typed for a manual run is checked as
 MAJOR.MINOR.PATCH before it is used in a file name.
 
+## Config packages: `js-agent config-hook`
+
+A Mac's flags file and certificate come in a config package (`js-agent-config-<group>`, a `.pkg`
+whose files are `/etc/js-agent/flags` and the certificate the flags name). Its hook restarts the
+agent's daemon so that the agent reads the new flags; the steps and what they check are the Linux
+package's (`packaging/js-agent/deb/README.md`, "Config packages"). The manifest names
+
+```
+"hook": {
+  "command": ["/usr/local/js-agent/link/current/js-agent", "config-hook"],
+  "timeoutSecs": {"prepare": "60", "cutover": "420", "verify": "300", "rollback": "420", "cleanup": "60", "uninstall": "60"}
+}
+```
+
+with the params
+
+```
+unit = "com.komira.js-agent"
+flags_file = "/etc/js-agent/flags"
+token_file = "/etc/js-agent/token"
+state_root = "/var/db/js-agent/state"
+state_dir = "/var/db/js-agent-config"
+cutover_timeout_secs = 420
+verify_timeout_secs = 300
+rollback_timeout_secs = 420
+```
+
+`unit` is the daemon's launchd label. The restart is `bootout` (which returns when the agent has
+exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the update hook's while
+`/etc/js-agent/token` is absent. The unit port has run against a fake of `launchctl` only.
+
 ## Privacy grants (TCC)
 
 The agent and the helper need no privacy grant (Full Disk Access, or any other the

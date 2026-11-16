@@ -96,7 +96,7 @@ agent, and the update hook reads the same file. The rules:
 --ca-cert=/etc/js-agent/ca.pem
 ```
 
-`--server` and `--pool` are required. `--host-id` and `--ca-cert` are optional. Set the mode
+`--server` and `--pool` are required. `--host-id` and `--ca-cert` are optional (a host of a host group may give `--host-id-from-facts=/var/lib/hostkeeper/facts.json` instead of `--host-id`, never both). Set the mode
 and owner:
 
 ```

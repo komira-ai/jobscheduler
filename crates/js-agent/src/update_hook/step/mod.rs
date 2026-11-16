@@ -30,6 +30,7 @@ use super::{
 
 pub use cleanup::cleanup;
 pub use cutover::cutover;
+pub(crate) use cutover::{Life, life};
 pub use prepare::prepare;
 pub use rollback::rollback;
 pub use verify::verify;

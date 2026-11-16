@@ -209,6 +209,8 @@ impl CommandRunner for FakeCommands {
 pub struct FakeFiles {
     files: BTreeMap<String, String>,
     links: BTreeMap<String, String>,
+    /// What the files read for their owner and mode (`--host-id-from-facts`) are.
+    facts: BTreeMap<String, js_agent::flags_file::FileFacts>,
     /// Paths under a prefix share a device.
     devices: Vec<(PathBuf, u64)>,
     /// Paths under a prefix cannot be looked at.
@@ -219,6 +221,13 @@ pub struct FakeFiles {
 impl FakeFiles {
     pub fn with(mut self, path: &str, text: &str) -> Self {
         self.files.insert(path.to_owned(), text.to_owned());
+        self
+    }
+
+    /// The file at `path` is what `facts` says (as a facts file is read, with its owner and
+    /// mode).
+    pub fn with_facts(mut self, path: &str, facts: js_agent::flags_file::FileFacts) -> Self {
+        self.facts.insert(path.to_owned(), facts);
         self
     }
 
@@ -261,6 +270,13 @@ impl FakeFiles {
 }
 
 impl FileReader for FakeFiles {
+    fn facts(&self, path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
+        self.facts
+            .get(path.to_string_lossy().as_ref())
+            .cloned()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+
     fn read(&self, path: &str) -> Result<String, String> {
         self.files
             .get(path)

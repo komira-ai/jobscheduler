@@ -34,11 +34,15 @@
 //! js-update-hook's; this module re-exports it under the names the agent's steps use, with the
 //! agent's [`Reason`]s and [`Record`].
 //!
+//! The hook of a config package (`js-agent config-hook`, the module [`config`]) shares this
+//! contract and its dispatch ([`is_hook_word`], [`run`]) and has steps of its own.
+//!
 //! The hook builds on Linux and macOS and differs between them in two places only: the unit
 //! manager ([`PlatformUnits`]: `systemctl` on Linux, `launchctl` on a Mac) and the runtime the
 //! staged agent must list on `--version` ([`Settings::runtime`]).
 
 mod args;
+pub mod config;
 mod launch_units;
 mod machine;
 pub mod params;
@@ -206,6 +210,10 @@ pub fn run(
     err: &mut dyn Write,
     host: &Host<'_>,
 ) -> ExitCode {
+    // The config package's hook shares the contract and the dispatch, and has its own steps.
+    if args.get(1).is_some_and(|verb| verb == config::VERB) {
+        return config::run(args, out, err, &config::Host::system());
+    }
     let done = match step_of(args, host) {
         Ok((step, done)) => {
             tell(err, step, &done);
