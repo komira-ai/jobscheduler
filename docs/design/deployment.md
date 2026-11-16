@@ -4,6 +4,11 @@ Companion to [docs/design.md](../design.md), sections 5.4, 5.8, 5.9 and 9.1. Sec
 decisions are D33 and D34 and the risks K28 to K31 ([risks-f.md](risks-f.md)). What it rests on in the merged code (read from `js-lease-server` and
 `js-agent` on `main`) is marked as merged; everything else is design.
 
+Over a Postgres state store (`--store`) the single-writer parts of this page (one replica under `Recreate`, the lock on the binding
+file, a fence and a leader for an external store) do not hold: the server takes no lock and no generation, any number of servers
+serve one store at once, and an update starts the new server before it stops the old one ([jobscheduler-design.md](jobscheduler-design.md),
+section 10). They still describe a server without `--store`, or over a SQLite store.
+
 ## Target shape
 
 jobscheduler runs as **one service** in a Kubernetes cluster: one process, one workload, the scheduler and both of its APIs.
@@ -40,7 +45,7 @@ All values are placeholders for the operator; no object names a host, an address
 
 | Object | Choice | Why |
 |---|---|---|
-| `Deployment` | `replicas: 1`, `strategy: Recreate` | one writer (state store, below); a rolling update would start a second pod beside the first |
+| `Deployment` | `replicas: 1`, `strategy: Recreate` | one writer (state store, below); a rolling update would start a second pod beside the first. Not over a Postgres store, which any number of servers serve: there a rolling update is the update |
 | `PersistentVolumeClaim` | `ReadWriteOncePod` where the cluster has it, else `ReadWriteOnce`; a block-backed volume; reclaim policy `Retain`; mounted at the directory of `--state-file` | the volume is the state; `Retain` so that deleting the claim by mistake does not delete the leases |
 | `Service` (cluster) | `ClusterIP`, port 7300 | in-cluster clients: the kbf frontend, `js-cli` jobs |
 | `Service` (external) | `LoadBalancer`, or the cluster's own L4 entry, passing TCP through | agents outside the cluster; **TLS is not terminated before the pod**, so a bearer token and a join token never cross in clear and the agent pins the server's certificate (5.8) |
@@ -127,9 +132,10 @@ job tables and the bindings in a database, with conditional writes (the `js-stat
 - **Restart.** A restart reads both files and takes a new term; nothing is rebuilt from elsewhere. Soft state is rebuilt by the agents:
   the facts of each host (5.13) come back at the next hello.
 - **The state database.** The Postgres store a server is given (`--store`, `server.store`: a file holding the connection URL)
-  holds the writer lock and the writer generation, the host bindings and join-token digests, and the scaler's records and hosts to
-  remove. The server takes the lock before it reads anything else and holds it for its life, and its
-  first start over an empty store imports the files that kept that state, once. The role, the
+  holds the host bindings and join-token digests, and the scaler's records and hosts to remove. It has no writer lock and no
+  writer generation: any number of servers open it and serve at once, each decision a transaction that holds for all of them, so
+  an update may start the new server before it stops the old one. The first start over an empty store imports the files that
+  kept that state, once. The role, the
   URL file, backups, restores and the checks after a restore are in the
   [state-database runbook](../runbooks/state-database.md).
 - **Loss of the volume** is a loss of the jobs. With `--boot resume` the pod refuses to start where a records file is required and missing; an operator restores the
