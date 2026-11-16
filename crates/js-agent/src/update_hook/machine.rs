@@ -420,33 +420,33 @@ fn refused(step: Step, params: &Params, stat: &StatFn, why: &RootError) -> Done 
     }
 }
 
-impl StateView for Root {
-    fn taint(&self) -> Option<Taint> {
+impl Root {
+    /// The state root when one is there: the one place an absent root is told apart, so
+    /// that each view below delegates without an arm of its own.
+    fn open(&self) -> Option<&StateRoot> {
         match self {
-            Root::Open(root) => StateView::taint(root),
+            Root::Open(root) => Some(root),
             Root::Absent => None,
         }
     }
+}
+
+impl StateView for Root {
+    fn taint(&self) -> Option<Taint> {
+        self.open().and_then(StateView::taint)
+    }
 
     fn restored_rechecks(&self, taint: &Taint) -> bool {
-        match self {
-            Root::Open(root) => StateView::restored_rechecks(root, taint),
-            Root::Absent => false,
-        }
+        self.open()
+            .is_some_and(|root| StateView::restored_rechecks(root, taint))
     }
 
     fn owed(&self) -> Result<Vec<String>, PortError> {
-        match self {
-            Root::Open(root) => StateView::owed(root),
-            Root::Absent => Ok(Vec::new()),
-        }
+        self.open().map_or_else(|| Ok(Vec::new()), StateView::owed)
     }
 
     fn has_credential(&self) -> bool {
-        match self {
-            Root::Open(root) => StateView::has_credential(root),
-            Root::Absent => false,
-        }
+        self.open().is_some_and(StateView::has_credential)
     }
 }
 
