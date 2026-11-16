@@ -824,11 +824,9 @@ impl PostgresStore {
         match tx.apply(&txn)? {
             Err(conflict) => Ok(Claim::Conflict(conflict)),
             Ok(commit) => {
-                let wrote = tx.dirty();
+                let wrote = u64::from(tx.dirty());
                 tx.commit()?;
-                if wrote {
-                    self.syncs.fetch_add(1, Ordering::Relaxed);
-                }
+                self.syncs.fetch_add(wrote, Ordering::Relaxed);
                 self.txns.fetch_add(1, Ordering::Relaxed);
                 Ok(Claim::Committed(commit))
             }

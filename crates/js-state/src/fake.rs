@@ -177,6 +177,13 @@ impl Data {
         Ok(())
     }
 
+    /// Judges every precondition of `txn`, then writes it with the next revisions.
+    fn commit_checked(&mut self, txn: &Txn, now: StoreTime) -> Result<Commit, Conflict> {
+        self.check_all(txn, now)?;
+        let base = self.alloc(txn.change_count());
+        self.write(txn, now, base, false)
+    }
+
     /// Increments the counter of each `Next` in `txn` (the C2 counter flaw).
     fn bump_counters(&mut self, txn: &Txn) {
         for op in txn.ops() {
@@ -589,11 +596,7 @@ impl Store for Fake {
         }) else {
             return Ok(Claim::Declined);
         };
-        if let Err(conflict) = inner.live.check_all(&txn, now) {
-            return Ok(Claim::Conflict(conflict));
-        }
-        let base = inner.live.alloc(txn.change_count());
-        let commit = match inner.live.write(&txn, now, base, false) {
+        let commit = match inner.live.commit_checked(&txn, now) {
             Ok(commit) => commit,
             Err(conflict) => return Ok(Claim::Conflict(conflict)),
         };

@@ -2,6 +2,7 @@
 //! ([`crate::JobStore::place_claimed`]): the capacity check and the booking are one
 //! transaction, a job is placed by one of two writers, and the host's reservation row moves.
 
+use js_state::Store;
 use js_state::conformance::Backend;
 
 use super::{cancelled, host, rig, share};
@@ -274,5 +275,54 @@ pub fn a_claimed_placement_of_a_missing_job_is_stale<B: Backend>(backend: &B) {
         rig.snapshot().0,
         before,
         "{name}: a missing job's placement wrote"
+    );
+}
+
+/// A stray index entry (an on-host entry whose allocation row is gone) is passed over when the
+/// host's bookings are counted, and an allocation row this build cannot read for the job being
+/// placed is an error that writes nothing, not a placement over it. Catches a count that stops at
+/// a stray entry, and a placement that overwrites a row it cannot read.
+pub fn a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read<B: Backend>(
+    backend: &B,
+) where
+    B::Store: 'static,
+{
+    let name = "a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read";
+    let rig = rig(backend);
+    let capacity = two_shares();
+    let plain = Placement::default();
+    let a = host("host-a");
+    rig.store
+        .inner()
+        .txn(js_state::Txn::new().put(
+            "idx/alloc/host/host-a/ghost",
+            Vec::new(),
+            js_state::Cond::Any,
+        ))
+        .expect("reachable")
+        .expect("commits");
+    let counted = rig.queue("s-counted");
+    rig.jobs
+        .place_claimed(&counted, &a, share(), &plain, Some(&capacity))
+        .expect("the stray entry is not a booking");
+
+    let unreadable = rig.queue("s-unreadable");
+    rig.put_raw("alloc/s-unreadable", b"not an allocation".to_vec());
+    let before = rig.snapshot().0;
+    let refused = rig
+        .jobs
+        .place_claimed(&unreadable, &a, share(), &plain, Some(&capacity))
+        .map(drop);
+    assert!(
+        matches!(
+            refused,
+            Err(JobStoreError::Corrupt { .. } | JobStoreError::UnknownRow { .. })
+        ),
+        "{name}: {refused:?}"
+    );
+    assert_eq!(
+        rig.snapshot().0,
+        before,
+        "{name}: a refused placement wrote"
     );
 }
