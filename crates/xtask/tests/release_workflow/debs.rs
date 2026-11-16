@@ -233,5 +233,7 @@ fn publish_compares_every_file_but_the_bundles() {
     let publish = job(&jobs, "publish").join("\n");
     let skip = "            [ \"$state\" = uploaded ] || continue\n            case \"$name\" in\n              *.sigstore.json) continue ;;\n            esac\n            gh api -H \"Accept: application/octet-stream\"";
     assert!(publish.contains(skip), "{publish}");
-    assert_eq!(publish.matches("continue").count(), 2, "{publish}");
+    // The other `continue` is the macOS archives, which `promote-macos` adds.
+    assert_eq!(publish.matches("continue").count(), 3, "{publish}");
+    assert!(publish.contains("              *-aarch64-apple-darwin.tar.gz) continue ;;\n"));
 }

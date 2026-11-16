@@ -48,7 +48,7 @@ fn artifacts_yml_is_started_only_by_the_release_s_call() {
         body,
         [
             "    needs: [plan]",
-            "    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' }}",
+            "    if: ${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}",
             "    permissions:",
             "      contents: read",
             "      id-token: write",
@@ -61,9 +61,9 @@ fn artifacts_yml_is_started_only_by_the_release_s_call() {
 }
 
 /// Asserts that `attest` and `verify` each run only for a push to main (one `if:`, that one),
-/// in that order after `sums`, and that `build` and `sums` have no condition, so the dry run of a
-/// pull request builds and sums and signs nothing. Catches a signing job that a pull request
-/// would run, and a build the dry run would skip.
+/// in that order after `sums`, and that `build` and `sums` have no condition of their own (the
+/// release's call runs them for a push alone). Catches a signing job that a pull request
+/// would run, and a build that skips itself.
 #[test]
 fn attest_and_verify_run_only_for_a_push_to_main() {
     let text = artifacts_workflow();
