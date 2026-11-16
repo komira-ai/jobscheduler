@@ -134,12 +134,18 @@ fn tell(err: &mut dyn Write, step: &str, done: &Done) {
         }
         return;
     }
-    // The config hook ends a step in success or failure: it defers nothing and halts nothing.
+    // The config hook halts nothing: a step that did not succeed failed, or was deferred
+    // (`cutover` while the lease server cannot be asked).
+    let ending = if done.outcome == Outcome::Deferred {
+        "deferred"
+    } else {
+        "failed"
+    };
     let reason = done.report.reason.map_or("", Reason::as_str);
     let detail = done.report.detail.as_deref().unwrap_or("");
     let _ = writeln!(
         err,
-        "js-agent config-hook: {step} failed: {reason}: {detail}"
+        "js-agent config-hook: {step} {ending}: {reason}: {detail}"
     );
 }
 

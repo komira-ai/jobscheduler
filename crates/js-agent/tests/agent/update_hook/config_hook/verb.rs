@@ -114,10 +114,18 @@ fn each_ending_is_an_exit_status_a_last_line_and_a_line_of_words() {
                     ..Report::default()
                 },
             },
-            _ => Done {
+            3 => Done {
                 outcome: Outcome::Failure,
                 report: Report {
                     class: Class::Environment,
+                    ..Report::failure(Reason::LeaseUnreachable, "no server")
+                },
+            },
+            _ => Done {
+                outcome: Outcome::Deferred,
+                report: Report {
+                    class: Class::Environment,
+                    retry_after_secs: Some(60),
                     ..Report::failure(Reason::LeaseUnreachable, "no server")
                 },
             },
@@ -150,8 +158,18 @@ fn each_ending_is_an_exit_status_a_last_line_and_a_line_of_words() {
         ran.err,
         "js-agent config-hook: rollback failed: lease_unreachable: no server\n"
     );
+
+    let ran = run_with(&["cutover", "--params", &file], &host);
+    assert_eq!(ran.status, status(75));
+    let line = last_line(&ran.out);
+    assert_eq!(line["reason"], "lease_unreachable");
+    assert_eq!(line["retry_after_secs"], 60);
+    assert_eq!(
+        ran.err,
+        "js-agent config-hook: cutover deferred: lease_unreachable: no server\n"
+    );
     let seen = seen.borrow();
-    assert_eq!(seen.len(), 3);
+    assert_eq!(seen.len(), 4);
     assert_eq!(seen[0].0.step, Step::Cutover);
     assert_eq!(seen[0].1, "js-agent.service");
 }
@@ -239,6 +257,49 @@ fn the_program_answers_the_config_verb_before_it_installs_the_signal_handlers() 
         last_line(&String::from_utf8(out).unwrap())["class"],
         "release"
     );
+}
+
+/// Asserts that the program's own dispatch runs a step on this machine's ports: `prepare` of
+/// a params file whose state directory is in the test's scratch directory ends with one valid
+/// last line, in success when the test runs as root (the directory is made, root's) and as
+/// `state_invalid` otherwise (the hook keeps its state only in a directory root owns), and the
+/// update hook's own step never runs.
+///
+/// Catches a verb whose machine host is never reached from the program, or one that runs the
+/// update hook's steps on a config package's params.
+#[test]
+fn the_program_runs_a_config_step_on_the_machine() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "config-verb-machine");
+    let root = dir.path().join("tree");
+    std::fs::create_dir_all(&root).unwrap();
+    let (_params_dir, file) = params_file(
+        "config-verb-machine-params",
+        &text(root.to_str().unwrap(), 600, 300, 600),
+    );
+    let step = |_: &Invocation, _: &js_agent::update_hook::Params| -> js_agent::update_hook::Done {
+        panic!("the update hook's step must not run")
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = js_agent::update_hook::run(
+        &words(&["prepare", "/staged", "--params", &file]),
+        &mut out,
+        &mut err,
+        &UpdateHost { step: &step },
+    );
+    let line = last_line(&String::from_utf8(out).unwrap());
+    if rustix::process::geteuid().is_root() {
+        assert_eq!(format!("{code:?}"), status(0));
+        assert!(line.get("reason").is_none(), "{line}");
+        assert!(root.join("state").is_dir());
+    } else {
+        assert_eq!(format!("{code:?}"), status(1));
+        assert_eq!(line["reason"], "state_invalid", "{line}");
+        assert!(
+            String::from_utf8(err)
+                .unwrap()
+                .starts_with("js-agent config-hook: prepare failed: state_invalid: ")
+        );
+    }
 }
 
 /// Asserts that the binary answers `config-hook` with one valid last line and the status of

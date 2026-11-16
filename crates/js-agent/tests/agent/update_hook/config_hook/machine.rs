@@ -205,6 +205,25 @@ fn on_the_machine_prepare_runs_without_touching_the_unit_or_the_server() {
     assert!(tree.params.state_dir.is_dir());
 }
 
+/// Asserts that, on the machine's own ports, `cleanup` with no record left succeeds without
+/// asking the unit manager or the lease server anything: an earlier cleanup finished.
+///
+/// Catches a machine that does not hand `cleanup` to its step.
+#[test]
+fn on_the_machine_a_cleanup_with_no_record_has_finished() {
+    let tree = Tree::new("config-machine-cleanup", UNIT);
+    let machine = Machine {
+        stat: &as_root,
+        ..Machine::system()
+    };
+    let done = run_step(Step::Cleanup, &tree.params, &machine);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some("there is no record: cleanup has finished")
+    );
+}
+
 /// Asserts that on a Mac's unit manager `cutover` boots the service out, bootstraps it again
 /// and sees it running, and records the restart.
 ///

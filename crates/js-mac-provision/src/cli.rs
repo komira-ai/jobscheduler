@@ -385,7 +385,8 @@ mod tests {
             text,
             Daemon::agent_from_flags_file("/etc/js-agent/flags").render()
         );
-        assert!(!text.contains("--server") && !text.contains("--pool"));
+        assert!(!text.contains("--server"));
+        assert!(!text.contains("--pool"));
     }
 
     /// `--flags-file` with `--server` or `--pool` is a usage error, and so is giving none of

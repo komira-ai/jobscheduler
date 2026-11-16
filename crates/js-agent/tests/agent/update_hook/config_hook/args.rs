@@ -102,6 +102,7 @@ fn uninstall_needs_no_params_and_takes_nothing_else() {
     );
     for line in [
         &["uninstall", "/staged"][..],
+        &["uninstall", "/staged", "/p"],
         &["uninstall", "--params"],
         &["uninstall", "--params", "/p", "/q"],
     ] {
