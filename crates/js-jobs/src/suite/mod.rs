@@ -28,6 +28,7 @@ mod claimed;
 mod clock;
 mod collect;
 mod compat;
+mod duties;
 mod failures;
 mod hosts;
 mod idempotency;
@@ -51,6 +52,7 @@ pub use claimed::*;
 pub use clock::*;
 pub use collect::*;
 pub use compat::*;
+pub use duties::*;
 pub use failures::*;
 pub use hosts::*;
 pub use idempotency::*;
@@ -100,6 +102,8 @@ where
     a_job_another_writer_placed_is_not_placed_again(backend);
     a_claimed_placement_moves_the_hosts_reservation_row(backend);
     a_claimed_placement_of_a_missing_job_is_stale(backend);
+    a_duty_is_claimed_by_one_server_for_each_period(backend);
+    a_failed_claim_is_an_error_and_claims_nothing(backend);
     end_and_free_is_one_commit(backend);
     requeue_loses_to_a_change_of_either_row(backend);
     a_move_that_loses_its_job_version_is_stale(backend);
@@ -233,6 +237,8 @@ macro_rules! job_store_tests {
             a_job_another_writer_placed_is_not_placed_again,
             a_claimed_placement_moves_the_hosts_reservation_row,
             a_claimed_placement_of_a_missing_job_is_stale,
+            a_duty_is_claimed_by_one_server_for_each_period,
+            a_failed_claim_is_an_error_and_claims_nothing,
             end_and_free_is_one_commit,
             requeue_loses_to_a_change_of_either_row,
             a_move_that_loses_its_job_version_is_stale,

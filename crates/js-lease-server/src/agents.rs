@@ -106,6 +106,9 @@ pub(crate) struct Agents {
     /// How far past its cores a host's CPU may be booked ([`crate::config::CpuSlack`]), which
     /// the capacity a placement is held to in its own transaction allows too.
     pub(crate) cpu_slack: CpuSlack,
+    /// How long a claim of a periodic duty ([`js_jobs::JobStore::claim_duty`]) keeps the other
+    /// servers off it, in milliseconds; zero claims every tick ([`Agents::set_duty_period`]).
+    duty_period_ms: AtomicU64,
     /// For each host, the session whose job listing was last committed: a listing of another
     /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
     listed_sessions: Mutex<BTreeMap<HostId, Session>>,
@@ -290,6 +293,7 @@ fn placed_in(
         logs,
         job_limits,
         cpu_slack,
+        duty_period_ms: AtomicU64::new(0),
         listed_sessions: Mutex::default(),
         meter: OnceLock::new(),
         placing: Mutex::default(),
@@ -299,6 +303,19 @@ fn placed_in(
 }
 
 impl Agents {
+    /// Makes the tick's periodic duties (the job pass, the feed's trim) run by one server in
+    /// `period`: each tick claims a duty first, and a duty another server claimed within `period`
+    /// is left to it. Zero, which is the start, claims every tick.
+    pub(crate) fn set_duty_period(&self, period: Duration) {
+        let millis = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
+        self.duty_period_ms.store(millis, Ordering::SeqCst);
+    }
+
+    /// How long a claim of a periodic duty keeps the other servers off it.
+    pub(crate) fn duty_period(&self) -> Duration {
+        Duration::from_millis(self.duty_period_ms.load(Ordering::SeqCst))
+    }
+
     /// The agent side over `registry`, with its files in `dir`, for a test that drives
     /// the routes without a socket.
     #[cfg(test)]
@@ -342,6 +359,7 @@ impl Agents {
             logs: None,
             job_limits: JobLimits::default(),
             cpu_slack: CpuSlack::default(),
+            duty_period_ms: AtomicU64::new(0),
             listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
             placing: Mutex::default(),

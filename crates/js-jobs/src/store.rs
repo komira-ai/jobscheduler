@@ -22,6 +22,7 @@ use crate::record::{
 };
 use crate::result::{JobEnd, Output, Retention};
 
+mod duties;
 mod ending;
 mod hosts;
 mod index;

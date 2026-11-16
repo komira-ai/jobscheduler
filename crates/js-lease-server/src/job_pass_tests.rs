@@ -182,6 +182,63 @@ async fn a_queued_job_ends_no_capacity_at_max_queue_wait() {
     assert_eq!(result.state, i32::from(v1::JobState::FailedToStart));
 }
 
+// A pass another server claimed for the period is left to it, and the one after the period is
+// run. The job is past its queue wait: with the duty claimed by another job store over the same
+// tables, this server's tick ends nothing, answers that the store did (nothing recorded as a
+// failure), and a tick a period later ends the job. It catches a server that runs a duty another
+// server has claimed, and one that never runs it again.
+#[test]
+fn a_pass_another_server_claimed_is_left_to_it_until_the_period_is_out() {
+    let limits = JobLimits {
+        max_queue_wait: 30 * MINUTE,
+        ..JobLimits::DEFAULT
+    };
+    let rig = clocked_rig("pass_claimed", true, limits);
+    rig.agents.set_duty_period(MINUTE);
+    let id = queue(&rig, "job-q", spec());
+    rig.advance(31 * MINUTE);
+    let claimed = rig
+        .jobs
+        .claim_duty("job-pass", store_time(now_ms(&rig)), MINUTE)
+        .unwrap();
+    assert!(claimed, "another server claims the period");
+    assert_eq!(rig.agents.job_pass(), None, "the pass was left to it");
+    assert_eq!(rig.job(&id).state, JobState::Queued);
+    rig.advance(MINUTE);
+    assert!(matches!(
+        rig.agents.job_pass(),
+        Some(crate::store_health::Pass::Ran(_))
+    ));
+    assert_eq!(
+        rig.job(&id).state,
+        JobState::FailedToStart(StartFailure::NoCapacity)
+    );
+}
+
+// A pass whose claim the store fails is not run and is a store failure for the tick's health,
+// and the feed is not trimmed for it. It catches a failed claim taken for a won one.
+#[test]
+fn a_pass_whose_claim_fails_is_a_store_failure_and_runs_nothing() {
+    let limits = JobLimits {
+        max_queue_wait: 30 * MINUTE,
+        ..JobLimits::DEFAULT
+    };
+    let rig = clocked_rig("pass_claim_fails", true, limits);
+    let id = queue(&rig, "job-q", spec());
+    rig.advance(31 * MINUTE);
+    rig.store.fail_next();
+    let failure = js_jobs::JobStoreError::Store(js_state::StoreError::Failed("x".to_owned()));
+    assert_eq!(
+        rig.agents.job_pass(),
+        crate::store_health::FailureKind::of(&failure).map(crate::store_health::Pass::Failed)
+    );
+    assert_eq!(rig.job(&id).state, JobState::Queued);
+    assert!(matches!(
+        rig.agents.job_pass(),
+        Some(crate::store_health::Pass::Ran(_))
+    ));
+}
+
 // Row 43. Catches an allocation freed at the timeout without the host's confirmation, a stop
 // never sent or sent once only, and the room of a timed-out start offered to the next job
 // before the host gives it back. Second host: with its agent silent for the whole time the

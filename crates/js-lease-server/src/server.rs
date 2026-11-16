@@ -191,6 +191,13 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         (None, _) => None,
     };
     gate.set(Phase::Starting);
+    // Over a store other servers share, a periodic duty is claimed for half a tick, so that of
+    // the servers whose ticks fall in one period one runs it, and a server whose tick is a
+    // little early does not skip a period. A store one process writes has no one to leave it to.
+    let duty_period = match store.as_ref().is_some_and(|store| !store.is_locked()) {
+        true => config.tick_period() / 2,
+        false => Duration::ZERO,
+    };
     let (prepared, listeners) = prepare(config, store, &clock)?;
     let tls = listeners
         .tls
@@ -220,6 +227,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         checker,
         cached,
     } = open(prepared, &clock)?;
+    shared.agents().set_duty_period(duty_period);
     info!(
         %addr,
         hosts = listing(&shared).hosts.len(),
