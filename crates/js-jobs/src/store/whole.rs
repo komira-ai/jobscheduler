@@ -459,6 +459,7 @@ mod tests {
         let jobs = JobStore::new(store, RandomIds).expect("opens");
         let id = JobId::parse("ghost").expect("an id");
         let host = HostId::new("host-a").expect("a host");
+        assert_eq!(Empty.scan_prefix("x/"), Ok(Vec::new()));
         let decided = jobs.decide_placement(
             &mut Empty,
             &id,
