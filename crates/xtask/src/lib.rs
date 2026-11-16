@@ -16,7 +16,7 @@
 //!   and laying down the files of each release archive (docs/release.md).
 //!
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
-//!   <dir>` ([`release::macos_leg`]): on a pull request, the release's macOS leg from that commit:
+//!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:
 //!   the release build of each binary, its archive directory, its minimum macOS and its
 //!   `--version`; nothing is uploaded.
 //! - `release deb --binary <path> --version <X.Y.Z> --platform linux-x86_64|linux-arm64 --out <dir>`

@@ -1,6 +1,6 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
-//! read as it is in the repository. Two jobs: `build` runs on every pull request and by hand,
-//! holds no secret and signs nothing; `sign` runs only by hand from main, in the protected
+//! read as it is in the repository. Two jobs: `build` runs in the release's beta stage and by hand
+//! (never on a pull request), holds no secret and signs nothing; `sign` runs only by hand from main, in the protected
 //! environment `macos-signing`, takes the checked unsigned package from `build` without
 //! rebuilding, and is the only place a secret is named, on the steps that sign and
 //! notarize and nowhere else. Neither job publishes anything.
@@ -89,14 +89,13 @@ fn on_block(text: &str) -> Vec<&str> {
 }
 
 #[test]
-fn the_workflow_starts_on_every_pull_request_and_by_hand_only() {
+fn the_workflow_is_called_by_the_release_and_started_by_hand_but_never_by_a_pull_request() {
     let text = read(WORKFLOW);
     let on: Vec<&str> = on_block(&text).into_iter().map(str::trim).collect();
-    // No paths and no types under `pull_request`: every pull request runs the build.
     assert_eq!(
         on,
         [
-            "pull_request:",
+            "workflow_call:",
             "workflow_dispatch:",
             "inputs:",
             "version:",
@@ -105,9 +104,8 @@ fn the_workflow_starts_on_every_pull_request_and_by_hand_only() {
             "type: string",
         ]
     );
-    assert!(!text.contains("pull_request_target"));
-    assert!(!text.contains("workflow_call"));
-    // A pull request builds version 0.0.0.
+    assert!(!text.contains("pull_request"));
+    // The release's call builds version 0.0.0.
     assert!(
         text.contains("  VERSION: ${{ inputs.version || '0.0.0' }}\n"),
         "the version"
@@ -115,10 +113,10 @@ fn the_workflow_starts_on_every_pull_request_and_by_hand_only() {
 }
 
 #[test]
-fn a_newer_push_to_a_pull_request_cancels_its_older_build_and_manual_runs_queue() {
+fn manual_runs_of_one_version_on_one_ref_queue() {
     let text = read(WORKFLOW);
     assert!(
-        text.contains("\nconcurrency:\n  group: js-agent-macos-pkg-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"),
+        text.contains("\nconcurrency:\n  group: js-agent-macos-pkg-${{ github.ref }}-${{ inputs.version }}\n  cancel-in-progress: false\n"),
         "the workflow's concurrency"
     );
 }
@@ -175,7 +173,7 @@ fn every_action_is_pinned_to_a_commit_and_both_jobs_run_on_macos_15() {
 }
 
 #[test]
-fn the_pull_request_job_names_no_secret_and_signs_nothing() {
+fn the_build_job_names_no_secret_and_signs_nothing() {
     let text = read(WORKFLOW);
     let build = job_text(&text, "build");
     assert!(!build.contains("secret"), "the build job mentions a secret");
