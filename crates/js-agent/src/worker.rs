@@ -159,6 +159,9 @@ pub struct Plan {
     pub platform: Platform,
     /// The directories the post-job checks watch.
     pub watch: Vec<PathBuf>,
+    /// How long the host settles before the checks and the blindness rule count what they
+    /// see against a job (`--settle-ms`).
+    pub settle: Duration,
     /// The clock, the runtime and the host view.
     pub machine: Arc<dyn Machine>,
     /// How long the worker waits for an order before it steps by itself.
@@ -767,6 +770,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
         host_id,
         platform,
         watch,
+        settle,
         machine,
         usage,
         vm,
@@ -788,7 +792,8 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     runtime.check_egress().map_err(|why| why.to_string())?;
     let (checks, actions): (Box<dyn CheckHook>, Result<String, &str>) = match &backend {
         Backend::Container(settings) => {
-            let integrity = Integrity::start(machine.view(), settings.uid(), watch)?;
+            let integrity =
+                Integrity::start(machine.view(), settings.uid(), watch)?.with_settle(settle);
             // The engines give each slot a user of its own; every crun job runs as the one id
             // of the job user's range, so there are no slots to tell apart.
             let integrity = match settings.crun() {
@@ -802,6 +807,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     };
     let (life, events) = Lifecycle::adopt(config, runtime, checks, Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
+    let life = life.with_blind_wait(settle);
     lines.extend(describe(&events));
     let collector = usage.and_then(|outbox| match actions {
         Ok(dir) => Some(Collector::new(

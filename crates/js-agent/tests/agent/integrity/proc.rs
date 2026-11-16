@@ -164,17 +164,41 @@ fn the_process_table_is_read_from_recorded_proc_text() {
                 ppid: 0,
                 uid: 0,
                 start: 1,
-                cgroup: "0::/init.scope".to_owned()
+                cgroup: "0::/init.scope".to_owned(),
+                comm: "systemd".to_owned(),
+                state: 'S'
             },
             Process {
                 pid: 100,
                 ppid: 1,
                 uid: 1000,
                 start: 5000,
-                cgroup: "1:name=systemd:/user.slice 0::/user.slice/user-1000.slice".to_owned()
+                cgroup: "1:name=systemd:/user.slice 0::/user.slice/user-1000.slice".to_owned(),
+                comm: "(sd-pam) (x y)".to_owned(),
+                state: 'S'
             }
         ]
     );
+}
+
+/// Asserts that the table carries each process's command name and state letter as the kernel
+/// prints them (a zombie is `Z`), and that a finding can name what a process is. It catches a
+/// parser that reads the state from the wrong field, so a zombie waiting to be reaped looks
+/// like a running process.
+#[test]
+fn the_process_table_carries_the_command_name_and_the_state() {
+    let mut recorded = with_processes(&[(1, "init", 0, 0, 1, "/"), (9, "conmon", 1, 0, 70, "/")]);
+    recorded.files.insert(
+        "/proc/9/stat".to_owned(),
+        stat(9, "conmon", 1, 70).replacen(") S ", ") Z ", 1),
+    );
+    recorded.listings = vec![Ok(vec!["1", "9"])];
+    let processes = host(recorded).processes().unwrap();
+    let seen: Vec<(&str, char)> = processes
+        .iter()
+        .map(|process| (process.comm.as_str(), process.state))
+        .collect();
+    assert_eq!(seen, [("init", 'S'), ("conmon", 'Z')]);
 }
 
 /// Asserts that a process that ends while the table is read is left out when `/proc` no
