@@ -5,10 +5,14 @@
 //! # The class
 //!
 //! A job's class is the value of its label [`SIZE_CLASS_LABEL`] when it has one, else its
-//! image's name (without the digest, so a rebuilt image keeps the history), its command and its
-//! arguments. The estimator's key is that class's SHA-256 (its first eight bytes), under the
-//! client that submitted the job (two clients never share a class) and the job's platform (its
-//! `os` and `arch`, as it names them), on the cgroup basis.
+//! image's name (without the digest, so a rebuilt image keeps the history) and its command. The
+//! arguments are not part of it: a client's arguments name what one run works on (an action's
+//! digest, a lease, a deadline, a grant), which no other run shares, so a class that held them
+//! would be a class of one run and never learn. A client that runs different work under one
+//! image and command names each work's class in the label. The estimator's key is that class's
+//! SHA-256 (its first eight bytes), under the client that submitted the job (two clients never
+//! share a class) and the job's platform (its `os` and `arch`, as it names them), on the cgroup
+//! basis.
 //!
 //! # The size
 //!
@@ -76,9 +80,10 @@ use tracing::warn;
 
 use crate::place::SchedPlacer;
 
-/// The label whose value names a job's class (`size-class`). A client that runs the same work
-/// under changing arguments (a build of each new commit) names it, so that every run of the
-/// work shares one history.
+/// The label whose value names a job's class (`size-class`): the name of the work, such as the
+/// build target it runs. A client that runs different work under one image and command names
+/// it, so that each work has its own history; without it, every run of an image and command
+/// shares one.
 pub const SIZE_CLASS_LABEL: &str = "size-class";
 
 /// The share a cold class books of the most cores and the most bookable memory a host has: a
@@ -293,8 +298,8 @@ fn day_of_millis(millis: u64) -> Day {
 }
 
 /// The name of `job`'s class, the history key a usage row records: its `size-class` label as
-/// it is, else `run-` and the 16 hex digits of the hash of its image name, command and args
-/// (never its image digest or its id, which change with every build).
+/// it is, else `run-` and the 16 hex digits of the hash of its image name and command (never
+/// its image digest, its id or its args, which change with every build or run).
 #[must_use]
 pub fn class_name(job: &JobRecord) -> String {
     match job.spec.labels.get(SIZE_CLASS_LABEL) {
@@ -304,21 +309,14 @@ pub fn class_name(job: &JobRecord) -> String {
 }
 
 /// The first 8 bytes, big-endian, of the SHA-256 of `job`'s class text: `label`, NUL and its
-/// `size-class` label, else `run`, NUL, its image name, NUL and its command and args joined by
-/// NUL.
+/// `size-class` label, else `run`, NUL, its image name, NUL and its command joined by NUL.
 fn class_hash(job: &JobRecord) -> u64 {
     let spec = &job.spec;
     let class = match spec.labels.get(SIZE_CLASS_LABEL) {
         Some(class) => format!("label\0{class}"),
         None => {
             let image = spec.image.as_ref().map_or("", |image| image.name());
-            let words: Vec<&str> = spec
-                .command
-                .iter()
-                .chain(&spec.args)
-                .map(String::as_str)
-                .collect();
-            format!("run\0{image}\0{}", words.join("\0"))
+            format!("run\0{image}\0{}", spec.command.join("\0"))
         }
     };
     let digest = Sha256::digest(class.as_bytes());

@@ -66,9 +66,11 @@ A job that leaves `Needs.cpu_millis` or `Needs.memory_bytes` at 0 (or sends no n
 of its class gives (`crates/js-sched-placer/src/sizes.rs`). A dimension the job names is booked as named. This is the generic key of
 7.1 for jobs:
 
-- **class**: the value of the job's label `size-class` when it has one, else its image's name (not its digest), command and arguments.
-  A client that runs the same work under changing arguments (a build of each new commit) names the class, so that every run shares one
-  history. The estimator's shape is the first eight bytes of the class's SHA-256.
+- **class**: the value of the job's label `size-class` when it has one (the name of the work, such as the build target), else its
+  image's name (not its digest) and command. The arguments are never part of it: a client's arguments name what one run works on (an
+  action's digest, a lease, a deadline), so a class that held them would hold one run and never learn. A client that runs different
+  work under one image and command names each work's class in the label. The estimator's shape is the first eight bytes of the
+  class's SHA-256.
 - **partition**: the client that submitted the job; **platform**: the job's `os` and `arch` as it names them; **basis**: cgroup.
 
 The estimator is `js-sizing` unchanged: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the 90th
