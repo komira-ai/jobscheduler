@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use js_agent::bundle::{Admission, Needs};
 use js_agent::lifecycle::{Body, Event};
-use js_agent_wire::{JobSpec, NativeSpec, NetworkLevel, refusal};
+use js_agent_wire::{InputRef, JobSpec, NativeSpec, NetworkLevel, Placement, refusal};
 use js_bundle::DottedVersion;
 use js_oci::Allow;
 use serde_json::json;
@@ -182,4 +182,39 @@ fn an_image_start_the_runtime_does_not_run_is_refused_with_its_answer() {
     let events = h.start(job("r1"));
     assert_eq!(events, refused("r1", refusal::IMAGE_UNSUPPORTED_HERE, why));
     assert!(h.fake.created().is_empty(), "the image start was created");
+}
+
+/// Asserts that a native body's inputs are staged as read-only mounts: an input below a mount
+/// root becomes a mount of that root at the input's `dest`, and an input that names no root (a
+/// stage, which the native runtime stages itself) becomes none; the run is created with exactly
+/// that one mount. It catches a lifecycle that drops a native job's mount inputs, binds one
+/// writable or at the root's own path, or turns a stage into a mount of nothing.
+#[test]
+fn a_native_bodys_mount_input_is_staged_read_only_at_its_dest() {
+    let mut h = Harness::new("nb-inputs");
+    h.fake.run_native();
+    std::fs::create_dir(h.dir.path("data/sub")).unwrap();
+    let mut spec = native_job("r1", NetworkLevel::Off);
+    let native = spec.native.as_mut().expect("a native body");
+    native.inputs = vec![
+        InputRef::Mount {
+            root_name: "data".to_owned(),
+            rel: "sub".to_owned(),
+            dest: "inputs/data".to_owned(),
+        },
+        InputRef::Stage {
+            stage_id: format!("sha256:{}", "a".repeat(64)),
+            dest: "inputs/stage".to_owned(),
+            placement: Placement::default(),
+        },
+    ];
+    assert_eq!(names(&h.start(spec)), ["started r1"]);
+    let created = h.fake.created();
+    assert_eq!(created.len(), 1);
+    let mounts: Vec<(&str, bool)> = created[0]
+        .mounts
+        .iter()
+        .map(|mount| (mount.target.as_str(), mount.ro))
+        .collect();
+    assert_eq!(mounts, [("inputs/data", true)]);
 }
