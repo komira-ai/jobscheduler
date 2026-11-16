@@ -25,7 +25,7 @@ use js_jobs::{
 };
 use js_state::Store;
 use js_types::HostId;
-use js_usage::{AllocationId, Booked as UsageBooked, DrainOutcome, EndedReason, EndedRow};
+use js_usage::{AllocationId, Booked as UsageBooked, DrainOutcome, EndedReason, EndedRow, Used};
 
 /// What says an allocation's container is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +156,8 @@ pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
 /// job id (or, for a job id with a letter the history's ids do not take, by the allocation
 /// id), on its host, with what it booked; queued from the job's submit to this placement,
 /// run from its start to its end (zero for a job that never ran, unknown for a job whose
-/// row is gone), ended at the free, for the reason it was freed.
+/// row is gone), ended at the free, for the reason it was freed, with what it was measured to
+/// use ([`used_of`]).
 pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<Row> {
     let end = freed.freed_at.unwrap_or(freed.created_at);
     let ran = |job: &JobRecord| {
@@ -178,10 +179,31 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
         estimated_end: None,
         actual_end: millis(end.as_duration()),
         error_ms: None,
-        used: None,
+        used: job.and_then(used_of),
     };
     let rows = named.map(|id| js_usage::ended_writes(&row(id)).to_vec());
     rows.unwrap_or_default()
+}
+
+/// What `job` was measured to use, from the usage its host reported with its result: its peak
+/// memory, and the CPU it used per second of its run (from its start to its end), as both the
+/// highest and the mean CPU (a job's host reports one total, not one per minute; a run of no
+/// time used none). `None` for a job with no result, or whose host reported no usage.
+fn used_of(job: &JobRecord) -> Option<Used> {
+    let result = job.result.as_ref()?;
+    let usage = result.usage?;
+    let timing = &result.timing;
+    let ran = timing
+        .started_at
+        .map(|started| timing.ended_at.since(started));
+    let ran = ran.unwrap_or_default().as_micros();
+    let per_second = (usage.cpu_time.as_micros() * 1000).checked_div(ran);
+    let cpu_milli = per_second.map_or(0, |cpu| u64::try_from(cpu).unwrap_or(u64::MAX));
+    Some(Used {
+        cpu_milli,
+        memory_bytes: usage.peak_memory_bytes,
+        cpu_mean_milli: cpu_milli,
+    })
 }
 
 /// What `booked` comes to in the usage history.

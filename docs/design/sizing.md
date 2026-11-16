@@ -60,3 +60,37 @@ replay output is an upper bound).
 
 ## 7.6 Learning handshake
 `Learned::stage` then `requeued` or `finish` (`crates/kbf-server/src/learned.rs`) learns from an attempt only after the scheduler committed the result, so a discarded result does not teach. This becomes `SizeLearner` with kbf types removed; persistence is a `SizeStore` trait (get_all, put_batch, delete, scan) with rows written outside the scheduler transaction, best-effort after kills and write-behind otherwise.
+
+## 7.7 Jobs that book nothing
+A job that leaves `Needs.cpu_millis` or `Needs.memory_bytes` at 0 (or sends no needs) is booked, for each of them, what the history
+of its class gives (`crates/js-sched-placer/src/sizes.rs`). A dimension the job names is booked as named. This is the generic key of
+7.1 for jobs:
+
+- **class**: the value of the job's label `size-class` when it has one, else its image's name (not its digest), command and arguments.
+  A client that runs the same work under changing arguments (a build of each new commit) names the class, so that every run shares one
+  history. The estimator's shape is the first eight bytes of the class's SHA-256.
+- **partition**: the client that submitted the job; **platform**: the job's `os` and `arch` as it names them; **basis**: cgroup.
+
+The estimator is `js-sizing` unchanged: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the 90th
+percentile of CPU used per second of wall time rounded up to a quarter core. A class with too few runs books the cold size: a quarter
+of the most cores and of the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows, and
+at least the class's kill floor. Before five runs the memory may only rise from there. A class whose estimate reaches the largest
+host's bookable memory books all of it and waits for an empty host.
+
+The size is decided by the placement pass, not at submit, and is not written on the job: its needs stay as submitted, so a retried
+submit with the same id is still the same job. What it was booked is its allocation's `booked`. A contained job's booking is its
+`memory.max` and `cpu.max`, and the CPU slack and memory percent bound the booking as they bound every booking.
+
+**What a run teaches.** When a pass sees a job's allocation freed, it reads the job once and gives the estimator one run: an exit 0 is
+a success; any other exit, a wall limit or a failed input a failure, which teaches the memory nothing; a stop for memory is a kill at
+the job's own limit, which raises the class's floor to twice the booking it died at. A success whose peak came within 5% of its
+booking counts as having hit its limit (the estimator's own censoring rule assumes the build-host limit of 7.3), so it can hold the
+class at its booking but not lower it. CPU counts as measured at no node pressure: a contained job's CPU is held to its booking by
+its `cpu.max`, so what it used is what it was given. Because CPU is capped at the booking, the runs a class makes at the cold size
+never teach it more CPU than the cold size; a class that needs more names its CPU (its runs that do are learned too).
+
+**Where the history lives.** Nowhere new: at its start the server teaches the estimator every ended job its job store still holds
+(seven days by default), in the order they ended, with what each allocation booked; then each pass teaches the jobs it sees freed.
+A failed read at the start is logged and every class starts cold. Each job's usage history row now carries what its host reported
+(`used`: the peak memory, and the CPU per second of its run as both the highest and the mean), so `GetUsage` can set what a host
+used beside what it booked.

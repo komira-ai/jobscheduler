@@ -7,16 +7,16 @@ use std::time::Duration;
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     AllocationStep, Booked, EndReason, JobEnd, JobId, JobState, JobStore, JobStoreError, NewJob,
-    Output, ResultReason, StartFailure, keys,
+    Output, ResourceUsage, ResultReason, StartFailure, keys,
 };
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, ManualClock, Store, Txn};
 use js_types::HostId;
 use js_usage::{
-    AllocationId, Booked as UsageBooked, DrainOutcome, EndedHistory, EndedReason, EndedRow,
+    AllocationId, Booked as UsageBooked, DrainOutcome, EndedHistory, EndedReason, EndedRow, Used,
 };
 
-use super::{Freed, answer_retired, ended_reason, free_allocation, reason_of};
+use super::{Freed, answer_retired, ended_reason, free_allocation, reason_of, used_of};
 use crate::agent_api::job_rig::{BOOKED, placed, spec, tables};
 use crate::job_store::ServerJobs;
 
@@ -404,4 +404,73 @@ fn the_history_row_of_a_free_names_its_allocation_its_booking_and_its_reason() {
     for (reason, recorded) in reasons {
         assert_eq!(ended_reason(reason), recorded, "{reason:?}");
     }
+}
+
+/// Asserts what a job's usage history row says it used: its host's peak memory, and the CPU
+/// time it reported per second of its run (from its start to its end) as both its highest and
+/// its mean; nothing for a job whose host reported no usage or that has no result; and no CPU
+/// for a job that never started. It catches a row that drops the job's measurement (every
+/// job row read "nothing measured", so no report could set what a host used beside what it
+/// booked) and a CPU divided by the wrong time.
+#[test]
+fn a_job_row_holds_the_peak_and_the_cpu_its_host_reported() {
+    let (time, _store, jobs) = timed();
+    let second = Duration::from_secs(1);
+    let usage = ResourceUsage {
+        cpu_time: Duration::from_secs(30),
+        peak_memory_bytes: 3 << 30,
+    };
+    let output = Output {
+        usage: Some(usage),
+        ..Output::default()
+    };
+    let (job, _) = placed(&jobs, "ran", "host-a", spec(), BOOKED);
+    assert_eq!(used_of(&job), None, "no result");
+    jobs.transition(&job.id, JobState::Placed, JobState::Starting)
+        .unwrap();
+    jobs.transition(&job.id, JobState::Starting, JobState::Running)
+        .unwrap();
+    time.advance(10 * second);
+    let end = JobEnd::Exited {
+        exit_code: 0,
+        output: output.clone(),
+    };
+    let ended = jobs.end_job(&job.id, end).unwrap();
+    let timing = ended.result.as_ref().unwrap().timing;
+    let ran = timing
+        .ended_at
+        .since(timing.started_at.unwrap())
+        .as_micros();
+    assert!(ran >= 10_000_000, "{ran}");
+    let cpu = u64::try_from(30_000_000_000 / ran).unwrap();
+    let used = Used {
+        cpu_milli: cpu,
+        memory_bytes: 3 << 30,
+        cpu_mean_milli: cpu,
+    };
+    assert_eq!(used_of(&ended), Some(used));
+
+    let (quiet, _) = placed(&jobs, "quiet", "host-a", spec(), BOOKED);
+    let cancelled = JobEnd::Cancelled {
+        exit_code: None,
+        output: Output::default(),
+    };
+    assert_eq!(
+        used_of(&jobs.end_job(&quiet.id, cancelled).unwrap()),
+        None,
+        "no usage"
+    );
+
+    let (unstarted, _) = placed(&jobs, "unstarted", "host-a", spec(), BOOKED);
+    let cancelled = JobEnd::Cancelled {
+        exit_code: None,
+        output,
+    };
+    let unstarted = jobs.end_job(&unstarted.id, cancelled).unwrap();
+    let none = Used {
+        cpu_milli: 0,
+        memory_bytes: 3 << 30,
+        cpu_mean_milli: 0,
+    };
+    assert_eq!(used_of(&unstarted), Some(none), "never ran: no CPU");
 }
