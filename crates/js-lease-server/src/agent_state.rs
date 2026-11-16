@@ -455,8 +455,7 @@ impl BindingStore {
     /// nothing was written, and the heartbeat is answered with an error so that the agent
     /// reports again.
     pub(crate) fn commit_taint(&self, change: &Change, expected: Option<&Taint>) -> io::Result<()> {
-        let (Keeper::Store(store), Some((name, Some(value)))) =
-            (&self.keeper, change.writes.first())
+        let (Keeper::Store(store), Some((name, value))) = (&self.keeper, change.writes.first())
         else {
             return Ok(());
         };
@@ -474,7 +473,9 @@ impl BindingStore {
                 "{name} holds another taint than this server's: another server changed it"
             )));
         }
-        let txn = Txn::new().put(name, value.clone(), Cond::Version(row.version));
+        // A change that sets a taint is a put, so there is a value; a delete would put nothing.
+        let value = value.clone().unwrap_or_default();
+        let txn = Txn::new().put(name, value, Cond::Version(row.version));
         host_keys::committed(store.txn(txn))
     }
 
