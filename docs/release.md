@@ -431,8 +431,10 @@ SHA-256 as the pin, and the manifest:
 | `minHostkeeper` | `0.1.225`, the first hostkeeper whose daemon runs a native entry's hook command |
 | `installerBounds` | stage 600, activate 300, remove 300 |
 
-There is no `macos-arm64` entry (below). The set does not wait for the fleet: the coordinator rolls
-the version out by its own plan.
+When the release's signed Mac package is published (`--pkg-url`, below) the targets also hold a
+`macos-arm64` entry of the installer `macos-pkg`, with the Mac form of this manifest; when it is not,
+there is no `macos-arm64` entry and the Linux targets are what they were. The set does not wait for
+the fleet: the coordinator rolls the version out by its own plan.
 
 **Which hosts.** Every deployment of hostkeeper targets a host group (hostkeeper's
 `docs/design/hostgroups.md`), and the group a call names is an input of `set-desired.yml` that
@@ -478,19 +480,56 @@ together) moves the entry. The call names the host group `all-in-one` (the `host
 
 ### macOS
 
-The Mac has no native package hostkeeper can install yet, so no `macos-arm64` target: a Mac whose
-daemon announces only `macos-pkg` is ordered nothing for `js-agent`. The signed installer package
-(`.github/workflows/js-agent-macos-pkg.yml`, `packaging/js-agent-macos`) is not ready for hostkeeper's
-`macos-pkg` installer. What is missing: a release job that builds, signs and attests the `.pkg` (the
-workflow runs by hand only); `productsign --timestamp` and hostkeeper's signature check of the signed
-package (`release check-pkg-signature`: the chain of the Developer ID Installer identity to Apple's
-root, a trusted timestamp); hosting under `pkg/js-agent/<version>/` at `packages.komira.ai` with a
-testing-to-stable promotion, which the publish role may not write today; the `macos-pkg` target
-entry (its store, locator, digest and size, and the manifest with the package identifier and launchd
-label); a decision on notarization, which changes the bytes after signing; and js-agent's hook reading
-the `.pkg`'s tree under `tree/Library/...`. The Mac archives (`*-aarch64-apple-darwin.tar.gz`) are
-released as before. The design that closes these gaps, with the package's new layout, is
-[docs/design/mac-hostkeeper-package.md](design/mac-hostkeeper-package.md); none of it is built yet.
+The Mac agent is installed on a Mac by its hostkeeper as a `macos-pkg` entry: the signed installer
+package `js-agent-X.Y.Z-macos-arm64.pkg` (identifier `com.komira.js-agent`, built and signed by
+`.github/workflows/js-agent-macos-pkg.yml`, not notarized). The release publishes it in two steps,
+and `release desired` adds it to the targets only when both happened.
+
+**Publishing.** After the three beta jobs and `promote-macos` passed, the job `pkg-upload` of
+`release.yml` runs `cargo xtask channels pkg upload --dir <dir> --version X.Y.Z --bucket <b> --work
+<dir>`. It holds the `SHA256SUMS` in `--dir` to list exactly the package, at the digest of the file,
+and refuses before any call otherwise. It then puts the package and, after it, the `SHA256SUMS` to
+`pkg/jobscheduler/X.Y.Z/` of the apt repository's bucket, each with one single-part `put-object` and
+`If-None-Match: *` (the publishing role may write nothing else under `pkg/`, and nothing twice). An
+answer `412` is a success only when the stored object's SHA-256 equals the local file's, so a
+re-run of the job passes and a different file at a version's key fails and is never replaced. The
+package is then at `https://packages.komira.ai/pkg/jobscheduler/X.Y.Z/js-agent-X.Y.Z-macos-arm64.pkg`
+beside its `SHA256SUMS`.
+
+**Desired version.** `cargo xtask release desired --pkg-url https://packages.komira.ai/pkg/jobscheduler`
+downloads `<base>/X.Y.Z/SHA256SUMS` and the package over HTTPS and holds the package's SHA-256 to the
+digest the sums list. When both are there it writes the output `set-mac=true` and adds this entry
+to `targets` under `macos-arm64`:
+
+| Entry field | Value |
+|---|---|
+| `installer` | `macos-pkg` |
+| `repository` | `komira-stable` |
+| `packageVersion` | `X.Y.Z` |
+| `digest`, `bytes` | the SHA-256 and the size of the signed package, `bytes` as a JSON string (proto3 64-bit integer) |
+| `manifest` | the Mac manifest below |
+
+When `SHA256SUMS` does not exist (an answer `404`) it writes `set-mac=false`, and `targets` is
+exactly what it is without `--pkg-url`: the Linux platforms alone. Any other failure to read it, sums
+that do not list the package, or a package whose digest is not the listed one is an error and nothing
+is set. A second call of the reusable workflow, with the host group `mac-build`, sets the same
+version and targets when `set-mac` is `true`.
+
+The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook's bounds and the
+`params` bounds are the same values) with these differences:
+
+| Manifest field | Mac value |
+|---|---|
+| `package` | `com.komira.js-agent` |
+| `hook.command` | `/Library/Application Support/js-agent/bin/js-agent update-hook` |
+| `run` | the launchd labels `js-agent` and `js-agent.session` (the agent and its root helper) |
+| `params.unit`, `params.helper_unit` | `js-agent`, `js-agent.session` |
+| `params.state_dir` | `/Library/Application Support/js-agent/update` |
+| `params.state_root` | `/var/db/js-agent/state` |
+| `params.runtime` | `native` |
+
+The `release_link` (`/var/lib/hostkeeper/packages/js-agent/current`), `flags_file` and `token_file`
+are the Linux values. The Mac archives (`*-aarch64-apple-darwin.tar.gz`) are released as before.
 
 The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners, its packages pinned by version and SHA-256 in `.github/debs/musl-tools.toml` and installed with `dpkg` after `cargo xtask debs` took them from the actions cache or, when the cache missed, from the pinned mirrors (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
 

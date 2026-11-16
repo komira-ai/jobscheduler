@@ -1,5 +1,5 @@
 //! `release desired --repo <owner/repo> --version <X.Y.Z or ""> --after-run <run id or ""> --dir
-//! <dir> [--output <file>] [--apt-url <url>] [--gh <program>] [--curl <program>]`: what
+//! <dir> [--output <file>] [--apt-url <url>] [--pkg-url <url>] [--gh <program>] [--curl <program>]`: what
 //! `.github/workflows/hostkeeper-desired.yml` sets as the desired version of the hostkeeper
 //! service `js-agent`, or why it sets nothing. It runs before any step of that workflow can hold
 //! a token, so a refusal here means the coordinator is never called.
@@ -29,8 +29,14 @@
 //!
 //! Every problem found is reported, one line each. When there is none, `--output` (on Actions,
 //! `GITHUB_OUTPUT`) gets `set=true`, `package-version=<X.Y.Z>` and `targets=<one-line JSON>`:
-//! the proto3 JSON of hostkeeper's `TargetList` per platform ([`manifest`]; no `macos-arm64`,
-//! which has no package).
+//! the proto3 JSON of hostkeeper's `TargetList` per platform ([`manifest`]).
+//!
+//! With `--pkg-url <base>` the Mac is looked at too ([`mac`]): when `<base>/<X.Y.Z>/SHA256SUMS`
+//! exists, the package it lists is downloaded and held to that digest, `targets` gains the
+//! `macos-arm64` entry of the installer `macos-pkg` and the output `set-mac=true` is written;
+//! when it does not exist (`404`), `targets` has the Linux platforms alone and `set-mac=false`
+//! is written. Any other failure, or a package that is not the one the sums list, is an error.
+//! Without `--pkg-url` there is no `macos-arm64` entry and no `set-mac`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,6 +48,7 @@ use serde_json::Value;
 use super::deb::{Platform, file_name};
 use super::{Version, io_error, latest};
 
+pub mod mac;
 pub mod manifest;
 pub mod repo;
 
@@ -104,6 +111,10 @@ pub struct DesiredArgs {
     /// The apt repository's URL, as a host reads it.
     #[arg(long, default_value = "https://packages.komira.ai/apt")]
     pub apt_url: String,
+    /// The base URL of the signed Mac packages, `<base>/<X.Y.Z>/SHA256SUMS` and the package
+    /// below it; without it the Mac is not looked at and no `set-mac` is written.
+    #[arg(long)]
+    pub pkg_url: Option<String>,
     /// The GitHub CLI.
     #[arg(long, default_value = "gh")]
     pub gh: String,
@@ -316,11 +327,17 @@ fn check_suite(
 /// one whose sums do not list a `.deb`, or a stable suite that does not list a `.deb` with
 /// the digest of the sums; [`Error::Release`] for a program that does not run or fails.
 pub fn run(args: &DesiredArgs) -> Result<String, Error> {
-    if !args.apt_url.starts_with("https://") || args.apt_url.ends_with('/') {
-        return Err(Error::Usage(format!(
-            "--apt-url {:?} is not an https URL without a trailing /",
-            args.apt_url
-        )));
+    for (flag, url) in [
+        ("--apt-url", Some(&args.apt_url)),
+        ("--pkg-url", args.pkg_url.as_ref()),
+    ] {
+        if let Some(url) = url
+            && (!url.starts_with("https://") || url.ends_with('/'))
+        {
+            return Err(Error::Usage(format!(
+                "{flag} {url:?} is not an https URL without a trailing /"
+            )));
+        }
     }
     let Some(version) = chosen(args)? else {
         let lines = [
@@ -358,21 +375,31 @@ pub fn run(args: &DesiredArgs) -> Result<String, Error> {
     if !problems.is_empty() {
         return Err(Error::Refused(problems));
     }
-    let lines = [
-        "set=true".to_owned(),
-        format!("package-version={version}"),
-        format!(
-            "targets={}",
-            manifest::targets(&version.to_string(), &digests)
-        ),
-    ];
-    if let Some(output) = &args.output {
-        append_output(output, &lines)?;
-    }
+    let mut targets = manifest::targets(&version.to_string(), &digests);
+    let mut lines = vec!["set=true".to_owned(), format!("package-version={version}")];
     let mut printed = vec![format!(
         "release {tag}: the stable suite lists js-agent {version} for each of {} architectures, each with the digest {SUMS} lists",
         digests.len()
     )];
+    let mac = match &args.pkg_url {
+        Some(base) => Some(mac::fetch(&args.curl, &args.dir, base, version)?),
+        None => None,
+    };
+    if let Some(Some(package)) = &mac {
+        let entry = manifest::mac_entry(&version.to_string(), &package.digest, package.bytes);
+        targets = manifest::with_mac(targets, entry);
+        printed.push(format!(
+            "the Mac package {} is published with the digest its {SUMS} lists",
+            mac::file_name(version)
+        ));
+    }
+    lines.push(format!("targets={targets}"));
+    if let Some(mac) = &mac {
+        lines.push(format!("set-mac={}", mac.is_some()));
+    }
+    if let Some(output) = &args.output {
+        append_output(output, &lines)?;
+    }
     printed.extend(lines);
     Ok(printed.join("\n"))
 }

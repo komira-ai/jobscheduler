@@ -22,10 +22,12 @@
 //! - `release deb --binary <path> --version <X.Y.Z> --platform linux-x86_64|linux-arm64 --out <dir>`
 //!   ([`release::deb`]): the js-agent Debian package of one Linux platform, byte for byte the same
 //!   for the same inputs.
-//! - `release desired --repo <owner/repo> --version <X.Y.Z> --after-run <id> --dir <dir> [--output <file>]`
+//! - `release desired --repo <owner/repo> --version <X.Y.Z> --after-run <id> --dir <dir> [--output <file>]
+//!   [--pkg-url <url>]`
 //!   ([`release::desired`]): the targets the hostkeeper set of js-agent is given for a release, or
 //!   `set=false`; refused unless the release's `.deb`s are in the stable apt index at the digests
-//!   of its `SHA256SUMS`.
+//!   of its `SHA256SUMS`. With `--pkg-url` the published signed Mac package is added as the
+//!   `macos-arm64` target (`set-mac=true`), or left out when it is not published (`set-mac=false`).
 //! - `release image-digest --dist <dir> --repo <owner/repo> --version <X.Y.Z> [--output <file>]`
 //!   ([`release::image_digest`]): the manifest digest of the release's linux-x86_64 image of
 //!   js-lease-server, held to `SHA256SUMS`, and the release's addresses of the image and its bundle:
@@ -54,6 +56,9 @@
 //! - `channels gate|assume|apt|check-apt ...` ([`channels`]): the release's .debs published to the apt
 //!   repository at `packages.komira.ai/apt` (suite `testing`, then `stable` once the install check
 //!   passed), and the check that the package installs from `testing` in a clean Ubuntu system.
+//! - `channels pkg upload --dir <dir> --version <X.Y.Z> --bucket <b> --work <dir>`
+//!   ([`channels::pkg`]): the signed macOS installer package and its `SHA256SUMS` into
+//!   `pkg/jobscheduler/<X.Y.Z>/` of the same bucket, each put once.
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
 //!   payload (it has no script), laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.
