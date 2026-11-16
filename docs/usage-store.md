@@ -21,7 +21,7 @@ Every row starts with a version byte.
 | field | what it holds |
 |---|---|
 | `id` | the allocation: the job id (or, in a lease-era row, the lease id's text) |
-| `profile` | the profile key a run of the lease named, if one did (the first a run of the lease was queued with) |
+| `profile` | the profile key a run of the lease named, if one did (the first a run of the lease was queued with); for a job, the name of its class (`docs/design/sizing.md` section 7.7) |
 | `host` | the host it was booked on; absent for a request cancelled before it had one |
 | `booked` | what it booked: whether the whole host, and the CPU (thousandths of a core) and memory (bytes); absent with no host |
 | `queued_ms` | the queue wait, below; absent when not known |

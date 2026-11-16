@@ -15,7 +15,7 @@ use js_state::Clock as _;
 use js_types::sched::Resources as Capacity;
 use js_types::{Labels, ManualClock, Resources, Shape, Timestamp};
 
-use super::{JobSizes, SIZE_CLASS_LABEL, bounds_of, day_of, micros, millis};
+use super::{JobSizes, SIZE_CLASS_LABEL, bounds_of, class_name, day_of, micros, millis};
 use crate::engine::Settings;
 use crate::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics};
 use crate::engine::rig::{Tables, at, host, spec_of};
@@ -738,4 +738,32 @@ fn a_start_teaches_every_ended_job_and_a_later_pass_each_job_live_then() {
     );
     tables.store.fail_read_after(0);
     assert!(placer.learn_ended(&tables.jobs).is_err());
+}
+
+/// Asserts the name a class is recorded under: the `size-class` label as it is, else `run-` and
+/// 16 hex digits that are the same for one command and differ for another. Catches a name
+/// built from the job's id, which a repeat run never shares.
+#[test]
+fn a_class_is_named_by_its_label_else_by_the_hash_of_its_command() {
+    let labelled = queued("one", of_class("kbf.cargo-test.kbf-server", needs(0, 0)));
+    assert_eq!(class_name(&labelled), "kbf.cargo-test.kbf-server");
+    let plain = |id: &str, args: &[&str]| {
+        let mut spec = spec_of(needs(0, 0), 600);
+        spec.args = args.iter().map(|arg| (*arg).to_owned()).collect();
+        queued(id, spec)
+    };
+    let name = class_name(&plain("first", &["test"]));
+    let digits = name.strip_prefix("run-").unwrap();
+    assert_eq!(digits.len(), 16, "{name}");
+    assert!(digits.bytes().all(|b| b.is_ascii_hexdigit()), "{name}");
+    assert_eq!(
+        class_name(&plain("second", &["test"])),
+        name,
+        "a repeat run"
+    );
+    assert_ne!(
+        class_name(&plain("third", &["bench"])),
+        name,
+        "another command"
+    );
 }

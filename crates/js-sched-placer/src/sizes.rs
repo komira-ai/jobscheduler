@@ -122,22 +122,6 @@ impl JobSizes {
     #[must_use]
     pub fn key_of(job: &JobRecord) -> Key {
         let spec = &job.spec;
-        let class = match spec.labels.get(SIZE_CLASS_LABEL) {
-            Some(class) => format!("label\0{class}"),
-            None => {
-                let image = spec.image.as_ref().map_or("", |image| image.name());
-                let words: Vec<&str> = spec
-                    .command
-                    .iter()
-                    .chain(&spec.args)
-                    .map(String::as_str)
-                    .collect();
-                format!("run\0{image}\0{}", words.join("\0"))
-            }
-        };
-        let digest = Sha256::digest(class.as_bytes());
-        let mut first = [0u8; 8];
-        first.copy_from_slice(&digest[..8]);
         let client = job.client.as_ref().map_or("", |client| client.as_str());
         let constraints = &spec.constraints;
         let os = constraints.os.as_deref().unwrap_or("");
@@ -146,7 +130,7 @@ impl JobSizes {
             Instance::new(client),
             PlatformClass::new(format!("{os}/{arch}")),
             Basis::Cgroup,
-            Shape(u64::from_be_bytes(first)),
+            Shape(class_hash(job)),
             None,
         )
     }
@@ -306,6 +290,41 @@ pub fn day_of(now: FarmTime) -> Day {
 /// The day of `millis` since the Unix epoch.
 fn day_of_millis(millis: u64) -> Day {
     Day(u32::try_from(millis / DAY_MILLIS).unwrap_or(u32::MAX))
+}
+
+/// The name of `job`'s class, the history key a usage row records: its `size-class` label as
+/// it is, else `run-` and the 16 hex digits of the hash of its image name, command and args
+/// (never its image digest or its id, which change with every build).
+#[must_use]
+pub fn class_name(job: &JobRecord) -> String {
+    match job.spec.labels.get(SIZE_CLASS_LABEL) {
+        Some(class) => class.to_owned(),
+        None => format!("run-{:016x}", class_hash(job)),
+    }
+}
+
+/// The first 8 bytes, big-endian, of the SHA-256 of `job`'s class text: `label`, NUL and its
+/// `size-class` label, else `run`, NUL, its image name, NUL and its command and args joined by
+/// NUL.
+fn class_hash(job: &JobRecord) -> u64 {
+    let spec = &job.spec;
+    let class = match spec.labels.get(SIZE_CLASS_LABEL) {
+        Some(class) => format!("label\0{class}"),
+        None => {
+            let image = spec.image.as_ref().map_or("", |image| image.name());
+            let words: Vec<&str> = spec
+                .command
+                .iter()
+                .chain(&spec.args)
+                .map(String::as_str)
+                .collect();
+            format!("run\0{image}\0{}", words.join("\0"))
+        }
+    };
+    let digest = Sha256::digest(class.as_bytes());
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(first)
 }
 
 /// `duration` in whole milliseconds, saturating.

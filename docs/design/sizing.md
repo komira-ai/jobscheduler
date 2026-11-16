@@ -93,4 +93,6 @@ never teach it more CPU than the cold size; a class that needs more names its CP
 (seven days by default), in the order they ended, with what each allocation booked; then each pass teaches the jobs it sees freed.
 A failed read at the start is logged and every class starts cold. Each job's usage history row now carries what its host reported
 (`used`: the peak memory, and the CPU per second of its run as both the highest and the mean), so `GetUsage` can set what a host
-used beside what it booked.
+used beside what it booked, and is kept under the name of the job's class as its `profile`: the `size-class` label as it is, else
+`run-` and the 16 hex digits of the class's shape. The name is what the job builds (for example `kbf.cargo-test.kbf-server`), the
+same for every run of it and never its job id or image digest, so the rows of one build read side by side.

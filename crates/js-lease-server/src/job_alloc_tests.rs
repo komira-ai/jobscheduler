@@ -13,10 +13,11 @@ use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, ManualClock, Store, Txn};
 use js_types::HostId;
 use js_usage::{
-    AllocationId, Booked as UsageBooked, DrainOutcome, EndedHistory, EndedReason, EndedRow, Used,
+    AllocationId, Booked as UsageBooked, DrainOutcome, EndedHistory, EndedReason, EndedRow,
+    ProfileKey, Used,
 };
 
-use super::{Freed, answer_retired, ended_reason, free_allocation, reason_of, used_of};
+use super::{Freed, answer_retired, ended_reason, free_allocation, profile_of, reason_of, used_of};
 use crate::agent_api::job_rig::{BOOKED, placed, spec, tables};
 use crate::job_store::ServerJobs;
 
@@ -307,7 +308,7 @@ fn a_freed_job_allocation_writes_one_usage_row() {
         );
         let row = EndedRow {
             id: AllocationId::parse("job-a").unwrap(),
-            profile: None,
+            profile: profile_of(&job),
             host: Some(HostId::new("host-a").unwrap()),
             booked: Some(UsageBooked {
                 whole_host: false,
@@ -473,4 +474,81 @@ fn a_job_row_holds_the_peak_and_the_cpu_its_host_reported() {
         cpu_mean_milli: 0,
     };
     assert_eq!(used_of(&unstarted), Some(none), "never ran: no CPU");
+}
+
+/// Asserts that a job's history row is kept under the name of what it builds, the same for a
+/// repeat run under another job id: the `size-class` label as it is, else `run-` and the hash
+/// of its image name, command and args (one name for two jobs that run the same command,
+/// another for other args). Each row keeps what its own run used. A label that is no profile
+/// key names none. Catches a row keyed by its job id or image digest, which a repeat run never
+/// finds.
+#[test]
+fn a_repeat_run_of_one_build_writes_its_row_under_the_same_name() {
+    let (time, store, jobs) = timed();
+    let labels = |value: &str| {
+        let map = std::collections::BTreeMap::from([("size-class".to_owned(), value.to_owned())]);
+        js_types::Labels::from_caller(&map).unwrap()
+    };
+    let named = || {
+        let mut spec = spec();
+        spec.labels = labels("kbf.cargo-test.kbf-server");
+        spec
+    };
+    for (id, peak) in [("build-1", 3u64 << 30), ("build-2", 5 << 30)] {
+        let (job, _) = placed(&jobs, id, "host-a", named(), BOOKED);
+        jobs.transition(&job.id, JobState::Placed, JobState::Starting)
+            .unwrap();
+        jobs.transition(&job.id, JobState::Starting, JobState::Running)
+            .unwrap();
+        time.advance(Duration::from_secs(10));
+        let usage = ResourceUsage {
+            cpu_time: Duration::from_secs(20),
+            peak_memory_bytes: peak,
+        };
+        let output = Output {
+            usage: Some(usage),
+            ..Output::default()
+        };
+        let end = JobEnd::Exited {
+            exit_code: 0,
+            output,
+        };
+        jobs.end_job(&job.id, end).unwrap();
+        free_allocation(&jobs, &job.id, Freed::HostConfirmed).unwrap();
+    }
+    let name = ProfileKey::parse("kbf.cargo-test.kbf-server").unwrap();
+    let rows: Vec<_> = history_rows(&store)
+        .into_iter()
+        .map(|row| {
+            (
+                row.id.to_string(),
+                row.profile,
+                row.used.map(|used| used.memory_bytes),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("build-1".to_owned(), Some(name.clone()), Some(3 << 30)),
+            ("build-2".to_owned(), Some(name), Some(5 << 30)),
+        ]
+    );
+
+    let (first, _) = placed(&jobs, "plain-1", "host-a", spec(), BOOKED);
+    let (again, _) = placed(&jobs, "plain-2", "host-a", spec(), BOOKED);
+    let mut other = spec();
+    other.args = vec!["--slow".to_owned()];
+    let (other, _) = placed(&jobs, "plain-3", "host-a", other, BOOKED);
+    let plain = profile_of(&first).unwrap();
+    let digits = plain.as_str().strip_prefix("run-").unwrap();
+    assert_eq!(digits.len(), 16, "{plain:?}");
+    assert!(digits.bytes().all(|b| b.is_ascii_hexdigit()), "{plain:?}");
+    assert_eq!(profile_of(&again), Some(plain.clone()), "same command");
+    assert_ne!(profile_of(&other), Some(plain), "other args");
+
+    let mut odd = spec();
+    odd.labels = labels("-odd");
+    let (odd, _) = placed(&jobs, "odd", "host-a", odd, BOOKED);
+    assert_eq!(profile_of(&odd), None, "no profile key");
 }

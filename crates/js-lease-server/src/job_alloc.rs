@@ -25,7 +25,9 @@ use js_jobs::{
 };
 use js_state::Store;
 use js_types::HostId;
-use js_usage::{AllocationId, Booked as UsageBooked, DrainOutcome, EndedReason, EndedRow, Used};
+use js_usage::{
+    AllocationId, Booked as UsageBooked, DrainOutcome, EndedReason, EndedRow, ProfileKey, Used,
+};
 
 /// What says an allocation's container is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +159,7 @@ pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
 /// id), on its host, with what it booked; queued from the job's submit to this placement,
 /// run from its start to its end (zero for a job that never ran, unknown for a job whose
 /// row is gone), ended at the free, for the reason it was freed, with what it was measured to
-/// use ([`used_of`]).
+/// use ([`used_of`]), and under the name of its class as its profile ([`profile_of`]).
 pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<Row> {
     let end = freed.freed_at.unwrap_or(freed.created_at);
     let ran = |job: &JobRecord| {
@@ -168,7 +170,7 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
     let named = AllocationId::parse(freed.job.as_str()).or_else(|_| AllocationId::parse(&hex));
     let row = |id| EndedRow {
         id,
-        profile: None,
+        profile: job.and_then(profile_of),
         host: Some(freed.host.clone()),
         booked: Some(booked_of(freed.booked)),
         queued_ms: job.map(|job| millis(freed.created_at.since(job.submitted_at))),
@@ -183,6 +185,14 @@ pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<
     };
     let rows = named.map(|id| js_usage::ended_writes(&row(id)).to_vec());
     rows.unwrap_or_default()
+}
+
+/// The history key of `job`'s row: the name of its class
+/// ([`js_sched_placer::sizes::class_name`]), the same for every run of what it builds and
+/// never its id or image digest. `None` for a name that is no profile key (a `size-class`
+/// label that starts with `.`, `_` or `-`).
+fn profile_of(job: &JobRecord) -> Option<ProfileKey> {
+    ProfileKey::parse(&js_sched_placer::sizes::class_name(job)).ok()
 }
 
 /// What `job` was measured to use, from the usage its host reported with its result: its peak
