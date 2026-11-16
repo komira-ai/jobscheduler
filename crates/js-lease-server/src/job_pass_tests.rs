@@ -224,6 +224,7 @@ fn a_pass_whose_claim_fails_is_a_store_failure_and_runs_nothing() {
         ..JobLimits::DEFAULT
     };
     let rig = clocked_rig("pass_claim_fails", true, limits);
+    rig.agents.set_duty_period(MINUTE);
     let id = queue(&rig, "job-q", spec());
     rig.advance(31 * MINUTE);
     rig.store.fail_next();
@@ -237,6 +238,50 @@ fn a_pass_whose_claim_fails_is_a_store_failure_and_runs_nothing() {
         rig.agents.job_pass(),
         Some(crate::store_health::Pass::Ran(_))
     ));
+}
+
+// The feed's trim is a duty of its own: with another server holding the period it is left to it
+// (the feed is not trimmed), a claim the store fails trims nothing and fails nothing, and once
+// the period is out the trim runs. It catches a trim that ignores the claim, and a failed claim
+// that stops the tick.
+#[test]
+fn the_feed_trim_is_claimed_like_the_pass() {
+    let rig = trimming("pass_feed_claim", 5);
+    rig.agents.set_duty_period(MINUTE);
+    for n in 0..8 {
+        queue(&rig, &format!("job-{n}"), spec());
+    }
+    assert!(
+        head(&rig) > 5,
+        "the writes made more changes than the feed keeps"
+    );
+    let claimed = rig
+        .jobs
+        .claim_duty("feed-trim", store_time(now_ms(&rig)), MINUTE)
+        .unwrap();
+    assert!(claimed, "another server claims the period");
+    rig.tick();
+    assert!(
+        feed_after(&rig, 0).is_ok(),
+        "the trim was left to the server that claimed it"
+    );
+    rig.advance(MINUTE);
+    // The pass's claim commits and the trim's does not.
+    rig.store.fail_after(1);
+    rig.tick();
+    assert!(
+        feed_after(&rig, 0).is_ok(),
+        "a claim the store failed trimmed"
+    );
+    rig.advance(MINUTE);
+    rig.tick();
+    assert!(
+        matches!(
+            feed_after(&rig, 0),
+            Err(js_state::StoreError::StaleCursor { .. })
+        ),
+        "the trim never ran once the period was out"
+    );
 }
 
 // Row 43. Catches an allocation freed at the timeout without the host's confirmation, a stop

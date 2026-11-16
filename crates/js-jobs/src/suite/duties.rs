@@ -62,7 +62,11 @@ where
     );
 
     assert!(
-        first("every", at(100), Duration::ZERO) && second("every", at(100), Duration::ZERO),
+        first("every", at(100), Duration::ZERO),
+        "{name}: a period of zero did not claim"
+    );
+    assert!(
+        second("every", at(100), Duration::ZERO),
         "{name}: a period of zero did not claim every call"
     );
 
