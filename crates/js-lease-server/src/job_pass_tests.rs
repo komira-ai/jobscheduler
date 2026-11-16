@@ -182,6 +182,108 @@ async fn a_queued_job_ends_no_capacity_at_max_queue_wait() {
     assert_eq!(result.state, i32::from(v1::JobState::FailedToStart));
 }
 
+// A pass another server claimed for the period is left to it, and the one after the period is
+// run. The job is past its queue wait: with the duty claimed by another job store over the same
+// tables, this server's tick ends nothing, answers that the store did (nothing recorded as a
+// failure), and a tick a period later ends the job. It catches a server that runs a duty another
+// server has claimed, and one that never runs it again.
+#[test]
+fn a_pass_another_server_claimed_is_left_to_it_until_the_period_is_out() {
+    let limits = JobLimits {
+        max_queue_wait: 30 * MINUTE,
+        ..JobLimits::DEFAULT
+    };
+    let rig = clocked_rig("pass_claimed", true, limits);
+    rig.agents.set_duty_period(MINUTE);
+    let id = queue(&rig, "job-q", spec());
+    rig.advance(31 * MINUTE);
+    let claimed = rig
+        .jobs
+        .claim_duty("job-pass", store_time(now_ms(&rig)), MINUTE)
+        .unwrap();
+    assert!(claimed, "another server claims the period");
+    assert_eq!(rig.agents.job_pass(), None, "the pass was left to it");
+    assert_eq!(rig.job(&id).state, JobState::Queued);
+    rig.advance(MINUTE);
+    assert!(matches!(
+        rig.agents.job_pass(),
+        Some(crate::store_health::Pass::Ran(_))
+    ));
+    assert_eq!(
+        rig.job(&id).state,
+        JobState::FailedToStart(StartFailure::NoCapacity)
+    );
+}
+
+// A pass whose claim the store fails is not run and is a store failure for the tick's health,
+// and the feed is not trimmed for it. It catches a failed claim taken for a won one.
+#[test]
+fn a_pass_whose_claim_fails_is_a_store_failure_and_runs_nothing() {
+    let limits = JobLimits {
+        max_queue_wait: 30 * MINUTE,
+        ..JobLimits::DEFAULT
+    };
+    let rig = clocked_rig("pass_claim_fails", true, limits);
+    rig.agents.set_duty_period(MINUTE);
+    let id = queue(&rig, "job-q", spec());
+    rig.advance(31 * MINUTE);
+    rig.store.fail_next();
+    let failure = js_jobs::JobStoreError::Store(js_state::StoreError::Failed("x".to_owned()));
+    assert_eq!(
+        rig.agents.job_pass(),
+        crate::store_health::FailureKind::of(&failure).map(crate::store_health::Pass::Failed)
+    );
+    assert_eq!(rig.job(&id).state, JobState::Queued);
+    assert!(matches!(
+        rig.agents.job_pass(),
+        Some(crate::store_health::Pass::Ran(_))
+    ));
+}
+
+// The feed's trim is a duty of its own: with another server holding the period it is left to it
+// (the feed is not trimmed), a claim the store fails trims nothing and fails nothing, and once
+// the period is out the trim runs. It catches a trim that ignores the claim, and a failed claim
+// that stops the tick.
+#[test]
+fn the_feed_trim_is_claimed_like_the_pass() {
+    let rig = trimming("pass_feed_claim", 5);
+    rig.agents.set_duty_period(MINUTE);
+    for n in 0..8 {
+        queue(&rig, &format!("job-{n}"), spec());
+    }
+    assert!(
+        head(&rig) > 5,
+        "the writes made more changes than the feed keeps"
+    );
+    let claimed = rig
+        .jobs
+        .claim_duty("feed-trim", store_time(now_ms(&rig)), MINUTE)
+        .unwrap();
+    assert!(claimed, "another server claims the period");
+    rig.tick();
+    assert!(
+        feed_after(&rig, 0).is_ok(),
+        "the trim was left to the server that claimed it"
+    );
+    rig.advance(MINUTE);
+    // The pass's claim commits and the trim's does not.
+    rig.store.fail_after(1);
+    rig.tick();
+    assert!(
+        feed_after(&rig, 0).is_ok(),
+        "a claim the store failed trimmed"
+    );
+    rig.advance(MINUTE);
+    rig.tick();
+    assert!(
+        matches!(
+            feed_after(&rig, 0),
+            Err(js_state::StoreError::StaleCursor { .. })
+        ),
+        "the trim never ran once the period was out"
+    );
+}
+
 // Row 43. Catches an allocation freed at the timeout without the host's confirmation, a stop
 // never sent or sent once only, and the room of a timed-out start offered to the next job
 // before the host gives it back. Second host: with its agent silent for the whole time the
@@ -594,6 +696,42 @@ fn a_job_pass_reads_no_wall_clock() {
         JobState::FailedToStart(StartFailure::NoCapacity),
     );
     assert_eq!((near, far), (want, want));
+}
+
+// A server that removed a host from its registry runs the pass in a period another server has
+// claimed, because only its own pass reads the host absent and settles the removal. The claim is
+// taken by another job store over the same tables, so without this the removal would wait for a
+// period this server won. It asserts the host's job lost and the removal settled in the claimed
+// period, and that a server with no removal still leaves a claimed period alone. Catches a
+// server that skips the pass of its removals and so starves the host's jobs.
+#[tokio::test]
+async fn a_server_with_a_removed_host_runs_the_pass_in_a_period_another_claimed() {
+    let mut rig = clocked_rig("pass_removed_claimed", true, NEVER);
+    rig.agents.set_duty_period(MINUTE);
+    rig.register("host-a", true);
+    let mut a = FakeAgent::new("host-a");
+    let on_a = started(&rig, &mut a, "job-a", true).await;
+    let placer = rig.agents.placer.clone().unwrap();
+    let claim = |rig: &Rig| {
+        rig.jobs
+            .claim_duty("job-pass", store_time(now_ms(rig)), MINUTE)
+            .unwrap()
+    };
+    assert!(claim(&rig), "another server claims the period");
+    assert_eq!(rig.agents.job_pass(), None, "nothing is owed: left to it");
+
+    let host_a = HostId::new("host-a").unwrap();
+    let registry = &rig.agents.registry;
+    registry.drain(&host_a).unwrap();
+    registry.release_host(&host_a).unwrap();
+    registry.remove(&host_a).unwrap();
+    assert!(placer.gone().contains_key(&host_a));
+    assert!(matches!(
+        rig.agents.job_pass(),
+        Some(crate::store_health::Pass::Ran(_))
+    ));
+    assert_eq!(rig.states(&on_a), (JobState::Lost, AllocationStep::Freed));
+    assert!(placer.gone().is_empty(), "the removal is settled");
 }
 
 // Catches a host the registry removed (the provider read it gone) not read absent by the

@@ -478,10 +478,10 @@ fn a_job_row_holds_the_peak_and_the_cpu_its_host_reported() {
 
 /// Asserts that a job's history row is kept under the name of what it builds, the same for a
 /// repeat run under another job id: the `size-class` label as it is, else `run-` and the hash
-/// of its image name, command and args (one name for two jobs that run the same command,
-/// another for other args). Each row keeps what its own run used. A label that is no profile
-/// key names none. Catches a row keyed by its job id or image digest, which a repeat run never
-/// finds.
+/// of its image name and command (one name for two jobs that run the same command, whatever
+/// their args, another for another command). Each row keeps what its own run used. A label that
+/// is no profile key names none. Catches a row keyed by its job id, image digest or args, which
+/// a repeat run never finds.
 #[test]
 fn a_repeat_run_of_one_build_writes_its_row_under_the_same_name() {
     let (time, store, jobs) = timed();
@@ -537,15 +537,19 @@ fn a_repeat_run_of_one_build_writes_its_row_under_the_same_name() {
 
     let (first, _) = placed(&jobs, "plain-1", "host-a", spec(), BOOKED);
     let (again, _) = placed(&jobs, "plain-2", "host-a", spec(), BOOKED);
+    let mut args = spec();
+    args.args = vec!["--lease".to_owned(), "plain-3".to_owned()];
+    let (args, _) = placed(&jobs, "plain-3", "host-a", args, BOOKED);
     let mut other = spec();
-    other.args = vec!["--slow".to_owned()];
-    let (other, _) = placed(&jobs, "plain-3", "host-a", other, BOOKED);
+    other.command = vec!["bench".to_owned()];
+    let (other, _) = placed(&jobs, "plain-4", "host-a", other, BOOKED);
     let plain = profile_of(&first).unwrap();
     let digits = plain.as_str().strip_prefix("run-").unwrap();
     assert_eq!(digits.len(), 16, "{plain:?}");
     assert!(digits.bytes().all(|b| b.is_ascii_hexdigit()), "{plain:?}");
     assert_eq!(profile_of(&again), Some(plain.clone()), "same command");
-    assert_ne!(profile_of(&other), Some(plain), "other args");
+    assert_eq!(profile_of(&args), Some(plain.clone()), "other args");
+    assert_ne!(profile_of(&other), Some(plain), "another command");
 
     let mut odd = spec();
     odd.labels = labels("-odd");
