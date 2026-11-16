@@ -6,10 +6,10 @@ use std::sync::Arc;
 use js_state::conformance::Backend;
 use js_state::{Cond, Store, Txn};
 
-use super::{exited, host, rig, share};
+use super::{exited, full_spec, host, job_id, rig, share};
 use crate::ids::{JobId, RandomIds};
 use crate::record::{EndReason, JobState};
-use crate::store::JobStore;
+use crate::store::{JobStore, NewJob};
 
 /// The ids of the queue `jobs` reads, in order.
 fn queue_of<S: Store>(jobs: &JobStore<S>) -> Vec<JobId> {
@@ -129,9 +129,9 @@ where
 {
     let name = "every_write_moves_the_written_mark_and_no_read_does";
     let rig = rig(backend);
-    let mut last = rig.jobs.written();
+    let mut last = rig.jobs.written().expect("reads");
     let mut moved = |label: &str| {
-        let now = rig.jobs.written();
+        let now = rig.jobs.written().expect("reads");
         assert_ne!(now, last, "{name}: {label} did not move the mark");
         last = now;
     };
@@ -143,18 +143,26 @@ where
     moved("a placement");
     let stale = rig.jobs.transition(&id, JobState::Queued, JobState::Placed);
     assert!(stale.is_err(), "{name}: a move from a state the job left");
-    let unmoved = rig.jobs.written();
+    let unmoved = rig.jobs.written().expect("reads");
     rig.jobs
         .transition(&id, JobState::Placed, JobState::Starting)
         .expect("starting");
-    assert_ne!(rig.jobs.written(), unmoved, "{name}: a transition");
-    let before = rig.jobs.written();
+    assert_ne!(
+        rig.jobs.written().expect("reads"),
+        unmoved,
+        "{name}: a transition"
+    );
+    let before = rig.jobs.written().expect("reads");
     rig.store.fail_next();
     let failed = rig
         .jobs
         .transition(&id, JobState::Starting, JobState::Running);
     assert!(failed.is_err(), "{name}: the commit was to fail");
-    assert_ne!(rig.jobs.written(), before, "{name}: a failed commit");
+    assert_ne!(
+        rig.jobs.written().expect("reads"),
+        before,
+        "{name}: a failed commit"
+    );
     rig.jobs
         .transition(&id, JobState::Starting, JobState::Running)
         .expect("running");
@@ -170,39 +178,88 @@ where
             .expect("reachable")
             .expect("commits");
     });
-    let before = rig.jobs.written();
+    let before = rig.jobs.written().expect("reads");
     let stale = rig.jobs.place(&raced, host("host-a"), share());
     assert!(
         stale.is_err(),
         "{name}: a placement over a changed row was not stale"
     );
-    assert_ne!(rig.jobs.written(), before, "{name}: a conflicted commit");
+    assert_ne!(
+        rig.jobs.written().expect("reads"),
+        before,
+        "{name}: a conflicted commit"
+    );
     // An entry the tables do not call for, put past the job store: the backfill deletes it.
     rig.store
         .inner()
         .txn(Txn::new().put("idx/job/queued/wr-gone", Vec::new(), Cond::Any))
         .expect("reachable")
         .expect("an unconditional put commits");
-    let before = rig.jobs.written();
+    let before = rig.jobs.written().expect("reads");
     let repaired = rig.jobs.backfill_indexes().expect("the backfill runs");
     assert_eq!(
         repaired.removed, 1,
         "{name}: the backfill left the stray entry"
     );
-    assert_ne!(rig.jobs.written(), before, "{name}: a backfill that wrote");
-    let read = rig.jobs.written();
+    assert_ne!(
+        rig.jobs.written().expect("reads"),
+        before,
+        "{name}: a backfill that wrote"
+    );
+    let read = rig.jobs.written().expect("reads");
     let _ = rig.jobs.get_job(&id).expect("reads");
     let _ = rig.jobs.get_allocation(&id).expect("reads");
     let _ = rig.jobs.queued().expect("reads");
     let _ = rig.jobs.live_allocations().expect("reads");
     let _ = rig.jobs.marks().expect("reads");
     let _ = rig.jobs.booked_on(&host("host-a")).expect("reads");
-    assert_eq!(rig.jobs.written(), read, "{name}: a read moved the mark");
+    assert_eq!(
+        rig.jobs.written().expect("reads"),
+        read,
+        "{name}: a read moved the mark"
+    );
     let other = JobStore::new(Arc::clone(&rig.store), RandomIds).expect("opens");
     let fresh = JobStore::new(Arc::clone(&rig.store), RandomIds).expect("opens");
     assert_ne!(
         other.written(),
         fresh.written(),
         "{name}: two job stores read the same"
+    );
+}
+
+/// A write by another job store over the same store moves where the first one's writes stand, as
+/// far as the store tells its head, so a caller that cached what it read from the first sees the
+/// other server's change; a store that tells no head (one only this process writes) leaves the
+/// mark where it was. A read by the other moves nothing. Catches a mark that counts only this
+/// job store's own writes, which hides another server's submit from a cached read of the queue.
+pub fn another_job_stores_write_moves_the_written_mark_where_the_store_tells_its_head<B: Backend>(
+    backend: &B,
+) where
+    B::Store: 'static,
+{
+    let name = "another_job_stores_write_moves_the_written_mark_where_the_store_tells_its_head";
+    let rig = rig(backend);
+    let other = rig.other();
+    let tells_head = rig.store.head().expect("reads").is_some();
+    let before = rig.jobs.written().expect("reads");
+    let _ = other.queued().expect("reads");
+    assert_eq!(
+        rig.jobs.written().expect("reads"),
+        before,
+        "{name}: another job store's read moved the mark"
+    );
+    other
+        .insert_queued(NewJob {
+            id: Some(job_id("wr-other")),
+            spec: full_spec(),
+            priority: 0,
+            client: None,
+        })
+        .expect("another job store records a job");
+    let after = rig.jobs.written().expect("reads");
+    assert_eq!(
+        after != before,
+        tells_head,
+        "{name}: another job store's write and the store's head disagree on the mark"
     );
 }

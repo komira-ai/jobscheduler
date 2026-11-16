@@ -6,9 +6,10 @@
 //! A pass ([`super::jobs`]) decides from:
 //!
 //! - the job tables: the live allocations, the queued jobs and the marks. They change only by
-//!   a write of the job store, which counts its writes ([`js_jobs::JobStore::written`]): a job
-//!   submitted, cancelled, started, ended or freed, a host's job lost, a prepare failed, the
-//!   tick's expiry and loss, and the pass's own placements, marks and queue status writes;
+//!   a commit to the job store, which this server's job store counts ([`js_jobs::JobStore::written`])
+//!   and, as far as the store tells its head, so does every other server's: a job submitted,
+//!   cancelled, started, ended or freed, a host's job lost, a prepare failed, the tick's expiry
+//!   and loss, and the pass's own placements, marks and queue status writes;
 //! - the engine's picture of the hosts, which the registry changes through the
 //!   [`js_registry::Placer`] calls only. The placer counts each call that changed it
 //!   ([`SchedPlacer::engine_changes`]): a hello, a heartbeat that brought a load reading or
@@ -110,7 +111,7 @@ impl SchedPlacer {
         sinks: (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Option<Vec<JobId>>, JobStoreError> {
         let _pass = self.pass();
-        let now = self.seen_now(jobs, hosts);
+        let now = self.seen_now(jobs, hosts)?;
         let told = !lock(&self.outcomes).is_empty();
         if !told && lock(&self.seen).as_ref() == Some(&now) {
             #[cfg(any(test, feature = "test-support"))]
@@ -144,18 +145,22 @@ impl SchedPlacer {
     }
 
     /// What a pass over `jobs` on `hosts` would depend on, as it stands now.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Store`] when the store's head cannot be read: whether the tables changed
+    /// is then not known, and the pass is not skipped.
     pub(crate) fn seen_now<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
         hosts: &JobHosts<'_>,
-    ) -> Seen {
-        Seen {
-            jobs: jobs.written(),
+    ) -> Result<Seen, JobStoreError> {
+        Ok(Seen {
+            jobs: jobs.written()?,
             engine: self.engine_changes(),
             open: hosts.open.clone(),
             hello: hosts.hello.clone(),
             whole: hosts.whole.cloned(),
-        }
+        })
     }
 
     /// The job tables of `jobs`: those the last pass read when no write of the job store came
@@ -167,7 +172,7 @@ impl SchedPlacer {
         &self,
         jobs: &JobStore<S, I>,
     ) -> Result<Arc<Tables>, JobStoreError> {
-        let written = jobs.written();
+        let written = jobs.written()?;
         let mut kept = lock(&self.tables);
         if let Some((at, tables)) = kept.as_ref()
             && *at == written
