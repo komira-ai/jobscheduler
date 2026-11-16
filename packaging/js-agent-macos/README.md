@@ -23,8 +23,38 @@ Both daemons run their program through `/usr/local/js-agent/link/current`.
 `com.komira.js-mac-session` (the root helper) and `com.komira.js-agent` are described by flags
 only (`js-mac-provision agent-plist`, `js-mac-provision session-plist`; the goldens are in
 `crates/js-mac-provision/tests/golden`). The package ships them with placeholders for the
-values of a host (the lease server, the helper's caller requirement and socket group), which
-the programs refuse at start.
+values of a host (the helper's caller requirement and socket group), which the helper refuses
+at start. The agent has no placeholder: its plist names a flags file, `/etc/js-agent/flags`
+(`agent-plist --flags-file`; the older form `agent-plist --server S --pool P` still prints a
+plist with those two flags), and the program is
+
+```
+js-agent --flags-file /etc/js-agent/flags --token-file /etc/js-agent/token \
+  --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch \
+  --native-helper-socket /var/run/js-mac-session/socket
+```
+
+The flags file is one argument per line (`--flags-file` in `crates/js-agent/src/flags_file.rs`).
+It gives the server, the pool and the native runtime, and is what a config package for a host
+group of Macs (`js-agent-config-mac-build`, which also places `/etc/js-agent/ca.pem`) installs.
+An example, with documentation addresses:
+
+```
+--server=https://leases.example:7300
+--pool=mac
+--ca-cert=/etc/js-agent/ca.pem
+--host-id-from-facts=/var/lib/hostkeeper/facts.json
+--native-network=on
+--native-pf-uid-start=600
+--native-pf-uid-count=100
+--native-pf-endpoint=192.0.2.10:443
+--native-pf-endpoint=192.0.2.11:443
+```
+
+Without the file the agent does not start.
+The file must be a regular file owned by root, not writable by group or others.
+`--host-id-from-facts` makes the host's id the `host_id` of hostkeeper's facts file, the name the
+coordinator enrolled the Mac under, so one file serves every Mac of the group.
 
 Neither runs at load. `KeepAlive` holds each while `/etc/js-agent/token` exists, so the
 package loads them at install time and they start when the host is given its join token.
@@ -64,6 +94,37 @@ Each is named only in the environment of the step that needs it. The key is impo
 `productsign` alone. The certificate password reaches `security import` as an argument, on a
 runner that exists for this job alone. The version typed for a manual run is checked as
 MAJOR.MINOR.PATCH before it is used in a file name.
+
+## Config packages: `js-agent config-hook`
+
+A Mac's flags file and certificate come in a config package (`js-agent-config-<group>`, a `.pkg`
+whose files are `/etc/js-agent/flags` and the certificate the flags name). Its hook restarts the
+agent's daemon so that the agent reads the new flags; the steps and what they check are the Linux
+package's (`packaging/js-agent/deb/README.md`, "Config packages"). The manifest names
+
+```
+"hook": {
+  "command": ["/usr/local/js-agent/link/current/js-agent", "config-hook"],
+  "timeoutSecs": {"prepare": "60", "cutover": "420", "verify": "300", "rollback": "420", "cleanup": "60", "uninstall": "60"}
+}
+```
+
+with the params
+
+```
+unit = "com.komira.js-agent"
+flags_file = "/etc/js-agent/flags"
+token_file = "/etc/js-agent/token"
+state_root = "/var/db/js-agent/state"
+state_dir = "/var/db/js-agent-config"
+cutover_timeout_secs = 420
+verify_timeout_secs = 300
+rollback_timeout_secs = 420
+```
+
+`unit` is the daemon's launchd label. The restart is `bootout` (which returns when the agent has
+exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the update hook's while
+`/etc/js-agent/token` is absent. The unit port has run against a fake of `launchctl` only.
 
 ## Privacy grants (TCC)
 

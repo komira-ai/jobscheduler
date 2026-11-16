@@ -2,10 +2,11 @@
 //! rules every one of them keeps.
 
 use js_mac_provision::daemon::{
-    AGENT_LABEL, Daemon, GATE, LOG_DIR, RELEASE_LINK, SESSION_LABEL, THROTTLE_SECS,
+    AGENT_LABEL, Daemon, FLAGS_FILE, GATE, LOG_DIR, RELEASE_LINK, SESSION_LABEL, THROTTLE_SECS,
 };
 
 const AGENT_GOLDEN: &str = include_str!("golden/agent.plist");
+const AGENT_FLAGS_FILE_GOLDEN: &str = include_str!("golden/agent-flags-file.plist");
 const SESSION_GOLDEN: &str = include_str!("golden/session.plist");
 
 fn agent() -> Daemon {
@@ -19,6 +20,17 @@ fn session() -> Daemon {
 #[test]
 fn the_agents_plist_is_the_golden_file() {
     assert_eq!(agent().render(), AGENT_GOLDEN);
+}
+
+/// The agent's plist for a flags file is the golden file: the file is named and the server and
+/// pool are not. It catches a plist that carries `--server` or `--pool` next to the file.
+#[test]
+fn the_agents_flags_file_plist_is_the_golden_file() {
+    assert_eq!(
+        Daemon::agent_from_flags_file(FLAGS_FILE).render(),
+        AGENT_FLAGS_FILE_GOLDEN
+    );
+    assert_eq!(FLAGS_FILE, "/etc/js-agent/flags");
 }
 
 #[test]
