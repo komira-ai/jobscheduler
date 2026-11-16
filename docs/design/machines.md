@@ -137,11 +137,11 @@ taint changes nothing; only the provider path below, or an operator, ends it.
 | Kind | Tainted host |
 |---|---|
 | `aws` and later elastic kinds (a registered elastic host is ordinary, but it has an instance id) | Once its leases are gone, `release` it (terminate, read back Absent), then acquire a replacement under the usual caps. A tainted machine counts toward `max_machines` until it reads back Absent, so at the cap the terminate comes first. The instance id is never reused. |
-| `static` (tests only), listed | Cordoned. It stays listed and takes no work until an operator reimages it and runs `js-cli host clear-taint`, which is an audited operator action. |
+| `static` (tests only), listed | Cordoned. It stays listed and takes no work until an operator reimages it and runs `ClearHostTaint` (`js host host-taint --host-id ID`), which is an audited operator action. |
 | `default` (registered) | The host id enters the tainted set and any hello from it is refused with a constant code, even with a valid join credential, until an operator reimages the machine and clears the id. Clearing also drops the binding of the id to its first credential (5.8). |
 
 A tainted host id cannot rejoin: it is checked at admission before the credential. The tainted set survives a scheduler restart (it is in
-the binding file), and an operator's clear is the only way out.
+the binding file), and an operator's clear (`ClearHostTaint`) is the only way out.
 
 **Replacement is bounded.** A replacement is an acquire like any other: it follows `max_step`, `cooldown` and `max_machines`, and a pool
 whose hosts keep tainting (a bad job class) raises an alert after `max_taints_in_a_row` replacements without a clean job between them,

@@ -240,6 +240,8 @@ async fn a_taint_reported_cleared_ends_in(kept: Kept) {
     assert_eq!(jobs, ["after-clear"], "{reply}");
 
     let h = restarted_placing(first).await;
+    let text = kept_bindings(&h);
+    assert_eq!(text.matches("taint_reason").count(), 0, "{text}");
     let listing = hosts(&h).await;
     assert!(
         listing["hosts"]

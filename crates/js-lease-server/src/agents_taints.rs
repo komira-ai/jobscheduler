@@ -63,12 +63,15 @@ impl Agents {
 
     /// Clears the taint the registry holds for `host`, as the operator's `ClearHostTaint`
     /// asks, and returns the taint it cleared; `None`, with nothing written, for a host that
-    /// has none. It is the clear of a heartbeat's `taint_cleared` made without the agent's
+    /// has none (in file mode the file is still saved, which writes nothing when it is current,
+    /// so a repeat after a failed save is the retry). It is the clear of a heartbeat's `taint_cleared` made without the agent's
     /// report, in the same order and under the same gate: under [`Agents::host_writes`] the
     /// binding without the taint is committed first, by the compare-and-set of
     /// [`Agents::keep_taint`] (refused when the store holds another taint than this server's),
     /// then the registry forgets the taint, then in file mode the file is saved. It does not
-    /// reach the agent, which reports its own taint again if its marker still holds it.
+    /// reach the agent, which reports its own taint again if its marker still holds it. A host
+    /// job's taint row still in the job store is put back at the next start, so the clear
+    /// follows that start.
     ///
     /// # Errors
     ///
@@ -82,6 +85,8 @@ impl Agents {
         let gate = self.host_writes.lock().await;
         let held = self.registry.own_host(host).ok_or(CordonFault::NotHeld)?;
         if held.host.taint.is_none() {
+            drop(gate);
+            self.saved().await?;
             return Ok(None);
         }
         self.keep_taint(host, None).await.map_err(|error| {

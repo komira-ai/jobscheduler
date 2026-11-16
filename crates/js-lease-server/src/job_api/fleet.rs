@@ -1,10 +1,11 @@
 //! The fleet calls: `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`,
-//! `ListProviders` and `GetUsage` (design section 3.6). Only a caller of the role `operator` reaches them: the
-//! service's dispatch (`mod.rs`) answers any other `PERMISSION_DENIED` `operator-only` before
-//! a function here runs. An operator reads the hosts with the resources
-//! booked on each, the pools, the machine providers and the ended bookings; the changes are
-//! a host's cordon and the clear of its stored taint. A client never sees an allocation as a job concept: what is booked on
-//! a host is a read-only [`wire::HostBooking`] in its listing.
+//! `ListProviders` and `GetUsage` (design section 3.6). Only a caller of the role `operator`
+//! reaches them: the service's dispatch (`mod.rs`) answers any other `PERMISSION_DENIED`
+//! `operator-only` before a function here runs. An operator reads the hosts with the
+//! resources booked on each, the pools, the machine providers and the ended bookings; the
+//! changes are a host's cordon and the clear of its stored taint. A client never sees an
+//! allocation as a job concept: what is booked on a host is a read-only [`wire::HostBooking`]
+//! in its listing.
 //!
 //! The group's state is [`Ctx`]. Until [`Ctx::served`] gives it the server's handles every
 //! call answers `UNIMPLEMENTED`. It reaches the server through three narrow traits, so the

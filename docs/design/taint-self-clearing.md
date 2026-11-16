@@ -100,7 +100,8 @@ its reason (`cleared_reason`); a host with no taint answers `cleared` false and 
 written; an unknown host is `NOT_FOUND`. The call does not reach the agent: an agent whose
 marker still holds the taint refuses the next start `host-tainted`, and the server takes that
 refusal as the host's taint again, so the operator moves the agent's `taint.json` and its
-`owed-*` records aside first, or lets the agent clear it itself.
+`owed-*` records aside first, or lets the agent clear it itself. A host job's taint row still
+in the job store is put back on the binding at the next start, so that clear follows the start.
 
 ## Left out on purpose
 

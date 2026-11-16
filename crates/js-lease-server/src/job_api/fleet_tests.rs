@@ -508,8 +508,9 @@ async fn clearing_an_unknown_host_is_not_found_and_a_clean_host_writes_nothing()
 
 /// Asserts that a clear whose bindings file cannot be written is `UNAVAILABLE`
 /// `taint-unsaved` (not the cordon's code), counts the failed write, and holds on this
-/// server all the same: the listing shows no taint afterwards. It catches an unsaved clear
-/// acknowledged as saved, and one rolled back.
+/// server all the same: the listing shows no taint afterwards. A repeat once the write works
+/// answers `cleared` false and saves the file without the taint. It catches an unsaved clear
+/// acknowledged as saved, one rolled back, and a repeat that never retries the save.
 #[tokio::test]
 async fn an_unsaved_clear_is_unavailable_with_its_own_code_but_holds() {
     let s = server("taint-unsaved");
@@ -521,6 +522,11 @@ async fn an_unsaved_clear_is_unavailable_with_its_own_code_but_holds() {
     assert_eq!(refused(clear_taint(&s.api, "h1").await), unsaved);
     assert_eq!(s.shared.agent_errors(), 1);
     assert_eq!(find(&list(&s.api).await, "h1").taint_reason, "");
+    std::fs::remove_dir(&blocker).unwrap();
+    let retried = clear_taint(&s.api, "h1").await.unwrap();
+    assert!(!retried.cleared);
+    let saved = s.bindings_file().unwrap();
+    assert!(!saved.contains("taint_reason"), "{saved}");
 }
 
 /// An ended booking of `id`, ending at `end`.
