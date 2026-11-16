@@ -14,6 +14,7 @@ mod exclusive;
 pub mod fake;
 mod fence;
 mod files;
+#[cfg(target_os = "linux")]
 mod flags;
 mod held;
 mod host_ports;

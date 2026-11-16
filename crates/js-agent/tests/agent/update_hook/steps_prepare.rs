@@ -356,8 +356,8 @@ fn a_retry_of_zero_defers_with_retry_after_zero() {
     assert_eq!(line(&done)["retry_after_secs"], 0);
 }
 
-/// What a Mac build's `--version` prints (the second line is `cli::LONG_VERSION`'s).
-const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: docker native\n";
+/// What a Mac build's `--version` prints (the second line is `platform::LONG_VERSION`'s).
+const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: native\n";
 
 #[test]
 fn a_staged_mac_agent_passes_prepare_under_params_that_name_the_native_runtime() {

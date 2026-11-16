@@ -414,11 +414,11 @@ fn errors_name_their_flag() {
 }
 
 /// Runs the agent with `extra` and returns (status, stderr, messages sent). A start with
-/// `--container-bin` names the engine runtime and its opt-in, which a Linux agent needs to run
-/// the engine (with no `--runtime` it is a crun start).
+/// `--container-bin` names the engine's opt-in, which a Linux agent needs to run the engine
+/// (without it it is a crun start that refuses the flag).
 fn start(extra: &[&str]) -> (String, String, usize) {
     let engine: &[&str] = if extra.contains(&"--container-bin") {
-        &["--runtime", "docker", "--allow-container-engine"]
+        &["--allow-container-engine"]
     } else {
         &[]
     };
@@ -536,7 +536,7 @@ fn container_flags_are_checked_when_the_agent_starts() {
         ),
         (
             &["--actions-cgroup", "/sys/fs/cgroup/jobs.slice"],
-            "need --container-bin",
+            "--actions-cgroup: not with --no-jobs (an agent that runs no job)",
         ),
         (
             &["--container-bin", exec],
@@ -546,7 +546,10 @@ fn container_flags_are_checked_when_the_agent_starts() {
             &["--container-bin", exec, "--container-subuid", "a:b"],
             "--container-subuid: not a user name",
         ),
-        (&["--container-subuid", "jobmap"], "need --container-bin"),
+        (
+            &["--container-subuid", "jobmap"],
+            "--container-subuid: not with --no-jobs (an agent that runs no job)",
+        ),
     ];
     for (extra, text) in cases {
         let (status, err, sent) = start(extra);

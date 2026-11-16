@@ -229,7 +229,8 @@ enum Kind {
     /// The agent cannot see the host ([`RuntimeError::blind`]).
     Blind,
     /// A removal that ended everything of the run and could not copy a declared output
-    /// ([`RuntimeError::outputs`]).
+    /// ([`RuntimeError::outputs`]): the native runtime's (a macOS build's).
+    #[cfg(target_os = "macos")]
     Outputs,
 }
 
@@ -254,12 +255,15 @@ impl RuntimeError {
 
     /// A removal that did everything a removal does (the run's processes and its user are
     /// gone) but could not copy one or more of the run's declared outputs. Nothing of the
-    /// run is left on the host, so the lifecycle reports it and does not taint the host.
+    /// run is left on the host, so the lifecycle reports it and does not taint the host. Only
+    /// the native runtime copies outputs.
+    #[cfg(target_os = "macos")]
     pub(crate) fn outputs(text: impl Into<String>) -> Self {
         Self(text.into(), Kind::Outputs)
     }
 
     /// Whether the failure is only that outputs were not copied ([`RuntimeError::outputs`]).
+    #[cfg(target_os = "macos")]
     pub(crate) fn is_outputs(&self) -> bool {
         self.1 == Kind::Outputs
     }

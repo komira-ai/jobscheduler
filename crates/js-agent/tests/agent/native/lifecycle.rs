@@ -21,7 +21,7 @@ use serde_json::json;
 use super::fake_helper::FakeHelper;
 use super::pf_gate::{Fake, Verdict};
 use super::{TERM, native, parse};
-use crate::bundle::image::{Served, rig};
+use crate::bundle::wired::{Served, rig};
 use crate::lifecycle::fake::ManualClock;
 use crate::lifecycle::{cleanup, config_in, names, reply, reply_json};
 use crate::support::Scratch;

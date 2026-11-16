@@ -16,3 +16,5 @@ mod registry;
 mod settings;
 mod start;
 mod system;
+#[cfg(target_os = "macos")]
+pub mod wired;

@@ -1,4 +1,4 @@
-//! The agent started with `--runtime crun`, over a node made of directories and a stand-in
+//! The agent started with the crun runtime (the Linux build's), over a node made of directories and a stand-in
 //! `crun`: the start check passes on stand-in files, the runtime opened is `CrunRuntime`, and
 //! a job submitted to a real server is created, started, polled and reported through it. The
 //! stand-in is a shell script that holds the container until the test creates a file and then
@@ -8,8 +8,8 @@
 //! `crun_runtime` target's.
 //!
 //! The jobs here are submitted through the v1 job API (`POST /v1/jobs` on `--job-listen`) and
-//! placed by `js-sched`. The path these cases walk with `--runtime crun` (a job through
-//! `crun run`, the default runtime, the host-id and scratch-root claims while a job runs) is
+//! placed by `js-sched`. The path these cases walk with the crun runtime (a job through
+//! `crun run`, the build's runtime, the host-id and scratch-root claims while a job runs) is
 //! also walked with the server's own binary, in js-lease-server's `v1_acceptance` target,
 //! which submits through `js` and `/v1/jobs`. The rest (the stop grace, the store and quota
 //! layouts, the cgroups) is the agent's own.
@@ -337,7 +337,7 @@ fn crun_cli(without: &str) -> Cli {
         node.scratch.display().to_string(),
     );
     let mut args = vec!["js-agent", "--server", "http://127.0.0.1:1", "--pool", "p"];
-    args.extend(["--runtime", "crun", "--job-user", Fixture::USER]);
+    args.extend(["--job-user", Fixture::USER]);
     args.extend(["--crun-bin", &crun]);
     if without != "--state-root" {
         args.extend(["--state-root", &state]);
@@ -349,13 +349,17 @@ fn crun_cli(without: &str) -> Cli {
 /// Asserts that the job flags of a crun agent are checked as a container agent's are, with
 /// the layout the job user needs: with settings for crun no `--container-bin` is needed, the
 /// scratch root may be `0711` (the engines' check would refuse it), the settings come back
-/// placed beside it, and a missing state root is refused naming `--runtime crun`. It catches
+/// placed beside it, and a missing state root is refused naming the crun runtime. It catches
 /// an agent that reads the flags of a crun agent with the rules of the engines.
 #[test]
 fn the_job_flags_of_a_crun_agent_are_read_with_the_searchable_layout() {
     let local =
         Local::from_cli_crun(&crun_cli(""), euid(), crun_settings()).expect("the flags pass");
-    let settings = local.container.as_ref().expect("containers are enabled");
+    let settings = local
+        .backend
+        .as_ref()
+        .expect("containers are enabled")
+        .settings();
     assert_eq!(
         settings.crun().map(|plan| plan.store.clone()),
         Some(node().dir.path().join("oci"))
@@ -369,7 +373,7 @@ fn the_job_flags_of_a_crun_agent_are_read_with_the_searchable_layout() {
     let why = Local::from_cli_crun(&crun_cli("--state-root"), euid(), crun_settings())
         .expect_err("no state root");
     assert!(
-        why.starts_with("--state-root: required with --runtime crun"),
+        why.starts_with("--state-root: required with the crun runtime"),
         "{why}"
     );
 }
@@ -379,7 +383,7 @@ fn the_job_flags_of_a_crun_agent_are_read_with_the_searchable_layout() {
 /// read), the job users the post-job checks look for are the job user's subordinate range,
 /// and the actions cgroup the usage is sampled from is the delegated one. The node has no
 /// engine, so an engine runtime could not have opened. It catches a machine that builds the
-/// engine runtime for `--runtime crun`.
+/// engine runtime for the crun runtime.
 #[test]
 fn the_system_opens_the_crun_runtime_for_crun_settings() {
     let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
@@ -407,7 +411,7 @@ fn the_system_opens_the_crun_runtime_for_crun_settings() {
     assert!(range.contains(SUB) && range.contains(SUB + 65_535) && !range.contains(SUB + 65_536));
 }
 
-/// A server and an agent started with `--runtime crun` over the node.
+/// A server and an agent of the crun runtime over the node.
 pub(super) struct Rig {
     server: Server,
     pub(super) agent: Agent,
@@ -423,8 +427,6 @@ pub(super) fn crun_flags(host_id: &str, extra: &[&str]) -> Vec<String> {
     let mut flags: Vec<String> = [
         "--host-id",
         host_id,
-        "--runtime",
-        "crun",
         "--job-user",
         Fixture::USER,
         "--crun-bin",
@@ -503,8 +505,9 @@ impl Rig {
         }
     }
 
-    /// An agent with `flags`, over a machine that is the node's. Flags that name no
-    /// `--runtime` start the agent of the default runtime, which on Linux is crun.
+    /// An agent with `flags` exactly as given, over a machine that is the node's. Flags that
+    /// name neither `--no-jobs` nor `--allow-container-engine` start the agent of the build's
+    /// runtime, which on Linux is crun.
     fn spawn(
         server: &Server,
         address: &Arc<Mutex<String>>,
@@ -513,11 +516,7 @@ impl Rig {
     ) -> Agent {
         let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
         let (url, join, to) = (server.url(), server.join_file(), Redirect(address.clone()));
-        if flags.contains(&"--runtime") {
-            Agent::spawn_machine(url, join, &flags, host, to, machine.clone())
-        } else {
-            Agent::spawn_machine_defaulted(url, join, &flags, host, to, machine.clone())
-        }
+        Agent::spawn_machine_defaulted(url, join, &flags, host, to, machine.clone())
     }
 
     /// A second agent with `flags` against the same server, run to its end.
@@ -583,7 +582,7 @@ impl Rig {
     }
 }
 
-/// Asserts the whole path with `--runtime crun`: the agent passes its start check on the
+/// Asserts the whole path of the crun runtime: the agent passes its start check on the
 /// node's stand-in files (it does not exit 2 saying crun jobs are unavailable), registers, takes
 /// a run the server queues, starts it through `crun run` of the stand-in with the run's
 /// container name, reports it running while the stand-in holds it, and reports it exited and
@@ -592,9 +591,11 @@ impl Rig {
 /// host id, and one with another id on the same scratch root, are each refused with status 2
 /// naming what they share, and both claims are free again after the agent ends. It catches an
 /// agent that checks the host and then runs no crun job, a run that never reaches `crun`, a
-/// result that is lost on the way back, and two agents that would sweep each other.
+/// result that is lost on the way back, an agent that registers with no runtime at all or
+/// that warns of the container engine it does not run (the node's machine has none), and two
+/// agents that would sweep each other.
 #[test]
-fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
+fn a_crun_agent_runs_a_job_through_crun() {
     let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
     let node = node();
     let rig = Rig::new("jobs_crun_e2e", &[]);
@@ -646,49 +647,15 @@ fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
     let ran = rig.agent.stop();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert!(!ran.err.contains("does not start jobs"), "{}", ran.err);
+    assert!(
+        !ran.err.contains(js_agent::platform::ENGINE_WARNING),
+        "{}",
+        ran.err
+    );
     // The claims go with the agent: a restart finds them free.
     let dir = node.dir.path();
     HostClaim::take(dir, "h1").expect("the id is free after the agent ended");
     HostClaim::scratch_root(dir, &node.scratch).expect("the scratch root is free too");
-}
-
-/// Asserts that crun is the default Linux runtime: an agent of the node started with the
-/// flags of `--runtime crun` less `--runtime crun` itself passes the crun start check on the
-/// node's stand-in files, registers, and runs a queued job through the stand-in's `crun run`
-/// with the run's container name to its result, `exited` and `succeeded`; nothing else could
-/// run it, as the node's machine has no container engine, and the agent prints no warning of
-/// the engine. It catches a default that is still the engine, a default the start check reads
-/// but the runtime does not, and an agent that registers with no runtime at all.
-#[test]
-fn the_default_runtime_is_crun() {
-    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
-    let node = node();
-    let mut flags = crun_flags("h1", &[]);
-    let at = flags.iter().position(|flag| flag == "--runtime").unwrap();
-    assert_eq!(
-        flags.drain(at..at + 2).collect::<Vec<_>>(),
-        ["--runtime", "crun"]
-    );
-    let rig = Rig::on_flags("jobs_crun_default", flags, POOL_RUNS_TOML);
-    let run = rig.queued();
-    rig.until_up(&run);
-    let calls = fs::read_to_string(node.dir.path().join("calls")).expect("the stand-in's calls");
-    let started = calls
-        .lines()
-        .any(|line| line.contains(" run ") && line.contains(&run));
-    assert!(started, "no `crun run` for {run} in\n{calls}");
-    fs::write(node.dir.path().join("go"), "go").expect("let the container end");
-    rig.until(&run, |seen| seen.1.is_some());
-    assert_eq!(
-        rig.view(&run),
-        (
-            "JOB_STATE_SUCCEEDED".to_owned(),
-            Some("RESULT_REASON_EXIT".to_owned())
-        )
-    );
-    let ran = rig.agent.stop();
-    assert_eq!(ran.status(), code(0), "{}", ran.err);
-    assert!(!ran.err.contains(js_agent::ENGINE_WARNING), "{}", ran.err);
 }
 
 /// Asserts that `--stop-grace` is what the runtime is told to wait before it kills: an agent
@@ -747,7 +714,7 @@ fn a_store_on_another_file_system_than_the_scratch_root_is_accepted() {
     ] {
         let server = Server::start_pool(name, &[], POOL_RUNS_TOML);
         let address = Arc::new(Mutex::new(server.url()));
-        let agent = Agent::spawn_machine(
+        let agent = Agent::spawn_machine_defaulted(
             server.url(),
             server.join_file(),
             &flags,
@@ -923,7 +890,7 @@ fn an_agent_below_a_directory_others_can_write_is_refused() {
         host.ancestors_floor = PathBuf::from("/");
         host
     }
-    let ran = Agent::spawn_machine(
+    let ran = Agent::spawn_machine_defaulted(
         server.url(),
         server.join_file(),
         &flags,
@@ -1161,8 +1128,6 @@ fn an_agent_whose_cgroups_cannot_be_set_up_exits_2() {
     let flags = [
         "--host-id",
         "h-cgroups",
-        "--runtime",
-        "crun",
         "--job-user",
         Fixture::USER,
         "--crun-bin",
@@ -1174,7 +1139,7 @@ fn an_agent_whose_cgroups_cannot_be_set_up_exits_2() {
     ];
     let cgroups = CgroupSource::Delegate { mount, own };
     let machine = CrunMachine::with_system(System::new().with_crun(Seams { cgroups, ..seams() }));
-    let ran = Agent::spawn_machine(
+    let ran = Agent::spawn_machine_defaulted(
         server.url(),
         server.join_file(),
         &flags,
@@ -1185,7 +1150,7 @@ fn an_agent_whose_cgroups_cannot_be_set_up_exits_2() {
     .finish();
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(
-        ran.err.contains("--runtime crun: the cgroups"),
+        ran.err.contains("the crun runtime: the cgroups"),
         "{}",
         ran.err
     );

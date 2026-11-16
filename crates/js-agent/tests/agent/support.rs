@@ -665,23 +665,27 @@ pub fn run_on(
     )
 }
 
-/// `--runtime none` for the arguments of an agent start that names no runtime: no `--runtime`,
-/// no `--container-bin` and no `--native-*` flag (a verb, which comes first, gets nothing). A
-/// Linux agent given no `--runtime` runs `crun`, its default; the tests written for the agent
-/// that runs no job name that agent with `--runtime none`, and the tests of the default start
-/// through `run_defaulted` (built on Linux only) or [`run_on_defaulted`], which add nothing.
+/// `--no-jobs` for the arguments of an agent start that names no runtime of this build: no
+/// `--no-jobs`, no `--allow-container-engine` or `--container-bin` (Linux), no `--native-*`
+/// flag (macOS), and no removed `--runtime` (a verb, which comes first, gets nothing). A Linux
+/// agent given none of them runs `crun`, its build's runtime, and a macOS one needs the native
+/// socket; the tests written for the agent that runs no job name that agent with `--no-jobs`,
+/// and the tests of the build's runtime go through `run_defaulted` (built on Linux only) or
+/// [`run_on_defaulted`], which add nothing.
 pub fn no_job_runtime(args: &[&str]) -> &'static [&'static str] {
     let start = args.first().is_some_and(|first| first.starts_with("--"));
     let names = args.iter().any(|arg| {
-        ["--runtime", "--container-bin", "--native-"]
-            .iter()
-            .any(|flag| arg.starts_with(flag))
+        [
+            "--no-jobs",
+            "--allow-container-engine",
+            "--container-bin",
+            "--native-",
+            "--runtime",
+        ]
+        .iter()
+        .any(|flag| arg.starts_with(flag))
     });
-    if start && !names {
-        &["--runtime", "none"]
-    } else {
-        &[]
-    }
+    if start && !names { &["--no-jobs"] } else { &[] }
 }
 
 /// [`run_on`] with the bundle store's host given.

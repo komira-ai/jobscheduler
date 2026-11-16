@@ -355,8 +355,6 @@ pub fn container_flags(dir: &Scratch) -> Vec<String> {
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
     let (user, _, _) = user();
     vec![
-        "--runtime".to_owned(),
-        "docker".to_owned(),
         "--allow-container-engine".to_owned(),
         "--container-bin".to_owned(),
         exec.display().to_string(),

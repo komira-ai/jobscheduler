@@ -48,7 +48,7 @@ install changes nothing a running agent reads until hostkeeper restarts the unit
 
 ## What the host provides
 
-The agent's start check of `--runtime crun` (`js-agent-crun.service` exits 2 and
+The agent's start check of the crun runtime (`js-agent-crun.service` exits 2 and
 `journalctl -u js-agent-crun` lists each missing piece) needs more than the package carries. The
 package makes the job user and its subordinate ranges; the rest is the host's, and is placed before hostkeeper starts the
 unit, by `crun_host_setup.sh` (`docs/runbooks/crun-host-setup.md`), by the machine image, or by

@@ -74,6 +74,8 @@
 //! report are tested there. Run anywhere but macOS, the ignored test stops at its first
 //! line.
 
+#![cfg(target_os = "macos")]
+
 mod after_seed;
 mod child;
 mod lines;
