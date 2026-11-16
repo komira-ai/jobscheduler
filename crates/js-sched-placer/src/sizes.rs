@@ -80,11 +80,7 @@ use tracing::warn;
 
 use crate::place::SchedPlacer;
 
-/// The label whose value names a job's class (`size-class`): the name of the work, such as the
-/// build target it runs ([`js_types::SizeClass::of_target`] writes a target's name as one). A
-/// client that runs different work under one image and command names it, so that each work
-/// has its own history; without it, every run of an image and command shares one.
-pub const SIZE_CLASS_LABEL: &str = js_types::SIZE_CLASS_LABEL;
+pub use js_types::SIZE_CLASS_LABEL;
 
 /// The share a cold class books of the most cores and the most bookable memory a host has: a
 /// quarter.
