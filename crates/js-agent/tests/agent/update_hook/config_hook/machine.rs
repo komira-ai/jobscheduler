@@ -224,6 +224,26 @@ fn on_the_machine_a_cleanup_with_no_record_has_finished() {
     );
 }
 
+/// Asserts that, on the machine's own ports, `rollback` with no record (a cutover that never
+/// began a restart) succeeds and leaves the unit alone, without asking the unit manager or the
+/// lease server anything.
+///
+/// Catches a machine that does not hand `rollback` to its step.
+#[test]
+fn on_the_machine_a_rollback_with_nothing_restarted_leaves_the_unit_alone() {
+    let tree = Tree::new("config-machine-rollback", UNIT);
+    let machine = Machine {
+        stat: &as_root,
+        ..Machine::system()
+    };
+    let done = run_step(Step::Rollback, &tree.params, &machine);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some("cutover restarted nothing: the unit is left as it is")
+    );
+}
+
 /// Asserts that on a Mac's unit manager `cutover` boots the service out, bootstraps it again
 /// and sees it running, and records the restart.
 ///
