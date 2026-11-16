@@ -81,8 +81,9 @@ The parent directories `Library`, `Library/Application Support`, `Library/Launch
 as owner), any script, and another identifier or version.
 
 - The labels are `js-agent` and `js-agent.session` (`crates/js-mac-provision/src/daemon.rs`: `AGENT_LABEL`,
-  `SESSION_LABEL`; the plist goldens; the update hook's launchd tests). `js-mac-provision` has two verbs,
-  `agent-plist`, which takes no flag and prints the fixed agent plist, and `session-plist --daemon-requirement <REQ>`.
+  `SESSION_LABEL`; the plist goldens; the update hook's launchd tests). The two `js-mac-provision` verbs
+  of this package are `agent-plist`, which takes no flag and prints the fixed agent plist, and
+  `session-plist --daemon-requirement <REQ>`; its pf anchor verbs are unchanged.
   Its `postinstall` verb is gone, with its link and its tests.
 - The agent plist is fixed text, checked for drift, never edited on a host. Its program arguments are
   `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file

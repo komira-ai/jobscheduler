@@ -27,12 +27,11 @@
 //!    `DelegateSubgroup` layout starts from an empty cgroup (`KillMode=process` leaves strays
 //!    behind); a cgroup still busy at the same bound ends `unit_not_empty`, class environment.
 //!    launchd's `bootout` already empties the job;
-//!    With a `helper_unit` in the params (a Mac package's root helper, see `helper`), the helper
-//!    is booted out after the agent is down and bootstrapped from the staged release's tree
-//!    and started before the agent's start is marked;
 //! 5. the record gets `link_moved` (kept under its name: the link was moved by the updater and
-//!    this is the mark that the start is next, and for a first install the commit), then
-//!    `start_issued`, then the unit is started and waited for. A start that fails is the
+//!    this is the mark that the start is next, and for a first install the commit); then, with a
+//!    `helper_unit` in the params (a Mac package's root helper, see `helper`) and the start not
+//!    issued yet, the helper is booted out and bootstrapped from the staged release's tree and
+//!    started; then the record gets `start_issued`, and the unit is started and waited for. A start that fails is the
 //!    release's fault only if the unit ran and died (`failed`, or `auto-restart` after a crash,
 //!    at any look); a unit still waiting in `start` is not.
 //!

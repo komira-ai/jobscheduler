@@ -1,10 +1,11 @@
 //! The LaunchDaemons of the js-agent package: the agent and the root helper it dials.
 //!
-//! Both are described by flags and nothing else: no environment variable, no file the program
-//! reads. Neither runs at load. `KeepAlive` holds each of them while [`GATE`], the file with
-//! the pool's join token, exists, which is launchd's form of the unit's
-//! `ConditionPathExists`: the package can load the daemons at install time, and they start
-//! when a host is configured. launchd then starts a daemon again after every exit, a clean
+//! Both are described by flags and nothing else: no environment variable; the agent's plist
+//! names a flags file ([`FLAGS_FILE`]), which holds only more flags. Neither runs at load.
+//! `KeepAlive` holds each of them while [`GATE`], the file with the pool's join token, exists,
+//! which is launchd's form of the unit's `ConditionPathExists`. The package runs no install
+//! script: the update hook bootstraps the plists, and a daemon starts once the host has its
+//! token. launchd then starts a daemon again after every exit, a clean
 //! one included (the agent exits 0 after it has drained), at most once in
 //! [`THROTTLE_SECS`]. The programs are the package's own files under [`BIN_DIR`]; the
 //! agent's host-specific flags (server, pool, network mode) are read from [`FLAGS_FILE`],
