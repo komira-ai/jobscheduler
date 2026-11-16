@@ -57,7 +57,7 @@ use std::time::Duration;
 
 pub use clock::{Clock, ManualClock, StoreTime, SystemClock};
 pub use shared::{GENERATION, SHARED_WRITERS, share};
-pub use store::Store;
+pub use store::{Claim, Store, TxnRead};
 pub use types::{
     Change, Changes, Commit, CommitStats, Cond, Conflict, Direction, Event, Op, ResumeToken,
     Revision, ScanPage, ScanRange, StoreError, Txn, Version, Versioned,

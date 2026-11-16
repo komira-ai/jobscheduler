@@ -200,6 +200,7 @@ fn each_input_of_a_pass_brings_the_next_one_back() {
             ceiling,
             host_jobs: true,
             rank: None,
+            capacity: None,
         },
     );
     rig.ran(&offered, &[]);
@@ -340,10 +341,10 @@ fn only_a_call_that_changes_the_engine_counts() {
 /// has read the tables with job `late` queued and nothing on host `a`, and the second then
 /// places job `early` (all 8 cores) on `a`. The first's pass, which is told by its own count
 /// of writes that nothing changed and so decides from that picture, tries to place `late` on
-/// `a` too: the commit is stale, `late` stays queued, and `a` books `early` alone. The pass
-/// after it reads the tables again and finds no room for `late` on `a`. It catches a
-/// placement that does not reserve its host in its own transaction, which books `a` for 16
-/// cores.
+/// `a` too: the host's live allocations, read in the placement's own transaction, leave no room
+/// (the host has 8 cores), so `late` stays queued and `a` books `early` alone. It catches a
+/// placement that does not check its host's capacity in its own transaction, which books `a`
+/// for 16 cores.
 #[test]
 fn a_placement_from_a_picture_another_server_changed_does_not_book_the_host() {
     let rig = Rig::new();
@@ -353,6 +354,14 @@ fn a_placement_from_a_picture_another_server_changed_does_not_book_the_host() {
     };
     let mut only_a = Offered::both();
     only_a.open.remove(&host("b"));
+    // The host's capacity: the 8 cores and the memory it was told of.
+    let capacity = js_jobs::Capacity {
+        cpu_millis: 8000,
+        memory_bytes: 8 << 30,
+        disk_bytes: 0,
+        accelerators: 0,
+    };
+    only_a.open.get_mut(&host("a")).unwrap().capacity = Some(capacity);
     rig.queue_whole_cores("late");
     // The first pass writes the job's queue status; the second reads the tables as they
     // stand after that write and writes nothing, so what it read is current for this server.
@@ -374,7 +383,7 @@ fn a_placement_from_a_picture_another_server_changed_does_not_book_the_host() {
         disk_bytes: 0,
         accelerators: 0,
     };
-    let placed = other.place_reserving(&early.id, host("a"), booked, Placement::default(), None);
+    let placed = other.place_claimed(&early.id, &host("a"), booked, &Placement::default(), None);
     placed.unwrap();
 
     rig.ran(&only_a, &[]);

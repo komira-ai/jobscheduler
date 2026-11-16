@@ -22,11 +22,11 @@ pub const MARK: &str = "mark/";
 /// `idx/` space names it.
 pub const TAINT: &str = "taint/";
 
-/// `hostbook/<host>`: the reservation row of a host. Every placement on the host writes it in
-/// the transaction that places the job, at the version the placement's picture of the host was
-/// read at ([`crate::JobStore::place_reserving`]), so two placements made from the same
-/// picture, on this server or on two, cannot both commit. Its value is the allocation id of
-/// the last placement and means nothing else: the allocation rows decide what is booked.
+/// `hostbook/<host>`: the reservation row of a host. Every placement made through
+/// [`crate::JobStore::place_claimed`] writes it in the transaction that places the job, at the
+/// version that transaction read, so a reader that works from a picture of the host sees it
+/// move. Its value is the allocation id of the last placement and means nothing else: the
+/// allocation rows decide what is booked.
 pub const HOSTBOOK: &str = "hostbook/";
 
 /// `meta/jobs/schema`: the schema version of the job, allocation and mark rows, four bytes,
