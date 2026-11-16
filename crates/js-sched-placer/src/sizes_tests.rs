@@ -230,11 +230,50 @@ fn five_successful_runs_size_the_class_from_their_peak_and_cpu() {
     assert_eq!(size(&five, &other), (2000, 4 * GIB));
 }
 
+/// Asserts that runs of one image and command that name no class share a history although
+/// each names its own action digest, lease and deadline in its arguments (as each job of a
+/// build farm does): after five runs of 2 GiB peak and three cores, the next run with other
+/// arguments books what they used, not the cold size. Catches a class that holds the
+/// arguments, which makes every run its own class and books every one of them cold.
+#[test]
+fn runs_that_differ_only_in_their_arguments_share_one_history() {
+    let tables = Tables::new();
+    let task = |at: usize| {
+        let mut spec = spec_of(needs(0, 0), 600);
+        spec.command = Vec::new();
+        spec.args = [
+            "--action",
+            &format!("{at:064x}/1234"),
+            "--lease",
+            &format!("lease-{at}"),
+            "--deadline-ms",
+            &(600_000 + at).to_string(),
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        spec
+    };
+    let jobs: Vec<JobRecord> = (0..5)
+        .map(|at| {
+            ran(
+                &tables,
+                (&format!("action-{at}"), None),
+                task(at),
+                booked(2000, 4 * GIB),
+                exited(0, 2 * GIB, Duration::from_secs(30)),
+            )
+        })
+        .collect();
+    let sizes = taught(&jobs, booked(2000, 4 * GIB));
+    let next = queued("action-next", task(99));
+    assert_eq!(size(&sizes, &next), (3000, 11 * 256 * MIB));
+}
+
 /// Asserts that the class is the label's value when the job has one, whatever its image's
 /// digest, command or arguments (each run of a build names a new commit), and its image's
-/// name, command and arguments otherwise, without the image's digest; and that two clients,
-/// or two platforms, never share a class. Catches a key that holds the commit, the digest, or
-/// that pools tenants or platforms.
+/// name and command otherwise, without the image's digest or the arguments; and that two
+/// clients, or two platforms, never share a class. Catches a key that holds the commit, the
+/// digest or the arguments, or that pools tenants or platforms.
 #[test]
 fn the_class_is_the_label_else_the_command_under_the_client_and_platform() {
     let tables = Tables::new();
@@ -248,8 +287,9 @@ fn the_class_is_the_label_else_the_command_under_the_client_and_platform() {
         JobSizes::key_of(&one),
         JobSizes::key_of(&label("two", &["def456"]))
     );
-    let run = |id: &str, digest: char, args: &[&str]| {
+    let run = |id: &str, digest: char, command: &str, args: &[&str]| {
         let mut spec = spec_of(needs(0, 0), 600);
+        spec.command = vec![command.to_owned()];
         spec.image = js_types::ImageDigestRef::parse(&format!(
             "team/app@sha256:{}",
             digest.to_string().repeat(64)
@@ -258,16 +298,30 @@ fn the_class_is_the_label_else_the_command_under_the_client_and_platform() {
         spec.args = args.iter().map(|arg| (*arg).to_owned()).collect();
         queued(id, spec)
     };
-    let plain = JobSizes::key_of(&run("a", 'a', &["x"]));
+    let plain = JobSizes::key_of(&run("a", 'a', "run", &["x"]));
     assert_eq!(
         plain,
-        JobSizes::key_of(&run("b", 'b', &["x"])),
+        JobSizes::key_of(&run("b", 'b', "run", &["x"])),
         "the digest is not the class"
+    );
+    assert_eq!(
+        plain,
+        JobSizes::key_of(&run("c", 'a', "run", &["y"])),
+        "nor are the arguments"
     );
     assert_ne!(
         plain,
-        JobSizes::key_of(&run("c", 'a', &["y"])),
-        "the arguments are"
+        JobSizes::key_of(&run("d", 'a', "bench", &["x"])),
+        "the command is"
+    );
+    let mut renamed = spec_of(needs(0, 0), 600);
+    renamed.image =
+        js_types::ImageDigestRef::parse(&format!("team/other@sha256:{}", "a".repeat(64))).ok();
+    renamed.args = vec!["x".to_owned()];
+    assert_ne!(
+        plain,
+        JobSizes::key_of(&queued("renamed", renamed)),
+        "the image's name is"
     );
     assert_ne!(plain, JobSizes::key_of(&one), "a label is not a command");
     let mut spec = spec_of(needs(0, 0), 600);
@@ -741,28 +795,30 @@ fn a_start_teaches_every_ended_job_and_a_later_pass_each_job_live_then() {
 }
 
 /// Asserts the name a class is recorded under: the `size-class` label as it is, else `run-` and
-/// 16 hex digits that are the same for one command and differ for another. Catches a name
-/// built from the job's id, which a repeat run never shares.
+/// 16 hex digits that are the same for one command, whatever its arguments, and differ for
+/// another command. Catches a name built from the job's id or its arguments, which a repeat run
+/// never shares.
 #[test]
 fn a_class_is_named_by_its_label_else_by_the_hash_of_its_command() {
     let labelled = queued("one", of_class("kbf.cargo-test.kbf-server", needs(0, 0)));
     assert_eq!(class_name(&labelled), "kbf.cargo-test.kbf-server");
-    let plain = |id: &str, args: &[&str]| {
+    let plain = |id: &str, command: &str, args: &[&str]| {
         let mut spec = spec_of(needs(0, 0), 600);
+        spec.command = vec![command.to_owned()];
         spec.args = args.iter().map(|arg| (*arg).to_owned()).collect();
         queued(id, spec)
     };
-    let name = class_name(&plain("first", &["test"]));
+    let name = class_name(&plain("first", "test", &["--lease", "1"]));
     let digits = name.strip_prefix("run-").unwrap();
     assert_eq!(digits.len(), 16, "{name}");
     assert!(digits.bytes().all(|b| b.is_ascii_hexdigit()), "{name}");
     assert_eq!(
-        class_name(&plain("second", &["test"])),
+        class_name(&plain("second", "test", &["--lease", "2"])),
         name,
         "a repeat run"
     );
     assert_ne!(
-        class_name(&plain("third", &["bench"])),
+        class_name(&plain("third", "bench", &["--lease", "1"])),
         name,
         "another command"
     );
