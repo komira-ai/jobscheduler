@@ -116,6 +116,9 @@ impl Tree {
                 Some(("host_id", value)) => {
                     flags.push(format!("--host-id={}", value.trim_matches('"')))
                 }
+                Some(("host_id_from_facts", value)) => {
+                    flags.push(format!("--host-id-from-facts={}", value.trim_matches('"')))
+                }
                 _ => rest.push_str(&format!("{line}\n")),
             }
         }
@@ -224,6 +227,46 @@ fn the_host_the_params_do_not_name_is_the_machines_own() {
             .unwrap()
             .contains("no machine id")
     );
+}
+
+/// A flags file that names the host by `--host-id-from-facts` makes the hook reach the server
+/// as the id in the facts file, the id the agent registered under; a facts file that is not
+/// there is the lease's error, told by the params key `flags_file`, and nothing is recorded.
+///
+/// It catches a hook that looks for the host under the machine-id default while the agent
+/// registered under the facts file's id.
+#[test]
+fn the_host_the_flags_take_from_the_facts_file_is_the_one_the_hook_reaches() {
+    let enrolled = enrol("hook_machine_facts_id");
+    let tree = Tree::new("hook-machine-facts-id");
+    let facts = tree.root.join("facts.json");
+    fs::write(
+        &facts,
+        r#"{"schema":1,"host_id":"mac-1","host_group":"build","labels":{}}"#,
+    )
+    .unwrap();
+    fs::set_permissions(&facts, fs::Permissions::from_mode(0o644)).unwrap();
+    let lines = reaching(&enrolled).replace(
+        "host_id = \"mac-1\"\n",
+        &format!("host_id_from_facts = \"{}\"\n", facts.display()),
+    );
+    let params = tree.params(true, &lines);
+    let done = tree.run(Step::Prepare, &params, Err("the machine id is not asked"));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(enrolled.server.host("mac-1")["cordon"].is_object());
+
+    fs::remove_file(&facts).unwrap();
+    fs::remove_file(tree.record()).unwrap();
+    let done = tree.run(Step::Prepare, &params, Err("unused"));
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::LeaseUnreachable));
+    let detail = done.report.detail.unwrap();
+    assert!(
+        detail.starts_with("flags_file: --host-id-from-facts "),
+        "{detail}"
+    );
+    assert!(detail.contains("cannot be read"), "{detail}");
+    assert!(!tree.record().exists());
 }
 
 #[test]

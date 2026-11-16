@@ -14,7 +14,7 @@ use js_caps::{DETECTED_KEYS, DISK_GIB, REPORT_ONLY_KEYS};
 use js_types::normalise_arch;
 
 use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
-use crate::cli::Cli;
+use crate::cli::{Cli, resolve_host_id};
 use crate::disk::{ImageReserve, image_budget_bytes, image_reserve_bytes};
 use crate::facts::{
     self, CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
@@ -162,8 +162,9 @@ fn id(
     runner: &dyn CommandRunner,
     files: &dyn FileReader,
 ) -> Result<String, String> {
-    match &cli.host_id {
-        Some(id) => Ok(id.clone()),
+    let euid = rustix::process::geteuid().as_raw();
+    match resolve_host_id(cli, euid, &|path| files.facts(path)).map_err(|why| why.to_string())? {
+        Some(id) => Ok(id),
         None => machine_id(platform, runner, files)
             .map(|machine| host_id(&machine))
             .map_err(|why| format!("cannot read the machine id ({why}); pass --host-id")),

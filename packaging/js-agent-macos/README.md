@@ -45,6 +45,28 @@ shipped: nothing in them is a placeholder.
   `session-plist --daemon-requirement`. The helper needs no flags file, and its socket group
   is `_jsagent`.
 
+The flags file is one argument per line (`--flags-file` in `crates/js-agent/src/flags_file.rs`).
+It gives the server, the pool and the native runtime, and is what a config package for a host
+group of Macs (`js-agent-config-mac-build`, which also places `/etc/js-agent/ca.pem`) installs.
+An example, with documentation addresses:
+
+```
+--server=https://leases.example:7300
+--pool=mac
+--ca-cert=/etc/js-agent/ca.pem
+--host-id-from-facts=/var/lib/hostkeeper/facts.json
+--native-network=on
+--native-pf-uid-start=600
+--native-pf-uid-count=100
+--native-pf-endpoint=192.0.2.10:443
+--native-pf-endpoint=192.0.2.11:443
+```
+
+Without the file the agent does not start.
+The file must be a regular file owned by root, not writable by group or others.
+`--host-id-from-facts` makes the host's id the `host_id` of hostkeeper's facts file, the name the
+coordinator enrolled the Mac under, so one file serves every Mac of the group.
+
 Neither runs at load. `KeepAlive` holds each while `/etc/js-agent/token` exists, so the
 daemons start when the host is given its join token, and launchd starts one again after
 every exit, at most once in 30 seconds (`ThrottleInterval`). A refusal is read from
@@ -83,6 +105,37 @@ deploy to it and with these secrets as environment secrets (none is in the tree)
 No certificate name and no team id is written in the tree: the identity is found in the
 temporary keychain by its hash. Each secret is named only in the environment of the step
 that needs it.
+
+## Config packages: `js-agent config-hook`
+
+A Mac's flags file and certificate come in a config package (`js-agent-config-<group>`, a `.pkg`
+whose files are `/etc/js-agent/flags` and the certificate the flags name). Its hook restarts the
+agent's daemon so that the agent reads the new flags; the steps and what they check are the Linux
+package's (`packaging/js-agent/deb/README.md`, "Config packages"). The manifest names
+
+```
+"hook": {
+  "command": ["/Library/Application Support/js-agent/bin/js-agent", "config-hook"],
+  "timeoutSecs": {"prepare": "60", "cutover": "420", "verify": "300", "rollback": "420", "cleanup": "60", "uninstall": "60"}
+}
+```
+
+with the params
+
+```
+unit = "js-agent"
+flags_file = "/etc/js-agent/flags"
+token_file = "/etc/js-agent/token"
+state_root = "/var/db/js-agent/state"
+state_dir = "/var/db/js-agent-config"
+cutover_timeout_secs = 420
+verify_timeout_secs = 300
+rollback_timeout_secs = 420
+```
+
+`unit` is the daemon's launchd label. The restart is `bootout` (which returns when the agent has
+exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the update hook's while
+`/etc/js-agent/token` is absent. The unit port has run against a fake of `launchctl` only.
 
 ## Privacy grants (TCC)
 

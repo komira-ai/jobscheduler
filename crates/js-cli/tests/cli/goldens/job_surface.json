@@ -63,7 +63,7 @@
         "required": false
       },
       {
-        "doc": "CPU, in thousandths of a core.",
+        "doc": "CPU, in thousandths of a core. 0: sized from the job's class.",
         "field": [
           "spec",
           "needs",
@@ -76,7 +76,7 @@
         "required": false
       },
       {
-        "doc": "Memory, in bytes.",
+        "doc": "Memory, in bytes. 0: sized from the job's class.",
         "field": [
           "spec",
           "needs",
@@ -362,7 +362,7 @@
         "required": false
       },
       {
-        "doc": "The client's labels, by key. A listing can filter by them.",
+        "doc": "The client's labels, by key. A listing can filter by them. The label size-class names the job's class, whose history sizes what Needs leaves at 0.",
         "field": [
           "spec",
           "labels"
