@@ -558,6 +558,20 @@ mod tests {
 
     const CREDENTIAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    /// A taint commit over a file writes nothing and succeeds: the file is saved after the
+    /// registry takes the change, and no other server shares it. It catches a commit that
+    /// reaches for a store the server does not have.
+    #[test]
+    fn a_taint_commit_over_a_file_writes_nothing() {
+        let dir = TestDir::under(std::env::temp_dir(), "agent_state_unit-taint-file");
+        let path = dir.join("taint.agents");
+        let store = BindingStore::new(path.clone(), BTreeMap::new());
+        let change = store.change(&host("a"), bound("token-a", None));
+        assert!(change.writes.is_empty());
+        store.commit_taint(&change, None).unwrap();
+        assert!(!path.exists());
+    }
+
     /// The snapshot is taken while the store's lock is held, so of two saves the one that
     /// writes last holds the newest bindings. It catches a save that reads the registry
     /// first and locks after, which lets a slower save put an older snapshot over a newer
