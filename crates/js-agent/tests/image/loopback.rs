@@ -32,7 +32,9 @@ async fn an_image_on_a_loopback_registry_is_pulled_over_plain_http() {
     ])
     .expect("flags");
     let table = RegistryCredentials::from_cli(&cli, 0).expect("no credentials");
-    let allow = table.image_allow(&cli).expect("the allow-list");
+    let allow = table
+        .image_allow(&cli.image_allow, &cli.os.image_allow_loopback)
+        .expect("the allow-list");
     let images = RegistryImages::new(Client::new(Policy::new(allow)), "x86_64").expect("images");
     let pin = PinnedImage {
         reference: format!("{entry}/app@{}", artifact.digest),

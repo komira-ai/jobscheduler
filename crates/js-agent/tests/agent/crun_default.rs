@@ -1,6 +1,6 @@
-//! crun as the default Linux runtime: a start that names no `--runtime` is a crun start, a host
-//! that fails the crun check refuses to start (it is never given the container engine), and the
-//! refusal of a defaulted start names both ways forward. Each agent runs on a host of its own:
+//! crun as the runtime of the Linux build: a start that names neither `--no-jobs` nor
+//! `--allow-container-engine` is a crun start, a host that fails the crun check refuses to start
+//! (it is never given the container engine), and the refusal names both ways forward. Each agent runs on a host of its own:
 //! the stand-in files of the crun check in a directory of the test (`Fixture`), a scripted
 //! `crun --version`, and a fake machine that counts the runtimes it opens.
 
@@ -9,9 +9,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use js_agent::crun_host::{CrunHost, DEFAULTED, start};
+use js_agent::crun_host::{CrunHost, start};
 use js_agent::integrity::HostView;
 use js_agent::lifecycle::Runtime;
+use js_agent::platform::NOT_READY;
 use js_agent::quota::ScratchQuota;
 use js_agent::usage::UsageClock;
 use js_agent::{FileReader, Machine, RuntimeBuild, SharedClock};
@@ -96,7 +97,7 @@ pub(crate) struct Started {
 }
 
 /// Runs the agent on `fixture` with the crun flags of the fixture (job user, `crun`, the roots)
-/// and `extra`, exactly as given: no `--runtime` unless `extra` names one. The server refuses
+/// and `extra`, exactly as given: a crun start unless `extra` names `--no-jobs` or `--allow-container-engine`. The server refuses
 /// the hello for good (`host-bound`), so an agent that gets as far as its hello ends there.
 pub(crate) fn start_on(fixture: &Fixture, extra: &[&str]) -> Started {
     let (crun, state, scratch) = (
@@ -143,9 +144,9 @@ fn controllers(fixture: &Fixture) -> std::path::PathBuf {
     fixture.host.cgroup_mount.join(unit)
 }
 
-/// Proves, one row per failing piece the design names, that an agent started with no
-/// `--runtime` on a host that fails the crun check exits 2 before it sends anything, names that
-/// piece and no other (`1 missing`), says crun is the default and how to go on, and opens no
+/// Proves, one row per failing piece the design names, that an agent started with
+/// the crun runtime on a host that fails the crun check exits 2 before it sends anything, names that
+/// piece and no other (`1 missing`), says crun is this build's runtime and how to go on, and opens no
 /// runtime at all, so no job reaches the container engine. The rows: unprivileged user
 /// namespaces restricted (`apparmor_restrict_unprivileged_userns` is 1) with no AppArmor profile
 /// for the crun path; and the agent's cgroup not offered `cpu`, `memory` or `pids`, each alone.
@@ -195,12 +196,12 @@ fn a_host_that_fails_the_crun_check_refuses_to_start() {
         assert_eq!(started.sent, 0, "{row}: a hello was sent: {err}");
         assert_eq!(started.opened, 0, "{row}: a runtime was opened: {err}");
         assert!(
-            err.contains("js-agent: --runtime crun: this host is not ready (1 missing):"),
+            err.contains("js-agent: the crun runtime: this host is not ready (1 missing):"),
             "{row}: {err}"
         );
         assert!(err.contains(&format!("\n  - {piece}: ")), "{row}: {err}");
         assert!(err.contains(&words), "{row}: {err}");
-        assert!(err.ends_with(&format!("\n{DEFAULTED}\n")), "{row}: {err}");
+        assert!(err.ends_with(&format!("\n{NOT_READY}\n")), "{row}: {err}");
     }
     let (uid, gid) = (
         rustix::process::getuid().as_raw(),
@@ -210,18 +211,19 @@ fn a_host_that_fails_the_crun_check_refuses_to_start() {
     let started = start_on(&fx, &[]);
     assert!(started.opened > 0, "{}", started.ran.err);
     assert_eq!(started.sent, 1, "{}", started.ran.err);
-    assert!(!started.ran.err.contains(DEFAULTED), "{}", started.ran.err);
+    assert!(!started.ran.err.contains(NOT_READY), "{}", started.ran.err);
 }
 
-/// Proves the text of a refusal: for a start that names no `--runtime`, it is the refusal of
-/// `--runtime crun` on the same host, then [`DEFAULTED`] on a line of its own, which says crun
-/// is the default, points at docs/runbooks/crun-host-setup.md and names the opt-in to the
-/// engine; for `--runtime crun` it names the missing piece and never the engine. A defaulted
-/// start with `--container-bin` is refused naming the flag and the opt-in that selects the
-/// engine. It catches the old message, a defaulted refusal that hides the way to the engine,
-/// and an explicit crun start told to use the engine.
+/// Proves the text of a refusal: the start check's refusal of a crun start names the missing
+/// piece and never the engine (the whole program appends [`NOT_READY`] on a line of its own, as
+/// the rows of `a_host_that_fails_the_crun_check_refuses_to_start` assert), and [`NOT_READY`]
+/// says crun is this build's runtime and no other is tried, points at
+/// docs/runbooks/crun-host-setup.md and names the opt-in to the engine. A crun start with
+/// `--container-bin` and no `--allow-container-engine` is refused naming the flag and the opt-in
+/// that selects the engine. It catches a refusal that hides the way to the engine, and one that
+/// names the engine in place of the missing piece.
 #[test]
-fn the_refusal_for_a_defaulted_runtime_names_both_ways_forward() {
+fn the_refusal_of_a_crun_start_names_both_ways_forward() {
     let fx = Fixture::with_ids("crun-default-refusal", 990, 991);
     fs::write(&fx.host.apparmor_profiles, "snap.x (enforce)\n").unwrap();
     let (crun, state, scratch) = (
@@ -245,42 +247,37 @@ fn the_refusal_for_a_defaulted_runtime_names_both_ways_forward() {
             .map(|_| ())
             .unwrap_err()
     };
-    let explicit = with(&["--runtime", "crun"]);
-    let defaulted = with(&[]);
+    let refused = with(&[]);
     assert!(
-        explicit.starts_with(
-            "--runtime crun: this host is not ready (1 missing):\n  - apparmor profile: "
+        refused.starts_with(
+            "the crun runtime: this host is not ready (1 missing):\n  - apparmor profile: "
         ),
-        "{explicit}"
+        "{refused}"
     );
-    assert!(!explicit.contains("--allow-container-engine"), "{explicit}");
-    assert!(!explicit.contains("docker"), "{explicit}");
-    assert_eq!(defaulted, format!("{explicit}\n{DEFAULTED}"));
+    assert!(!refused.contains("--allow-container-engine"), "{refused}");
+    assert!(!refused.contains("docker"), "{refused}");
     for named in [
-        "the default Linux runtime",
+        "the runtime of this Linux build is crun",
         "docs/runbooks/crun-host-setup.md",
-        "--runtime docker --container-bin <path> --allow-container-engine",
+        "--allow-container-engine --container-bin <path>",
         "network none",
     ] {
-        assert!(DEFAULTED.contains(named), "{named}: {DEFAULTED}");
+        assert!(NOT_READY.contains(named), "{named}: {NOT_READY}");
     }
     let engine = with(&["--container-bin", "/usr/bin/docker"]);
     assert_eq!(
         engine,
-        format!(
-            "--container-bin: not accepted with --runtime crun (a flag of the container engine, \
-             which the crun runtime does not use; --runtime docker --allow-container-engine \
-             selects the engine)\n{DEFAULTED}"
-        )
+        "--container-bin: needs --allow-container-engine (a flag of the container engine; \
+         without it this agent runs crun)"
     );
 }
 
-/// Proves `--runtime none`, the agent that runs no job: on Linux it registers and says hello with
-/// none of the contract's runtime capabilities, where the same start with no `--runtime` is a
-/// crun start that refuses this host (it has no job user); it refuses `--container-bin` and a
-/// `--native-*` flag by name before it sends anything; and the crun check's flags refuse it as
-/// not a crun start. It catches a no-job agent that runs jobs anyway, one that ignores a flag of
-/// a runtime it does not run, and a default that is the no-job agent.
+/// Proves `--no-jobs`, the agent that runs no job: on Linux it registers and says hello with
+/// none of the contract's runtime capabilities, where the same start without it is a crun start
+/// that refuses this host (it has no job user); it refuses a flag of either runtime by name
+/// before it sends anything, and the crun check's flags refuse it as not a crun start. It
+/// catches a no-job agent that runs jobs anyway, one that ignores a flag of a runtime it does
+/// not run, and a default that is the no-job agent.
 #[test]
 fn the_agent_that_runs_no_job_is_named_and_takes_no_runtime_flag() {
     let hello = |extra: &[&str]| {
@@ -297,7 +294,7 @@ fn the_agent_that_runs_no_job_is_named_and_takes_no_runtime_flag() {
         let first = sent.borrow().first().map(|sent| sent.1.clone());
         (ran, first)
     };
-    let (ran, sent) = hello(&["--runtime", "none"]);
+    let (ran, sent) = hello(&["--no-jobs"]);
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     let caps = &sent.expect("a hello")["capabilities"];
     assert!(caps.get("runtime").is_none(), "{caps}");
@@ -306,30 +303,38 @@ fn the_agent_that_runs_no_job_is_named_and_takes_no_runtime_flag() {
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(sent.is_none(), "{}", ran.err);
     assert!(
-        ran.err.contains("--job-user: required with --runtime crun"),
+        ran.err
+            .contains("--job-user: required with the crun runtime"),
         "{}",
         ran.err
     );
-    let refusals: [(&[&str], &str); 2] = [
+    let refusals: [(&[&str], &str); 3] = [
         (
             &["--container-bin", "/bin/sh"],
-            "js-agent: --container-bin: not with --runtime none (an agent that runs no job; \
-             --runtime docker --allow-container-engine runs jobs through the engine)\n",
+            "js-agent: --container-bin: not with --no-jobs (an agent that runs no job)\n",
+        ),
+        (
+            &["--job-user", Fixture::USER],
+            "js-agent: --job-user: not with --no-jobs (an agent that runs no job)\n",
         ),
         (
             &["--native-helper-socket", "/native/helper.sock"],
-            "js-agent: --native-helper-socket: not with --runtime none (an agent that runs no \
-             job)\n",
+            "--native-helper-socket: macOS only (a flag of the native runtime): this Linux \
+             build runs its jobs with crun, or with the container engine of \
+             --allow-container-engine\n",
         ),
     ];
     for (extra, said) in refusals {
-        let all = [&["--runtime", "none"][..], extra].concat();
+        let all = [&["--no-jobs"][..], extra].concat();
         let (ran, sent) = hello(&all);
         assert_eq!(ran.status(), code(2), "{extra:?}: {}", ran.err);
         assert!(sent.is_none(), "{extra:?}: {}", ran.err);
         assert!(ran.err.ends_with(said), "{extra:?}: {}", ran.err);
     }
-    let none = cli(&["--runtime", "none", "--job-user", Fixture::USER]);
+    let none = cli(&["--no-jobs", "--job-user", Fixture::USER]);
     let not_crun = js_agent::crun_host::flags(&none).map(|_| ()).unwrap_err();
-    assert_eq!(not_crun, "--runtime crun: not given");
+    assert_eq!(
+        not_crun,
+        "the crun runtime: not this agent's (--no-jobs or --allow-container-engine)"
+    );
 }

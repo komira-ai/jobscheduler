@@ -70,7 +70,7 @@ The agent's configuration comes from the provider's user data at boot. The user 
 The baked unit's line is:
 
 ```text
-/opt/js-agent/link/current/js-agent --server <server> --token-file /etc/js-agent/token --pool <pool> --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+/opt/js-agent/link/current/js-agent --server <server> --token-file /etc/js-agent/token --pool <pool> --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
 ```
 
 `js-agent-user-data.service` runs after `cloud-init.service` and before the agent and hostkeeper.

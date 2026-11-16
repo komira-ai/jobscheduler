@@ -13,7 +13,7 @@ use crate::lifecycle::{Capacity, Config, Local};
 use crate::quota::ScratchQuota;
 use crate::readiness::WorkerHook;
 use crate::session::Drain;
-use crate::system::{Backend, Machine};
+use crate::system::Machine;
 use crate::usage::Outbox;
 use crate::worker::{Handle, Plan, STEP_EVERY, Worker};
 
@@ -39,8 +39,9 @@ pub struct Seams<'a> {
     pub quota: Option<Arc<dyn ScratchQuota>>,
 }
 
-/// Starts the worker when `--container-bin`, `--runtime crun` or `--native-helper-socket` is
-/// given, and `None` when none is: an agent without them registers and heartbeats and runs
+/// Starts the worker when the runtime of this build is configured (Linux: the crun runtime or
+/// `--container-bin`; macOS: `--native-helper-socket`), and `None` when it is not: an agent
+/// started with `--no-jobs` registers and heartbeats and runs
 /// no job. The worker has built the lifecycle and adopted the containers an earlier process
 /// left when this returns, and the lines it has to say (the engine's warnings, what it
 /// adopted) are written to `err`.
@@ -72,8 +73,7 @@ pub fn start(
         scratch_quota_failures: _,
         scratch_usage_wait_secs: _,
         scratch_abandon_limit: _,
-        container,
-        native,
+        backend,
         state,
         watch,
         settle,
@@ -86,22 +86,12 @@ pub fn start(
         vm,
         allow_host_jobs,
     } = local;
-    // `Local` holds at most one of the two, and a state root and a scratch root with it.
-    let (backend, scratch, state) = match (container, native, scratch, state) {
-        (Some(container), _, Some(scratch), Some(state)) => {
-            (Backend::Container(container), scratch, state)
-        }
-        (None, Some(native), Some(scratch), Some(state)) => {
-            (Backend::Native(native), scratch, state)
-        }
+    // `Local` holds a state root and a scratch root with a backend.
+    let (backend, scratch, state) = match (backend, scratch, state) {
+        (Some(backend), Some(scratch), Some(state)) => (backend, scratch, state),
         _ => return Ok(None),
     };
-    let flag = match &backend {
-        Backend::Container(settings) => settings
-            .crun()
-            .map_or("--container-bin", |_| "--runtime crun"),
-        Backend::Native(_) => "--native-helper-socket",
-    };
+    let flag = backend.flag();
     let config = Config {
         capacity: Capacity::of(hello),
         allow_host_jobs,

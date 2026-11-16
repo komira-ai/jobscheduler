@@ -1,4 +1,4 @@
-//! The hello of a whole `--runtime crun` agent: `gpu-passthrough` is reported by an agent
+//! The hello of a whole crun agent: `gpu-passthrough` is reported by an agent
 //! given a device list and by no other, `host-jobs` by an agent given `--allow-host-jobs` and
 //! by no other, and an operator cannot claim either. Each run of the agent
 //! has a host of its own: the stand-in files of the crun start check in a directory of the
@@ -26,7 +26,7 @@ use crate::bounds::WakeBudget;
 use crate::crun_host::Fixture;
 use crate::support::{
     Host, Jobs, Lowest, Ran, Script, ScriptConnector, beat_ok, code, flags, linux_host, refused,
-    reply, run_on, welcome,
+    reply, run_on_defaulted, welcome,
 };
 
 /// A sleeper that lets the worker (taken from the hook) finish what it was given at every
@@ -52,7 +52,7 @@ impl Sleeper for Settle<'_> {
     }
 }
 
-/// The fake machine, with the start check of `--runtime crun` reading the test's own host.
+/// The fake machine, with the start check of the crun runtime reading the test's own host.
 struct GpuHost {
     fake: FakeMachine,
     crun: CrunHost,
@@ -67,10 +67,8 @@ impl Machine for GpuHost {
     }
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
-        let plan = match build.backend {
-            Backend::Container(settings) => settings.crun().map(|plan| plan.host_jobs),
-            Backend::Native(_) => None,
-        };
+        let Backend::Container(settings) = build.backend;
+        let plan = settings.crun().map(|plan| plan.host_jobs);
         self.host_jobs.lock().expect("host jobs").push(plan);
         self.fake.runtime(build)
     }
@@ -174,8 +172,6 @@ fn run_crun(
     let mut owned: Vec<String> = [
         "--host-id",
         "h1",
-        "--runtime",
-        "crun",
         "--job-user",
         Fixture::USER,
         "--crun-bin",
@@ -209,7 +205,7 @@ fn run_crun(
     let machine: Arc<dyn Machine> = gpu_host.clone();
     let jobs: Jobs<'_> = (machine, Some(&hook));
     let host = host_of(&fixture);
-    let ran = run_on(
+    let ran = run_on_defaulted(
         &flags(&all),
         &host,
         &connector,

@@ -7,9 +7,9 @@
 # crates/xtask/tests/js_agent_farm_unit.rs pins the settings described here. The setup script
 # does not start or enable the unit: the switch from the engine unit is a step of its own.
 #
-# `--runtime crun` is written out here, though an agent given no `--runtime` on Linux runs crun
-# too: crun is the default Linux runtime. The packaged Docker unit and the elastic boot payload
-# name `--runtime docker --allow-container-engine`, the opt-in to the engine fallback.
+# crun is the runtime of the agent's Linux build, so the unit names no runtime: the crun flags
+# below are the ones it takes. The packaged Docker unit and the elastic boot payload name
+# `--allow-container-engine --container-bin`, the opt-in to the engine fallback.
 #
 # The agent stays root and runs every `crun` as the job user (`--job-user`), a system account
 # with a subuid and subgid range of 65536 ids or more that the setup script makes. At start the
@@ -92,7 +92,7 @@ DelegateSubgroup=supervisor
 StateDirectory=js-agent
 StateDirectoryMode=0711
 ExecStartPre=+systemd-tmpfiles --create /etc/tmpfiles.d/js-agent-crun.conf
-ExecStart=/opt/js-agent/link/current/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+ExecStart=/opt/js-agent/link/current/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
 KillMode=process
 TimeoutStopSec=3900
 Restart=always

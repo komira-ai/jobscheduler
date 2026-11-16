@@ -34,10 +34,12 @@ pub const DEFAULT_ROOT: &str = "/run/js-agent/files";
 
 /// What the agent runs, as far as its files root is concerned.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Runs {
+pub(crate) enum Runs {
     /// Containers: the root is the flag's, or the default, in the runtime's layout.
+    #[cfg(target_os = "linux")]
     Containers(DirLayout),
     /// Native programs: the root is the flag's, searchable, and there is no default.
+    #[cfg(target_os = "macos")]
     Native,
     /// No jobs: no root.
     None,
@@ -62,10 +64,18 @@ pub(super) fn open_root(
     runs: Runs,
     others: &[(&str, &Path)],
 ) -> Result<(Option<FilesRoot>, Option<String>), String> {
+    // A native agent (a macOS build's) has no default root: its root is the flag's only.
+    #[cfg(target_os = "macos")]
+    let _ = default;
     let root = match (given, runs) {
-        (_, Runs::None) | (None, Runs::Native) => return Ok((None, None)),
+        (_, Runs::None) => return Ok((None, None)),
+        #[cfg(target_os = "macos")]
+        (None, Runs::Native) => return Ok((None, None)),
+        #[cfg(target_os = "macos")]
         (Some(path), Runs::Native) => FilesRoot::open_with(path, DirLayout::Searchable)?,
+        #[cfg(target_os = "linux")]
         (Some(path), Runs::Containers(layout)) => FilesRoot::open_with(path, layout)?,
+        #[cfg(target_os = "linux")]
         (None, Runs::Containers(layout)) => match FilesRoot::open_with(default, layout) {
             Ok(root) => root,
             Err(why) => return Ok((None, Some(format!("run files unavailable: {why}")))),
