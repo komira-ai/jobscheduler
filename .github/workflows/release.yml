@@ -53,10 +53,9 @@
 # repository, gamma and the control-plane deploy. The beta stage, the platforms other than Linux
 # x86_64, runs beside publish and the jobs after it, not before them: after `artifacts`, the
 # jobs `beta-macos` (beta.yml: the workspace's tests on Apple silicon), `beta-macos-pkg`
-# (js-agent-macos-pkg.yml: the installer package at the release's version, signed when the
-# environment `macos-signing` is set up) and `beta-macos-probe`
+# (js-agent-macos-pkg.yml: the unsigned installer package) and `beta-macos-probe`
 # (macos-probe.yml) run on the hosted macOS runners, and `promote-macos` adds the macOS
-# archives (`*-aarch64-apple-darwin.tar.gz`) and the signed package to the published release when all three and
+# archives (`*-aarch64-apple-darwin.tar.gz`) to the published release when all three and
 # `publish` succeeded. `publish` leaves those archives out, and nothing else waits for the beta
 # stage: not the Linux assets, the .debs, the apt repository, gamma or the control-plane deploy.
 # A pull request runs none of it. The tag is made first of those: `publish`
@@ -439,9 +438,6 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/js-agent-macos-pkg.yml
-    with:
-      version: ${{ needs.plan.outputs.version }}
-      sign: true
 
   beta-macos-probe:
     needs: [plan, artifacts]
@@ -452,13 +448,8 @@ jobs:
 
   # Adds the macOS archives to the release `publish` published, when the three beta jobs
   # passed. They are the files artifacts.yml built, attested and verified, and `publish` checked
-  # against SHA256SUMS; nothing is rebuilt. It also adds the signed installer package, when the
-  # `sign` job of the beta stage's package workflow produced one, as
-  # `js-agent-<version>-macos-arm64.pkg` (hostkeeper's name for a versioned macos-pkg file) with
-  # its SHA-256 line in `js-agent-<version>-macos-arm64.pkg.sha256`; with no signed package (the
-  # `macos-signing` environment is not set up) it attaches none, and never the unsigned one.
-  # A file the release has already must equal this run's, byte for byte, and is kept; a
-  # missing one is uploaded. Like `publish` it runs no
+  # against SHA256SUMS; nothing is rebuilt. An archive the release has already must equal this
+  # run's, byte for byte, and is kept; a missing one is uploaded. Like `publish` it runs no
   # repository code, holds `contents: write` alone, and a release run's re-run of the failed
   # jobs continues here.
   promote-macos:
@@ -472,37 +463,25 @@ jobs:
         with:
           name: release-assets
           path: dist
-      # The signed package, when the `sign` job of js-agent-macos-pkg.yml ran (it uploads this
-      # artifact only after it signed, notarized and checked the package). The unsigned package
-      # is another artifact and is never downloaded here. No artifact of this name: the
-      # `macos-signing` environment is not set up, and nothing is attached.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: js-agent-macos-pkg
-          merge-multiple: true
-          path: pkg
-      - name: Add the macOS archives and the signed package to the release
+      - name: Add the macOS archives to the release
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ needs.plan.outputs.tag }}
-          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
-          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cd dist
+          sha256sum --check --strict SHA256SUMS
           api="repos/$REPO"
           id="$(gh api "$api/releases/tags/$TAG" --jq .id)"
           assets="$(gh api "$api/releases/$id" --jq '.assets[] | select(.state == "uploaded") | "\(.id) \(.name)"')"
-          mkdir existing
-          # Keeps an asset the release has already when it is identical, refuses one that
-          # differs, uploads one that is missing.
-          attach() {
-            file="$1"
-            name="$2"
+          mkdir ../existing
+          for file in ./*-aarch64-apple-darwin.tar.gz; do
+            name="${file#./}"
             asset_id="$(awk -v n="$name" '$2 == n {print $1}' <<< "$assets")"
             if [ -n "$asset_id" ]; then
-              gh api -H "Accept: application/octet-stream" "$api/releases/assets/$asset_id" > "existing/$asset_id"
-              if ! cmp -s -- "$file" "existing/$asset_id"; then
+              gh api -H "Accept: application/octet-stream" "$api/releases/assets/$asset_id" > "../existing/$asset_id"
+              if ! cmp -s -- "$name" "../existing/$asset_id"; then
                 echo "::error::the release $TAG holds a $name that differs from this run's; a published release is never changed (docs/release.md)"
                 exit 1
               fi
@@ -510,20 +489,7 @@ jobs:
             else
               gh api --method POST -H "Content-Type: application/octet-stream" "https://uploads.github.com/$api/releases/$id/assets?name=$name" --input "$file" --silent
             fi
-          }
-          for file in dist/*-aarch64-apple-darwin.tar.gz; do
-            attach "$file" "${file#dist/}"
           done
-          signed="pkg/js-agent-$VERSION-aarch64-apple-darwin.pkg"
-          if [ -f "$signed" ]; then
-            (cd pkg && sha256sum --check --strict SHA256SUMS)
-            name="js-agent-$VERSION-macos-arm64.pkg"
-            printf '%s  %s\n' "$(sha256sum "$signed" | cut -d ' ' -f 1)" "$name" > "$name.sha256"
-            attach "$signed" "$name"
-            attach "$name.sha256" "$name.sha256"
-          else
-            echo "::notice::no signed macOS package: the macos-signing environment is not set up, so none is attached"
-          fi
 
   # Builds the `xtask` binary that gamma, cp-deploy-digest and every apt read, index and write job
   # run. A job of its own so that the build, whose scripts run code from the locked dependency

@@ -1,7 +1,6 @@
 # js-agent on a Mac
 
-An installer package (`js-agent-<version>-aarch64-apple-darwin.pkg`, attached to a release,
-once signed, as `js-agent-<version>-macos-arm64.pkg`) that lays down the
+A signed installer package (`js-agent-<version>-aarch64-apple-darwin.pkg`) that lays down the
 agent, its root helper and the install-time tool, installs two LaunchDaemons and loads them.
 It is built by `.github/workflows/js-agent-macos-pkg.yml` and read back by
 `cargo xtask pkg check-macos`; `cargo xtask pkg stage-macos` is the one place that lists
@@ -74,10 +73,10 @@ restarts the agent. Nothing is loaded when the volume is not `/`.
 ## Signing and notarization
 
 The workflow has two jobs. `build` runs in the beta stage of the release (`release.yml` calls the workflow on
-a push to main) and by hand, never on a pull request; it builds the package unsigned (at the release's version when the release calls it, 0.0.0 for a call without one), checks it and writes `SHA256SUMS`, and names no secret: no
-code of a branch can see a signing key. `sign` runs by hand from main, and when the release calls the workflow with `sign: true` on a push to main, in the environment `macos-signing`. It does
+a push to main) and by hand, never on a pull request; it builds the package unsigned, checks it and writes `SHA256SUMS`, and names no secret: no
+code of a branch can see a signing key. `sign` runs only by hand from main, in the environment `macos-signing`. It does
 not build: it takes the checked package and the checker from `build`, checks the package again,
-signs it with `productsign --timestamp`, notarizes and staples it, checks it again and sums it. When the
+signs it with `productsign`, notarizes and staples it, checks it again and sums it. When the
 environment or its secrets are not set up it prints a notice and skips every step after the
 first, and the run succeeds.
 
@@ -191,15 +190,10 @@ Known limits:
 
 ## Not done yet
 
-- Done: the release builds the package at its version, `sign` signs it in the release when the
-  environment `macos-signing` is set up, and `promote-macos` attaches the signed package to the
-  release as `js-agent-<version>-macos-arm64.pkg` with a `.sha256` file. Not done: the
-  environment `macos-signing` (the Developer ID Installer identity and the notary key) does not
-  exist, so no release carries a package yet; the package is not attested; it is not published
-  under `packages.komira.ai` `pkg/` (the descriptor has no `js-agent` entry for the `macos-pkg`
-  format); the `macos-pkg` target entry of `release desired` and the call for a host group of
-  Macs are not made. The package carries no update declaration, and nothing in it moves
-  `link/current`, so a Mac's agent is not updated by hostkeeper yet.
+- The package is a workflow artifact for seven days, not a release asset: `artifacts.yml` (which
+  `release.yml` calls) lists the release's assets by name and attests `*.tar.gz` and the
+  Linux `.deb` files. It carries no update declaration, and nothing in it moves `link/current`.
+  There is no native Mac package for hostkeeper yet, so a Mac's agent is not updated by hostkeeper.
 - The update hook (`js-agent update-hook`) runs its five steps on a Mac as hostkeeper's hook, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
   `print`) and `runtime = "native"` in the `[params]` a Mac's hostkeeper entry would carry, over the lease server's own-host routes
   and the agent's state root, which the params name beside the release link (`state_root`,

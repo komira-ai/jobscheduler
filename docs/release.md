@@ -37,7 +37,7 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    it, and publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a
    Debian package or an image without its bundle. It leaves the macOS archives (`*-aarch64-apple-darwin.tar.gz`) out: step 6a adds them.
 
-6a. The beta stage, the platforms other than Linux x86_64, runs after `artifacts` and beside `publish` and everything after it (nothing of the Linux files, the Debian packages, the apt repository, `gamma` or the control-plane deploy waits for it). On the hosted `macos-15` runners it runs three jobs, each calling a workflow that holds `contents: read` and no secret: `beta-macos` (`beta.yml`: the workspace's tests on Apple silicon, all but the Linux-only crates js-contain, js-host-step and js-mdm), `beta-macos-pkg` (`js-agent-macos-pkg.yml`: the installer package of the agent, built at the release's version and read back; its `sign` job, which runs when the environment `macos-signing` is set up, signs, notarizes and checks it and keeps it as a workflow artifact for seven days) and `beta-macos-probe` (`macos-probe.yml`: what the native runtime relies on, probed on the runner). When the three and `publish` succeeded, `promote-macos` (`contents: write` alone, no repository code) adds the macOS archives to the published release, and the signed package when `sign` produced one, as `js-agent-<version>-macos-arm64.pkg` with its SHA-256 line in `js-agent-<version>-macos-arm64.pkg.sha256` (an unsigned package is never attached); a file the release already has must equal this run's byte for byte and is kept. `SHA256SUMS` lists them from the start, so until they are added `sha256sum -c --ignore-missing SHA256SUMS` is the check. A beta job that fails leaves the release without the macOS archives and the run red; fix forward, then re-run the failed jobs and `promote-macos` adds them. Following the owner's rule, a pull request runs none of this (`cargo test -p xtask --test pr_linux_only`): a pull request that changes `release.yml` runs `plan` as a dry run on Linux x86_64 and builds nothing, since `artifacts.yml`'s build matrix names the arm64 and macOS runners.
+6a. The beta stage, the platforms other than Linux x86_64, runs after `artifacts` and beside `publish` and everything after it (nothing of the Linux files, the Debian packages, the apt repository, `gamma` or the control-plane deploy waits for it). On the hosted `macos-15` runners it runs three jobs, each calling a workflow that holds `contents: read` and no secret: `beta-macos` (`beta.yml`: the workspace's tests on Apple silicon, all but the Linux-only crates js-contain, js-host-step and js-mdm), `beta-macos-pkg` (`js-agent-macos-pkg.yml`: the unsigned installer package of the agent, built and read back, kept as a workflow artifact for seven days) and `beta-macos-probe` (`macos-probe.yml`: what the native runtime relies on, probed on the runner). When the three and `publish` succeeded, `promote-macos` (`contents: write` alone, no repository code) adds the macOS archives to the published release; an archive the release already has must equal this run's byte for byte and is kept. `SHA256SUMS` lists them from the start, so until they are added `sha256sum -c --ignore-missing SHA256SUMS` is the check. A beta job that fails leaves the release without the macOS archives and the run red; fix forward, then re-run the failed jobs and `promote-macos` adds them. Following the owner's rule, a pull request runs none of this (`cargo test -p xtask --test pr_linux_only`): a pull request that changes `release.yml` runs `plan` as a dry run on Linux x86_64 and builds nothing, since `artifacts.yml`'s build matrix names the arm64 and macOS runners.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
@@ -479,24 +479,17 @@ together) moves the entry. The call names the host group `all-in-one` (the `host
 ### macOS
 
 The Mac has no native package hostkeeper can install yet, so no `macos-arm64` target: a Mac whose
-daemon announces only `macos-pkg` is ordered nothing for `js-agent`. Done: the release builds the
-installer package (`.github/workflows/js-agent-macos-pkg.yml`, `packaging/js-agent-macos`) at the
-release's version in the beta stage; when the environment `macos-signing` is set up, the same run
-signs it with `productsign --timestamp`, notarizes and staples it, and checks it again; and `promote-macos`
-attaches it to the release as `js-agent-<version>-macos-arm64.pkg` (the name of hostkeeper's
-named-version form) with a `.sha256` file. Without the environment the `sign` job skips with a
-notice and the release carries no package. The package is not attested the way the archives are.
-What remains: the environment `macos-signing` with the Developer ID Installer identity and the
-notary key (none exists yet); hostkeeper's signature check of the signed package
-(`release check-pkg-signature`: the chain of the identity to Apple's root, a trusted timestamp),
-which this workflow does not run; hosting under `pkg/js-agent/<version>/` at `packages.komira.ai`
-with a testing-to-stable promotion, which the publish role may not write today, and the `js-agent`
-entry of the `macos-pkg` format in the descriptor; the `macos-pkg` target entry of `release desired`
-(its store, locator, digest and size, and the manifest with the package identifier and launchd
-label) and the call for a host group of Macs (`mac-build`); and js-agent's hook reading the
-`.pkg`'s tree under `tree/Library/...`. The package's agent runs from `/etc/js-agent/flags`,
-which a config package places. The Mac archives (`*-aarch64-apple-darwin.tar.gz`) are released
-as before.
+daemon announces only `macos-pkg` is ordered nothing for `js-agent`. The signed installer package
+(`.github/workflows/js-agent-macos-pkg.yml`, `packaging/js-agent-macos`) is not ready for hostkeeper's
+`macos-pkg` installer. What is missing: a release job that builds, signs and attests the `.pkg` (the
+workflow runs by hand only); `productsign --timestamp` and hostkeeper's signature check of the signed
+package (`release check-pkg-signature`: the chain of the Developer ID Installer identity to Apple's
+root, a trusted timestamp); hosting under `pkg/js-agent/<version>/` at `packages.komira.ai` with a
+testing-to-stable promotion, which the publish role may not write today; the `macos-pkg` target
+entry (its store, locator, digest and size, and the manifest with the package identifier and launchd
+label); a decision on notarization, which changes the bytes after signing; and js-agent's hook reading
+the `.pkg`'s tree under `tree/Library/...`. The Mac archives (`*-aarch64-apple-darwin.tar.gz`) are
+released as before.
 
 The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners, its packages pinned by version and SHA-256 in `.github/debs/musl-tools.toml` and installed with `dpkg` after `cargo xtask debs` took them from the actions cache or, when the cache missed, from the pinned mirrors (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
 

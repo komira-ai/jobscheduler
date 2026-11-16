@@ -7,8 +7,7 @@
 # Two jobs. `build` runs in the beta stage of the release (release.yml's `beta-macos-pkg` calls
 # this file on a push to main) and by hand; no pull request runs it. It builds, checks and sums the package
 # unsigned, and no secret is named anywhere in it, so no code of a branch (a build script, a
-# macro, xtask) can see one. `sign` runs by hand from main, and when release.yml calls this file
-# with `sign: true` on a push to main; never on a pull request. It runs in the environment
+# macro, xtask) can see one. `sign` runs only by hand from main, in the environment
 # `macos-signing`, which a repository administrator creates with its secrets and a rule that
 # only main may deploy to it. It does not build: it takes the checked unsigned package and the
 # checker from `build`, checks that the package is the one `build` summed, signs and notarizes
@@ -16,29 +15,16 @@
 # repository runs before the signing steps, and the system tools it calls are called by
 # absolute path. It runs no cargo. A secret is named only in the environment of the step that
 # needs it. When the environment or the secrets are not set up, `sign` says so in a notice, skips
-# every step after the first, uploads no signed package and the run succeeds; release.yml's
-# `promote-macos` attaches the artifact `js-agent-macos-pkg` to the release when there is one.
+# every step after the first and the run succeeds.
 #
 # No command expands an expression: a script reads its environment. The version, which goes
 # into file names, is checked as MAJOR.MINOR.PATCH before anything uses it.
 #
-# The beta stage builds it at the release's version (the `version` input); a manual run builds the
-# version typed. crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
+# The beta stage builds it as version 0.0.0. A manual run builds the version typed. crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
 name: js-agent-macos-pkg
 
 on:
   workflow_call:
-    inputs:
-      version:
-        description: The package version, MAJOR.MINOR.PATCH
-        required: false
-        type: string
-        default: ""
-      sign:
-        description: Run the sign job (release.yml passes true on a push to main)
-        required: false
-        type: boolean
-        default: false
   workflow_dispatch:
     inputs:
       version:
@@ -140,7 +126,7 @@ jobs:
 
   sign:
     needs: [build]
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && inputs.sign)) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     environment: macos-signing
     runs-on: macos-15
     timeout-minutes: 60
@@ -215,7 +201,7 @@ jobs:
           /usr/bin/security import "$RUNNER_TEMP/installer.p12" -P "$MACOS_INSTALLER_CERT_PASSWORD" -T /usr/bin/productsign -t cert -f pkcs12 -k "$keychain"
           /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
           pkg="dist/js-agent-$VERSION-aarch64-apple-darwin.pkg"
-          /usr/bin/productsign --sign "$MACOS_INSTALLER_IDENTITY" --keychain "$keychain" --timestamp "$pkg" "$pkg.signed"
+          /usr/bin/productsign --sign "$MACOS_INSTALLER_IDENTITY" --keychain "$keychain" "$pkg" "$pkg.signed"
           mv "$pkg.signed" "$pkg"
           pkgutil --check-signature "$pkg"
       - name: Notarize the package

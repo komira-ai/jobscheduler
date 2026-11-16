@@ -13,7 +13,6 @@ mod artifacts;
 mod calls;
 mod debs;
 mod images;
-mod pkg;
 
 use calls::{CALLERS, calls};
 

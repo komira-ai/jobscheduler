@@ -1,7 +1,6 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
 //! read as it is in the repository. Two jobs: `build` runs in the release's beta stage and by hand
-//! (never on a pull request), holds no secret and signs nothing; `sign` runs by hand from main, or
-//! when the release calls the workflow with `sign: true` on a push to main, in the protected
+//! (never on a pull request), holds no secret and signs nothing; `sign` runs only by hand from main, in the protected
 //! environment `macos-signing`, takes the checked unsigned package from `build` without
 //! rebuilding, and is the only place a secret is named, on the steps that sign and
 //! notarize and nowhere else. Neither job publishes anything.
@@ -97,17 +96,6 @@ fn the_workflow_is_called_by_the_release_and_started_by_hand_but_never_by_a_pull
         on,
         [
             "workflow_call:",
-            "inputs:",
-            "version:",
-            "description: The package version, MAJOR.MINOR.PATCH",
-            "required: false",
-            "type: string",
-            "default: \"\"",
-            "sign:",
-            "description: Run the sign job (release.yml passes true on a push to main)",
-            "required: false",
-            "type: boolean",
-            "default: false",
             "workflow_dispatch:",
             "inputs:",
             "version:",
@@ -117,7 +105,7 @@ fn the_workflow_is_called_by_the_release_and_started_by_hand_but_never_by_a_pull
         ]
     );
     assert!(!text.contains("pull_request"));
-    // The release's call passes its version; a call with none (and no manual input) builds 0.0.0.
+    // The release's call builds version 0.0.0.
     assert!(
         text.contains("  VERSION: ${{ inputs.version || '0.0.0' }}\n"),
         "the version"
@@ -285,33 +273,8 @@ fn a_secret_is_named_only_in_the_environment_of_the_step_that_uses_it() {
     }
 }
 
-/// What is wrong with the `if:` of the sign job: it must hold the job to main, allow a manual
-/// run and a push with `inputs.sign`, and name nothing else that could start it.
-fn sign_condition_problems(cond: &str) -> Vec<&'static str> {
-    let mut problems = Vec::new();
-    if !cond.contains("github.ref == 'refs/heads/main'") {
-        problems.push("does not hold the job to main");
-    }
-    if !cond.contains("github.event_name == 'workflow_dispatch'") {
-        problems.push("does not allow a manual run");
-    }
-    if !cond.contains("github.event_name == 'push' && inputs.sign") {
-        problems.push("does not allow the release's call with sign: true");
-    }
-    if cond.contains("pull_request") {
-        problems.push("lets a pull request start the job");
-    }
-    if cond.matches("github.event_name").count() != 2 {
-        problems.push("names an event beyond a manual run and a push");
-    }
-    problems
-}
-
-/// The sign job runs on main only, by hand or when the release calls the workflow with
-/// `sign: true` on a push, in the protected environment. It catches a condition that lets a
-/// pull request, another event or another branch sign, and one that drops either way in.
 #[test]
-fn the_sign_job_runs_only_from_main_by_hand_or_by_the_releases_call_in_the_protected_environment() {
+fn the_sign_job_runs_only_by_hand_from_main_in_the_protected_environment() {
     let text = read(WORKFLOW);
     let sign = jobs(&text)["sign"].clone();
     let at_four: Vec<&str> = sign
@@ -319,40 +282,17 @@ fn the_sign_job_runs_only_from_main_by_hand_or_by_the_releases_call_in_the_prote
         .filter(|l| indent(l) == 4)
         .map(|l| l.trim())
         .collect();
-    let cond = at_four
-        .iter()
-        .find_map(|l| l.strip_prefix("if: "))
-        .expect("the sign job has a condition");
-    assert_eq!(sign_condition_problems(cond), Vec::<&str>::new(), "{cond}");
+    assert!(
+        at_four.contains(
+            &"if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}"
+        ),
+        "{at_four:?}"
+    );
     assert!(
         at_four.contains(&"environment: macos-signing"),
         "{at_four:?}"
     );
     assert!(at_four.contains(&"needs: [build]"), "{at_four:?}");
-    for (bad, want) in [
-        (
-            "${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && inputs.sign) }}",
-            "does not hold the job to main",
-        ),
-        (
-            "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && inputs.sign }}",
-            "does not allow a manual run",
-        ),
-        (
-            "${{ github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}",
-            "does not allow the release's call with sign: true",
-        ),
-        (
-            "${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'push' && inputs.sign)) }}",
-            "lets a pull request start the job",
-        ),
-        (
-            "${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'push' && inputs.sign)) }}",
-            "names an event beyond a manual run and a push",
-        ),
-    ] {
-        assert!(sign_condition_problems(bad).contains(&want), "{bad}");
-    }
 }
 
 #[test]
@@ -446,29 +386,6 @@ fn the_key_is_imported_for_productsign_alone() {
         .expect("the sign job imports the key");
     assert!(import.contains("-T /usr/bin/productsign"), "{import}");
     assert!(!import.contains(" -A"), "{import}");
-}
-
-/// The signing line of a sign job, or a problem when it signs without a trusted timestamp.
-fn timestamp_problem(sign: &str) -> Option<String> {
-    let line = sign.lines().find(|l| l.contains("productsign --sign"))?;
-    (!line.split_whitespace().any(|w| w == "--timestamp"))
-        .then(|| format!("productsign signs without --timestamp: {}", line.trim()))
-}
-
-/// `productsign` asks for a trusted timestamp, which hostkeeper's signature check of a Mac's
-/// `.pkg` requires and which keeps the signature valid after the certificate expires. It
-/// catches a signing line that loses `--timestamp`.
-#[test]
-fn the_package_is_signed_with_a_trusted_timestamp() {
-    let sign = job_text(&read(WORKFLOW), "sign");
-    assert!(sign.contains("productsign --sign"), "the sign job signs");
-    assert_eq!(timestamp_problem(&sign), None);
-    let without = sign.replace(" --timestamp", "");
-    assert!(
-        timestamp_problem(&without)
-            .is_some_and(|p| p.starts_with("productsign signs without --timestamp")),
-        "a signing line without --timestamp is not named"
-    );
 }
 
 #[test]
