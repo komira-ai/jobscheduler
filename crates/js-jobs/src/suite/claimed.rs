@@ -6,6 +6,8 @@ use js_state::Store;
 use js_state::conformance::Backend;
 
 use super::{cancelled, host, rig, share};
+use crate::interfere::Read;
+use crate::keys;
 use crate::{Booked, Capacity, EndReason, JobState, JobStoreError, Placement};
 
 /// A host that holds two [`share`]s and no more.
@@ -246,6 +248,58 @@ pub fn a_claimed_placement_moves_the_hosts_reservation_row<B: Backend>(backend: 
         rig.raw("hostbook/host-a").expect("the row stays").version,
         moved.version,
         "{name}: a placement on another host moved this host's row"
+    );
+}
+
+/// A claimed placement reads the host's reservation row, which locks it, before it sums the
+/// host's allocations: a placement ahead of it on the host has then committed when the sum is
+/// taken, so two servers cannot each see room the other's booking takes. It asserts the order of
+/// the decision's reads, since the interleaving it protects is not one a test can force on a
+/// store that serializes its writers. Catches a sum taken before the row is locked.
+pub fn a_claimed_placement_locks_the_hosts_row_before_it_sums_the_host<B: Backend>(backend: &B) {
+    let name = "a_claimed_placement_locks_the_hosts_row_before_it_sums_the_host";
+    let rig = rig(backend);
+    let a = host("host-a");
+    let id = rig.queue("o-first");
+    let _ = rig.store.take_claim_reads();
+    rig.jobs
+        .place_claimed(&id, &a, share(), &Placement::default(), Some(&two_shares()))
+        .expect("placed");
+    let reads = rig.store.take_claim_reads();
+    let at = |wanted: Read| reads.iter().position(|read| *read == wanted);
+    let book = at(Read::Get(keys::hostbook(&a))).expect("the reservation row is read");
+    let sum = at(Read::Scan(keys::on_host_prefix(&a))).expect("the host's entries are read");
+    assert!(
+        book < sum,
+        "{name}: the host's allocations were summed before its row was read: {reads:?}"
+    );
+}
+
+/// A claimed placement of a job that has a mark deletes the mark in its own transaction: the job
+/// is placed, its mark row is gone, and the host's reservation row is written. Catches a claimed
+/// placement that leaves the mark of the job it placed behind.
+pub fn a_claimed_placement_deletes_the_marked_jobs_mark<B: Backend>(backend: &B) {
+    let name = "a_claimed_placement_deletes_the_marked_jobs_mark";
+    let rig = rig(backend);
+    let (id, _) = super::marks::marked(&rig, "m-first");
+    assert!(
+        rig.jobs.get_mark(&id).expect("reads").is_some(),
+        "{name}: the job has a mark before it is placed"
+    );
+    let (placed, _) = rig
+        .jobs
+        .place_claimed(
+            &id,
+            &host("host-a"),
+            Booked::WholeHost,
+            &Placement::default(),
+            None,
+        )
+        .expect("placed");
+    assert_eq!(placed.state, JobState::Placed, "{name}");
+    assert!(
+        rig.jobs.get_mark(&id).expect("reads").is_none(),
+        "{name}: the placement left the mark"
     );
 }
 

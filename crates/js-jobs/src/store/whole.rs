@@ -162,6 +162,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             .get(&earlier_key)?
             .map(|row| allocation_at(&earlier_key, &row.value).map(|found| (found, row.version)))
             .transpose()?;
+        // The host's reservation row is read first, which locks it (`FOR UPDATE` on Postgres), so
+        // the host's allocations are summed after any placement ahead of this one on the host has
+        // committed, and not before.
+        let book_key = keys::hostbook(host);
+        let cond = read
+            .get(&book_key)?
+            .map_or(Cond::Absent, |row| Cond::Version(row.version));
         if let Some(capacity) = capacity {
             let booking = booked_in(read, host)?;
             ensure(
@@ -183,10 +190,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             Some(row) => txn.delete(mark_key, Cond::Version(row.version)),
             None => txn.check(mark_key, Cond::Absent),
         };
-        let book_key = keys::hostbook(host);
-        let cond = read
-            .get(&book_key)?
-            .map_or(Cond::Absent, |row| Cond::Version(row.version));
         let txn = txn.put(book_key, allocation.allocation_id.to_string(), cond);
         Ok((txn, placed, allocation))
     }
