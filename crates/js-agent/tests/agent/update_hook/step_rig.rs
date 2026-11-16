@@ -320,11 +320,17 @@ impl Rig {
     }
 
     pub fn taint(&self) {
+        self.taint_with("residue", None);
+    }
+
+    /// The marker holds a taint of `reason`, found by the check `check` (none for a taint no
+    /// check found).
+    pub fn taint_with(&self, reason: &str, check: Option<&str>) {
         self.state_root()
             .write(&Taint {
-                reason: "residue".to_owned(),
+                reason: reason.to_owned(),
                 run_id: None,
-                check: None,
+                check: check.map(str::to_owned),
             })
             .unwrap();
     }

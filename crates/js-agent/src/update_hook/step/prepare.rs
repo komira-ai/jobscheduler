@@ -11,7 +11,8 @@
 //!    is first written (5), and named in the detail of the step's last line. The state
 //!    directory is made, mode 0700, when it is not there: hostkeeper makes none, so a first
 //!    install finds none;
-//! 2. a taint or an `owed-*` record halts (76);
+//! 2. a taint the agent cannot clear itself, or an `owed-*` record, halts (76); a taint it can
+//!    clear (see [`clearable`]) does not, and the step goes on as for a clean host;
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
 //!    release, see [`agent_in`]) `--version` names the target version (1), and the staged release
 //!    carries the unit the hook manages (`bad_artifact` otherwise);
@@ -37,6 +38,8 @@ use crate::update_hook::{
     Report, UnitRestart, UpdateInfo, agent_in, plan,
 };
 
+use crate::lifecycle::taint::clearable;
+
 use super::supersede::{judge, set_aside};
 use super::{Env, check, failure, lease_failure, open_unchecked, save, success};
 
@@ -56,7 +59,8 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
         Some(record) => judge(env, params, record)?,
         None => false,
     };
-    // Before anything else is looked at or written: no version can repair a taint.
+    // Before anything else is looked at or written: no version can repair a taint the agent
+    // cannot clear itself.
     refuse_host(env)?;
     let (fresh, aside, mut record) = match loaded {
         Some(record) if !stale => (false, None, record),
@@ -178,10 +182,13 @@ fn bad_artifact(why: impl ToString) -> Done {
     failure(Reason::BadArtifact, why.to_string())
 }
 
-/// A taint or an owed check halts: no version can repair it, and the old agent would refuse
-/// its next start.
+/// A taint the agent cannot clear itself, or an owed check, halts: no version can repair it.
+/// A taint the agent may clear ([`clearable`]: a residue of a process, or a check that could
+/// not read its input) does not: the marker stays, the restarted agent restores it, and its
+/// own re-checks clear it, so a halt would only keep the release that carries that clearing
+/// from reaching the host.
 pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
-    if let Some(taint) = env.ports.state.taint() {
+    if let Some(taint) = env.ports.state.taint().filter(|taint| !clearable(taint)) {
         return Err(Done {
             outcome: Outcome::Halt,
             report: Report::failure(

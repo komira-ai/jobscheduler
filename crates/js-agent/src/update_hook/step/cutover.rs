@@ -7,7 +7,7 @@
 //! In this order:
 //! 1. the lock, the record and the params agree; there must be a record, and the release link
 //!    must point at the staged release (`link_failed` otherwise, nothing done);
-//! 2. unless the stop is begun already: a taint or an `owed-*` record halts (76), and the host
+//! 2. unless the stop is begun already: a taint the agent cannot clear itself, or an `owed-*` record, halts (76), and the host
 //!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
 //!    between the placing and the confirming), so a cordon of ours that is gone is put back
 //!    within the cap, and a cap that is spent or a lease that came in defers (75, class
