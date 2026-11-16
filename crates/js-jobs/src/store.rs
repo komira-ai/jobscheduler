@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_state::{
-    Commit, Cond, Conflict, ResumeToken, Revision, ScanRange, Store, StoreError, Txn, TxnRead,
-    Version, Versioned,
+    Commit, Cond, Conflict, ResumeToken, ScanRange, Store, StoreError, Txn, TxnRead, Version,
+    Versioned,
 };
 use js_types::HostId;
 
@@ -30,12 +30,15 @@ mod queue;
 mod status;
 mod taints;
 mod whole;
+mod written;
 
 pub use index::Backfill;
 
 pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};
+
+pub use written::Written;
 
 /// The schema version of the rows this build writes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -107,22 +110,6 @@ pub struct JobStore<S, I = RandomIds> {
 
 /// The number the next job store this process makes gets ([`Written`]).
 static INSTANCES: AtomicU64 = AtomicU64::new(0);
-
-/// Where the writes of one job store, and the store under it, stood when it was asked
-/// ([`JobStore::written`]): two that are equal were taken from the same job store with no write
-/// of it in between and, when the store tells its head, with no commit to the store by anyone
-/// in between, so its tables held the same rows at both. Taken from two job stores, they are
-/// never equal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Written {
-    /// The job store's number among those this process made.
-    instance: u64,
-    /// How many writes it had sent to its store.
-    writes: u64,
-    /// The store's committed head revision, when it tells one ([`Store::head`]): what another
-    /// server's commit moves.
-    head: Option<Revision>,
-}
 
 /// `Err(error)` unless `ok`.
 fn ensure(ok: bool, error: JobStoreError) -> Result<(), JobStoreError> {
@@ -770,25 +757,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     fn allocation_row(&self, id: &JobId) -> Result<(AllocationRecord, Version), JobStoreError> {
         self.read_allocation(id)?
             .ok_or(JobStoreError::NoAllocation { id: id.clone() })
-    }
-
-    /// Where this job store's writes stand, and where the store's head stands: each transaction
-    /// it sends counts once, after the store answered it, whether it committed, conflicted or
-    /// failed (a failed commit may still have landed), and the store's committed head moves with
-    /// every commit, this job store's or another server's. The tables change only through such
-    /// a commit, so when two readings are equal the tables held the same rows at both. A store
-    /// that does not tell its head ([`Store::head`]) is one only this process writes, and its
-    /// own writes are the count. The write count is kept in memory and starts again with each job
-    /// store; the head is the store's, one small read.
-    ///
-    /// # Errors
-    /// [`JobStoreError::Store`] when the store's head cannot be read.
-    pub fn written(&self) -> Result<Written, JobStoreError> {
-        Ok(Written {
-            instance: self.instance,
-            writes: self.writes.load(Ordering::SeqCst),
-            head: self.store.head()?,
-        })
     }
 
     /// Sends `txn` to the store and counts it ([`JobStore::written`]): the one way this job
