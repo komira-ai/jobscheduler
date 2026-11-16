@@ -623,6 +623,7 @@ impl Rig {
             held: Vec::new(),
             results: Vec::new(),
             taint,
+            taint_cleared: None,
             exclusive_ready: agent.ready.clone(),
             exclusive_refused: agent.refused.clone(),
             load: None,

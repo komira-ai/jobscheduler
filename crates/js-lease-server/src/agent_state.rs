@@ -7,9 +7,11 @@
 //! the registry at start (a host that reported a taint, or is cordoned, is put back as an
 //! awaiting host, bound as it was).
 //!
-//! A taint is kept so that a restart does not make a host that reported one clean: nothing
-//! in the server clears a taint, and a tainted host's binding is kept until an operator
-//! stops the server and removes the three `taint_` fields of its entry. A cordon is kept so
+//! A taint is kept so that a restart does not make a host that reported one clean: the only
+//! thing in the server that clears a taint is the host's own heartbeat reporting the taint
+//! it holds as cleared (`taint_cleared`, see the server's "Taint"), which removes the three
+//! `taint_` fields of its entry; otherwise a tainted host's binding is kept until an operator
+//! stops the server and removes them. A cordon is kept so
 //! that a restart does not lift it; it is written only while it is in force, so it leaves
 //! the entry at the first save after it lapses or is lifted. An entry from before the field
 //! is read as no cordon.
@@ -60,7 +62,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_registry::{Binding, Credential};
-use js_state::Store;
+use js_state::{Cond, Store, Txn};
 use js_types::HostId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -439,6 +441,44 @@ impl BindingStore {
         }
     }
 
+    /// Commits `change`, which changes the host's taint, only when the store still holds the
+    /// binding with the taint `expected` (the taint this server's registry holds for the
+    /// host) and the binding is as it was read: the write is conditional on the version just
+    /// read, so a write of another server between the read and the commit is refused, and a
+    /// taint another server reported or cleared is never overwritten by a report or a clear
+    /// made on what this server saw before. Nothing in file mode (the one server is the
+    /// file's only writer), and nothing to commit is a success.
+    ///
+    /// # Errors
+    ///
+    /// The store failed or refused the write, or holds a different taint than `expected`:
+    /// nothing was written, and the heartbeat is answered with an error so that the agent
+    /// reports again.
+    pub(crate) fn commit_taint(&self, change: &Change, expected: Option<&Taint>) -> io::Result<()> {
+        let (Keeper::Store(store), Some((name, value))) = (&self.keeper, change.writes.first())
+        else {
+            return Ok(());
+        };
+        let name = name.as_str();
+        let row = store
+            .get(name)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other(format!("{name} is not in the store")))?;
+        let stored: Stored = host_keys::decode(name, &row.value).map_err(io::Error::other)?;
+        let (_, binding, _) = stored
+            .into_binding(change.host.to_string())
+            .map_err(io::Error::other)?;
+        if binding.taint() != expected {
+            return Err(io::Error::other(format!(
+                "{name} holds another taint than this server's: another server changed it"
+            )));
+        }
+        // A change that sets a taint is a put, so there is a value; a delete would put nothing.
+        let value = value.clone().unwrap_or_default();
+        let txn = Txn::new().put(name, value, Cond::Version(row.version));
+        host_keys::committed(store.txn(txn))
+    }
+
     /// Holds `change` as the store holds it once its writes are committed. Nothing in file
     /// mode, where what the file holds changes only when [`BindingStore::save`] writes it.
     pub(crate) fn applied(&self, change: &Change) {
@@ -517,6 +557,20 @@ mod tests {
     }
 
     const CREDENTIAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// A taint commit over a file writes nothing and succeeds: the file is saved after the
+    /// registry takes the change, and no other server shares it. It catches a commit that
+    /// reaches for a store the server does not have.
+    #[test]
+    fn a_taint_commit_over_a_file_writes_nothing() {
+        let dir = TestDir::under(std::env::temp_dir(), "agent_state_unit-taint-file");
+        let path = dir.join("taint.agents");
+        let store = BindingStore::new(path.clone(), BTreeMap::new());
+        let change = store.change(&host("a"), bound("token-a", None));
+        assert!(change.writes.is_empty());
+        store.commit_taint(&change, None).unwrap();
+        assert!(!path.exists());
+    }
 
     /// The snapshot is taken while the store's lock is held, so of two saves the one that
     /// writes last holds the newest bindings. It catches a save that reads the registry

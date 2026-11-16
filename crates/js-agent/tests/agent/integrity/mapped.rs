@@ -46,7 +46,9 @@ fn a_leftover_process_in_the_mapped_range_is_found() {
             (
                 true,
                 code::PROCESS_AS_JOB_USER,
-                format!("process-as-job-user: pid 700 of user {uid} is running after job r1")
+                format!(
+                    "process-as-job-user: pid 700 (stray, state S, cgroup 0::/machine.slice/libpod-9e1.scope) of user {uid} is running after job r1"
+                )
             )
         );
     }
@@ -149,7 +151,7 @@ fn a_leftover_at_the_finished_slots_uid_is_named_as_the_slots() {
         (
             true,
             code::PROCESS_AS_JOB_USER,
-            "process-as-job-user: pid 700 of user 232073 is running after job r1 (leftover of slot 1)"
+            "process-as-job-user: pid 700 (stray, state S, cgroup 0::/machine.slice/libpod-9e1.scope) of user 232073 is running after job r1 (leftover of slot 1)"
                 .to_owned()
         )
     );
@@ -176,7 +178,7 @@ fn a_leftover_at_an_idle_slots_uid_is_still_found() {
         (
             true,
             code::PROCESS_AS_JOB_USER,
-            "process-as-job-user: pid 701 of user 232072 is running after job r1".to_owned()
+            "process-as-job-user: pid 701 (stray, state S, cgroup 0::/machine.slice/libpod-9e1.scope) of user 232072 is running after job r1".to_owned()
         )
     );
 }
@@ -239,6 +241,6 @@ fn without_slots_a_run_s_slot_changes_nothing() {
     let found = after_slot(&mut checks, "r1", 1, &[1]).unwrap_err();
     assert_eq!(
         said(&found).2,
-        "process-as-job-user: pid 705 of user 232073 is running after job r1"
+        "process-as-job-user: pid 705 (stray, state S, cgroup 0::/machine.slice/libpod-9e1.scope) of user 232073 is running after job r1"
     );
 }

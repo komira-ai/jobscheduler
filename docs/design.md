@@ -75,7 +75,7 @@ The decisions, in one place:
     slot, queued work that fits runs on the same machine at once, and a machine is released only after an idle time. `max_machines` is
     never exceeded and growth is a few machines per tick; this is overload protection, not a cost guardrail (5.10, 5.11).
 14. **A job declares `contained` or `host`; a machine can be tainted.** A host job taints its machine (the scheduler records this itself, not on the agent's report), `js-agent` checks after every job
-    and taints on any finding, and a tainted machine takes no work and is replaced, never cleared on the agent's word (5.12).
+    and taints on any finding, and a tainted machine takes no work and is replaced, never cleared on the agent's word (5.12) — except a taint a check merely judged (a process left behind, an input it could not read), which the agent clears after two clean re-checks of an idle host and the server's acknowledgement (`docs/design/taint-self-clearing.md`).
 15. **Capabilities are typed data; consumers translate into constraints.** An agent advertises scalars, version sets and counters; the
     scheduler matches equality, membership, version ranges and counters, and knows no consumer's words (5.13).
 16. **A fresh VM per run, never reused.** The machine is reused, the guest is not: a VM is cloned, booted, used and destroyed for each
@@ -272,7 +272,7 @@ until its first hello, and takes none.
 | memory-pressure | only while the node holds a lease | no |
 | draining | announced by the agent (SIGTERM): leases run to their end, nothing is requeued | no |
 | quarantined | held out | no |
-| tainted | the scheduler granted a `host_jobs` lease or sent a host `Start`, or a post-job check found something (5.12); sticky until the provider replaces the host or an operator clears it | no |
+| tainted | the scheduler granted a `host_jobs` lease or sent a host `Start`, or a post-job check found something (5.12); sticky until the provider replaces the host or an operator clears it; a taint of a process or of an unread input clears itself after two clean re-checks of an idle host (`docs/design/taint-self-clearing.md`) | no |
 
 An unknown phase value is read as quarantined (fail closed), the one deliberate exception to "skip what you do not know", since skipping a
 phase could place work on a node that is not serving. Agent-announced draining is distinct from operator cordon and drain (4.1).

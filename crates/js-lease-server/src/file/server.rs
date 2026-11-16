@@ -39,6 +39,7 @@ const SERVER_KEYS: &[&str] = &[
     "write_timeout",
     "max_requests",
     "drain_timeout",
+    "drain_hold",
     "agent_hello_burst",
     "agent_hello_interval",
     "require_host_credential",
@@ -233,6 +234,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         write_timeout: s.duration_or("write_timeout", defaults.write_timeout)?,
         max_requests: u32::try_from(requests).unwrap_or(defaults.max_requests),
         drain_timeout: s.duration_or("drain_timeout", defaults.drain_timeout)?,
+        drain_hold: s.duration_or("drain_hold", defaults.drain_hold)?,
     };
     let burst = s.bounded_given("agent_hello_burst", 1, u64::from(u32::MAX))?;
     let agents = AgentKeys {

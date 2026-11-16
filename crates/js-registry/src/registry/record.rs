@@ -21,8 +21,8 @@ pub(super) struct Record {
     pub(super) held: BTreeSet<String>,
     /// The heartbeats taken in this session.
     pub(super) beats: u64,
-    /// The first taint the host reported. It outlives a session and, through the file of
-    /// bindings, a restart.
+    /// The first taint the host reported, until the host reports it cleared. It outlives a
+    /// session and, through the file of bindings, a restart.
     pub(super) taint: Option<Taint>,
     /// When the host's cordon lapses, once it has been cordoned ([`Registry::cordon`]): it
     /// takes no new job until then. It outlives a session and, through the file of

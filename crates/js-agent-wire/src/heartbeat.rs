@@ -229,6 +229,14 @@ pub struct Heartbeat {
     /// The taint report, until the server acknowledges it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint: Option<Taint>,
+    /// The taint the agent has found cleared (its host passed the re-checks, see the agent's
+    /// `--taint-recheck-ms`), until the server acknowledges it with `taint_ack`. The server
+    /// forgets the taint of the host when it holds this one; a taint it holds that differs
+    /// stays. Never sent together with [`Heartbeat::taint`] for the same taint. A server
+    /// that does not know the field ignores it and does not acknowledge, so the agent stays
+    /// tainted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint_cleared: Option<Taint>,
     /// The lease id of the exclusive lease the host has finished preparing for; the
     /// scheduler mints the lease token only on seeing it. Not sent together with
     /// [`Heartbeat::exclusive_refused`].
@@ -321,6 +329,12 @@ pub struct HeartbeatReply {
     /// Whether the taint report was recorded; the agent then stops sending it.
     #[serde(default)]
     pub taint_ack: bool,
+    /// Whether the cleared taint ([`Heartbeat::taint_cleared`]) was recorded; the agent then
+    /// ends its taint and stops sending the clear. A separate flag from `taint_ack`, so that
+    /// the acknowledgement of a taint report that was in flight when the agent began to clear
+    /// it cannot end the taint before the server has heard of the clear. Absent means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub taint_cleared_ack: bool,
     /// The lease id of an exclusive lease granted to this host: the agent is to prepare
     /// for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -437,6 +451,7 @@ impl fmt::Debug for Heartbeat {
             .field("held", &self.held)
             .field("results", &self.results)
             .field("taint", &self.taint)
+            .field("taint_cleared", &self.taint_cleared)
             .field("exclusive_ready", &self.exclusive_ready)
             .field("exclusive_refused", &self.exclusive_refused)
             .field("load", &self.load)
@@ -451,7 +466,7 @@ impl fmt::Debug for Heartbeat {
 impl Heartbeat {
     /// Checks the heartbeat against every bound of [`crate::limits`]: the host id, the
     /// held runs and results (no run id twice in either), the jobs and the retired job ids
-    /// (no job id twice in either) and the taint. It reads no
+    /// (no job id twice in either) and the taint and the cleared taint. It reads no
     /// state: whether the epoch is current and whether the host is known is the
     /// server's. The server calls it on every heartbeat before it acts on one.
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -471,6 +486,9 @@ impl Heartbeat {
             self.results.iter().map(|result| result.run_id.as_str()),
         )?;
         if let Some(taint) = &self.taint {
+            taint.check(at)?;
+        }
+        if let Some(taint) = &self.taint_cleared {
             taint.check(at)?;
         }
         if let Some(gib) = self.disk_gib {

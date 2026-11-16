@@ -195,6 +195,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--write-timeout", "6s"),
         key("--max-requests", "9"),
         key("--drain-timeout", "7s"),
+        key("--drain-hold", "8s"),
         key("--usage-db", "/usage.db"),
         key("--profile-store-bytes", "5"),
         key("--history-retention-days", "5"),

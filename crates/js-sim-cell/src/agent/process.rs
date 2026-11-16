@@ -513,6 +513,7 @@ impl Process {
             held,
             results,
             taint: None,
+            taint_cleared: None,
             exclusive_ready: ready,
             exclusive_refused: refused,
             load: None,

@@ -80,8 +80,8 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
 - **Resources.** Requests of 250m CPU and 256 MiB of memory, a memory limit equal to the request and no CPU limit (a CPU limit throttles
   the tick). These are starting values, not measurements: the table is held in memory and written whole, so the memory follows the lease
   count, and the first deployment records the real numbers.
-- **Shutdown.** `terminationGracePeriodSeconds` exceeds `--drain-timeout` (merged, default 10 s) by the length of a tick. On `SIGTERM` the
-  server stops accepting, answers the requests in flight and exits; the state is durable before every answer, so nothing waits to be
+- **Shutdown.** `terminationGracePeriodSeconds` exceeds `--drain-hold` (default 15 s) plus `--drain-timeout` (merged, default 10 s) by the length of a tick. On `SIGTERM` the
+  server answers `/readyz` 503 at once, keeps serving for `--drain-hold`, then stops accepting, answers the requests in flight and exits; the state is durable before every answer, so nothing waits to be
   flushed.
 - **PodDisruptionBudget.** With one replica, any voluntary eviction is an outage. `minAvailable: 1` makes an automated node drain (a node
   upgrade, a scale-down) wait for a person, who deletes the pod at a moment of their choosing, not one in the middle of a whole-node
