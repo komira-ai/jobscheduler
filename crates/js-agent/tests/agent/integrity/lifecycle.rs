@@ -95,7 +95,13 @@ fn a_taint_for_a_process_clears_when_the_process_is_gone() {
     let host = FakeHost::quiet();
     let mut h = checked("clears-when-gone", &host);
     h.start(job("r1"));
-    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/left",
+    ));
     h.fake.exit("r1", 0);
     h.life.step();
     assert!(h.life.is_tainted());
@@ -249,4 +255,81 @@ fn an_unreadable_host_at_an_idle_start_is_found_by_the_check() {
         "{events:?}"
     );
     assert!(h.life.is_tainted());
+}
+
+/// An agent that has just started over `host` and found a marker of a residue of a process in
+/// its state root: the checks took their baseline now, so the baseline holds whatever is on
+/// the host. The report of the taint is acknowledged.
+fn restarted_with_marker(name: &str, host: &FakeHost) -> Harness {
+    let mut h = Harness::new(name);
+    let taint = js_agent_wire::Taint {
+        reason: "residue".to_owned(),
+        run_id: Some("r1".to_owned()),
+        check: Some("daemonised-child".to_owned()),
+    };
+    h.config.state.write(&taint).unwrap();
+    h.restart_with(Box::new(started(host, vec![]))).unwrap();
+    assert!(h.life.is_tainted());
+    h.life.apply(&reply_json(&json!({ "taint_ack": true })));
+    h.life.step();
+    h
+}
+
+/// Steps `waits` re-check intervals of the default wait.
+fn wait_rechecks(h: &mut Harness, waits: u32) {
+    for _ in 0..waits {
+        h.clock.advance(60_000);
+        h.life.step();
+    }
+}
+
+/// Asserts, with the real checks over the in-memory host, that a restarted agent re-checks a
+/// restored residue taint without the baseline: a process of the job user, and one with
+/// parent `init` in the agent's own group, are in the restart baseline and keep the host
+/// tainted for as many waits as pass; when they are gone, two clean re-checks report the
+/// clear and the acknowledgement ends the taint. It catches a restart that lets the restart
+/// baseline hide the process the tainting job left, and a restored taint that never clears.
+#[test]
+fn a_restored_taint_clears_only_when_the_process_in_the_baseline_is_gone() {
+    for (pid, ppid, uid, cgroup) in [
+        (300, 100, JOB_UID, "0::/machine.slice/libpod-9e1.scope"),
+        (301, 1, 0, "0::/system.slice/agent.service/leftover"),
+    ] {
+        let host = FakeHost::quiet();
+        host.start_process(process(pid, ppid, uid, 900, cgroup));
+        let mut h = restarted_with_marker("restored-baseline", &host);
+        wait_rechecks(&mut h, 5);
+        assert!(h.life.is_tainted(), "{cgroup}");
+        assert_eq!(h.life.pending_taint_clear(), None, "{cgroup}");
+
+        host.end_process(pid);
+        wait_rechecks(&mut h, 1);
+        assert_eq!(
+            h.life.pending_taint_clear(),
+            None,
+            "{cgroup}: one clean check"
+        );
+        wait_rechecks(&mut h, 1);
+        assert!(h.life.pending_taint_clear().is_some(), "{cgroup}");
+        let events = h
+            .life
+            .apply(&reply_json(&json!({ "taint_cleared_ack": true })));
+        assert_eq!(names(&events), ["finding - taint-cleared"], "{cgroup}");
+        assert!(!h.life.is_tainted(), "{cgroup}");
+    }
+}
+
+/// Asserts that a restored residue taint on a host with nothing of a job on it clears after
+/// two re-checks, though the host holds the agent itself (parent `init`, in its own group)
+/// and transient processes of the host with parent `init` in a scope of the system slice and
+/// in `init.scope`, all in the restart baseline. It catches a baseline-free rule that counts
+/// the agent or the host's own processes, which would hold every restarted host tainted.
+#[test]
+fn a_restored_taint_clears_on_a_host_with_only_its_own_processes() {
+    let host = FakeHost::quiet();
+    host.start_process(process(300, 1, 0, 900, "0::/system.slice/foo.scope"));
+    host.start_process(process(301, 1, 0, 901, "0::/init.scope"));
+    let mut h = restarted_with_marker("restored-quiet", &host);
+    wait_rechecks(&mut h, 2);
+    assert!(h.life.pending_taint_clear().is_some());
 }

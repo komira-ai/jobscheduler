@@ -45,11 +45,19 @@ state the host really holds and a re-check that sees no difference does not prov
   see does not show that it now can). A taint that cannot clear, sealed beside one that can (the marker keeps the first),
   keeps the host tainted for the life of the process; after a restart the same sources seal again (a host job taken over,
   owed checks, a container that cannot be removed), so the pin is rebuilt.
-- **Not after a restart.** A taint read from the marker at start is pinned for the life of
-  the process. The re-check compares with the baseline taken at start, which already holds a
-  process the tainting job left (the pre-job baseline is not persisted), so two clean re-checks would
-  clear a taint whose process is still there. A restarted agent keeps its restored taint until an
-  operator moves the marker aside. Not measured: how often an agent restarts with a taint.
+- **After a restart.** A taint read from the marker at start clears only when it is a residue of a process
+  (`process-as-job-user` or `daemonised-child`). The re-check compares with the baseline taken at start, which already holds
+  a process the tainting job left (the pre-job baseline is not persisted), so for such a taint the re-check also applies two
+  rules that need no baseline, and a process the baseline holds is not exempt from them. A process (seen in both looks of
+  the settle wait, like the normal leftover rule) is a finding when (a) its uid is in the job users' range (the range
+  `process-as-job-user` uses) and it is not of a live slot (the host is idle at a re-check, so none is live), or (b) its
+  parent is `init` and its control group is one a job can be in (see "A process outside the groups a job can be in"). The
+  agent's own process is never a finding. The rest of the re-check is the normal full check against the baseline. Every
+  other restored taint stays pinned until an operator moves the marker aside: `unchecked` of any kind, `cleanup-failed`,
+  `check-owed`, `host-job`, `marker-unreadable`, and a mount, user, group, module or watched-directory residue. A restored
+  taint beside which a non-clearable one is sealed at start (owed records make `check-owed`, a host job taken over) is
+  pinned too: the seal pins it. The code is `TaintState::load`, `CheckHook::run_restored` and `Integrity::compare`. Not
+  measured: how often an agent restarts with a taint.
 - **Idle.** Every run is over; a run whose checks found the taint (`Blocked`) counts as over, since its container and
   scratch directory are gone and it would otherwise hold the host busy for good.
 - **The wait.** `--taint-recheck-ms`, default 60000 (a minute outlasts a service manager's fork of a unit and the
@@ -120,6 +128,19 @@ second detail would need a format change. A rollback onto a release that predate
 leaves such a taint standing, and that agent refuses starts until an operator clears it; that is
 accepted, because a halt would stop every release of the group.
 
+## A process outside the groups a job can be in
+
+`daemonised-child` once counted every process with parent `init` that the baseline did not have and that lived past the
+settle wait, except a service of the system slice, the user slice, a Podman monitor's scope and the runner's helpers. Any
+other transient process of the host with parent `init` (a `.scope` under the system slice, the root group, `init.scope`,
+another slice) that outlived the wait tainted the host. A contained job cannot place a process outside its own control
+group: the control group file system is read-only in its container, and the job runs in a user namespace without
+capabilities. So a process with parent `init` outside the agent's own group and every group that names a container is not
+a job's, and `daemonised-child` no longer judges it. The groups a job can be in are the agent's own group and below it, a
+group that names a container (an engine's group, or the actions tree), and, as before, a process with no unified path (judged
+conservatively). `process-as-job-user` is unchanged: a uid of the job users' range is a job's wherever the process is. The
+same predicate is rule (b) of the re-check of a restored taint. Code: `job_can_be_in` in `integrity/mod.rs`.
+
 ## Left out on purpose
 
 Clearing `process-as-job-user` or `daemonised-child` residue that is still there at the re-check: it stays tainted, because a
@@ -134,10 +155,11 @@ use. An older agent reading the directory sees no `taint.json` and starts clean,
 ## Tests
 
 js-agent `tests/agent/lifecycle/taint_clear.rs` (a residue taint on an idle host clears after two clean re-checks and the
-acknowledgement, and the file is kept as `taint.json.cleared-<time>`; a re-check that still finds the process keeps the
+acknowledgement, and the file is kept as `taint.json.cleared-<time>`; a restored residue taint clears the same way and a restored
+non-residue taint stays pinned; a re-check that still finds the process keeps the
 taint and the count starts again; `cleanup-failed`, `check-owed`, `host-job` and the mount, user, group, module and
 watched-directory residues never clear; a run held keeps the re-checks off), `tests/agent/integrity/lifecycle.rs` (the
-real checks over the in-memory host), js-registry `tests/taint_cleared.rs` and `tests/taint_host.rs`,
+real checks over the in-memory host, and a restored residue taint re-checked without the baseline), js-registry `tests/taint_cleared.rs` and `tests/taint_host.rs`,
 js-lease-server `tests/server/host_taints.rs` and `src/job_api/fleet_tests.rs` (the server's side, and the
 operator's clear), js-agent `tests/agent/update_hook/steps_taint_clearable.rs` (the hook does not halt for a
 clearable taint and does for any other), js-agent-wire `tests/golden.rs`, `previous_release.rs` and

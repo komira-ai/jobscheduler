@@ -18,14 +18,19 @@
 //! host is tainted, and every later check is compared with the last clean state). The
 //! re-checks of a taint that may clear itself (see [`crate::lifecycle::taint`]) are these
 //! same checks, run on an idle host with nothing live: one that passes takes the baseline
-//! again, as after any job that leaves nothing.
+//! again, as after any job that leaves nothing. The re-check of a taint read from the marker
+//! at start ([`CheckHook::run_restored`]) is the same check with one change: the baseline
+//! exempts no process, because this process took it with whatever the tainting job left. A
+//! process of the job users' range, and a process whose parent is `init` in a group a job
+//! can be in, are findings even if the baseline holds them (the agent's own process, read from
+//! `/proc/self/stat` when the agent starts, is never one).
 //!
 //! # What is checked
 //!
 //! | code | what | kind |
 //! |---|---|---|
 //! | `process-as-job-user` | a process that was not there at the baseline whose host uid is in the range the jobs' user namespaces are mapped onto (`--container-subuid`: 65536 uids, so any process of any job's user, root included), outside the containers of the agent's other jobs and not of the uid of a slot whose job is still running; one of the finished job's own slot's uid is named as that slot's leftover | residue |
-//! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs: what a child that outlived its parent looks like | residue |
+//! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs, and in a control group a job can be in (the agent's own group or below it, a group that names a container, or no unified path; see [What the host does while jobs run](#what-the-host-does-while-jobs-run)): what a child that outlived its parent looks like | residue |
 //! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers and those below the directory where the runtime mounts another held job's file system | residue |
 //! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
 //! | `kernel-module-changed` | a module in `/proc/modules` that was not there at the baseline, or one that was and is gone (an unload is a finding too: a job holds no capability to change modules, and a host where an operator unloads modules while jobs run cannot be called clean) | residue |
@@ -86,8 +91,9 @@
 //! # What is not checked
 //!
 //! - **A process of another user** that started during the job, unless its parent is
-//!   `init`: a host where operators log in and services restart while jobs run has such
-//!   processes, and the agent does not call every one of them the job's. A kernel thread
+//!   `init` and it is in a group a job can be in: a host where operators log in and services
+//!   restart while jobs run has such processes, and the agent does not call every one of
+//!   them the job's. A kernel thread
 //!   (its parent is `kthreadd`, pid 2) is not a daemonised child.
 //! - **Files outside the watched directories**, and the contents of any file. With no
 //!   `--watch-dir` that is every file but `/etc/passwd` and `/etc/group` (no cron, systemd
@@ -127,6 +133,15 @@
 //! a job's: a job cannot place a process outside its container's control group, nor make a
 //! mount on the host. They are not counted:
 //!
+//! - **A process with parent `init` outside every group a job can be in** is not a
+//!   `daemonised-child`. A contained job cannot place a process in a control group other
+//!   than its container's (the control group file system is read-only in the container, and
+//!   it runs in a user namespace without capabilities), so a transient process of the host
+//!   with parent `init` in the root group, `init.scope`, a scope of the system slice or
+//!   another slice is not a job's, whatever lives past the settle wait. The groups a job can
+//!   be in are the agent's own group and below it, a group that names a container (below), and
+//!   a process with no unified path, which is judged conservatively. `process-as-job-user` is
+//!   not narrowed this way: a uid of the job users' range is a job's wherever the process is.
 //! - **A process in a service of the system slice** (`/system.slice/<unit>.service`, as
 //!   timers start them: a disk alarm every minute, statistics, package upgrades, firmware
 //!   refreshes), **in the user slice** (`/user.slice/...`: a login's session and its
@@ -439,6 +454,9 @@ const ENGINES: [&str; 4] = ["libpod-", "docker-", "crio-", "cri-containerd-"];
 /// A path that holds such a name is never the host's, wherever it is, so a container placed
 /// under the system or the user slice still counts.
 ///
+/// A process with parent `init` that is not in a group a job can be in ([`job_can_be_in`])
+/// is not a `daemonised-child` either; that is judged separately, after this.
+///
 /// The agent's own control group (`own`, its unified path) and every group below it are
 /// not the host's: a child of the agent that outlives it is in the agent's service, and is
 /// judged like any other process. A Podman monitor's scope is the host's even there.
@@ -456,13 +474,7 @@ fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
     if monitor {
         return true;
     }
-    let agents = own.is_some_and(|own| {
-        path == own
-            || path
-                .strip_prefix(own)
-                .is_some_and(|rest| rest.starts_with('/'))
-    });
-    if agents {
+    if in_or_below(path, own) {
         return false;
     }
     if runners_helper(&units) {
@@ -478,6 +490,31 @@ fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether the unified path `path` is the agent's own control group `own` or lies below it.
+fn in_or_below(path: &str, own: Option<&str>) -> bool {
+    own.is_some_and(|own| {
+        path == own
+            || path
+                .strip_prefix(own)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// Whether a job's process can be in the control groups `cgroup` (the lines of
+/// `/proc/<pid>/cgroup`): the agent's own group (`own`) or one below it, a group that names
+/// a container ([`names_a_container`]), or a process with no unified path, which is judged
+/// conservatively. A contained job cannot place a process in any other group: the control
+/// group file system is read-only in its container and it holds no capability, so a process
+/// elsewhere (the root group, `init.scope`, a scope of the system slice, another slice) is
+/// the host's, whatever its parent.
+fn job_can_be_in(cgroup: &str, own: Option<&str>) -> bool {
+    let Some(path) = unified(cgroup) else {
+        return true;
+    };
+    let units: Vec<&str> = path.split('/').filter(|unit| !unit.is_empty()).collect();
+    in_or_below(path, own) || names_a_container(&units)
 }
 
 /// The path of the unified hierarchy (`0::`) in the control groups `cgroup` (the lines of
@@ -585,6 +622,10 @@ pub struct Integrity {
     baseline: Snapshot,
     /// The agent's own control group (its unified path), which is never the host's.
     own: Option<String>,
+    /// The agent's own process id, read from `/proc/self/stat` when the agent starts (none
+    /// when it cannot be read). The agent is never a job's leftover: a re-check of a taint
+    /// read from the marker judges processes the baseline holds, the agent's among them.
+    agent_pid: Option<u32>,
     /// How long a process the checks would call a job's leftover must go on before it is
     /// one (`--settle-ms`); zero looks once.
     settle: Duration,
@@ -612,6 +653,11 @@ impl Integrity {
         let own = unified(&own)
             .filter(|path| !path.trim_matches('/').is_empty())
             .map(|path| path.trim_end_matches('/').to_owned());
+        let agent_pid = view.file("/proc/self/stat").ok().and_then(|stat| {
+            stat.split_whitespace()
+                .next()
+                .and_then(|pid| pid.parse().ok())
+        });
         let mut this = Self {
             view,
             users,
@@ -619,6 +665,7 @@ impl Integrity {
             watch,
             baseline: Snapshot::default(),
             own,
+            agent_pid,
             settle: Duration::ZERO,
         };
         this.baseline = this.observe().map_err(|problems| {
@@ -713,10 +760,15 @@ impl Integrity {
     /// leftover of the job is looked at again after the settle wait, and only the processes
     /// of the first look that are still there are judged; the second look is the host that
     /// is compared. A process that starts during the wait is judged by the next check, and
-    /// is not in the baseline this one may take.
-    fn look(&self, job: &Finished<'_>) -> Result<(Snapshot, Vec<Problem>), Vec<Problem>> {
+    /// is not in the baseline this one may take. `restored` is the re-check of a taint read
+    /// from the marker at start (see [`Integrity::compare`]).
+    fn look(
+        &self,
+        job: &Finished<'_>,
+        restored: bool,
+    ) -> Result<(Snapshot, Vec<Problem>), Vec<Problem>> {
         let first = self.observe()?;
-        let found = self.compare(&first, job);
+        let found = self.compare(&first, job, restored);
         let leftover = found.iter().any(|problem| {
             matches!(
                 problem.code,
@@ -732,20 +784,29 @@ impl Integrity {
         later
             .processes
             .retain(|process| seen.contains(&process.key()));
-        let found = self.compare(&later, job);
+        let found = self.compare(&later, job, restored);
         Ok((later, found))
     }
 
     /// What differs between the baseline and `now`, in the order of the table of the module.
-    fn compare(&self, now: &Snapshot, job: &Finished<'_>) -> Vec<Problem> {
+    ///
+    /// With `restored` (the re-check of a taint read from the marker at start) the baseline
+    /// exempts no process: the baseline of this process was taken with whatever the tainting
+    /// job left, so every process is judged by the two rules that need no baseline, a uid of
+    /// the job users' range and a parent `init` in a group a job can be in. The agent's own
+    /// process is the exception.
+    fn compare(&self, now: &Snapshot, job: &Finished<'_>, restored: bool) -> Vec<Problem> {
         let mine = |text: &str| is_live(job, text);
-        let known: BTreeSet<(u32, u64)> =
-            self.baseline.processes.iter().map(Process::key).collect();
+        let known: BTreeSet<(u32, u64)> = match restored {
+            true => BTreeSet::new(),
+            false => self.baseline.processes.iter().map(Process::key).collect(),
+        };
         let strays: Vec<&Process> = now
             .processes
             .iter()
             .filter(|process| {
                 !known.contains(&process.key())
+                    && Some(process.pid) != self.agent_pid
                     && !mine(&process.cgroup)
                     && !hosts_own_process(&process.cgroup, self.own.as_deref())
                     && !runners_own(process, self.own.as_deref())
@@ -760,7 +821,9 @@ impl Integrity {
         let as_job = strays
             .iter()
             .filter(|stray| self.users.contains(stray.uid) && !live_uids.contains(&stray.uid));
-        let daemonised = strays.iter().filter(|stray| stray.ppid == 1);
+        let daemonised = strays
+            .iter()
+            .filter(|stray| stray.ppid == 1 && job_can_be_in(&stray.cgroup, self.own.as_deref()));
         let new_mounts = now
             .mounts
             .difference(&self.baseline.mounts)
@@ -879,7 +942,19 @@ impl CheckHook for Integrity {
     }
 
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
-        let problems = match self.look(job) {
+        self.judge(job, false)
+    }
+
+    fn run_restored(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
+        self.judge(job, true)
+    }
+}
+
+impl Integrity {
+    /// The check after `job`, as [`CheckHook::run`], or as [`CheckHook::run_restored`] when
+    /// `restored`.
+    fn judge(&mut self, job: &Finished<'_>, restored: bool) -> Result<(), CheckFinding> {
+        let problems = match self.look(job, restored) {
             Err(unrun) => unrun,
             Ok((now, found)) => {
                 if found.is_empty() {

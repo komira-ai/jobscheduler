@@ -139,10 +139,16 @@ impl Harness {
     /// lists. Its post-job checks are the scripted ones, which pass.
     pub fn restart(&mut self) -> Result<Vec<Event>, RuntimeError> {
         let scratch = self.dir.path("scratch");
+        let checks = hook(&self.log, &self.fake, &scratch, &[]);
+        self.restart_with(checks)
+    }
+
+    /// As [`Harness::restart`], with `checks` as the post-job checks of the new process.
+    pub fn restart_with(&mut self, checks: Box<dyn CheckHook>) -> Result<Vec<Event>, RuntimeError> {
         let (life, events) = Lifecycle::adopt(
             self.config.clone(),
             Box::new(self.fake.clone()),
-            hook(&self.log, &self.fake, &scratch, &[]),
+            checks,
             Box::new(self.clock.clone()),
         )?;
         self.life = life;

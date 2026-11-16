@@ -26,21 +26,33 @@ const WAIT: Duration = Duration::from_millis(300);
 fn a_process_that_is_gone_after_the_wait_is_not_a_leftover_and_one_that_stays_is() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/left",
+    ));
     host.at_settle(|host| host.end_process(300));
     assert!(after(&mut checks, "r1").is_ok());
     assert_eq!(host.settled(), [WAIT]);
 
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/left",
+    ));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(
         said(&found),
         (
             true,
             code::DAEMONISED_CHILD,
-            "daemonised-child: pid 300 (stray, state S, cgroup 0::/init.scope) was left behind by job r1 (parent init)".to_owned()
+            "daemonised-child: pid 300 (stray, state S, cgroup 0::/system.slice/agent.service/left) was left behind by job r1 (parent init)".to_owned()
         )
     );
     assert_eq!(host.settled(), [WAIT]);
@@ -70,10 +82,22 @@ fn the_wait_applies_to_a_process_of_the_job_user_too() {
 fn a_process_that_starts_during_the_wait_is_judged_by_the_next_check() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/left",
+    ));
     host.at_settle(|host| {
         host.end_process(300);
-        host.start_process(process(303, 1, 0, 903, "0::/init.scope"));
+        host.start_process(process(
+            303,
+            1,
+            0,
+            903,
+            "0::/system.slice/agent.service/left",
+        ));
     });
     assert!(after(&mut checks, "r1").is_ok());
 
@@ -83,7 +107,7 @@ fn a_process_that_starts_during_the_wait_is_judged_by_the_next_check() {
         (
             true,
             code::DAEMONISED_CHILD,
-            "daemonised-child: pid 303 (stray, state S, cgroup 0::/init.scope) was left behind by job r2 (parent init)".to_owned()
+            "daemonised-child: pid 303 (stray, state S, cgroup 0::/system.slice/agent.service/left) was left behind by job r2 (parent init)".to_owned()
         )
     );
     assert_eq!(host.settled(), [WAIT, WAIT]);
@@ -95,7 +119,13 @@ fn a_process_that_starts_during_the_wait_is_judged_by_the_next_check() {
 fn a_second_look_that_cannot_read_the_processes_is_unchecked() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/left",
+    ));
     host.at_settle(|host| host.fail(input::PROCESSES));
     let found = after(&mut checks, "r1").unwrap_err();
     assert!(matches!(found, CheckFinding::Unchecked { .. }), "{found:?}");
@@ -117,7 +147,13 @@ fn the_checks_wait_only_for_a_process_and_only_when_given_a_wait() {
 
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
-    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/left",
+    ));
     assert!(after(&mut checks, "r1").is_err());
     assert!(host.settled().is_empty());
 }
@@ -176,7 +212,13 @@ fn a_view_with_no_wait_of_its_own_still_looks_twice() {
     let mut checks = Integrity::start(Box::new(NoWait(host.clone())), JOB_USERS, vec![])
         .unwrap()
         .with_settle(WAIT);
-    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/left",
+    ));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(found.code(), code::DAEMONISED_CHILD);
     assert!(host.settled().is_empty());

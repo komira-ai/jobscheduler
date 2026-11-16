@@ -44,9 +44,9 @@ fn the_hosts_own_services_logins_and_monitors_are_not_a_jobs() {
 /// Asserts that a process whose parent is `init` still counts when its control group names
 /// a container, wherever the container's group is (Podman's and Docker's scopes, cgroupfs
 /// groups, a rootless container in the user slice, a container under a system service),
-/// when it is in a scope under a system service, in the root group, in a slice itself, or
-/// has no unified-hierarchy line. It catches an exemption by prefix alone, which would let
-/// a job's leftover process pass because its container sat under a host slice.
+/// when it is in a scope under the agent's own service, or has no unified-hierarchy line.
+/// It catches an exemption by prefix alone, which would let a job's leftover process pass
+/// because its container sat under a host slice.
 #[test]
 fn a_process_in_a_containers_group_counts_wherever_it_is() {
     for cgroup in [
@@ -58,9 +58,6 @@ fn a_process_in_a_containers_group_counts_wherever_it_is() {
         "0::/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-4f3a9c.scope",
         "0::/system.slice/agent.service/libpod-4f3a9c",
         "0::/system.slice/agent.service/run-r1.scope",
-        "0::/system.slice/run-r1.scope",
-        "0::/system.slice",
-        "0::/",
         "1:name=systemd:/system.slice/x.service",
         "",
         "0::/system.slice/libpod-conmon-4f3a9c",
@@ -191,8 +188,9 @@ fn an_agent_that_cannot_read_its_own_control_group_does_not_start() {
 
 /// Asserts that an agent whose own control group names no unified path, or the root, starts
 /// and exempts no group for being its own: a service of the system slice is the host's as
-/// it is for any agent, and a process in the root group still counts. It catches a root
-/// path taken as the agent's group, which would make every process the agent's.
+/// it is for any agent, a process in the root group is not a job's, and one with no unified
+/// path still counts. It catches a root path taken as the agent's group, which would make
+/// every process one a job can be.
 #[test]
 fn an_agent_in_the_root_group_or_on_cgroup_v1_has_no_group_of_its_own() {
     for own in ["1:name=systemd:/system.slice/agent.service\n", "0::/\n"] {
@@ -202,7 +200,74 @@ fn an_agent_in_the_root_group_or_on_cgroup_v1_has_no_group_of_its_own() {
         host.start_process(process(300, 1, 0, 900, "0::/system.slice/agent.service"));
         assert!(after(&mut checks, "r1").is_ok(), "{own:?}");
         host.start_process(process(301, 1, 0, 901, "0::/"));
-        let found = after(&mut checks, "r2").unwrap_err();
+        assert!(
+            after(&mut checks, "r2").is_ok(),
+            "{own:?}: the root group is not a job's"
+        );
+        host.start_process(process(302, 1, 0, 902, ""));
+        let found = after(&mut checks, "r3").unwrap_err();
         assert_eq!(found.code(), code::DAEMONISED_CHILD, "{own:?}");
     }
+}
+
+/// Asserts that a process whose parent is `init` is not a `daemonised-child` when its control
+/// group is one no job can be in: a scope under the system slice, the root group,
+/// `init.scope`, another slice, a service of another slice's unit. A contained job cannot
+/// place a process outside its own group, so such a process is the host's, however long it
+/// lives. Catches a host process of a timer or a login, forked by `init` and moved into a
+/// scope of its own, that taints a node.
+#[test]
+fn a_process_with_parent_init_outside_every_group_a_job_can_be_in_is_the_hosts() {
+    for cgroup in [
+        "0::/system.slice/foo.scope",
+        "0::/",
+        "0::/init.scope",
+        "0::/system.slice",
+        "0::/system.slice/run-r1.scope",
+        "0::/other.slice/job.scope",
+        "1:name=systemd:/system.slice/x.scope 0::/system.slice/x.scope",
+    ] {
+        let host = FakeHost::quiet();
+        let mut checks = started(&host, vec![]);
+        host.start_process(process(300, 1, 0, 900, cgroup));
+        assert!(after(&mut checks, "r1").is_ok(), "{cgroup}");
+    }
+}
+
+/// Asserts that the same process still counts as a `daemonised-child` where a job can be: in
+/// the agent's own group and below it, under the runner's `actions/<lease>/ctr`, in an
+/// engine's scope, and with no unified path at all. Catches a narrowing that lets a job's
+/// leftover pass.
+#[test]
+fn a_process_with_parent_init_where_a_job_can_be_still_counts() {
+    for cgroup in [
+        "0::/system.slice/agent.service",
+        "0::/system.slice/agent.service/leftover",
+        "0::/system.slice/js.service/actions/js-0123456789abcdef-r1/ctr",
+        "0::/machine.slice/libpod-4f3a9c.scope",
+        "1:name=systemd:/x",
+    ] {
+        let host = FakeHost::quiet();
+        let mut checks = started(&host, vec![]);
+        host.start_process(process(300, 1, 0, 900, cgroup));
+        let found = after(&mut checks, "r1").unwrap_err();
+        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{cgroup}");
+    }
+}
+
+/// Asserts that the narrowing is of `daemonised-child` only: a process of the job users'
+/// range with parent `init` in the root group is still a `process-as-job-user`, since a uid
+/// of that range is a job's wherever the process is. Catches a rule that exempts a process
+/// of the job user for sitting in a host group.
+#[test]
+fn a_process_of_the_job_user_outside_the_job_groups_is_still_found() {
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]);
+    host.start_process(process(300, 1, super::JOB_UID, 900, "0::/init.scope"));
+    let found = after(&mut checks, "r1").unwrap_err();
+    assert_eq!(found.code(), code::PROCESS_AS_JOB_USER);
+    assert!(
+        !found.detail().contains("daemonised-child"),
+        "the group is not a job's: {found:?}"
+    );
 }

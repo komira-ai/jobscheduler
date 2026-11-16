@@ -68,10 +68,16 @@
 //! after they were seen. So such a taint clears itself, by the rules of
 //! `docs/design/taint-self-clearing.md`:
 //!
-//! 0. Only a taint made in this process clears: one found in the marker at start was judged
-//!    against another process's baseline, and this process's baseline already holds what the
-//!    job left, so its re-checks would pass with the residue still there. It stays until an
-//!    operator moves the marker aside.
+//! 0. A taint found in the marker at start clears only when it is a residue of a process
+//!    (`process-as-job-user`, `daemonised-child`). It was judged against another process's
+//!    baseline, and this process's baseline already holds what the job left, so its
+//!    re-checks also apply two rules that need no baseline: a process whose uid is in the job
+//!    users' range, and one whose parent is `init` in a control group a job can be in, are
+//!    findings even when the baseline holds them (the agent's own process aside). Every other
+//!    restored taint (`unchecked` of any kind, `cleanup-failed`, `check-owed`, `host-job`,
+//!    `marker-unreadable`, a mount, user, group, module or watched-directory change) stays
+//!    until an operator moves the marker aside, as does a restored taint beside which a
+//!    non-clearable one was sealed at start (owed records, a host job taken over).
 //! 1. Only a taint [`clearable`] says so: reason [`reason::RESIDUE`] with the check
 //!    `process-as-job-user` or `daemonised-child`, or reason [`reason::UNCHECKED`] with a
 //!    check that could not read its input (`*-unreadable`, `watch-over-bound`). Never
@@ -355,6 +361,16 @@ pub fn clearable(taint: &Taint) -> bool {
     }
 }
 
+/// Whether a taint read from the marker at start may be re-checked: a residue of a process
+/// (`process-as-job-user`, `daemonised-child`), which a re-check judges without the baseline
+/// (see [`CheckHook::run_restored`](super::CheckHook::run_restored)). Every other restored
+/// taint stays pinned: a re-check of the restart baseline cannot speak for it.
+fn restorable(taint: &Taint) -> bool {
+    let code = taint.check.as_deref().unwrap_or_default();
+    taint.reason == reason::RESIDUE
+        && [check::PROCESS_AS_JOB_USER, check::DAEMONISED_CHILD].contains(&code)
+}
+
 /// The wait between re-checks `--taint-recheck-ms` gave, or [`DEFAULT_TAINT_RECHECK`].
 ///
 /// # Errors
@@ -379,10 +395,12 @@ pub(super) struct TaintState {
     persisted: bool,
     acked: bool,
     /// A taint the agent never clears: one sealed beside the first, or one read from the
-    /// marker at start (the baseline of this process was taken with whatever the job left
-    /// on the host, so a re-check cannot tell it from the host's own). The host stays
+    /// marker at start that [`restorable`] does not allow to be re-checked. The host stays
     /// tainted whatever the re-checks say.
     pinned: bool,
+    /// The taint was read from the marker at start and may be re-checked (see [`restorable`]):
+    /// its re-checks also judge what the restart baseline cannot clear.
+    restored: bool,
     /// The clean re-checks in a row.
     clean: u32,
     /// When the next re-check is due, on the lifecycle's clock; none until the taint is
@@ -394,13 +412,16 @@ pub(super) struct TaintState {
 
 impl TaintState {
     /// The state on record in `root`: tainted when a marker is there. A taint read from the
-    /// marker is pinned: the baseline this process took already holds what the job left, so
-    /// a re-check passes with a residue process still present.
+    /// marker is pinned, unless it is a residue of a process ([`restorable`]): that one is
+    /// re-checked, with the re-check that needs no baseline, because the baseline this
+    /// process took already holds what the job left.
     pub(super) fn load(root: StateRoot) -> Self {
         let taint = root.read();
+        let restored = taint.as_ref().is_some_and(restorable);
         Self {
             persisted: taint.is_some(),
-            pinned: taint.is_some(),
+            pinned: taint.is_some() && !restored,
+            restored,
             taint,
             root,
             acked: false,
@@ -441,6 +462,12 @@ impl TaintState {
         clearable && self.persisted && !self.pinned && !self.clearing
     }
 
+    /// Whether the taint was read from the marker at start and is re-checked with the
+    /// baseline-free rules.
+    pub(super) fn restored(&self) -> bool {
+        self.restored
+    }
+
     /// The host is not idle, or a re-check found something: the count starts again.
     pub(super) fn restart_rechecks(&mut self) {
         self.clean = 0;
@@ -476,6 +503,7 @@ impl TaintState {
         self.persisted = false;
         self.acked = false;
         self.pinned = false;
+        self.restored = false;
         self.clearing = false;
         self.restart_rechecks();
         Ok(())

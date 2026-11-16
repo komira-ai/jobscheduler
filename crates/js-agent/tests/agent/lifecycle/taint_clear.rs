@@ -2,7 +2,7 @@
 //! idle host, the clear reported to the server, and what never clears. The runtime, the
 //! checks and the clock are the in-memory ones; the marker is a real file in the state root.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs;
 use std::rc::Rc;
@@ -523,19 +523,193 @@ fn a_restart_before_the_acknowledgement_starts_over() {
     assert_eq!(cleared_copies(&h), Vec::<String>::new());
 }
 
-/// Asserts that a taint restored from the marker never clears, even with the process still
-/// present at every re-check: the restarted agent's baseline holds that process, so its
-/// re-checks pass; no re-check runs, the host stays tainted and nothing is reported cleared.
-/// It catches a restart that lets two clean re-checks clear a taint whose residue is still
-/// there.
+/// The marker of a taint of `why` with the check `what`, written into `h`'s state root as
+/// an agent that stopped with it would have left it.
+fn leave_marker(h: &Harness, why: &str, what: Option<&str>) {
+    let taint = Taint {
+        reason: why.to_owned(),
+        run_id: Some("r1".to_owned()),
+        check: what.map(str::to_owned),
+    };
+    h.config.state.write(&taint).unwrap();
+}
+
+/// A check that passes `run` (the re-check against the baseline) and answers
+/// `run_restored` (the re-check of a taint read from the marker) from `present`: the process
+/// is there while it is set. It fails `r1`'s job with a residue, and notes which of the two
+/// re-checks ran.
+struct Restored {
+    present: Rc<Cell<bool>>,
+    calls: Rc<RefCell<Vec<&'static str>>>,
+}
+
+impl CheckHook for Restored {
+    fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
+        if job.run_id == "r1" {
+            return Err(residue());
+        }
+        self.calls.borrow_mut().push("run");
+        Ok(())
+    }
+
+    fn run_restored(&mut self, _job: &Finished<'_>) -> Result<(), CheckFinding> {
+        self.calls.borrow_mut().push("restored");
+        match self.present.get() {
+            true => Err(residue()),
+            false => Ok(()),
+        }
+    }
+}
+
+/// Asserts that a residue of a process read from the marker at start clears like a fresh one:
+/// the taint is reported again after the restart, two clean re-checks a wait apart report
+/// the clear, and the server's acknowledgement ends the taint, keeps the marker as
+/// `taint.json.cleared-<time>` and lets the next start run. It holds for both checks of a
+/// process. Catches a restart that leaves the host tainted until an operator moves the
+/// marker, which took every build node out of service for a process that was long gone.
 #[test]
-fn a_restored_taint_never_clears_with_its_process_still_present() {
-    let mut h = tainted_by("restored", residue());
+fn a_restored_residue_taint_clears_after_two_clean_rechecks() {
+    for what in [check::DAEMONISED_CHILD, check::PROCESS_AS_JOB_USER] {
+        let mut h = tainted_by("restored-clears", CheckFinding::residue(what, "pid 41"));
+        ack(&mut h);
+        h.restart().unwrap();
+        assert!(h.life.is_tainted());
+        assert_eq!(h.life.pending_taint().unwrap().reason, reason::RESIDUE);
+        ack(&mut h);
+        h.life.step();
+        tick(&mut h, EVERY - 1);
+        assert_eq!(rechecks(&h), 0, "{what}: no re-check before the wait");
+        tick(&mut h, 1);
+        assert_eq!(
+            h.life.pending_taint_clear(),
+            None,
+            "{what}: one clean check"
+        );
+        tick(&mut h, EVERY);
+        assert_eq!(rechecks(&h), 2, "{what}");
+        assert!(h.life.pending_taint_clear().is_some(), "{what}");
+        assert_eq!(names(&ack_clear(&mut h)), ["finding - taint-cleared"]);
+        assert!(!h.life.is_tainted(), "{what}");
+        assert_eq!(cleared_copies(&h).len(), 1, "{what}");
+        assert!(!h.marker().exists(), "{what}");
+        assert_eq!(names(&h.start(job("r2"))), ["started r2"], "{what}");
+    }
+}
+
+/// Asserts that the re-check of a restored taint is the one that needs no baseline, and that
+/// it keeps the host tainted for as long as it finds the process: five waits pass with the
+/// process there and nothing clears, each of them ran `run_restored`; when the process is
+/// gone two re-checks clear the taint. Catches a restored taint that is re-checked against
+/// the restart baseline alone, which holds the process and passes.
+#[test]
+fn a_restored_recheck_that_still_finds_the_process_keeps_the_taint() {
+    let present = Rc::new(Cell::new(true));
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut h = tainted_by("restored-present", residue());
     ack(&mut h);
+    h.restart_with(Box::new(Restored {
+        present: present.clone(),
+        calls: calls.clone(),
+    }))
+    .unwrap();
+    ack(&mut h);
+    h.life.step();
+    for _ in 0..5 {
+        tick(&mut h, EVERY);
+        assert_eq!(h.life.pending_taint_clear(), None);
+        assert!(h.life.is_tainted());
+    }
+    assert_eq!(*calls.borrow(), ["restored"; 5]);
+
+    present.set(false);
+    tick(&mut h, EVERY);
+    assert_eq!(h.life.pending_taint_clear(), None, "one clean check");
+    tick(&mut h, EVERY);
+    assert!(h.life.pending_taint_clear().is_some());
+    assert_eq!(names(&ack_clear(&mut h)), ["finding - taint-cleared"]);
+}
+
+/// Asserts that a taint made in this process is re-checked with `run`, the check against the
+/// baseline, and never with the restored one: the baseline was taken before the job, so the
+/// baseline-free rules would add findings it does not need. Catches a lifecycle that gives
+/// every taint the restored re-check.
+#[test]
+fn a_taint_made_in_this_process_is_rechecked_against_the_baseline() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut h = Harness::with(
+        "fresh-baseline",
+        Options {
+            hook: Some(Box::new(Restored {
+                present: Rc::new(Cell::new(true)),
+                calls: calls.clone(),
+            })),
+            ..Options::default()
+        },
+    );
+    h.start(job("r1"));
+    h.fake.exit("r1", 0);
+    h.life.step();
+    ack(&mut h);
+    h.life.step();
+    tick(&mut h, EVERY);
+    tick(&mut h, EVERY);
+    assert_eq!(*calls.borrow(), ["run", "run"]);
+    assert!(h.life.pending_taint_clear().is_some());
+}
+
+/// Asserts that a restored taint that is not a residue of a process stays until an operator
+/// moves the marker aside, with the host idle for any number of waits: an input that could
+/// not be read, `host-not-visible`, a failed removal, a check owed, a host job, an unreadable
+/// marker, and a mount, user, group, module or watched-directory residue. Catches a restart
+/// that lets a re-check of the restart baseline clear a taint it cannot speak for.
+#[test]
+fn a_restored_taint_that_is_not_a_process_residue_stays_pinned() {
+    for (why, what) in [
+        (reason::UNCHECKED, Some(check::PROCESSES_UNREADABLE)),
+        (reason::UNCHECKED, Some(check::MOUNTS_UNREADABLE)),
+        (reason::UNCHECKED, Some(code::HOST_NOT_VISIBLE)),
+        (reason::CLEANUP_FAILED, Some(code::CONTAINER_REMOVE_FAILED)),
+        (reason::CHECK_OWED, None),
+        (reason::HOST_JOB, None),
+        (reason::RESIDUE, Some(check::NEW_MOUNT)),
+        (reason::RESIDUE, Some(check::USER_CHANGED)),
+        (reason::RESIDUE, Some(check::GROUP_CHANGED)),
+        (reason::RESIDUE, Some(check::MODULE_CHANGED)),
+        (reason::RESIDUE, Some(check::WATCH_DIR_CHANGED)),
+    ] {
+        let mut h = Harness::new("restored-pinned");
+        leave_marker(&h, why, what);
+        h.restart().unwrap();
+        assert!(h.life.is_tainted(), "{why} {what:?}");
+        ack(&mut h);
+        stays_tainted(&mut h, 4);
+    }
+
+    let mut h = Harness::new("restored-unreadable");
+    fs::write(h.marker(), "not json").unwrap();
     h.restart().unwrap();
-    assert!(h.life.is_tainted());
-    stays_tainted(&mut h, 5);
-    assert_eq!(cleared_copies(&h), Vec::<String>::new());
+    assert_eq!(
+        h.life.pending_taint().unwrap().reason,
+        reason::MARKER_UNREADABLE
+    );
+    ack(&mut h);
+    stays_tainted(&mut h, 4);
+}
+
+/// Asserts that a restored residue taint beside the records of owed checks stays pinned: the
+/// agent that stopped left the marker and the record of a run whose checks never ran, the new
+/// process taints the host `check-owed` beside it (the marker keeps the first), and no
+/// number of clean re-checks clears it. Catches a restored taint that clears while the host
+/// also holds a taint no re-check can speak for.
+#[test]
+fn a_restored_residue_taint_with_owed_records_stays_pinned() {
+    let mut h = Harness::new("restored-owed");
+    leave_marker(&h, reason::RESIDUE, Some(check::DAEMONISED_CHILD));
+    h.config.state.owe("r9").unwrap();
+    h.restart().unwrap();
+    assert_eq!(h.life.pending_taint().unwrap().reason, reason::RESIDUE);
+    ack(&mut h);
+    stays_tainted(&mut h, 4);
 }
 
 /// Asserts that a clear that cannot be finished leaves the host tainted and says so: the
