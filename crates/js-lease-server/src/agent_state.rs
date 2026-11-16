@@ -455,18 +455,17 @@ impl BindingStore {
     /// nothing was written, and the heartbeat is answered with an error so that the agent
     /// reports again.
     pub(crate) fn commit_taint(&self, change: &Change, expected: Option<&Taint>) -> io::Result<()> {
-        let Keeper::Store(store) = &self.keeper else {
+        let (Keeper::Store(store), Some((name, Some(value)))) =
+            (&self.keeper, change.writes.first())
+        else {
             return Ok(());
         };
-        if change.writes.is_empty() {
-            return Ok(());
-        }
-        let name = key(&change.host);
+        let name = name.as_str();
         let row = store
-            .get(&name)
+            .get(name)
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other(format!("{name} is not in the store")))?;
-        let stored: Stored = host_keys::decode(&name, &row.value).map_err(io::Error::other)?;
+        let stored: Stored = host_keys::decode(name, &row.value).map_err(io::Error::other)?;
         let (_, binding, _) = stored
             .into_binding(change.host.to_string())
             .map_err(io::Error::other)?;
@@ -475,20 +474,7 @@ impl BindingStore {
                 "{name} holds another taint than this server's: another server changed it"
             )));
         }
-        let txn = change
-            .writes
-            .iter()
-            .fold(Txn::new(), |txn, (written, value)| {
-                let cond = if *written == name {
-                    Cond::Version(row.version)
-                } else {
-                    Cond::Any
-                };
-                match value {
-                    Some(value) => txn.put(written.clone(), value.clone(), cond),
-                    None => txn.delete(written.clone(), cond),
-                }
-            });
+        let txn = Txn::new().put(name, value.clone(), Cond::Version(row.version));
         host_keys::committed(store.txn(txn))
     }
 

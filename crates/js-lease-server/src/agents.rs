@@ -561,18 +561,17 @@ impl Agents {
     /// holds ([`BindingStore::commit_taint`]): a taint another server reported or cleared is
     /// refused, not overwritten. The caller holds [`Agents::host_writes`].
     async fn keep_taint(self: &Arc<Self>, host: &HostId, taint: Option<Taint>) -> io::Result<()> {
-        let Some(held) = self.registry.bindings().remove(host) else {
-            return Ok(());
-        };
-        let expected = held.taint().cloned();
-        let change = self.store.change(host, held.with_taint(taint));
+        let held = self.registry.bindings().remove(host);
+        let expected = held.as_ref().and_then(|bound| bound.taint().cloned());
+        let change = held.map(|bound| self.store.change(host, bound.with_taint(taint)));
         let this = Arc::clone(self);
         let change = blocking(move || {
-            this.store.commit_taint(&change, expected.as_ref())?;
+            let commit = |change| this.store.commit_taint(change, expected.as_ref());
+            change.as_ref().map_or(Ok(()), commit)?;
             Ok::<_, io::Error>(change)
         })
         .await?;
-        self.store.applied(&change);
+        change.iter().for_each(|change| self.store.applied(change));
         Ok(())
     }
 
