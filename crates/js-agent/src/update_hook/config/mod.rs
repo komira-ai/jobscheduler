@@ -49,7 +49,7 @@ pub use params::{
 };
 pub use reason::{Reason, Report};
 pub use record::{Held, Invalid, Record, SCHEMA, StateError};
-pub use steps::{Env, LeaseOf, cleanup, cutover, prepare, rollback, verify};
+pub use steps::{CUTOVER_RETRY_SECS, Env, LeaseOf, cleanup, cutover, prepare, rollback, verify};
 
 /// How a step ended and what it tells the updater.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -2,10 +2,18 @@
 //! notes the session the lease server shows, restarts the unit (stop, wait for it to be down,
 //! start, wait for it to be active) and does not restart twice.
 
-use js_agent::update_hook::config::{Reason, cutover};
+use js_agent::update_hook::config::{CUTOVER_RETRY_SECS, Reason, cutover, prepare, verify};
 use js_agent::update_hook::{Class, Outcome};
 
 use super::rig::{Rig, Say};
+
+/// A rig whose lease server answers that it does not know the host (no session to note), unless
+/// the test says otherwise: a cutover that is not about the server restarts the unit.
+fn fresh(name: &str) -> Rig {
+    let rig = Rig::new(name);
+    rig.lease.say(&[Say::Unknown]);
+    rig
+}
 
 /// Asserts the whole of a restart: the session the server shows is recorded before the stop,
 /// the unit is stopped and started in that order, and the record says it was restarted.
@@ -15,7 +23,7 @@ use super::rig::{Rig, Say};
 /// the stop.
 #[test]
 fn cutover_notes_the_session_then_stops_and_starts_the_unit() {
-    let rig = Rig::new("config-cutover-restart");
+    let rig = fresh("config-cutover-restart");
     rig.lease.say(&[Say::Host("live", Some(1000))]);
     let done = rig.run(cutover);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
@@ -35,7 +43,7 @@ fn cutover_notes_the_session_then_stops_and_starts_the_unit() {
 /// an agent until a person looks.
 #[test]
 fn a_flags_file_the_agent_cannot_use_ends_cutover_before_anything_is_restarted() {
-    let rig = Rig::new("config-cutover-bad-flags");
+    let rig = fresh("config-cutover-bad-flags");
     *rig.flags.borrow_mut() = Some("flags_file: --pool is required".to_owned());
     let done = rig.run(cutover);
     assert_eq!(done.outcome, Outcome::Failure);
@@ -51,20 +59,15 @@ fn a_flags_file_the_agent_cannot_use_ends_cutover_before_anything_is_restarted()
     assert_eq!(rig.lease.looks.get(), 0);
 }
 
-/// Asserts that a server that cannot be asked, a host it does not know, a refusal and a host
-/// with no session each record no session, and the unit is restarted all the same.
+/// Asserts that a host the server does not know and a host it shows in no session each record
+/// no session, and the unit is restarted all the same.
 ///
-/// Catches a restart held up by a server that is down: the agent's new flags may be what
-/// brings the host back to it.
+/// Catches a restart held up by a host that has not said hello yet: the agent's new flags may
+/// be what registers it.
 #[test]
-fn a_server_that_cannot_say_which_session_the_host_is_in_does_not_hold_the_restart() {
-    for say in [
-        Say::Down("cannot talk to the server"),
-        Say::Unknown,
-        Say::Refused("host-credential-required"),
-        Say::Host("awaiting", None),
-    ] {
-        let rig = Rig::new("config-cutover-no-session");
+fn a_host_the_server_shows_in_no_session_does_not_hold_the_restart() {
+    for say in [Say::Unknown, Say::Host("awaiting", None)] {
+        let rig = fresh("config-cutover-no-session");
         rig.lease.say(&[say]);
         let done = rig.run(cutover);
         assert_eq!(done.outcome, Outcome::Success, "{say:?}: {done:?}");
@@ -75,13 +78,83 @@ fn a_server_that_cannot_say_which_session_the_host_is_in_does_not_hold_the_resta
     }
 }
 
+/// Asserts that a server that cannot be reached, or refuses the question, defers cutover
+/// (exit 75, class environment, `lease_unreachable`, retried after `CUTOVER_RETRY_SECS`) with
+/// nothing restarted and no session noted, and that the cutover tried again once the server
+/// answers reads the session then and restarts.
+///
+/// Catches a restart made without the session the server showed before it: verify would then
+/// take the old agent's session, still live on the server, for the new agent's hello.
+#[test]
+fn a_server_that_cannot_be_asked_defers_the_cutover_before_anything_is_restarted() {
+    for say in [
+        Say::Down("cannot talk to the server"),
+        Say::Refused("host-credential-required"),
+    ] {
+        let rig = fresh("config-cutover-lease-down");
+        rig.lease.say(&[say]);
+        let done = rig.run(cutover);
+        assert_eq!(done.outcome, Outcome::Deferred, "{say:?}: {done:?}");
+        assert_eq!(done.report.class, Class::Environment, "{say:?}");
+        assert_eq!(
+            done.report.reason,
+            Some(Reason::LeaseUnreachable),
+            "{say:?}"
+        );
+        assert_eq!(
+            done.report.retry_after_secs,
+            Some(CUTOVER_RETRY_SECS),
+            "{say:?}"
+        );
+        assert!(rig.calls().is_empty(), "{say:?}");
+        assert!(rig.record().is_none(), "{say:?}");
+        rig.lease.say(&[Say::Host("live", Some(1000))]);
+        let again = rig.run(cutover);
+        assert_eq!(again.outcome, Outcome::Success, "{say:?}: {again:?}");
+        assert_eq!(rig.calls(), ["stop", "start"], "{say:?}");
+        assert_eq!(
+            rig.record().unwrap().session_started_ms,
+            Some(1000),
+            "{say:?}"
+        );
+    }
+}
+
+/// Asserts that `prepare` begins an update afresh: after a whole update whose `cleanup` never
+/// ran, the next update's `prepare` deletes the record, and its `cutover` restarts the unit
+/// again and its `verify` waits for another hello.
+///
+/// Catches a record left by an earlier update that makes the next `cutover` and `verify`
+/// succeed without restarting the agent, so the new flags would never be read.
+#[test]
+fn prepare_clears_a_record_an_earlier_update_left_and_the_next_cutover_restarts_again() {
+    let rig = fresh("config-cutover-next-update");
+    rig.lease.say(&[Say::Host("live", Some(1000))]);
+    assert_eq!(rig.run(prepare).outcome, Outcome::Success);
+    assert_eq!(rig.run(cutover).outcome, Outcome::Success);
+    rig.lease.say(&[Say::Host("live", Some(2000))]);
+    assert_eq!(rig.run(verify).outcome, Outcome::Success);
+    assert!(rig.record().unwrap().verified);
+    rig.units.log.borrow_mut().clear();
+    let done = rig.run(prepare);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(rig.record().is_none());
+    assert_eq!(rig.run(cutover).outcome, Outcome::Success);
+    assert_eq!(rig.calls(), ["stop", "start"]);
+    let record = rig.record().unwrap();
+    assert_eq!(
+        (record.session_started_ms, record.restarted, record.verified),
+        (Some(2000), true, false)
+    );
+}
+
 /// Asserts that a run after the restart was recorded restarts nothing and reads nothing.
 ///
 /// Catches a retried cutover that restarts the agent a second time, or one that re-reads the
 /// session of the agent it restarted.
 #[test]
 fn a_cutover_run_again_after_the_restart_does_not_restart_again() {
-    let rig = Rig::new("config-cutover-rerun");
+    let rig = fresh("config-cutover-rerun");
     rig.lease.say(&[Say::Host("live", Some(1000))]);
     assert_eq!(rig.run(cutover).outcome, Outcome::Success);
     let before = (rig.units.log.borrow().len(), rig.lease.looks.get());
@@ -105,7 +178,7 @@ fn a_cutover_run_again_after_the_restart_does_not_restart_again() {
 /// already down.
 #[test]
 fn a_cutover_that_stopped_halfway_keeps_its_session_and_finishes_the_restart() {
-    let rig = Rig::new("config-cutover-resume");
+    let rig = fresh("config-cutover-resume");
     rig.lease.say(&[Say::Host("live", Some(1000))]);
     rig.units.fail.borrow_mut().push("start");
     let first = rig.run(cutover);
@@ -134,7 +207,7 @@ fn a_cutover_that_stopped_halfway_keeps_its_session_and_finishes_the_restart() {
 /// Catches a wait that never ends, one that ends early, and a unit stopped twice.
 #[test]
 fn the_stop_is_waited_for_within_its_bound() {
-    let rig = Rig::new("config-cutover-slow-stop");
+    let rig = fresh("config-cutover-slow-stop");
     rig.units.on_stop.replace(
         vec![("deactivating", "stop-sigterm"); 3]
             .into_iter()
@@ -144,7 +217,7 @@ fn the_stop_is_waited_for_within_its_bound() {
     assert_eq!(rig.run(cutover).outcome, Outcome::Success);
     assert_eq!(rig.clock.pauses.get(), 3);
 
-    let rig = Rig::new("config-cutover-stuck-stop");
+    let rig = fresh("config-cutover-stuck-stop");
     rig.units
         .on_stop
         .replace(vec![("deactivating", "stop-sigterm")]);
@@ -158,7 +231,7 @@ fn the_stop_is_waited_for_within_its_bound() {
     assert_eq!(rig.clock.pauses.get(), 42);
     assert_eq!(rig.calls(), ["stop"]);
 
-    let rig = Rig::new("config-cutover-no-stop");
+    let rig = fresh("config-cutover-no-stop");
     rig.units.fail.borrow_mut().push("stop");
     let done = rig.run(cutover);
     assert_eq!(done.report.reason, Some(Reason::StopFailed));
@@ -167,7 +240,7 @@ fn the_stop_is_waited_for_within_its_bound() {
         Some("cannot stop js-agent.service: stop failed")
     );
 
-    let rig = Rig::new("config-cutover-no-show");
+    let rig = fresh("config-cutover-no-show");
     rig.units.fail.borrow_mut().push("show");
     let done = rig.run(cutover);
     assert_eq!(done.report.reason, Some(Reason::StopFailed));
@@ -177,12 +250,12 @@ fn the_stop_is_waited_for_within_its_bound() {
         Some("cannot read the state of js-agent.service: show failed")
     );
 
-    let rig = Rig::new("config-cutover-already-down");
+    let rig = fresh("config-cutover-already-down");
     rig.units.is("inactive", "dead");
     assert_eq!(rig.run(cutover).outcome, Outcome::Success);
     assert_eq!(rig.calls(), ["start"]);
 
-    let rig = Rig::new("config-cutover-already-stopping");
+    let rig = fresh("config-cutover-already-stopping");
     rig.units.is("deactivating", "stop-sigterm");
     rig.units
         .follow(&[("deactivating", "stop-sigterm"), ("inactive", "dead")]);
@@ -226,7 +299,7 @@ fn a_unit_that_does_not_come_up_is_start_failed_and_a_crash_is_the_configs_fault
         ),
     ];
     for (what, script, class, detail) in cases {
-        let rig = Rig::new("config-cutover-start");
+        let rig = fresh("config-cutover-start");
         rig.units.on_start.replace(script);
         let done = rig.run(cutover);
         assert_eq!(done.outcome, Outcome::Failure, "{what}");
@@ -236,7 +309,7 @@ fn a_unit_that_does_not_come_up_is_start_failed_and_a_crash_is_the_configs_fault
         assert!(done.report.reversible, "{what}");
         assert!(rig.record().unwrap().restart_begun, "{what}");
     }
-    let rig = Rig::new("config-cutover-start-refused");
+    let rig = fresh("config-cutover-start-refused");
     rig.units.fail.borrow_mut().push("start");
     let done = rig.run(cutover);
     assert_eq!(done.report.reason, Some(Reason::StartFailed));

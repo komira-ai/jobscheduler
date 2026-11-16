@@ -146,9 +146,26 @@ pub fn resolve_host_id(
     euid: u32,
     read: &dyn Fn(&Path) -> io::Result<FileFacts>,
 ) -> Result<Option<String>, FactsError> {
-    match &cli.host.host_id_from_facts {
+    host_id_of(
+        cli.host.host_id.as_deref(),
+        cli.host.host_id_from_facts.as_deref(),
+        euid,
+        read,
+    )
+}
+
+/// The host id of a `--host-id` and a `--host-id-from-facts` (at most one is given): the id
+/// given, the facts file's `host_id`, or none. The agent's flags and the cordon verb's both
+/// resolve through it.
+pub(crate) fn host_id_of(
+    host_id: Option<&str>,
+    from_facts: Option<&Path>,
+    euid: u32,
+    read: &dyn Fn(&Path) -> io::Result<FileFacts>,
+) -> Result<Option<String>, FactsError> {
+    match from_facts {
         Some(path) => read_facts(path, euid, read).map(Some),
-        None => Ok(cli.host.host_id.clone()),
+        None => Ok(host_id.map(str::to_owned)),
     }
 }
 

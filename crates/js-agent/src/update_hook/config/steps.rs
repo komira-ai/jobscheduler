@@ -82,6 +82,10 @@ fn state_failure(error: StateError) -> Done {
     failure(error.reason(), error.to_string())
 }
 
+/// How long hostkeeper waits before it tries a `cutover` again that could not ask the lease
+/// server which session the host is in.
+pub const CUTOVER_RETRY_SECS: u64 = 60;
+
 /// The lease server did not answer as asked: not the config's fault.
 fn lease_failure(error: LeaseError) -> Done {
     environment(Reason::LeaseUnreachable, error.to_string())
@@ -125,17 +129,29 @@ fn is_new_session(host: &HostReading, before: Option<u64>) -> bool {
 }
 
 /// `prepare`: the params were read and are sound, which is all there is to check. It takes the
-/// lock, so that a step still running refuses it, and changes nothing.
+/// lock, so that a step still running refuses it. It begins a new update, so a record it finds
+/// is of an earlier one whose `cleanup` never ran, and is deleted: left, its marks would make
+/// this update's `cutover` and `verify` succeed without restarting anything.
 #[must_use]
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
-    open_state(env, params).map_or_else(|done| done, |_| success())
+    prepare_run(env, params).unwrap_or_else(|done| done)
+}
+
+fn prepare_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
+    let (held, _) = open_state(env, params)?;
+    held.delete().map_err(state_failure)?;
+    Ok(success())
 }
 
 /// `cutover`: checks the flags file now in place, notes the host's session, restarts the unit.
 ///
 /// A flags file the agent could not use ends the step `bad_config`, reversible, before anything
 /// is restarted: hostkeeper then puts the previous files back. The session the server shows is
-/// recorded before the stop, once; a rerun after the restart does nothing.
+/// recorded before the stop, once; a rerun after the restart does nothing. A server that does not
+/// know the host, or shows it in no session, is recorded as no session. A server that cannot be
+/// reached or refuses the question defers the step (`lease_unreachable`, retried after
+/// [`CUTOVER_RETRY_SECS`]) before anything is restarted: without the session, `verify` could
+/// take the old agent's for the new one's.
 #[must_use]
 pub fn cutover(env: &Env<'_>, params: &Params) -> Done {
     cutover_run(env, params).unwrap_or_else(|done| done)
@@ -149,8 +165,17 @@ fn cutover_run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     }
     let lease = (env.lease)(params).map_err(|why| failure(Reason::BadConfig, why))?;
     if !record.session_read {
+        record.session_started_ms = match lease.host() {
+            Ok(host) => host.session_started_ms,
+            Err(LeaseError::UnknownHost) => None,
+            Err(why) => {
+                let mut done = lease_failure(why);
+                done.outcome = Outcome::Deferred;
+                done.report.retry_after_secs = Some(CUTOVER_RETRY_SECS);
+                return Err(done);
+            }
+        };
         record.session_read = true;
-        record.session_started_ms = session_of(lease.as_ref());
     }
     record.restart_begun = true;
     save(&held, &record)?;

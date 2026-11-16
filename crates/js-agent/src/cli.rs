@@ -11,6 +11,7 @@ use crate::identity::IdentityFlags;
 mod flag_sets;
 mod host_id;
 
+pub(crate) use host_id::host_id_of;
 pub use host_id::{FactsError, HostIdFlags, resolve_host_id};
 
 /// What `--version` prints after the version: the runtimes this build can run jobs with, on a

@@ -179,11 +179,14 @@ and hostkeeper runs `/usr/bin/js-agent config-hook <step> [<dir>] --params <file
 exit statuses, last line and lock as the update hook above. The installer has put the new files in
 place before `cutover`, and the previous version's back before `rollback`.
 
-- `prepare` reads and checks the params and changes nothing.
+- `prepare` reads and checks the params, and deletes the record an earlier update left when its
+  `cleanup` did not run, so the update it begins restarts the agent again.
 - `cutover` checks that the flags file now in place parses as the agent's flags and names a host
   id (a facts file read included). If it does not, the step ends `bad_config` (reversible) with
   nothing restarted, and hostkeeper rolls the files back. Otherwise it notes the session the lease
-  server shows for the host, then stops the unit, waits for it to be down, starts it and waits
+  server shows for the host (none when the server does not know the host or shows it in no
+  session); a server that cannot be reached or refuses the question defers the step
+  (`lease_unreachable`, retried after 60 s) before anything is restarted. Then it stops the unit, waits for it to be down, starts it and waits
   for it to be active. The restart is not preceded by a cordon or a drain: running jobs are
   stopped as they are on any stop of the agent. A run after the restart was recorded does not
   restart again.

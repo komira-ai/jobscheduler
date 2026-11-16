@@ -11,7 +11,7 @@ use js_agent::own_host::{HttpLease, Lease as _, RequestLimit};
 use js_agent::update_hook::config::{Done, Params, Reason, Record, run_on, run_step};
 use js_agent::update_hook::{Class, LaunchUnits, Machine, Outcome, Step, Units};
 
-use super::super::lease_stub::closed;
+use super::super::lease_stub::{Reply, Stub};
 use super::super::step_rig::as_root;
 use super::super::unit_conformance::{Launchctl, Service, plist_of};
 use super::rig::{Ticks, UNIT, UnitScript, text};
@@ -213,10 +213,16 @@ fn on_the_machine_prepare_runs_without_touching_the_unit_or_the_server() {
 #[test]
 fn on_launchd_cutover_boots_the_service_out_and_bootstraps_it_again() {
     let label = "com.example.agent";
+    // A server that has not heard the host yet: there is no session to note.
+    let stub = Stub::start(&[Reply::Answer(409, r#"{"error":"unknown-host"}"#)]);
     let tree = Tree::new("config-machine-launchd", label);
-    let (_socket, url) = closed();
-    tree.flags(&[&format!("--server={url}"), "--pool=farm", "--host-id=mac-1"]);
+    tree.flags(&[
+        &format!("--server={}", stub.url),
+        "--pool=farm",
+        "--host-id=mac-1",
+    ]);
     fs::write(&tree.params.token_file, "tok-0123456789\n").unwrap();
+    fs::set_permissions(&tree.params.token_file, fs::Permissions::from_mode(0o600)).unwrap();
     let tool = Launchctl::default();
     tool.plists.borrow_mut().insert(label.to_owned());
     tool.load(label, Service::running());
@@ -236,6 +242,9 @@ fn on_launchd_cutover_boots_the_service_out_and_bootstraps_it_again() {
             )),
         "{calls:?}"
     );
-    assert!(tree.record().unwrap().restarted);
+    let record = tree.record().unwrap();
+    assert!(record.restarted);
+    assert_eq!(record.session_started_ms, None);
     assert_eq!(tool.loaded.borrow()[label].state, "running");
+    assert_eq!(stub.stop(), 1);
 }
