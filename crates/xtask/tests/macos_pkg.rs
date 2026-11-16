@@ -558,6 +558,49 @@ fn the_agents_plist_names_flags_the_agent_accepts() {
     );
 }
 
+/// What a Mac's `/etc/js-agent/flags` holds, one word per line, with documentation addresses.
+const MAC_FLAGS: &str = "# the Mac build host group\n\
+    --server=https://leases.example:7300\n\
+    --pool=mac\n\
+    --ca-cert=/etc/js-agent/ca.pem\n\
+    --host-id-from-facts=/var/lib/hostkeeper/facts.json\n\
+    --native-network=on\n\
+    --native-pf-uid-start=600\n\
+    --native-pf-uid-count=100\n\
+    --native-pf-endpoint=192.0.2.10:443\n\
+    --native-pf-endpoint=192.0.2.11:443\n";
+
+/// The agent's flags-file plist, once the flags file is expanded in place of `--flags-file`,
+/// is a command line `js_agent::Cli` accepts: the file gives the server, the pool and the
+/// native network, and the plist's own words give the rest. It catches a plist word the agent
+/// would refuse next to the file's, or a file word the plist makes a duplicate of.
+#[test]
+fn the_agents_flags_file_plist_names_flags_the_agent_accepts_with_a_flags_file_expanded() {
+    let plist = Daemon::agent_from_flags_file("/etc/js-agent/flags").render();
+    let words = program_arguments(&plist);
+    assert_eq!(words[0], format!("{RELEASE_LINK}/js-agent"));
+    let mut args = vec!["js-agent".to_owned()];
+    let mut rest = words.into_iter().skip(1);
+    while let Some(word) = rest.next() {
+        if word == "--flags-file" {
+            assert_eq!(rest.next().as_deref(), Some("/etc/js-agent/flags"));
+            args.extend(js_agent::flags_file::words(MAC_FLAGS).unwrap());
+        } else {
+            args.push(word);
+        }
+    }
+    let cli = js_agent::Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(cli.pool, "mac");
+    assert_eq!(
+        cli.host.host_id_from_facts.as_deref(),
+        Some(Path::new("/var/lib/hostkeeper/facts.json"))
+    );
+    assert_eq!(
+        cli.native_helper_socket.as_deref(),
+        Some(Path::new("/var/run/js-mac-session/socket"))
+    );
+}
+
 #[test]
 fn the_helpers_plist_names_flags_the_helper_accepts_and_a_socket_the_agent_dials() {
     let plist = Daemon::session("cdhash H\"abc\"", "_jsagent").render();

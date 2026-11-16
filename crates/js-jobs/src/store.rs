@@ -30,12 +30,15 @@ mod queue;
 mod status;
 mod taints;
 mod whole;
+mod written;
 
 pub use index::Backfill;
 
 pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};
+
+pub use written::Written;
 
 /// The schema version of the rows this build writes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -87,8 +90,9 @@ pub struct JobPage {
 /// it needs, decides, and commits with the versions it read as preconditions, so a row that
 /// changed in between makes the operation [`JobStoreError::Stale`].
 ///
-/// Every write it makes is counted ([`JobStore::written`]), so a caller that read the tables
-/// can tell that they have not changed since without reading them again.
+/// Every write it makes is counted, and the store's head is read ([`JobStore::written`]), so a
+/// caller that read the tables can tell that they have not changed since, by this server or by
+/// another over the same store, without reading them again.
 pub struct JobStore<S, I = RandomIds> {
     store: Arc<S>,
     ids: I,
@@ -106,17 +110,6 @@ pub struct JobStore<S, I = RandomIds> {
 
 /// The number the next job store this process makes gets ([`Written`]).
 static INSTANCES: AtomicU64 = AtomicU64::new(0);
-
-/// Where the writes of one job store stood when it was asked ([`JobStore::written`]): two
-/// that are equal were taken from the same job store with no write of it in between, so its
-/// tables held the same rows at both. Taken from two job stores, they are never equal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Written {
-    /// The job store's number among those this process made.
-    instance: u64,
-    /// How many writes it had sent to its store.
-    writes: u64,
-}
 
 /// `Err(error)` unless `ok`.
 fn ensure(ok: bool, error: JobStoreError) -> Result<(), JobStoreError> {
@@ -764,20 +757,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     fn allocation_row(&self, id: &JobId) -> Result<(AllocationRecord, Version), JobStoreError> {
         self.read_allocation(id)?
             .ok_or(JobStoreError::NoAllocation { id: id.clone() })
-    }
-
-    /// Where this job store's writes stand: each transaction it sends counts once, after the
-    /// store answered it, whether it committed, conflicted or failed (a failed commit may
-    /// still have landed). The tables change only through such a write, so when two readings
-    /// are equal the tables held the same rows at both, unless another writer shares the
-    /// store, which the server's lock on its store rules out. The count is kept in memory and
-    /// starts again with each job store; the store is never asked.
-    #[must_use]
-    pub fn written(&self) -> Written {
-        Written {
-            instance: self.instance,
-            writes: self.writes.load(Ordering::SeqCst),
-        }
     }
 
     /// Sends `txn` to the store and counts it ([`JobStore::written`]): the one way this job

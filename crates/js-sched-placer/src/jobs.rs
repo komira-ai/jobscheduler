@@ -677,7 +677,7 @@ impl SchedPlacer {
         sinks: (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
         let _pass = self.pass();
-        let now = self.seen_now(jobs, hosts);
+        let now = self.seen_now(jobs, hosts)?;
         self.pass_seen(jobs, hosts, sinks, now)
     }
 

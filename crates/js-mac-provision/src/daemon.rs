@@ -1,7 +1,7 @@
 //! The LaunchDaemons of the js-agent package: the agent and the root helper it dials.
 //!
-//! Both are described by flags and nothing else: no environment variable, no file the program
-//! reads. Neither runs at load. `KeepAlive` holds each of them while [`GATE`], the file with
+//! Both are described by flags and nothing else: no environment variable. The agent's plist
+//! may name a flags file (`--flags-file`), which is itself only more flags. Neither runs at load. `KeepAlive` holds each of them while [`GATE`], the file with
 //! the pool's join token, exists, which is launchd's form of the unit's
 //! `ConditionPathExists`: the package can load the daemons at install time, and they start
 //! when a host is configured. launchd then starts a daemon again after every exit, a clean
@@ -40,6 +40,9 @@ pub const AGENT_EXIT_TIMEOUT_SECS: u32 = 120;
 pub const THROTTLE_SECS: u32 = 30;
 /// The `--server` of a plist nobody has configured; the agent refuses it.
 pub const UNSET_SERVER: &str = "SET-THE-SERVER";
+/// The flags file the agent's plist names: the file a config package places, which gives the
+/// agent its server, pool, CA, host id and native-runtime flags.
+pub const FLAGS_FILE: &str = "/etc/js-agent/flags";
 /// The helper's socket, which the agent dials.
 pub const SESSION_SOCKET: &str = "/var/run/js-mac-session/socket";
 
@@ -70,6 +73,32 @@ impl Daemon {
             GATE,
             "--pool",
             pool,
+            "--state-root",
+            "/var/db/js-agent/state",
+            "--scratch-root",
+            "/var/db/js-agent/scratch",
+            "--native-helper-socket",
+            SESSION_SOCKET,
+        ];
+        Daemon {
+            label: AGENT_LABEL.to_owned(),
+            program: format!("{RELEASE_LINK}/js-agent"),
+            args: words.iter().map(|w| (*w).to_owned()).collect(),
+            exit_timeout_secs: AGENT_EXIT_TIMEOUT_SECS,
+            log_stem: "js-agent".to_owned(),
+        }
+    }
+
+    /// The agent's daemon that takes its server, pool, CA, host id and runtime flags from the
+    /// flags file at `flags_file` (the agent's `--flags-file`), with the exit timeout
+    /// [`AGENT_EXIT_TIMEOUT_SECS`]. The plist names no `--server` or `--pool`: the file does.
+    #[must_use]
+    pub fn agent_from_flags_file(flags_file: &str) -> Daemon {
+        let words = [
+            "--flags-file",
+            flags_file,
+            "--token-file",
+            GATE,
             "--state-root",
             "/var/db/js-agent/state",
             "--scratch-root",
