@@ -600,9 +600,7 @@ fn bootout_is_run_by_the_stop_runner_and_nothing_else_is() {
 
 #[test]
 fn the_stop_runner_waits_longer_than_the_exit_timeout_of_the_agent_daemon() {
-    let exit = Duration::from_secs(u64::from(
-        Daemon::agent("https://x", "pool").exit_timeout_secs,
-    ));
+    let exit = Duration::from_secs(u64::from(Daemon::agent().exit_timeout_secs));
     assert!(BOOTOUT_MARGIN > Duration::ZERO);
     assert!(StopRunner::new(exit).limit() >= exit + BOOTOUT_MARGIN);
 }
