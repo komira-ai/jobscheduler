@@ -109,11 +109,13 @@ async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
 }
 
 /// Asserts that a taint outlives a restart: two tainted hosts are put back awaiting with
-/// their taint, a job submitted after their agents say hello again is refused 422
-/// `no-capable-host` (no host is clean) and recorded nowhere, and the taint is still kept
+/// their taint, a job submitted after their agents say hello again is accepted 201 and
+/// recorded queued (a taint ends, so the job waits for a host to clear; no host is clean to
+/// place it on), and the taint is still kept
 /// (in the state file, or in the store's host bindings). It runs with the bindings in files
 /// and in the store, and in the store it also asserts that no `.agents` file is written. It
-/// catches a restart that makes a host clean, and a store that loses a taint.
+/// catches a restart that makes a host clean, a store that loses a taint, and an admission that
+/// refuses a job with `no-capable-host` while every host is tainted.
 #[tokio::test]
 async fn a_taint_survives_a_restart() {
     for kept in Kept::BOTH {
@@ -138,12 +140,9 @@ async fn a_taint_survives_a_restart_in(kept: Kept) {
     }
     job_agent(&h, &cpu_hello("burst-1")).await;
     job_agent(&h, &cpu_hello("burst-2")).await;
-    let refused = submit_body(&h, &JobBody::new("taint-restart").json()).await;
-    assert_eq!(
-        (refused.status, refused.json()),
-        (422, json!({ "error": "no-capable-host" }))
-    );
-    assert_eq!(job_of(&h, "taint-restart").await.status, 404);
+    let accepted = submit_body(&h, &JobBody::new("taint-restart").json()).await;
+    assert_eq!(accepted.status, 201, "{}", accepted.body);
+    assert_eq!(job_of(&h, "taint-restart").await.status, 200);
     let text = kept_bindings(&h);
     assert_eq!(text.matches("taint_reason").count(), 2, "{text}");
     for id in ["burst-1", "burst-2"] {
@@ -193,7 +192,7 @@ async fn a_start_refused_as_host_tainted_taints_the_host_and_is_written() {
 
 /// Asserts the clear end to end, with the bindings in files and in the store: a tainted host
 /// that reports its taint cleared is acknowledged, `GET /v1/hosts` shows no taint, the
-/// bindings hold none, a job is refused while it is tainted and starts on it after the clear (the only host),
+/// bindings hold none, a job submitted while it is tainted is queued and starts on it only after the clear (the only host),
 /// and after a restart it is not put back tainted (the clear survived). A cleared report of
 /// a taint other than the held one changes nothing. It catches a server that forgets the
 /// taint in memory only (a restart would bring it back), one that clears a taint the report
@@ -211,8 +210,8 @@ async fn a_taint_reported_cleared_ends_in(kept: Kept) {
     let held = json!({ "reason": "residue", "run_id": "run-1-1", "check": "daemonised-child" });
     let reply = beat_with(&first, &me, json!({ "taint": held })).await;
     assert_eq!(reply["taint_ack"], true);
-    let refused = submit_body(&first, &JobBody::new("before-clear").json()).await;
-    assert_eq!(refused.status, 422, "{}", refused.body);
+    let queued = submit_body(&first, &JobBody::new("before-clear").json()).await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
 
     let other = json!({ "reason": "residue", "run_id": "run-1-2", "check": "daemonised-child" });
     let reply = beat_with(&first, &me, json!({ "taint_cleared": other })).await;
@@ -229,8 +228,9 @@ async fn a_taint_reported_cleared_ends_in(kept: Kept) {
     first.ticks.step().await;
     let reply = beat_with(&first, &me, json!({})).await;
     let (starts, _) = commands(&reply);
-    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
-    assert_eq!(jobs, ["after-clear"], "{reply}");
+    let mut jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    jobs.sort_unstable();
+    assert_eq!(jobs, ["after-clear", "before-clear"], "{reply}");
 
     let h = restarted_placing(first).await;
     let listing = hosts(&h).await;

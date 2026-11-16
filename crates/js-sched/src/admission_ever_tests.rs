@@ -137,24 +137,38 @@ fn a_busy_capable_host_is_not_a_refusal() {
     }
 }
 
-/// Asserts that a pool whose one fitting host is tainted, or draining, refuses, and that a
-/// clean host beside it admits. Catches a check that ignores the taint or the drain, which
-/// would queue a request for a host nobody will clear.
+/// Asserts that a pool whose one fitting host is draining refuses, and that a clean host
+/// beside it admits. Catches a check that ignores the drain, which would queue a request for
+/// a host that is leaving the pool.
 #[test]
-fn a_tainted_only_pool_refuses() {
-    let tainted = HostView {
-        tainted: true,
-        ..host("h1")
-    };
+fn a_draining_only_pool_refuses() {
     let draining = HostView {
         draining: true,
         ..host("h1")
     };
-    for hosts in [[tainted.clone()], [draining.clone()]] {
-        assert_eq!(can_ever_serve(&wanted(), &hosts, &[]), Admission::Refuse);
-    }
-    let beside = [tainted, draining, host("h2")];
-    assert_eq!(can_ever_serve(&wanted(), &beside, &[]), HOST);
+    assert_eq!(
+        can_ever_serve(&wanted(), &[draining.clone()], &[]),
+        Admission::Refuse
+    );
+    assert_eq!(can_ever_serve(&wanted(), &[draining, host("h2")], &[]), HOST);
+}
+
+/// Asserts that a pool whose every fitting host is tainted still admits: a taint ends (the
+/// agent clears a residue taint, an operator moves the marker aside), so the request waits
+/// for a cleared host as it waits for a busy one. Catches a check that refuses while every
+/// host is tainted, which failed every submit with `no-capable-host` once each host of the
+/// farm had been tainted by a residue.
+#[test]
+fn a_tainted_only_pool_admits() {
+    let tainted = |name| HostView {
+        tainted: true,
+        ..host(name)
+    };
+    assert_eq!(can_ever_serve(&wanted(), &[tainted("h1")], &[]), HOST);
+    assert_eq!(
+        can_ever_serve(&wanted(), &[tainted("h1"), tainted("h2")], &[]),
+        HOST
+    );
 }
 
 /// Asserts that a catalog that could not be read admits as may offer, and that a catalog
