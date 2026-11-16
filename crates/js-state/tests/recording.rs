@@ -19,36 +19,40 @@ fn fake() -> Arc<dyn Store> {
     ))
 }
 
-/// A store that fails every call with `StoreError::Fenced`.
+/// A store that fails every call with [`refused`].
 struct Refusing;
+
+fn refused() -> StoreError {
+    StoreError::Failed("refused".to_owned())
+}
 
 impl Store for Refusing {
     fn apply_batch(&self, _batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn get(&self, _key: &str) -> Result<Option<Versioned>, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn scan_range(&self, _scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn changes(&self, _after: Revision, _limit: usize) -> Result<Changes, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn trim_feed(&self, _before: Revision) -> Result<u64, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn reap_expired(&self) -> Result<usize, StoreError> {
-        Err(StoreError::Fenced)
+        Err(refused())
     }
 
     fn commit_stats(&self) -> CommitStats {
@@ -132,7 +136,7 @@ fn a_write_the_store_fails_is_recorded_and_the_error_passes_through() {
     let err = recording
         .txn(Txn::new().put("mine", "v", Cond::Any))
         .unwrap_err();
-    assert_eq!(err, StoreError::Fenced);
+    assert_eq!(err, refused());
     assert_eq!(recording.writes(), [write("mine", WriteKind::Put, false)]);
 }
 

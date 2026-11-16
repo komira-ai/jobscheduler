@@ -146,20 +146,16 @@ file, the job store and the usage file are kept as without it.
   refused at start with exit status 2: `--store: <file> names a sqlite: store, which is accepted only with --allow-sqlite-store: SQLite
   is for tests and single-node development`. With a Postgres store the flag is accepted and does nothing, so one file serves both kinds
   of environment. Like every flag, it is refused beside `--config`.
-- **The lock.** The server takes the store's writer lock before anything else (before it reads any file of the state file's family and before it
-  binds a listener, except the readiness listener of `--ready-listen`) and holds it for its life: a session-level advisory lock on a
-  connection of its own on Postgres, the lock file beside the store's file on SQLite. It tries once and does not wait, unless
-  `--ready-listen` is given: then it logs `waiting for the store's writer lock` once, tries again every second while another process
-  holds the lock, and takes it before it reads anything from the store or binds any other listener (see "The readiness port").
-- **A refused start.** Without `--ready-listen`, a second server on the same store exits 2 with one line, `--store: another process holds the store's writer
-  lock`, having bound nothing and opened neither the store nor any file of the state file's family. A lock that cannot be tried (the server is down, the
-  login is refused) is `--store: the store's writer lock could not be taken: ...`, also exit 2, with `--ready-listen` too: only a lock another
-  process holds is waited for.
-- **A lost lock.** Every tick asks the lock's session first. When the session is gone (the database restarted, an administrator ended
-  it, the connection broke), the lock is gone with it: the tick does nothing more, the server stops serving and ticking, writes
-  nothing more (there is no final tick), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. Taking the
-  lock also takes the store's next writer generation, and every commit checks it: once another process takes the lock, no commit of
-  this one succeeds, between ticks too.
+- **No lock on Postgres.** Any number of servers open one Postgres store and serve at once: nothing is taken at start, nothing is checked
+  in a commit, and no server is the leader. Every decision (placing a job, booking a host, a periodic duty, a host's heartbeat writes) is a
+  transaction whose preconditions hold for however many servers make it. A server opens the store before it reads any file of the state
+  file's family and before it binds a listener, except the readiness listener of `--ready-listen`. A login that is refused or a database that
+  cannot be opened is `--store: the store could not be opened: ...`, exit 2.
+- **The lock of a SQLite store.** A SQLite file is written by one process: the server takes the lock file beside it before anything else and
+  holds it for its life. It tries once and does not wait, unless `--ready-listen` is given: then it logs `waiting for the store's writer lock` once,
+  tries again every second while another process holds the lock, and takes it before it reads anything from the store or binds any other
+  listener (see "The readiness port"). Without `--ready-listen`, a second server on the same file exits 2 with one line, `--store: another
+  process holds the store's writer lock`, having bound nothing and opened neither the store nor any file of the state file's family.
 - **What it keeps.** The host bindings (with each host's taint and cordon) and the digests of the join tokens and host credentials:
   `hosts/binding/<host id>` and `hosts/join/<digest>`, each a JSON object with a `version`, whose unknown fields are kept and written
   back; and the scaler's records and the hosts the registry refused to remove: `acquires/scaler/records` (the records file's own
@@ -226,19 +222,19 @@ names no job, lease, run or token: its labels are a state, a failure code, a hos
 ### The readiness port
 
 `--ready-listen <addr>` (`server.ready_listen`) serves `GET /readyz` on a port of its own, plain HTTP, with no token. It is off by
-default: without it the server binds no such port, tries the store's writer lock once and refuses a start whose lock another process
-holds. Any other path, on that port, is a 404.
+default: without it the server binds no such port, tries a SQLite store's file lock once and refuses a start whose lock another process
+holds (a Postgres store has none). Any other path, on that port, is a 404.
 
 | phase | answer |
 |---|---|
-| another process holds the store's writer lock and the server retries | 503 `waiting for the store's writer lock` |
-| the lock is held (a server without a store setting has none to take) and the listeners are not all serving yet | 503 `starting` |
+| another process holds the SQLite store's file lock and the server retries | 503 `waiting for the store's writer lock` |
+| the store is open (a server without a store setting, or over Postgres, has no lock to take) and the listeners are not all serving yet | 503 `starting` |
 | every listener is bound and serving | 200 `ready` |
-| from the SIGTERM or ctrl-c that starts the stop, and after a loss of the writer lock, until the process exits | 503 `draining` |
+| from the SIGTERM or ctrl-c that starts the stop until the process exits | 503 `draining` |
 
 - **Address.** A loopback address only, since the route takes no token; any other address is refused at start naming the flag or the
   key. An address in use is refused at start naming the flag or the key.
-- **Order.** The port is bound before the store's writer lock is tried, so a supervisor sees the phases from outside; the program
+- **Order.** The port is bound before a SQLite store's file lock is tried, so a supervisor sees the phases from outside; the program
   prints `ready on <addr>` as soon as it is bound, and `listening on <addr>` when the start is done. The port is the last listener
   closed at a stop and answers through the whole drain of the others.
 - **A signal while waiting.** SIGTERM or ctrl-c while the server waits for the lock or starts ends the process with status 0, at

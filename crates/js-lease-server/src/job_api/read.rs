@@ -85,7 +85,6 @@ use tonic::{Request, Response, Status};
 
 use super::fleet::Handle;
 use super::roles::{Caller, hidden};
-use super::submit::unavailable_if_fenced;
 use super::{JobApi, logs};
 
 pub(crate) mod view;
@@ -197,11 +196,9 @@ fn invalid(field: &str) -> Status {
 }
 
 /// The answer to a read of the store that failed. The cause is logged, never answered.
-/// `UNAVAILABLE` `state-fenced` instead when the store says this process is no longer its
-/// writer, which trips the fence ([`super::submit::unavailable_if_fenced`]).
-fn read_failed(api: &JobApi, error: &js_jobs::JobStoreError) -> Status {
+fn read_failed(error: &js_jobs::JobStoreError) -> Status {
     tracing::warn!(%error, "a read of the job tables failed");
-    unavailable_if_fenced(api, error, Status::internal("internal"))
+    Status::internal("internal")
 }
 
 /// The reads the read calls (and the logs group's follows) make of the job tables, and
@@ -218,7 +215,7 @@ impl Reads<'_> {
             .0
             .jobs
             .get_job(&id)
-            .map_err(|error| read_failed(self.0, &error))?;
+            .map_err(|error| read_failed(&error))?;
         let job = found.ok_or_else(unknown_job)?;
         match caller.owns(&job) {
             true => Ok(job),
@@ -237,7 +234,7 @@ impl Reads<'_> {
         self.0
             .jobs
             .list_jobs(state, resume, window)
-            .map_err(|error| read_failed(self.0, &error))
+            .map_err(|error| read_failed(&error))
     }
 }
 

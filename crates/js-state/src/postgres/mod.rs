@@ -27,8 +27,11 @@
 //! connections of their own, outside the commit head, taking none of the locks above.
 //! Such a crate registers its migration with [`schema::extend`].
 //!
-//! [`WRITER_LOCK_KEY`] is the advisory lock the active writer holds on a connection of its
-//! own ([`crate::WriterLock`]), apart from the transaction-scoped lock schema changes take.
+//! There is no writer lock and no writer generation: any number of processes open the same
+//! schema and write at once, and each commit is correct on its own (the head lock orders the
+//! commits, every row a transaction changes carries a version it must still find).
+//! [`serving::probe`] says whether a process of a given application name is connected, for
+//! the update hook; it takes no lock.
 //!
 //! [`PostgresStore::claim`] is the claim path: read committed, rows locked
 //! `FOR UPDATE SKIP LOCKED`, each claimed through the same version compare-and-set.
@@ -42,13 +45,6 @@
 //! transaction is run again only when its connection was gone before it began: one under way
 //! is rolled back by the server and reported, not run again, since its commit may have
 //! happened.
-//!
-//! **Fencing.** A store opened for the holder of the writer lock ([`PostgresStore::fenced`],
-//! with the [`crate::WriterGeneration`] the lock took) reads the `writer_generation` row
-//! `FOR SHARE` in every transaction before it commits, and commits nothing (it rolls back and
-//! returns [`StoreError::Fenced`]) when the row no longer holds its generation: another
-//! process took the lock since. Taking the lock increments the row and waits for a commit
-//! that holds it shared, so every commit is ordered before or after the new holder's start.
 //!
 //! The feed table grows until [`Store::trim_feed`] trims it (the server's job pass calls
 //! it); a trim deletes in a `SERIALIZABLE` transaction that holds the head lock, so it
@@ -70,12 +66,12 @@ mod extension;
 mod not_up;
 mod reach;
 pub mod schema;
+pub mod serving;
 mod session;
 mod timeouts;
 mod tls;
 mod tx;
 mod url;
-pub(crate) mod writer;
 
 use std::fmt;
 use std::ops::Bound;
@@ -100,7 +96,6 @@ pub use timeouts::Timeouts;
 use tls::Tls;
 pub use tls::{TlsError, TlsMode};
 use tx::{Level, Row, Tx, micros};
-pub use writer::WRITER_LOCK_KEY;
 
 use conn::{Dial, DialError, connection_lost};
 
@@ -108,7 +103,7 @@ use crate::clock::{Clock, StoreTime};
 use crate::store::{Span, Store, page_of};
 use crate::{
     Change, Changes, Commit, CommitStats, Conflict, Direction, Event, Revision, ScanPage,
-    ScanRange, StoreError, Txn, Version, Versioned, WriterGeneration,
+    ScanRange, StoreError, Txn, Version, Versioned,
 };
 
 /// The most times a batch is run again after a serialization failure.
@@ -386,8 +381,6 @@ pub(crate) enum Fail {
     Pg(postgres::Error),
     Refused(String),
     Tls(TlsError),
-    /// The writer generation row no longer holds the store's generation.
-    Fenced,
 }
 
 impl From<postgres::Error> for Fail {
@@ -413,7 +406,7 @@ impl Fail {
                 *code == SqlState::T_R_SERIALIZATION_FAILURE
                     || *code == SqlState::T_R_DEADLOCK_DETECTED
             }),
-            Fail::Refused(_) | Fail::Tls(_) | Fail::Fenced => false,
+            Fail::Refused(_) | Fail::Tls(_) => false,
         }
     }
 
@@ -429,7 +422,7 @@ impl Fail {
     }
 
     /// The failure to open a store or an extension's pool, or of an extension's call: every
-    /// failure but a fence is [`StoreError::Failed`].
+    /// failure is [`StoreError::Failed`].
     fn into_failed(self) -> StoreError {
         self.into_error(false)
     }
@@ -442,7 +435,6 @@ impl Fail {
             Fail::Pg(err) => StoreError::Failed(describe(&err)),
             Fail::Refused(why) => StoreError::Failed(why),
             Fail::Tls(err) => StoreError::Failed(err.to_string()),
-            Fail::Fenced => StoreError::Fenced,
         }
     }
 }
@@ -458,7 +450,7 @@ pub struct Claimed {
     pub commit: Commit,
 }
 
-/// A failed client call, as an extension's call and the writer lock's check report it.
+/// A failed client call, as an extension's call reports it.
 fn failed(err: postgres::Error) -> StoreError {
     Fail::Pg(err).into_failed()
 }
@@ -505,8 +497,6 @@ pub struct PostgresStore {
     config: PostgresConfig,
     clock: Option<Arc<dyn Clock>>,
     flaw: Flaw,
-    /// The writer generation every commit checks ([`PostgresStore::fenced`]).
-    fence: Option<i64>,
     reconnected: Option<Hook>,
     txns: AtomicU64,
     syncs: AtomicU64,
@@ -568,7 +558,6 @@ impl PostgresStore {
             config: config.clone(),
             clock: None,
             flaw: Flaw::None,
-            fence: None,
             reconnected: None,
             txns: AtomicU64::new(0),
             syncs: AtomicU64::new(0),
@@ -587,16 +576,6 @@ impl PostgresStore {
     #[must_use]
     pub fn with_flaw(mut self, flaw: Flaw) -> PostgresStore {
         self.flaw = flaw;
-        self
-    }
-
-    /// Makes every commit check that the store's writer generation is still `generation`, the
-    /// one [`crate::WriterLock::generation`] says the lock took, and refuse with
-    /// [`StoreError::Fenced`] (committing nothing) once another process took the lock. The
-    /// store of the writer-lock holder is opened so; a store opened without it checks nothing.
-    #[must_use]
-    pub fn fenced(mut self, generation: WriterGeneration) -> PostgresStore {
-        self.fence = Some(generation.get());
         self
     }
 
@@ -624,7 +603,7 @@ impl PostgresStore {
         &self.config
     }
 
-    /// Opens the same database again with the same clock, flaw, generation and hook,
+    /// Opens the same database again with the same clock, flaw and hook,
     /// dropping this store's connections: a crash of the frontend, for a test.
     ///
     /// # Errors
@@ -632,7 +611,6 @@ impl PostgresStore {
     pub fn reopen(self) -> Result<PostgresStore, StoreError> {
         let mut store = PostgresStore::open(&self.config)?.with_flaw(self.flaw);
         store.clock = self.clock;
-        store.fence = self.fence;
         store.reconnected = self.reconnected;
         Ok(store)
     }
@@ -706,7 +684,7 @@ impl PostgresStore {
     /// a new connection; nothing was written on the old one.
     fn start(&self, level: Level) -> Result<Tx<'_>, Fail> {
         let over = self.over();
-        self.twice(|session| Tx::begin(session, level, over, self.flaw, self.fence))
+        self.twice(|session| Tx::begin(session, level, over, self.flaw))
     }
 
     fn run_batch(&self, batch: &[Txn]) -> Result<(Tx<'_>, Vec<Result<Commit, Conflict>>), Fail> {

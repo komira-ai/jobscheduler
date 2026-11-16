@@ -252,8 +252,11 @@ mod tests {
         for (error, said) in cases {
             assert_eq!(error.to_string(), said);
         }
-        let from_store: JobStoreError = StoreError::Fenced.into();
-        assert_eq!(from_store, JobStoreError::Store(StoreError::Fenced));
+        let from_store: JobStoreError = StoreError::Failed("down".to_owned()).into();
+        assert_eq!(
+            from_store,
+            JobStoreError::Store(StoreError::Failed("down".to_owned()))
+        );
         let from_mint: JobStoreError = MintError { code }.into();
         assert!(
             from_mint.source().is_none(),

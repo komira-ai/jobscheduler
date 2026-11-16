@@ -58,8 +58,6 @@ pub(crate) enum FailureKind {
     Disconnected,
     /// The store could not complete the call ([`StoreError::Failed`]).
     Failed,
-    /// The store has a newer writer ([`StoreError::Fenced`]); the fence ends the server.
-    Fenced,
     /// A read of the store's change feed began past its trim ([`StoreError::StaleCursor`]).
     StaleCursor,
 }
@@ -71,7 +69,6 @@ impl FailureKind {
         match error {
             JobStoreError::Store(StoreError::Disconnected(_)) => Some(FailureKind::Disconnected),
             JobStoreError::Store(StoreError::Failed(_)) => Some(FailureKind::Failed),
-            JobStoreError::Store(StoreError::Fenced) => Some(FailureKind::Fenced),
             JobStoreError::Store(StoreError::StaleCursor { .. }) => Some(FailureKind::StaleCursor),
             _ => None,
         }
@@ -82,7 +79,6 @@ impl FailureKind {
         match self {
             FailureKind::Disconnected => "disconnected",
             FailureKind::Failed => "failed",
-            FailureKind::Fenced => "fenced",
             FailureKind::StaleCursor => "stale_cursor",
         }
     }
@@ -114,17 +110,15 @@ impl TickStore {
     }
 }
 
-/// The store's writer lock (`--store`), as the server last saw it.
+/// The store's file lock (a SQLite `--store`), as the server holds it. A Postgres store has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LockState {
-    /// The server was given no store setting, so it holds no lock.
+    /// The server holds no lock: it has no store setting, or a Postgres store.
     #[default]
     None,
     /// The lock is held.
     Held,
-    /// A tick found the lock lost; the server is stopping.
-    Lost,
 }
 
 impl LockState {
@@ -132,7 +126,6 @@ impl LockState {
         match self {
             LockState::None => "none",
             LockState::Held => "held",
-            LockState::Lost => "lost",
         }
     }
 }
@@ -172,7 +165,7 @@ pub(crate) struct StoreView {
     /// How long the last job pass that ran to its end took, in milliseconds of the server's
     /// clock; null before one, and always without the job tables.
     pub(crate) latency_ms: Option<u64>,
-    /// The store's writer lock: `none` without a store setting, `held`, or `lost`.
+    /// The store's file lock: `none` without a store setting or on Postgres, `held` on SQLite.
     pub(crate) lock: LockState,
     /// How long a streak lasts before the store is unreachable, in milliseconds.
     pub(crate) unreachable_after_ms: u64,
@@ -208,7 +201,7 @@ impl StoreHealth {
         self.seen.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Records the writer lock's state.
+    /// Records the file lock's state.
     pub(crate) fn set_lock(&self, lock: LockState) {
         self.seen().lock = lock;
     }

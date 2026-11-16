@@ -150,37 +150,40 @@ pub fn hellos(store: Store) -> Scenario {
         .settle_within(HELLO_SETTLE)
 }
 
-/// Proves that a second server on the store is refused while the first holds the store's
-/// writer lock (design sections 6.7, step 1, and 10): started while the first runs work, it
-/// is refused with the one line that names the lock, and the first is undisturbed (every
-/// item succeeds and every host serves at the end); started once the first is stopped, it
-/// starts (and is stopped again), and the first then starts again over the store. Over
-/// Postgres the lock is the advisory lock, over SQLite the lock file beside the store. Red
-/// for a lock that is not taken or not held, one that outlives its server, and a refusal
-/// that disturbs the first.
+/// Proves what a second server on the store meets (design sections 6.7, step 1, and 10): over
+/// SQLite the file lock beside the store is held by the first server, so the second, started
+/// while the first runs work, is refused with the one line that names the lock; over Postgres
+/// there is no lock, so it starts beside the first, which is undisturbed either way (every
+/// item succeeds and every host serves at the end). Started once the first is stopped, it
+/// starts (and is stopped again) over both, and the first then starts again over the store. Red
+/// for a SQLite lock that is not taken or not held, one that outlives its server, a Postgres
+/// store that refuses a second server, and a second server that disturbs the first.
 pub fn second(store: Store) -> Scenario {
     let spec = ServerSpec::registered_pool(POOL, Shape::gpu_host(), SECOND_HOSTS);
-    Scenario::new("a_second_server_over_the_same_store_is_refused_while_the_first_holds_the_lock")
-        .scratch(env!("CARGO_TARGET_TMPDIR"))
-        .server(spec)
-        .over_store(store)
-        .hosts(POOL, SECOND_HOSTS)
-        .work(SECOND_RUNS, Work::run_for(SECOND_RUN))
-        .at(SECOND_AT, start_second_server())
-        .at(SECOND_STOP_AT, stop_server())
-        .at(SECOND_AGAIN_AT, start_second_server())
-        .at(SECOND_RESTART_AT, restart_server())
-        .expect(Expect::all_items_terminal())
-        .expect(Expect::terminal_count(
-            SECOND_RUNS as usize,
-            HowEnded::Succeeded,
-        ))
-        .expect(Expect::every_host_serving())
-        .expect_that(
-            "a second server is refused, then starts",
-            refused_then_started,
-        )
-        .settle_within(SECOND_SETTLE)
+    let locked = matches!(store, Store::Sqlite);
+    Scenario::new(
+        "a_second_server_is_refused_over_sqlite_and_starts_beside_the_first_over_postgres",
+    )
+    .scratch(env!("CARGO_TARGET_TMPDIR"))
+    .server(spec)
+    .over_store(store)
+    .hosts(POOL, SECOND_HOSTS)
+    .work(SECOND_RUNS, Work::run_for(SECOND_RUN))
+    .at(SECOND_AT, start_second_server())
+    .at(SECOND_STOP_AT, stop_server())
+    .at(SECOND_AGAIN_AT, start_second_server())
+    .at(SECOND_RESTART_AT, restart_server())
+    .expect(Expect::all_items_terminal())
+    .expect(Expect::terminal_count(
+        SECOND_RUNS as usize,
+        HowEnded::Succeeded,
+    ))
+    .expect(Expect::every_host_serving())
+    .expect_that(
+        "a second server is refused only by a lock, and starts once the first is stopped",
+        move |cell| refused_then_started(cell, locked),
+    )
+    .settle_within(SECOND_SETTLE)
 }
 
 /// Proves that the scaler's records survive a restart over the store and launch nothing
@@ -266,12 +269,13 @@ fn inside_the_burst(cell: &mut Cell) -> Option<String> {
     (!between).then(|| format!("{used:?} of {HELLO_HOSTS} tokens used at the stop"))
 }
 
-/// Whether the second server was refused, naming the writer lock, while the first ran, and
-/// started once the first was stopped.
-fn refused_then_started(cell: &mut Cell) -> Option<String> {
+/// Whether the second server was refused, naming the writer lock, while the first ran when the
+/// store has a lock (`locked`, SQLite), and started otherwise, and started once the first was
+/// stopped.
+fn refused_then_started(cell: &mut Cell, locked: bool) -> Option<String> {
     let seconds = cell.second_servers();
     let got: Vec<Option<&str>> = seconds.iter().map(|s| s.refused.as_deref()).collect();
-    let wanted = [Some(WRITER_LOCK_REFUSAL), None];
+    let wanted = [locked.then_some(WRITER_LOCK_REFUSAL), None];
     (got != wanted).then(|| format!("wanted {wanted:?}, got {got:?}"))
 }
 

@@ -90,8 +90,7 @@ impl Agents {
     /// places no job). The hosts that said hello to this server (those the registry
     /// holds a claim of) and the pool's whole-node settings go with them: a queued job that
     /// books the whole host is marked, placed and prepared only under those settings. A failed
-    /// read of the tables is logged; the next pass reads them again, unless the store said it
-    /// has a newer writer, which trips the fence ([`crate::fence`]).
+    /// read of the tables is logged; the next pass reads them again.
     ///
     /// A host is offered to a job with host isolation only when its hello reported
     /// `host-jobs`. Each host such a job was placed on is tainted in the registry
@@ -167,7 +166,6 @@ impl Agents {
             Pass::IfChanged => placer.place_jobs_if_changed(jobs, &hosts, sinks).map(drop),
         };
         if let Err(error) = placed {
-            self.fence.note(&error);
             warn!(%error, "the queued jobs could not be read; the next pass places them");
         }
         let hosts = starts.hosts.into_inner();

@@ -36,9 +36,9 @@
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
 //! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
-//! | `--ready-listen <addr>` | off unless given: serves `GET /readyz` (see "The readiness route" below) on a listener of its own, plain HTTP with no token, on a loopback address only; and, with a store, a held writer lock is waited for instead of refusing the start (see "The store" below). The listener is bound before the lock is tried. An address that is not a loopback one, or one in use, is refused at start naming the flag |
+//! | `--ready-listen <addr>` | off unless given: serves `GET /readyz` (see "The readiness route" below) on a listener of its own, plain HTTP with no token, on a loopback address only; and, with a SQLite store, a held file lock is waited for instead of refusing the start (see "The store" below). The listener is bound before the lock is tried. An address that is not a loopback one, or one in use, is refused at start naming the flag |
 //! | `--state-file <path>` | the base path of the server's state files: `<path>.agents`, `<path>.joins`, `<path>.scaler`, `<path>.jobs` and the default place of `usage.db`; a lease file of an earlier release at the path is left as it is |
-//! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; the server takes the store's writer lock before anything else (see "The store" below). Its content is never printed |
+//! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; a SQLite store's file lock is taken before anything else (see "The store" below). Its content is never printed |
 //! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
 //! | `--store-unreachable-after <duration>` | `60s`: how long the store paths of the tick (the job pass over the job tables) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both. Zero or an unparsable value is refused at start naming the flag |
 //! | `--boot initialise\|resume` | required: `initialise` is the first start (a live elastic pool may have no records yet), `resume` a later one (its records must exist); the server reads no lease file at either, so `resume` without one starts |
@@ -60,7 +60,7 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
-//! | `--drain-hold` | how long after SIGTERM or ctrl-c the server keeps serving, its readiness route already answering 503 `draining`, before the stop begins, `15s`, at least `1ms`. A stop because the store's writer lock was lost or the store has a newer writer is not held |
+//! | `--drain-hold` | how long after SIGTERM or ctrl-c the server keeps serving, its readiness route already answering 503 `draining`, before the stop begins, `15s`, at least `1ms` |
 //! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given; not used with `--store`, which keeps them in the store. Needs agent registration to have anything to keep. Not with `--usage-off` |
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
@@ -375,24 +375,28 @@
 //! The URL's `sslmode` (`disable` to `verify-full`) and `sslrootcert` choose its TLS. A
 //! Postgres store must hold the state schema already: the server creates none.
 //!
-//! The server takes the store's writer lock first, before it reads anything else
-//! and before it binds a listener (the readiness listener of `--ready-listen` excepted, which
-//! is bound before the lock), and holds it for its life: on Postgres a session-level
-//! advisory lock (`js_state::postgres::WRITER_LOCK_KEY`) on a connection of its own, on
-//! SQLite the lock file beside the store's file. A second server on the same store does not
-//! wait unless `--ready-listen` is given: it exits 2 with one line,
+//! A Postgres store has no writer lock and no leader: any number of servers open the same
+//! database and serve at once (in steady state one, and two while an update starts the new
+//! release before it stops the old). Every decision is a transaction of the store that holds
+//! for however many servers make it: a job is placed by the one transaction that finds it
+//! queued, and books its host only if the host's live allocations leave room; a host's
+//! heartbeat writes carry the connection that made them, and only the newest connection of a
+//! host writes its rows; each periodic duty is claimed per period, by the server that
+//! advances its row. The scaler's records and a pool with more than one server are as the
+//! release notes say.
+//!
+//! A SQLite store is written by one process: the server takes the lock file beside the
+//! store's file first, before it reads anything else and before it binds a listener (the
+//! readiness listener of `--ready-listen` excepted, which is bound before the lock), and
+//! holds it for its life. A second server on the same file does not wait unless
+//! `--ready-listen` is given: it exits 2 with one line,
 //! `--store: another process holds the store's writer lock`, having opened nothing else.
 //! With `--ready-listen` it waits instead: it logs `waiting for the store's writer lock` once
-//! and tries again every second, answering 503 on its readiness route meanwhile, and
-//! takes the lock, still before it reads anything from the store and before it binds any
-//! other listener, once the holder has let go. A lock that cannot be tried at all (the
-//! server cannot be reached, the login is refused, a file call failed) still refuses the
-//! start, exit 2, with or without the flag. A SIGTERM or ctrl-c while it waits (or starts) ends
-//! the process with status 0, the lock not taken. Every tick asks the lock's session first; a tick that finds
-//! it gone does nothing more, and the server stops serving and ticking, writes nothing more
-//! (there is no final tick), logs the loss and exits 1 ([`LockLost`]). The lock takes the
-//! store's next writer generation and every commit checks it, so once another process takes
-//! the lock no commit of this one succeeds, between ticks too.
+//! and tries again every second, answering 503 on its readiness route meanwhile, and takes
+//! the lock, still before it reads anything from the store and before it binds any other
+//! listener, once the holder has let go. A lock that cannot be tried at all (a file call
+//! failed) still refuses the start, exit 2, with or without the flag. A SIGTERM or ctrl-c
+//! while it waits (or starts) ends the process with status 0, the lock not taken.
 //!
 //! With the setting, the host bindings (with their taints and cordons), the join tokens'
 //! digests, the scaler's records and its hosts to remove are kept in the store, under
@@ -414,9 +418,9 @@
 //! | request | answers |
 //! |---|---|
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `registered` (every listed host said hello; the value `static` of the removed agentless pool is not written any more), and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (work still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when the host a reservation is draining is expected to be drained at the latest; reaching it gives nothing up, and the mark stays) are those of a registered host; so is `cordon {expires_at_ms}`, present while the host is cordoned (see "Cordon" below: a cordon left by a dead hook lapses within its last `lease_secs`, at most 3600 s after its last extension, or the host's own `:uncordon` lifts it) |
-//! | `GET /readyz` | only on the listener of `--ready-listen`, plain HTTP, no token (see "The readiness route"): 200 `ready` while the server serves; else 503 `waiting for the store's writer lock`, `starting` or `draining` |
+//! | `GET /readyz` | only on the listener of `--ready-listen`, plain HTTP, no token (see "The readiness route"): 200 `ready` while the server serves; else 503 `waiting for the store's writer lock` (a SQLite store's file lock), `starting` or `draining` |
 //! | `GET /healthz` | 200 `ok`, no token; 503 `tick loop stopped` once the tick loop has stopped; else 503 `store unreachable` while the tick's store paths have failed for `--store-unreachable-after` (until a tick's store work succeeds) |
-//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `fenced`, `stale_cursor`) and never an error's text, `lock` `none`, `held` or `lost`, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `stale_cursor`) and never an error's text, `lock` `none`, or `held` for a SQLite store's file lock, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `POST /v1/pools/{pool}/brake/reset` | 202 `{pool, reset: "requested"}`; 401; 404 for another pool |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
@@ -428,7 +432,7 @@
 //!
 //! `--ready-listen <addr>` (`server.ready_listen`) serves `GET /readyz` on a listener of its
 //! own, on a loopback address only, plain HTTP whatever the other ports speak, with no
-//! token; any other path is a 404. It is bound and answering before the store's writer lock
+//! token; any other path is a 404. It is bound and answering before a SQLite store's file lock
 //! is tried, and it is the last listener closed when the server stops, so a supervisor
 //! can tell the phases of the process apart from outside. At start the program prints
 //! `ready on <addr>` (the bound address) at once, and `listening on <addr>` when the start
@@ -436,10 +440,10 @@
 //!
 //! | phase | answers |
 //! |---|---|
-//! | another process holds the store's writer lock and the server retries | 503 `waiting for the store's writer lock` |
+//! | another process holds the SQLite store's file lock and the server retries | 503 `waiting for the store's writer lock` |
 //! | the lock is held (a server without a store setting has none to take) and the listeners are not all serving yet | 503 `starting` |
 //! | every listener is bound and serving | 200 `ready` |
-//! | from the SIGTERM or ctrl-c that starts the stop (and from the loss of the writer lock) until the process exits | 503 `draining` |
+//! | from the SIGTERM or ctrl-c that starts the stop until the process exits | 503 `draining` |
 //!
 //! The route keeps answering through the whole drain of the other listeners. A signal that
 //! arrives while the server waits for the lock or starts ends the process with status 0
@@ -684,7 +688,6 @@ mod clock;
 mod config;
 mod cordon;
 mod error;
-mod fence;
 mod file;
 mod file_checks;
 mod flags;
@@ -768,7 +771,6 @@ pub use scaler::{
     RETRY_AFTER, RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_waiting, start_with_checks};
-pub use store::LockLost;
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{
     BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, LoadIn, MAX_KEY_LEN, MinuteIn,

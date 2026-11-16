@@ -318,13 +318,13 @@ everything after the image in `docker run` is the server's flags: either the fla
 **Readiness and health.** Two routes answer two questions:
 
 - `GET /readyz` on `--ready-listen`: 503 `waiting for the store's writer lock` while another process
-  holds it, 503 `starting` until every listener serves, 200 `ready`, then 503 `draining` from SIGTERM
+  holds a SQLite store's file lock (a Postgres store has none), 503 `starting` until every listener serves, 200 `ready`, then 503 `draining` from SIGTERM
   until the process exits. Route traffic to a container only while it answers 200. With
-  `--ready-listen` and a store, a server whose store's writer lock is held waits for it instead of
-  exiting, so a replacement can be started before the old process has let the lock go.
+  `--ready-listen` and a SQLite store, a server whose store's file lock is held waits for it instead of
+  exiting. Over Postgres a replacement is started before the old process stops and both serve.
 - `GET /healthz` on `--listen`: 200 `ok` while the tick loop runs; 503 `tick loop stopped`, or 503
   `store unreachable` once the store paths have failed for `--store-unreachable-after`. It says
-  nothing about the writer lock.
+  nothing about a lock: a Postgres store has none.
 
 **Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
 `/readyz` 503 `draining` at once and keeps serving for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed; then it stops
@@ -335,12 +335,15 @@ signal while the server waits for the lock or starts ends it at once with status
 the lock.
 
 **Exit status.** 0 after a stop. 2 when the start is refused: a bad flag or file, the store
-unreachable, or (without `--ready-listen`) another process holding the store's writer lock. Do not
+unreachable, or (without `--ready-listen`, on SQLite) another process holding the store's file lock. Do not
 restart a container in a loop on 2: the same flags are refused again. 1 when the server stops on its
-own while running, such as when it loses the store's writer lock.
+own while running.
 
-**One writer per store.** Two servers never serve one store at once: the writer lock lets one in.
-With `--ready-listen`, a second server waits and answers 503 until the first lets the lock go.
+**Servers per store.** Over Postgres any number of servers serve one store at once (one in steady state,
+two while an update starts the new server before it stops the old): none is the leader, and the store's
+transactions keep them from placing one job twice or over-booking a host. A SQLite store is written by one
+process: its file lock lets one in, and with `--ready-listen` a second server waits and answers 503 until the
+first lets the lock go.
 
 An example, with the server on the host's network, its state in `/var/lib/js-lease-server` and its
 flags in a file under `/etc/js-lease-server`, run by the image ID `docker load` printed (the manifest's digest on an engine with the containerd image store):

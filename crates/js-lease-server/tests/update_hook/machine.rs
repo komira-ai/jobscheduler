@@ -19,8 +19,8 @@ use js_lease_server::update_hook::{
     judge, run, run_step, store_target,
 };
 use js_state::postgres::schema::Supported;
-use js_state::postgres::{PostgresConfig, TestDatabase, test_database};
-use js_state::{WriterLock, WriterTarget};
+use js_state::postgres::{PostgresConfig, PostgresStore, TestDatabase, test_database};
+use js_state::{Store, WriterLock, WriterTarget};
 use js_testkit::dir::TestDir;
 use js_update_hook::CommandRunner;
 
@@ -187,12 +187,13 @@ fn a_schema_below_the_oldest_is_too_old() {
 #[test]
 fn a_sqlite_probe_reports_the_holder_and_never_takes_the_lock() {
     let dir = scratch("sqlite");
-    let target = WriterTarget::Sqlite(dir.path().join("state.db"));
+    let file = dir.path().join("state.db");
+    let target = WriterTarget::Sqlite(file.clone());
     let probe = StoreProbe::new(target.clone());
     assert_eq!(probe.writer(), Ok(Writer::Free));
     assert_eq!(probe.schema(), Ok(Schema::Unchecked));
 
-    let held = WriterLock::acquire(&target).unwrap();
+    let held = WriterLock::acquire(&file).unwrap();
     let js_state::LockState::Held { holder } = WriterLock::probe(&target).unwrap() else {
         panic!("the lock is held");
     };
@@ -203,10 +204,10 @@ fn a_sqlite_probe_reports_the_holder_and_never_takes_the_lock() {
         })
     );
     assert_eq!(probe.writer(), probe.writer());
-    assert!(WriterLock::acquire(&target).is_err());
+    assert!(WriterLock::acquire(&file).is_err());
     drop(held);
     assert_eq!(probe.writer(), Ok(Writer::Free));
-    assert!(WriterLock::acquire(&target).is_ok());
+    assert!(WriterLock::acquire(&file).is_ok());
 }
 
 /// Asserts that a SQLite lock file that cannot be read as a token (a directory in its
@@ -227,11 +228,12 @@ fn postgres_target(database: &TestDatabase) -> WriterTarget {
     WriterTarget::Postgres(Box::new(config))
 }
 
-/// Asserts that a fresh test database has a schema this release runs on, and that its writer
-/// is free, then held while a lock is taken, with the holder the lock's own, and that the
-/// probe left the lock alone.
+/// Asserts that a fresh test database has a schema this release runs on, that its writer is
+/// free while no server is connected, and held, with a holder that stays the same while the
+/// server stays connected, once one is (a Postgres store has no lock: the probe reads the
+/// sessions under the server's application name).
 #[test]
-fn a_postgres_probe_reads_the_schema_and_the_writer() {
+fn a_postgres_probe_reads_the_schema_and_the_serving_process() {
     let database = test_database();
     let target = postgres_target(&database);
     let probe = StoreProbe::new(target.clone());
@@ -240,9 +242,13 @@ fn a_postgres_probe_reads_the_schema_and_the_writer() {
         Ok(Schema::Runs(Supported::this_build().max))
     );
     assert_eq!(probe.writer(), Ok(Writer::Free));
-    let held = WriterLock::acquire(&target).unwrap();
+    let WriterTarget::Postgres(config) = &target else {
+        panic!("a Postgres target");
+    };
+    let store = PostgresStore::open(config).unwrap();
+    store.get("k").unwrap();
     let js_state::LockState::Held { holder } = WriterLock::probe(&target).unwrap() else {
-        panic!("the lock is held");
+        panic!("a server is connected");
     };
     assert_eq!(
         probe.writer(),
@@ -250,8 +256,8 @@ fn a_postgres_probe_reads_the_schema_and_the_writer() {
             holder: holder.to_string()
         })
     );
-    assert!(WriterLock::acquire(&target).is_err());
-    drop(held);
+    assert_eq!(probe.writer(), probe.writer());
+    drop(store);
 }
 
 /// Asserts that a database with no schema reads as `Missing`.

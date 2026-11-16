@@ -15,7 +15,7 @@ use js_registry::{Placer, WholeNodeConfig};
 use js_sched::Backfill;
 use js_sched::failover::Refused;
 use js_sched::queue_status::Outcome;
-use js_state::{Store, StoreError};
+use js_state::Store;
 use js_types::{ExecMode, HostId, Resources, Shape};
 use js_types::{JobEventKind, ProviderId, QueueCode};
 use js_types::{ManualClock, Timestamp};
@@ -325,25 +325,6 @@ fn a_commit_that_fails_leaves_the_job_queued_and_the_next_pass_places_it() {
     assert_eq!(rig.placer.engine().whole_jobs.len(), 1);
     rig.at(2_000);
     assert_eq!(rig.go(&recorder), std::slice::from_ref(&j.id));
-}
-
-/// Catches: a store with a newer writer that the pass goes on writing to, and a failed write
-/// that is not counted. A commit answered fenced ends the pass with the error and counts it.
-#[test]
-fn a_fenced_commit_ends_the_pass_with_the_error() {
-    let rig = Rig::quiet();
-    rig.tables.whole("j");
-    rig.at(1_000);
-    let recorder = Recorder::default();
-    rig.tables.store.fail_with(StoreError::Fenced);
-    rig.tables.store.fail_next();
-    let whole = settings();
-    let result = rig.pass(Some(&whole), &["a", "b"], &recorder);
-    assert!(matches!(
-        result,
-        Err(JobStoreError::Store(StoreError::Fenced))
-    ));
-    assert_eq!(recorder.failures(), 1);
 }
 
 /// Catches: a mark write that fails and takes the pass with it (the other jobs would not be
@@ -744,20 +725,6 @@ fn a_status_write_that_fails_is_counted_and_written_at_the_next_pass() {
     rig.go(&recorder);
     assert_eq!(read(&rig, &j.id).queue.since(), Some(store(2_000)));
     assert!(rig.placer.take_outcomes().is_empty());
-}
-
-/// Catches: a status write the store answers as fenced that does not end the pass. The
-/// status write is answered with a newer writer: the pass answers the error.
-#[test]
-fn a_fenced_status_write_ends_the_pass() {
-    let rig = full();
-    rig.tables.share("j");
-    rig.at(1_000);
-    rig.tables.store.fail_with(StoreError::Fenced);
-    rig.tables.store.fail_next();
-    let whole = settings();
-    let answered = rig.pass(Some(&whole), &["a", "b"], &Recorder::default());
-    assert_eq!(answered, Err(JobStoreError::Store(StoreError::Fenced)));
 }
 
 /// Catches: what pass 2 told of a job lost when the write that carried it failed, and given

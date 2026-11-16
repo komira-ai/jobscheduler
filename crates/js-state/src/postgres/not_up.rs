@@ -62,9 +62,8 @@ impl From<Fail> for OpenError {
                 None => io_cause(err).is_some_and(|io| not_listening(io.kind())),
             },
             Fail::Tls(tls) => return OpenError::Tls(tls.clone()),
-            // A schema or durability refusal came from a server that answered; a fence is
-            // never met before the store is open.
-            Fail::Refused(_) | Fail::Fenced => false,
+            // A schema or durability refusal came from a server that answered.
+            Fail::Refused(_) => false,
         };
         let error = fail.into_failed();
         if not_up {
