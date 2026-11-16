@@ -1,9 +1,9 @@
-//! The fleet calls: `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`
-//! and `GetUsage` (design section 3.6). Only a caller of the role `operator` reaches them: the
+//! The fleet calls: `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`,
+//! `ListProviders` and `GetUsage` (design section 3.6). Only a caller of the role `operator` reaches them: the
 //! service's dispatch (`mod.rs`) answers any other `PERMISSION_DENIED` `operator-only` before
 //! a function here runs. An operator reads the hosts with the resources
-//! booked on each, the pools, the machine providers and the ended bookings; the one change
-//! is a host's cordon. A client never sees an allocation as a job concept: what is booked on
+//! booked on each, the pools, the machine providers and the ended bookings; the changes are
+//! a host's cordon and the clear of its stored taint. A client never sees an allocation as a job concept: what is booked on
 //! a host is a read-only [`wire::HostBooking`] in its listing.
 //!
 //! The group's state is [`Ctx`]. Until [`Ctx::served`] gives it the server's handles every
@@ -32,7 +32,12 @@
 //! no length is given, cut to 3600 s, zero refused; a repeat renews and never shortens; the
 //! answer waits for the cordon to be durable and is `UNAVAILABLE` `cordon-unsaved` when it
 //! cannot be: in file mode the cordon then holds on this server all the same; with a store
-//! setting it was not committed, and nothing changed.
+//! setting it was not committed, and nothing changed. A clear of a host's taint
+//! ([`Hosts::clear_taint`]) is the clear a heartbeat's `taint_cleared` makes, made without the
+//! agent's report: the binding without the taint is committed (by compare-and-set, so a store
+//! that holds another taint refuses it), then the registry forgets the taint. It answers
+//! whether a taint was cleared and its reason, writes nothing for a host with none, and is
+//! `UNAVAILABLE` `taint-unsaved` when it cannot be made durable.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -42,9 +47,10 @@ use std::time::Duration;
 use js_jobs::{AllocationRecord, Booked, JobRecord};
 use js_proto::v1 as wire;
 use js_proto::v1::{
-    CordonHostRequest, CordonHostResponse, GetUsageRequest, GetUsageResponse, ListHostsRequest,
-    ListHostsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, UncordonHostRequest, UncordonHostResponse,
+    ClearHostTaintRequest, ClearHostTaintResponse, CordonHostRequest, CordonHostResponse,
+    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListPoolsRequest,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use js_registry::{HostMark, HostState};
 use js_types::HostId;
@@ -55,7 +61,7 @@ use super::JobApi;
 use crate::agents::CordonFault;
 use crate::api::Shared;
 use crate::checks::State;
-use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, UNKNOWN_HOST};
+use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, TAINT_UNSAVED, UNKNOWN_HOST};
 use crate::hosts::{self, HostEntry, HostList, MemoryView, ShapeView, Source};
 use crate::status::Status as PoolStatus;
 use crate::status::{CheckView, MachineView, NamedCheckView, PoolView, PoolsView, ProviderState};
@@ -101,9 +107,14 @@ pub(crate) trait Hosts: Send + Sync {
 
     /// Lifts the cordon of `host` and saves the bindings; whether a cordon was in force.
     async fn uncordon(&self, host: &HostId) -> Result<bool, Refused>;
+
+    /// Clears the taint stored for `host`, in the binding and in the registry, and returns
+    /// the reason code of the taint cleared; `None`, with nothing written, when the host has
+    /// none.
+    async fn clear_taint(&self, host: &HostId) -> Result<Option<String>, Refused>;
 }
 
-/// Why a cordon or an uncordon was not acknowledged.
+/// Why a cordon, an uncordon or a clear of a taint was not acknowledged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refused {
     /// The registry holds no such host: it never said hello, was forgotten, or is static.
@@ -111,6 +122,10 @@ pub(crate) enum Refused {
     /// The change holds on this server, but the bindings that keep it over a restart could
     /// not be written.
     Unsaved,
+    /// The clear of a taint was not committed (nothing changed: the store failed, or holds
+    /// another taint than this server's), or holds on this server but the bindings that keep
+    /// it over a restart could not be written.
+    TaintUnsaved,
 }
 
 /// The status of the pools, as `GET /v1/pools` reads it.
@@ -273,6 +288,23 @@ pub(super) async fn uncordon_host(
     }))
 }
 
+/// `ClearHostTaint`: clears the taint stored for a registered host, so that placement offers
+/// it jobs again; a host with no taint changes nothing.
+pub(super) async fn clear_host_taint(
+    api: &JobApi,
+    request: Request<ClearHostTaintRequest>,
+) -> Result<Response<ClearHostTaintResponse>, Status> {
+    let served = served(api)?;
+    let host = known(&request.into_inner().host_id)?;
+    let cleared = served.hosts.0.clear_taint(&host).await.map_err(refusal)?;
+    let host = one_host(api, served, &host).await?;
+    Ok(Response::new(ClearHostTaintResponse {
+        host: Some(host),
+        cleared: cleared.is_some(),
+        cleared_reason: cleared.unwrap_or_default(),
+    }))
+}
+
 /// `ListPools`: the elastic pools, by name; none for a server without one.
 pub(super) async fn list_pools(
     api: &JobApi,
@@ -358,11 +390,12 @@ fn known(id: &str) -> Result<HostId, Status> {
     HostId::new(id).map_err(|_| Status::not_found(UNKNOWN_HOST))
 }
 
-/// The answer to a refused cordon or uncordon.
+/// The answer to a refused cordon, uncordon or clear of a taint.
 fn refusal(refused: Refused) -> Status {
     match refused {
         Refused::UnknownHost => Status::not_found(UNKNOWN_HOST),
         Refused::Unsaved => Status::unavailable(CORDON_UNSAVED),
+        Refused::TaintUnsaved => Status::unavailable(TAINT_UNSAVED),
     }
 }
 
@@ -751,6 +784,12 @@ impl Hosts for Shared {
         let uncordoned = self.agents().uncordon(host).await;
         Ok(uncordoned.map_err(refused_cordon)?.lifted)
     }
+
+    async fn clear_taint(&self, host: &HostId) -> Result<Option<String>, Refused> {
+        let cleared = self.agents().clear_taint(host).await;
+        let cleared = cleared.map_err(refused_taint)?;
+        Ok(cleared.map(|taint| taint.reason))
+    }
 }
 
 /// A cordon or uncordon that was not done, or not made durable, as the host's own route
@@ -759,6 +798,14 @@ fn refused_cordon(fault: CordonFault) -> Refused {
     match fault {
         CordonFault::NotHeld => Refused::UnknownHost,
         CordonFault::Unsaved => Refused::Unsaved,
+    }
+}
+
+/// A clear of a taint that was not done, or not made durable, as the call answers it.
+fn refused_taint(fault: CordonFault) -> Refused {
+    match fault {
+        CordonFault::NotHeld => Refused::UnknownHost,
+        CordonFault::Unsaved => Refused::TaintUnsaved,
     }
 }
 

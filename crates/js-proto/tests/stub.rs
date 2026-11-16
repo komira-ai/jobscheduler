@@ -13,14 +13,15 @@ use js_proto::refusal::{refusal_of, refusal_status};
 use js_proto::v1::job_service_client::JobServiceClient;
 use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
-    Availability, CancelJobRequest, CancelJobResponse, CordonHostRequest, CordonHostResponse,
-    GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
-    GetResultResponse, GetUsageRequest, GetUsageResponse, Host, HostBooking, HostMark, HostSource,
-    HostState, Job, JobResult, JobState, JobTimes, ListHostsRequest, ListHostsResponse,
-    ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, Machine, Memory, Pool, Provider, ProviderCatalog, ProviderCheck,
-    Refusal, RefusalCode, ResourceUsage, ResultReason, Shape, SubmitJobRequest, SubmitJobResponse,
-    UncordonHostRequest, UncordonHostResponse, UsageRecord, WholeHostOutcome,
+    Availability, CancelJobRequest, CancelJobResponse, ClearHostTaintRequest,
+    ClearHostTaintResponse, CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse,
+    GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest,
+    GetUsageResponse, Host, HostBooking, HostMark, HostSource, HostState, Job, JobResult, JobState,
+    JobTimes, ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse,
+    ListPoolsRequest, ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, Machine,
+    Memory, Pool, Provider, ProviderCatalog, ProviderCheck, Refusal, RefusalCode, ResourceUsage,
+    ResultReason, Shape, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse, UsageRecord, WholeHostOutcome,
 };
 use tokio::io::DuplexStream;
 use tonic::codegen::Service;
@@ -82,6 +83,7 @@ enum Call {
     ListHosts(ListHostsRequest),
     CordonHost(CordonHostRequest),
     UncordonHost(UncordonHostRequest),
+    ClearHostTaint(ClearHostTaintRequest),
     ListPools(ListPoolsRequest),
     ListProviders(ListProvidersRequest),
     GetUsage(GetUsageRequest),
@@ -184,6 +186,16 @@ impl JobService for Recording {
         )
     }
 
+    async fn clear_host_taint(
+        &self,
+        request: Request<ClearHostTaintRequest>,
+    ) -> Result<Response<ClearHostTaintResponse>, Status> {
+        self.record(
+            Call::ClearHostTaint(request.into_inner()),
+            answers::clear_host_taint(),
+        )
+    }
+
     async fn list_pools(
         &self,
         request: Request<ListPoolsRequest>,
@@ -267,6 +279,12 @@ mod requests {
     pub fn uncordon_host() -> UncordonHostRequest {
         UncordonHostRequest {
             host_id: "uncordon-host".to_owned(),
+        }
+    }
+
+    pub fn clear_host_taint() -> ClearHostTaintRequest {
+        ClearHostTaintRequest {
+            host_id: "tainted-host".to_owned(),
         }
     }
 
@@ -422,6 +440,14 @@ mod answers {
         }
     }
 
+    pub fn clear_host_taint() -> ClearHostTaintResponse {
+        ClearHostTaintResponse {
+            host: Some(host("cleared-host")),
+            cleared: true,
+            cleared_reason: "residue".to_owned(),
+        }
+    }
+
     pub fn list_pools() -> ListPoolsResponse {
         ListPoolsResponse {
             pools: vec![Pool {
@@ -548,6 +574,10 @@ async fn every_method_round_trips_through_a_stub() {
         answers::uncordon_host()
     );
     assert_eq!(
+        answer(client.clear_host_taint(requests::clear_host_taint()).await),
+        answers::clear_host_taint()
+    );
+    assert_eq!(
         answer(client.list_pools(ListPoolsRequest {}).await),
         answers::list_pools()
     );
@@ -571,6 +601,7 @@ async fn every_method_round_trips_through_a_stub() {
             Call::ListHosts(ListHostsRequest {}),
             Call::CordonHost(requests::cordon_host()),
             Call::UncordonHost(requests::uncordon_host()),
+            Call::ClearHostTaint(requests::clear_host_taint()),
             Call::ListPools(ListPoolsRequest {}),
             Call::ListProviders(ListProvidersRequest {}),
             Call::GetUsage(requests::get_usage()),
@@ -647,7 +678,7 @@ impl JobService for OnlyGetJob {
 }
 
 /// Asserts that a server implementing only `GetJob` answers it and answers each of the
-/// other 11 methods `UNIMPLEMENTED`, so a partial server fails closed.
+/// other 12 methods `UNIMPLEMENTED`, so a partial server fails closed.
 #[tokio::test]
 async fn unimplemented_default_methods_answer_unimplemented() {
     let mut client = connect(OnlyGetJob).await;
@@ -668,9 +699,10 @@ async fn unimplemented_default_methods_answer_unimplemented() {
         code(client.list_hosts(ListHostsRequest {}).await),
         code(client.cordon_host(requests::cordon_host()).await),
         code(client.uncordon_host(requests::uncordon_host()).await),
+        code(client.clear_host_taint(requests::clear_host_taint()).await),
         code(client.list_pools(ListPoolsRequest {}).await),
         code(client.list_providers(ListProvidersRequest {}).await),
         code(client.get_usage(requests::get_usage()).await),
     ];
-    assert_eq!(codes, [Code::Unimplemented; 11]);
+    assert_eq!(codes, [Code::Unimplemented; 12]);
 }

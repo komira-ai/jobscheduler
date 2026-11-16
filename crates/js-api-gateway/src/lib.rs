@@ -22,7 +22,7 @@
 //! for route in js_api_gateway::ROUTES {
 //!     println!("{} {} -> {}", route.verb.as_str(), route.template, route.rpc.name());
 //! }
-//! assert_eq!(js_api_gateway::ROUTES.len(), 12);
+//! assert_eq!(js_api_gateway::ROUTES.len(), 13);
 //! ```
 //!
 //! A call that changes state is a POST and a read is a GET. `CancelJob` is

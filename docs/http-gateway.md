@@ -45,6 +45,7 @@ writes it between the markers below, and `cargo xtask gen-job-surface --check --
 | `GET /v1/hosts` | `ListHosts` | 200 |
 | `POST /v1/hosts/{host_id}:cordon` | `CordonHost` | 200 |
 | `POST /v1/hosts/{host_id}:uncordon` | `UncordonHost` | 200 |
+| `POST /v1/hosts/{host_id}:cleartaint` | `ClearHostTaint` | 200 |
 | `GET /v1/pools` | `ListPools` | 200 |
 | `GET /v1/providers` | `ListProviders` | 200 |
 | `GET /v1/usage` | `GetUsage` | 200 |
@@ -190,7 +191,7 @@ request.
 | `SubmitJob` | yes | yes |
 | `GetJob`, `GetResult`, `GetLogs`, `CancelJob` | its own jobs only | every job |
 | `ListJobs` | its own jobs only, whatever the filter | every job |
-| `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403 `operator-only`) | yes |
+| `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403 `operator-only`) | yes |
 
 A client's own jobs are the ones recorded with its name. A job recorded with no client
 (submitted before clients were named) belongs to no client, so only an operator can read or
@@ -237,15 +238,15 @@ along with them.
 
 - `call`: the method.
 - `client` and `role`: the caller, from its token.
-- `target`: the job id, or the host for `CordonHost` and `UncordonHost`; empty for a listing.
+- `target`: the job id, or the host for `CordonHost`, `UncordonHost` and `ClearHostTaint`; empty for a listing.
 - `job`: the job alone, as before.
 - `outcome`: `ok`, `denied` (a client's fleet call, or another client's job, logged as
   `denied` although the answer is `unknown-job`), `not-found`, `refused` (an argument, a
   conflict or a precondition), or `failed` (the server could not answer).
 - `code`: the gRPC code.
 
-This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost` and
-`UncordonHost`. No line holds a token or its digest. A request whose token is no client's
+This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost`,
+`UncordonHost` and `ClearHostTaint`. No line holds a token or its digest. A request whose token is no client's
 reaches no call and writes no call line. The job record does not take a `cancelled_by` field:
 the line is the record of who cancelled.
 
@@ -265,7 +266,7 @@ A request carries at most 64 KiB over either transport: a larger gateway body is
 | `GetJob`, `ListJobs`, `GetResult`, `GetLogs` | `read.rs` |
 | `SubmitJob` | `submit.rs` (its checks in `validate.rs`) |
 | `CancelJob` | `cancel.rs` |
-| `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
+| `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
 
 ### Serving the read calls
 
@@ -488,6 +489,18 @@ generated paragraph above.
   only once the bindings are written: when they cannot be, the answer is `UNAVAILABLE`
   `cordon-unsaved` and the change holds on this server all the same. A host the registry does
   not hold (a static host, or one that never said hello) is `NOT_FOUND` `unknown-host`.
+- `ClearHostTaint` clears the taint the server stores for a host, so the host is offered jobs
+  again: the registry's taint and the host's stored binding, by the compare-and-set a
+  heartbeat's `taint_cleared` uses, under the same lock. `cleared` says a taint was there and
+  is gone, and `cleared_reason` is its reason code; a host with no taint answers `cleared`
+  false and nothing is written. A store that holds another taint than the server (another
+  server's newer report) refuses the clear, `UNAVAILABLE` `taint-unsaved`, and nothing
+  changes; in file mode, when the bindings file cannot be written, the clear holds on this
+  server all the same. A host the registry does not hold is `NOT_FOUND` `unknown-host`. The
+  call does not reach the agent: an agent whose marker still holds the taint refuses the next
+  start `host-tainted`, which the server takes as the host's taint again, so the operator
+  moves the agent's `taint.json` and its `owed-*` records aside first, or lets the agent clear
+  the taint itself ([design/taint-self-clearing.md](design/taint-self-clearing.md)).
 - `ListPools` and `ListProviders` read the status `GET /v1/pools` writes: per elastic pool its
   name, kind, state, reasons, memory, machine count and last tick; per pool's provider its
   credentials check and its own checks, and the machines it launched. Nothing else of the
@@ -513,7 +526,7 @@ generated paragraph above.
 
 Over the gateway, a fleet call's `INVALID_ARGUMENT` is 400 `invalid-argument` as for any call,
 but the gateway's error table does not name the fleet calls' other refusals yet: `unknown-host`
-(`NOT_FOUND`), and `cordon-unsaved`, `store-unavailable` and `usage-unavailable`
+(`NOT_FOUND`), and `cordon-unsaved`, `taint-unsaved`, `store-unavailable` and `usage-unavailable`
 (`UNAVAILABLE`), each answer 500 `internal`.
 
 None of the reads takes a write lock, writes a row or counts anything. The hand-written

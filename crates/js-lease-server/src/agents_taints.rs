@@ -1,6 +1,6 @@
 //! The taint of a host job on the host's binding: written after the pass that placed the job
 //! ([`Agents::keep_taints`]) and put back at start from the job store's taint rows
-//! ([`restore_job_taints`]).
+//! ([`restore_job_taints`]); and the operator's clear of a host's taint ([`Agents::clear_taint`]).
 //!
 //! The placement commit writes `taint/<host>` in the job store, and the host's binding lives
 //! in another store (the `--store` state store, or the `.agents` file), so the two cannot be
@@ -17,9 +17,9 @@ use js_agent_wire::Taint;
 use js_jobs::HOST_JOB_TAINT;
 use js_registry::Binding;
 use js_types::HostId;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use super::Agents;
+use super::{Agents, CordonFault};
 use crate::agent_state::BindingStore;
 use crate::error::StartupError;
 use crate::job_store::ServerJobs;
@@ -59,6 +59,39 @@ impl Agents {
         if let Err(error) = dropped {
             warn!(%error, "a host job's taint row is not deleted; the next start deletes it");
         }
+    }
+
+    /// Clears the taint the registry holds for `host`, as the operator's `ClearHostTaint`
+    /// asks, and returns the taint it cleared; `None`, with nothing written, for a host that
+    /// has none. It is the clear of a heartbeat's `taint_cleared` made without the agent's
+    /// report, in the same order and under the same gate: under [`Agents::host_writes`] the
+    /// binding without the taint is committed first, by the compare-and-set of
+    /// [`Agents::keep_taint`] (refused when the store holds another taint than this server's),
+    /// then the registry forgets the taint, then in file mode the file is saved. It does not
+    /// reach the agent, which reports its own taint again if its marker still holds it.
+    ///
+    /// # Errors
+    ///
+    /// [`CordonFault::NotHeld`] for a host the registry does not hold;
+    /// [`CordonFault::Unsaved`] when the commit failed or was refused (nothing changed), or in
+    /// file mode when the save after it did (the clear holds on this server).
+    pub(crate) async fn clear_taint(
+        self: &Arc<Self>,
+        host: &HostId,
+    ) -> Result<Option<Taint>, CordonFault> {
+        let gate = self.host_writes.lock().await;
+        let held = self.registry.own_host(host).ok_or(CordonFault::NotHeld)?;
+        if held.host.taint.is_none() {
+            return Ok(None);
+        }
+        self.keep_taint(host, None).await.map_err(|error| {
+            error!(%error, "cannot commit the clearing of a host's taint");
+            CordonFault::Unsaved
+        })?;
+        let cleared = self.registry.clear_taint(host);
+        drop(gate);
+        self.saved().await?;
+        Ok(cleared)
     }
 }
 

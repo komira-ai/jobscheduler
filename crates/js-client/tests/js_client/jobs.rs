@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use js_client::jobs::{Dialer, JobClient, JobError};
 use js_proto::v1::{
-    CancelJobRequest, CordonHostRequest, GetJobRequest, GetLogsRequest, GetResultRequest,
-    GetUsageRequest, JobSpec, ListHostsRequest, ListJobsRequest, ListPoolsRequest,
+    CancelJobRequest, ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetLogsRequest,
+    GetResultRequest, GetUsageRequest, JobSpec, ListHostsRequest, ListJobsRequest, ListPoolsRequest,
     ListProvidersRequest, Needs, SubmitJobRequest, UncordonHostRequest,
 };
 use prost::Message as _;
@@ -251,6 +251,9 @@ async fn job_client_sends_the_bearer_on_every_call() {
     jobs.uncordon_host(UncordonHostRequest::default())
         .await
         .unwrap();
+    jobs.clear_host_taint(ClearHostTaintRequest::default())
+        .await
+        .unwrap();
     jobs.list_pools(ListPoolsRequest {}).await.unwrap();
     jobs.list_providers(ListProvidersRequest {}).await.unwrap();
     jobs.get_usage(GetUsageRequest::default()).await.unwrap();
@@ -271,6 +274,7 @@ async fn job_client_sends_the_bearer_on_every_call() {
             "ListHosts",
             "CordonHost",
             "UncordonHost",
+            "ClearHostTaint",
             "ListPools",
             "ListProviders",
             "GetUsage",
@@ -451,6 +455,7 @@ async fn every_call_classifies_a_refusal_and_a_lost_answer() {
         "ListHosts",
         "CordonHost",
         "UncordonHost",
+        "ClearHostTaint",
         "ListPools",
         "ListProviders",
         "GetUsage",
@@ -477,6 +482,11 @@ async fn every_call_classifies_a_refusal_and_a_lost_answer() {
         said.push(jobs.cordon_host(CordonHostRequest::default()).await.err());
         said.push(
             jobs.uncordon_host(UncordonHostRequest::default())
+                .await
+                .err(),
+        );
+        said.push(
+            jobs.clear_host_taint(ClearHostTaintRequest::default())
                 .await
                 .err(),
         );

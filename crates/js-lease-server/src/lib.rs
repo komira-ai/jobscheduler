@@ -350,7 +350,7 @@
 //! [`SERVED_CALLS`] are served: `SubmitJob` (validated, idempotent on the job id, admitted
 //! over the registered hosts and the pool's catalog, committed before it answers; its wall
 //! limit held to `--max-job-wall`), `CancelJob` and the reads, and the fleet calls (`ListHosts`,
-//! `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
+//! `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
 //! hosts, the status of its pools, and its usage and job stores. `docs/http-gateway.md` has the answers
 //! of each call. The port has the connection cap and the timeouts of the other listeners, and
 //! stops with them. The job routes are not served on `--listen`: the gateway's `/v1/hosts`
@@ -548,15 +548,21 @@
 //! toward `max_machines`, is never forgotten for being silent, and keeps its taint across its own
 //! hello and a server restart (the `.agents` file or the store holds it, see "Restart"). The runs
 //! it already holds finish: their stops are sent, their results are acknowledged, and the budget
-//! returns when the host stops listing them. A taint ends in one way: the agent's own heartbeat
-//! reports it cleared (`taint_cleared`: the agent re-checked an idle host twice, see its
-//! `--taint-recheck-ms`). The server clears the host's taint when `taint_cleared` equals the
+//! returns when the host stops listing them. A taint ends in one of two ways. The first is the
+//! agent's own heartbeat, which reports it cleared (`taint_cleared`: the agent re-checked an idle host twice, see its
+//! `--taint-recheck-ms`): the server clears the host's taint when `taint_cleared` equals the
 //! taint it holds, field for field, commits the binding without it first (as for a report), and
 //! answers `taint_cleared_ack: true` (not `taint_ack`, which answers a taint report, so that a late acknowledgement of the report cannot end the agent's taint before the server has heard of the clear), so the agent stops sending it; a cleared report of any other
 //! taint (a host job's, say) changes nothing and is acknowledged all the same. A start refused
 //! `host-tainted` in the beat that reports the clear taints nothing: those results predate it.
-//! Otherwise an operator stops the server and removes the `taint_` keys of the host's entry in the
-//! `.agents` file (or of its value in the store). A job with host isolation taints its host when
+//! The second is the operator's `ClearHostTaint` call of the job service (`js host host-taint`),
+//! for a taint the agent will not report cleared (an agent too old to report a clear, a marker
+//! moved aside by hand, a reimaged host): the server commits the binding without the taint by
+//! the same compare-and-set as a heartbeat's clear, under the same lock, then forgets it in the
+//! registry; a host that has none changes nothing and writes nothing. The call does not reach
+//! the agent, so an agent whose marker still holds the taint refuses the next start
+//! `host-tainted`, which the server takes as the host's taint again: the operator moves the
+//! agent's `taint.json` and its `owed-*` records aside first. A job with host isolation taints its host when
 //! its placement commits (reason `host-job`, `run_id` the job's id; `docs/runbooks/host-jobs.md`),
 //! and its own start is still sent. An agent that cleared a taint stays tainted for the server
 //! until it is acknowledged, so a server that does not know the field (an older release) leaves

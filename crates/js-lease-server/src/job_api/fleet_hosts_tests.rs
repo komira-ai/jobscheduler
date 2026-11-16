@@ -211,10 +211,12 @@ async fn a_cordon_whose_host_is_gone_is_not_found() {
     let unknown = (Code::NotFound, UNKNOWN_HOST.to_owned());
     assert_eq!(refused(cordon(&api, "gone", Some(60)).await), unknown);
     assert_eq!(refused(uncordon(&api, "gone").await), unknown);
+    assert_eq!(refused(clear_taint(&api, "gone").await), unknown);
     let mut refusing = FakeHosts::new();
     refusing.answer = Err(Refused::UnknownHost);
     let api = api_over(Arc::new(refusing), Arc::new(FakePools(no_pools)), None);
     assert_eq!(refused(cordon(&api, "gone", Some(60)).await), unknown);
+    assert_eq!(refused(clear_taint(&api, "gone").await), unknown);
 }
 
 /// The message types `ListHostsResponse` is made of, with the enums they use: its own

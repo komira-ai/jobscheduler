@@ -1,8 +1,13 @@
-//! The taint a failed prepare of a whole-host job puts on its host.
+//! The taint a failed prepare of a whole-host job puts on its host, and the clear an
+//! operator makes.
 //!
 //! A whole-host job whose prepare the agent refuses `host-unsafe` taints its host; the
-//! placement engine that fails the prepare asks for the taint here.
+//! placement engine that fails the prepare asks for the taint here. The one other way a
+//! taint ends, besides the host's own report that it cleared it ([`Registry::heartbeat`]), is
+//! [`Registry::clear_taint`], which the operator's call makes after the caller has written
+//! the binding without it.
 
+use js_agent_wire::Taint;
 use js_types::HostId;
 
 use super::Registry;
@@ -22,5 +27,16 @@ impl Registry {
         let changed = record.taint.is_none();
         record.taint.get_or_insert_with(prepare_taint);
         changed
+    }
+
+    /// Ends the taint of `host`, whoever set it, and returns the taint it held: `None` when
+    /// the registry does not hold `host` or the host has none, and then nothing changes. From
+    /// then on the host's view ([`Registry::hosts`]) and [`Registry::bindings`] carry no taint
+    /// and placement offers the host jobs again. It is for the operator's clear of a taint
+    /// the agent will not report cleared; a caller that persists bindings writes the binding
+    /// without the taint first.
+    pub fn clear_taint(&self, host: &HostId) -> Option<Taint> {
+        let mut guard = self.lock();
+        guard.records.get_mut(host)?.taint.take()
     }
 }

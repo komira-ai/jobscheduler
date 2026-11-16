@@ -86,6 +86,22 @@ taint with a clear, or revive a cleared taint with a report. Left stuck on purpo
 visible as `state-write-failed`: a server whose memory differs from the store keeps refusing
 until it restarts and reads the store.
 
+### The operator's clear
+
+A taint the agent will not report cleared stays stored for good: an agent whose marker an
+operator moved aside by hand, a reimaged host, an agent too old to report a clear. The job
+service's `ClearHostTaint` (operator only, `POST /v1/hosts/{host_id}:cleartaint`,
+`js host host-taint --host-id ID`) clears the stored taint. It is the heartbeat's clear made without
+the agent's report, through the same code: under the same lock the binding without the
+taint is committed by the same compare-and-set (a store that holds another taint refuses it,
+`UNAVAILABLE` `taint-unsaved`, and nothing changes), then the registry forgets the taint, then
+in file mode the file is saved. The answer says whether a taint was cleared (`cleared`) and
+its reason (`cleared_reason`); a host with no taint answers `cleared` false and nothing is
+written; an unknown host is `NOT_FOUND`. The call does not reach the agent: an agent whose
+marker still holds the taint refuses the next start `host-tainted`, and the server takes that
+refusal as the host's taint again, so the operator moves the agent's `taint.json` and its
+`owed-*` records aside first, or lets the agent clear it itself.
+
 ## Left out on purpose
 
 Clearing `process-as-job-user` or `daemonised-child` residue that is still there at the re-check: it stays tainted, because a
@@ -94,7 +110,7 @@ process that outlives the container and the wait is the escape the check exists 
 ## Compatibility
 
 Additive: one new optional flag with a default; one new optional heartbeat field (`taint_cleared`, absent when none, ignored
-by a server that does not know it); the taint file keeps its format; the cleared copy uses the name operators already
+by a server that does not know it); one new job-service call, `ClearHostTaint`, with its own request and answer messages; the taint file keeps its format; the cleared copy uses the name operators already
 use. An older agent reading the directory sees no `taint.json` and starts clean, as after an operator's clear.
 
 ## Tests
@@ -103,5 +119,6 @@ js-agent `tests/agent/lifecycle/taint_clear.rs` (a residue taint on an idle host
 acknowledgement, and the file is kept as `taint.json.cleared-<time>`; a re-check that still finds the process keeps the
 taint and the count starts again; `cleanup-failed`, `check-owed`, `host-job` and the mount, user, group, module and
 watched-directory residues never clear; a run held keeps the re-checks off), `tests/agent/integrity/lifecycle.rs` (the
-real checks over the in-memory host), js-registry `tests/taint_cleared.rs` and js-lease-server `tests/server/host_taints.rs`
-(the server's side), js-agent-wire `tests/golden.rs`, `previous_release.rs` and `hostile_heartbeat.rs` (the field).
+real checks over the in-memory host), js-registry `tests/taint_cleared.rs` and `tests/taint_host.rs`,
+js-lease-server `tests/server/host_taints.rs` and `src/job_api/fleet_tests.rs` (the server's side, and the
+operator's clear), js-agent-wire `tests/golden.rs`, `previous_release.rs` and `hostile_heartbeat.rs` (the field).

@@ -56,7 +56,8 @@
 //! js job list [--states S ...] [--labels K=V ...] [--page-size N] [--page-token T]
 //! js job result --job-id ID       js job logs --job-id ID
 //! js host list                    js host cordon --host-id ID [--cordon-secs <dur>]
-//! js host uncordon --host-id ID   js pool list     js provider list
+//! js host uncordon --host-id ID   js host host-taint --host-id ID
+//! js pool list                    js provider list
 //! js usage [--from-ms N] [--to-ms N] [--host-id ID] [--job-id ID] ...
 //! js job wait --job-id ID         js job follow --job-id ID [--stream stdout|stderr]
 //! js job run <the flags of job submit>
