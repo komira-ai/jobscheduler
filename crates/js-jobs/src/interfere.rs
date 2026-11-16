@@ -312,6 +312,32 @@ mod tests {
         assert_eq!(store.take_reads(), []);
     }
 
+    // Catches a head that is not the inner store's: it moves with a commit, and a decision made
+    // through the wrapper (which counts as a commit for the hook and the failure countdown) is
+    // the inner store's.
+    #[test]
+    fn the_head_and_a_claimed_decision_are_the_inner_stores() {
+        use js_state::Claim;
+        let store = wrapped();
+        let before = store.head().expect("answers");
+        put(&store, "q").expect("commits");
+        assert_ne!(
+            store.head().expect("answers"),
+            before,
+            "a commit moves the head"
+        );
+        let claim = ["q".to_owned()];
+        let placed = store
+            .claim_decide(&claim, &mut |_| {
+                Some(Txn::new().put("p", "1", Cond::Absent))
+            })
+            .expect("answers");
+        assert!(matches!(placed, Claim::Committed(_)), "{placed:?}");
+        store.fail_next();
+        let failed = store.claim_decide(&claim, &mut |_| None);
+        assert_eq!(failed, Err(StoreError::Failed(INJECTED.to_owned())));
+    }
+
     // Catches an injected error that is not the one told: a failed commit and a failed read
     // each answer the error `fail_with` set, and the default stays `Failed` until then.
     #[test]
