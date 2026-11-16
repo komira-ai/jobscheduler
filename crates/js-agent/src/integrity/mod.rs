@@ -15,7 +15,10 @@
 //! could not remove; see [`CheckHook::idle`]): what changed between jobs is the host's, not
 //! a job's. So the baseline is the host as it was after the last job that left nothing, or
 //! when the job started on an idle host. A check that finds something leaves it alone (the
-//! host is tainted for good, and every later job is compared with the last clean state).
+//! host is tainted, and every later check is compared with the last clean state). The
+//! re-checks of a taint that may clear itself (see [`crate::lifecycle::taint`]) are these
+//! same checks, run on an idle host with nothing live: one that passes takes the baseline
+//! again, as after any job that leaves nothing.
 //!
 //! # What is checked
 //!
@@ -32,6 +35,13 @@
 //!
 //! A new process and a new mount count only when they are not the host's own (see
 //! [What the host does while jobs run](#what-the-host-does-while-jobs-run)).
+//!
+//! A new process counts only when it is still there after the settle wait
+//! ([`Integrity::with_settle`], `--settle-ms`): the checks that would call one a job's
+//! leftover look again after the wait and judge the processes of the first look that are
+//! still there. The service manager's fork of a unit (its parent is `init` for the moment
+//! before it is moved into the unit's control group), and a process that is ending, are
+//! gone by then; a job's leftover is not.
 //!
 //! A check that cannot run is a finding, never a skipped check. When several things are
 //! found, the code is the first's (in the order of the table) and the detail holds all of
@@ -146,7 +156,7 @@
 //!   by a part of a longer name (`run-3-1` and `run-3-12`).
 //! - **A runtime that cannot see a container's group** is blind: see
 //!   [`Runtime::places_in_cgroup`](crate::lifecycle::Runtime::places_in_cgroup); the
-//!   lifecycle taints the host as unchecked when it sees such a run, still running, with no group.
+//!   lifecycle taints the host as unchecked when it sees such a run, still running, with no group for the settle wait (`--settle-ms`).
 //! - **A network namespace Podman pins** (`nsfs` at `/run/netns/<name>`: one per container,
 //!   a neighbour's included, named without the container id), **the bind of `/run/netns`
 //!   onto itself** (`tmpfs`, root `/netns`) that the first container after a boot makes,
@@ -194,6 +204,7 @@ mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::cli_runtime::{IdRange, JobUsers};
 use crate::lifecycle::{CheckFinding, CheckHook, Finished};
@@ -574,6 +585,9 @@ pub struct Integrity {
     baseline: Snapshot,
     /// The agent's own control group (its unified path), which is never the host's.
     own: Option<String>,
+    /// How long a process the checks would call a job's leftover must go on before it is
+    /// one (`--settle-ms`); zero looks once.
+    settle: Duration,
 }
 
 impl Integrity {
@@ -605,6 +619,7 @@ impl Integrity {
             watch,
             baseline: Snapshot::default(),
             own,
+            settle: Duration::ZERO,
         };
         this.baseline = this.observe().map_err(|problems| {
             format!(
@@ -613,6 +628,21 @@ impl Integrity {
             )
         })?;
         Ok(this)
+    }
+
+    /// The same checks, which count a process the baseline did not have as a job's leftover
+    /// (`process-as-job-user`, `daemonised-child`) only when it is still there `wait` after
+    /// they first saw it: the checks look again then, and keep of the processes of the
+    /// first look the ones still there. A host's own process that lives for a moment (the
+    /// service manager's fork of a timer's unit, whose parent is `init` until it is moved
+    /// into the unit's control group) is gone by then; a job's leftover is not. With no wait
+    /// (what [`Integrity::start`] gives) the checks look once.
+    #[must_use]
+    pub fn with_settle(self, wait: Duration) -> Self {
+        Self {
+            settle: wait,
+            ..self
+        }
     }
 
     /// Tells the checks that the containers run as the slots' users, the container uid of
@@ -679,6 +709,33 @@ impl Integrity {
         }
     }
 
+    /// The host after `job`, and what differs from the baseline. A process that would be a
+    /// leftover of the job is looked at again after the settle wait, and only the processes
+    /// of the first look that are still there are judged; the second look is the host that
+    /// is compared. A process that starts during the wait is judged by the next check, and
+    /// is not in the baseline this one may take.
+    fn look(&self, job: &Finished<'_>) -> Result<(Snapshot, Vec<Problem>), Vec<Problem>> {
+        let first = self.observe()?;
+        let found = self.compare(&first, job);
+        let leftover = found.iter().any(|problem| {
+            matches!(
+                problem.code,
+                code::PROCESS_AS_JOB_USER | code::DAEMONISED_CHILD
+            )
+        });
+        if self.settle.is_zero() || !leftover {
+            return Ok((first, found));
+        }
+        self.view.settle(self.settle);
+        let mut later = self.observe()?;
+        let seen: BTreeSet<(u32, u64)> = first.processes.iter().map(Process::key).collect();
+        later
+            .processes
+            .retain(|process| seen.contains(&process.key()));
+        let found = self.compare(&later, job);
+        Ok((later, found))
+    }
+
     /// What differs between the baseline and `now`, in the order of the table of the module.
     fn compare(&self, now: &Snapshot, job: &Finished<'_>) -> Vec<Problem> {
         let mine = |text: &str| is_live(job, text);
@@ -727,8 +784,8 @@ impl Integrity {
                         .filter(|_| own == Some(stray.uid))
                         .map_or(String::new(), |slot| format!(" (leftover of slot {slot})"));
                     format!(
-                        "pid {} of user {} is running after job {}{slot}",
-                        stray.pid, stray.uid, job.run_id
+                        "pid {} ({}, state {}, cgroup {}) of user {} is running after job {}{slot}",
+                        stray.pid, stray.comm, stray.state, stray.cgroup, stray.uid, job.run_id
                     )
                 }),
             ),
@@ -736,8 +793,8 @@ impl Integrity {
                 code::DAEMONISED_CHILD,
                 daemonised.map(|stray| {
                     format!(
-                        "pid {} was left behind by job {} (parent init)",
-                        stray.pid, job.run_id
+                        "pid {} ({}, state {}, cgroup {}) was left behind by job {} (parent init)",
+                        stray.pid, stray.comm, stray.state, stray.cgroup, job.run_id
                     )
                 }),
             ),
@@ -822,10 +879,9 @@ impl CheckHook for Integrity {
     }
 
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
-        let problems = match self.observe() {
+        let problems = match self.look(job) {
             Err(unrun) => unrun,
-            Ok(now) => {
-                let found = self.compare(&now, job);
+            Ok((now, found)) => {
                 if found.is_empty() {
                     self.baseline = now.without_live(job);
                 }

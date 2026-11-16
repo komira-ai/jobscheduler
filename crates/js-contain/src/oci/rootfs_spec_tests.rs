@@ -138,3 +138,38 @@ fn a_host_mount_at_the_exec_root_takes_the_overlays_place() {
     let (_, overlay) = mount_at(&plain, "/job/root").expect("the overlay");
     assert_eq!(overlay["type"], "overlay");
 }
+
+/// Catches the exec root's empty overlay mounted over a layered root's own `/work` (the
+/// action's inputs are there), a shared tree lost with it, or the working directory moved;
+/// and a job without a mounted root losing its overlay.
+#[test]
+fn a_mounted_root_has_no_exec_root_overlay_and_keeps_its_shared_mounts() {
+    use crate::container::SharedMount;
+    let shared = vec![SharedMount {
+        path: "lib".to_owned(),
+        source: PathBuf::from("/scratch/trees/bb"),
+    }];
+    let mut layered = spec();
+    layered.mounted_root = Some(PathBuf::from("/run/js-agent/mounts/lease-1-2/rootfs"));
+    layered.shared.clone_from(&shared);
+    let config = config_of(&layered);
+    let work = layered.exec_root.clone();
+    assert!(mount_at(&config, &work).is_none(), "{config}");
+    assert!(
+        config["mounts"]
+            .as_array()
+            .expect("mounts")
+            .iter()
+            .all(|m| m["type"] != "overlay"),
+        "{config}"
+    );
+    let (_, lib) = mount_at(&config, &format!("{work}/lib")).expect("shared mount");
+    assert_eq!(lib["source"], "/scratch/trees/bb");
+    assert_eq!(config["process"]["cwd"], format!("{work}/pkg"));
+
+    let mut plain = spec();
+    plain.shared = shared;
+    let config = config_of(&plain);
+    let (_, overlay) = mount_at(&config, &work).expect("overlay");
+    assert_eq!(overlay["type"], "overlay");
+}

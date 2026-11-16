@@ -2,23 +2,16 @@
 # crates/js-mac-probe prints a JSON report and exits non-zero when a probe with an
 # expected outcome is wrong; probes whose answer is unknown only report. No sudo: the
 # probe runs as the runner's own user; the trace file is uploaded with the report. The image
-# is pinned to macos-15 (macos-14 retires on 2026-11-02). It runs only when the probe crate or
-# this file changes (not on lockfile or toolchain bumps), to spare the scarce macOS runners.
+# is pinned to macos-15 (macos-14 retires on 2026-11-02). It runs in the beta stage of the
+# release (release.yml's `beta-macos-probe` calls this file on a push to main) and by hand; no
+# pull request runs it.
 name: macos-probe
 
 on:
-  pull_request:
-    paths:
-      - crates/js-mac-probe/**
-      - .github/workflows/macos-probe.yml
+  workflow_call:
   workflow_dispatch:
 
 permissions: {}
-
-# One run per pull request: a new push cancels the queued or running probe of that PR.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

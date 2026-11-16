@@ -14,9 +14,9 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 |---|---|
 | `--listen`, `--state-file` (the base path of the server's files: `.jobs`, `.agents`, `.joins`, `.scaler`; there is no lease file), `--boot` (`initialise` or `resume`; it governs the first start and whether the records files are required), `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
 | `--default-ttl`, `--max-ttl` | removed: a lease has no time to live (it ends when released or at its maximum wall time). Either flag, and the keys `server.default_ttl` and `server.max_ttl`, are refused at start naming the flag or the key |
-| `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
+| `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout`, `--drain-hold` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is deprecated and does nothing: js-sched is the only placement, `"js-sched"` is accepted with a warning and `"registry"` is refused at start; a joined pool whose capabilities name no `arch` is refused, as with the flag, and an elastic pool, whose floor names none, is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent); refused unless a pool registers agents |
-| `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |
+| `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (with `--store` the usage rows are in the store and `usage_db` is not used; `usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |
 | `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
 | `--job-feed-retention` | `server.job_feed_retention`, same default (`100000`) and rules: how many of the newest changes of the job store's change feed each tick keeps, a whole number of at least 1 (a count of feed changes, never a time); zero or a non-number is refused at start naming the flag or the key. Older rows are trimmed by the job pass of the tick, and a reader whose cursor is behind them is refused with a stale-cursor error and starts again from the tables. It is read once at start and applies to the job store of `--job-listen`; without `--job-listen` the setting is checked and kept, and nothing reads it |
 | `--job-allocation-retention` | `server.job_allocation_retention`, same default (`14d`) and rules as `--job-retention`: how long a freed allocation's row is kept after its free, a whole count of days or a duration of at least one minute. The tick deletes freed rows past it, at most 500 a tick; booked and releasing rows, and the usage history of an allocation, are never deleted. It is read once at start and applies to the job store of `--job-listen`; without `--job-listen` the setting is checked and kept, and nothing reads it |
@@ -72,9 +72,8 @@ changing its role, takes a restart (a restart ends no job); `default`'s token is
   at start naming the flag.
 - **Agents.** The flag needs `--agent-pool-config` (the key, a pool that registers agents): the job store is held by the agent side,
   and jobs run on hosts that register.
-- **The job store.** Turning the port on opens the job store: today a SQLite file named after the state file, `<state file>.jobs`, owned
-  by the server's user and owner-only (mode 0600), with SQLite's own files beside it. It is the single-node development backend: the
-  file moves into the shared store when the server's state does. A file that cannot be made owner-only or opened as a state store
+- **The job store.** Turning the port on opens the job store: with `--store`, rows of that store (the first start over it begins with no jobs; a `.jobs` file of an earlier start is left unread); without it, a SQLite file named after the state file, `<state file>.jobs`, owned
+  by the server's user and owner-only (mode 0600), with SQLite's own files beside it, the single-node development backend. A file that cannot be made owner-only or opened as a state store
   is refused at start naming `--job-listen`. With the store open, the heartbeat of an agent that reports the `per-job` capability is
   also served from it: its job listing is committed and it is told the starts and stops of its jobs. Without `--job-listen` such a
   heartbeat gets the lease and run reply alone, as before.
@@ -147,20 +146,16 @@ file, the job store and the usage file are kept as without it.
   refused at start with exit status 2: `--store: <file> names a sqlite: store, which is accepted only with --allow-sqlite-store: SQLite
   is for tests and single-node development`. With a Postgres store the flag is accepted and does nothing, so one file serves both kinds
   of environment. Like every flag, it is refused beside `--config`.
-- **The lock.** The server takes the store's writer lock before anything else (before it reads any file of the state file's family and before it
-  binds a listener, except the readiness listener of `--ready-listen`) and holds it for its life: a session-level advisory lock on a
-  connection of its own on Postgres, the lock file beside the store's file on SQLite. It tries once and does not wait, unless
-  `--ready-listen` is given: then it logs `waiting for the store's writer lock` once, tries again every second while another process
-  holds the lock, and takes it before it reads anything from the store or binds any other listener (see "The readiness port").
-- **A refused start.** Without `--ready-listen`, a second server on the same store exits 2 with one line, `--store: another process holds the store's writer
-  lock`, having bound nothing and opened neither the store nor any file of the state file's family. A lock that cannot be tried (the server is down, the
-  login is refused) is `--store: the store's writer lock could not be taken: ...`, also exit 2, with `--ready-listen` too: only a lock another
-  process holds is waited for.
-- **A lost lock.** Every tick asks the lock's session first. When the session is gone (the database restarted, an administrator ended
-  it, the connection broke), the lock is gone with it: the tick does nothing more, the server stops serving and ticking, writes
-  nothing more (there is no final tick), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. Taking the
-  lock also takes the store's next writer generation, and every commit checks it: once another process takes the lock, no commit of
-  this one succeeds, between ticks too.
+- **No lock on Postgres.** Any number of servers open one Postgres store and serve at once: nothing is taken at start, nothing is checked
+  in a commit, and no server is the leader. Every decision (placing a job, booking a host, a periodic duty, a host's heartbeat writes) is a
+  transaction whose preconditions hold for however many servers make it. A server opens the store before it reads any file of the state
+  file's family and before it binds a listener, except the readiness listener of `--ready-listen`. A login that is refused or a database that
+  cannot be opened is `--store: the store could not be opened: ...`, exit 2.
+- **The lock of a SQLite store.** A SQLite file is written by one process: the server takes the lock file beside it before anything else and
+  holds it for its life. It tries once and does not wait, unless `--ready-listen` is given: then it logs `waiting for the store's writer lock` once,
+  tries again every second while another process holds the lock, and takes it before it reads anything from the store or binds any other
+  listener (see "The readiness port"). Without `--ready-listen`, a second server on the same file exits 2 with one line, `--store: another
+  process holds the store's writer lock`, having bound nothing and opened neither the store nor any file of the state file's family.
 - **What it keeps.** The host bindings (with each host's taint and cordon) and the digests of the join tokens and host credentials:
   `hosts/binding/<host id>` and `hosts/join/<digest>`, each a JSON object with a `version`, whose unknown fields are kept and written
   back; and the scaler's records and the hosts the registry refused to remove: `acquires/scaler/records` (the records file's own
@@ -227,19 +222,19 @@ names no job, lease, run or token: its labels are a state, a failure code, a hos
 ### The readiness port
 
 `--ready-listen <addr>` (`server.ready_listen`) serves `GET /readyz` on a port of its own, plain HTTP, with no token. It is off by
-default: without it the server binds no such port, tries the store's writer lock once and refuses a start whose lock another process
-holds. Any other path, on that port, is a 404.
+default: without it the server binds no such port, tries a SQLite store's file lock once and refuses a start whose lock another process
+holds (a Postgres store has none). Any other path, on that port, is a 404.
 
 | phase | answer |
 |---|---|
-| another process holds the store's writer lock and the server retries | 503 `waiting for the store's writer lock` |
-| the lock is held (a server without a store setting has none to take) and the listeners are not all serving yet | 503 `starting` |
+| another process holds the SQLite store's file lock and the server retries | 503 `waiting for the store's writer lock` |
+| the store is open (a server without a store setting, or over Postgres, has no lock to take) and the listeners are not all serving yet | 503 `starting` |
 | every listener is bound and serving | 200 `ready` |
-| from the SIGTERM or ctrl-c that starts the stop, and after a loss of the writer lock, until the process exits | 503 `draining` |
+| from the SIGTERM or ctrl-c that starts the stop until the process exits | 503 `draining` |
 
 - **Address.** A loopback address only, since the route takes no token; any other address is refused at start naming the flag or the
   key. An address in use is refused at start naming the flag or the key.
-- **Order.** The port is bound before the store's writer lock is tried, so a supervisor sees the phases from outside; the program
+- **Order.** The port is bound before a SQLite store's file lock is tried, so a supervisor sees the phases from outside; the program
   prints `ready on <addr>` as soon as it is bound, and `listening on <addr>` when the start is done. The port is the last listener
   closed at a stop and answers through the whole drain of the others.
 - **A signal while waiting.** SIGTERM or ctrl-c while the server waits for the lock or starts ends the process with status 0, at

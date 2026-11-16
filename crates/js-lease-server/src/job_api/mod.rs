@@ -86,7 +86,6 @@ use tower::Layer;
 
 use crate::clock::SharedClock;
 use crate::config::LiveClients;
-use crate::fence::Fence;
 use crate::job_store::ServerJobs;
 use roles::{Caller, admitted, caller_of};
 
@@ -111,9 +110,6 @@ mod access_tests;
 mod clients_tests;
 #[cfg(test)]
 mod conformance_tests;
-#[cfg(test)]
-#[path = "fenced_tests.rs"]
-mod fenced_tests;
 #[cfg(test)]
 mod logs_follow_tests;
 #[cfg(test)]
@@ -154,9 +150,6 @@ pub struct JobApi {
     cancel: cancel::Ctx,
     fleet: fleet::Ctx,
     logs: logs::Ctx,
-    /// Trips when the job tables answer that this process is no longer their writer; with
-    /// the server it is the agent side's ([`crate::fence`]), so the server stops.
-    fence: Fence,
 }
 
 impl JobApi {
@@ -172,15 +165,7 @@ impl JobApi {
             cancel: cancel::Ctx::default(),
             fleet: fleet::Ctx::default(),
             logs: logs::Ctx::default(),
-            fence: Fence::new(),
         }
-    }
-
-    /// The service tripping `fence` when the job tables say this process is no longer their
-    /// writer, and answering `UNAVAILABLE` `state-fenced` to that call.
-    #[must_use]
-    pub(crate) fn with_fence(self, fence: Fence) -> JobApi {
-        JobApi { fence, ..self }
     }
 }
 

@@ -47,12 +47,14 @@ Read in code; every later section builds on these facts.
   tree `oci-images/<hex>/rootfs` of the agent's image store, with whiteouts applied (`crates/js-contain/src/unpack.rs`;
   the whiteout entries themselves are never written), and gives that tree to `crun` as `root.path`, read-only
   (`crates/js-contain/src/oci/spec.rs`, `action_config`). Two images never share a layer on disk.
-- **The only overlay is `/work`.** `crun`, run as the unprivileged job user inside a new user namespace, mounts
+- **The only overlay is `/work`, and only for a job without layers.** `crun`, run as the unprivileged job user inside a new user namespace, mounts
   `lowerdir=<lease>/root,upperdir=<lease>/upper,workdir=<lease>/work` with the options
   `userxattr,metacopy=off,redirect_dir=nofollow,index=off,xino=off` at `/work` (`OVERLAY_OPTIONS`,
   `crates/js-contain/src/oci/spec.rs:47`, rendered at `:208`). `<lease>/root` is always empty
   (`crates/js-agent/src/crun/spec.rs`, `input_root: lease.root`). The job's working directory is `/work`; the image's
-  `WORKDIR` is not applied. The agent itself never calls `mount(2)`.
+  `WORKDIR` is not applied. A job with `layers` (4.3) gets no `/work` overlay: its root's own upper takes the writes, and an empty overlay there
+  would hide the files the root has at `/work` (an action's inputs); the working directory is still `/work`, and the shared
+  trees are still bound below it. The agent itself never calls `mount(2)`.
 - **Host paths are an operator's table of named roots, and `crun` refuses it.** `--mount-root NAME=PATH` and
   `--mount-root-ro NAME=PATH` name directories a job may mount from; `MountRoots`
   (`crates/js-agent/src/lifecycle/mounts.rs`) canonicalises a request beneath its root and refuses `..`, a link out, a

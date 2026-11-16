@@ -6,13 +6,6 @@
 //! so revisions commit in the order they were taken and the feed has no gap a poller
 //! could step over (C5). Every writer takes the locks in the same order, head then keys,
 //! so none deadlocks on another.
-//!
-//! A transaction of a fenced store ([`super::PostgresStore::fenced`]) reads the writer
-//! generation row `FOR SHARE` last, just before its commit, and rolls back when the row holds
-//! another generation. Taking the writer lock updates that row, so it waits for every commit
-//! that holds the row shared, and every commit that begins after it sees the new generation.
-//! The row is the last lock a writer takes, and the lock's taker takes no other, so the order
-//! is the same for all and none deadlocks.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -26,11 +19,6 @@ use crate::{Commit, Cond, Conflict, Op, Revision, Txn};
 const KIND_PUT: i16 = 0;
 const KIND_DELETE: i16 = 1;
 const KIND_EXPIRE: i16 = 2;
-
-/// The writer generation, held shared to the commit. Not a prepared statement: a store
-/// that is not fenced never runs it, and a schema older than the table's migration has no
-/// table to prepare it on.
-const FENCE: &str = "SELECT generation FROM writer_generation FOR SHARE";
 
 /// How a transaction sees the database.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,8 +71,6 @@ pub(super) struct Tx<'p> {
     /// The store's time for this transaction, read once after the head lock.
     now: i64,
     alloc: Alloc,
-    /// The writer generation the commit must find, when the store is fenced.
-    fence: Option<i64>,
     /// Every key this transaction has loaded or written, as it stands now. The head lock
     /// keeps other writers out, so a loaded row stays what was loaded.
     cache: BTreeMap<String, Option<Row>>,
@@ -95,14 +81,12 @@ pub(super) struct Tx<'p> {
 
 impl<'p> Tx<'p> {
     /// Opens a transaction and takes the head lock. `over` is an injected clock reading,
-    /// or `None` for the database's own clock; `fence` the writer generation the commit
-    /// checks.
+    /// or `None` for the database's own clock.
     pub(super) fn begin(
         mut session: Pooled<'p>,
         level: Level,
         over: Option<i64>,
         flaw: Flaw,
-        fence: Option<i64>,
     ) -> Result<Tx<'p>, Fail> {
         let begin = session.client.batch_execute(match level {
             Level::Serializable => "BEGIN ISOLATION LEVEL SERIALIZABLE",
@@ -115,7 +99,6 @@ impl<'p> Tx<'p> {
             session,
             now: 0,
             alloc: Alloc::Sequence,
-            fence,
             cache: BTreeMap::new(),
             dirty: false,
             open: true,
@@ -147,23 +130,8 @@ impl<'p> Tx<'p> {
         self.dirty
     }
 
-    /// Makes the transaction durable, unless the store is fenced and the writer generation
-    /// is no longer its own: then [`Fail::Fenced`], and the drop rolls it back.
+    /// Makes the transaction durable.
     pub(super) fn commit(mut self) -> Result<(), Fail> {
-        if let Some(generation) = self.fence {
-            // At SERIALIZABLE a row changed since the snapshot cannot be read: that is a
-            // serialization failure, run again by the caller like any other, and the run
-            // again reads the new generation. It is not taken for a fence here: the server
-            // raises the same code for other conflicts, and a fence stops the writer for good.
-            let held: Option<i64> = self
-                .session
-                .client
-                .query_opt(FENCE, &[])?
-                .map(|row| row.get(0));
-            if held != Some(generation) {
-                return Err(Fail::Fenced);
-            }
-        }
         if let Alloc::Locked { head, last } = self.alloc
             && last != head
         {
@@ -299,6 +267,49 @@ impl<'p> Tx<'p> {
             .iter()
             .map(|row| (row.get(0), Row::from_row(row, 1)))
             .collect())
+    }
+
+    /// Locks the live rows of `keys`, skipping rows another transaction holds, and keeps them
+    /// as the transaction's own. The rows it got, in key order.
+    pub(super) fn lock_keys(&mut self, keys: &[String]) -> Result<Vec<(String, Row)>, Error> {
+        let now = self.now;
+        let s: &mut Session = &mut self.session;
+        let rows = s.client.query(&s.st.claim_keys, &[&keys, &now])?;
+        let rows: Vec<(String, Row)> = rows
+            .iter()
+            .map(|row| (row.get(0), Row::from_row(row, 1)))
+            .collect();
+        for (key, row) in &rows {
+            self.remember(key.clone(), row.clone());
+        }
+        Ok(rows)
+    }
+
+    /// The live row at `key` as the transaction sees it, locked.
+    pub(super) fn read(&mut self, key: &str) -> Result<Option<Row>, Error> {
+        self.load(&[key])?;
+        Ok(self.live(key).cloned())
+    }
+
+    /// The live rows under `prefix` as the transaction sees them, in key order. Rows this
+    /// transaction has written are as it wrote them.
+    pub(super) fn read_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Row)>, Error> {
+        let now = Some(self.now);
+        let s: &mut Session = &mut self.session;
+        let rows = s.client.query(&s.st.scan, &[&prefix, &now])?;
+        let mut seen: BTreeMap<String, Row> = rows
+            .iter()
+            .map(|row| (row.get(0), Row::from_row(row, 1)))
+            .collect();
+        for (key, row) in &self.cache {
+            if key.starts_with(prefix) {
+                match row {
+                    Some(row) => drop(seen.insert(key.clone(), row.clone())),
+                    None => drop(seen.remove(key)),
+                }
+            }
+        }
+        Ok(seen.into_iter().collect())
     }
 
     fn live(&self, key: &str) -> Option<&Row> {

@@ -1,235 +1,93 @@
-//! The writer lock over a Postgres store: a second server refused, a lost lock that stops the
-//! server, a store fenced by the lock's generation, and refusals that never show the
-//! connection URL; and the state a restart reads back from it, the first start's import of
-//! the files beside the state file included.
+//! A server over a Postgres store: a second server serves beside the first, refusals that
+//! never show the connection URL, and the state a restart reads back from it, the first
+//! start's import of the files beside the state file included.
 //!
 //! Each test has a database of its own (`js_state::postgres::test_database`, the state schema
-//! applied), and an advisory lock is scoped to its database, so the tests do not see each
-//! other's locks. They need the server `KBF_TEST_POSTGRES_URL` names (CI's `test` and
+//! applied). They need the server `KBF_TEST_POSTGRES_URL` names (CI's `test` and
 //! `coverage` jobs have one; a superuser, to end a backend) and fail, not skip, without it.
 //! The database calls block, so they are made outside the async runtime a server runs on.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
 
-use js_lease_server::{LockLost, RecordsFile, UnremovedFile};
+use js_jobs::ScriptedIds;
+use js_lease_server::{RecordsFile, UnremovedFile};
 use js_scaler::Records;
-use js_state::postgres::{PostgresConfig, TestDatabase, test_database};
-use js_state::{Cond, Store, StoreError, Txn, WriterLock, WriterTarget};
+use js_state::postgres::{TestDatabase, test_database};
+use js_state::{ManualClock, Store};
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
-use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, post, session};
+use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, job_host_args, post, session};
 use crate::binary::{address_in, launch, spawn};
+use crate::jobs_support::{job_agent, job_of, per_job_hello, submit};
 use crate::joins::{code, hello, minted};
-use crate::ready_listen::{WAITING, with_ready};
+use crate::ready_listen::with_ready;
 use crate::store_support::{
-    LIMIT, assert_unquoted, end_the_holder, holder, launch_ticking, revision, run_to_end,
-    store_args, store_file, taken_address, unflushed, with_userinfo,
+    assert_unquoted, revision, run_to_end, store_args, store_file, unflushed, with_userinfo,
 };
-use crate::support::{Harness, Scratch, TOKEN, replace, request};
+use crate::support::{Harness, Scratch, TOKEN, config, replace, request};
 
 /// A role no test server has and a password for it: neither may ever be printed.
 const ROLE: &str = "js_store_no_such_role";
 const PASSWORD: &str = "store-secret-0123456789";
 
-/// Asserts that a second server on a Postgres store another server holds exits 2 with the
-/// one line naming the writer lock, and that it took the lock before anything else: it
-/// bound no listener (its listen address is taken, which would have been refused naming
-/// `--listen`), made no state file and printed no address; the store's revision is
-/// unchanged, and the first server still holds the lock and serves. It catches a lock that
-/// is not taken, taken after the listener or the state files, or released early.
+/// Asserts that a second server on a Postgres store another server serves starts at once and
+/// serves beside it: both print their address, both answer `/healthz` 200, neither waits for
+/// a lock, and when the first is stopped with SIGTERM the second keeps serving. It catches a
+/// server that takes a lock of the store, or that stops serving when another opens it.
 #[test]
-fn a_second_process_cannot_take_the_writer_lock() {
+fn a_second_process_serves_beside_the_first() {
     let database = test_database();
     let url = database.url();
-    let first = Scratch::new("store_pg_lock_first");
-    let (mut child, addr) = launch(&store_args(&first, &url, &[]), Stdio::null());
-    let holding = holder(&url).expect("the first server holds the writer lock");
-    let before = revision(&url);
-
-    let second = Scratch::new("store_pg_lock_second");
-    let listen = taken_address();
-    let at = listen.local_addr().unwrap().to_string();
-    let args = replace(store_args(&second, &url, &[]), "--listen", at);
-    let ended = run_to_end(&args);
-    assert_eq!(ended.code, Some(2), "{}", ended.stderr);
-    assert!(
-        ended
-            .stderr
-            .contains("js-lease-server: --store: another process holds the store's writer lock\n"),
-        "{}",
-        ended.stderr
-    );
-    assert_eq!(ended.stdout, "", "no address was printed");
-    assert!(
-        !second.state().exists(),
-        "the second server made no state file"
-    );
-    assert_eq!(revision(&url), before, "the second server wrote nothing");
-    assert_eq!(
-        holder(&url),
-        Some(holding),
-        "the first server still holds the lock"
-    );
-
+    let first = Scratch::new("store_pg_pair_first");
+    let (mut first_child, first_addr) = launch(&store_args(&first, &url, &[]), Stdio::null());
+    let second = Scratch::new("store_pg_pair_second");
+    let (mut second_child, second_addr) = launch(&store_args(&second, &url, &[]), Stdio::null());
+    assert_ne!(first_addr, second_addr);
     let runtime = Runtime::new().unwrap();
-    let health = runtime.block_on(request(addr, "GET", "/healthz", None, None));
-    assert_eq!(health.status, 200, "the first server serves on");
-    kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();
-    assert!(child.0.wait().unwrap().success());
-}
-
-/// Asserts that a second server with the readiness route on, beside a first that holds the
-/// Postgres store's writer lock, waits instead of exiting: the route answers 503 with the
-/// waiting body, the store's revision is unchanged and the first server still holds the
-/// lock; once the first stops, the second takes the lock (another backend holds it), prints
-/// the address it listens on and its route answers 200 `ready`. It catches a wait on Postgres
-/// that takes the lock and the store before the holder lets go, or never retries.
-#[test]
-fn a_second_process_with_a_route_waits_for_the_writer_lock() {
-    let database = test_database();
-    let url = database.url();
-    let first = Scratch::new("store_pg_wait_first");
-    let (mut holder_child, _) = launch(&store_args(&first, &url, &[]), Stdio::null());
-    let holding = holder(&url).expect("the first server holds the writer lock");
-    let before = revision(&url);
-
-    let second = Scratch::new("store_pg_wait_second");
-    let args = with_ready(store_args(&second, &url, &[]), "127.0.0.1:0");
-    let (mut waiting, lines) = spawn(&args, Stdio::null());
-    let ready = address_in(&lines.next(), "ready on ");
-    let runtime = Runtime::new().unwrap();
-    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
-    assert_eq!((reply.status, reply.body.as_str()), (503, WAITING));
-    assert_eq!(revision(&url), before, "the second server wrote nothing");
-    assert_eq!(
-        holder(&url),
-        Some(holding),
-        "the first server still holds it"
-    );
-
-    kill_process(Pid::from_child(&holder_child.0), Signal::TERM).unwrap();
-    assert!(holder_child.0.wait().unwrap().success());
-    let listen = address_in(&lines.next(), "listening on ");
-    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
-    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
-    let health = runtime.block_on(request(listen, "GET", "/healthz", None, None));
-    assert_eq!(health.status, 200);
-    let now = holder(&url).expect("the second server holds the writer lock");
-    assert_ne!(now, holding, "another backend holds it");
-    kill_process(Pid::from_child(&waiting.0), Signal::TERM).unwrap();
-    assert!(waiting.0.wait().unwrap().success());
-}
-
-/// Asserts that the route of a server whose writer lock is lost answers 503 `draining`
-/// from the tick that found the loss, before any stop, and that the stop then answers the
-/// loss. It catches a route that stays ready for a server that serves nothing more.
-#[test]
-fn a_lost_writer_lock_makes_the_route_say_draining() {
-    let database = test_database();
-    let url = database.url();
-    let scratch = Scratch::new("store_pg_lost_route");
-    let args = with_ready(
-        replace(store_args(&scratch, &url, &[]), "--boot", "resume"),
-        "127.0.0.1:0",
-    );
-    let mut config = crate::support::config(args).unwrap();
-    let ready = config.bind_ready().unwrap().unwrap();
-    let runtime = Runtime::new().unwrap();
-    let h = runtime.block_on(Harness::over(scratch, config));
-    runtime.block_on(h.ticks.step());
-    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
-    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
-    end_the_holder(&url);
-
-    let lost: LockLost = runtime.block_on(async {
-        h.ticks.step().await;
-        h.running.lock_lost().await
-    });
-    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
-    assert_eq!((reply.status, reply.body.as_str()), (503, "draining"));
-    let Harness { running, .. } = h;
-    let stopped = runtime.block_on(running.shutdown());
-    assert_eq!(
-        stopped.err().map(|err| err.to_string()),
-        Some(lost.to_string())
-    );
-}
-
-/// Asserts that when the session holding the writer lock is ended from another connection,
-/// the next tick stops the server: `lock_lost` names the loss, the tick does nothing else,
-/// the shutdown runs no final tick and answers the loss as an error, and the store's
-/// revision is unchanged. A tick before the loss runs as usual. It catches a server that
-/// keeps serving and writing after its session, and its lock, ended.
-#[test]
-fn losing_the_writer_lock_stops_the_server() {
-    let database = test_database();
-    let url = database.url();
-    let scratch = Scratch::new("store_pg_lost");
-    let args = replace(store_args(&scratch, &url, &[]), "--boot", "resume");
-    let runtime = Runtime::new().unwrap();
-    let h = runtime.block_on(Harness::with(scratch, args));
-    runtime.block_on(h.ticks.step());
-    let before = revision(&url);
-    end_the_holder(&url);
-
-    let lost: LockLost = runtime.block_on(async {
-        h.ticks.step().await;
-        h.running.lock_lost().await
-    });
-    let said = lost.to_string();
-    assert!(
-        said.starts_with("the store's writer lock was lost, so the server stopped: "),
-        "{said}"
-    );
-    assert_unquoted(&url, &said);
-
-    let Harness { running, .. } = h;
-    let stopped = runtime.block_on(running.shutdown());
-    assert_eq!(stopped.err().map(|err| err.to_string()), Some(said));
-    assert_eq!(revision(&url), before, "nothing was written to the store");
-}
-
-/// Asserts that the program whose writer lock is lost ends on its own with exit status 1,
-/// after one line saying the lock was lost, and that the line carries neither the URL nor
-/// its password. It catches a program that keeps running, or exits 0, without its lock.
-#[test]
-fn losing_the_writer_lock_ends_the_program_with_status_1() {
-    let database = test_database();
-    let url = database.url();
-    let scratch = Scratch::new("store_pg_lost_program");
-    let (mut child, _addr) = launch_ticking(&store_args(&scratch, &url, &[]), "50ms");
-    end_the_holder(&url);
-    let pid = Pid::from_child(&child.0);
-    let (done, ended) = std::sync::mpsc::channel();
-    let mut stderr = child.0.stderr.take().unwrap();
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
-        let _ = done.send(text);
-    });
-    let stderr = ended.recv_timeout(LIMIT);
-    if stderr.is_err() {
-        let _ = kill_process(pid, Signal::KILL);
+    for addr in [first_addr, second_addr] {
+        let health = runtime.block_on(request(addr, "GET", "/healthz", None, None));
+        assert_eq!(health.status, 200, "{addr}");
     }
-    let stderr = stderr.expect("the program ended on its own");
-    let status = child.0.wait().unwrap();
-    assert_eq!(status.code(), Some(1), "{stderr}");
-    let last = stderr.lines().last().unwrap_or_default();
-    assert!(
-        last.starts_with(
-            "js-lease-server: the store's writer lock was lost, so the server stopped: "
-        ),
-        "{stderr}"
-    );
-    assert_unquoted(&url, &stderr);
+
+    kill_process(Pid::from_child(&first_child.0), Signal::TERM).unwrap();
+    assert!(first_child.0.wait().unwrap().success());
+    let health = runtime.block_on(request(second_addr, "GET", "/healthz", None, None));
+    assert_eq!(health.status, 200, "the second server serves on");
+    kill_process(Pid::from_child(&second_child.0), Signal::TERM).unwrap();
+    assert!(second_child.0.wait().unwrap().success());
+}
+
+/// Asserts that a second server with the readiness route on, over a Postgres store another
+/// server serves, answers `/readyz` 200 `ready` once it serves, and was never `waiting`: a
+/// Postgres store has no lock to wait for. It catches a route that still says it waits.
+#[test]
+fn a_second_process_with_a_route_does_not_wait() {
+    let database = test_database();
+    let url = database.url();
+    let first = Scratch::new("store_pg_route_first");
+    let (mut first_child, _) = launch(&store_args(&first, &url, &[]), Stdio::null());
+    let second = Scratch::new("store_pg_route_second");
+    let args = with_ready(store_args(&second, &url, &[]), "127.0.0.1:0");
+    let (mut serving, lines) = spawn(&args, Stdio::null());
+    let ready = address_in(&lines.next(), "ready on ");
+    let _listen = address_in(&lines.next(), "listening on ");
+    let runtime = Runtime::new().unwrap();
+    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
+    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
+    for child in [&mut first_child, &mut serving] {
+        kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();
+        assert!(child.0.wait().unwrap().success());
+    }
 }
 
 /// Asserts that a refused login (a role the server does not have, with a password) is
-/// refused at start with exit status 2, naming `--store` and the server's SQLSTATE, and that
+/// refused at start with exit status 2, naming `--store` and that the server refused the login, and that
 /// neither the URL, nor the password, nor the role is in anything the program printed, its
 /// log lines included. (The test server trusts every login, so a wrong password alone would
 /// be accepted; a role it does not have is refused the same way, SQLSTATE 28000.) It catches
@@ -243,7 +101,7 @@ fn the_store_url_is_never_in_an_error_or_a_log_line() {
     assert_eq!(ended.code, Some(2), "{}", ended.stderr);
     assert!(
         ended.stderr.contains(
-            "js-lease-server: --store: the store's writer lock could not be taken: the server refused (SQLSTATE 28000)\n"
+            "js-lease-server: --store: the store could not be opened: the server refused the login\n"
         ),
         "{}",
         ended.stderr
@@ -255,10 +113,9 @@ fn the_store_url_is_never_in_an_error_or_a_log_line() {
 }
 
 /// Asserts that a Postgres database without the state schema is refused at start with exit
-/// status 2 when the writer lock is taken (the lock takes the schema's writer generation),
-/// naming `--store` with the line that says what to run, that the refusal releases the lock
-/// and made no lease file, and that no part of the URL is printed. It catches a server that
-/// runs on a database it cannot keep its state in, or that creates a schema of its own.
+/// status 2, naming `--store` and that the store could not be opened, that the refusal made
+/// no lease file, and that no part of the URL is printed. It catches a server that runs on a
+/// database it cannot keep its state in, or that creates a schema of its own.
 #[test]
 fn a_store_without_the_schema_is_refused_at_start() {
     let database = TestDatabase::empty();
@@ -267,26 +124,23 @@ fn a_store_without_the_schema_is_refused_at_start() {
     let ended = run_to_end(&store_args(&scratch, &url, &[]));
     assert_eq!(ended.code, Some(2), "{}", ended.stderr);
     assert!(
-        ended.stderr.contains(
-            "js-lease-server: --store: the store's writer lock could not be taken: the state \
-             schema has no writer generation table (it is older than version 2): run the \
-             installer to bring it forward\n"
-        ),
+        ended
+            .stderr
+            .contains("js-lease-server: --store: the store could not be opened: "),
         "{}",
         ended.stderr
     );
     assert_unquoted(&url, &ended.stderr);
     assert!(!scratch.state().exists(), "no lease file was made");
-    assert_eq!(holder(&url), None, "the refusal released the lock");
 }
 
-/// Asserts that a store whose writer lock was taken but that does not open (its database
-/// does not flush commits: `synchronous_commit` is off) is refused at start with exit status
-/// 2, naming `--store`, saying the store could not be opened and why; that the refusal
-/// released the lock and made no lease file; and that no part of the URL is printed. It
-/// catches a refused open that keeps the lock, or a server that goes on to serve.
+/// Asserts that a store that does not open (its database does not flush commits:
+/// `synchronous_commit` is off) is refused at start with exit status 2, naming `--store`,
+/// saying the store could not be opened and why; that the refusal made no lease file; and
+/// that no part of the URL is printed. It catches a server that goes on to serve a store
+/// that can lose an acknowledged write.
 #[test]
-fn a_store_that_does_not_open_is_refused_after_the_lock() {
+fn a_store_that_does_not_open_is_refused() {
     let database = test_database();
     let url = database.url();
     unflushed(&url);
@@ -307,37 +161,6 @@ fn a_store_that_does_not_open_is_refused_after_the_lock() {
     );
     assert_unquoted(&url, &ended.stderr);
     assert!(!scratch.state().exists(), "no lease file was made");
-    assert_eq!(holder(&url), None, "the refusal released the lock");
-}
-
-/// Asserts that the server's store is opened fenced by the generation its writer lock took:
-/// a commit succeeds while the server holds the lock, and once its session is ended and
-/// another process takes the lock, a commit of the server's store is refused `Fenced` and
-/// writes nothing, with no tick run in between. It catches a store opened without the
-/// fence, whose commits would land after another writer took over.
-#[test]
-fn a_commit_after_another_process_took_the_lock_is_refused() {
-    let database = test_database();
-    let url = database.url();
-    let scratch = Scratch::new("store_pg_fenced");
-    let args = store_args(&scratch, &url, &[]);
-    let runtime = Runtime::new().unwrap();
-    let h = runtime.block_on(Harness::with(scratch, args));
-    let store = h.running.store().expect("the server has a store");
-    let put = |key: &str| Txn::new().put(key, "v", Cond::Any);
-    let committed = store.txn(put("before"));
-    assert!(committed.is_ok(), "{committed:?}");
-
-    end_the_holder(&url);
-    let target = WriterTarget::Postgres(Box::new(PostgresConfig::parse(&url).unwrap()));
-    let next = WriterLock::acquire(&target).expect("another process takes the lock");
-    let before = revision(&url);
-    assert_eq!(store.txn(put("after")).err(), Some(StoreError::Fenced));
-    assert_eq!(revision(&url), before, "the fenced commit wrote nothing");
-    drop(next);
-    drop(store);
-    let Harness { running, .. } = h;
-    let _ = runtime.block_on(running.shutdown());
 }
 
 /// Asserts that the host bindings and the join tokens survive a restart over a Postgres store
@@ -473,6 +296,82 @@ fn the_files_are_imported_once_over_postgres() {
     let store = h.running.store().expect("the server holds the store");
     assert!(store.get("hosts/binding/burst-9").unwrap().is_some());
     drop(store);
+    let Harness { running, .. } = h;
+    let _ = runtime.block_on(running.shutdown());
+}
+
+/// Asserts that with a Postgres store the job store lives in it: a job submitted to the first
+/// server is rows `job/` of the store and is read back by the server of the restart, and
+/// neither a `.jobs` file nor a `usage.db` is made beside the state file. It catches a job
+/// store that is still a local SQLite file when the server has a shared store, which a second
+/// instance could not see.
+#[test]
+fn the_job_store_is_in_postgres_and_survives_a_restart() {
+    let database = test_database();
+    let url = database.url();
+    let flags = |scratch: &Scratch| {
+        let mut args = job_host_args(scratch);
+        args.extend(["--store".into(), store_file(scratch, &url).into_os_string()]);
+        args
+    };
+    let scratch = Scratch::new("store_pg_jobs");
+    let args = flags(&scratch);
+    let runtime = Runtime::new().unwrap();
+    let h = runtime.block_on(async {
+        let first = Harness::with(scratch, args).await;
+        job_agent(&first, &per_job_hello("burst-1")).await;
+        let made = submit(&first, "kept-1").await;
+        assert_eq!(made.status, 201, "{}", made.body);
+        let Harness {
+            running, scratch, ..
+        } = first;
+        running.shutdown().await.unwrap();
+        let resumed = replace(flags(&scratch), "--boot", "resume");
+        Harness::with(scratch, resumed).await
+    });
+    let read = runtime.block_on(job_of(&h, "kept-1"));
+    assert_eq!(read.status, 200, "{}", read.body);
+    let store = h.running.store().expect("the server holds the store");
+    let keys: Vec<String> = store
+        .scan_prefix("job/")
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(keys, ["job/kept-1"]);
+    for file in ["leases.toml.jobs", "usage.db"] {
+        assert!(!h.scratch.path(file).exists(), "{file}");
+    }
+    drop(store);
+    let Harness { running, .. } = h;
+    let _ = runtime.block_on(running.shutdown());
+}
+
+/// Asserts that a server over a Postgres store whose job tables are given a clock (as a
+/// simulation does) stamps the rows of the job store in Postgres with that clock: a job
+/// submitted with the clock at 42 s is reported queued at 42000 ms, and is the row `job/` of
+/// the store. It catches a Postgres store that stamps with the database's clock whatever the
+/// server was given, which a simulation could not drive.
+#[test]
+fn the_job_store_in_postgres_is_stamped_with_the_clock_it_is_given() {
+    let database = test_database();
+    let url = database.url();
+    let scratch = Scratch::new("store_pg_jobs_clock");
+    let mut args = job_host_args(&scratch);
+    args.extend([
+        "--store".into(),
+        store_file(&scratch, &url).into_os_string(),
+    ]);
+    let clock = Arc::new(ManualClock::default());
+    clock.advance(Duration::from_secs(42));
+    let ids = Arc::new(ScriptedIds::new([7; 16], []));
+    let config = config(args).unwrap().with_job_sources(clock, ids);
+    let runtime = Runtime::new().unwrap();
+    let h = runtime.block_on(Harness::over(scratch, config));
+    runtime.block_on(job_agent(&h, &per_job_hello("burst-1")));
+    let made = runtime.block_on(submit(&h, "stamped-1"));
+    assert_eq!(made.status, 201, "{}", made.body);
+    assert_eq!(made.json()["job"]["times"]["queuedAtMs"], "42000");
     let Harness { running, .. } = h;
     let _ = runtime.block_on(running.shutdown());
 }

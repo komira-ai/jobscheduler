@@ -296,6 +296,7 @@ fn round_trip_of_every_message() {
             ack: Ack::Stale,
         }],
         taint_ack: true,
+        taint_cleared_ack: false,
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),

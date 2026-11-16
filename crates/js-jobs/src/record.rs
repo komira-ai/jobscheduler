@@ -517,6 +517,48 @@ pub struct HostBooking {
     pub allocations: u64,
 }
 
+/// What a host can book: the most its live allocations may sum to. A placement made on the
+/// host through [`crate::JobStore::place_claimed`] is refused when the allocations the store
+/// holds, as the placement's own transaction reads them, leave no room for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Capacity {
+    /// Thousandths of a CPU core.
+    pub cpu_millis: u64,
+    /// Bytes of memory.
+    pub memory_bytes: u64,
+    /// Bytes of scratch disk.
+    pub disk_bytes: u64,
+    /// Whole accelerator devices.
+    pub accelerators: u64,
+}
+
+impl Capacity {
+    /// Whether a host of this capacity, with `booking` live on it, has room for `add`: a whole
+    /// host books only a host with nothing live on it, and a share only a host no allocation
+    /// books whole, on every axis.
+    #[must_use]
+    pub fn has_room(&self, booking: &HostBooking, add: &Booked) -> bool {
+        let within = |held: u64, asked: u64, most: u64| {
+            held.checked_add(asked).is_some_and(|total| total <= most)
+        };
+        match *add {
+            Booked::WholeHost => booking.allocations == 0,
+            Booked::Shape {
+                cpu_millis,
+                memory_bytes,
+                disk_bytes,
+                accelerators,
+            } => {
+                !booking.whole_host
+                    && within(booking.cpu_millis, cpu_millis, self.cpu_millis)
+                    && within(booking.memory_bytes, memory_bytes, self.memory_bytes)
+                    && within(booking.disk_bytes, disk_bytes, self.disk_bytes)
+                    && within(booking.accelerators, accelerators, self.accelerators)
+            }
+        }
+    }
+}
+
 impl HostBooking {
     /// This sum with `booked` added, or `None` when a count overflows.
     pub(crate) fn plus(self, booked: &Booked) -> Option<HostBooking> {
@@ -752,5 +794,64 @@ mod tests {
             ..HostBooking::default()
         };
         assert_eq!(counted_out.plus(&Booked::WholeHost), None);
+    }
+
+    /// Asserts the room a host of a capacity has for a booking: a share needs every axis within
+    /// the capacity and no whole-host booking beside it, a whole host needs nothing live on the
+    /// host, and a sum that overflows is no room. It catches an axis left out of the check, a
+    /// whole host booked beside a share, and a wrapped sum read as small.
+    #[test]
+    fn a_capacity_has_room_for_a_booking_only_when_every_axis_fits() {
+        let capacity = Capacity {
+            cpu_millis: 4000,
+            memory_bytes: 8,
+            disk_bytes: 8,
+            accelerators: 2,
+        };
+        let share = |cpu_millis, memory_bytes, disk_bytes, accelerators| Booked::Shape {
+            cpu_millis,
+            memory_bytes,
+            disk_bytes,
+            accelerators,
+        };
+        let held = |cpu_millis, memory_bytes, disk_bytes, accelerators, whole_host| HostBooking {
+            cpu_millis,
+            memory_bytes,
+            disk_bytes,
+            accelerators,
+            whole_host,
+            allocations: 1,
+        };
+        let empty = HostBooking::default();
+        assert!(
+            capacity.has_room(&empty, &share(4000, 8, 8, 2)),
+            "all of it fits an empty host"
+        );
+        assert!(capacity.has_room(&empty, &Booked::WholeHost));
+        let some = held(2000, 4, 4, 1, false);
+        assert!(
+            capacity.has_room(&some, &share(2000, 4, 4, 1)),
+            "the rest fits"
+        );
+        for (axis, over) in [
+            ("cpu", share(2001, 4, 4, 1)),
+            ("memory", share(2000, 5, 4, 1)),
+            ("disk", share(2000, 4, 5, 1)),
+            ("accelerators", share(2000, 4, 4, 2)),
+        ] {
+            assert!(!capacity.has_room(&some, &over), "{axis} is over");
+        }
+        assert!(
+            !capacity.has_room(&some, &Booked::WholeHost),
+            "a whole host beside a share"
+        );
+        assert!(
+            !capacity.has_room(&held(0, 0, 0, 0, true), &share(1, 0, 0, 0)),
+            "a share beside a whole host"
+        );
+        assert!(
+            !capacity.has_room(&held(u64::MAX, 0, 0, 0, false), &share(1, 0, 0, 0)),
+            "a sum that overflows is no room"
+        );
     }
 }

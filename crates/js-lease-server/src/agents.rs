@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use js_agent_wire::{Heartbeat, Hello, InstanceIdentity};
+use js_agent_wire::{Heartbeat, Hello, InstanceIdentity, Taint};
 use js_elastic::HostName;
 use js_registry::{Binding, Cordoned, Credential, OsSessions, Registry, Uncordoned};
 use js_types::Clock;
@@ -33,9 +33,8 @@ use self::taints::restore_job_taints;
 use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::AgentTokens;
 use crate::clock::SharedClock;
-use crate::config::{AgentSetup, placer, split};
+use crate::config::{AgentSetup, CpuSlack, placer, split};
 use crate::error::StartupError;
-use crate::fence::Fence;
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{self, FeedTrim, ServerJobs};
@@ -63,7 +62,7 @@ pub(crate) struct Agents {
     pub(crate) limiter: HelloLimiter,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
-    store: BindingStore,
+    pub(crate) store: BindingStore,
     /// The gate every change of the bindings and of the join tokens' uses goes through, held
     /// from the change's commit until the registry has taken it (or its undo is committed): a
     /// hello, the taint of a heartbeat, a cordon or its lift, and the save of each tick. So
@@ -87,6 +86,9 @@ pub(crate) struct Agents {
     /// The state store under the job tables, held with them: `GetUsage` reads the
     /// `usage/ended/` row each free of a job's allocation writes there.
     pub(crate) job_state: Option<Arc<dyn js_state::Store>>,
+    /// Whether the usage sink keeps its rows in the same state store as the job tables, so
+    /// that the ended bookings it would list are the rows `job_state` lists already.
+    pub(crate) usage_in_job_store: bool,
     /// The registry's placer, which also places the queued jobs when the job tables are
     /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
     /// one, which places no job.
@@ -101,15 +103,15 @@ pub(crate) struct Agents {
     /// The pool's `max_queue_wait` and `start_timeout`, which the job pass of the tick
     /// enforces ([`Agents::job_pass`]).
     pub(crate) job_limits: JobLimits,
+    /// How far past its cores a host's CPU may be booked ([`crate::config::CpuSlack`]), which
+    /// the capacity a placement is held to in its own transaction allows too.
+    pub(crate) cpu_slack: CpuSlack,
     /// For each host, the session whose job listing was last committed: a listing of another
     /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
     listed_sessions: Mutex<BTreeMap<HostId, Session>>,
     /// Where the job side's events are counted ([`crate::metrics`]); set once, at start, when
     /// the server serves its metrics, and counting nothing until then.
     meter: OnceLock<Meter>,
-    /// Trips when the state store says this process is no longer its writer
-    /// ([`crate::fence`]): the tick ends, heartbeats are refused and the process exits.
-    pub(crate) fence: Fence,
     /// The gate of the server's pass over the queued jobs ([`Agents::place_jobs`]): one pass
     /// at a time, from its read of the open hosts to its last taint.
     pub(crate) placing: Mutex<()>,
@@ -247,7 +249,7 @@ fn placed_in(
     let placer = placer(max_lease_wall, cpu_slack, memory, clock);
     let registry = Registry::new(pool, clock.clone(), placer.clone());
     let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
-    let usage = usage.build(clock, limits)?;
+    let (usage, usage_in_job_store) = usage.build(clock, limits, kept.map(ServerStore::store))?;
     // The one job store of the server, when the job service is on. It is opened
     // before the bindings are put back: a host a host job tainted whose binding lost
     // the taint (a crash between the placement and the binding's write) gets it from
@@ -255,7 +257,11 @@ fn placed_in(
     // that cannot be read does.
     let (jobs, job_feed, job_state) = match jobs {
         Some(setup) => {
-            let opened = job_store::open(state_file, setup, &job_sources)?;
+            let opened = job_store::open(
+                (state_file, kept.map(ServerStore::store)),
+                setup,
+                &job_sources,
+            )?;
             restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
             (Some(opened.jobs), Some(opened.feed), Some(opened.store))
         }
@@ -278,13 +284,14 @@ fn placed_in(
         jobs,
         job_feed,
         job_state,
+        usage_in_job_store,
         placer: Some(placer.clone()),
         unclean: Mutex::default(),
         logs,
         job_limits,
+        cpu_slack,
         listed_sessions: Mutex::default(),
         meter: OnceLock::new(),
-        fence: Fence::new(),
         placing: Mutex::default(),
         providers,
     };
@@ -329,13 +336,14 @@ impl Agents {
             jobs: None,
             job_feed: None,
             job_state: None,
+            usage_in_job_store: false,
             placer: None,
             unclean: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
+            cpu_slack: CpuSlack::default(),
             listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
-            fence: Fence::new(),
             placing: Mutex::default(),
             providers,
         }
@@ -529,11 +537,12 @@ impl Agents {
         Ok(())
     }
 
-    /// Makes the taint `heartbeat` would record durable before the registry records it
-    /// ([`Registry::check_heartbeat`]): the host's binding with the taint is committed under
-    /// [`Agents::host_writes`], whose guard is returned for the caller to hold until the
-    /// registry has recorded the beat. Nothing when the beat would record no taint, or the
-    /// registry refuses it (the beat is then refused the same).
+    /// Makes the taint `heartbeat` would record, or the clearing of the host's taint it
+    /// reports, durable before the registry records it
+    /// ([`Registry::check_heartbeat`]): the host's binding with the taint (none for a clear)
+    /// is committed under [`Agents::host_writes`], whose guard is returned for the caller to
+    /// hold until the registry has recorded the beat. Nothing when the beat would record no
+    /// taint and clear none, or the registry refuses it (the beat is then refused the same).
     ///
     /// # Errors
     ///
@@ -547,13 +556,31 @@ impl Agents {
         let Ok(check) = self.registry.check_heartbeat(heartbeat, who) else {
             return Ok(None);
         };
-        let Some(taint) = check.taint else {
+        if check.taint.is_none() && !check.cleared {
             return Ok(None);
-        };
+        }
         let gate = self.host_writes.lock().await;
-        self.keep(&check.host, |bound| bound.with_taint(Some(taint)))
-            .await?;
+        self.keep_taint(&check.host, check.taint).await?;
         Ok(Some(gate))
+    }
+
+    /// Commits the binding of `host` with `taint` (none for a clear), when the registry holds
+    /// one, as [`Agents::keep`] does, but only if the store still holds the taint the registry
+    /// holds ([`BindingStore::commit_taint`]): a taint another server reported or cleared is
+    /// refused, not overwritten. The caller holds [`Agents::host_writes`].
+    async fn keep_taint(self: &Arc<Self>, host: &HostId, taint: Option<Taint>) -> io::Result<()> {
+        let held = self.registry.bindings().remove(host);
+        let expected = held.as_ref().and_then(|bound| bound.taint().cloned());
+        let change = held.map(|bound| self.store.change(host, bound.with_taint(taint)));
+        let this = Arc::clone(self);
+        let change = blocking(move || {
+            let commit = |change| this.store.commit_taint(change, expected.as_ref());
+            change.as_ref().map_or(Ok(()), commit)?;
+            Ok::<_, io::Error>(change)
+        })
+        .await?;
+        change.iter().for_each(|change| self.store.applied(change));
+        Ok(())
     }
 
     /// Cordons `host` for `lease` (see [`Registry::cordon`]). With the store the cordon is

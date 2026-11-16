@@ -209,6 +209,19 @@ hostkeeper ctl --endpoint https://hostkeeper.example.com:9443 --ca-file ./ca.pem
 
 ## 8. Troubleshooting
 
+### The update fails with `host-credential-required`
+
+The hook's refusal reads `refused: host-credential-required: no host credential in the state root:
+this host enrolled with the shared pool token; re-enroll with a join token`. The agent was
+admitted with the pool's shared token (the server's log says `credential_issued=false`), so the
+state root holds no `host-credential`, and the server refuses the shared token on the host's own
+routes, which the hook uses. The agent itself keeps working. Re-enroll the host: mint a one-time
+token (section 2) and place it (section 3). The host id is bound to the shared token's digest,
+so with the server stopped delete that host's binding (`hosts/binding/<host id>` in the store, or
+its entry in the `.agents` file), stop the agent first so it cannot bind the id again when the
+server starts, then start the server and the agent. The agent's hello is answered with a host
+credential (`credential_issued=true`) and `host-credential` appears in the state root.
+
 ### The server refuses the token, or says it expired
 
 The server answers `join-token-expired` for a token past its time, `join-token-used` for a token

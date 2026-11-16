@@ -9,12 +9,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::error::Failure;
-use crate::server::stop_or_fence;
 use crate::{Config, IntervalTicker, SharedClock, start};
 
-/// Serves `config` on a runtime of its own until a termination signal, or until the server
-/// stops on its own because the store's writer lock was lost or the state store has a newer
-/// writer (an error either way: exit status 1).
+/// Serves `config` on a runtime of its own until a termination signal.
 pub(crate) fn serve(config: Config, out: &mut dyn Write) -> Result<(), Failure> {
     Builder::new_multi_thread()
         .enable_all()
@@ -34,7 +31,7 @@ async fn serve_until_signal(mut config: Config, out: &mut dyn Write) -> Result<(
     // Before the readiness address is printed, so a SIGTERM sent once it is known is
     // handled, not left to kill the process.
     let mut termination = Termination::register().map_err(Failure::Runtime)?;
-    // Bound before the start, which can wait for the store's writer lock for as long as
+    // Bound before the start, which can wait for a SQLite store's file lock for as long as
     // another process holds it: the address says where the readiness route answers meanwhile.
     if let Some(ready) = config.bind_ready()? {
         let _ = writeln!(out, "ready on {ready}");
@@ -52,7 +49,7 @@ async fn serve_until_signal(mut config: Config, out: &mut dyn Write) -> Result<(
             termination.arrived().await;
             Ok(())
         };
-        let mut stopping = std::pin::pin!(stop_or_fence(&running, signalled));
+        let mut stopping = std::pin::pin!(signalled);
         loop {
             tokio::select! {
                 stopped = &mut stopping => {
@@ -63,11 +60,10 @@ async fn serve_until_signal(mut config: Config, out: &mut dyn Write) -> Result<(
                     // The refusal is logged by the reload; the old pair stays.
                     let _ = running.reload_tls();
                 }
-                // The server has stopped serving and ticking; the shutdown answers the loss.
-                _ = running.lock_lost() => break,
             }
         }
     }
+    running.hold().await;
     running.shutdown().await.map_err(Failure::Runtime)
 }
 

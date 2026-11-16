@@ -54,6 +54,9 @@ impl Config {
         clock: Arc<dyn js_state::Clock>,
         ids: Arc<dyn js_jobs::IdSource>,
     ) -> Self {
+        if let Some(store) = self.store.as_mut() {
+            store.clock = crate::config::StoreClock(Some(Arc::clone(&clock)));
+        }
         self.agents.job_sources = JobSources {
             clock,
             ids: ServerIds::new(ids),

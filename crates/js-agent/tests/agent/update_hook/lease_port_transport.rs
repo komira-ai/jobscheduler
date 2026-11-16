@@ -18,6 +18,7 @@ use super::lease_port::{all_unreachable, cut_over, lease, reach, short, unreacha
 use super::lease_stub::{Reply, Stub, closed};
 use super::step_rig::Rig;
 use crate::cordon::http::enrol;
+use crate::jobs::private;
 use crate::support::Scratch;
 
 /// A host reading of every field, as a current server sends it.
@@ -197,6 +198,37 @@ fn a_server_that_is_down_or_silent_is_a_bounded_unreachable_lease_and_the_steps_
     assert_eq!(silent.stop(), 3 + 1 + 4);
 }
 
+/// Asserts that a 403 `host-credential-required` to a call made with the token file, the state
+/// root holding no host credential, is told with its cause on each of the three calls (the
+/// server's code first, then that this host enrolled with the shared pool token and is to be
+/// enrolled again with a join token), and that the same refusal to a call made with the state
+/// root's host credential keeps the bare code: the cause is not the pool token there. It
+/// catches a refusal that leaves the operator with a bare `lease_unreachable`, or that blames
+/// the pool token of a host that has a credential.
+#[test]
+fn a_host_credential_required_to_the_token_file_names_the_pool_token_as_the_cause() {
+    let files = Scratch::new("hook-lease-pool-token");
+    let body = r#"{"error":"host-credential-required"}"#;
+    let named = LeaseError::Refused(
+        "host-credential-required: no host credential in the state root: this host enrolled with the shared pool token; re-enroll with a join token (docs/runbooks/farm-node-enroll.md)".to_owned(),
+    );
+    let stub = Stub::start(&[Reply::Answer(403, body)]);
+    let port = lease(&reach(&stub.url, None, Some(token(&files))), short());
+    assert_eq!(port.host().unwrap_err(), named);
+    assert_eq!(port.cordon(60).unwrap_err(), named);
+    assert_eq!(port.uncordon().unwrap_err(), named);
+    assert_eq!(stub.stop(), 3);
+    let state = private(&files, "state");
+    files.write("state/host-credential", &"a".repeat(64), 0o600);
+    let stub = Stub::start(&[Reply::Answer(403, body)]);
+    let port = lease(&reach(&stub.url, Some(state), None), short());
+    let bare = LeaseError::Refused("host-credential-required".to_owned());
+    assert_eq!(port.host().unwrap_err(), bare);
+    assert_eq!(port.cordon(60).unwrap_err(), bare);
+    assert_eq!(port.uncordon().unwrap_err(), bare);
+    assert_eq!(stub.stop(), 3);
+}
+
 /// Asserts how each refusal is told on each of the three calls: only a 409 whose code is
 /// `unknown-host` is the typed `UnknownHost`; another 409 code and `unknown-host` under another
 /// status are refusals by their code; a code that is not a string, an empty body and a body
@@ -211,11 +243,6 @@ fn only_a_409_unknown_host_is_the_unknown_host_and_every_other_refusal_keeps_its
         (409, r#"{"error":"unknown-host"}"#, LeaseError::UnknownHost),
         (409, r#"{"error":"host-live"}"#, refused("host-live")),
         (404, r#"{"error":"unknown-host"}"#, refused("unknown-host")),
-        (
-            403,
-            r#"{"error":"host-credential-required"}"#,
-            refused("host-credential-required"),
-        ),
         (409, r#"{"error":5}"#, refused("http-409")),
         (409, "", refused("http-409")),
         (500, "not json", refused("http-500")),

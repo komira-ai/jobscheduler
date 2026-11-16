@@ -1,0 +1,97 @@
+# The beta stage of the release for the platforms other than Linux x86_64: the workspace's tests
+# on Apple silicon (the job `macos`). release.yml calls this file (`workflow_call`) in a run of a
+# push to main, in parallel with `artifacts`, and holds back only the promotion of the macOS
+# assets to the release (release.yml's `promote-macos`); nothing of Linux x86_64 waits for it.
+# No pull request runs it: a pull request's checks are Linux x86_64 alone
+# (crates/xtask/tests/pr_linux_only holds every workflow to that).
+#
+# The workspace builds and passes its tests on Apple silicon but for the three crates that are
+# Linux code and are not built for macOS: js-contain (the crun runtime, cgroups), js-host-step
+# (the Linux host steps) and js-mdm (which applies its rendering to a Linux host through
+# js-host-step; the rendering, js-mdm-core, is tested here). Tests that need Linux (pidfds,
+# /proc, crun) are cfg-gated, not removed; the coverage and the Postgres tests stay on Linux.
+# js-mac-pool's Seatbelt profile builder also runs its generated profile under the real
+# `sandbox-exec` here (tests/runner.rs), and xtask's macOS package tests build a package with
+# Apple's pkgbuild. The release's own macOS build (artifacts.yml, `build` for
+# aarch64-apple-darwin) makes the release binaries of that leg.
+name: beta
+
+on:
+  workflow_call:
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  macos:
+    runs-on: macos-15
+    # The workspace's tests take about an hour on the hosted runner (the first full run: the
+    # build 10 minutes, the tests 47 minutes before one test hung).
+    timeout-minutes: 120
+    env:
+      # The oldest macOS the binaries must run on; a newer image must not raise it
+      # (the step after the build reads each binary's minos and fails above this).
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      # The tests' host, prepared as the Linux jobs prepare theirs. A second loopback address:
+      # Linux routes all of 127.0.0.0/8 to the loopback interface, macOS answers on 127.0.0.1
+      # alone, and the lease server's tests put a second listener on 127.0.0.2. And a Postgres
+      # server for the tests that need one (macOS runners have no service containers), from
+      # Homebrew as the Linux jobs take theirs from the distribution: a data directory of this
+      # job, local connections trusted and the socket in the job's temporary directory, as the
+      # `test` job's service container; its URL is the one that job sets. A test that needs
+      # the server fails, and does not skip, when it is not there.
+      - name: Add the loopback address 127.0.0.2
+        run: sudo ifconfig lo0 alias 127.0.0.2 up
+      - name: Install Postgres from Homebrew
+        run: brew install --quiet postgresql@17
+      # crates/xtask/src/postgres_for_tests.rs: initdb, start and wait, then the URL in
+      # GITHUB_ENV for the steps after this one.
+      - name: Start a Postgres server for the tests that need one
+        run: cargo xtask postgres-for-tests --bin-dir /opt/homebrew/opt/postgresql@17/bin --data-dir "$RUNNER_TEMP/pg" --socket-dir "$RUNNER_TEMP" --github-env "$GITHUB_ENV"
+      - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step --exclude js-mdm
+      - name: Check the minimum macOS of the built binaries
+        run: |
+          set -euo pipefail
+          checked=0
+          for f in target/debug/*; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            file "$f" | grep -q 'Mach-O 64-bit executable arm64' || continue
+            minos="$(otool -l "$f" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
+            echo "$f minos $minos"
+            if [ "$(printf '%s\n%s\n' "$minos" "$MACOSX_DEPLOYMENT_TARGET" | sort -V | tail -n 1)" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+              echo "::error::$f needs macOS $minos, above the pinned $MACOSX_DEPLOYMENT_TARGET"
+              exit 1
+            fi
+            checked=$((checked + 1))
+          done
+          [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
+      # --no-fail-fast: a red run names every failing test, as in the Linux `test` job.
+      - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step --exclude js-mdm
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

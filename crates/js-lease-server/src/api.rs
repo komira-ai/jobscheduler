@@ -22,7 +22,7 @@ use crate::hosts::listing;
 use crate::join_api;
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
-use crate::store::{LockLost, ServerStore};
+use crate::store::ServerStore;
 use crate::store_health::{StoreHealth, TickStore};
 use crate::usage::ProfileCurves;
 use crate::usage_api;
@@ -53,7 +53,7 @@ pub(crate) struct Shared {
     store_health: Option<Arc<StoreHealth>>,
     /// The pool's launching machine providers, which a submitted job is admitted over.
     admit: Admit,
-    /// The store, under the writer lock the server holds for its life (`--store`).
+    /// The store the server keeps its state in (`--store`).
     store: Option<ServerStore>,
 }
 
@@ -92,7 +92,7 @@ impl Shared {
         self
     }
 
-    /// The same state holding `store` and its writer lock.
+    /// The same state holding `store`.
     #[must_use]
     pub(crate) fn with_store(mut self, store: Option<ServerStore>) -> Self {
         self.store = store;
@@ -108,6 +108,7 @@ impl Shared {
     }
 
     /// The health of the store paths; `None` when the state was built without it.
+    #[cfg(test)]
     pub(crate) fn store_health(&self) -> Option<&Arc<StoreHealth>> {
         self.store_health.as_ref()
     }
@@ -115,14 +116,6 @@ impl Shared {
     /// The store the server holds; `None` without a store setting.
     pub(crate) fn server_store(&self) -> Option<&ServerStore> {
         self.store.as_ref()
-    }
-
-    /// Whether the store's writer lock is still held; always without a store.
-    pub(crate) async fn check_store(&self) -> Result<(), LockLost> {
-        match &self.store {
-            Some(store) => store.check().await,
-            None => Ok(()),
-        }
     }
 
     /// The same state serving the status routes from `status`.
@@ -183,17 +176,6 @@ impl Shared {
     /// Records that the tick loop has ended.
     pub(crate) fn stop_ticking(&self) {
         self.ticking.store(false, Ordering::SeqCst);
-    }
-
-    /// Whether the state store has said this process is no longer its writer.
-    pub(crate) fn is_fenced(&self) -> bool {
-        self.agents.fence.is_tripped()
-    }
-
-    /// Completes once the state store has said this process is no longer its writer
-    /// ([`crate::fence`]); never without a store.
-    pub(crate) async fn fenced(&self) {
-        self.agents.fence.tripped().await
     }
 
     /// One tick: runs the job pass, which ends the jobs that ran out of time, deletes those

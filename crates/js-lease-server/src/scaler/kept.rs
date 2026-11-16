@@ -11,7 +11,7 @@
 //! written: the records before the first call a step decided, the hosts before the registry
 //! is asked to remove one. A save that cannot be committed is the shell's failed save, as a
 //! file that cannot be written is: the step stops before any call and the failure is counted.
-//! The keys are read once at start, after the writer lock, and are refused as the files are
+//! The keys are read once at start, and are refused as the files are
 //! when they cannot be read as written; a live pool that is not at its first start does not
 //! start without the records key, as it does not without the file.
 

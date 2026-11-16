@@ -56,6 +56,11 @@ pub const MIN_SUPPORTED: u32 = 1;
 /// The migrations of this crate: version, name, file. A crate that keeps tables of its own
 /// in the schema ships its migration itself and continues the numbering ([`extend`]); the set
 /// a release runs is this one plus theirs, put together by the binary that depends on them.
+///
+/// Version 2, the writer generation table, is no longer read or written by any release: the
+/// server holds no writer lock and no store is fenced. Its migration stays where it is (a
+/// database records it by number and name, and a release that still fences needs the table), and
+/// the table is left in place, empty of meaning.
 const EMBEDDED: [(u32, &str, &str); 2] = [
     (1, "state", include_str!("migrations/0001_state.sql")),
     (

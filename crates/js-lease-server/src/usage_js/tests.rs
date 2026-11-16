@@ -315,7 +315,7 @@ fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
         history_retention_days: 90,
         names: no_names(),
     };
-    let err = open(&setup, 0)
+    let err = open(&setup, None, 0)
         .err()
         .expect("a directory is not a usage file");
     assert_eq!(err.flag(), "--usage-db");
@@ -372,7 +372,7 @@ fn the_usage_file_keeps_ended_allocations_for_the_retention_days() {
         history_retention_days: 2,
         names: no_names(),
     };
-    let sink = open(&setup, 0).unwrap();
+    let sink = open(&setup, None, 0).unwrap();
     let now_minute = 10 * MINUTES_PER_DAY;
     let now = now_minute * 60_000;
     let edge = now - 2 * DAY_MS;

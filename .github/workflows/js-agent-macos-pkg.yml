@@ -4,7 +4,8 @@
 # refuses anything but the files, modes, owners and script the package is meant to have. It
 # publishes nothing: the packages and their SHA256SUMS are workflow artifacts for seven days.
 #
-# Two jobs. `build` (its check is `js-agent-macos-pkg`) runs on every pull request and by hand: it builds, checks and sums the package
+# Two jobs. `build` runs in the beta stage of the release (release.yml's `beta-macos-pkg` calls
+# this file on a push to main) and by hand; no pull request runs it. It builds, checks and sums the package
 # unsigned, and no secret is named anywhere in it, so no code of a branch (a build script, a
 # macro, xtask) can see one. `sign` runs only by hand from main, in the environment
 # `macos-signing`, which a repository administrator creates with its secrets and a rule that
@@ -19,12 +20,11 @@
 # No command expands an expression: a script reads its environment. The version, which goes
 # into file names, is checked as MAJOR.MINOR.PATCH before anything uses it.
 #
-# Every pull request builds it as version 0.0.0; it is a required check of main. A manual run
-# builds the version typed. crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
+# The beta stage builds it as version 0.0.0. A manual run builds the version typed. crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
 name: js-agent-macos-pkg
 
 on:
-  pull_request:
+  workflow_call:
   workflow_dispatch:
     inputs:
       version:
@@ -34,11 +34,10 @@ on:
 
 permissions: {}
 
-# A newer push to a pull request cancels its older run, so a burst of pushes does not queue
-# macOS runners; a manual run of one version on one ref waits for the one before it.
+# A manual run of one version on one ref waits for the one before it.
 concurrency:
-  group: js-agent-macos-pkg-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: js-agent-macos-pkg-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -49,8 +48,7 @@ env:
 
 jobs:
   build:
-    # The check's name, which main's branch protection requires (`build` alone is also a job
-    # of js-agent-deb.yml).
+    # The check's name (`build` alone is also a job of js-agent-deb.yml).
     name: js-agent-macos-pkg
     runs-on: macos-15
     timeout-minutes: 60

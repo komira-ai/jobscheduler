@@ -48,6 +48,15 @@ pub enum JobStoreError {
         /// The job.
         id: JobId,
     },
+    /// The host's live allocations leave no room for the job's booking, as the placement's
+    /// transaction found them.
+    #[error("host {host} has no room for job {id}")]
+    HostFull {
+        /// The job.
+        id: JobId,
+        /// The host.
+        host: HostId,
+    },
     /// The job is not in the state the caller expects.
     #[error("job {id} is {found:?}, not {expected:?}")]
     UnexpectedState {
@@ -252,8 +261,11 @@ mod tests {
         for (error, said) in cases {
             assert_eq!(error.to_string(), said);
         }
-        let from_store: JobStoreError = StoreError::Fenced.into();
-        assert_eq!(from_store, JobStoreError::Store(StoreError::Fenced));
+        let from_store: JobStoreError = StoreError::Failed("down".to_owned()).into();
+        assert_eq!(
+            from_store,
+            JobStoreError::Store(StoreError::Failed("down".to_owned()))
+        );
         let from_mint: JobStoreError = MintError { code }.into();
         assert!(
             from_mint.source().is_none(),

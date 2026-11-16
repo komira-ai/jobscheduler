@@ -3,8 +3,10 @@
 
 use js_agent::integrity::{FakeHost, Integrity, input};
 
+use serde_json::json;
+
 use super::{JOB_UID, mount, process, started};
-use crate::lifecycle::{Harness, Options, cleanup, job, names};
+use crate::lifecycle::{Harness, Options, cleanup, job, names, reply_json};
 
 /// The harness with `host` checked after every job.
 fn checked(name: &str, host: &FakeHost) -> Harness {
@@ -79,6 +81,56 @@ fn a_dirty_job_leaves_the_baseline_where_it_was() {
     assert_eq!(events.last().unwrap(), "finding r2 kernel-module-changed");
     assert_eq!(h.life.free().cpu_millis, 2000, "neither slot came back");
     assert_eq!(h.life.findings().len(), 2);
+}
+
+/// Asserts, with the real checks over the in-memory host, that a daemonised process a job
+/// left taints the host and that the host clears itself once the process is gone: while
+/// the process is there the re-checks find it again and again and the host stays tainted;
+/// when it ends, two clean re-checks a wait apart report the clear, and the server's
+/// acknowledgement ends the taint, frees the blocked run and its slot, and the next job
+/// runs. It catches re-checks that do not look at the host, and a clear that does not need
+/// the process to be gone.
+#[test]
+fn a_taint_for_a_process_clears_when_the_process_is_gone() {
+    let host = FakeHost::quiet();
+    let mut h = checked("clears-when-gone", &host);
+    h.start(job("r1"));
+    host.start_process(process(300, 1, 0, 900, "0::/init.scope"));
+    h.fake.exit("r1", 0);
+    h.life.step();
+    assert!(h.life.is_tainted());
+    assert_eq!(
+        h.life.pending_taint().unwrap().check.unwrap(),
+        "daemonised-child"
+    );
+    h.life.apply(&reply_json(&json!({ "taint_ack": true })));
+
+    h.life.step();
+    for _ in 0..4 {
+        h.clock.advance(60_000);
+        h.life.step();
+    }
+    assert!(h.life.is_tainted());
+    assert_eq!(
+        h.life.pending_taint_clear(),
+        None,
+        "the process is still there"
+    );
+
+    host.end_process(300);
+    h.clock.advance(60_000);
+    h.life.step();
+    assert_eq!(h.life.pending_taint_clear(), None, "one clean check");
+    h.clock.advance(60_000);
+    h.life.step();
+    assert!(h.life.pending_taint_clear().is_some());
+    let events = h
+        .life
+        .apply(&reply_json(&json!({ "taint_cleared_ack": true })));
+    assert_eq!(names(&events), ["finding - taint-cleared"]);
+    assert!(!h.life.is_tainted());
+    assert_eq!(h.life.free().cpu_millis, 4000);
+    assert_eq!(names(&h.start(job("r2"))), ["started r2"]);
 }
 
 /// Asserts that the checks are told every container that is still on the host beside the

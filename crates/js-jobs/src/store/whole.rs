@@ -12,18 +12,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_state::{Cond, Store, StoreTime, Txn, Version};
+use std::sync::atomic::Ordering;
+
+use js_state::{Claim, Cond, Store, StoreTime, Txn, TxnRead, Version};
 use js_types::{HostId, QueueNote};
 
 use super::index::{put_allocation, put_job};
-use super::{Beside, JobStore, ensure, with_rows};
+use super::{Beside, JobStore, allocation_at, booked_in, ensure, job_at, with_rows};
 use crate::codec::Carried;
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
 use crate::record::{
-    AllocationRecord, AllocationStep, Booked, EndReason, Exclusion, JobRecord, JobState, Needs,
-    StartFailure,
+    AllocationRecord, AllocationStep, Booked, Capacity, EndReason, Exclusion, JobRecord, JobState,
+    Needs, StartFailure,
 };
 use crate::result::{JobEnd, ended};
 
@@ -88,6 +90,110 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok((placed, allocation))
     }
 
+    /// [`JobStore::place_with`] decided on the rows the placement's own transaction has
+    /// locked, which is how a server places a queued job when other servers place too.
+    ///
+    /// The job's row is claimed first (`FOR UPDATE SKIP LOCKED` on Postgres): a job another
+    /// transaction holds is [`JobStoreError::Stale`] at once and is left to it, without waiting.
+    /// Then, in the same transaction, the job, its earlier allocation, its mark and the
+    /// host's live allocations are read as they stand, so the decision is made on what the
+    /// commit finds and not on a picture read earlier:
+    ///
+    /// - the job must still be queued (a placement by another server made it
+    ///   [`JobStoreError::UnexpectedState`]);
+    /// - with `capacity`, the host's live allocations plus this booking must fit it, else
+    ///   [`JobStoreError::HostFull`] and nothing is written (the conditional update that
+    ///   reserves the capacity: the booking and the check are one transaction);
+    /// - the host's reservation row (`hostbook/<host>`) is written at the version the
+    ///   transaction read, so a reader that works from a picture of the host sees it moved.
+    ///
+    /// Returns the job and the allocation as written.
+    ///
+    /// # Errors
+    /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the job's row is held by
+    /// another transaction or its commit's preconditions failed; [`JobStoreError::HostFull`].
+    pub fn place_claimed(
+        &self,
+        id: &JobId,
+        host: &HostId,
+        booked: Booked,
+        placement: &Placement,
+        capacity: Option<&Capacity>,
+    ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
+        let mut failed = None;
+        let mut placed = None;
+        let claim = [keys::job(id)];
+        let outcome = self.store.claim_decide(&claim, &mut |read| {
+            let decided = self.decide_placement(read, id, (host, booked, placement), capacity);
+            match decided {
+                Ok((txn, job, allocation)) => {
+                    placed = Some((job, allocation));
+                    Some(txn)
+                }
+                Err(error) => {
+                    failed = Some(error);
+                    None
+                }
+            }
+        });
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        match (outcome?, placed, failed) {
+            (Claim::Committed(_), Some(placed), _) => Ok(placed),
+            (_, _, Some(error)) => Err(error),
+            _ => Err(JobStoreError::Stale { id: id.clone() }),
+        }
+    }
+
+    /// The transaction [`JobStore::place_claimed`] commits, decided on what `read` shows.
+    fn decide_placement(
+        &self,
+        read: &mut dyn TxnRead,
+        id: &JobId,
+        (host, booked, placement): (&HostId, Booked, &Placement),
+        capacity: Option<&Capacity>,
+    ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
+        let job_key = keys::job(id);
+        let row = read
+            .get(&job_key)?
+            .ok_or(JobStoreError::NotFound { id: id.clone() })?;
+        let job = job_at(&job_key, &row.value)?;
+        let earlier_key = keys::allocation(id);
+        let earlier = read
+            .get(&earlier_key)?
+            .map(|row| allocation_at(&earlier_key, &row.value).map(|found| (found, row.version)))
+            .transpose()?;
+        // The host's reservation row is read first, which locks it (`FOR UPDATE` on Postgres), so
+        // the host's allocations are summed after any placement ahead of this one on the host has
+        // committed, and not before.
+        let book_key = keys::hostbook(host);
+        let cond = read
+            .get(&book_key)?
+            .map_or(Cond::Absent, |row| Cond::Version(row.version));
+        if let Some(capacity) = capacity {
+            let booking = booked_in(read, host)?;
+            ensure(
+                capacity.has_room(&booking, &booked),
+                JobStoreError::HostFull {
+                    id: id.clone(),
+                    host: host.clone(),
+                },
+            )?;
+        }
+        let (txn, placed, allocation) = self.build_placement(
+            id,
+            (job, row.version),
+            earlier,
+            (host.clone(), booked, placement.clone()),
+        )?;
+        let mark_key = keys::mark(id);
+        let txn = match read.get(&mark_key)? {
+            Some(row) => txn.delete(mark_key, Cond::Version(row.version)),
+            None => txn.check(mark_key, Cond::Absent),
+        };
+        let txn = txn.put(book_key, allocation.allocation_id.to_string(), cond);
+        Ok((txn, placed, allocation))
+    }
+
     /// The transaction that places the queued job `id` on `host` as [`JobStore::place`]
     /// describes, with `placement` written beside the booking, and the job and allocation it
     /// writes.
@@ -98,7 +204,21 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         booked: Booked,
         placement: Placement,
     ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
-        let (job, job_version) = self.job_row(id)?;
+        let job = self.job_row(id)?;
+        let earlier = self.read_allocation(id)?;
+        self.build_placement(id, job, earlier, (host, booked, placement))
+    }
+
+    /// The transaction that places the queued job `id`, read at `job`, on a host as
+    /// [`JobStore::place`] describes, given its `earlier` allocation as read, and the job and
+    /// allocation it writes.
+    fn build_placement(
+        &self,
+        id: &JobId,
+        (job, job_version): (JobRecord, Version),
+        earlier: Option<(AllocationRecord, Version)>,
+        (host, booked, placement): (HostId, Booked, Placement),
+    ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
         ensure(
             job.state == JobState::Queued,
             JobStoreError::UnexpectedState {
@@ -107,7 +227,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 found: job.state,
             },
         )?;
-        let earlier = self.read_allocation(id)?;
         let (allocation_cond, earlier_id) = match &earlier {
             None => (Cond::Absent, None),
             Some((earlier, version)) => {
@@ -305,5 +424,51 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             },
         )?;
         Ok((allocation, version))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use js_state::{StoreError, TxnRead, Versioned};
+
+    use super::*;
+    use crate::ids::RandomIds;
+
+    /// A view of a store that holds no row.
+    struct Empty;
+
+    impl TxnRead for Empty {
+        fn get(&mut self, _key: &str) -> Result<Option<Versioned>, StoreError> {
+            Ok(None)
+        }
+
+        fn scan_prefix(&mut self, _prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Asserts that a decision made on a view that holds no row for the job says the job is
+    /// not found, writing nothing. (The store claims the row before it decides, so a store
+    /// never shows this; the decision does not rest on that.) It catches a decision that
+    /// invents a job.
+    #[test]
+    fn a_decision_on_a_view_without_the_job_says_it_is_not_found() {
+        let store = Arc::new(js_state::fake::Fake::with_flaw(
+            Arc::new(js_state::ManualClock::default()),
+            js_state::fake::Flaw::None,
+        ));
+        let jobs = JobStore::new(store, RandomIds).expect("opens");
+        let id = JobId::parse("ghost").expect("an id");
+        let host = HostId::new("host-a").expect("a host");
+        assert_eq!(Empty.scan_prefix("x/"), Ok(Vec::new()));
+        let decided = jobs.decide_placement(
+            &mut Empty,
+            &id,
+            (&host, Booked::WholeHost, &Placement::default()),
+            None,
+        );
+        assert_eq!(decided.err(), Some(JobStoreError::NotFound { id }));
     }
 }

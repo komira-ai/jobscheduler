@@ -24,6 +24,7 @@ use crate::{
     Needs, NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
 };
 
+mod claimed;
 mod clock;
 mod collect;
 mod compat;
@@ -46,6 +47,7 @@ mod scrub;
 mod taints;
 mod whole;
 
+pub use claimed::*;
 pub use clock::*;
 pub use collect::*;
 pub use compat::*;
@@ -93,6 +95,15 @@ where
     booked_on_sums_the_live_allocations_of_a_host(backend);
     placement_books_the_jobs_host_ports(backend);
     live_on_lists_the_live_allocations_of_one_host(backend);
+    a_claimed_placement_books_only_what_the_host_has_room_for(backend);
+    a_whole_host_and_a_share_exclude_each_other_in_the_placement(backend);
+    a_job_another_writer_placed_is_not_placed_again(backend);
+    a_claimed_placement_moves_the_hosts_reservation_row(backend);
+    a_claimed_placement_locks_the_hosts_row_before_it_sums_the_host(backend);
+    a_claimed_placement_deletes_the_marked_jobs_mark(backend);
+    a_claimed_placement_of_a_missing_job_is_stale(backend);
+    a_requeued_job_is_placed_again_over_its_freed_allocation(backend);
+    a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read(backend);
     end_and_free_is_one_commit(backend);
     requeue_loses_to_a_change_of_either_row(backend);
     a_move_that_loses_its_job_version_is_stale(backend);
@@ -220,6 +231,15 @@ macro_rules! job_store_tests {
             booked_on_sums_the_live_allocations_of_a_host,
             placement_books_the_jobs_host_ports,
             live_on_lists_the_live_allocations_of_one_host,
+            a_claimed_placement_books_only_what_the_host_has_room_for,
+            a_whole_host_and_a_share_exclude_each_other_in_the_placement,
+            a_job_another_writer_placed_is_not_placed_again,
+            a_claimed_placement_moves_the_hosts_reservation_row,
+            a_claimed_placement_locks_the_hosts_row_before_it_sums_the_host,
+            a_claimed_placement_deletes_the_marked_jobs_mark,
+            a_claimed_placement_of_a_missing_job_is_stale,
+            a_requeued_job_is_placed_again_over_its_freed_allocation,
+            a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read,
             end_and_free_is_one_commit,
             requeue_loses_to_a_change_of_either_row,
             a_move_that_loses_its_job_version_is_stale,

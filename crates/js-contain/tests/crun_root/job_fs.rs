@@ -331,6 +331,47 @@ async fn a_job_makes_files_at_the_top_of_a_layered_root() {
     mounts.unmount_lease();
 }
 
+/// Catches an empty overlay at `/work` over a layered root's own `/work`: a file a layer
+/// holds at `/work/x` is read by the job at `/work/x`, its working directory.
+#[tokio::test]
+#[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
+async fn a_file_of_a_layer_at_the_exec_root_is_visible_to_the_job() {
+    let cell = Cell::new("layer-work");
+    let job = cell.job_ids();
+    let root = host_root(&cell);
+    let image = cell
+        .store()
+        .join(cell.image.digest.trim_start_matches("sha256:"))
+        .join("rootfs");
+    owned_dir(&root.join("layer/work"), job);
+    owned_file(&root.join("layer/work/x"), "from the layer\n", job);
+    let mut lease = cell.lease(
+        "layer-work",
+        &["/bin/sh", "-c", "cat x /work/x"],
+        Shape::default(),
+    );
+    let mut mounts = Mounts::new(&cell, &lease);
+    let layer = mounts.clone(
+        0,
+        &root,
+        "layer",
+        "",
+        Attributes {
+            read_only: true,
+            no_exec: false,
+        },
+    );
+    lease.spec.mounted_root = Some(mounts.root(&cell, vec![layer, image]));
+    let ran = run(&cell, &lease).await;
+    assert_eq!(
+        ran.out(),
+        "from the layer\nfrom the layer\n",
+        "{}",
+        ran.said
+    );
+    mounts.unmount_lease();
+}
+
 /// Catches a read-only mount the job can write, a read-write mount whose writes do not
 /// reach the host, and a copy-on-write mount at `/work` whose writes do, or that leaves the
 /// exec root's own overlay over it: the write to the read-only mount fails "Read-only file

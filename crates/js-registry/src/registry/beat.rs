@@ -25,26 +25,43 @@ use super::{Record, Registry};
 pub struct HeartbeatCheck {
     /// The host the heartbeat is from, as its admitted session names it.
     pub host: HostId,
-    /// The taint the beat would record on a host that has none: the taint the heartbeat
+    /// The taint the beat would record on a host that has none, or has none left after
+    /// the beat clears it ([`HeartbeatCheck::cleared`]): the taint the heartbeat
     /// reports; else, when a start it reports was refused as `host-tainted`, a taint
     /// naming that run. `None` when the beat records none: it carries none of these, or the
     /// host is tainted already, since the first taint is kept. After the beat,
     /// [`crate::HostView::taint`] and the binding ([`Registry::bindings`]) carry this
     /// taint.
     pub taint: Option<Taint>,
+    /// The beat reports the host's taint cleared (`taint_cleared` is the taint the host
+    /// holds), so the host holds [`HeartbeatCheck::taint`] after it, which is none unless
+    /// the same beat reports a new taint. A caller that makes the taint durable before the
+    /// registry records it commits the binding when this is set, as when `taint` is.
+    pub cleared: bool,
 }
 
-/// The taint the host holds once the beat is recorded: the host's own, else the one the
-/// beat reports, else (the first taint is kept) one that names a start the agent refused
-/// as `host-tainted`. An agent that refuses a start because its host is tainted may be
-/// unable to write its own marker (a full disk), so that refusal taints the host here as a
-/// report would. A start refused as `quota-unavailable` is the host's fault too, and
-/// taints nothing.
+/// Whether `heartbeat` reports the taint `record` holds as cleared: the taint it names is
+/// the one held, field for field. A host whose held taint differs (a host job's, the
+/// server's own, one the agent never reported) stays tainted.
+pub(super) fn clears(record: &Record, heartbeat: &Heartbeat) -> bool {
+    record.taint.is_some() && record.taint == heartbeat.taint_cleared
+}
+
+/// The taint the host holds once the beat is recorded: the host's own unless the beat clears
+/// it, else the one the beat reports, else (the first taint is kept) one that names a start
+/// the agent refused as `host-tainted`. An agent that refuses a start because its host is
+/// tainted may be unable to write its own marker (a full disk), so that refusal taints the
+/// host here as a report would. A start refused as `quota-unavailable` is the host's fault
+/// too, and taints nothing. A beat that reports a taint cleared is the agent saying the
+/// host is clean again, so the refusals it still carries (results not yet acknowledged,
+/// from before the clear) taint nothing; a taint the agent makes again after the clear is
+/// reported in `taint`.
 pub(super) fn taint_after(record: &Record, heartbeat: &Heartbeat) -> Option<Taint> {
     let refused_start = heartbeat.results.iter().find(|result| {
         let by_host = result.detail.as_deref() == Some(refusal_code::HOST_TAINTED);
         by_host && result.outcome == Outcome::FailedToStart
     });
+    let refused_start = refused_start.filter(|_| heartbeat.taint_cleared.is_none());
     let reported = heartbeat.taint.clone().or_else(|| {
         refused_start.map(|result| Taint {
             reason: refusal_code::HOST_TAINTED.to_string(),
@@ -52,7 +69,8 @@ pub(super) fn taint_after(record: &Record, heartbeat: &Heartbeat) -> Option<Tain
             check: None,
         })
     });
-    record.taint.clone().or(reported)
+    let held = record.taint.clone().filter(|_| !clears(record, heartbeat));
+    held.or(reported)
 }
 
 /// The reply to the heartbeat of an agent that keys its work by run, which this registry no
@@ -73,6 +91,7 @@ pub(super) fn answer(heartbeat: &Heartbeat) -> HeartbeatReply {
         commands: cancels.take(limits::MAX_COMMANDS).collect(),
         result_acks: acks.collect(),
         taint_ack: heartbeat.taint.is_some(),
+        taint_cleared_ack: heartbeat.taint_cleared.is_some(),
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
@@ -173,11 +192,16 @@ impl Registry {
             .get(&host)
             .filter(|record| !forgotten(&state.book, (&host, *record), now, config) || held(&host));
         let record = admitted(kept, heartbeat, credential)?;
-        let taint = match record.taint {
-            Some(_) => None,
-            None => taint_after(record, heartbeat),
+        let cleared = clears(record, heartbeat);
+        let taint = match (record.taint.is_some(), cleared) {
+            (true, false) => None,
+            _ => taint_after(record, heartbeat),
         };
-        Ok(HeartbeatCheck { host, taint })
+        Ok(HeartbeatCheck {
+            host,
+            taint,
+            cleared,
+        })
     }
 }
 
@@ -245,6 +269,7 @@ mod tests {
             held: Vec::new(),
             results: Vec::new(),
             taint: None,
+            taint_cleared: None,
             exclusive_ready: None,
             exclusive_refused: None,
             load: None,

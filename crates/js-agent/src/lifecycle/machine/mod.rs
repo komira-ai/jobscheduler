@@ -7,6 +7,7 @@
 
 mod adopt;
 mod cleanup;
+mod clear;
 mod exclusive;
 mod held;
 mod job;
@@ -20,6 +21,7 @@ mod vm;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, NativeSpec, Outcome, ResultAck,
@@ -119,9 +121,26 @@ pub struct Lifecycle {
     parked_reminded_ms: Option<u64>,
     /// The stop after a silence of the server, once it is set (see `silence`).
     silence: Option<silence::Watch>,
+    /// How long a run must be seen with no control group before the host counts as blind
+    /// to it ([`Lifecycle::with_blind_wait`]).
+    blind_wait: Duration,
+    /// The wait between the re-checks of a taint that may clear itself
+    /// ([`Lifecycle::with_taint_recheck`]).
+    taint_recheck: Duration,
 }
 
 impl Lifecycle {
+    /// The same lifecycle, with `wait` as the time a running run must go without a control
+    /// group the runtime can name, from the first step that sees it so, before the host is
+    /// tainted as unchecked: `--settle-ms`. The default is [`DEFAULT_SETTLE`].
+    #[must_use]
+    pub fn with_blind_wait(self, wait: Duration) -> Self {
+        Self {
+            blind_wait: wait,
+            ..self
+        }
+    }
+
     /// Acts on a heartbeat reply: validates it as the wire demands, starts what can be
     /// started, stops what is to be stopped and drops the results the server
     /// acknowledged. A command that fails validation is skipped and reported; the commands
@@ -176,6 +195,7 @@ impl Lifecycle {
             self.acknowledge_retired(&reply.retired_acks);
         }
         self.taint.ack(reply.taint_ack);
+        self.finish_taint_clear(reply.taint_cleared_ack, &mut events);
         self.sweep();
         self.persist_held(&mut events);
         events
@@ -189,7 +209,8 @@ impl Lifecycle {
         self.taint.pending()
     }
 
-    /// Whether the host is tainted, acknowledged or not.
+    /// Whether the host is tainted, acknowledged or not. It is until the clear of a taint
+    /// that clears itself has been acknowledged ([`Lifecycle::pending_taint_clear`]).
     pub fn is_tainted(&self) -> bool {
         self.taint.is_tainted()
     }
@@ -211,6 +232,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
+        self.recheck_taint();
         self.retry_parked(&mut events);
         self.watch_quota(&mut events);
         self.fit_log_tails_to_beat(&mut events);

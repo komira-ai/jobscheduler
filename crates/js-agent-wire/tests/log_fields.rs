@@ -569,6 +569,7 @@ fn busy_reply() -> HeartbeatReply {
             })
             .collect(),
         taint_ack: true,
+        taint_cleared_ack: false,
         exclusive: None,
         job_acks: (200..296)
             .map(|i| JobResultAck {

@@ -49,6 +49,7 @@ fn open_with(names: &[&str], ceiling: &NetworkCeiling) -> BTreeMap<HostId, OpenH
         ceiling: ceiling.clone(),
         host_jobs: false,
         rank: None,
+        capacity: None,
     };
     let hosts = names.iter().map(|name| host(name));
     hosts.map(|host| (host, offer.clone())).collect()

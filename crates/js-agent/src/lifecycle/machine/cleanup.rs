@@ -21,8 +21,10 @@ impl Lifecycle {
             runtime,
             config,
             taint,
+            blind_wait,
             ..
         } = self;
+        let blind_wait_ms = u64::try_from(blind_wait.as_millis()).unwrap_or(u64::MAX);
         let job = &mut jobs[index];
         let Stage::Running(id) = job.stage.clone() else {
             return;
@@ -54,21 +56,33 @@ impl Lifecycle {
                 // A runtime that puts every container in a group the agent can read, and
                 // cannot name this running container's group (not at the start, not at a
                 // window, not now), left the agent blind to it: its usage is not sampled
-                // and what it leaves is not known to be checkable, when two steps in a row
-                // find it so. A run seen only after it ended has no group to look at
+                // and what it leaves is not known to be checkable, when steps find it so over the
+                // settle wait. A run seen only after it ended has no group to look at
                 // (`cgroup` says `None` for it), and one that ended between the poll and the
                 // look is read as ended by the next step: neither is blindness.
-                if runtime.places_in_cgroup() && job.cgroup.is_none() && !job.blind_told {
+                //
+                // A run whose end the runtime holds (a failed run whose sources are being
+                // checked) has ended, though `poll` says running: its group is gone, and no
+                // number of steps makes that blindness.
+                if runtime.places_in_cgroup()
+                    && job.cgroup.is_none()
+                    && !job.blind_told
+                    && !runtime.ends_held(&id)
+                {
                     job.cgroup = runtime.cgroup(&id);
                     // The first sighting is not enough: a run that ended a moment ago has
                     // no group left, and is still read as running until its end is read
-                    // (the next step reads it as ended). Only a run that is still running
-                    // and still has no group at the next step is one the agent cannot see.
-                    if job.cgroup.is_none() && !job.blind_seen {
-                        job.blind_seen = true;
-                    } else if job.cgroup.is_none() {
-                        job.blind_told = true;
-                        job.taint(taint, blind_taint(&job.run_id), events);
+                    // (a later step reads it as ended). Steps come at once after one
+                    // another (every order nudges the worker), so the count of steps says
+                    // nothing: only a run that is still running and still has no group a
+                    // settle time (`--settle-ms`) after the first sighting is one the agent
+                    // cannot see.
+                    if job.cgroup.is_none() {
+                        let since = *job.blind_since.get_or_insert(now);
+                        if now.saturating_sub(since) >= blind_wait_ms {
+                            job.blind_told = true;
+                            job.taint(taint, blind_taint(&job.run_id), events);
+                        }
                     }
                 }
             }
