@@ -190,6 +190,11 @@ Known limits:
 
 ## Not done yet
 
+The layout above is not one hostkeeper's `macos-pkg` installer is designed to take. The design of the package
+hostkeeper installs (payload under `/Library/Application Support/js-agent/`, labels `js-agent` and
+`js-agent.session`, fixed plists with the host's values in flags files, no `postinstall`) is
+[docs/design/mac-hostkeeper-package.md](../../docs/design/mac-hostkeeper-package.md); none of it is built yet.
+
 - The package is a workflow artifact for seven days, not a release asset: `artifacts.yml` (which
   `release.yml` calls) lists the release's assets by name and attests `*.tar.gz` and the
   Linux `.deb` files. It carries no update declaration, and nothing in it moves `link/current`.

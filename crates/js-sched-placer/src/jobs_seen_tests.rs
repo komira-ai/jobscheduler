@@ -262,10 +262,10 @@ fn a_pass_whose_read_failed_is_run_again_with_nothing_else_changed() {
     rig.skipped(&both);
     rig.queue_whole_cores("one");
     rig.tables.store.fail_read_after(0);
-    let written = rig.tables.jobs.written();
+    let written = rig.tables.jobs.written().unwrap();
     assert!(rig.beat(&both).is_err(), "the read was to fail");
     assert_eq!(
-        rig.tables.jobs.written(),
+        rig.tables.jobs.written().unwrap(),
         written,
         "a failed read writes nothing"
     );
@@ -311,6 +311,39 @@ fn the_tables_are_read_again_only_after_a_write_and_never_for_another_job_store(
         reads.contains(&Read::Scan("idx/job/queued/".to_owned())),
         "{reads:?}"
     );
+}
+
+/// Asserts that a job another server submits to the store they share is read by the next pass
+/// after a heartbeat, which is not skipped for it and places the job, and that the tables a pass
+/// cached are read again for it. The first server has run its passes to rest (the next is
+/// skipped and reads nothing); a second server's job store over the same store submits a job; the
+/// first server's next pass runs and places it. It catches a pass that counts only its own
+/// server's writes, which leaves a job submitted elsewhere queued until something of this server's
+/// own changes.
+#[test]
+fn a_job_another_server_submitted_is_read_by_the_next_pass_and_placed() {
+    let rig = Rig::new();
+    let both = Offered::both();
+    rig.queue_whole_cores("here");
+    rig.ran(&both, &["here"]);
+    rig.ran(&both, &[]);
+    rig.skipped(&both);
+
+    let other = JobStore::new(Arc::clone(&rig.tables.store), RandomIds).unwrap();
+    let cores = js_types::Resources::new(8000, 1 << 30, 0, None).unwrap();
+    let there = NewJob {
+        id: Some(JobId::parse("there").unwrap()),
+        spec: spec_of(Needs::Shape(cores), 600),
+        priority: 0,
+        client: None,
+    };
+    other.insert_queued(there).unwrap();
+    rig.ran(&both, &["there"]);
+    let state = |id: &str| {
+        let id = JobId::parse(id).unwrap();
+        rig.tables.jobs.get_job(&id).unwrap().unwrap().state
+    };
+    assert_eq!(state("there"), JobState::Placed);
 }
 
 /// Asserts which calls of the registry count as changes of the engine: a hello, a reading and
