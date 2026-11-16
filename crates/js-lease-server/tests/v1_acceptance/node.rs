@@ -1,5 +1,5 @@
-//! The host the agent runs its jobs on: a tree of directories that passes the `--runtime
-//! crun` start check, an image store that holds the one image every job names, cgroup
+//! The host the agent runs its jobs on: a tree of directories that passes the crun
+//! runtime's start check, an image store that holds the one image every job names, cgroup
 //! directories, and the stand-in `crun`.
 //!
 //! The stand-in is a shell script. Every call is appended to `calls`. `run` reads the job's

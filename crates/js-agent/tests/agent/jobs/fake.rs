@@ -14,15 +14,18 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::ThreadId;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use js_agent::cli_runtime::Mapping;
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
-use js_agent::lifecycle::{
-    Clock, Exit, Found, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
-};
+use js_agent::lifecycle::{Clock, Exit, Runtime};
+#[cfg(target_os = "linux")]
+use js_agent::lifecycle::{Found, RunHandle, RunSpec, RuntimeError, Status, label};
+#[cfg(target_os = "macos")]
 use js_agent::native::NativeRuntime;
 use js_agent::quota::{FakeQuota, ScratchQuota};
 use js_agent::vm::VmSettings;
 use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock};
+#[cfg(target_os = "macos")]
 use js_mac_session::client::Client;
 use js_vm_lease::VmDriver;
 use js_vm_lease::fake::FakeDriver;
@@ -48,6 +51,7 @@ impl Clock for TestClock {
 
 struct Container {
     run_id: String,
+    #[cfg(target_os = "linux")]
     labels: BTreeMap<String, String>,
     exit: Option<Exit>,
 }
@@ -55,6 +59,7 @@ struct Container {
 #[derive(Default)]
 struct State {
     containers: BTreeMap<String, Container>,
+    #[cfg(target_os = "linux")]
     next: u32,
     /// Calls to fail: the name of the call and how many more times it fails.
     failing: BTreeMap<&'static str, u32>,
@@ -158,6 +163,7 @@ impl World {
     }
 
     /// From now on `list_labelled` waits for [`World::release`].
+    #[cfg(target_os = "linux")]
     pub fn hold_lists(&self) {
         self.lock().hold_lists = true;
     }
@@ -231,12 +237,14 @@ impl World {
 
     /// The runtime of the agent `host_id` on this world: it labels what it makes with the
     /// host id and lists only what carries the run label and its own host id.
+    #[cfg(target_os = "linux")]
     pub fn runtime(&self, host_id: &str) -> WorldRuntime {
         WorldRuntime(self.clone(), host_id.to_owned())
     }
 
     /// A running container of the run `run_id` that the agent `host_id` made, which no
     /// runtime of another agent may list or stop.
+    #[cfg(target_os = "linux")]
     pub fn leak(&self, run_id: &str, host_id: &str) {
         let mut state = self.lock();
         state.next += 1;
@@ -254,6 +262,7 @@ impl World {
 
 impl State {
     /// Whether the call `call` fails now (and counts it), and panics if it is to.
+    #[cfg(target_os = "linux")]
     fn fails(&mut self, call: &'static str) -> bool {
         if self.panic_at.take_if(|at| *at == call).is_some() {
             panic!("the {call} of the fake runtime panics");
@@ -268,13 +277,16 @@ impl State {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn failed(call: &str) -> RuntimeError {
     RuntimeError::new(format!("{call} failed"))
 }
 
 /// The container runtime the worker thread makes.
+#[cfg(target_os = "linux")]
 pub struct WorldRuntime(World, String);
 
+#[cfg(target_os = "linux")]
 impl Runtime for WorldRuntime {
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         let world = &self.0;
@@ -425,6 +437,7 @@ pub struct FakeMachine {
     /// The scratch quota of the machine: one that works, unless a test replaces it.
     pub quota: Arc<FakeQuota>,
     /// For each native runtime made: whether its settings carried a bundle store.
+    #[cfg(target_os = "macos")]
     pub bundles_seen: Arc<Mutex<Vec<bool>>>,
     /// The VM driver of the VM backend; none for a machine that runs no VMs (the default
     /// driver, which runs none off macOS).
@@ -449,6 +462,7 @@ impl SharedFiles {
     }
 
     /// The threads that read a file, one entry for each read.
+    #[cfg(target_os = "linux")]
     pub fn readers(&self) -> Vec<ThreadId> {
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.readers.clone()
@@ -493,6 +507,7 @@ impl FakeMachine {
             build: Build::Fine,
             files: SharedFiles::default(),
             quota: Arc::new(FakeQuota::new()),
+            #[cfg(target_os = "macos")]
             bundles_seen: Arc::default(),
             vms: None,
         }
@@ -507,11 +522,13 @@ impl FakeMachine {
     }
 
     /// For each native runtime made: whether its settings carried a bundle store.
+    #[cfg(target_os = "macos")]
     pub fn bundles_seen(&self) -> Vec<bool> {
         self.bundles_seen.lock().unwrap().clone()
     }
 
     /// The same machine with `quota` as its scratch quota.
+    #[cfg(target_os = "linux")]
     pub fn with_quota(self, quota: FakeQuota) -> Self {
         Self {
             quota: Arc::new(quota),
@@ -539,30 +556,33 @@ impl Machine for FakeMachine {
             Build::Fine | Build::HostNotSeen => {
                 // What opening the real runtime does for jobs mapped onto a range: the
                 // checks take the range from the settings (the fake engine maps nothing).
-                let settings = match build.backend {
-                    Backend::Container(settings) => settings,
-                    // A native agent's runtime is the real one, over whatever helper the
-                    // flags name (the tests serve a fake one on that socket).
-                    Backend::Native(native) => {
-                        let helper = Client::new(native.socket());
-                        let opened = NativeRuntime::open(helper, native.config().clone(), 1);
-                        let runtime = opened.map_err(|why| why.to_string())?;
-                        self.bundles_seen
-                            .lock()
-                            .unwrap()
-                            .push(native.bundles().is_some());
-                        let runtime = match native.bundles() {
-                            Some(store) => runtime.with_bundles(Arc::clone(store)),
-                            None => runtime,
-                        };
-                        return Ok((Box::new(runtime), Vec::new()));
-                    }
-                };
-                settings.resolve(Mapping::new(231_072, 462_144));
-                Ok((
-                    Box::new(self.world.runtime(build.host_id)),
-                    vec!["the fake engine is ready".to_owned()],
-                ))
+                // A native agent's runtime (a macOS build's) is the real one, over whatever
+                // helper the flags name (the tests serve a fake one on that socket).
+                #[cfg(target_os = "macos")]
+                {
+                    let Backend::Native(native) = build.backend;
+                    let helper = Client::new(native.socket());
+                    let opened = NativeRuntime::open(helper, native.config().clone(), 1);
+                    let runtime = opened.map_err(|why| why.to_string())?;
+                    self.bundles_seen
+                        .lock()
+                        .unwrap()
+                        .push(native.bundles().is_some());
+                    let runtime = match native.bundles() {
+                        Some(store) => runtime.with_bundles(Arc::clone(store)),
+                        None => runtime,
+                    };
+                    Ok((Box::new(runtime), Vec::new()))
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let Backend::Container(settings) = build.backend;
+                    settings.resolve(Mapping::new(231_072, 462_144));
+                    Ok((
+                        Box::new(self.world.runtime(build.host_id)),
+                        vec!["the fake engine is ready".to_owned()],
+                    ))
+                }
             }
         }
     }

@@ -28,7 +28,7 @@ pub const SCHEMA: u64 = 1;
 pub struct HostIdFlags {
     /// The id this host registers under. By default a salted hash of the machine id
     /// (`/etc/machine-id`, or the platform UUID on a Mac), never the machine id itself. With
-    /// `--runtime crun` one agent may hold a host id: the claim is a lock file in the
+    /// the crun runtime one agent may hold a host id: the claim is a lock file in the
     /// directory above `--scratch-root`, so agents that share a host id must share that
     /// directory to be refused.
     #[arg(long, value_name = "ID", conflicts_with = "host_id_from_facts")]

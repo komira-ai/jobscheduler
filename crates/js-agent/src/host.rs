@@ -116,7 +116,7 @@ pub fn offered_disk_bytes(free: u64, low_water_gib: Option<u64>) -> u64 {
 /// value of 0 leaves nothing out here; the runtime's flags refuse it) or without
 /// `--scratch-root`.
 fn image_reserve(cli: &Cli) -> Option<(u64, Option<String>)> {
-    let budget = image_budget_bytes(cli.image_budget_gib).ok().flatten();
+    let budget = image_budget_bytes(cli.os.image_budget_gib()).ok().flatten();
     let root = cli.scratch_root.as_deref()?;
     ImageReserve::of(budget, root)
         .as_ref()

@@ -54,6 +54,8 @@
 //! The file builds on every platform, so clippy reads it on Linux; the pure part is tested
 //! there. Run anywhere but macOS, the ignored test stops at its first line.
 
+#![cfg(target_os = "macos")]
+
 #[cfg(target_os = "macos")]
 mod mac;
 mod verdict;

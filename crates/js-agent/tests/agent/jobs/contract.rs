@@ -157,9 +157,9 @@ fn the_toolkit_is_reported_from_its_hook() {
     assert!(!host.commands.ran.borrow().contains(&format!("{HOOK} ")));
 }
 
-/// Asserts that the flag is refused before anything is sent, naming the flag: without
-/// `--container-bin` (there is no engine whose toolkit it checks) and with a path that is
-/// not absolute (it would be looked up in whatever directory the agent is in).
+/// Asserts that the flag is refused before anything is sent, naming the flag: on an agent that
+/// runs no job (`--no-jobs`: there is no engine whose toolkit it checks) and with a path that
+/// is not absolute (it would be looked up in whatever directory the agent is in).
 #[test]
 fn the_toolkit_hook_flag_is_checked_at_start() {
     let host = linux_host();
@@ -168,7 +168,7 @@ fn the_toolkit_hook_flag_is_checked_at_start() {
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(
         ran.err
-            .contains("--gpu-toolkit-hook: needs --container-bin"),
+            .contains("--gpu-toolkit-hook: not with --no-jobs (an agent that runs no job)"),
         "{}",
         ran.err
     );

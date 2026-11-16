@@ -106,13 +106,13 @@ fn with_devices(devices: &[&str], more: &[&str]) -> Cli {
 
 /// The checked flags `cli` on the host of the table with the GPUs [`REPORTED`].
 fn checked(cli: &Cli) -> GpuPassthrough {
-    let checked = GpuPassthrough::from_cli(cli, &REPORTED, host_nodes);
+    let checked = GpuPassthrough::from_cli(&cli.os, &REPORTED, host_nodes);
     checked.expect("good flags").expect("a device list")
 }
 
 /// The refusal of the flags `cli` on that host, as the agent prints it.
 fn refusal(cli: &Cli) -> String {
-    let refused = GpuPassthrough::from_cli(cli, &REPORTED, host_nodes);
+    let refused = GpuPassthrough::from_cli(&cli.os, &REPORTED, host_nodes);
     refused.expect_err("refused").to_string()
 }
 
@@ -125,7 +125,7 @@ const NVIDIA: [&str; 2] = ["/dev/nvidiactl", "/dev/nvidia{index}"];
 /// mounts or variables that would silently go nowhere.
 #[test]
 fn without_a_device_list_no_gpu_is_passed_and_the_other_flags_are_refused() {
-    let none = GpuPassthrough::from_cli(&cli(&[]), &REPORTED, host_nodes);
+    let none = GpuPassthrough::from_cli(&cli(&[]).os, &REPORTED, host_nodes);
     assert!(none.expect("no flags").is_none());
     let mount = refusal(&cli(&["--gpu-mount", "/opt/driver:/usr/local/driver"]));
     assert_eq!(mount, "--gpu-mount: needs --gpu-device");
@@ -141,14 +141,14 @@ fn without_a_device_list_no_gpu_is_passed_and_the_other_flags_are_refused() {
 #[test]
 fn the_nodes_are_checked_for_exactly_the_gpus_the_host_offers() {
     let flags = with_devices(&NVIDIA, &[]);
-    let none = GpuPassthrough::from_cli(&flags, &[], host_nodes).expect_err("no GPU");
+    let none = GpuPassthrough::from_cli(&flags.os, &[], host_nodes).expect_err("no GPU");
     assert_eq!(
         none.to_string(),
         "--gpu-device: the host offers no GPU to give a job"
     );
-    let one = GpuPassthrough::from_cli(&flags, &[0], one_gpu_host);
+    let one = GpuPassthrough::from_cli(&flags.os, &[0], one_gpu_host);
     assert!(one.expect("GPU 0's nodes are there").is_some());
-    let two = GpuPassthrough::from_cli(&flags, &[0, 1], one_gpu_host).expect_err("GPU 1");
+    let two = GpuPassthrough::from_cli(&flags.os, &[0, 1], one_gpu_host).expect_err("GPU 1");
     assert_eq!(
         two.to_string(),
         "--gpu-device: /dev/nvidia1: No such file or directory (os error 2)"
@@ -204,7 +204,7 @@ fn a_missing_node_is_refused_at_start_naming_it() {
         "--gpu-device: /dev/nvidia-modeset: No such file or directory (os error 2)"
     );
     let reported = [0, 12, 40];
-    let gpu = GpuPassthrough::from_cli(&with_devices(&NVIDIA, &[]), &reported, host_nodes);
+    let gpu = GpuPassthrough::from_cli(&with_devices(&NVIDIA, &[]).os, &reported, host_nodes);
     assert_eq!(
         gpu.expect_err("GPU 40 has no node").to_string(),
         "--gpu-device: /dev/nvidia40: No such file or directory (os error 2)"

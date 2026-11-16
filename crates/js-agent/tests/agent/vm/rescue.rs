@@ -3,29 +3,24 @@
 
 use std::sync::Arc;
 
-use clap::Parser as _;
+use js_agent::Worker;
 use js_agent::vm::VmSettings;
-use js_agent::{Cli, Platform, Worker};
 use js_vm_lease::fake::{Call, FakeDriver};
 use js_vm_lease::{Step, VmDriver};
 
-use super::agent::vm_flags;
 use super::vm;
 use crate::jobs::fake::FakeMachine;
 use crate::jobs::{STEP_NEVER, plan};
-use crate::support::{Scratch, flags};
+use crate::support::Scratch;
 
-/// The VM settings of flags over a driver and a store in `dir`.
+/// The VM settings over a driver binary and a store with a base image, both in `dir`.
 fn settings(dir: &Scratch) -> VmSettings {
-    let mut args = vec!["js-agent".to_owned()];
-    args.extend(flags(&[]).iter().map(|flag| (*flag).to_owned()));
-    args.extend(vm_flags(dir));
-    let cli = Cli::try_parse_from(&args).unwrap();
-    let mac = Platform {
-        os: "macos".to_owned(),
-        arch: "arm64".to_owned(),
-    };
-    VmSettings::from_cli(&cli, &mac, true).unwrap().unwrap()
+    let driver = dir.write("js-vmm", "#!/bin/sh\n", 0o755);
+    let store = dir.path("vm-store");
+    std::fs::create_dir_all(store.join("base")).unwrap();
+    VmSettings::new(Some(&driver), Some(&store))
+        .unwrap()
+        .unwrap()
 }
 
 /// Asserts that a worker with the VM backend reclaims the VMs an earlier process left when it

@@ -16,6 +16,8 @@
 //! The file builds on every platform, so clippy reads it on Linux; run anywhere but macOS,
 //! each test stops at its first line.
 
+#![cfg(target_os = "macos")]
+
 use std::fs;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};

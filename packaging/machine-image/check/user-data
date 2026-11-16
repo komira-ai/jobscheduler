@@ -16,7 +16,7 @@ write_files:
     content: |
       [Service]
       ExecStart=
-      ExecStart=/opt/js-agent/link/current/js-agent --server http://127.0.0.1:7300 --token-file /etc/js-agent/token --pool image-check --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+      ExecStart=/opt/js-agent/link/current/js-agent --server http://127.0.0.1:7300 --token-file /etc/js-agent/token --pool image-check --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
 # Each line runs in order and the first that fails ends the list (`set -eu`), so the line the
 # workflow looks for on the console is printed only when every check before it passed. The
 # status and journal lines come first and never fail, so a failed check leaves them on the

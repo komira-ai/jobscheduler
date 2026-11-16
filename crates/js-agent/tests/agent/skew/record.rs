@@ -104,8 +104,6 @@ pub fn agent_flags(files: &Scratch) -> Vec<String> {
     [
         "--host-id",
         "h1",
-        "--runtime",
-        "docker",
         "--allow-container-engine",
         "--container-bin",
         &exec.display().to_string(),

@@ -239,7 +239,7 @@ impl js_agent::CommandRunner for NoPrograms {
 #[cfg(target_os = "linux")]
 pub const JOB_PIECES: [Piece; 3] = [Piece::JobUser, Piece::SubUid, Piece::SubGid];
 
-/// The agent's start check of `--runtime crun` against the system below `root` (every file it
+/// The agent's start check of the crun runtime against the system below `root` (every file it
 /// reads is below `root`), as the packaged unit asks it (`--job-user jsjob`, the distribution's
 /// crun, the unit's state and scratch roots): what it finds missing of [`JOB_PIECES`], one
 /// problem each. The other pieces (crun, newuidmap and newgidmap, the roots, cgroups, AppArmor)

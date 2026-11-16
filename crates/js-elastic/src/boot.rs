@@ -8,24 +8,17 @@ use crate::ids::HostName;
 /// unit and checks it exists; a provider whose image keeps it elsewhere installs it here.
 pub const CONTAINER_BIN: &str = "/usr/bin/docker";
 
-/// The runtime the agent runs jobs with (`--runtime`): named in the agent's unit, with
-/// [`ENGINE_OPT_IN`] beside it, since `crun` is the agent's default Linux runtime and the
-/// engine runs jobs only for an agent given the opt-in.
+/// The flag that makes the agent run its jobs through the container engine at
+/// [`CONTAINER_BIN`]: the runtime of a Linux build of the agent is `crun`, and the engine runs
+/// jobs only for an agent given this flag beside `--container-bin`, so the boot payload names
+/// both.
 ///
-/// Rollout order: an agent that does not know `--runtime` exits 2 at start on this flag. The
-/// plan's [`Artifact`] is a URL and a digest and carries no version, so the boot payload
-/// cannot tell whether the agent it installs knows the flag and cannot gate on it: the pinned
-/// artifact must be bumped to an agent that does before a lease server that renders this flag
-/// is deployed (see `docs/runbooks/first-live-launch.md`).
-pub const RUNTIME: &str = "docker";
-
-/// The flag that lets [`RUNTIME`] run jobs: an agent that defaults to `crun` refuses
-/// `--runtime docker` without it (exit status 2), so the boot payload names both.
-///
-/// Rollout order, as for [`RUNTIME`]: an agent that does not know this flag exits 2 at start
-/// on it, and the payload cannot tell which agent its pinned artifact is. A lease server that
-/// renders it is deployed only after the agent release that knows the flag, with the pinned
-/// artifact bumped to that release first (see `docs/runbooks/first-live-launch.md`).
+/// Rollout order: an agent built before the runtime was the build's own (one that still takes
+/// `--runtime`) refuses this flag without `--runtime docker`, and exits 2 at start. The plan's
+/// [`Artifact`] is a URL and a digest and carries no version, so the boot payload cannot tell
+/// which agent it installs and cannot gate on it: the pinned artifact must be bumped to an
+/// agent that takes the flag alone in the same deploy as a lease server that renders it (see
+/// `docs/runbooks/first-live-launch.md`).
 pub const ENGINE_OPT_IN: &str = "--allow-container-engine";
 
 /// The agent's state root, which the bootstrap creates (owner-only) and names in the

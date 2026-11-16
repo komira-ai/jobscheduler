@@ -58,7 +58,9 @@ fn cli(fx: &Fixture, file: Option<&Path>) -> Cli {
 /// credentials included, are the agent's.
 fn images(fx: &Fixture, cli: &Cli) -> RegistryImages {
     let table = RegistryCredentials::from_cli(cli, me()).expect("credentials");
-    let allow = table.image_allow(cli).expect("image allow");
+    let allow = table
+        .image_allow(&cli.image_allow, &cli.os.image_allow_loopback)
+        .expect("image allow");
     let allow = allow.into_iter().map(js_oci::Allow::loopback).collect();
     RegistryImages::new(fx.client_with(allow), "x86_64").expect("a platform")
 }
