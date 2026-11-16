@@ -32,6 +32,7 @@ use js_types::sched::{
 use js_types::{HostId, Shape};
 
 use crate::map;
+use crate::sizes::JobSizes;
 
 #[path = "jobs.rs"]
 pub mod jobs;
@@ -46,7 +47,7 @@ pub mod whole_jobs;
 /// hosts, and the settings of the rounds.
 #[cfg(test)]
 #[path = "whole_jobs_rig.rs"]
-mod rig;
+pub(crate) mod rig;
 
 /// The term of the scheduler's leases the engine numbers itself: an allocation of the job
 /// table it takes up is numbered in term 0, a job's placement in [`jobs::JOB_TERM`] and a
@@ -95,6 +96,8 @@ pub struct Engine {
     whole_jobs: BTreeMap<js_jobs::JobId, OperationId>,
     /// The whole-node settings the scheduler has now, if it has any.
     whole_settings: Option<js_registry::WholeNodeConfig>,
+    /// The history the jobs that book nothing are sized from ([`crate::sizes`]).
+    sizes: JobSizes,
     /// The sequence the next grant of a whole-host job gets, in [`whole::WHOLE_TERM`].
     whole_seq: u64,
     /// How many placement rounds the walks over the queued jobs ran, for the tests that
@@ -119,10 +122,24 @@ impl Engine {
             jobs: BTreeMap::new(),
             whole_jobs: BTreeMap::new(),
             whole_settings: None,
+            sizes: JobSizes::new(),
             whole_seq: 0,
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
         }
+    }
+
+    /// The history the jobs that book nothing are sized from.
+    pub(crate) fn sizes(&mut self) -> &mut JobSizes {
+        &mut self.sizes
+    }
+
+    /// The bookable capacity of every host the engine knows as a worker.
+    pub(crate) fn capacities(&self) -> Vec<js_types::sched::Resources> {
+        let workers = self.hosts.keys().map(map::worker);
+        workers
+            .filter_map(|worker| self.sched.capacity(&worker))
+            .collect()
     }
 
     /// `host` is no longer listed by the registry: it is forgotten, worker and all, unless
