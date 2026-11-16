@@ -29,6 +29,12 @@ pub const TAINT: &str = "taint/";
 /// allocation rows decide what is booked.
 pub const HOSTBOOK: &str = "hostbook/";
 
+/// `periodic/<duty>`: when a periodic duty of the servers next runs, as the microseconds since
+/// the Unix epoch of its next run, eight bytes, big-endian. Each server that is due advances the
+/// row with a compare-and-set ([`crate::JobStore::claim_duty`]); the one whose advance
+/// commits runs the duty for that period.
+pub const PERIODIC: &str = "periodic/";
+
 /// `meta/jobs/schema`: the schema version of the job, allocation and mark rows, four bytes,
 /// big-endian, written once by the first store to open.
 pub const SCHEMA: &str = "meta/jobs/schema";
@@ -55,6 +61,12 @@ pub fn mark(id: &JobId) -> String {
 #[must_use]
 pub fn taint(host: &HostId) -> String {
     format!("{TAINT}{host}")
+}
+
+/// The key of the row of the periodic duty `duty`.
+#[must_use]
+pub fn duty(duty: &str) -> String {
+    format!("{PERIODIC}{duty}")
 }
 
 /// The key of the reservation row of `host`.
