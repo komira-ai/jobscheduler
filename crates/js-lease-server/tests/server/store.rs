@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
 use std::sync::Arc;
 
 use js_lease_server::{Cli, Config, OwnerOnlyFiles, StartupError, run};
@@ -14,8 +14,9 @@ use js_state::{Revision, Store, SystemClock, WriterLock};
 use rustix::process::{Pid, Signal, kill_process};
 
 use crate::agents_support::agent_args;
-use crate::binary::launch;
+use crate::binary::{address_in, launch, spawn};
 use crate::config_support::{PoolText, clock, file, kinds, quoted, server};
+use crate::ready_listen::{WAITING, with_ready};
 use crate::scaler_support::{account, records_path, start, text};
 use crate::store_support::{
     run_to_end, sqlite_args_over, sqlite_db, sqlite_line, store_args, store_file, taken_address,
@@ -332,4 +333,33 @@ async fn without_a_store_setting_nothing_changes() {
     } = h;
     running.shutdown().await.unwrap();
     assert_eq!(names(&scratch), expected);
+}
+
+/// Asserts that a second program with the readiness route on, beside a first that holds a SQLite
+/// store's file lock, waits instead of exiting: its route answers 503 with the waiting body while
+/// the first holds the lock, and once the first stops it takes the lock, prints the address it
+/// listens on and its route answers 200 `ready`. It runs the real program (the program's own
+/// start, with its own tickers), as the in-process tests of the wait do not. It catches a wait
+/// that exits, never retries, or never takes the lock the holder let go.
+#[test]
+fn a_second_program_with_a_route_waits_for_the_sqlite_file_lock() {
+    let first = Scratch::new("store_sqlite_program_wait_first");
+    let (mut holder_child, _) = launch(&sqlite_args_over(&first, &first), Stdio::null());
+    let second = Scratch::new("store_sqlite_program_wait_second");
+    let args = with_ready(sqlite_args_over(&second, &first), "127.0.0.1:0");
+    let (mut waiting, lines) = spawn(&args, Stdio::null());
+    let ready = address_in(&lines.next(), "ready on ");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
+    assert_eq!((reply.status, reply.body.as_str()), (503, WAITING));
+
+    kill_process(Pid::from_child(&holder_child.0), Signal::TERM).unwrap();
+    assert!(holder_child.0.wait().unwrap().success());
+    let listen = address_in(&lines.next(), "listening on ");
+    let reply = runtime.block_on(request(ready, "GET", "/readyz", None, None));
+    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
+    let health = runtime.block_on(request(listen, "GET", "/healthz", None, None));
+    assert_eq!(health.status, 200);
+    kill_process(Pid::from_child(&waiting.0), Signal::TERM).unwrap();
+    assert!(waiting.0.wait().unwrap().success());
 }
