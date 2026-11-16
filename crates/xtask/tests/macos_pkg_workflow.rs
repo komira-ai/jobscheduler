@@ -448,6 +448,29 @@ fn the_key_is_imported_for_productsign_alone() {
     assert!(!import.contains(" -A"), "{import}");
 }
 
+/// The signing line of a sign job, or a problem when it signs without a trusted timestamp.
+fn timestamp_problem(sign: &str) -> Option<String> {
+    let line = sign.lines().find(|l| l.contains("productsign --sign"))?;
+    (!line.split_whitespace().any(|w| w == "--timestamp"))
+        .then(|| format!("productsign signs without --timestamp: {}", line.trim()))
+}
+
+/// `productsign` asks for a trusted timestamp, which hostkeeper's signature check of a Mac's
+/// `.pkg` requires and which keeps the signature valid after the certificate expires. It
+/// catches a signing line that loses `--timestamp`.
+#[test]
+fn the_package_is_signed_with_a_trusted_timestamp() {
+    let sign = job_text(&read(WORKFLOW), "sign");
+    assert!(sign.contains("productsign --sign"), "the sign job signs");
+    assert_eq!(timestamp_problem(&sign), None);
+    let without = sign.replace(" --timestamp", "");
+    assert!(
+        timestamp_problem(&without)
+            .is_some_and(|p| p.starts_with("productsign signs without --timestamp")),
+        "a signing line without --timestamp is not named"
+    );
+}
+
 #[test]
 fn both_jobs_check_the_version_before_anything_else_but_the_presence_check() {
     let text = read(WORKFLOW);

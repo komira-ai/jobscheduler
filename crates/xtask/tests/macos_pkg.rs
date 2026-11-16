@@ -559,12 +559,11 @@ fn the_agents_plist_names_flags_the_agent_accepts() {
 }
 
 /// What a Mac's `/etc/js-agent/flags` holds, one word per line, with documentation addresses.
-/// The `--host-id-from-facts=/var/lib/hostkeeper/facts.json` line belongs here too once
-/// `js_agent::Cli` accepts that flag.
 const MAC_FLAGS: &str = "# the Mac build host group\n\
     --server=https://leases.example:7300\n\
     --pool=mac\n\
     --ca-cert=/etc/js-agent/ca.pem\n\
+    --host-id-from-facts=/var/lib/hostkeeper/facts.json\n\
     --native-network=on\n\
     --native-pf-uid-start=600\n\
     --native-pf-uid-count=100\n\
@@ -592,6 +591,10 @@ fn the_agents_flags_file_plist_names_flags_the_agent_accepts_with_a_flags_file_e
     }
     let cli = js_agent::Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(cli.pool, "mac");
+    assert_eq!(
+        cli.host.host_id_from_facts.as_deref(),
+        Some(Path::new("/var/lib/hostkeeper/facts.json"))
+    );
     assert_eq!(
         cli.native_helper_socket.as_deref(),
         Some(Path::new("/var/run/js-mac-session/socket"))

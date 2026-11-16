@@ -215,7 +215,7 @@ jobs:
           /usr/bin/security import "$RUNNER_TEMP/installer.p12" -P "$MACOS_INSTALLER_CERT_PASSWORD" -T /usr/bin/productsign -t cert -f pkcs12 -k "$keychain"
           /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
           pkg="dist/js-agent-$VERSION-aarch64-apple-darwin.pkg"
-          /usr/bin/productsign --sign "$MACOS_INSTALLER_IDENTITY" --keychain "$keychain" "$pkg" "$pkg.signed"
+          /usr/bin/productsign --sign "$MACOS_INSTALLER_IDENTITY" --keychain "$keychain" --timestamp "$pkg" "$pkg.signed"
           mv "$pkg.signed" "$pkg"
           pkgutil --check-signature "$pkg"
       - name: Notarize the package

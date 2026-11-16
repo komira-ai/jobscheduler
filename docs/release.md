@@ -482,7 +482,7 @@ The Mac has no native package hostkeeper can install yet, so no `macos-arm64` ta
 daemon announces only `macos-pkg` is ordered nothing for `js-agent`. Done: the release builds the
 installer package (`.github/workflows/js-agent-macos-pkg.yml`, `packaging/js-agent-macos`) at the
 release's version in the beta stage; when the environment `macos-signing` is set up, the same run
-signs it with `productsign`, notarizes and staples it, and checks it again; and `promote-macos`
+signs it with `productsign --timestamp`, notarizes and staples it, and checks it again; and `promote-macos`
 attaches it to the release as `js-agent-<version>-macos-arm64.pkg` (the name of hostkeeper's
 named-version form) with a `.sha256` file. Without the environment the `sign` job skips with a
 notice and the release carries no package. The package is not attested the way the archives are.

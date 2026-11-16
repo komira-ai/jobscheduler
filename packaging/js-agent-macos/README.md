@@ -44,6 +44,7 @@ An example, with documentation addresses:
 --server=https://leases.example:7300
 --pool=mac
 --ca-cert=/etc/js-agent/ca.pem
+--host-id-from-facts=/var/lib/hostkeeper/facts.json
 --native-network=on
 --native-pf-uid-start=600
 --native-pf-uid-count=100
@@ -52,35 +53,14 @@ An example, with documentation addresses:
 ```
 
 Without the file the agent does not start.
-The file must be a regular file owned by root, not writable by group or others. Once the agent
-reads its host id from hostkeeper's facts file, the file also carries
-`--host-id-from-facts=/var/lib/hostkeeper/facts.json`; until then a host that is not named by
-`--host-id` takes the default id derived from the machine id.
+The file must be a regular file owned by root, not writable by group or others.
+`--host-id-from-facts` makes the host's id the `host_id` of hostkeeper's facts file, the name the
+coordinator enrolled the Mac under, so one file serves every Mac of the group.
 
 Neither runs at load. `KeepAlive` holds each while `/etc/js-agent/token` exists, so the
 package loads them at install time and they start when the host is given its join token.
 `ThrottleInterval` is 30 seconds: a refusal is retried every 30 seconds and is read from
 `/Library/Logs/js-agent/js-agent.err.log`.
-
-## The flags file's package on a Mac
-
-The config package of a host group of Macs places `/etc/js-agent/flags` and
-`/etc/js-agent/ca.pem`, and names `js-agent config-hook` as its hook, so hostkeeper restarts the
-agent after the files change and checks that it comes back with a new session. On a Mac the
-manifest's `hook.command` is
-`["/usr/local/js-agent/link/current/js-agent", "config-hook"]`, and its `[params]` are:
-
-| param | value |
-|---|---|
-| `unit` | `com.komira.js-agent` (the launchd label) |
-| `flags_file` | `/etc/js-agent/flags` |
-| `token_file` | `/etc/js-agent/token` |
-| `state_root` | `/var/db/js-agent/state` |
-| `state_dir` | `/var/db/js-agent-config` (the hook's own directory, root's, mode 0700) |
-| `cutover_timeout_secs`, `verify_timeout_secs`, `rollback_timeout_secs` | 300 each |
-
-`config-hook` is a subcommand of the package's own `js-agent`; the host group's config package
-and its manifest are not in this repository.
 
 ## What `postinstall` does
 
@@ -97,7 +77,7 @@ The workflow has two jobs. `build` runs in the beta stage of the release (`relea
 a push to main) and by hand, never on a pull request; it builds the package unsigned (at the release's version when the release calls it, 0.0.0 for a call without one), checks it and writes `SHA256SUMS`, and names no secret: no
 code of a branch can see a signing key. `sign` runs by hand from main, and when the release calls the workflow with `sign: true` on a push to main, in the environment `macos-signing`. It does
 not build: it takes the checked package and the checker from `build`, checks the package again,
-signs it with `productsign`, notarizes and staples it, checks it again and sums it. When the
+signs it with `productsign --timestamp`, notarizes and staples it, checks it again and sums it. When the
 environment or its secrets are not set up it prints a notice and skips every step after the
 first, and the run succeeds.
 
@@ -219,8 +199,7 @@ Known limits:
   under `packages.komira.ai` `pkg/` (the descriptor has no `js-agent` entry for the `macos-pkg`
   format); the `macos-pkg` target entry of `release desired` and the call for a host group of
   Macs are not made. The package carries no update declaration, and nothing in it moves
-  `link/current`. There is no native Mac package for hostkeeper yet, so a Mac's agent is not
-  updated by hostkeeper.
+  `link/current`, so a Mac's agent is not updated by hostkeeper yet.
 - The update hook (`js-agent update-hook`) runs its five steps on a Mac as hostkeeper's hook, with a `launchctl` form of its unit port (`bootout`, `bootstrap`, `kickstart -k`,
   `print`) and `runtime = "native"` in the `[params]` a Mac's hostkeeper entry would carry, over the lease server's own-host routes
   and the agent's state root, which the params name beside the release link (`state_root`,
