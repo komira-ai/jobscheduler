@@ -99,6 +99,8 @@ where
     a_whole_host_and_a_share_exclude_each_other_in_the_placement(backend);
     a_job_another_writer_placed_is_not_placed_again(backend);
     a_claimed_placement_moves_the_hosts_reservation_row(backend);
+    a_claimed_placement_locks_the_hosts_row_before_it_sums_the_host(backend);
+    a_claimed_placement_deletes_the_marked_jobs_mark(backend);
     a_claimed_placement_of_a_missing_job_is_stale(backend);
     a_requeued_job_is_placed_again_over_its_freed_allocation(backend);
     a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read(backend);
@@ -234,6 +236,8 @@ macro_rules! job_store_tests {
             a_whole_host_and_a_share_exclude_each_other_in_the_placement,
             a_job_another_writer_placed_is_not_placed_again,
             a_claimed_placement_moves_the_hosts_reservation_row,
+            a_claimed_placement_locks_the_hosts_row_before_it_sums_the_host,
+            a_claimed_placement_deletes_the_marked_jobs_mark,
             a_claimed_placement_of_a_missing_job_is_stale,
             a_requeued_job_is_placed_again_over_its_freed_allocation,
             a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read,

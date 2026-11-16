@@ -240,6 +240,27 @@ async fn the_route_is_ready_while_serving_and_draining_from_the_stop_until_it_cl
     assert!(TcpStream::connect(ready).await.is_err());
 }
 
+/// Asserts a server over a SQLite store with the route on, whose file lock is free: it opens the
+/// store at its first try, without waiting, and serves, the route answering 200 `ready`, and its
+/// lock is held until it stops. It is the start of the harness the other tests use (a ticker the
+/// test steps), over a store and a route together. It catches a start that waits on a lock
+/// nothing holds, and one that leaves the lock free while serving.
+#[tokio::test]
+async fn a_route_over_a_free_store_lock_serves_at_once_and_holds_the_lock() {
+    let scratch = Scratch::new("ready_listen_free_lock");
+    let target = sqlite_db(&scratch);
+    let mut config = config(waiting_args(&scratch)).unwrap();
+    let ready = config.bind_ready().unwrap().unwrap();
+    let h = crate::support::Harness::over(scratch, config).await;
+    assert_eq!(readyz(ready).await, (200, "ready".to_owned()));
+    assert!(
+        WriterLock::acquire(&target).is_err(),
+        "the running server holds the lock"
+    );
+    h.running.shutdown().await.unwrap();
+    drop(WriterLock::acquire(&target).expect("the stopped server let the lock go"));
+}
+
 /// Asserts a server that waits: while another holder has the store's writer lock the route
 /// answers 503 with the waiting body, the store is not opened, the state file not made and
 /// the wait is logged once however many tries it takes; when the holder lets go and the
