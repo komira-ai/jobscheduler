@@ -4,6 +4,11 @@ Companion to [docs/design.md](../design.md), sections 5.4, 5.8, 5.9 and 9.1. Sec
 decisions are D33 and D34 and the risks K28 to K31 ([risks-f.md](risks-f.md)). What it rests on in the merged code (read from `js-lease-server` and
 `js-agent` on `main`) is marked as merged; everything else is design.
 
+Over a Postgres state store (`--store`) the single-writer parts of this page (one replica under `Recreate`, the lock on the binding
+file, a fence and a leader for an external store) do not hold: the server takes no lock and no generation, any number of servers
+serve one store at once, and an update starts the new server before it stops the old one ([jobscheduler-design.md](jobscheduler-design.md),
+section 10). They still describe a server without `--store`, or over a SQLite store.
+
 ## Target shape
 
 jobscheduler runs as **one service** in a Kubernetes cluster: one process, one workload, the scheduler and both of its APIs.
@@ -40,7 +45,7 @@ All values are placeholders for the operator; no object names a host, an address
 
 | Object | Choice | Why |
 |---|---|---|
-| `Deployment` | `replicas: 1`, `strategy: Recreate` | one writer (state store, below); a rolling update would start a second pod beside the first |
+| `Deployment` | `replicas: 1`, `strategy: Recreate` | one writer (state store, below); a rolling update would start a second pod beside the first. Not over a Postgres store, which any number of servers serve: there a rolling update is the update |
 | `PersistentVolumeClaim` | `ReadWriteOncePod` where the cluster has it, else `ReadWriteOnce`; a block-backed volume; reclaim policy `Retain`; mounted at the directory of `--state-file` | the volume is the state; `Retain` so that deleting the claim by mistake does not delete the leases |
 | `Service` (cluster) | `ClusterIP`, port 7300 | in-cluster clients: the kbf frontend, `js-cli` jobs |
 | `Service` (external) | `LoadBalancer`, or the cluster's own L4 entry, passing TCP through | agents outside the cluster; **TLS is not terminated before the pod**, so a bearer token and a join token never cross in clear and the agent pins the server's certificate (5.8) |
