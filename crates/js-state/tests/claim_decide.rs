@@ -284,6 +284,35 @@ mod postgres {
         assert_eq!(setup.scan_prefix("on/").expect("scans").len(), 3);
     }
 
+    // A decision that reads under a prefix sees the rows its own transaction holds: the claimed row,
+    // and a key it read as absent stays absent in the scan, as one it holds present stays present.
+    // Catches a scan that answers from the table alone, which would show a row the transaction
+    // saw deleted or miss one it loaded.
+    #[test]
+    fn a_decision_sees_the_rows_its_own_transaction_holds_in_a_scan() {
+        let database = test_database();
+        let store = open(&database.url());
+        put(&store, "q/a", "queued");
+        put(&store, "q/b", "queued");
+        let claim = ["q/a".to_owned()];
+        let mut seen = Vec::new();
+        let outcome = store
+            .claim_decide(&claim, &mut |read| {
+                assert!(read.get("q/none").expect("reads").is_none());
+                assert!(read.get("q/b").expect("reads").is_some());
+                seen = read
+                    .scan_prefix("q/")
+                    .expect("scans")
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect();
+                None
+            })
+            .expect("answers");
+        assert_eq!(outcome, Claim::Declined);
+        assert_eq!(seen, ["q/a", "q/b"], "the absent key is not in the scan");
+    }
+
     // A failed read inside the decision fails the call with the store's error and commits nothing.
     #[test]
     fn a_decision_whose_read_fails_fails_the_call() {

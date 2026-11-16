@@ -199,3 +199,40 @@ fn everything_else_is_forwarded_and_not_recorded() {
     );
     assert_eq!(recording.writes(), Vec::new());
 }
+
+// A decision committed through the recording store is recorded as a committed write of each key it
+// writes, one that conflicts as a write that did not commit, and one that declines is not
+// recorded; the head is the inner store's. It catches a claim that bypasses the record.
+#[test]
+fn a_decided_transaction_is_recorded_as_it_committed_or_conflicted() {
+    use js_state::Claim;
+    let recording = RecordingStore::new(fake());
+    recording
+        .txn(Txn::new().put("q", "queued", Cond::Any))
+        .unwrap()
+        .unwrap();
+    let claim = ["q".to_owned()];
+    let placed = recording
+        .claim_decide(&claim, &mut |_| {
+            Some(Txn::new().put("p", "1", Cond::Absent))
+        })
+        .unwrap();
+    assert!(matches!(placed, Claim::Committed(_)), "{placed:?}");
+    let conflicted = recording
+        .claim_decide(&claim, &mut |_| {
+            Some(Txn::new().put("p", "2", Cond::Absent))
+        })
+        .unwrap();
+    assert!(matches!(conflicted, Claim::Conflict(_)), "{conflicted:?}");
+    let declined = recording.claim_decide(&claim, &mut |_| None).unwrap();
+    assert_eq!(declined, Claim::Declined);
+    assert_eq!(
+        recording.writes(),
+        [
+            write("q", WriteKind::Put, true),
+            write("p", WriteKind::Put, true),
+            write("p", WriteKind::Put, false),
+        ]
+    );
+    assert!(recording.head().unwrap().is_some());
+}
