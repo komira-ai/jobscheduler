@@ -42,8 +42,8 @@ restarts the agent. Nothing is loaded when the volume is not `/`.
 
 ## Signing and notarization
 
-The workflow has two jobs. `build` (the check `js-agent-macos-pkg`) runs on every pull request
-and by hand; it builds the package unsigned, checks it and writes `SHA256SUMS`, and names no secret: no
+The workflow has two jobs. `build` runs in the beta stage of the release (`release.yml` calls the workflow on
+a push to main) and by hand, never on a pull request; it builds the package unsigned, checks it and writes `SHA256SUMS`, and names no secret: no
 code of a branch can see a signing key. `sign` runs only by hand from main, in the environment `macos-signing`. It does
 not build: it takes the checked package and the checker from `build`, checks the package again,
 signs it with `productsign`, notarizes and staples it, checks it again and sums it. When the
