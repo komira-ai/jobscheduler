@@ -19,9 +19,11 @@ js-caps = { path = "../js-caps" }
 js-jobs = { path = "../js-jobs" }
 js-registry = { path = "../js-registry" }
 js-sched = { path = "../js-sched" }
+js-sizing = { path = "../js-sizing" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
 js-whole = { path = "../js-whole" }
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
