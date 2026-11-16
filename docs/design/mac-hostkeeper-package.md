@@ -75,8 +75,11 @@ for js-agent. An entry that does not resolve leaves the Mac `no_build_for_host` 
 - The plists are fixed text, checked for drift, never edited on a host. They carry what is the same on every Mac:
   `--flags-file`, `--token-file /etc/js-agent/token`, the state and scratch roots, the helper's socket. A host's own
   values (the lease server and its CA, the pool, the helper's caller requirement and socket group,
-  `--native-network`) go to `/etc/js-agent/flags` and `/etc/js-agent/session.flags`, which are not in the payload and
-  which hostkeeper never touches. js-agent reads `--flags-file` already (`crates/js-agent/src/flags_file.rs`: a
+  `--native-network` and its pf flags) go to `/etc/js-agent/flags`, `/etc/js-agent/session.flags` and
+  `/etc/js-agent/ca.pem`, which this package does not list. They are the group's: a config package per service and
+  host group (`js-agent-config-mac-build`, listed in the group after `js-agent`) installs them, as
+  `js-agent-config-all-in-one` installs `/etc/js-agent/{flags,ca.pem}` on the Linux nodes, so no operator edits them on
+  a host. js-agent reads `--flags-file` already (`crates/js-agent/src/flags_file.rs`: a
   regular file, root's or the agent's, not writable by group or others, one word per line); `js-mac-session` gains the
   same flag through the same code.
 - The log directory and the hook's state directory leave the payload: they move to
@@ -111,17 +114,19 @@ for js-agent. An entry that does not resolve leaves the Mac `no_build_for_host` 
 
 ## Host setup and the group, once per Mac
 
-Done by an operator as root, never by the package, and before the group's first `set-desired`:
+Done by an operator as root, never by a package, and before the group's first `set-desired`:
 
-- `/etc/js-agent/{token,flags,session.flags,ca.pem}`, root's, the token mode 0600;
+- `/etc/js-agent/token` (root's, 0600: a secret, which no package carries) and `/etc/js-agent/instance` (it differs by
+  host); the flags files and the CA come from the group's config package, above;
 - the agent's state and scratch roots on different devices (the agent refuses a state root on the scratch root's
   device);
 - the helper's socket group (the operator makes it; the helper is told its name), and the pool, which `js-mac-session`
   makes users in (`pool-create`);
 - for `--native-network on`, the pool's pf anchor (`js-mac-provision install`).
 
-Then `host-groups put` of `mac-build` with `[hostkeeper, js-agent]` (the whole group, `hostkeeper` kept). Until the
-group lists the package, a `set-desired` for the group is refused `not_in_host_group`.
+The group lists the package with `host-groups put` (the whole group, `hostkeeper` kept); a package added is installed
+once the group has a desired version for it, so the group may list js-agent before any release can be ordered onto a
+Mac. Until the group lists the package, a `set-desired` for the group is refused `not_in_host_group`.
 
 The lease server's agent pool configuration gains a pool the Macs meet: `capabilities = { os = "macos", arch =
 "arm64" }` and `exec = "sandbox-exec"`. The Macs must reach its agent listener.
@@ -138,7 +143,8 @@ at-least, is a separate change in `js-caps` and the agent; until it lands a job 
    `js-mac-session`, the update hook's launchd form, the workflow and its lint, `packaging/js-agent-macos/README.md`,
    `docs/release.md` and the goldens.
 3. The signing environment and the upload role (operator), then the release jobs and the `macos-arm64` entry.
-4. Host setup and `host-groups put` (operator), then the first `set-desired` for `mac-build`.
+4. Host setup, `host-groups put` and the group's config package (operator), then the first `set-desired` for
+   `mac-build`.
 5. kbf asks for `os=macos` (kbf).
 
 ## Failure modes
