@@ -11,7 +11,7 @@ use js_agent::lifecycle::{
     CheckFinding, CheckHook, Clock, Exit, Finished, Found, FsPrepared, JobFs, NativeRefusal,
     Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, label,
 };
-use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
+use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 
 /// A clock that moves only when a test says so. Clones share one reading.
 #[derive(Clone, Default)]
@@ -105,9 +105,21 @@ struct State {
     lost: BTreeMap<String, String>,
     /// The runs whose end the runtime holds once they exit ([`FakeRuntime::hold_end`]).
     held_ends: Vec<String>,
+    /// How the runtime answers a native body: `None` runs none, as the trait's default.
+    native: Option<NativeScript>,
     /// What a job's file system answers (see [`FakeRuntime::give_layers`]); none: the
     /// runtime gives no layers, as the trait's default, and says nothing of them.
     fs: Option<FsScript>,
+}
+
+/// What the fake answers of a native body.
+#[derive(Default)]
+struct NativeScript {
+    /// Whether a start named by its image with a `run` is run as a native body
+    /// (`runs_image_runs`).
+    image_runs: bool,
+    /// What `check_native` refuses with; none: it accepts the body.
+    refusal: Option<(&'static str, String)>,
 }
 
 /// What the fake answers of a job's file system.
@@ -155,6 +167,31 @@ impl FakeRuntime {
             log: Rc::clone(log),
             clock: clock.clone(),
         }
+    }
+
+    /// From now on the runtime runs native bodies (`check_native` accepts them), as the Mac
+    /// runtime does; its network check for one stays the trait's default.
+    pub fn run_native(&self) {
+        self.state.borrow_mut().native = Some(NativeScript::default());
+    }
+
+    /// From now on the runtime also runs a start named by its image with a `run` as a native
+    /// body (`runs_image_runs`), and runs native bodies.
+    pub fn run_image_runs(&self) {
+        self.state.borrow_mut().native = Some(NativeScript {
+            image_runs: true,
+            refusal: None,
+        });
+    }
+
+    /// From now on `check_native` refuses every body with `code` and `why`; the runtime runs
+    /// native bodies otherwise ([`FakeRuntime::run_native`]).
+    pub fn refuse_native(&self, code: &'static str, why: &str) {
+        let script = NativeScript {
+            image_runs: false,
+            refusal: Some((code, why.to_owned())),
+        };
+        self.state.borrow_mut().native = Some(script);
     }
 
     /// From now on the runtime gives a job layers and mounts (`layered_rootfs`), binds no
@@ -752,6 +789,30 @@ impl Runtime for FakeRuntime {
                 why: "this runtime carries no environment".to_owned(),
             }),
         }
+    }
+
+    fn check_native(&self, _native: &NativeSpec) -> Result<(), NativeRefusal> {
+        match &self.state.borrow().native {
+            None => Err(NativeRefusal {
+                code: js_agent_wire::refusal::NATIVE_UNSUPPORTED,
+                why: "this agent runs no native jobs".to_owned(),
+            }),
+            Some(script) => match &script.refusal {
+                Some((code, why)) => Err(NativeRefusal {
+                    code,
+                    why: why.clone(),
+                }),
+                None => Ok(()),
+            },
+        }
+    }
+
+    fn runs_image_runs(&self) -> bool {
+        self.state
+            .borrow()
+            .native
+            .as_ref()
+            .is_some_and(|script| script.image_runs)
     }
 
     fn supports_gpus(&self) -> bool {

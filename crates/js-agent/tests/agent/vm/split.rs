@@ -6,12 +6,11 @@ use std::time::Duration;
 
 use js_agent::lifecycle::{FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, label};
 use js_agent::vm::{VmRuntime, WithVms};
-use js_agent_wire::{LogReport, LogTail, NetworkLevel, PortRange, refusal};
+use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
 use js_vm_lease::fake::FakeDriver;
 use js_vm_lease::{ExecEnd, Step};
 
 use super::super::lifecycle::fake::{FakeRuntime, Log, ManualClock};
-use super::super::native::native;
 use super::{ended, spec, vm};
 
 /// A grace far above what a fake guest takes to end its command once killed.
@@ -156,4 +155,18 @@ fn every_host_question_is_the_other_runtimes() {
         with.reclaim(),
         ["vm: destroyed the VM old an earlier process left"]
     );
+}
+
+/// A native body that runs `program` with `args`, with no network and nothing else.
+fn native(program: &str, args: &[&str]) -> NativeSpec {
+    NativeSpec {
+        program: program.to_owned(),
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        env: std::collections::BTreeMap::new(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: NetworkLevel::Off,
+        ports: Vec::new(),
+    }
 }

@@ -10,7 +10,6 @@ mod lifecycle;
 mod rescue;
 mod runtime;
 mod settings;
-#[cfg(target_os = "macos")]
 mod split;
 
 use std::collections::BTreeMap;
@@ -70,7 +69,6 @@ pub fn ended(rt: &mut dyn Runtime, driver: &FakeDriver, id: &RunHandle) -> Statu
 }
 
 /// The status of a run that exited with `code`.
-#[cfg(target_os = "macos")]
 pub fn runtime_exit(code: i32) -> Status {
     Status::Exited(js_agent::lifecycle::Exit {
         code,

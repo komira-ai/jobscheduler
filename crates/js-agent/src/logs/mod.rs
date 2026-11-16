@@ -442,6 +442,7 @@ impl RunLogs {
     /// uploader reads at most [`LiveLogs::file_cap`] bytes of each file and the end counts the
     /// rest as dropped, so the upload is what it would be from a capture that stops at that
     /// cap: chunks up to it, then a gap marker and no final.
+    #[cfg(target_os = "macos")]
     pub fn start_capped(
         &mut self,
         logs: Option<&LiveLogs>,

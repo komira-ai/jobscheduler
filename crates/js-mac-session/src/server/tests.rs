@@ -840,6 +840,73 @@ fn the_client_reports_unexpected_replies_and_hangups() {
     assert!(matches!(gone.kill_uid("1.1"), Err(ClientError::Io(_))));
 }
 
+/// `stop` sends `Request::Stop` carrying the lease and the grace in milliseconds (saturating
+/// at `u64::MAX` for a grace that does not fit), returns `Ok` on `Reply::Killed`, and
+/// reports any other reply as the client's own error with its exact text. Catches a stop
+/// that sends the grace in the wrong unit, wraps an oversized grace, or accepts a reply
+/// of the wrong kind as success.
+#[test]
+fn stop_sends_the_lease_and_grace_and_expects_killed() {
+    let dir = scratch("server-client-stop");
+    let path = dir.join("socket");
+    let listener = UnixListener::bind(&path).unwrap();
+    let answers = [
+        Reply::Killed,
+        Reply::Killed,
+        Reply::Created { uid: 1 },
+        Reply::Refused {
+            reason: "no such lease".to_owned(),
+        },
+    ];
+    let helper = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for answer in answers {
+            let (stream, _) = listener.accept().unwrap();
+            let hello = Reply::Hello {
+                nonce: "n".to_owned(),
+            };
+            proto::send(stream.as_fd(), &hello, &[]).unwrap();
+            let (call, _) = proto::recv::<Call>(stream.as_fd(), RUN_FDS)
+                .unwrap()
+                .unwrap();
+            seen.push(call.request);
+            proto::send(stream.as_fd(), &answer, &[]).unwrap();
+        }
+        seen
+    });
+    let client = Client::new(&path);
+    client.stop("1.1", Duration::from_millis(2500)).unwrap();
+    client.stop("1.2", Duration::MAX).unwrap();
+    match client.stop("1.3", Duration::ZERO) {
+        Err(error @ ClientError::Unexpected(_)) => {
+            assert_eq!(
+                error.to_string(),
+                "kbf-mac-session answered Created { uid: 1 }"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    match client.stop("1.4", Duration::ZERO) {
+        Err(error @ ClientError::Refused(_)) => {
+            assert_eq!(error.to_string(), "kbf-mac-session refused: no such lease");
+        }
+        other => panic!("{other:?}"),
+    }
+    let stop = |lease: &str, grace_ms: u64| Request::Stop {
+        lease: lease.to_owned(),
+        grace_ms,
+    };
+    assert_eq!(
+        helper.join().unwrap(),
+        [
+            stop("1.1", 2500),
+            stop("1.2", u64::MAX),
+            stop("1.3", 0),
+            stop("1.4", 0)
+        ]
+    );
+}
+
 /// A failed `accept` ends serving with its error (the service manager restarts the
 /// helper) rather than spinning.
 #[test]

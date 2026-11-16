@@ -113,6 +113,44 @@ fn a_mac_start_with_no_socket_and_no_no_jobs_is_refused() {
     assert!(sent.borrow().is_empty(), "something was sent");
 }
 
+/// Asserts that `--no-jobs` refuses each flag of the macOS build's runtime, the native socket
+/// first among them: through the agent's own entry point, a start with `--no-jobs` and one such
+/// flag ends with status 2 before anything is sent, naming the flag and `--no-jobs`. It catches
+/// an agent that runs no job yet takes a runtime flag it would ignore, so that a flags file
+/// written for a native agent starts one that silently runs nothing.
+#[test]
+fn no_jobs_refuses_every_native_flag_by_name() {
+    let rows: [(&str, &str); 5] = [
+        ("--native-helper-socket", "/var/run/js-mac-session/socket"),
+        ("--native-network", "on"),
+        ("--native-pf-uid-start", "600"),
+        ("--vm-driver", "/usr/local/bin/js-vmm"),
+        ("--vm-store", "/var/db/js-vm"),
+    ];
+    for (flag, value) in rows {
+        let args = flags(&["--no-jobs", flag, value]);
+        let (script, sent) = Script::new(vec![welcome(1)]);
+        let connector = ScriptConnector::of(script);
+        let mut sleeper = CountingSleeper::stopping_at(1);
+        let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+        let ran = run_on_defaulted(
+            &args,
+            &mac_host(),
+            &connector,
+            &mut sleeper,
+            &mut Lowest,
+            jobs,
+        );
+        assert_eq!(ran.status(), code(2), "{flag}: {}", ran.err);
+        assert_eq!(
+            ran.err,
+            format!("js-agent: {flag}: not with --no-jobs (an agent that runs no job)\n"),
+            "{flag}"
+        );
+        assert!(sent.borrow().is_empty(), "{flag}: something was sent");
+    }
+}
+
 /// Asserts that a Mac agent's hello reports its `--native-network` as the job level a
 /// server places by: `none` by default (`off`), `none` for `loopback`, `open` for `open`, and
 /// never `egress-ports`. It catches a Mac host that a server would send an `open` job it

@@ -23,6 +23,7 @@ mod lease_dir;
 mod live_logs;
 mod logs;
 mod mounts;
+mod native_bodies;
 mod network;
 mod owed;
 mod per_job;
