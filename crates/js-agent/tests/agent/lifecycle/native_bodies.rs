@@ -169,3 +169,17 @@ fn a_native_body_the_runtime_refuses_is_refused_with_its_answer() {
     );
     assert!(h.fake.created().is_empty());
 }
+
+/// Asserts that a start named by its image, on a runtime that does not run it (the Mac runtime
+/// with no bundle store answers so), is refused with the runtime's own code and text and creates
+/// nothing. It catches a lifecycle that creates an image start the runtime said it cannot run,
+/// or refuses it with a generic code that hides why.
+#[test]
+fn an_image_start_the_runtime_does_not_run_is_refused_with_its_answer() {
+    let mut h = Harness::new("nb-image-refused");
+    let why = "this agent has no bundle store";
+    h.fake.refuse_images(refusal::IMAGE_UNSUPPORTED_HERE, why);
+    let events = h.start(job("r1"));
+    assert_eq!(events, refused("r1", refusal::IMAGE_UNSUPPORTED_HERE, why));
+    assert!(h.fake.created().is_empty(), "the image start was created");
+}

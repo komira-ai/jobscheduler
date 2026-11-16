@@ -107,6 +107,9 @@ struct State {
     held_ends: Vec<String>,
     /// How the runtime answers a native body: `None` runs none, as the trait's default.
     native: Option<NativeScript>,
+    /// What `check_image` refuses a start named by its image with; none: it runs them, as the
+    /// trait's default.
+    image_refusal: Option<(&'static str, String)>,
     /// What a job's file system answers (see [`FakeRuntime::give_layers`]); none: the
     /// runtime gives no layers, as the trait's default, and says nothing of them.
     fs: Option<FsScript>,
@@ -182,6 +185,12 @@ impl FakeRuntime {
             image_runs: true,
             refusal: None,
         });
+    }
+
+    /// From now on `check_image` refuses every start named by its image with `code` and `why`,
+    /// as the Mac runtime does without a bundle store.
+    pub fn refuse_images(&self, code: &'static str, why: &str) {
+        self.state.borrow_mut().image_refusal = Some((code, why.to_owned()));
     }
 
     /// From now on `check_native` refuses every body with `code` and `why`; the runtime runs
@@ -804,6 +813,16 @@ impl Runtime for FakeRuntime {
                 }),
                 None => Ok(()),
             },
+        }
+    }
+
+    fn check_image(&self) -> Result<(), NativeRefusal> {
+        match &self.state.borrow().image_refusal {
+            Some((code, why)) => Err(NativeRefusal {
+                code,
+                why: why.clone(),
+            }),
+            None => Ok(()),
         }
     }
 

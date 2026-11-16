@@ -791,6 +791,31 @@ mod tests {
         }
     }
 
+    /// Asserts the defaults of a runtime that says nothing of native bodies and image starts:
+    /// it refuses a native body `native-unsupported` (every runtime but the Mac one), runs a
+    /// start named by its image (every container runtime) and runs no image run. Catches a
+    /// default that would let a Linux runtime take a native job, or refuse the image starts
+    /// every container runtime runs.
+    #[test]
+    fn a_runtime_that_says_nothing_runs_images_and_no_native_body() {
+        let bare = Bare;
+        let native = NativeSpec {
+            program: "/bin/true".to_owned(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: String::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            network: NetworkLevel::Off,
+            ports: Vec::new(),
+        };
+        let refused = bare.check_native(&native).unwrap_err();
+        assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
+        assert_eq!(refused.why, "this agent runs no native jobs");
+        assert!(bare.check_image().is_ok());
+        assert!(!bare.runs_image_runs());
+    }
+
     /// Catches a runtime that gives no layers (the container engine's, a Mac's, a VM's)
     /// answering as if it did: it gives none, allows any image of a layer (it is never
     /// asked), binds the mounts of named roots, has nothing to prepare, discard or check,
