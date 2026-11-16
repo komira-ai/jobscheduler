@@ -207,7 +207,8 @@ impl Lifecycle {
                     // Everything of the run is gone and only the copy of an output failed (a
                     // link where an output was declared, an output over its cap): the host
                     // holds nothing of the job, so it is a finding and not a taint, and the
-                    // cleanup goes on.
+                    // cleanup goes on. Only the native runtime (a macOS build's) copies outputs.
+                    #[cfg(target_os = "macos")]
                     Err(why) if why.is_outputs() => {
                         job.note(code::OUTPUTS_FAILED, why.to_string(), events);
                         events.push(Event::ContainerRemoved {

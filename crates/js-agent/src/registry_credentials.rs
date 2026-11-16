@@ -153,7 +153,7 @@ impl RegistryCredentials {
         let listed: Vec<Allow> = cli
             .image_allow
             .iter()
-            .chain(&cli.image_allow_loopback)
+            .chain(cli.os.image_registries())
             .chain(&cli.bundle_registry_allow)
             .chain(&cli.bundle_registry_allow_private)
             .filter_map(|text| Allow::parse(text).ok())
@@ -188,7 +188,8 @@ impl RegistryCredentials {
         }
     }
 
-    /// The `--image-allow` entries of `cli`, then its `--image-allow-loopback` entries, each
+    /// The `--image-allow` entries (`public`), then the `--image-allow-loopback` entries
+    /// (`loopback`), each
     /// checked and given its credentials: the allow-list of the crun runtime's image client.
     /// A loopback entry may reach its loopback address, over plain http
     /// ([`Allow::loopback`], [`Allow::plain_http_loopback`]); an entry pulled over plain
@@ -198,13 +199,17 @@ impl RegistryCredentials {
     ///
     /// [`ImageAllowError`]: the first entry that is not `HOST[:PORT]/PREFIX`, or a loopback
     /// entry whose registry is not a loopback address with a port.
-    pub fn image_allow(&self, cli: &Cli) -> Result<Vec<Allow>, ImageAllowError> {
-        let public = cli.image_allow.iter().map(|text| {
+    pub fn image_allow(
+        &self,
+        public: &[String],
+        loopback: &[String],
+    ) -> Result<Vec<Allow>, ImageAllowError> {
+        let public = public.iter().map(|text| {
             Allow::parse(text)
                 .map(|entry| self.attach(entry))
                 .map_err(ImageAllowError::Entry)
         });
-        let local = cli.image_allow_loopback.iter().map(|text| {
+        let local = loopback.iter().map(|text| {
             loopback_entry(text).map(|entry| self.attach(entry).loopback().plain_http_loopback())
         });
         public.chain(local).collect()
@@ -510,6 +515,7 @@ mod tests {
     /// Proves the credentials are read once: after the table is made, the file can be
     /// replaced or removed and the table still gives the credentials it read, so a later
     /// pull uses those. Catches a table that reads its file again at each use.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_credentials_are_read_once_at_start() {
         let dir = private_dir("registry-credentials-once");
@@ -522,7 +528,9 @@ mod tests {
         fs::remove_file(&path).expect("remove");
         assert_eq!(table.attach(entry("registry.example/team")), want);
         assert_eq!(
-            table.image_allow(&cli).expect("image allow"),
+            table
+                .image_allow(&cli.image_allow, &cli.os.image_allow_loopback)
+                .expect("image allow"),
             [want],
             "the crun runtime's allow-list"
         );
@@ -531,6 +539,7 @@ mod tests {
     /// Proves the crun runtime's allow-list is the `--image-allow` entries in order, each
     /// with its own file's credentials and the others without, and that a wrong entry
     /// names `--image-allow`. Catches credentials dropped on the way to the image client.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_image_allow_list_carries_the_credentials() {
         let dir = private_dir("registry-credentials-images");
@@ -541,14 +550,18 @@ mod tests {
         ]);
         let table = RegistryCredentials::from_cli(&cli, me()).expect("credentials");
         assert_eq!(
-            table.image_allow(&cli).expect("image allow"),
+            table
+                .image_allow(&cli.image_allow, &cli.os.image_allow_loopback)
+                .expect("image allow"),
             [
                 entry("registry.example/team").with_credentials(credentials("puller", "pw")),
                 entry("registry.example/other"),
             ]
         );
         let bare = self::cli(&["--image-allow=registry.example".to_owned()]);
-        let refused = table.image_allow(&bare).expect_err("a bare host");
+        let refused = table
+            .image_allow(&bare.image_allow, &bare.os.image_allow_loopback)
+            .expect_err("a bare host");
         assert_eq!(
             format!("{refused:?}"),
             "Entry(Reference(\"registry.example\"))"
@@ -565,6 +578,7 @@ mod tests {
     /// not `127.0.0.1` or `[::1]` with a port, or an entry with no prefix, is refused naming
     /// the flag. Catches a loopback entry pulled over https (or not reached at all), a
     /// non-loopback host given plain http, and credentials lost on a loopback entry.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_loopback_entry_is_pulled_over_plain_http_from_the_loopback_alone() {
         let dir = private_dir("registry-credentials-loopback");
@@ -578,7 +592,9 @@ mod tests {
         let table = RegistryCredentials::from_cli(&cli, me()).expect("credentials");
         let local = |text: &str| entry(text).loopback().plain_http_loopback();
         assert_eq!(
-            table.image_allow(&cli).expect("image allow"),
+            table
+                .image_allow(&cli.image_allow, &cli.os.image_allow_loopback)
+                .expect("image allow"),
             [
                 entry("registry.example/team"),
                 entry("127.0.0.1:5000/cache")
@@ -607,7 +623,9 @@ mod tests {
             ),
         ] {
             let flags = self::cli(&[format!("--image-allow-loopback={given}")]);
-            let refused = table.image_allow(&flags).expect_err(given);
+            let refused = table
+                .image_allow(&flags.image_allow, &flags.os.image_allow_loopback)
+                .expect_err(given);
             assert_eq!(
                 refused.to_string(),
                 format!("--image-allow-loopback: {why}")

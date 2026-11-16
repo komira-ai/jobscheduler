@@ -1,5 +1,5 @@
-//! `packaging/js-agent/crun_host_setup.sh`, the setup of a Linux host that runs `js-agent --runtime
-//! crun`, run against a fake root with a `PATH` of recording stand-ins (`host-shim`) for every
+//! `packaging/js-agent/crun_host_setup.sh`, the setup of a Linux host whose `js-agent` runs the
+//! crun runtime, run against a fake root with a `PATH` of recording stand-ins (`host-shim`) for every
 //! program that reads or changes the host. Nothing here runs a real `systemctl`, `mount`,
 //! `useradd` or `apt-get`: the harness refuses to start if one could be reached, or if it runs as
 //! root, and a stand-in nobody configured fails the call (exit 97) and is logged.

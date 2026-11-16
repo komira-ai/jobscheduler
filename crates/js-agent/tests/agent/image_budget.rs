@@ -6,14 +6,15 @@ use clap::Parser;
 use js_agent::Cli;
 use js_testkit::dir::TestDir;
 
-use crate::support::{code, linux_host, run_scripted, welcome};
+use crate::support::{
+    CountingSleeper, Lowest, Script, ScriptConnector, code, flags, linux_host, run_defaulted,
+    welcome,
+};
 
 const GIB: u64 = 1 << 30;
 
 /// The flags of a crun agent that pass every check before the image budget's.
-const CRUN: [&str; 8] = [
-    "--runtime",
-    "crun",
+const CRUN: [&str; 6] = [
     "--job-user",
     "jsjob",
     "--state-root",
@@ -22,16 +23,26 @@ const CRUN: [&str; 8] = [
     "/r",
 ];
 
-/// Runs the agent with `extra`; returns (status, stderr, whether it sent anything).
+/// Runs the agent with `extra` exactly as given (a crun start when it names neither
+/// `--no-jobs` nor `--allow-container-engine`); returns (status, stderr, whether it sent
+/// anything).
 fn run_agent(extra: &[&str]) -> (String, String, bool) {
-    let (ran, sent, _) = run_scripted(extra, &linux_host(), vec![welcome(1)], 1);
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let ran = run_defaulted(
+        &flags(extra),
+        &linux_host(),
+        &ScriptConnector::of(script),
+        &mut sleeper,
+        &mut Lowest,
+    );
     let sent = !sent.borrow().is_empty();
     (ran.status(), ran.err, sent)
 }
 
 /// Proves a budget of 0 stops a crun agent with status 2 before anything is sent, naming
-/// the flag, as `--bundle-budget-gib 0` stops a Mac agent; and that the flag with a runtime
-/// other than crun is refused by name. Catches a 0 taken as "evict everything", and a flag
+/// the flag, as `--bundle-budget-gib 0` stops a Mac agent; and that the flag with the container
+/// engine, or with no jobs, is refused by name. Catches a 0 taken as "evict everything", and a flag
 /// accepted and ignored by a runtime that has no image store.
 #[test]
 fn a_zero_budget_and_a_budget_without_crun_are_refused() {
@@ -44,8 +55,6 @@ fn a_zero_budget_and_a_budget_without_crun_are_refused() {
     );
     assert!(!sent);
     let engine = [
-        "--runtime",
-        "docker",
         "--container-bin",
         "/usr/bin/docker",
         "--allow-container-engine",
@@ -55,7 +64,18 @@ fn a_zero_budget_and_a_budget_without_crun_are_refused() {
     let (status, err, sent) = run_agent(&engine);
     assert_eq!(status, code(2), "{err}");
     assert!(
-        err.contains("js-agent: --image-budget-gib: needs --runtime crun"),
+        err.contains(
+            "js-agent: --image-budget-gib: not with --allow-container-engine (a flag of the crun runtime)"
+        ),
+        "{err}"
+    );
+    assert!(!sent);
+    let (status, err, sent) = run_agent(&["--no-jobs", "--image-budget-gib", "4"]);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains(
+            "js-agent: --image-budget-gib: not with --no-jobs (an agent that runs no job)"
+        ),
         "{err}"
     );
     assert!(!sent);
@@ -96,7 +116,7 @@ fn a_budget_that_is_not_a_number_is_refused_as_the_bundle_budget_is() {
         "7",
     ])
     .unwrap();
-    assert_eq!(given.image_budget_gib, Some(7));
+    assert_eq!(given.os.image_budget_gib, Some(7));
 }
 
 /// The hello's `disk-gib` of a Linux host whose scratch root's volume has 100 GiB free, with

@@ -213,7 +213,7 @@
 //! - **A user-namespace remapping engine is not supported.** The container user would be
 //!   another uid on the host, and the check for a job's leftover processes compares the
 //!   host's uid with `--container-user`.
-//! - **Host jobs need `--runtime crun`.** Only the crun runtime launches a host job (an OCI
+//! - **Host jobs need the crun runtime.** Only the crun runtime launches a host job (an OCI
 //!   container in the host's namespaces, in a cgroup of its own below its lease's; the
 //!   module [`crate::crun`]), so `--allow-host-jobs` is refused at start on every other
 //!   runtime ([`HOST_JOBS_NEED_CRUN`]), and only an agent that took it reports `host-jobs`:
@@ -250,7 +250,7 @@ mod mounts;
 mod prefetch;
 mod quota;
 mod quota_flags;
-mod run_files;
+pub(crate) mod run_files;
 mod runtime;
 mod scratch;
 mod settle;
@@ -258,7 +258,6 @@ mod silence;
 pub mod taint;
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -269,8 +268,8 @@ use js_oci::Allow;
 use crate::FileReader;
 use crate::bundle::Admission;
 use crate::cli::Cli;
-use crate::cli_runtime::{Flags, Settings};
-use crate::native::{NativeFlags, NativeSettings, PfFlags};
+use crate::cli_runtime::Settings;
+use crate::platform::Backend;
 use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
@@ -461,12 +460,9 @@ pub struct Local {
     /// Why the default run files root could not be used, for a warning; none when it was
     /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
     pub files_warning: Option<String>,
-    /// `--container-bin` and the container flags beside it, when containers are enabled by
-    /// `--container-bin`.
-    pub container: Option<Settings>,
-    /// `--native-helper-socket` and the flags beside it, when native jobs are enabled; never
-    /// together with [`Local::container`].
-    pub native: Option<NativeSettings>,
+    /// What the agent runs jobs with (the runtime of this build, [`crate::platform`]); none
+    /// for an agent that runs no job.
+    pub backend: Option<Backend>,
     /// `--state-root`, when given; always given when jobs are enabled.
     pub state: Option<StateRoot>,
     /// The `--watch-dir` flags, canonicalised, sorted, each once.
@@ -482,15 +478,15 @@ pub struct Local {
     /// The `--image-allow` flags, in the order given: where an image may be pulled from.
     pub image_allow: Vec<Allow>,
     /// The `--egress*` flags: the most network a `crun` job may ask for. Mode none unless
-    /// `allow-list` or `open` was given, which only `--runtime crun` takes ([`crate::egress`]).
+    /// `allow-list` or `open` was given, which only the crun runtime takes ([`crate::egress`]).
     pub egress: crate::egress::Config,
     /// `--silence-stop`, or [`DEFAULT_SILENCE_STOP`]: how long the server may be silent
     /// before every job is stopped; above the server's default grace plus the stop grace.
     pub silence_stop: Duration,
     /// The VM backend, when `--vm-driver` turned it on; the agent sets it after the checks
-    /// here ([`crate::vm::VmSettings::from_cli`]).
+    /// here ([`crate::platform`]).
     pub vm: Option<crate::vm::VmSettings>,
-    /// `--allow-host-jobs`, which only `--runtime crun` takes: the one runtime that launches
+    /// `--allow-host-jobs`, which only the crun runtime takes: the one runtime that launches
     /// a host job. The agent reports `host-jobs` only with it.
     pub allow_host_jobs: bool,
 }
@@ -546,7 +542,7 @@ impl Local {
         Self::from_parts(cli, default_files_root, euid, None)
     }
 
-    /// [`Local::from_cli`] for `--runtime crun`, whose settings (`crun`) stand where the
+    /// [`Local::from_cli`] for the crun runtime, whose settings (`crun`) stand where the
     /// container flags make them for an engine. The scratch root and the run files root are
     /// [`DirLayout::Searchable`] (the job's ids walk down to them); the image store is the
     /// directory beside the scratch root, and the settings are told where it is.
@@ -564,46 +560,15 @@ impl Local {
         euid: u32,
         crun: Option<Settings>,
     ) -> Result<Self, String> {
-        let layout = match crun {
-            Some(_) => DirLayout::Searchable,
-            None => DirLayout::Private,
-        };
-        if cli.allow_host_jobs && crun.is_none() {
-            return Err(HOST_JOBS_NEED_CRUN.to_owned());
-        }
-        let crun = crun.map(|settings| settings.with_host_jobs(cli.allow_host_jobs));
-        let egress = egress_of(cli, crun.is_some())?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
-        let crun = crun.map(|settings| settings.with_mount_roots(&mounts));
+        // The flags of this build's runtime (see `platform`).
+        let mut jobs = crate::platform::jobs(cli, crun, &mounts)?;
+        let layout = jobs.layout;
         let scratch = cli
             .scratch_root
             .as_deref()
             .map(|path| ScratchRoot::open_with(path, layout))
             .transpose()?;
-        let from_flags = Settings::from_flags(
-            &Flags {
-                bin: cli.container_bin.as_deref(),
-                user: cli.container_user.as_deref(),
-                host: cli.container_host.as_deref(),
-                pull: cli.container_pull.as_deref(),
-                tmp_size: cli.container_tmp_size.as_deref(),
-                add_hosts: &cli.container_add_host,
-                actions_cgroup: cli.actions_cgroup.as_deref(),
-                subuid: cli.container_subuid.as_deref(),
-            },
-            (
-                rustix::process::geteuid().as_raw(),
-                rustix::process::getegid().as_raw(),
-            ),
-        )
-        .map_err(|why| why.to_string())?;
-        let is_crun = crun.is_some();
-        let needs = if is_crun {
-            "--runtime crun"
-        } else {
-            "--container-bin"
-        };
-        let container = crun.or(from_flags);
         let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
         // What no run may read: the agent's own roots and the files it keeps secrets in.
         let denied: Vec<&Path> = state
@@ -614,88 +579,29 @@ impl Local {
             .chain(cli.instance_file.as_deref())
             .chain(cli.ca_cert.as_deref())
             .collect();
-        let journal = state
-            .as_ref()
-            .map_or_else(PathBuf::new, |state| state.path().join(NATIVE_JOURNAL));
-        let native = NativeSettings::from_flags(
-            &NativeFlags {
-                socket: cli.native_helper_socket.as_deref(),
-                homes: cli.native_homes.as_deref(),
-                network: cli.native_network.as_deref(),
-                tool_roots: &cli.native_tool_roots,
-                deny_read: &cli.native_deny_read,
-                max_file_mib: cli.native_max_file_mib,
-                max_processes: cli.native_max_processes,
-                pf: PfFlags {
-                    pfctl: cli.native_pfctl.as_deref(),
-                    anchor: cli.native_pf_anchor.as_deref(),
-                    state_dir: cli.native_pf_state_dir.as_deref(),
-                    uid_start: cli.native_pf_uid_start,
-                    uid_count: cli.native_pf_uid_count,
-                    endpoints: &cli.native_pf_endpoints,
-                },
-            },
-            &denied,
-            &journal,
-        )?;
-        if native.is_some() && euid != 0 {
-            return Err(
-                "--native-helper-socket: the agent must run as root: it gives each run's \
-                 directory to the run's user"
-                    .to_owned(),
-            );
-        }
-        if container.is_some() && native.is_some() {
-            return Err(
-                "--native-helper-socket: not with --container-bin: an agent runs \
-                        containers or native programs, not both"
-                    .to_owned(),
-            );
-        }
-        if native.is_some() && state.is_none() {
-            return Err(
-                "--state-root: required with --native-helper-socket: the taint \
-                        marker is kept there"
-                    .to_owned(),
-            );
-        }
-        if native.is_some() && scratch.is_none() {
-            return Err(
-                "--scratch-root: required with --native-helper-socket: each run's \
-                        private directory is made there"
-                    .to_owned(),
-            );
-        }
-        if container.is_none() && !cli.watch_dirs.is_empty() {
-            return Err("--watch-dir: needs --container-bin".to_owned());
-        }
-        if container.is_none() && native.is_none() && cli.run_files_root.is_some() {
-            return Err("--run-files-root: needs --container-bin or --native-helper-socket".into());
-        }
-        if container.is_some() && state.is_none() {
+        jobs.finish(cli, &denied, state.as_ref(), euid)?;
+        // The flag that turned the jobs on; an agent that runs no job takes none of the job
+        // flags below.
+        let needs = jobs.needs();
+        if let Some(needs) = needs.filter(|_| state.is_none()) {
             return Err(format!(
                 "--state-root: required with {needs}: the taint marker is kept there"
             ));
         }
+        let no_jobs =
+            |flag: &str| format!("{flag}: not with --no-jobs (an agent that runs no job)");
+        if needs.is_none() && cli.run_files_root.is_some() {
+            return Err(no_jobs("--run-files-root"));
+        }
         let graces = [cli.stop_grace, cli.drain_wait];
-        if container.is_none() && native.is_none() && graces.iter().any(Option::is_some) {
-            return Err("--stop-grace and --drain-wait: need --container-bin".to_owned());
+        if needs.is_none() && graces.iter().any(Option::is_some) {
+            return Err(no_jobs("--stop-grace and --drain-wait"));
         }
         let stop_grace = seconds("--stop-grace", cli.stop_grace, DEFAULT_STOP_GRACE)?;
         let drain_wait = seconds("--drain-wait", cli.drain_wait, stop_grace)?;
-        if container.is_none() && native.is_none() && cli.silence_stop.is_some() {
-            return Err(
-                "--silence-stop: needs --container-bin or --native-helper-socket".to_owned(),
-            );
+        if needs.is_none() && cli.silence_stop.is_some() {
+            return Err(no_jobs("--silence-stop"));
         }
-        if container.is_none() && cli.settle_ms.is_some() {
-            return Err("--settle-ms: needs --container-bin".to_owned());
-        }
-        let settle = settle::settle(cli.settle_ms)?;
-        if container.is_none() && cli.taint_recheck_ms.is_some() {
-            return Err("--taint-recheck-ms: needs --container-bin".to_owned());
-        }
-        let taint_recheck = taint::recheck_every(cli.taint_recheck_ms)?;
         let silence_stop = silence::silence_stop(cli.silence_stop)?;
         silence::fits_grace(silence_stop, js_agent_wire::DEFAULT_GRACE_MS, stop_grace)?;
         if let Some(state) = &state {
@@ -708,51 +614,34 @@ impl Local {
                 );
             }
         }
-        // A native agent's files root may also not be, hold or lie in a path its profiles
-        // deny reads of (the job could not read its files) or the homes of its users.
-        let native_paths = native.iter().flat_map(|native| {
-            let config = native.config();
-            let denies = config
-                .read_denies
-                .iter()
-                .map(|path| Path::new(path.as_str()));
-            let denies = denies.map(|path| ("path no native run may read", path));
-            denies.chain([("--native-homes", config.homes.as_path())])
-        });
+        let denied_paths = jobs.denied_paths();
         let others: Vec<(&str, &Path)> = mounts
             .paths()
             .map(|path| ("--mount-root", path))
             .chain(scratch.iter().map(|r| ("--scratch-root", r.path())))
             .chain(state.iter().map(|r| ("--state-root", r.path())))
-            .chain(native_paths)
+            .chain(denied_paths)
             .collect();
-        let runs = match (&container, &native) {
-            (Some(_), _) => run_files::Runs::Containers(layout),
-            (None, Some(_)) => run_files::Runs::Native,
-            (None, None) => run_files::Runs::None,
-        };
         let given = cli.run_files_root.as_deref();
         let (files, files_warning) =
-            run_files::open_root(given, default_files_root, runs, &others)?;
+            run_files::open_root(given, default_files_root, jobs.runs(), &others)?;
         let busy: Vec<&Path> = mounts
             .paths()
             .chain(scratch.iter().map(ScratchRoot::path))
             .chain(state.iter().map(StateRoot::path))
             .chain(files.iter().map(FilesRoot::path))
             .collect();
-        let watch = watch_dirs(&cli.watch_dirs, &busy)?;
-        if container.is_some() && scratch.is_none() {
+        let watch = crate::platform::Jobs::watch(cli, &busy)?;
+        if let Some(needs) = needs.filter(|_| scratch.is_none()) {
             return Err(format!(
                 "--scratch-root: required with {needs}: each run's private directory is made there"
             ));
         }
-        let container = match (is_crun, &scratch) {
-            (true, Some(root)) => {
-                container.map(|settings| settings.placed_beside(root.path(), files.clone()))
-            }
-            _ => container,
-        };
         let (default_gib, max_inodes, failures, usage_wait, abandon) = scratch_quota_limits(cli)?;
+        let settle = jobs.settle;
+        let taint_recheck = jobs.taint_recheck;
+        let egress = std::mem::take(&mut jobs.egress);
+        let allow_host_jobs = jobs.allow_host_jobs;
         Ok(Self {
             watch,
             mounts,
@@ -762,11 +651,10 @@ impl Local {
             scratch_quota_failures: failures,
             scratch_usage_wait_secs: usage_wait,
             scratch_abandon_limit: abandon,
+            backend: jobs.backend(scratch.as_ref(), files.as_ref()),
             scratch,
             files,
             files_warning,
-            container,
-            native,
             state,
             settle,
             taint_recheck,
@@ -776,39 +664,9 @@ impl Local {
             egress,
             silence_stop,
             vm: None,
-            allow_host_jobs: cli.allow_host_jobs,
+            allow_host_jobs,
         })
     }
-}
-
-/// Why `--allow-host-jobs` is refused at start on an agent whose runtime is not `crun`.
-pub const HOST_JOBS_NEED_CRUN: &str = "--allow-host-jobs: only --runtime crun launches a host \
-     job; the container engine (--container-bin) and native runtimes run contained jobs only";
-
-/// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. Only
-/// `crun` enforces a ceiling, so a ceiling above none on another runtime is refused rather
-/// than run with no network at all.
-fn egress_of(cli: &Cli, crun: bool) -> Result<crate::egress::Config, String> {
-    use crate::egress::{Config, Flags, Mode};
-    let config = Config::from_flags(&Flags {
-        mode: cli.egress.as_deref(),
-        allow: &cli.egress_allow,
-        dns: &cli.egress_dns,
-        forward_ports: &cli.egress_forward_port,
-        pool: cli.egress_pool.as_deref(),
-        ip: cli.egress_ip.as_deref(),
-        nft: cli.egress_nft.as_deref(),
-        nsenter: cli.egress_nsenter.as_deref(),
-    })
-    .map_err(|why| why.to_string())?;
-    if config.mode() != Mode::None && !crun {
-        return Err(format!(
-            "--egress {}: needs --runtime crun, the only runtime that enforces it; a job run \
-             through --container-bin has network none",
-            config.mode()
-        ));
-    }
-    Ok(config)
 }
 
 /// The `--image-allow` entries, each checked.
@@ -849,7 +707,11 @@ impl Local {
     /// The text names the flags at fault; a path that cannot be looked at is an error too.
     pub fn check_filesystems(&self, files: &dyn FileReader) -> Result<(), String> {
         // A Mac has no tmpfs: a native agent's root is wherever the operator put it.
-        if let Some(root) = self.files.as_ref().filter(|_| self.native.is_none()) {
+        if let Some(root) = self
+            .files
+            .as_ref()
+            .filter(|_| crate::platform::RUN_FILES_ON_TMPFS)
+        {
             let on_tmpfs = files.is_tmpfs(root.path()).map_err(|why| {
                 format!("--run-files-root: cannot tell what file system it is on: {why}")
             })?;
@@ -925,12 +787,13 @@ impl Local {
 /// The `--watch-dir` flags as canonical paths, sorted, each once. A directory that a job
 /// writes into by design would taint the host after every job, so one that lies in or
 /// holds a path of `busy` is refused.
-fn watch_dirs(given: &[PathBuf], busy: &[&Path]) -> Result<Vec<PathBuf>, String> {
+#[cfg(target_os = "linux")]
+pub(crate) fn watch_dirs(given: &[PathBuf], busy: &[&Path]) -> Result<Vec<PathBuf>, String> {
     let mut dirs = given
         .iter()
         .map(|path| {
             let fail = |why: &str| format!("--watch-dir {}: {why}", path.display());
-            let canonical = fs::canonicalize(path)
+            let canonical = std::fs::canonicalize(path)
                 .ok()
                 .filter(|canonical| path.is_absolute() && canonical.is_dir())
                 .ok_or_else(|| fail("not an existing directory given as an absolute path"))?;

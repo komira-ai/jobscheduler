@@ -97,7 +97,7 @@ impl Rig {
                  mkdir -p \"target/$t/release\"\n\
                  p=\"target/$t/release/$b\"\n\
                  line=\"{line}\"\n\
-                 printf '#!/bin/sh\\nprintf \"%s\\\\n\" \"%s\"\\nexit 0\\n# {VERSION}\\nruntimes: docker\\n' \"$line\" > \"$p\"\n\
+                 printf '#!/bin/sh\\nprintf \"%s\\\\n\" \"%s\"\\nexit 0\\n# {VERSION}\\nruntimes: native\\n' \"$line\" > \"$p\"\n\
                  chmod {mode:o} \"$p\"\n",
                 log = log.display(),
                 failing = self.failing,

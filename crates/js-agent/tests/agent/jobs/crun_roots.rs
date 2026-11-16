@@ -28,7 +28,7 @@ fn the_mount_roots_reach_the_crun_plan_with_their_access() {
     let path = |name: &str| roots.path().join(name).display().to_string();
     let plan_of = |extra: &[String]| {
         let mut args = vec!["js-agent", "--server", "http://127.0.0.1:1", "--pool", "p"];
-        args.extend(["--runtime", "crun", "--job-user", Fixture::USER]);
+        args.extend(["--job-user", Fixture::USER]);
         let (state, scratch) = (fixture.state.display(), fixture.scratch.display());
         let given = [
             format!("--state-root={state}"),
@@ -44,8 +44,13 @@ fn the_mount_roots_reach_the_crun_plan_with_their_access() {
             Settings::for_crun(fixture.crun.clone(), Fixture::USER, (uid, gid), Vec::new());
         let euid = rustix::process::geteuid().as_raw();
         let local = Local::from_cli_crun(&cli, euid, settings).expect("the flags pass");
-        let settings = local.container.expect("containers are enabled");
-        settings.crun().expect("crun settings").mount_roots.clone()
+        let backend = local.backend.expect("containers are enabled");
+        backend
+            .settings()
+            .crun()
+            .expect("crun settings")
+            .mount_roots
+            .clone()
     };
     let given = plan_of(&[
         format!("--mount-root=data={}", path("data")),

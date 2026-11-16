@@ -5,7 +5,9 @@
 //! (an order done, a call begun) with a hang guard, never for a time.
 
 mod answers;
+#[cfg(target_os = "linux")]
 mod contract;
+#[cfg(target_os = "linux")]
 mod contract_e2e;
 #[cfg(target_os = "linux")]
 mod crun_budget;
@@ -23,35 +25,47 @@ mod crun_logs;
 mod crun_machine;
 #[cfg(target_os = "linux")]
 mod crun_roots;
+#[cfg(target_os = "linux")]
 mod drain;
 mod e2e;
+#[cfg(target_os = "linux")]
 mod ends;
 #[cfg(target_os = "linux")]
 mod engine_opt_in;
+#[cfg(target_os = "linux")]
 mod exclusive;
 pub mod fake;
+#[cfg(target_os = "linux")]
 mod files_flags;
 mod per_job;
 mod quiesce;
+#[cfg(target_os = "linux")]
 mod quota_start;
+#[cfg(target_os = "linux")]
 mod session;
 mod silence;
 mod system;
 #[cfg(target_os = "linux")]
 mod unmounted;
+#[cfg(target_os = "linux")]
 mod usage;
 mod worker;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use js_agent::Rescue;
+#[cfg(target_os = "linux")]
 use js_agent::cli_runtime::Settings;
 use js_agent::lifecycle::{Capacity, Config, FilesRoot, MountRoots, ScratchRoot, StateRoot};
+#[cfg(target_os = "linux")]
 use js_agent::usage::Outbox;
-use js_agent::{Backend, Plan, Platform, Rescue, Worker};
+use js_agent::{Backend, Plan, Platform, Worker};
 use js_agent_wire::{Command, HeartbeatReply};
 use serde_json::{Value, json};
 
@@ -81,6 +95,7 @@ pub fn private(dir: &Scratch, name: &str) -> std::path::PathBuf {
 }
 
 /// The checked container flags: a program that is never run, the agent's own user.
+#[cfg(target_os = "linux")]
 pub fn settings(dir: &Scratch) -> Settings {
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
     let (user, uid, gid) = user();
@@ -89,9 +104,37 @@ pub fn settings(dir: &Scratch) -> Settings {
 }
 
 /// The checked container flags with `--actions-cgroup` set to `actions`.
+#[cfg(target_os = "linux")]
 pub fn settings_in(dir: &Scratch, actions: Option<&str>) -> Settings {
     let actions = actions.map(Path::new);
     settings(dir).with_actions_cgroup(actions).unwrap()
+}
+
+/// What the jobs run with, under `dir`: the container flags of a program that is never run.
+#[cfg(target_os = "linux")]
+pub fn backend(dir: &Scratch) -> Backend {
+    Backend::Container(settings(dir))
+}
+
+/// What the jobs run with, under `dir`: the native settings of a helper socket nobody
+/// listens on.
+#[cfg(target_os = "macos")]
+pub fn backend(dir: &Scratch) -> Backend {
+    let socket = dir.path("helper.sock");
+    let homes = private(dir, "homes");
+    let flags = js_agent::native::NativeFlags {
+        socket: Some(socket.as_path()),
+        homes: Some(homes.as_path()),
+        network: None,
+        tool_roots: &[],
+        deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
+        pf: js_agent::native::PfFlags::default(),
+    };
+    let journal = dir.path("native-leases");
+    let settings = js_agent::native::NativeSettings::from_flags(&flags, &[], &journal);
+    Backend::Native(settings.unwrap().unwrap())
 }
 
 /// What a worker is made from, under `dir`: eight CPUs and 16 GiB, a scratch root and a
@@ -115,7 +158,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
     };
     Plan {
         config,
-        backend: Backend::Container(settings(dir)),
+        backend: backend(dir),
         host_id: "h1".to_owned(),
         platform: Platform {
             os: "linux".to_owned(),
@@ -134,6 +177,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
     }
 }
 
+#[cfg(target_os = "linux")]
 /// A worker over `machine` that steps only when asked and publishes its usage in `outbox`,
 /// with `actions` as the actions control group.
 pub fn start_with_usage(
@@ -152,6 +196,7 @@ pub fn start_with_usage(
 }
 
 /// How the agent stops its containers without a worker, over `machine`.
+#[cfg(target_os = "linux")]
 pub fn rescue(dir: &Scratch, machine: &FakeMachine) -> Rescue {
     let platform = Platform {
         os: "linux".to_owned(),
@@ -159,13 +204,7 @@ pub fn rescue(dir: &Scratch, machine: &FakeMachine) -> Rescue {
     };
     let machine = Arc::new(machine.clone());
     let grace = Duration::from_secs(1);
-    Rescue::new(
-        machine,
-        Backend::Container(settings(dir)),
-        "h1".to_owned(),
-        platform,
-        grace,
-    )
+    Rescue::new(machine, backend(dir), "h1".to_owned(), platform, grace)
 }
 
 /// A worker over `machine` that steps only when asked.

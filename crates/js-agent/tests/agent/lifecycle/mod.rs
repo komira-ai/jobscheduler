@@ -14,6 +14,7 @@ mod exclusive;
 pub mod fake;
 mod fence;
 mod files;
+#[cfg(target_os = "linux")]
 mod flags;
 mod held;
 mod host_ports;
@@ -22,6 +23,7 @@ mod lease_dir;
 mod live_logs;
 mod logs;
 mod mounts;
+mod native_bodies;
 mod network;
 mod owed;
 mod per_job;

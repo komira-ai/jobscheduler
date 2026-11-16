@@ -33,11 +33,11 @@ const DEB_UNIT: &str = concat!(
 /// The unit most tests extend.
 const UNIT: &str = "[Unit]\nDescription=x\nExecStart=/not/a/service/line\n\n[Service]\n\
     Type=simple\nExecStart=/opt/js-agent/link/current/js-agent --server https://s.example:7300 \
-    --token-file /etc/js-agent/token --pool p --runtime crun\nKillMode=process\n";
+    --token-file /etc/js-agent/token --pool p\nKillMode=process\n";
 
 /// The command line of [`UNIT`].
 const UNIT_LINE: &str = "/opt/js-agent/link/current/js-agent --server https://s.example:7300 \
-    --token-file /etc/js-agent/token --pool p --runtime crun";
+    --token-file /etc/js-agent/token --pool p";
 
 /// Any `/dev` path reads as a node of the NVIDIA driver's major number.
 fn any_node(path: &Path) -> Result<DeviceNode, NodeError> {
@@ -250,10 +250,10 @@ fn two_gpus_give_the_index_node_and_each_common_node_in_name_order() {
     assert_eq!(ran.err, "");
     let cli = Cli::try_parse_from(words(&line)).unwrap();
     assert_eq!(
-        cli.gpu_devices,
+        cli.os.gpu_devices,
         ["/dev/nvidia{index}", "/dev/nvidia-uvm", "/dev/nvidiactl"]
     );
-    let checked = GpuPassthrough::from_cli(&cli, &[0, 1], any_node).unwrap();
+    let checked = GpuPassthrough::from_cli(&cli.os, &[0, 1], any_node).unwrap();
     assert!(checked.is_some(), "the flags check to a device list");
 }
 
@@ -456,7 +456,7 @@ fn the_dropin_extends_the_packaged_units_exec_start() {
     want.extend(rig.driver_flags());
     assert_eq!(words(&line), want);
     let cli = Cli::try_parse_from(words(&line)).unwrap();
-    assert_eq!(cli.gpu_devices.len(), 3);
+    assert_eq!(cli.os.gpu_devices.len(), 3);
 }
 
 /// The unit's drop-ins (the `systemctl edit` override in /etc, and the runtime ones beside the

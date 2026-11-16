@@ -51,9 +51,10 @@ pool's `max_machines`.
 
 ## What the agent needs
 
-Start the agent with `--runtime crun --allow-host-jobs`. Only the `crun` runtime launches a host
-job, so `js-agent` refuses `--allow-host-jobs` at start on every other runtime (the container
-engine of `--container-bin` and the native runtime of a Mac run contained jobs only). An agent
+Start the Linux agent with `--allow-host-jobs`, and without `--allow-container-engine`. Only the
+`crun` runtime launches a host job, so `js-agent` refuses `--allow-host-jobs` at start with
+`--allow-container-engine` (the container engine runs contained jobs only), and a macOS build
+has no such flag (its native runtime runs contained jobs only). An agent
 that took the flag reports `host-jobs` in its hello; no other agent does, and
 `--capability host-jobs=...` is refused as a detected key. Without an agent that reports it, every
 host job is refused `no-capable-host` at submit, and no host is tainted for a job it cannot start.

@@ -21,7 +21,7 @@ mod helper;
 mod runtime;
 mod split;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use js_agent_wire::Hello;
@@ -30,8 +30,6 @@ use js_vm_lease::VmDriver;
 pub use self::helper::{HelperDriver, HelperLaunch, Launch, Launched};
 pub use self::runtime::VmRuntime;
 pub use self::split::WithVms;
-use crate::cli::Cli;
-use crate::facts::Platform;
 use crate::lifecycle::Runtime;
 use crate::system::Machine;
 
@@ -98,30 +96,22 @@ pub struct VmSettings {
 }
 
 impl VmSettings {
-    /// The VM flags of `cli` on `platform`, checked; `None` when neither is given (the
-    /// backend is off). `native` says whether the agent runs native jobs.
+    /// The VM flags (`--vm-driver` and `--vm-store`), checked; `None` when neither is given
+    /// (the backend is off). The flags exist in the macOS build only, beside the native
+    /// runtime the VMs run next to.
     ///
     /// # Errors
     ///
-    /// The flag at fault and why: one of the two without the other, a platform other than
-    /// macOS, no native jobs, a driver that is not an absolute path to a file, or a store
-    /// that is not an absolute path to a directory holding the base image `base`.
-    pub fn from_cli(cli: &Cli, platform: &Platform, native: bool) -> Result<Option<Self>, String> {
-        let (driver, store) = match (&cli.vm_driver, &cli.vm_store) {
+    /// The flag at fault and why: one of the two without the other, a driver that is not an
+    /// absolute path to a file, or a store that is not an absolute path to a directory holding
+    /// the base image `base`.
+    pub fn new(driver: Option<&Path>, store: Option<&Path>) -> Result<Option<Self>, String> {
+        let (driver, store) = match (driver, store) {
             (None, None) => return Ok(None),
             (Some(driver), Some(store)) => (driver, store),
             (None, Some(_)) => return Err("--vm-store: needs --vm-driver".to_owned()),
             (Some(_), None) => return Err("--vm-driver: needs --vm-store".to_owned()),
         };
-        if !platform.is_macos() {
-            return Err("--vm-driver: VM leases run on macOS only".to_owned());
-        }
-        if !native {
-            return Err(
-                "--vm-driver: needs --native-helper-socket (the VMs run beside the native jobs)"
-                    .to_owned(),
-            );
-        }
         if !driver.is_absolute() || !driver.is_file() {
             return Err("--vm-driver: must be an absolute path to the js-vmm binary".to_owned());
         }
@@ -132,8 +122,8 @@ impl VmSettings {
             );
         }
         Ok(Some(Self {
-            driver: driver.clone(),
-            store: store.clone(),
+            driver: driver.to_owned(),
+            store: store.to_owned(),
         }))
     }
 }

@@ -377,21 +377,9 @@ impl Agent {
         Self::launch(url, Some(token), extra, host, connector, machine, false)
     }
 
-    /// [`Agent::spawn_on`] over any machine.
-    #[cfg(target_os = "linux")]
-    pub fn spawn_machine(
-        url: String,
-        token: PathBuf,
-        extra: &[&str],
-        host: fn() -> Host,
-        connector: impl Connector + Send + 'static,
-        machine: Arc<dyn Machine>,
-    ) -> Self {
-        Self::launch(url, Some(token), extra, host, connector, machine, false)
-    }
-
-    /// [`Agent::spawn_machine`] with `extra` exactly as given: a start with no `--runtime` is
-    /// the default runtime's (`crun` on Linux), not the agent that runs no job.
+    /// [`Agent::spawn_on`] over any machine, with `extra` exactly as given: a start that names
+    /// no runtime flag is a crun start (the Linux build's runtime), not the agent that runs no
+    /// job.
     #[cfg(target_os = "linux")]
     pub fn spawn_machine_defaulted(
         url: String,
