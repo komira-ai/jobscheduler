@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, UNSET_SERVER};
 use crate::launchd::render_plist;
 use crate::pfctl::{Pfctl, SYSTEM_PFCTL, SystemPfctl};
 use crate::policy::{AnchorName, Endpoint, PolicyError, UidRange};
@@ -83,12 +83,21 @@ pub enum Verb {
     },
     /// Print the property list of the js-agent LaunchDaemon.
     AgentPlist {
-        /// The lease server's address, the agent's `--server`.
-        #[arg(long)]
-        server: String,
+        /// The lease server's address, the agent's `--server`. Required unless `--flags-file`
+        /// is given.
+        #[arg(
+            long,
+            required_unless_present = "flags_file",
+            conflicts_with = "flags_file"
+        )]
+        server: Option<String>,
         /// The pool the host asks to join, the agent's `--pool`.
-        #[arg(long, default_value = "default")]
+        #[arg(long, default_value = "default", conflicts_with = "flags_file")]
         pool: String,
+        /// The agent's `--flags-file`: the file that gives it the server, the pool and the
+        /// rest, as `/etc/js-agent/flags`. The plist then names neither `--server` nor `--pool`.
+        #[arg(long)]
+        flags_file: Option<String>,
     },
     /// Print the property list of the js-mac-session LaunchDaemon.
     SessionPlist {
@@ -223,8 +232,18 @@ pub fn execute(cli: &Cli, pf: &dyn Pfctl, out: &mut dyn Write) -> Result<bool, C
             let args = install_args(cli, uids, &endpoints);
             out.write_all(render_plist(program, &args, *interval).as_bytes())?;
         }
-        Verb::AgentPlist { server, pool } => {
-            out.write_all(Daemon::agent(server, pool).render().as_bytes())?;
+        Verb::AgentPlist {
+            server,
+            pool,
+            flags_file,
+        } => {
+            let daemon = match flags_file {
+                Some(file) => Daemon::agent_from_flags_file(file),
+                // clap requires `--server` without `--flags-file`; the placeholder is the
+                // value the agent refuses.
+                None => Daemon::agent(server.as_deref().unwrap_or(UNSET_SERVER), pool),
+            };
+            out.write_all(daemon.render().as_bytes())?;
         }
         Verb::SessionPlist {
             daemon_requirement,
@@ -343,6 +362,47 @@ mod tests {
         let (r, text) = run(&c, &pf);
         assert!(r.unwrap());
         assert_eq!(text, Daemon::agent("https://x:1", "default").render());
+    }
+
+    /// `agent-plist --flags-file F` prints the flags-file daemon: the file is named, and the
+    /// plist carries neither `--server` nor `--pool`. It catches a verb that still demands a
+    /// server, or one that prints the old form.
+    #[test]
+    fn agent_plist_with_a_flags_file_prints_the_flags_file_daemon() {
+        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-cli-agent-flags");
+        let pf = Fake::new(dir.path());
+        let c = parse(
+            dir.path(),
+            &[
+                "agent-plist".to_owned(),
+                "--flags-file".to_owned(),
+                "/etc/js-agent/flags".to_owned(),
+            ],
+        );
+        let (r, text) = run(&c, &pf);
+        assert!(r.unwrap());
+        assert_eq!(
+            text,
+            Daemon::agent_from_flags_file("/etc/js-agent/flags").render()
+        );
+        assert!(!text.contains("--server") && !text.contains("--pool"));
+    }
+
+    /// `--flags-file` with `--server` or `--pool` is a usage error, and so is giving none of
+    /// them: one of the two forms is required. It catches a plist that would carry the flag
+    /// twice, or a verb that prints a plist with no server at all.
+    #[test]
+    fn agent_plist_takes_one_form_only() {
+        for extra in [
+            &["--flags-file", "/f", "--server", "https://x:1"][..],
+            &["--flags-file", "/f", "--pool", "mac"][..],
+            &[][..],
+            &["--pool", "mac"][..],
+        ] {
+            let mut args = vec!["js-mac-provision", "agent-plist"];
+            args.extend_from_slice(extra);
+            assert!(Cli::try_parse_from(args).is_err(), "{extra:?}");
+        }
     }
 
     #[test]

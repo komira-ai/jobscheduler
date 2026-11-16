@@ -123,6 +123,36 @@ fn a_beta_job_without_its_push_condition_is_refused() {
     );
 }
 
+/// The package workflow's `sign` job is a macOS job that holds the signing environment: it is
+/// kept off a pull request by the push condition of the release's call, and by nothing else
+/// the lint can see inside the called file. It catches a call of the package workflow that
+/// loses its push condition, which would start `sign` (and `build`) for a pull request.
+#[test]
+fn the_signing_job_is_started_by_a_pull_request_only_if_the_calls_push_condition_is_lost() {
+    let gate = "  beta-macos-pkg:\n    needs: [plan, artifacts]\n    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}\n";
+    let ungated = "  beta-macos-pkg:\n    needs: [plan, artifacts]\n";
+    let (jobs, problems) = lint(&changed("release.yml", gate, ungated));
+    assert!(
+        jobs.iter()
+            .any(|j| j == "release.yml/beta-macos-pkg -> js-agent-macos-pkg.yml/sign"),
+        "{jobs:?}"
+    );
+    assert_eq!(
+        problems,
+        [
+            "release.yml/beta-macos-pkg -> js-agent-macos-pkg.yml/build: runs on macos-15, not Linux x86_64 (ubuntu-*)",
+            "release.yml/beta-macos-pkg -> js-agent-macos-pkg.yml/sign: runs on macos-15, not Linux x86_64 (ubuntu-*)"
+        ]
+    );
+    // As the repository has it, neither job is one a pull request starts.
+    let (jobs, problems) = lint(&repository_workflows());
+    assert!(
+        !jobs.iter().any(|j| j.contains("js-agent-macos-pkg.yml")),
+        "{jobs:?}"
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
 #[test]
 fn the_release_dry_run_builds_nothing_on_arm_or_macos() {
     // artifacts.yml's build matrix names arm64 and macOS runners; only the `if:` of the
