@@ -1780,9 +1780,11 @@ dependencies = [
  "js-jobs",
  "js-registry",
  "js-sched",
+ "js-sizing",
  "js-state",
  "js-types",
  "js-whole",
+ "sha2 0.11.1",
  "thiserror",
  "tracing",
 ]

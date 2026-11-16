@@ -714,6 +714,7 @@ mod job_api;
 mod job_expiry;
 mod job_loss;
 mod job_pass;
+mod job_sizes;
 mod job_start;
 mod job_store;
 mod job_whole;

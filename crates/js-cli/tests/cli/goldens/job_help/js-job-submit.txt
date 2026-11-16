@@ -74,7 +74,7 @@ Options:
           The image, pinned by digest: NAME@sha256:HEX, with an optional tag after the name. The service rejects an image without a digest. Empty only when layers is not: the root is then the layers alone.
 
       --spec.labels <KEY=VALUE>
-          The client's labels, by key. A listing can filter by them. KEY=VALUE; repeat for more.
+          The client's labels, by key. A listing can filter by them. The label size-class names the job's class, whose history sizes what Needs leaves at 0. KEY=VALUE; repeat for more.
 
       --spec.layers-file <PATH>
           The read-only layers of the job's root, base first, stacked on image (or in place of it, when image is empty): at most 16. A later layer's file hides an earlier one's. With layers, the root is writable and the writes are the job's own, and the job runs in a container. Empty: the root is image alone, read-only, as before. Read from a file holding the field's value in proto3 JSON.
@@ -83,7 +83,7 @@ Options:
           Trees at paths in the job's file system: at most 64. Empty: none. Read from a file holding the field's value in proto3 JSON.
 
       --spec.needs.cpu-millis <N>
-          CPU, in thousandths of a core.
+          CPU, in thousandths of a core. 0: sized from the job's class.
 
       --spec.needs.disk-bytes <N>
           Scratch disk, in bytes. Absent: none is asked for.
@@ -95,7 +95,7 @@ Options:
           The number of GPUs. 0: none. A job that sets only gpus and gpu_class, and no Constraints.accelerator, keeps the meaning it has always had: the class is read through the alias table of design section 3.8, so a full spelling pins its variant and a family name such as nvidia-a100 matches every variant of it.
 
       --spec.needs.memory-bytes <N>
-          Memory, in bytes.
+          Memory, in bytes. 0: sized from the job's class.
 
       --spec.needs.whole-host <BOOL>
           The job needs the whole host: it is placed only on a host that holds no other job, and a host is drained for it (design section 5.4). The other needs still bound which hosts are capable.

@@ -121,6 +121,14 @@ impl Resources {
         self
     }
 
+    /// This vector with `memory_bytes` of memory in place of its own, every other dimension
+    /// and the GPU class as they were.
+    #[must_use]
+    pub fn with_memory_bytes(mut self, memory_bytes: u64) -> Self {
+        self.memory_bytes = memory_bytes;
+        self
+    }
+
     /// A vector from `(dimension name, count)` pairs; a dimension left out is zero.
     /// An unknown name is refused by name.
     pub fn from_named<'a>(
@@ -281,6 +289,18 @@ mod tests {
             .with_cpu_millis(11_000);
         assert_eq!(built.cpu_millis(), 11_000);
         assert_eq!((built.memory_bytes(), built.gpus()), (2, 1));
+        assert_eq!((built.gpu_class(), built.disk_bytes()), (Some("a100"), 9));
+    }
+
+    /// Asserts that the memory builder sets the memory and nothing else: CPU, GPUs, their
+    /// class and disk are kept. It catches a builder that drops the disk or the class.
+    #[test]
+    fn memory_bytes_is_set_by_its_builder_alone() {
+        let built = res(1, 2, 1, Some("a100"))
+            .with_disk_bytes(9)
+            .with_memory_bytes(1 << 30);
+        assert_eq!(built.memory_bytes(), 1 << 30);
+        assert_eq!((built.cpu_millis(), built.gpus()), (1, 1));
         assert_eq!((built.gpu_class(), built.disk_bytes()), (Some("a100"), 9));
     }
 
