@@ -641,6 +641,16 @@ pub struct Cli {
     /// from 1 to 60000. Needs `--container-bin`.
     #[arg(long, value_name = "MILLISECONDS")]
     pub settle_ms: Option<u64>,
+    /// How many milliseconds the agent waits between the re-checks of a taint it may clear
+    /// itself: a taint that a check judged (a process that outlived a job, or a check that
+    /// could not read its input; never a failed removal, owed checks, or a change of mounts,
+    /// users, groups, modules or a watched directory) is re-checked while no run is held, and
+    /// ends after two clean re-checks this far apart and the server's acknowledgement of the
+    /// clear; the marker is kept as `taint.json.cleared-<time>` and the clear is logged. A
+    /// process still there keeps the host tainted. By default 60000; from 1 to 3600000. Needs
+    /// `--container-bin`.
+    #[arg(long, value_name = "MILLISECONDS")]
+    pub taint_recheck_ms: Option<u64>,
 
     /// The bundle store: the directory a Mac keeps unpacked toolchain bundles in (`--bundle-*`
     /// flags need it). Absolute; on the same APFS volume as `--scratch-root` (cloning needs

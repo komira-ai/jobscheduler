@@ -123,6 +123,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         },
         watch: Vec::new(),
         settle: js_agent::lifecycle::DEFAULT_SETTLE,
+        taint_recheck: js_agent::lifecycle::DEFAULT_TAINT_RECHECK,
         machine: Arc::new(machine.clone()),
         step_every,
         usage: None,

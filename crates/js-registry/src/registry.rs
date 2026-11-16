@@ -466,10 +466,13 @@ impl Registry {
     /// by the transport.
     ///
     /// **Taint.** The first taint report a host sends is kept, and the reply says
-    /// `taint_ack` whenever the heartbeat carries one. The caller must make the taint
-    /// durable ([`Registry::bindings`]) before it lets the acknowledgement go, since the
-    /// agent stops reporting once it has it. A tainted host takes no new job and is never
-    /// forgotten for being silent. Nothing here clears a taint.
+    /// `taint_ack` whenever the heartbeat carries one, and `taint_cleared_ack` whenever it
+    /// carries a cleared taint (`taint_cleared`). The caller must make the taint (or its clearing) durable
+    /// ([`Registry::bindings`]) before it lets the acknowledgement go, since the agent stops
+    /// reporting once it has it. A tainted host takes no new job and is never forgotten for
+    /// being silent. The one thing that ends a taint here is the host's own report that it
+    /// cleared the taint held for it: `taint_cleared` equal to the held taint, field for
+    /// field. A report of a different taint changes nothing.
     ///
     /// This records the beat: it changes the registry. [`Registry::check_heartbeat`] runs
     /// the same checks and finds the taint the beat would record, changing nothing, so a

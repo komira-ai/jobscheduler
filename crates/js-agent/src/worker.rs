@@ -162,6 +162,9 @@ pub struct Plan {
     /// How long the host settles before the checks and the blindness rule count what they
     /// see against a job (`--settle-ms`).
     pub settle: Duration,
+    /// How long the lifecycle waits between the re-checks of a taint that may clear itself
+    /// (`--taint-recheck-ms`).
+    pub taint_recheck: Duration,
     /// The clock, the runtime and the host view.
     pub machine: Arc<dyn Machine>,
     /// How long the worker waits for an order before it steps by itself.
@@ -347,6 +350,8 @@ pub struct Snapshot {
     pub results: Vec<RunResult>,
     /// The taint to report, until the server acknowledges it.
     pub taint: Option<Taint>,
+    /// The taint to report cleared, until the server acknowledges that.
+    pub taint_cleared: Option<Taint>,
     /// Every job a job start began, with its result until acknowledged.
     pub jobs: Vec<HeldJob>,
     /// The job ids retired on a stop for a job the agent did not hold, until acknowledged.
@@ -359,6 +364,7 @@ impl Snapshot {
             held: life.held(),
             results: life.results(),
             taint: life.pending_taint(),
+            taint_cleared: life.pending_taint_clear(),
             jobs: life.held_jobs(),
             retired_jobs: life.retired_jobs(),
         }
@@ -771,6 +777,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
         platform,
         watch,
         settle,
+        taint_recheck,
         machine,
         usage,
         vm,
@@ -807,7 +814,9 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     };
     let (life, events) = Lifecycle::adopt(config, runtime, checks, Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
-    let life = life.with_blind_wait(settle);
+    let life = life
+        .with_blind_wait(settle)
+        .with_taint_recheck(taint_recheck);
     lines.extend(describe(&events));
     let collector = usage.and_then(|outbox| match actions {
         Ok(dir) => Some(Collector::new(

@@ -820,3 +820,69 @@ fn the_settle_flag_is_bounded() {
     assert!(err.contains("--settle-ms: needs --container-bin"), "{err}");
     assert_eq!(sent, 0);
 }
+
+/// The job flags of an agent that runs a container engine, with `extra` beside them,
+/// checked as the agent checks them.
+fn container_local(name: &str, extra: &[&str]) -> Result<js_agent::lifecycle::Local, String> {
+    let dir = Scratch::new(name);
+    let (state, scratch) = (dir.path("state"), dir.path("scratch"));
+    for path in [&state, &scratch] {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
+    let user = container_user();
+    let s = |path: &std::path::Path| path.display().to_string();
+    let (exec, state, scratch) = (s(&exec), s(&state), s(&scratch));
+    let mut argv = vec![
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--token-file",
+        "/nonexistent/token",
+        "--pool",
+        "p",
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
+        "--container-bin",
+        &exec,
+        "--container-user",
+        &user,
+        "--container-subuid",
+        "jobmap",
+        "--state-root",
+        &state,
+        "--scratch-root",
+        &scratch,
+    ];
+    argv.extend(extra.iter().copied());
+    use clap::Parser;
+    let cli = js_agent::Cli::try_parse_from(argv).unwrap();
+    js_agent::lifecycle::Local::from_cli(&cli, 0)
+}
+
+/// Asserts `--taint-recheck-ms` end to end: the job flags of an agent that runs containers
+/// carry a minute when it is not given and the value when it is, the bounds are refused
+/// naming the flag, and the flag on an agent that runs no container ends it with status 2
+/// before anything is sent. It catches a flag that is read and dropped, one without
+/// bounds, and one taken where nothing would re-check.
+#[test]
+fn the_taint_recheck_flag_is_read_bounded_and_needs_a_container() {
+    let default = container_local("recheck-default", &[]).unwrap();
+    assert_eq!(default.taint_recheck, Duration::from_secs(60));
+    let given = container_local("recheck-given", &["--taint-recheck-ms", "5000"]).unwrap();
+    assert_eq!(given.taint_recheck, Duration::from_millis(5000));
+    assert_eq!(
+        container_local("recheck-zero", &["--taint-recheck-ms", "0"]).unwrap_err(),
+        "--taint-recheck-ms: at least 1"
+    );
+
+    let (status, err, sent) = start(&["--taint-recheck-ms", "500"]);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains("--taint-recheck-ms: needs --container-bin"),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
+}

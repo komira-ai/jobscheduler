@@ -378,8 +378,10 @@ async fn heartbeat(
         .results
         .iter()
         .any(|result| result.detail.as_deref() == Some(refusal::HOST_TAINTED));
-    if reply.taint_ack {
-        reply.taint_ack = agents.save_bindings().await;
+    if reply.taint_ack || reply.taint_cleared_ack {
+        let saved = agents.save_bindings().await;
+        reply.taint_ack &= saved;
+        reply.taint_cleared_ack &= saved;
     } else if refused {
         agents.save_bindings().await;
     }
@@ -751,6 +753,7 @@ mod tests {
             held: Vec::new(),
             results: Vec::new(),
             taint: None,
+            taint_cleared: None,
             exclusive_ready: None,
             exclusive_refused: None,
             load: None,
