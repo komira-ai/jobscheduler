@@ -101,6 +101,7 @@ fn hosts(g: &mut Gen) -> (Vec<Candidate>, BTreeMap<HostId, OpenHost>) {
                 },
                 host_jobs: g.one_in(2),
                 rank: None,
+                capacity: None,
             };
             open.insert(host(&name), offer);
         }

@@ -269,6 +269,49 @@ impl<'p> Tx<'p> {
             .collect())
     }
 
+    /// Locks the live rows of `keys`, skipping rows another transaction holds, and keeps them
+    /// as the transaction's own. The rows it got, in key order.
+    pub(super) fn lock_keys(&mut self, keys: &[String]) -> Result<Vec<(String, Row)>, Error> {
+        let now = self.now;
+        let s: &mut Session = &mut self.session;
+        let rows = s.client.query(&s.st.claim_keys, &[&keys, &now])?;
+        let rows: Vec<(String, Row)> = rows
+            .iter()
+            .map(|row| (row.get(0), Row::from_row(row, 1)))
+            .collect();
+        for (key, row) in &rows {
+            self.remember(key.clone(), row.clone());
+        }
+        Ok(rows)
+    }
+
+    /// The live row at `key` as the transaction sees it, locked.
+    pub(super) fn read(&mut self, key: &str) -> Result<Option<Row>, Error> {
+        self.load(&[key])?;
+        Ok(self.live(key).cloned())
+    }
+
+    /// The live rows under `prefix` as the transaction sees them, in key order. Rows this
+    /// transaction has written are as it wrote them.
+    pub(super) fn read_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Row)>, Error> {
+        let now = Some(self.now);
+        let s: &mut Session = &mut self.session;
+        let rows = s.client.query(&s.st.scan, &[&prefix, &now])?;
+        let mut seen: BTreeMap<String, Row> = rows
+            .iter()
+            .map(|row| (row.get(0), Row::from_row(row, 1)))
+            .collect();
+        for (key, row) in &self.cache {
+            if key.starts_with(prefix) {
+                match row {
+                    Some(row) => drop(seen.insert(key.clone(), row.clone())),
+                    None => drop(seen.remove(key)),
+                }
+            }
+        }
+        Ok(seen.into_iter().collect())
+    }
+
     fn live(&self, key: &str) -> Option<&Row> {
         self.cache.get(key).and_then(Option::as_ref)
     }

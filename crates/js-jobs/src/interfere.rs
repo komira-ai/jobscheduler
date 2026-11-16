@@ -6,8 +6,8 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_state::{
-    Changes, Commit, CommitStats, Conflict, Revision, ScanPage, ScanRange, Store, StoreError,
-    StoreTime, Txn, Versioned,
+    Changes, Claim, Commit, CommitStats, Conflict, Revision, ScanPage, ScanRange, Store,
+    StoreError, StoreTime, Txn, TxnRead, Versioned,
 };
 
 /// The text of the [`StoreError::Failed`] a failed commit answers.
@@ -144,6 +144,24 @@ impl<S: Store> Store for Interfere<S> {
         }
         self.countdown(&self.fail_at)?;
         self.inner.apply_batch(batch)
+    }
+
+    fn head(&self) -> Result<Option<Revision>, StoreError> {
+        self.inner.head()
+    }
+
+    fn claim_decide(
+        &self,
+        claim: &[String],
+        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
+    ) -> Result<Claim, StoreError> {
+        // A decided commit is a commit: the hook and the failure countdown of commits apply.
+        let hook = lock(&self.before).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.countdown(&self.fail_at)?;
+        self.inner.claim_decide(claim, decide)
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {

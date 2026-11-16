@@ -1,12 +1,13 @@
 //! [`JobStore`]: the job, allocation, mark and taint tables over a state [`Store`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_state::{
-    Commit, Cond, Conflict, ResumeToken, ScanRange, Store, StoreError, Txn, Version, Versioned,
+    Commit, Cond, Conflict, ResumeToken, ScanRange, Store, StoreError, Txn, TxnRead, Version,
+    Versioned,
 };
 use js_types::HostId;
 
@@ -164,6 +165,43 @@ fn job_at(key: &str, value: &[u8]) -> Result<JobRecord, JobStoreError> {
     decode_job(value)
         .and_then(|job| same_key(key, keys::job(&job.id), job))
         .map_err(|why| JobStoreError::row(key, why))
+}
+
+/// What the allocation rows `rows` (key and value) book on `host`, summed: those that are live
+/// there.
+fn sum_booking(
+    host: &HostId,
+    rows: impl IntoIterator<Item = (String, Vec<u8>)>,
+) -> Result<HostBooking, JobStoreError> {
+    let mut total = HostBooking::default();
+    for (key, value) in rows {
+        let allocation = allocation_at(&key, &value)?;
+        if allocation.host == *host && allocation.step != AllocationStep::Freed {
+            total = total
+                .plus(&allocation.booked)
+                .ok_or(JobStoreError::BookingOverflow { host: host.clone() })?;
+        }
+    }
+    Ok(total)
+}
+
+/// What the live allocations on `host` book, summed, as the reads of `read` show them: the
+/// rows of the host's on-host entries and the allocation rows this build cannot read, which a
+/// booking cannot be counted without.
+fn booked_in(read: &mut dyn TxnRead, host: &HostId) -> Result<HostBooking, JobStoreError> {
+    let mut entries = read.scan_prefix(&keys::on_host_prefix(host))?;
+    entries.extend(read.scan_prefix(keys::UNREAD_ALLOCATION)?);
+    let rows: BTreeSet<String> = entries
+        .iter()
+        .filter_map(|(entry, _)| keys::indexed_row(entry))
+        .collect();
+    let mut found = Vec::with_capacity(rows.len());
+    for key in rows {
+        if let Some(row) = read.get(&key)? {
+            found.push((key, row.value));
+        }
+    }
+    sum_booking(host, found)
 }
 
 /// The allocation the row `key` holds.
@@ -665,22 +703,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         })
     }
 
-    /// The version of every host's reservation row ([`JobStore::place_reserving`]), by host.
-    /// A pass reads it before the allocations it decides from, so that a placement made
-    /// after the read, by anyone, fails the pass's own placement on that host.
-    ///
-    /// # Errors
-    /// [`JobStoreError::Store`].
-    pub fn host_books(&self) -> Result<BTreeMap<HostId, Version>, JobStoreError> {
-        let rows = self.store.scan_prefix(keys::HOSTBOOK)?;
-        // A key whose host part is not a host id is not one of this build's rows: left out.
-        let books = rows.into_iter().filter_map(|(key, row)| {
-            let host = HostId::new(key.trim_start_matches(keys::HOSTBOOK));
-            host.ok().map(|host| (host, row.version))
-        });
-        Ok(books.collect())
-    }
-
     /// What the live (booked and releasing) allocations on `host` book, summed. It reads
     /// the rows of the host's on-host entries and the allocation rows this build cannot read.
     ///
@@ -689,21 +711,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// cannot be read (a booking that cannot be counted is not taken as none);
     /// [`JobStoreError::BookingOverflow`]; [`JobStoreError::Store`].
     pub fn booked_on(&self, host: &HostId) -> Result<HostBooking, JobStoreError> {
-        let mut total = HostBooking::default();
         let on_host = keys::on_host_prefix(host);
         let spans = [
             index::Span::all(&on_host),
             index::Span::all(keys::UNREAD_ALLOCATION),
         ];
-        for (key, row) in self.indexed_rows(&spans)? {
-            let allocation = allocation_at(&key, &row.value)?;
-            if allocation.host == *host && allocation.step != AllocationStep::Freed {
-                total = total
-                    .plus(&allocation.booked)
-                    .ok_or(JobStoreError::BookingOverflow { host: host.clone() })?;
-            }
-        }
-        Ok(total)
+        let rows = self.indexed_rows(&spans)?;
+        sum_booking(host, rows.into_iter().map(|(key, row)| (key, row.value)))
     }
 
     // ---- rows --------------------------------------------------------------------------

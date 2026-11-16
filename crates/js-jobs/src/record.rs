@@ -517,6 +517,48 @@ pub struct HostBooking {
     pub allocations: u64,
 }
 
+/// What a host can book: the most its live allocations may sum to. A placement made on the
+/// host through [`crate::JobStore::place_claimed`] is refused when the allocations the store
+/// holds, as the placement's own transaction reads them, leave no room for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Capacity {
+    /// Thousandths of a CPU core.
+    pub cpu_millis: u64,
+    /// Bytes of memory.
+    pub memory_bytes: u64,
+    /// Bytes of scratch disk.
+    pub disk_bytes: u64,
+    /// Whole accelerator devices.
+    pub accelerators: u64,
+}
+
+impl Capacity {
+    /// Whether a host of this capacity, with `booking` live on it, has room for `add`: a whole
+    /// host books only a host with nothing live on it, and a share only a host no allocation
+    /// books whole, on every axis.
+    #[must_use]
+    pub fn has_room(&self, booking: &HostBooking, add: &Booked) -> bool {
+        let within = |held: u64, asked: u64, most: u64| {
+            held.checked_add(asked).is_some_and(|total| total <= most)
+        };
+        match *add {
+            Booked::WholeHost => booking.allocations == 0,
+            Booked::Shape {
+                cpu_millis,
+                memory_bytes,
+                disk_bytes,
+                accelerators,
+            } => {
+                !booking.whole_host
+                    && within(booking.cpu_millis, cpu_millis, self.cpu_millis)
+                    && within(booking.memory_bytes, memory_bytes, self.memory_bytes)
+                    && within(booking.disk_bytes, disk_bytes, self.disk_bytes)
+                    && within(booking.accelerators, accelerators, self.accelerators)
+            }
+        }
+    }
+}
+
 impl HostBooking {
     /// This sum with `booked` added, or `None` when a count overflows.
     pub(crate) fn plus(self, booked: &Booked) -> Option<HostBooking> {

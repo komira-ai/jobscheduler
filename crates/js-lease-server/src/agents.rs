@@ -33,7 +33,7 @@ use self::taints::restore_job_taints;
 use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::AgentTokens;
 use crate::clock::SharedClock;
-use crate::config::{AgentSetup, placer, split};
+use crate::config::{AgentSetup, CpuSlack, placer, split};
 use crate::error::StartupError;
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
@@ -103,6 +103,9 @@ pub(crate) struct Agents {
     /// The pool's `max_queue_wait` and `start_timeout`, which the job pass of the tick
     /// enforces ([`Agents::job_pass`]).
     pub(crate) job_limits: JobLimits,
+    /// How far past its cores a host's CPU may be booked ([`crate::config::CpuSlack`]), which
+    /// the capacity a placement is held to in its own transaction allows too.
+    pub(crate) cpu_slack: CpuSlack,
     /// For each host, the session whose job listing was last committed: a listing of another
     /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
     listed_sessions: Mutex<BTreeMap<HostId, Session>>,
@@ -286,6 +289,7 @@ fn placed_in(
         unclean: Mutex::default(),
         logs,
         job_limits,
+        cpu_slack,
         listed_sessions: Mutex::default(),
         meter: OnceLock::new(),
         placing: Mutex::default(),
@@ -337,6 +341,7 @@ impl Agents {
             unclean: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
+            cpu_slack: CpuSlack::default(),
             listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
             placing: Mutex::default(),

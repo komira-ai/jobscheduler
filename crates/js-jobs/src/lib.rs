@@ -171,9 +171,9 @@ pub use ids::{
 };
 pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{
-    AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, Exclusion,
-    FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint, Isolation, JobFiles, JobRecord, JobSpec,
-    JobState, MarkRecord, Needs, NetworkPolicy, StartFailure,
+    AllocationRecord, AllocationStep, Booked, Capacity, Constraints, DeclaredPort, EndReason,
+    Exclusion, FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint, Isolation, JobFiles, JobRecord,
+    JobSpec, JobState, MarkRecord, Needs, NetworkPolicy, StartFailure,
 };
 pub use result::{
     BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,

@@ -24,11 +24,11 @@ use crate::{
     Needs, NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
 };
 
+mod claimed;
 mod clock;
 mod collect;
 mod compat;
 mod failures;
-mod hostbook;
 mod hosts;
 mod idempotency;
 mod indexes;
@@ -47,11 +47,11 @@ mod scrub;
 mod taints;
 mod whole;
 
+pub use claimed::*;
 pub use clock::*;
 pub use collect::*;
 pub use compat::*;
 pub use failures::*;
-pub use hostbook::*;
 pub use hosts::*;
 pub use idempotency::*;
 pub use indexes::*;
@@ -95,8 +95,11 @@ where
     booked_on_sums_the_live_allocations_of_a_host(backend);
     placement_books_the_jobs_host_ports(backend);
     live_on_lists_the_live_allocations_of_one_host(backend);
-    a_reserving_placement_loses_to_one_made_after_its_picture(backend);
-    host_books_leaves_out_a_key_that_is_not_a_host(backend);
+    a_claimed_placement_books_only_what_the_host_has_room_for(backend);
+    a_whole_host_and_a_share_exclude_each_other_in_the_placement(backend);
+    a_job_another_writer_placed_is_not_placed_again(backend);
+    a_claimed_placement_moves_the_hosts_reservation_row(backend);
+    a_claimed_placement_of_a_missing_job_is_stale(backend);
     end_and_free_is_one_commit(backend);
     requeue_loses_to_a_change_of_either_row(backend);
     a_move_that_loses_its_job_version_is_stale(backend);
@@ -224,8 +227,11 @@ macro_rules! job_store_tests {
             booked_on_sums_the_live_allocations_of_a_host,
             placement_books_the_jobs_host_ports,
             live_on_lists_the_live_allocations_of_one_host,
-            a_reserving_placement_loses_to_one_made_after_its_picture,
-            host_books_leaves_out_a_key_that_is_not_a_host,
+            a_claimed_placement_books_only_what_the_host_has_room_for,
+            a_whole_host_and_a_share_exclude_each_other_in_the_placement,
+            a_job_another_writer_placed_is_not_placed_again,
+            a_claimed_placement_moves_the_hosts_reservation_row,
+            a_claimed_placement_of_a_missing_job_is_stale,
             end_and_free_is_one_commit,
             requeue_loses_to_a_change_of_either_row,
             a_move_that_loses_its_job_version_is_stale,

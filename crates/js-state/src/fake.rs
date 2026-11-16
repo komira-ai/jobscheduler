@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::clock::{Clock, ManualClock, StoreTime};
 use crate::conformance::{Backend, C1_RACERS, C8_SNAPSHOT_PREFIX, RACE_KEY};
-use crate::store::{Span, Store, page_of};
+use crate::store::{Claim, Span, Store, TxnRead, page_of};
 use crate::types::{
     Change, Changes, Commit, CommitStats, Cond, Conflict, Direction, Event, Op, ResumeToken,
     Revision, ScanPage, ScanRange, StoreError, Txn, Version, Versioned,
@@ -271,6 +271,28 @@ impl Data {
             revision: wrote.unwrap_or(Revision(self.head)),
             counters,
         })
+    }
+}
+
+/// What a decision of [`Fake::claim_decide`] reads: the live rows, under the lock it holds.
+struct Seen<'a> {
+    data: &'a Data,
+    now: StoreTime,
+}
+
+impl TxnRead for Seen<'_> {
+    fn get(&mut self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        Ok(self.data.live_row(key, self.now).map(Row::versioned))
+    }
+
+    fn scan_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        Ok(self
+            .data
+            .rows
+            .iter()
+            .filter(|(key, row)| key.starts_with(prefix) && row.alive(self.now))
+            .map(|(key, row)| (key.clone(), row.versioned()))
+            .collect())
     }
 }
 
@@ -540,6 +562,46 @@ impl Store for Fake {
             self.sync();
         }
         Ok(results)
+    }
+
+    fn head(&self) -> Result<Option<Revision>, StoreError> {
+        Ok(Some(Revision(lock(&self.inner).live.head)))
+    }
+
+    fn claim_decide(
+        &self,
+        claim: &[String],
+        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
+    ) -> Result<Claim, StoreError> {
+        let now = self.clock_now();
+        let mut inner = lock(&self.inner);
+        inner.live.reap(now);
+        if claim
+            .iter()
+            .any(|key| inner.live.live_row(key, now).is_none())
+        {
+            return Ok(Claim::Held);
+        }
+        // Decided and written under the one lock, so no other writer runs between.
+        let Some(txn) = decide(&mut Seen {
+            data: &inner.live,
+            now,
+        }) else {
+            return Ok(Claim::Declined);
+        };
+        if let Err(conflict) = inner.live.check_all(&txn, now) {
+            return Ok(Claim::Conflict(conflict));
+        }
+        let base = inner.live.alloc(txn.change_count());
+        let commit = match inner.live.write(&txn, now, base, false) {
+            Ok(commit) => commit,
+            Err(conflict) => return Ok(Claim::Conflict(conflict)),
+        };
+        inner.stats.txns += 1;
+        self.committed.notify_all();
+        drop(inner);
+        self.sync();
+        Ok(Claim::Committed(commit))
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {

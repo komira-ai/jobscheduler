@@ -12,18 +12,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_state::{Cond, Store, StoreTime, Txn, Version};
+use std::sync::atomic::Ordering;
+
+use js_state::{Claim, Cond, Store, StoreTime, Txn, TxnRead, Version};
 use js_types::{HostId, QueueNote};
 
 use super::index::{put_allocation, put_job};
-use super::{Beside, JobStore, ensure, with_rows};
+use super::{Beside, JobStore, allocation_at, booked_in, ensure, job_at, with_rows};
 use crate::codec::Carried;
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
 use crate::record::{
-    AllocationRecord, AllocationStep, Booked, EndReason, Exclusion, JobRecord, JobState, Needs,
-    StartFailure,
+    AllocationRecord, AllocationStep, Booked, Capacity, EndReason, Exclusion, JobRecord, JobState,
+    Needs, StartFailure,
 };
 use crate::result::{JobEnd, ended};
 
@@ -88,36 +90,105 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok((placed, allocation))
     }
 
-    /// [`JobStore::place_with`] that also reserves `host`: the same transaction writes the
-    /// host's reservation row (`hostbook/<host>`) at the version `seen` says the placement's
-    /// picture of the host was read at ([`JobStore::host_books`]; `None` when the host had no
-    /// row then). A placement on the host that committed since, by this server or another,
-    /// wrote the row, so this one is [`JobStoreError::Stale`] and the job stays queued: two
-    /// placements decided from one picture never both book the host. Frees need no such row, as
-    /// a free only makes room.
+    /// [`JobStore::place_with`] decided on the rows the placement's own transaction has
+    /// locked, which is how a server places a queued job when other servers place too.
     ///
-    /// Returns the job, the allocation and the version the host's row has now: the
-    /// row is the last write of the transaction, so it is the commit's revision, and the
-    /// caller's picture of the host is current again as far as its own placement goes.
+    /// The job's row is claimed first (`FOR UPDATE SKIP LOCKED` on Postgres): a job another
+    /// transaction holds is [`JobStoreError::Stale`] at once and is left to it, without waiting.
+    /// Then, in the same transaction, the job, its earlier allocation, its mark and the
+    /// host's live allocations are read as they stand, so the decision is made on what the
+    /// commit finds and not on a picture read earlier:
+    ///
+    /// - the job must still be queued (a placement by another server made it
+    ///   [`JobStoreError::UnexpectedState`]);
+    /// - with `capacity`, the host's live allocations plus this booking must fit it, else
+    ///   [`JobStoreError::HostFull`] and nothing is written (the conditional update that
+    ///   reserves the capacity: the booking and the check are one transaction);
+    /// - the host's reservation row (`hostbook/<host>`) is written at the version the
+    ///   transaction read, so a reader that works from a picture of the host sees it moved.
+    ///
+    /// Returns the job and the allocation as written.
     ///
     /// # Errors
-    /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the host's row is not at
-    /// `seen`.
-    pub fn place_reserving(
+    /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the job's row is held by
+    /// another transaction or its commit's preconditions failed; [`JobStoreError::HostFull`].
+    pub fn place_claimed(
         &self,
         id: &JobId,
-        host: HostId,
+        host: &HostId,
         booked: Booked,
-        placement: Placement,
-        seen: Option<Version>,
-    ) -> Result<(JobRecord, AllocationRecord, Version), JobStoreError> {
-        let book = keys::hostbook(&host);
-        let (txn, placed, allocation) = self.placement_txn(id, host, booked, placement)?;
-        let txn = self.without_mark(txn, id)?;
-        let cond = seen.map_or(Cond::Absent, Cond::Version);
-        let txn = txn.put(book, allocation.allocation_id.to_string(), cond);
-        let commit = self.commit(id, txn)?;
-        Ok((placed, allocation, Version(commit.revision.0)))
+        placement: &Placement,
+        capacity: Option<&Capacity>,
+    ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
+        let mut failed = None;
+        let mut placed = None;
+        let claim = [keys::job(id)];
+        let outcome = self.store.claim_decide(&claim, &mut |read| {
+            let decided = self.decide_placement(read, id, (host, booked, placement), capacity);
+            match decided {
+                Ok((txn, job, allocation)) => {
+                    placed = Some((job, allocation));
+                    Some(txn)
+                }
+                Err(error) => {
+                    failed = Some(error);
+                    None
+                }
+            }
+        });
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        match (outcome?, placed, failed) {
+            (Claim::Committed(_), Some(placed), _) => Ok(placed),
+            (_, _, Some(error)) => Err(error),
+            _ => Err(JobStoreError::Stale { id: id.clone() }),
+        }
+    }
+
+    /// The transaction [`JobStore::place_claimed`] commits, decided on what `read` shows.
+    fn decide_placement(
+        &self,
+        read: &mut dyn TxnRead,
+        id: &JobId,
+        (host, booked, placement): (&HostId, Booked, &Placement),
+        capacity: Option<&Capacity>,
+    ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
+        let job_key = keys::job(id);
+        let row = read
+            .get(&job_key)?
+            .ok_or(JobStoreError::NotFound { id: id.clone() })?;
+        let job = job_at(&job_key, &row.value)?;
+        let earlier_key = keys::allocation(id);
+        let earlier = read
+            .get(&earlier_key)?
+            .map(|row| allocation_at(&earlier_key, &row.value).map(|found| (found, row.version)))
+            .transpose()?;
+        if let Some(capacity) = capacity {
+            let booking = booked_in(read, host)?;
+            ensure(
+                capacity.has_room(&booking, &booked),
+                JobStoreError::HostFull {
+                    id: id.clone(),
+                    host: host.clone(),
+                },
+            )?;
+        }
+        let (txn, placed, allocation) = self.build_placement(
+            id,
+            (job, row.version),
+            earlier,
+            (host.clone(), booked, placement.clone()),
+        )?;
+        let mark_key = keys::mark(id);
+        let txn = match read.get(&mark_key)? {
+            Some(row) => txn.delete(mark_key, Cond::Version(row.version)),
+            None => txn.check(mark_key, Cond::Absent),
+        };
+        let book_key = keys::hostbook(host);
+        let cond = read
+            .get(&book_key)?
+            .map_or(Cond::Absent, |row| Cond::Version(row.version));
+        let txn = txn.put(book_key, allocation.allocation_id.to_string(), cond);
+        Ok((txn, placed, allocation))
     }
 
     /// The transaction that places the queued job `id` on `host` as [`JobStore::place`]
@@ -130,7 +201,21 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         booked: Booked,
         placement: Placement,
     ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
-        let (job, job_version) = self.job_row(id)?;
+        let job = self.job_row(id)?;
+        let earlier = self.read_allocation(id)?;
+        self.build_placement(id, job, earlier, (host, booked, placement))
+    }
+
+    /// The transaction that places the queued job `id`, read at `job`, on a host as
+    /// [`JobStore::place`] describes, given its `earlier` allocation as read, and the job and
+    /// allocation it writes.
+    fn build_placement(
+        &self,
+        id: &JobId,
+        (job, job_version): (JobRecord, Version),
+        earlier: Option<(AllocationRecord, Version)>,
+        (host, booked, placement): (HostId, Booked, Placement),
+    ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
         ensure(
             job.state == JobState::Queued,
             JobStoreError::UnexpectedState {
@@ -139,7 +224,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 found: job.state,
             },
         )?;
-        let earlier = self.read_allocation(id)?;
         let (allocation_cond, earlier_id) = match &earlier {
             None => (Cond::Absent, None),
             Some((earlier, version)) => {

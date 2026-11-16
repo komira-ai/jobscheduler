@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::clock::StoreTime;
-use crate::store::Store;
+use crate::store::{Claim, Store, TxnRead};
 use crate::types::{
     Changes, Commit, CommitStats, Conflict, Op, Revision, ScanPage, ScanRange, StoreError, Txn,
     Versioned,
@@ -114,6 +114,26 @@ impl Store for RecordingStore {
             let committed =
                 matches!(&result, Ok(results) if matches!(results.get(index), Some(Ok(_))));
             self.record(txn, committed);
+        }
+        result
+    }
+
+    fn head(&self) -> Result<Option<Revision>, StoreError> {
+        self.inner.head()
+    }
+
+    fn claim_decide(
+        &self,
+        claim: &[String],
+        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
+    ) -> Result<Claim, StoreError> {
+        let mut decided = None;
+        let result = self.inner.claim_decide(claim, &mut |read| {
+            decided = decide(read);
+            decided.clone()
+        });
+        if let Some(txn) = decided {
+            self.record(&txn, matches!(result, Ok(Claim::Committed(_))));
         }
         result
     }
