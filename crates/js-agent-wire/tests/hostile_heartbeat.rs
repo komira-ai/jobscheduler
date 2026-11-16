@@ -205,6 +205,34 @@ fn outcome_must_agree_with_exit_code() {
     }
 }
 
+/// The cleared taint is held to the bounds of the taint: an empty reason and a bad run id
+/// are refused. It catches unbounded text a server would compare and persist.
+#[test]
+fn taint_cleared_is_bounded() {
+    let cleared = |edit: fn(&mut Taint)| {
+        let mut beat = heartbeat();
+        let mut taint = beat.taint.take().unwrap();
+        edit(&mut taint);
+        beat.taint_cleared = Some(taint);
+        beat.validate().unwrap_err()
+    };
+    expect(
+        cleared(|taint| taint.reason.clear()),
+        "taint.reason",
+        Rule::Empty,
+        refusal::INVALID_HEARTBEAT,
+    );
+    expect(
+        cleared(|taint| taint.run_id = Some("../x".into())),
+        "taint.run_id",
+        Rule::BadChars,
+        refusal::INVALID_HEARTBEAT,
+    );
+    let mut ok = heartbeat();
+    ok.taint_cleared = ok.taint.take();
+    assert_eq!(ok.validate(), Ok(()));
+}
+
 /// The taint: an empty, long or control-character reason, a bad run id and a long check
 /// are refused. It catches unbounded text a server would persist.
 #[test]

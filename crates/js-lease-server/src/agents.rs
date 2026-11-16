@@ -529,11 +529,12 @@ impl Agents {
         Ok(())
     }
 
-    /// Makes the taint `heartbeat` would record durable before the registry records it
-    /// ([`Registry::check_heartbeat`]): the host's binding with the taint is committed under
-    /// [`Agents::host_writes`], whose guard is returned for the caller to hold until the
-    /// registry has recorded the beat. Nothing when the beat would record no taint, or the
-    /// registry refuses it (the beat is then refused the same).
+    /// Makes the taint `heartbeat` would record, or the clearing of the host's taint it
+    /// reports, durable before the registry records it
+    /// ([`Registry::check_heartbeat`]): the host's binding with the taint (none for a clear)
+    /// is committed under [`Agents::host_writes`], whose guard is returned for the caller to
+    /// hold until the registry has recorded the beat. Nothing when the beat would record no
+    /// taint and clear none, or the registry refuses it (the beat is then refused the same).
     ///
     /// # Errors
     ///
@@ -547,11 +548,11 @@ impl Agents {
         let Ok(check) = self.registry.check_heartbeat(heartbeat, who) else {
             return Ok(None);
         };
-        let Some(taint) = check.taint else {
+        if check.taint.is_none() && !check.cleared {
             return Ok(None);
-        };
+        }
         let gate = self.host_writes.lock().await;
-        self.keep(&check.host, |bound| bound.with_taint(Some(taint)))
+        self.keep(&check.host, |bound| bound.with_taint(check.taint))
             .await?;
         Ok(Some(gate))
     }
