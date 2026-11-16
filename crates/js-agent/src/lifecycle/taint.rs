@@ -80,7 +80,9 @@
 //!    non-clearable one was sealed at start (owed records, a host job taken over).
 //! 1. Only a taint [`clearable`] says so: reason [`reason::RESIDUE`] with the check
 //!    `process-as-job-user` or `daemonised-child`, or reason [`reason::UNCHECKED`] with a
-//!    check that could not read its input (`*-unreadable`, `watch-over-bound`). Never
+//!    check that could not read its input (`*-unreadable`, `watch-over-bound`) or
+//!    `cgroup-not-found` (a crun run whose container group was not found within the settle
+//!    wait; the checks do not depend on that group). Never
 //!    `cleanup-failed`, `check-owed`, `host-job`, `marker-unreadable`, `host-not-visible`
 //!    (a re-check does not show that the agent now sees the host), nor a mount, user, group,
 //!    module or watched-directory change: state the host really holds. A non-clearable taint
@@ -341,7 +343,9 @@ fn unreadable() -> Taint {
 }
 
 /// Whether `taint` is one the agent may clear itself (see "A taint that clears itself"): a
-/// residue of a process, or a check that could not read its input. Anything else is state
+/// residue of a process, a check that could not read its input, or a run whose container
+/// group was not found (`cgroup-not-found`: the checks do not depend on that group, so a
+/// re-check speaks for the host). Anything else is state
 /// the host really holds, or a taint a re-check cannot speak for.
 pub fn clearable(taint: &Taint) -> bool {
     let code = taint.check.as_deref().unwrap_or_default();
@@ -355,6 +359,7 @@ pub fn clearable(taint: &Taint) -> bool {
             check::MODULES_UNREADABLE,
             check::WATCH_UNREADABLE,
             check::WATCH_OVER_BOUND,
+            super::code::CGROUP_NOT_FOUND,
         ]
         .contains(&code),
         _ => false,

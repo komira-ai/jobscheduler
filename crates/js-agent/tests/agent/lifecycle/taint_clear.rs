@@ -197,6 +197,53 @@ fn an_unchecked_taint_clears_too() {
     assert!(!h.life.is_tainted());
 }
 
+/// Asserts that a crun run whose container group was not found a settle wait after the first
+/// sighting taints the host as unchecked with `cgroup-not-found`, and that the taint clears
+/// after two clean re-checks of the idle host and the server's acknowledgement of the clear.
+/// Catches a group that was slow to appear leaving a node out of service until an operator
+/// moves the marker aside.
+#[test]
+fn a_cgroup_not_found_taint_clears_after_two_clean_rechecks() {
+    let mut h = Harness::new("cgroup-not-found-clears");
+    h.fake.promise_cgroups(true);
+    h.start(job("r1"));
+    h.life.step();
+    h.clock.advance(1000);
+    h.life.step();
+    let held = Taint {
+        reason: reason::UNCHECKED.to_owned(),
+        run_id: Some("r1".to_owned()),
+        check: Some(code::CGROUP_NOT_FOUND.to_owned()),
+    };
+    assert_eq!(h.life.pending_taint(), Some(held.clone()));
+    h.fake.exit("r1", 0);
+    h.life.step();
+    ack(&mut h);
+    for _ in 0..3 {
+        tick(&mut h, EVERY);
+    }
+    assert_eq!(rechecks(&h), 2);
+    assert_eq!(h.life.pending_taint_clear(), Some(held));
+    let events = ack_clear(&mut h);
+    assert_eq!(names(&events), ["finding - taint-cleared"]);
+    assert!(!h.life.is_tainted());
+    assert!(!h.marker().exists());
+}
+
+/// Asserts that a start whose container the agent's process table cannot see (the engine
+/// path, `host-not-visible`) is never re-checked and keeps the host tainted however long it
+/// idles, unlike `cgroup-not-found`. Catches the two codes being treated alike, so that a
+/// host the agent cannot see is cleared by checks that cannot see it.
+#[test]
+fn a_host_not_visible_taint_of_a_start_never_clears() {
+    let mut h = Harness::new("host-not-visible-stays");
+    h.fake.blind_next_create();
+    h.start(job("r1"));
+    assert!(h.life.is_tainted());
+    ack(&mut h);
+    stays_tainted(&mut h, 4);
+}
+
 /// Asserts that the wait between re-checks is the one the lifecycle was given
 /// (`--taint-recheck-ms`). It catches a wait that is the default whatever the flag says.
 #[test]
@@ -758,8 +805,10 @@ fn a_marker_an_operator_moved_is_already_kept() {
 }
 
 /// Asserts which taints [`clearable`] says the agent may clear: the residue of a process and
-/// the unchecked of an input that could not be read, and nothing else, a taint with no check
-/// or an unknown one included. It catches a code added to the checks and cleared by default.
+/// the unchecked of an input that could not be read or of a run whose container group was not
+/// found, and nothing else (`host-not-visible` of an engine runtime included), a taint with no
+/// check or an unknown one included. It catches a code added to the checks and cleared by
+/// default, and `cgroup-not-found` left off the allow-list.
 #[test]
 fn only_a_process_or_an_unread_input_may_clear() {
     let taint = |why: &str, what: Option<&str>| Taint {
@@ -778,6 +827,7 @@ fn only_a_process_or_an_unread_input_may_clear() {
         check::MODULES_UNREADABLE,
         check::WATCH_UNREADABLE,
         check::WATCH_OVER_BOUND,
+        code::CGROUP_NOT_FOUND,
     ] {
         assert!(clearable(&taint(reason::UNCHECKED, Some(what))), "{what}");
     }

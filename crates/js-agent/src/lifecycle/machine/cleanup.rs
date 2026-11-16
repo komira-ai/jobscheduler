@@ -3,7 +3,8 @@
 
 use super::Lifecycle;
 use super::job::{
-    Cause, Stage, blind_taint, cause_detail, check_taint, cleanup_taint, input_failure, outcome,
+    Cause, Stage, cause_detail, cgroup_not_found_taint, check_taint, cleanup_taint, input_failure,
+    outcome,
 };
 use crate::lifecycle::runtime::{RunHandle, Status};
 use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
@@ -81,7 +82,13 @@ impl Lifecycle {
                         let since = *job.blind_since.get_or_insert(now);
                         if now.saturating_sub(since) >= blind_wait_ms {
                             job.blind_told = true;
-                            job.taint(taint, blind_taint(&job.run_id), events);
+                            job.taint(taint, cgroup_not_found_taint(&job.run_id), events);
+                            let message = format!(
+                                "run {}: its container group was not found within the settle wait \
+                                 of {blind_wait_ms} ms",
+                                job.run_id
+                            );
+                            job.note(code::CGROUP_NOT_FOUND, message, events);
                         }
                     }
                 }

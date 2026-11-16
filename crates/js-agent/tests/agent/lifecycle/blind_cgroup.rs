@@ -4,7 +4,7 @@
 //! engines) is not tainted for lacking one. The runtime is the in-memory fake; the end of a
 //! run is a call the test makes, not a wait.
 
-use js_agent::lifecycle::code;
+use js_agent::lifecycle::{Event, code};
 use js_agent::lifecycle::taint::reason;
 use js_agent_wire::Taint;
 
@@ -18,7 +18,7 @@ fn blind(run_id: &str) -> Taint {
     Taint {
         reason: reason::UNCHECKED.to_owned(),
         run_id: Some(run_id.to_owned()),
-        check: Some(code::HOST_NOT_VISIBLE.to_owned()),
+        check: Some(code::CGROUP_NOT_FOUND.to_owned()),
     }
 }
 
@@ -54,6 +54,34 @@ fn a_run_whose_group_was_never_seen_taints_the_host() {
     h.fake.exit("r1", 0);
     h.life.step();
     assert_eq!(h.life.pending_taint(), Some(blind("r1")), "told once");
+}
+
+/// Asserts that the finding of a run whose group was not found names the run and says its
+/// container group was not found within the settle wait, with the wait given, under the code
+/// `cgroup-not-found`. Catches a finding that says only that the host is blind, leaving the
+/// operator without the run to look at.
+#[test]
+fn the_finding_names_the_run_and_the_wait() {
+    let mut h = Harness::new("blind-finding");
+    h.fake.promise_cgroups(true);
+    h.start(job("r1"));
+    h.life.step();
+    h.clock.advance(SETTLE_MS);
+    let events = h.life.step();
+    let found: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Finding(finding) => Some(finding),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{events:?}");
+    assert_eq!(found[0].code, code::CGROUP_NOT_FOUND);
+    assert_eq!(found[0].run_id.as_deref(), Some("r1"));
+    assert_eq!(
+        found[0].message,
+        "run r1: its container group was not found within the settle wait of 1000 ms"
+    );
 }
 
 /// Asserts that a run whose group is known when it ends taints nothing, whether the runtime

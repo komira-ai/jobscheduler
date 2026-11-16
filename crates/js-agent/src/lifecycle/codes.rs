@@ -63,6 +63,11 @@ pub mod code {
     /// the host its jobs run on. The container was removed and the host is tainted as
     /// unchecked.
     pub const HOST_NOT_VISIBLE: &str = "host-not-visible";
+    /// A run the runtime reports as running has no container group (the control group the
+    /// runtime puts every container in) a settle wait after the agent first saw it. The
+    /// host is tainted as unchecked. The post-job checks do not depend on that group, so
+    /// what the run leaves is still found, and a re-check of an idle host clears the taint.
+    pub const CGROUP_NOT_FOUND: &str = "cgroup-not-found";
     /// The taint marker could not be written. The host is tainted in memory all the same.
     pub const TAINT_WRITE_FAILED: &str = "taint-write-failed";
     /// A taint cleared itself: the host passed two re-checks while idle, the server

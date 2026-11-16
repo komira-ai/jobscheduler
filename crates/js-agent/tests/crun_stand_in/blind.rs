@@ -136,7 +136,7 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
         Some(Taint {
             reason: reason::UNCHECKED.to_owned(),
             run_id: Some("r1-hold".to_owned()),
-            check: Some(code::HOST_NOT_VISIBLE.to_owned()),
+            check: Some(code::CGROUP_NOT_FOUND.to_owned()),
         }),
         "start: {started:?}; step: {stepped:?}"
     );
