@@ -61,6 +61,8 @@ pub struct Running {
     tls: Option<tls::Tls>,
     /// Where the tick announces the loss of the store's writer lock.
     lock_watch: LockWatch,
+    /// How long [`Running::hold`] keeps serving (`--drain-hold`).
+    drain_hold: Duration,
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
@@ -326,6 +328,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         scaler,
         tls,
         lock_watch,
+        drain_hold: limits.drain_hold,
     })
 }
 
@@ -849,6 +852,20 @@ impl Running {
     /// agents or without the job service, which have no state store.
     pub async fn fenced(&self) {
         self.shared.fenced().await;
+    }
+
+    /// The first half of a stop on a termination signal: the readiness route
+    /// (`--ready-listen`) answers 503 `draining` at once, and the server keeps serving and
+    /// ticking for `--drain-hold`, so a proxy that polls readiness takes it out of rotation
+    /// while requests still succeed. [`Running::shutdown`] is the second half. Nothing is
+    /// held when the store's writer lock was lost or the store has a newer writer: the
+    /// server has stopped serving and a restart is what is wanted.
+    pub async fn hold(&self) {
+        if self.lock_watch.lost().is_some() || self.shared.is_fenced() {
+            return;
+        }
+        self.gate.drain();
+        tokio::time::sleep(self.drain_hold).await;
     }
 
     /// Stops the server: no new connections, the requests in flight finish (those still

@@ -68,6 +68,7 @@ async fn serve_until_signal(mut config: Config, out: &mut dyn Write) -> Result<(
             }
         }
     }
+    running.hold().await;
     running.shutdown().await.map_err(Failure::Runtime)
 }
 
