@@ -326,3 +326,41 @@ pub fn a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read<B:
         "{name}: a refused placement wrote"
     );
 }
+
+/// A job requeued after a failed prepare is placed again by a claimed placement over its freed
+/// allocation: the new allocation has an id of its own, is booked on the new host, and replaces
+/// the freed one. Catches a claimed placement that cannot place a requeued job, and one that
+/// reuses the freed allocation's id.
+pub fn a_requeued_job_is_placed_again_over_its_freed_allocation<B: Backend>(backend: &B) {
+    let name = "a_requeued_job_is_placed_again_over_its_freed_allocation";
+    let rig = rig(backend);
+    let plain = Placement::default();
+    let id = rig.queue_spec("rq", super::whole_host_spec());
+    let (_, first) = rig
+        .jobs
+        .place_claimed(&id, &host("host-a"), Booked::WholeHost, &plain, None)
+        .expect("placed");
+    rig.tick();
+    rig.jobs
+        .requeue_failed_prepare(&id)
+        .expect("a failed prepare requeues the job");
+    rig.tick();
+    let (placed, second) = rig
+        .jobs
+        .place_claimed(&id, &host("host-b"), Booked::WholeHost, &plain, None)
+        .expect("a requeued job is placed again");
+    assert_ne!(
+        second.allocation_id, first.allocation_id,
+        "{name}: the new allocation reused the old id"
+    );
+    assert_eq!(
+        (placed.state, second.host.clone()),
+        (JobState::Placed, host("host-b")),
+        "{name}: the second placement is not on the new host"
+    );
+    assert_eq!(
+        rig.jobs.get_allocation(&id).expect("reads"),
+        Some(second),
+        "{name}: the freed allocation was not replaced"
+    );
+}
