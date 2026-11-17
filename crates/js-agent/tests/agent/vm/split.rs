@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, Whereabouts, label,
+    FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, Wake, Whereabouts, label,
 };
 use js_agent::vm::{VmRuntime, WithVms};
 use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
@@ -126,6 +126,17 @@ fn every_host_question_is_the_other_runtimes() {
     assert_eq!(with.supports_gpus(), alone.supports_gpus());
     assert_eq!(with.check_egress(), alone.check_egress());
     assert_eq!(with.network_ceiling(), alone.network_ceiling());
+    // The wake is the other runtime's to ring, and a start's steps are its runtime's.
+    let rings = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counted = Arc::clone(&rings);
+    with.set_wake(Wake::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    fake.ring_wake();
+    assert_eq!(rings.load(std::sync::atomic::Ordering::SeqCst), 1);
+    fake.steps_of("left", &[("begin", 7)]);
+    let steps = with.start_steps(&RunHandle(leaked.clone()));
+    assert_eq!(steps, [("begin", 7)]);
     fake.set_host_ports(&[PortRange::new(5432, 5433).unwrap()]);
     assert_eq!(with.host_ports(), [PortRange::new(5432, 5433).unwrap()]);
     fake.lose_host_ports("left", "taken");

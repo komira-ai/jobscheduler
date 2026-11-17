@@ -93,4 +93,9 @@ pub trait Providers {
     /// whose answer is handed over is forgotten: asking it again sends it again. A provider
     /// this agent was not given answers [`ProviderAnswer::Unavailable`].
     fn ask(&mut self, provider: &str, call: &ProviderCall) -> ProviderAnswer;
+
+    /// Gives the providers the [`Wake`](super::Wake) to ring when a call's answer comes, so
+    /// the start that waits on it is asked again at once. The default keeps none: answers are
+    /// then asked for at the next step.
+    fn set_wake(&mut self, _wake: super::Wake) {}
 }

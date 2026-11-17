@@ -236,3 +236,44 @@ fn a_pull_that_panics_is_a_failed_pull() {
         other => panic!("{other:?}"),
     }
 }
+
+/// How long a test waits for a ring that must come: a guard against a hang, far above
+/// any real wait.
+const GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A prefetcher given a wake rings it each time a pull ends, after the end is there to be
+/// asked for: a pull that succeeded and one that failed each ring once. Catches a start that
+/// waits on an image until the lifecycle's next step although the pull has ended.
+#[test]
+fn the_end_of_each_pull_rings_the_wake() {
+    let (rung, rings) = std::sync::mpsc::channel::<()>();
+    let rung = std::sync::Mutex::new(rung);
+    let prefetcher = Prefetcher::new(1, |image| -> PullFuture {
+        let fails = image == B;
+        Box::pin(async move {
+            match fails {
+                true => Err("no such image".to_owned()),
+                false => Ok(()),
+            }
+        })
+    })
+    .expect("a runtime");
+    prefetcher.set_wake(js_agent::lifecycle::Wake::new(move || {
+        let _ = rung.lock().map(|rung| rung.send(()));
+    }));
+    let Prepared::Pending(ticket) = prefetcher.prepare(A, None) else {
+        panic!("not pending");
+    };
+    rings
+        .recv_timeout(GUARD)
+        .expect("rung when the pull of A ended");
+    assert_eq!(prefetcher.prepare(A, Some(ticket)), Prepared::Ready);
+    let Prepared::Pending(ticket) = prefetcher.prepare(B, None) else {
+        panic!("not pending");
+    };
+    rings
+        .recv_timeout(GUARD)
+        .expect("rung when the pull of B failed");
+    assert_eq!(prefetcher.prepare(B, Some(ticket)), failed("no such image"));
+    assert!(rings.try_recv().is_err(), "one ring for each pull");
+}

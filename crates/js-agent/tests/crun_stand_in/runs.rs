@@ -25,6 +25,36 @@ fn read(path: &std::path::Path) -> String {
 /// the same, and removing it leaves no directory, no cgroup and no listing, repeated without
 /// error. Catches a limit that is not the booking, files the job cannot write or `crun`
 /// cannot use, and a removal that leaves a lease behind.
+/// Proves the steps of a start the runtime gives for its timeline: each step of the making
+/// and of the start, in the order they are done, at the runtime's clock (5000 here), given
+/// once; a container it does not hold has none. Catches a step left out or out of order, and
+/// steps kept (and logged) again.
+#[test]
+fn a_start_gives_its_steps_once_in_the_order_they_were_done() {
+    let node = Node::new("run-steps");
+    let mut runtime = node.open();
+    let id = runtime
+        .create_and_start(&node.spec("r1-exit"))
+        .expect("started");
+    let steps = [
+        "begin",
+        "recorded",
+        "image",
+        "dirs",
+        "cgroup",
+        "bundle",
+        "supervised",
+        "running",
+    ];
+    let at_5000: Vec<(&str, u64)> = steps.iter().map(|step| (*step, 5_000)).collect();
+    assert_eq!(runtime.start_steps(&id), at_5000);
+    assert!(runtime.start_steps(&id).is_empty(), "given once");
+    let other = RunHandle("js-node-1-r9".to_owned());
+    assert!(runtime.start_steps(&other).is_empty());
+    runtime.wait_ended(&id);
+    runtime.remove(&id).expect("removed");
+}
+
 #[test]
 fn a_run_is_made_started_read_and_removed() {
     let node = Node::new("run-life");

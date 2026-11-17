@@ -24,6 +24,7 @@ use js_agent_wire::{
 };
 use js_types::{JobNetwork, PortMap};
 
+use super::Wake;
 use crate::logs::Sink;
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
@@ -440,6 +441,21 @@ pub trait Runtime {
     /// nothing else ends a fetch that hangs, and every run that names the image waits on it.
     fn prepare(&mut self, _image: &str, _waited: Option<Ticket>) -> Prepared {
         Prepared::Ready
+    }
+
+    /// Gives the runtime the [`Wake`] to ring when work it does off the lifecycle's worker (a
+    /// pull, a lookup or an assembly of a start's file system) is done, so the start that
+    /// waits on it is asked again at once. The default keeps none: a runtime that does
+    /// nothing off the worker, whose answers come at the next step.
+    fn set_wake(&mut self, _wake: Wake) {}
+
+    /// The runtime's own steps of the start of the container `id` (what it made, in the
+    /// order it made it), each with the wall clock time it was done at in milliseconds since
+    /// the Unix epoch, for the start's [`StartTimeline`](super::StartTimeline). Asked once,
+    /// after [`Runtime::create_and_start`] returned it; a second call has none. The default
+    /// keeps none.
+    fn start_steps(&mut self, _id: &RunHandle) -> Vec<(&'static str, u64)> {
+        Vec::new()
     }
 
     /// Creates and starts the container of `spec`. A call that fails leaves no

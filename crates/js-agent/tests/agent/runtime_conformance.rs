@@ -179,7 +179,8 @@ impl js_agent::lifecycle::Runtime for Bare {
 
 /// Proves the defaults of the trait are what the documentation says: a runtime that says
 /// nothing of GPUs supports them, has nothing to check of its network, has no control group
-/// for a container, keeps no log, is always ready for an image and lists the ids it lists.
+/// for a container, keeps no log, is always ready for an image, lists the ids it lists,
+/// keeps no wake (it rings nothing) and gives no step of a start.
 /// Catches a default that changes under the runtimes that rely on it.
 #[test]
 fn a_runtime_that_overrides_nothing_gets_the_documented_defaults() {
@@ -192,4 +193,8 @@ fn a_runtime_that_overrides_nothing_gets_the_documented_defaults() {
     assert_eq!(bare.log_tail(&id), Ok(None));
     assert_eq!(bare.prepare("image", None), Prepared::Ready);
     assert_eq!(bare.list_ids(), Ok(Vec::new()));
+    bare.set_wake(js_agent::lifecycle::Wake::new(|| {
+        panic!("a bare runtime rang")
+    }));
+    assert!(bare.start_steps(&id).is_empty());
 }

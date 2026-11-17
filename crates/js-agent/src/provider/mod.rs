@@ -36,7 +36,7 @@ use std::time::Duration;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tonic::transport::{Channel, Endpoint};
 
-use crate::lifecycle::{ProviderAnswer, ProviderCall, Providers};
+use crate::lifecycle::{ProviderAnswer, ProviderCall, Providers, Wake};
 use flight::{Flights, Key};
 use socket::UnixConnector;
 
@@ -89,6 +89,8 @@ pub struct ProviderClient {
     /// One lazily connected channel for each provider, by name.
     clients: BTreeMap<String, Channel>,
     flights: Arc<Flights>,
+    /// Rung when a call's answer is in ([`Providers::set_wake`]).
+    wake: Wake,
     /// Kept to be shut down on drop; calls are spawned through `handle`.
     runtime: Option<Runtime>,
     handle: Handle,
@@ -136,6 +138,7 @@ impl ProviderClient {
             bounds,
             clients,
             flights: Arc::new(Flights::default()),
+            wake: Wake::default(),
             handle: runtime.handle().clone(),
             runtime: Some(runtime),
         })
@@ -185,12 +188,17 @@ impl Providers for ProviderClient {
             call.clone(),
             self.bounds.of(call),
         );
-        let flights = Arc::clone(&self.flights);
+        let (flights, wake) = (Arc::clone(&self.flights), self.wake.clone());
         self.handle.spawn(async move {
             let answer = task.await;
             flights.finish(key, answer);
+            wake.wake();
         });
         ProviderAnswer::Pending
+    }
+
+    fn set_wake(&mut self, wake: Wake) {
+        self.wake = wake;
     }
 }
 

@@ -72,7 +72,9 @@ the ceiling `allow-list` the text has no `openifs` and no `open` rule, and is wh
 `open` existed. `ip js_crun_egress_nat` has an empty `prerouting` chain (a NAT hook at
 `dstnat`) for the forwards, and masquerades the pool toward anything outside it. Every rule
 counts and has a comment, so the tests can read that a refusal was the rule's doing.
-`Egress::check` (called before every create) checks that IPv4 forwarding is on, reads both
+`Egress::check` (called before every create of a wired job: `allow-list` or `open`; a `none`
+job's namespace has loopback alone and nothing of the firewall is its, so it is not checked)
+checks that IPv4 forwarding is on, reads both
 tables back, sets apart the forwards' rules (comment `fwd-...`), and compares the rest, rule for
 rule, with what start loaded (counters, handles and the members of both sets are not compared),
 and the forwards' rules with the forwards of the runs wired now (below).
@@ -163,7 +165,8 @@ addresses only for an `allow-list` job (an `open` job reaches them through its o
 - `egress::{Config, Egress, Attachment}`, `OciConfig::{resolv_conf, route_wait}`,
   `Oci::container_pid` and `js-init --wait-route` are the parts. The `crun` runtime
   (`crates/js-agent/src/crun/net.rs`) calls them in this order: `Egress::check` before every
-  create (the lifecycle's `check_egress`; a failure is `egress-unchecked` and creates nothing),
+  create of a wired job (the lifecycle's `check_egress`, never asked for a `none` job; a failure
+  is `egress-unchecked` and creates nothing),
   the create, `Oci::start`, `Oci::container_pid` (asked again until `crun` names the pid, until
   `crun run` ends, or for the init's route wait at most), `Egress::attach` with the job's level
   (its interface goes in `jobifs` for `allow-list`, `openifs` for `open`), and

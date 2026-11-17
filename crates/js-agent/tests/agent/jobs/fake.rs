@@ -21,7 +21,9 @@ use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 use js_agent::lifecycle::Exit;
 use js_agent::lifecycle::{Clock, ProviderAnswer, ProviderCall, Providers, Runtime};
 #[cfg(target_os = "linux")]
-use js_agent::lifecycle::{Found, RunHandle, RunSpec, RuntimeError, Status, label};
+use js_agent::lifecycle::{
+    Found, Prepared, RunHandle, RunSpec, RuntimeError, Status, Ticket, Wake, label,
+};
 #[cfg(target_os = "macos")]
 use js_agent::native::NativeRuntime;
 use js_agent::quota::{FakeQuota, ScratchQuota};
@@ -95,6 +97,12 @@ struct State {
     /// The directory every container is in, as `<dir>/docker-<run>.scope`.
     #[cfg(target_os = "linux")]
     cgroup_base: Option<PathBuf>,
+    /// The images being pulled: `prepare` answers `Pending` for them.
+    #[cfg(target_os = "linux")]
+    pulling: BTreeSet<String>,
+    /// What the runtime was given to ring when a pull ends (`Runtime::set_wake`).
+    #[cfg(target_os = "linux")]
+    wake: Wake,
 }
 
 struct Inner {
@@ -259,6 +267,24 @@ impl World {
         }
     }
 
+    /// `image` is being pulled: a start that names it waits until [`World::end_pull`].
+    #[cfg(target_os = "linux")]
+    pub fn begin_pull(&self, image: &str) {
+        self.lock().pulling.insert(image.to_owned());
+    }
+
+    /// The pull of `image` is over: the image is here, and the runtime rings its wake, as a
+    /// runtime whose pull ends off the worker does.
+    #[cfg(target_os = "linux")]
+    pub fn end_pull(&self, image: &str) {
+        let wake = {
+            let mut state = self.lock();
+            state.pulling.remove(image);
+            state.wake.clone()
+        };
+        wake.wake();
+    }
+
     /// The runtime of the agent `host_id` on this world: it labels what it makes with the
     /// host id and lists only what carries the run label and its own host id.
     #[cfg(target_os = "linux")]
@@ -312,6 +338,17 @@ pub struct WorldRuntime(World, String);
 
 #[cfg(target_os = "linux")]
 impl Runtime for WorldRuntime {
+    fn set_wake(&mut self, wake: Wake) {
+        self.0.lock().wake = wake;
+    }
+
+    fn prepare(&mut self, image: &str, _waited: Option<Ticket>) -> Prepared {
+        match self.0.lock().pulling.contains(image) {
+            true => Prepared::Pending(Ticket(1)),
+            false => Prepared::Ready,
+        }
+    }
+
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         let world = &self.0;
         let mut state = world.lock();

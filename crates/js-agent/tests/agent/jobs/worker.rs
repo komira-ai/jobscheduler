@@ -344,3 +344,25 @@ fn a_worker_that_panics_is_seen_to_have_ended() {
         "nobody takes a reply"
     );
 }
+
+/// Asserts that a start waiting for its image goes on as soon as the pull ends, though the
+/// worker has no step interval to fall back on: the pull's end rings the worker, which steps
+/// and creates the container. It catches a start held to the step interval (up to a second
+/// on a node) for each wait of its preparation.
+#[test]
+fn a_start_waiting_for_its_image_goes_on_when_the_pull_ends() {
+    let dir = Scratch::new("jobs-worker-wake");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    let image = job("r1").image;
+    machine.world.begin_pull(&image);
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    assert_eq!(worker.snapshot().held[0].state, HeldState::Starting);
+    assert!(machine.world.created().is_empty());
+
+    machine.world.end_pull(&image);
+    let running = |s: &js_agent::Snapshot| s.held.iter().any(|h| h.state == HeldState::Running);
+    assert!(worker.handle().wait_until(&running, HANG_GUARD));
+    assert_eq!(machine.world.created(), ["r1"]);
+}
