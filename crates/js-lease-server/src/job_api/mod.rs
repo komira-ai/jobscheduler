@@ -22,7 +22,7 @@
 //! | `logs.rs` | `GetLogs` with a stream, which `read.rs` hands it after reading the job's row |
 //! | `submit.rs` | `SubmitJob` (with `validate.rs`, the checks of a submitted job) |
 //! | `cancel.rs` | `CancelJob` |
-//! | `fleet.rs` | `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` |
+//! | `fleet.rs` | `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` |
 //!
 //! The [`JobService`] implementation below hands each call to its group's function and
 //! writes the call's log line ([`logged`]). Serving a call replaces the body of that function
@@ -45,8 +45,8 @@
 //! (`call`), the client (`client`) and its role (`role`), the job or host the request names
 //! (`target`; `job` holds the job alone), the outcome (`outcome`: `ok`, `denied`, `not-found`,
 //! `refused` or `failed`, [`roles::outcome`]) and the gRPC code (`code`). It is the audit line
-//! of the calls that change state, `SubmitJob`, `CancelJob`, `CordonHost` and `UncordonHost`,
-//! denied ones among them. No line holds a token or its digest.
+//! of the calls that change state, `SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost` and
+//! `ClearHostTaint`, denied ones among them. No line holds a token or its digest.
 //!
 //! # One context per group
 //!
@@ -74,12 +74,12 @@ use std::sync::Arc;
 use axum::Router;
 use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
-    CancelJobRequest, CancelJobResponse, CordonHostRequest, CordonHostResponse, GetJobRequest,
-    GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse,
-    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListJobsRequest,
-    ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse,
+    CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
+    CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
+    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
+    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
+    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use tonic::{Code, Request, Response, Status};
 use tower::Layer;
@@ -367,6 +367,25 @@ impl JobService for JobApi {
         };
         logged(
             "UncordonHost",
+            caller.as_ref(),
+            Target::Host(&host),
+            &answer,
+        );
+        answer
+    }
+
+    async fn clear_host_taint(
+        &self,
+        request: Request<ClearHostTaintRequest>,
+    ) -> Result<Response<ClearHostTaintResponse>, Status> {
+        let caller = caller_of(&request);
+        let host = request.get_ref().host_id.clone();
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::clear_host_taint(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged(
+            "ClearHostTaint",
             caller.as_ref(),
             Target::Host(&host),
             &answer,

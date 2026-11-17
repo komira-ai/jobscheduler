@@ -663,11 +663,11 @@ fn kind_of(expr: &Expr) -> Kind {
 }
 
 /// Asserts the required flags and the retry key the job service's own definition gives:
-/// exactly the subject ids of the six calls on one job or host, and `--id` (not required,
+/// exactly the subject ids of the seven calls on one job or host, and `--id` (not required,
 /// in place of `--spec.job-id`) as the retry key of `job submit`. It catches a change of
 /// the subject rule and a retry-key entry that no longer reaches its field.
 #[test]
-fn the_job_service_requires_six_flags_and_keys_submit_on_its_id() {
+fn the_job_service_requires_seven_flags_and_keys_submit_on_its_id() {
     let table = surface_of(
         &generate(js_proto::FILE_DESCRIPTOR_SET)
             .expect("renders")
@@ -693,6 +693,7 @@ fn the_job_service_requires_six_flags_and_keys_submit_on_its_id() {
             "job logs --job-id",
             "host cordon --host-id",
             "host uncordon --host-id",
+            "host host-taint --host-id",
         ]
     );
     let keyed: Vec<(String, Vec<&str>, Vec<&str>)> = table

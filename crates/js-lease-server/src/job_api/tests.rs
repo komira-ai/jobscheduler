@@ -18,12 +18,12 @@ use js_jobs::JobStore;
 use js_proto::FILE_DESCRIPTOR_SET;
 use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
-    CancelJobRequest, CancelJobResponse, CordonHostRequest, CordonHostResponse, GetJobRequest,
-    GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse,
-    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListJobsRequest,
-    ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse,
+    CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
+    CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
+    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
+    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
+    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use js_state::Store;
 use js_state::fake::{Fake, Flaw};
@@ -93,10 +93,11 @@ const SERVED: [&str; 5] = ["GetJob", "ListJobs", "CancelJob", "GetResult", "GetL
 
 /// The methods the fleet group (`fleet.rs`) serves once its context is given the server's
 /// handles ([`fleet::Ctx::served`]), as the server's service is.
-const FLEET: [&str; 6] = [
+const FLEET: [&str; 7] = [
     "ListHosts",
     "CordonHost",
     "UncordonHost",
+    "ClearHostTaint",
     "ListPools",
     "ListProviders",
     "GetUsage",
@@ -328,6 +329,7 @@ recorded! {
     list_hosts: ListHostsRequest => ListHostsResponse;
     cordon_host: CordonHostRequest => CordonHostResponse;
     uncordon_host: UncordonHostRequest => UncordonHostResponse;
+    clear_host_taint: ClearHostTaintRequest => ClearHostTaintResponse;
     list_pools: ListPoolsRequest => ListPoolsResponse;
     list_providers: ListProvidersRequest => ListProvidersResponse;
     get_usage: GetUsageRequest => GetUsageResponse;
@@ -419,8 +421,8 @@ async fn the_same_token_opens_both_transports() {
     }
 }
 
-/// The hosts of a server that holds none: an empty listing, and every cordon and uncordon
-/// refused as of a host the registry does not hold.
+/// The hosts of a server that holds none: an empty listing, and every cordon, uncordon and clear
+/// of a taint refused as of a host the registry does not hold.
 struct NoHosts;
 
 #[tonic::async_trait]
@@ -434,6 +436,10 @@ impl fleet::Hosts for NoHosts {
     }
 
     async fn uncordon(&self, _: &HostId) -> Result<bool, fleet::Refused> {
+        Err(fleet::Refused::UnknownHost)
+    }
+
+    async fn clear_taint(&self, _: &HostId) -> Result<Option<String>, fleet::Refused> {
         Err(fleet::Refused::UnknownHost)
     }
 }

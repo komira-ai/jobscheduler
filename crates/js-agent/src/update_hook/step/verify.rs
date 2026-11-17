@@ -19,8 +19,10 @@
 //!   `native`).
 //!
 //! Before it starts: a record with `start_issued` and the release link on the staged release
-//! (`state_invalid` otherwise, nothing read of the lease server). A taint or an `owed-*`
-//! record halts (76), at every look. At each look the unit is read with `show`: `failed`,
+//! (`state_invalid` otherwise, nothing read of the lease server). A taint the restarted
+//! agent will not re-check (see `refuse_host` in `prepare`), or an `owed-*` record, halts (76),
+//! at every look. At each look the unit is read
+//! with `show`: `failed`,
 //! `inactive`, `deactivating` or a restart pending (`auto-restart`) ends the step at once as a
 //! `start_failed` of the release: the binary ran and died.
 //!
@@ -30,7 +32,8 @@
 //! class environment, and says nothing of the release.
 //!
 //! A rerun with `verify_ok` set succeeds without a look of the unit or the lease server (a
-//! taint or an `owed-*` record still halts it); without it, it observes again.
+//! taint the restarted agent will not re-check, or an `owed-*` record, still halts it); without it, it observes
+//! again.
 
 use std::time::Duration;
 
@@ -55,7 +58,7 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
             "there is no record: prepare has not run",
         ));
     };
-    // A taint halts even a rerun after the mark: nothing clears it.
+    // A taint the agent cannot clear halts even a rerun after the mark.
     refuse_host(env)?;
     if record.verify_ok {
         return Ok(success());

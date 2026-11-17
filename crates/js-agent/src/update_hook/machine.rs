@@ -420,26 +420,33 @@ fn refused(step: Step, params: &Params, stat: &StatFn, why: &RootError) -> Done 
     }
 }
 
-impl StateView for Root {
-    fn taint(&self) -> Option<Taint> {
+impl Root {
+    /// The state root when one is there: the one place an absent root is told apart, so
+    /// that each view below delegates without an arm of its own.
+    fn open(&self) -> Option<&StateRoot> {
         match self {
-            Root::Open(root) => StateView::taint(root),
+            Root::Open(root) => Some(root),
             Root::Absent => None,
         }
     }
+}
+
+impl StateView for Root {
+    fn taint(&self) -> Option<Taint> {
+        self.open().and_then(StateView::taint)
+    }
+
+    fn restored_rechecks(&self, taint: &Taint) -> bool {
+        self.open()
+            .is_some_and(|root| StateView::restored_rechecks(root, taint))
+    }
 
     fn owed(&self) -> Result<Vec<String>, PortError> {
-        match self {
-            Root::Open(root) => StateView::owed(root),
-            Root::Absent => Ok(Vec::new()),
-        }
+        self.open().map_or_else(|| Ok(Vec::new()), StateView::owed)
     }
 
     fn has_credential(&self) -> bool {
-        match self {
-            Root::Open(root) => StateView::has_credential(root),
-            Root::Absent => false,
-        }
+        self.open().is_some_and(StateView::has_credential)
     }
 }
 
@@ -535,7 +542,7 @@ mod tests {
 
     use js_client::ClientError;
 
-    use super::{CommandRunner, launch_units, named};
+    use super::{CommandRunner, Root, StateView, Taint, launch_units, named};
     use crate::update_hook::{LAUNCHCTL, Units};
 
     /// A `launchctl` that shows every service running, and notes each command it is given.
@@ -612,5 +619,21 @@ mod tests {
             why: "is wrong".to_owned(),
         };
         assert_eq!(named(&error, "token_file"), "--other: is wrong");
+    }
+
+    /// Asserts that a state root that is not there (a first install) holds no taint, re-checks
+    /// none, and owes no check. It catches an absent root read as tainted, or as one whose
+    /// taint a restart re-checks, which would let the hook go on over a taint it never read.
+    #[test]
+    fn an_absent_state_root_holds_no_taint_rechecks_none_and_owes_nothing() {
+        let root = Root::Absent;
+        let taint = Taint {
+            reason: "residue".to_owned(),
+            run_id: None,
+            check: Some("daemonised-child".to_owned()),
+        };
+        assert_eq!(root.taint(), None);
+        assert!(!root.restored_rechecks(&taint));
+        assert_eq!(root.owed().unwrap(), Vec::<String>::new());
     }
 }

@@ -11,6 +11,9 @@ use js_agent::integrity::{
 use js_agent::lifecycle::CHECK_DETAIL_MAX;
 
 use super::{JOB_UID, JOB_USERS, after, beside, mount, process, said, started};
+
+/// The control group the fake host gives the agent, below which a job's leftover can be.
+const AGENT_GROUP: &str = "0::/system.slice/agent.service";
 use crate::support::Scratch;
 
 /// Asserts that a process the baseline did not have, whose parent is `init`, is found after
@@ -22,14 +25,14 @@ use crate::support::Scratch;
 fn daemonised_child() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
-    host.start_process(process(300, 1, 2000, 900, "0::/"));
+    host.start_process(process(300, 1, 2000, 900, AGENT_GROUP));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(
         said(&found),
         (
             true,
             code::DAEMONISED_CHILD,
-            "daemonised-child: pid 300 (stray, state S, cgroup 0::/) was left behind by job r1 (parent init)".to_owned()
+            "daemonised-child: pid 300 (stray, state S, cgroup 0::/system.slice/agent.service) was left behind by job r1 (parent init)".to_owned()
         )
     );
 
@@ -96,7 +99,13 @@ fn process_as_job_user_after_end() {
 
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
-    host.start_process(process(500, 1, JOB_UID, 960, "0::/x"));
+    host.start_process(process(
+        500,
+        1,
+        JOB_UID,
+        960,
+        "0::/system.slice/agent.service/x",
+    ));
     let found = after(&mut checks, "r3").unwrap_err();
     assert_eq!(found.code(), code::PROCESS_AS_JOB_USER);
     assert!(

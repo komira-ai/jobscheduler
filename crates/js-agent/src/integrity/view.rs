@@ -231,6 +231,10 @@ impl FakeHost {
                     "/proc/self/cgroup".to_owned(),
                     "0::/system.slice/agent.service\n".to_owned(),
                 ),
+                (
+                    "/proc/self/stat".to_owned(),
+                    "100 (js-agent) S 1 100 100 0".to_owned(),
+                ),
             ]);
         }
         host

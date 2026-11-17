@@ -67,3 +67,34 @@ fn a_heartbeat_taint_does_not_replace_a_set_taint() {
     assert_eq!(view(&fx, "a").taint, Some(first.clone()));
     assert_eq!(fx.registry.bindings()[&host("a")].taint(), Some(&first));
 }
+
+/// Asserts that `clear_taint` ends a held taint whoever set it: it returns the taint it held,
+/// the host's view and the bindings a caller persists carry none, a second call returns
+/// `None`, and a taint set afterwards stands as the first of a clean host. It catches a clear
+/// that leaves the taint in the view or the bindings, a repeat that reports a clear it did
+/// not make, and a clear that leaves the host unable to be tainted again.
+#[test]
+fn a_cleared_taint_is_returned_and_gone_from_the_view_and_the_bindings() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    let first = taint("host-job", Some("job-1"));
+    assert!(fx.registry.taint_host(&host("a"), first.clone()));
+
+    assert_eq!(fx.registry.clear_taint(&host("a")), Some(first));
+    assert_eq!(view(&fx, "a").taint, None);
+    assert_eq!(fx.registry.bindings()[&host("a")].taint(), None);
+    assert_eq!(fx.registry.clear_taint(&host("a")), None);
+
+    let second = taint("residue", None);
+    assert!(fx.registry.taint_host(&host("a"), second.clone()));
+    assert_eq!(view(&fx, "a").taint, Some(second));
+}
+
+/// Asserts that `clear_taint` of a host the registry does not hold returns `None` and makes
+/// no host up. It catches a clear that inserts a record.
+#[test]
+fn clearing_an_unknown_host_changes_nothing() {
+    let fx = fixture(2);
+    assert_eq!(fx.registry.clear_taint(&host("a")), None);
+    assert!(fx.registry.hosts().is_empty());
+}

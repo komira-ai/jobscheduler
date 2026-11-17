@@ -88,6 +88,20 @@ impl JobClient {
         answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
+    /// Clears the taint a host has stored, so that placement offers the host jobs again.
+    /// Operator only. It ends the taint in the server's registry and in the host's stored
+    /// binding, which is written by compare-and-set as a heartbeat's clear is. A host that has
+    /// no taint is left as it is and nothing is written. An unknown host is NOT_FOUND, as for
+    /// a cordon. The call does not reach the agent: an agent whose marker still holds the
+    /// taint refuses the next start as host-tainted, and the server takes that refusal as the
+    /// host's taint again, so the operator moves the agent's marker and its owed-* records
+    /// aside first, or lets the agent clear it itself.
+    pub async fn clear_host_taint(&mut self, request: v1::ClearHostTaintRequest) -> Result<v1::ClearHostTaintResponse, JobError> {
+        let (attempt, request) = self.begin(request);
+        let answer = tokio::time::timeout(self.limit, self.service.clear_host_taint(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
+    }
+
     /// Lists the pools. Changes nothing.
     pub async fn list_pools(&mut self, request: v1::ListPoolsRequest) -> Result<v1::ListPoolsResponse, JobError> {
         let (attempt, request) = self.begin(request);
