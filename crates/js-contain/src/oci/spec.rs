@@ -17,7 +17,8 @@ use oci_spec::runtime::{
 
 use super::devices;
 use super::hardening::{MASKED_PATHS, READONLY_PATHS, SeccompError, seccomp};
-use crate::container::{ACTION_ID, ContainerSpec, HostMount, Isolation};
+use crate::cgroup::{cpu_max, hard_memory_max};
+use crate::container::{ACTION_ID, ContainerLimits, ContainerSpec, HostMount, Isolation};
 use crate::subids::DaemonIds;
 
 /// The OCI version the file declares (what `crun spec` writes).
@@ -303,6 +304,29 @@ pub(crate) fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
 }
 
 /// The namespaces a container gets, each new (the network namespace has loopback only).
+/// The `unified` cgroup files of the container's own cgroup (`<lease cgroup>/ctr`):
+/// `memory.oom.group` 1, so an out-of-memory kill takes the whole container, and, when
+/// `limits` name a booking, the lease's `cpu.max` ([`cpu_max`]) and `memory.max`
+/// ([`hard_memory_max`]).
+///
+/// Those two bound nothing the lease's own files do not already bound (a child cannot use
+/// more than its parent allows, and the job, which owns its cgroup's files, may raise them
+/// to no effect). They are there because the job's cgroup namespace makes this cgroup its
+/// `/sys/fs/cgroup`: a tool that sizes itself from `cpu.max` or `memory.max` there (Rust's
+/// `available_parallelism`, Go's `GOMAXPROCS` from Go 1.25, the JVM) reads the booking
+/// rather than `max`. A tool that counts the CPUs it may run on (`sched_getaffinity`:
+/// busybox `nproc`, Zig's `getCpuCount`) still sees the node's.
+pub(crate) fn unified(limits: ContainerLimits) -> HashMap<String, String> {
+    let mut files = HashMap::from([("memory.oom.group".to_owned(), "1".to_owned())]);
+    if let Some(cpu) = limits.cpu_millis.and_then(cpu_max) {
+        files.insert("cpu.max".to_owned(), cpu);
+    }
+    if let Some(memory) = limits.memory_bytes.and_then(hard_memory_max) {
+        files.insert("memory.max".to_owned(), memory.to_string());
+    }
+    files
+}
+
 pub(crate) fn namespaces() -> Vec<LinuxNamespace> {
     use LinuxNamespaceType::{Cgroup, Ipc, Mount, Network, Pid, User, Uts};
     [Pid, Network, Ipc, Uts, User, Cgroup, Mount]
@@ -333,6 +357,7 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | only the Command's environment           | `process.env` is the Command's variables only      |
 /// | the Command's argv and directory         | `process.args`, `process.cwd`                      |
 /// | the lease cgroup, `memory.oom.group=1`   | `cgroupsPath` a child of the lease cgroup, `unified` `memory.oom.group`       |
+/// | the booking seen from inside             | `unified` `cpu.max`, `memory.max` the lease's (only when the limits name them) |
 /// | a pids limit                             | `resources.pids.limit`                             |
 /// | `nofile`, `nproc` ulimits, no core dump  | `process.rlimits` (`RLIMIT_CORE` 0)                |
 /// | no capability                            | the five `process.capabilities` sets, empty; the seccomp filter resolved for none |
@@ -345,8 +370,9 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | the input root, writes in `upper`        | an `overlay` mount at `exec_root`, or the host mount there; none for a mounted root |
 /// | a root of layers the caller mounted      | `root.path` that root, not read-only               |
 ///
-/// No memory or CPU limit is set here: the lease cgroup carries them
-/// ([`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard)).
+/// The lease cgroup carries the memory and CPU limits that bound the job
+/// ([`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard)); the container's own cgroup gets
+/// the same `cpu.max` and `memory.max` only so the job can read them ([`unified`]).
 ///
 /// A host container ([`Isolation::Host`]) is built by
 /// [`host_config`](super::host_spec::host_config), whose table says what differs.
@@ -415,8 +441,9 @@ pub(crate) fn action_config(
             .limit(i64::try_from(spec.limits.pids).unwrap_or(i64::MAX))
             .build(),
     );
-    let unified = HashMap::from([("memory.oom.group".to_owned(), "1".to_owned())]);
-    let mut resources = LinuxResourcesBuilder::default().pids(pids).unified(unified);
+    let mut resources = LinuxResourcesBuilder::default()
+        .pids(pids)
+        .unified(unified(spec.limits));
     // A container given no device gets no device section, as before devices were given.
     let given = !spec.devices.is_empty();
     if given {
@@ -785,7 +812,9 @@ mod tests {
     }
 
     /// Catches the container's cgroup not being below the lease's (its limits would not
-    /// apply) and the memory-or-CPU limits being set on the container instead of the lease.
+    /// apply), and a CPU or memory limit on the container's cgroup when its limits name no
+    /// booking, or one written through `resources.memory`/`resources.cpu`, which `crun`
+    /// converts from cgroup v1 (a swap limit of its own beside the memory limit).
     #[test]
     fn the_cgroup_is_a_child_of_the_lease_with_no_memory_or_cpu_limit() {
         let config = config_of(&spec());
@@ -797,5 +826,70 @@ mod tests {
         assert_eq!(resources["pids"], json!({"limit": 101}));
         assert!(resources.get("memory").is_none());
         assert!(resources.get("cpu").is_none());
+        assert_eq!(resources["unified"], json!({"memory.oom.group": "1"}));
+    }
+
+    /// `spec()` with the limits naming a booking of `cpu_millis` and `memory_bytes`.
+    fn booked(cpu_millis: Option<u64>, memory_bytes: Option<u64>) -> ContainerSpec {
+        let mut booked = spec();
+        booked.limits.cpu_millis = cpu_millis;
+        booked.limits.memory_bytes = memory_bytes;
+        booked
+    }
+
+    /// The `cpu.max` and `memory.max` a lease cgroup made under the Hard policy for
+    /// `cpu_millis` and `memory_bytes` holds: what the agent's lease gets.
+    fn lease_files(cpu_millis: u64, memory_bytes: u64) -> (String, String) {
+        let root = crate::unit_dir("oci-spec-lease-files");
+        std::fs::create_dir(root.join("actions")).expect("mkdir");
+        let lease = crate::cgroup::LeaseCgroup::at(&root, "/actions", "lease-1-2");
+        let booking =
+            js_types::Resources::new(cpu_millis, memory_bytes, 0, None).expect("a booking");
+        lease
+            .create_with(&booking, None, crate::cgroup::LeasePolicy::Hard)
+            .expect("created");
+        let read = |file: &str| std::fs::read_to_string(lease.dir().join(file)).expect(file);
+        (read("cpu.max"), read("memory.max"))
+    }
+
+    /// Catches a job whose `/sys/fs/cgroup/cpu.max` reads `max` while its lease is held to
+    /// the booking (`make -j$(nproc)` and the like then size themselves to the node), and a
+    /// container cgroup whose files differ from the lease's: 1.5 booked cores and 1 GiB are
+    /// `150000 100000` and `1073741824` in both, byte for byte, beside `memory.oom.group`.
+    #[test]
+    fn the_containers_cgroup_repeats_the_leases_cpu_max_and_memory_max() {
+        let config = config_of(&booked(Some(1500), Some(1 << 30)));
+        let resources = &config["linux"]["resources"];
+        assert_eq!(
+            resources["unified"],
+            json!({
+                "memory.oom.group": "1",
+                "cpu.max": "150000 100000",
+                "memory.max": "1073741824",
+            })
+        );
+        let (cpu, memory) = lease_files(1500, 1 << 30);
+        assert_eq!(resources["unified"]["cpu.max"], cpu.as_str());
+        assert_eq!(resources["unified"]["memory.max"], memory.as_str());
+        assert!(resources.get("memory").is_none());
+        assert!(resources.get("cpu").is_none());
+    }
+
+    /// Catches a booking of 0 written as a limit (a `memory.max` of 0 kills the job at
+    /// once, a `cpu.max` quota of 0 is refused by the kernel), a booking below the kernel's
+    /// least quota written as it is, and one limit written without the other.
+    #[test]
+    fn a_zero_or_tiny_booking_follows_the_leases_rules() {
+        let unified =
+            |cpu, memory| config_of(&booked(cpu, memory))["linux"]["resources"]["unified"].clone();
+        assert_eq!(unified(Some(0), Some(0)), json!({"memory.oom.group": "1"}));
+        assert_eq!(
+            unified(Some(1), None),
+            json!({"memory.oom.group": "1", "cpu.max": "1000 100000"})
+        );
+        assert_eq!(
+            unified(None, Some(4096)),
+            json!({"memory.oom.group": "1", "memory.max": "4096"})
+        );
     }
 }

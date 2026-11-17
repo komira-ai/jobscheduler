@@ -1,6 +1,8 @@
 //! What the job sees of its own container, read by programs run inside it.
 
-use crate::cell::Cell;
+use js_contain::container::ContainerLimits;
+
+use crate::cell::{Cell, Shape};
 
 /// One line of `/proc/self/mountinfo`, as the job reads it.
 struct MountInfo {
@@ -254,6 +256,43 @@ async fn the_containers_cgroup_kills_as_a_group_on_out_of_memory() {
         .await;
     let lines: Vec<&str> = run.out().lines().collect();
     assert_eq!(lines, ["0::/", "1"], "{}", run.said);
+}
+
+/// Catches a job that reads `max` in its own `cpu.max` and `memory.max` while its lease holds
+/// it to the booking (tools that size themselves from those files then size themselves to
+/// the node): with the limits naming the lease's booking, 1 CPU and 512 MiB, the job reads
+/// `100000 100000` and `536870912` there, and its `pids.max` is the limit given.
+#[tokio::test]
+#[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
+async fn the_job_reads_its_booking_in_its_own_cgroup() {
+    let cell = Cell::new("booking");
+    let shape = Shape::default();
+    let lease = cell.lease(
+        "booking",
+        &[
+            "/bin/sh",
+            "-c",
+            "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max",
+        ],
+        Shape {
+            limits: ContainerLimits {
+                pids: 32_768,
+                cpu_millis: Some(1000),
+                memory_bytes: Some(shape.memory),
+                ..ContainerLimits::DEFAULT
+            },
+            ..shape
+        },
+    );
+    let running = cell.start(&lease).await;
+    let run = cell.finish(&lease, running).await;
+    let lines: Vec<&str> = run.out().lines().collect();
+    assert_eq!(
+        lines,
+        ["100000 100000", "536870912", "32768"],
+        "{}",
+        run.said
+    );
 }
 
 /// Catches an exec-root overlay mounted without the pinned options, and one that can run
