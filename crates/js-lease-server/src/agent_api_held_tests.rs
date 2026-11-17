@@ -46,8 +46,10 @@ fn quiet_held() -> HeartbeatReply {
 }
 
 /// Asserts that a job the tick's pass places while the host's heartbeat is held is started by
-/// that heartbeat's reply, which says `beat_now`, with no second heartbeat. It catches a
-/// placement that does not wake the held reply, so the start waits for the next heartbeat.
+/// that heartbeat's reply, with no second heartbeat; the reply carries a command, so it does
+/// not say `beat_now` (the start is sent again until the agent lists it). It catches a
+/// placement that does not wake the held reply, so the start waits for the next heartbeat, and
+/// a woken start that asks the agent to beat again before it can list the job.
 #[tokio::test]
 async fn a_job_the_tick_places_rides_on_the_held_reply() {
     let (rig, agent) = held_rig("held_tick", LONG);
@@ -60,7 +62,7 @@ async fn a_job_the_tick_places_rides_on_the_held_reply() {
     let reply = reply.unwrap();
     let started: Vec<String> = starts(&reply).into_iter().map(|s| s.job_id).collect();
     assert_eq!(started, ["job-1"]);
-    assert!(reply.beat_now);
+    assert!(!reply.beat_now);
     assert_eq!(rig.states(&job), (JobState::Placed, AllocationStep::Booked));
     assert_eq!(rig.allocation(&job).host.as_str(), "host-a");
 }
@@ -115,6 +117,29 @@ async fn a_reply_with_only_an_acknowledgement_is_not_held_and_says_beat_now() {
     assert_eq!(reply.commands, []);
     assert_eq!(reply.job_acks.len(), 1);
     assert!(reply.beat_now);
+    assert_eq!(waits(&rig), 0);
+}
+
+/// Asserts that a reply that acknowledges a taint the beat reported is answered at once, not
+/// held, and says `beat_now` (it has no command). It catches a hold that delays the
+/// acknowledgement the agent keeps reporting the taint until.
+#[tokio::test]
+async fn a_reply_with_a_taint_acknowledgement_is_not_held_and_says_beat_now() {
+    let (rig, agent) = held_rig("held_taint", LONG);
+    let taint = js_agent_wire::Taint {
+        reason: "cleanup-failed".to_owned(),
+        run_id: None,
+        check: None,
+    };
+    let reply = rig.beat_reporting(&agent, Some(taint)).await.unwrap();
+    assert_eq!(
+        reply,
+        HeartbeatReply {
+            taint_ack: true,
+            beat_now: true,
+            ..HeartbeatReply::default()
+        }
+    );
     assert_eq!(waits(&rig), 0);
 }
 

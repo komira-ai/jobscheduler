@@ -37,8 +37,10 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    store read and the hold is kept, so none is lost. A wake that brings nothing to send holds on.
 
 Submit to start on an idle host is then one pass, one store read and one reply, with no tick and no
-interval in it. The agent beats again as soon as a held reply reaches it, so a heartbeat of the host is
-waiting at the server nearly all the time.
+interval in it. The agent beats again as soon as a reply without a command reaches it, so while the host is
+idle a heartbeat of it is waiting at the server nearly all the time. After a start (a reply with a command)
+it waits the interval, so a job submitted to the same host within one interval of the last start waits for
+that beat.
 
 ## Compatibility
 

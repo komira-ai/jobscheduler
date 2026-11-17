@@ -360,9 +360,10 @@ pub struct HeartbeatReply {
     )]
     pub log_grant: Option<LogGrant>,
     /// Whether the agent is to send its next heartbeat at once instead of after the interval
-    /// ([`crate::HELD_BEAT_CAPABILITY`]): the server says it when it held this reply open
-    /// until it had something to send or its hold ran out, and when the reply carries no
-    /// command, so that a heartbeat is nearly always waiting at the server. Sent
+    /// ([`crate::HELD_BEAT_CAPABILITY`]): the server says it for a reply that carries no
+    /// command, whether it held the reply open until its hold ran out or did not hold it, so
+    /// that a heartbeat is nearly always waiting at the server. The agent acts on the rest of
+    /// the reply either way. Sent
     /// only to an agent that reported the capability; absent means false, and an agent from
     /// before the field ignores it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

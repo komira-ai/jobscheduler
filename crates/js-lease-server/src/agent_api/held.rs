@@ -75,8 +75,9 @@ pub(super) struct Hold {
 
 /// Holds `reply` while it carries nothing (beside the whole-host allocation it names): until a
 /// wake builds a reply with something in it, which replaces its commands and allocation, or
-/// until the bound. A held reply says `beat_now`, and so does one that is not held but carries
-/// no command (only acknowledgements, a taint acknowledgement or a log credential).
+/// until the bound. A reply says `beat_now` when it carries no command: one held to the bound,
+/// one woken with a new whole-host allocation alone, and one not held that carries only
+/// acknowledgements, a taint acknowledgement or a log credential.
 pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut HeartbeatReply) {
     let quiet = HeartbeatReply {
         exclusive: reply.exclusive.clone(),
@@ -112,6 +113,9 @@ pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut Heartbeat
             Ok((commands, exclusive)) => {
                 let exclusive = hold.registry_exclusive.clone().or(exclusive);
                 if !commands.is_empty() || exclusive != reply.exclusive {
+                    // A start is sent again until the agent lists it: the agent waits the
+                    // interval after it, as after any reply with a command.
+                    reply.beat_now = commands.is_empty();
                     reply.commands = commands;
                     reply.exclusive = exclusive;
                     return;

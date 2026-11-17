@@ -65,8 +65,8 @@ fn stuck(rig: &Rig, id: &str, priority: i32) {
 }
 
 /// Asserts the acceptance of the design: with an idle host whose heartbeat is held, a submit
-/// into an empty queue is answered `placed` on that host, and the held reply carries its start
-/// (with `beat_now`), with no tick and no second heartbeat. It catches a submit that leaves the
+/// into an empty queue is answered `placed` on that host, and the held reply carries its start,
+/// with no tick and no second heartbeat. It catches a submit that leaves the
 /// job to the tick, and a placement in the call that does not wake the held heartbeat.
 #[tokio::test]
 async fn a_submit_into_an_empty_queue_starts_on_the_held_heartbeat() {
@@ -87,13 +87,13 @@ async fn a_submit_into_an_empty_queue_starts_on_the_held_heartbeat() {
     let reply = reply.unwrap();
     let started: Vec<String> = starts(&reply).into_iter().map(|s| s.job_id).collect();
     assert_eq!(started, ["job-s"]);
-    assert!(reply.beat_now);
 }
 
-/// Asserts that a job submitted behind a queued job of its own priority is answered `queued`
-/// and left queued (no pass ran in the call, though the host has room), while one of a higher
-/// priority than every queued job is placed in its call. It catches a submit that jumps the
-/// queue past a job it should wait behind, and one that counts lower priorities as ahead.
+/// Asserts that a job submitted behind a queued job of its own priority, or of a higher one, is
+/// answered `queued` and left queued (no pass ran in the call, though the host has room), while
+/// one of a higher priority than every queued job is placed in its call. It catches a submit
+/// that jumps the queue past a job it should wait behind, and one that counts lower priorities
+/// as ahead.
 #[tokio::test]
 async fn only_a_job_with_nothing_of_its_priority_ahead_is_placed_in_the_call() {
     let rig = placing_rig("submit_ahead");
@@ -114,6 +114,17 @@ async fn only_a_job_with_nothing_of_its_priority_ahead_is_placed_in_the_call() {
         (first.state(), first.host_id.as_str()),
         (v1::JobState::Placed, "host-a")
     );
+    stuck(&rig, "job-5", 5);
+    let lower = submit(
+        &api,
+        v1::JobSpec {
+            priority: 2,
+            ..wire("job-l")
+        },
+    )
+    .await;
+    assert_eq!(lower.state(), v1::JobState::Queued);
+    assert_eq!(rig.job(&id("job-l")).state, JobState::Queued);
 }
 
 /// Asserts that a retry of a job already queued runs no pass and is answered as the job stands

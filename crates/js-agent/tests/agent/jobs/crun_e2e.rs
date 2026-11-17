@@ -37,37 +37,14 @@ use serde_json::json;
 
 use super::crun_machine::CrunMachine;
 use crate::crun_host::Fixture;
-use crate::server::{Agent, POOL_RUNS_QUICK_TOML, POOL_RUNS_TOML, Redirect, Server};
+use crate::server::{
+    Agent, POOL_QUOTA_TOML, POOL_RUNS_QUICK_TOML, POOL_RUNS_TOML, QUICK_INTERVAL, Redirect, Server,
+};
 use crate::support::{Host, code, linux_host};
 
 /// Held by a test while it opens runtimes or runs an agent on the node: the backend makes
 /// its helper directories in the node's store, which two openings at once would fight over.
 pub(super) static NODE_IN_USE: Mutex<()> = Mutex::new(());
-
-/// The heartbeat interval of every pool a [`Rig`] runs on ([`POOL_RUNS_QUICK_TOML`],
-/// [`POOL_QUOTA_TOML`]): the server holds the reply of a quiet heartbeat for up to the
-/// interval, and the default 5 s would hold each quiet beat of these tests that long.
-const INTERVAL: Duration = Duration::from_millis(250);
-
-/// The pool of an agent that bounds its runs' disk: it names the quota capability, so a host
-/// joins it only by reporting one, and books 4 GiB for each host.
-const POOL_QUOTA_TOML: &str = r#"
-heartbeat_interval = "250ms"
-grace = "1m"
-name = "macs"
-class = "mac"
-max_machines = 4
-
-[shape]
-cpu_millis = 4000
-memory_bytes = 4294967296
-disk_bytes = 4294967296
-
-[capabilities]
-os = "linux"
-arch = "x86_64"
-scratch-quota = "project"
-"#;
 
 /// The first host uid and gid of the subordinate ranges of the node's job user.
 const SUB: u32 = 100_000;
@@ -469,7 +446,7 @@ fn end_leftovers(scratch: &Path) {
 
 impl Rig {
     /// Starts the server and the agent, and waits until the agent has said hello; the pool
-    /// beats every [`INTERVAL`].
+    /// beats every [`QUICK_INTERVAL`].
     pub(super) fn new(name: &str, extra: &[&str]) -> Self {
         Self::on_pool(name, extra, POOL_RUNS_QUICK_TOML)
     }
@@ -503,7 +480,7 @@ impl Rig {
                 agent.finish().err
             ),
         };
-        assert_eq!(agent.next_wait(), INTERVAL, "the hello");
+        assert_eq!(agent.next_wait(), QUICK_INTERVAL, "the hello");
         Self {
             server,
             agent,
@@ -539,7 +516,7 @@ impl Rig {
     fn beat(&self) {
         self.agent.elapse();
         let wait = self.agent.next_wait();
-        assert!(wait == INTERVAL || wait.is_zero(), "{wait:?}");
+        assert!(wait == QUICK_INTERVAL || wait.is_zero(), "{wait:?}");
         assert!(self.worker.settle());
     }
 

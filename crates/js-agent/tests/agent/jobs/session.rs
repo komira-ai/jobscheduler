@@ -329,6 +329,27 @@ fn a_held_reply_alone_is_not_delivered_and_beats_again_at_once() {
     assert!(worker.handle().settle());
 }
 
+/// Asserts that a reply that says `beat_now` beside a start still hands the start to the
+/// worker, which creates its container, and asks for the next heartbeat at once. It catches a
+/// `beat_now` that makes the session drop the rest of the reply.
+#[test]
+fn a_start_beside_beat_now_is_delivered_and_the_next_beat_goes_at_once() {
+    let dir = Scratch::new("jobs-session-start-beat-now");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    let mut body = start_answer(&["r1"]);
+    body["beat_now"] = Value::Bool(true);
+    let (mut script, _) = Script::new(vec![welcome(1), reply(200, body)]);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    session.tick();
+    match session.tick() {
+        Step::Wait { after, note } => assert_eq!((after, note), (Duration::ZERO, None)),
+        other => panic!("{other:?}"),
+    }
+    assert!(worker.handle().settle());
+    assert_eq!(machine.world.created(), ["r1"]);
+}
+
 /// Asserts that a session whose worker has ended ends with `Failed`, and that a worker that
 /// is alive does not. It catches an agent that heartbeats on with jobs nobody supervises.
 #[test]

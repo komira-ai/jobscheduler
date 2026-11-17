@@ -138,11 +138,12 @@ impl Rig {
         (state, reason)
     }
 
-    /// Beats until the server lists `job` as running: the beat that brings its start (answered
-    /// with the wait `start`), the one that lists it created and the one after, both held.
+    /// Beats until the server lists `job` as running: the beat that brings its start (a
+    /// command, so the interval follows), the one that lists it created and the one after,
+    /// both held.
     #[track_caller]
-    fn until_running(&self, start: Duration, job: &str) {
-        self.beat(start);
+    fn until_running(&self, job: &str) {
+        self.beat(INTERVAL);
         self.beat(HELD);
         self.beat(HELD);
         assert_eq!(self.view(job).0, RUNNING);
@@ -203,7 +204,7 @@ fn a_job_goes_through_the_agent_and_its_result_comes_back() {
     );
     assert_eq!(rig.machine.world.alive(), 0);
 
-    rig.until_running(HELD, &second);
+    rig.until_running(&second);
     let ran = rig.drain_now();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
@@ -216,7 +217,7 @@ fn a_job_goes_through_the_agent_and_its_result_comes_back() {
 fn a_cancel_is_delivered_and_the_job_is_stopped() {
     let rig = rig("jobs_e2e_stop", &[]);
     let job = rig.queued(2000);
-    rig.until_running(INTERVAL, &job);
+    rig.until_running(&job);
 
     let asked = rig.server.cancel(&job);
     assert_eq!(asked.status, 200, "{}", asked.body);
@@ -258,7 +259,7 @@ fn the_agent_sends_its_load_to_a_real_server() {
         "inactive_file 0\nactive_file 0\n",
     );
     rig.machine.clock.advance(5_000);
-    rig.until_running(INTERVAL, &run);
+    rig.until_running(&run);
     rig.beat(HELD);
 
     let loads: Vec<Value> = posted
@@ -285,7 +286,7 @@ fn the_agent_sends_its_load_to_a_real_server() {
 fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
     let rig = rig("jobs_e2e_restart", &[]);
     let job = rig.queued(2000);
-    rig.until_running(INTERVAL, &job);
+    rig.until_running(&job);
 
     let Rig {
         server,
@@ -334,7 +335,7 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
 fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
     let rig = rig("jobs_e2e_forgot", &[]);
     let job = rig.queued(2000);
-    rig.until_running(INTERVAL, &job);
+    rig.until_running(&job);
 
     let Rig {
         server,
@@ -384,7 +385,7 @@ fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
 fn a_taint_is_reported_acknowledged_and_new_jobs_are_not_placed() {
     let rig = rig("jobs_e2e_taint", &[]);
     let run = rig.queued(2000);
-    rig.until_running(INTERVAL, &run);
+    rig.until_running(&run);
     assert!(rig.server.host("h1").get("taint").is_none());
 
     rig.machine.world.fail("remove", u32::MAX);
@@ -464,7 +465,7 @@ fn the_heartbeats_go_on_while_the_runtime_is_slow() {
 fn sigterm_lets_the_job_finish_and_reports_it_before_the_agent_leaves() {
     let rig = rig("jobs_e2e_term", &["--drain-wait", "3600"]);
     let run = rig.queued(2000);
-    rig.until_running(INTERVAL, &run);
+    rig.until_running(&run);
 
     rig.agent.signal();
     assert_eq!(
@@ -517,7 +518,7 @@ fn sigterm_lets_the_job_finish_and_reports_it_before_the_agent_leaves() {
 fn sigterm_with_no_wait_stops_the_job_and_reports_it_killed() {
     let rig = rig("jobs_e2e_term_now", &["--drain-wait", "0"]);
     let run = rig.queued(2000);
-    rig.until_running(INTERVAL, &run);
+    rig.until_running(&run);
 
     rig.agent.signal();
     assert_eq!(rig.agent.next_wait(), INTERVAL);
@@ -553,7 +554,7 @@ fn a_cordoned_host_is_placed_no_job_until_it_is_uncordoned() {
 
     let lifted = rig.server.job_post("/v1/hosts/h1:uncordon", &json!({}));
     assert_eq!(lifted.status, 200, "{}", lifted.body);
-    rig.until_running(HELD, &job);
+    rig.until_running(&job);
     assert_eq!(rig.machine.world.created(), [job.as_str()]);
     let ran = rig.drain_now();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
