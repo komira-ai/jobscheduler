@@ -285,6 +285,43 @@ fn the_pool_answers_once_waits_to_the_deadline_and_survives_a_panic() {
     assert_eq!(seven, 7);
 }
 
+/// How long a test waits for a ring that must come: a guard against a hang, far above
+/// any real wait.
+const GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Catches a pool whose answer is had only at the lifecycle's next step: a pool given a wake
+/// rings it once for each task that answered, after the answer is there to be had, and a
+/// task that panics (no answer) rings nothing.
+#[test]
+fn a_task_that_answered_rings_the_pools_wake() {
+    let (rung, rings) = channel::<()>();
+    let rung = std::sync::Mutex::new(rung);
+    let mut pool = Pool::new(1).expect("a pool");
+    pool.set_wake(crate::lifecycle::Wake::new(move || {
+        let _ = rung.lock().map(|rung| rung.send(()));
+    }));
+    let answered = pool.run(u64::MAX, task(None, false));
+    rings
+        .recv_timeout(GUARD)
+        .expect("rung once the task answered");
+    assert_eq!(answered.poll(0), Poll::Answered(7));
+    let panicked = pool.run(u64::MAX, task(None, true));
+    let after = pool.run(u64::MAX, task(None, false));
+    // One thread: the second task ran after the first panicked, and only it rang.
+    rings
+        .recv_timeout(GUARD)
+        .expect("rung once the next task answered");
+    assert_eq!(after.poll(0), Poll::Answered(7));
+    assert_eq!(
+        panicked.poll(0),
+        Poll::Unanswered("ended without an answer")
+    );
+    assert!(
+        rings.try_recv().is_err(),
+        "a task with no answer rings nothing"
+    );
+}
+
 /// A task of the pool's test, of one type whatever it does: it waits for `gate` when it
 /// has one (one more, for a word), then panics when `panics` says so, and answers 7.
 fn task(gate: Option<Receiver<()>>, panics: bool) -> impl FnOnce() -> u32 + Send + 'static {

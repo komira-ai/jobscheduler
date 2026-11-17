@@ -422,6 +422,8 @@ impl CrunRuntime {
             logs: RunLogs::adopted(None),
             // What its file system cloned, from its list of mounts, for the check after it ends.
             fs: self.run_fs_of(&entry.name),
+            // An adopted run was started by an earlier process: no step of its start is here.
+            marks: Vec::new(),
         }
     }
 

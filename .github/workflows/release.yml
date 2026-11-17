@@ -425,9 +425,12 @@ jobs:
   # The beta stage: the platforms other than Linux x86_64, on the hosted macOS runners, after
   # `artifacts` and in parallel with `publish` and everything after it (none of those needs
   # these jobs). A push to main only; a pull request runs none of them. Each job calls a
-  # workflow that holds `contents: read` alone. None of them is given a secret: the package's
-  # `sign` job, which this call asks for (`sign: true`, on a push to main), takes the secrets
-  # of its own environment `pkg-signing`, and skips itself with a notice when they are not set.
+  # workflow that holds `contents: read` alone. Only `beta-macos-pkg` is given secrets
+  # (`secrets: inherit`), since a called workflow sees none of the caller's repository or
+  # organization secrets otherwise: in js-agent-macos-pkg.yml only the `sign` job, which this
+  # call asks for (`sign: true`, on a push to main), names them, in the environment
+  # `pkg-signing`, and it skips itself with a notice when they are not set.
+  # crates/xtask/tests/release_workflow/secrets.rs checks each call against this rule.
   beta-macos:
     needs: [plan, artifacts]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
@@ -444,6 +447,7 @@ jobs:
     with:
       version: ${{ needs.plan.outputs.version }}
       sign: true
+    secrets: inherit
 
   beta-macos-probe:
     needs: [plan, artifacts]

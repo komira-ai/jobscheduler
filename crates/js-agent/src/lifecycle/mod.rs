@@ -271,6 +271,7 @@ mod scratch;
 mod settle;
 mod silence;
 pub mod taint;
+mod wake;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -288,7 +289,7 @@ use crate::platform::Backend;
 use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
-pub use event::{Event, Finding, Skip};
+pub use event::{Event, Finding, Skip, StartTimeline};
 pub use finding::{CHECK_DETAIL_MAX, CheckFinding};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
@@ -318,6 +319,7 @@ pub use silence::{
 pub use taint::{
     DEFAULT_TAINT_RECHECK, MARKER_FILE, MAX_TAINT_RECHECK_MS, StateRoot, clearable, recheck_every,
 };
+pub use wake::Wake;
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only
 /// subtracts two readings, so the origin does not matter and a change of the wall clock
