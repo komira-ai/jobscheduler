@@ -75,7 +75,7 @@ pub(crate) fn report_layered(hello: &mut Hello, layered: bool) {
 /// never places a job that names the provider there.
 pub(crate) fn report_mount_providers(hello: &mut Hello, providers: &MountProviders, layered: bool) {
     if layered {
-        for (name, _) in providers.sockets() {
+        for (name, _, _) in providers.sockets() {
             hello
                 .capabilities
                 .insert(mount_provider_key(name), FLAG_SET.to_owned());
@@ -369,7 +369,8 @@ mod tests {
         let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "report-providers");
         let socket = |name: &str| (name.to_owned(), dir.path().join(format!("{name}.sock")));
         let given = [socket("tierstore"), socket("scratch-cache")];
-        let providers = MountProviders::from_flags(&given, None).expect("sound flags");
+        let providers = MountProviders::from_flags(&given, &[], None, std::path::Path::new("/nonexistent"))
+            .expect("sound flags");
         let mut layered = reported(&Config::none());
         report_mount_providers(&mut layered, &providers, true);
         let named = |hello: &Hello| -> Vec<String> {

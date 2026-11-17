@@ -8,8 +8,9 @@
 //!   over once. It runs the calls on a tokio runtime of its own (two threads named
 //!   `js-provide`), as the image pulls of `lifecycle::prefetch` do.
 //! - Each channel connects lazily, on its first call, and again after a connection is lost.
-//!   Before every connect it checks the socket file: a socket others cannot write, in a
-//!   directory of root (or of the agent's user) that its group and others cannot write
+//!   Before every connect it checks the socket file against the user the provider runs as
+//!   (`--mount-provider-user`): a socket of that user or root that no other user can write
+//!   (its group may), in a directory of root or that user that no one else can write
 //!   (`socket`).
 //! - Each call has a bound ([`CallBounds`]); a provider that does not answer within it is
 //!   answered `Unavailable`, and the lifecycle asks again when it chooses.
@@ -94,15 +95,14 @@ pub struct ProviderClient {
 }
 
 impl ProviderClient {
-    /// A client of the providers `sockets` names (name and socket path), for the agent whose
-    /// host id is `host_id`, which runs as the user `euid`: a socket must lie in a closed
-    /// directory of root or of `euid`. The bounds are [`CallBounds::default`]. No socket is opened until a call is
-    /// asked of its provider.
+    /// A client of the providers `sockets` names (name, socket path and the uid the provider
+    /// runs as, whose socket it is), for the agent whose host id is `host_id`. The bounds are
+    /// [`CallBounds::default`]. No socket is opened until a call is asked of its provider.
     ///
     /// # Errors
     /// The runtime could not be made (threads or descriptors are exhausted).
-    pub fn new(host_id: &str, euid: u32, sockets: &[(String, PathBuf)]) -> std::io::Result<Self> {
-        Self::with_bounds(host_id, euid, sockets, CallBounds::default())
+    pub fn new(host_id: &str, sockets: &[(String, PathBuf, u32)]) -> std::io::Result<Self> {
+        Self::with_bounds(host_id, sockets, CallBounds::default())
     }
 
     /// [`ProviderClient::new`] with the bounds `bounds`.
@@ -111,8 +111,7 @@ impl ProviderClient {
     /// As [`ProviderClient::new`].
     pub fn with_bounds(
         host_id: &str,
-        euid: u32,
-        sockets: &[(String, PathBuf)],
+        sockets: &[(String, PathBuf, u32)],
         bounds: CallBounds,
     ) -> std::io::Result<Self> {
         let runtime = Builder::new_multi_thread()
@@ -125,9 +124,9 @@ impl ProviderClient {
             let _entered = runtime.enter();
             sockets
                 .iter()
-                .map(|(name, socket)| {
+                .map(|(name, socket, user)| {
                     let channel = Endpoint::from_static("http://provider.invalid")
-                        .connect_with_connector_lazy(UnixConnector::new(socket.clone(), euid));
+                        .connect_with_connector_lazy(UnixConnector::new(socket.clone(), *user));
                     (name.clone(), channel)
                 })
                 .collect()

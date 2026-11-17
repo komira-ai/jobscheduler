@@ -651,10 +651,10 @@ impl Machine for FakeMachine {
     fn providers(
         &self,
         host_id: &str,
-        sockets: &[(String, PathBuf)],
+        sockets: &[(String, PathBuf, u32)],
     ) -> std::io::Result<Box<dyn Providers>> {
         let calls = self.providers.clone().map_err(std::io::Error::other)?;
-        let names = sockets.iter().map(|(name, _)| name.clone()).collect();
+        let names = sockets.iter().map(|(name, _, _)| name.clone()).collect();
         Ok(Box::new(AskedProviders {
             host_id: host_id.to_owned(),
             names,

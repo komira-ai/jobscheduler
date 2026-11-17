@@ -448,7 +448,7 @@ pub(crate) fn named_path(text: &str) -> Result<(String, PathBuf), String> {
 }
 
 /// `key=value` split at the first `=`.
-fn key_value(text: &str) -> Result<(String, String), String> {
+pub(crate) fn key_value(text: &str) -> Result<(String, String), String> {
     text.split_once('=')
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .ok_or_else(|| format!("{text:?} is not key=value"))

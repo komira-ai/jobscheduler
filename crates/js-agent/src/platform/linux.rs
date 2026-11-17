@@ -313,13 +313,20 @@ pub struct Flags {
     /// serving the protocol `jobscheduler.provider.v1.MountProvider` on the Unix socket
     /// `SOCKET`. The name is 1 to 32 bytes of `a-z`, `0-9` and `-`, the first a letter, and
     /// is given once; the directory of the socket must exist (the agent does not wait for the
-    /// provider to start). The socket must be owned by the user running the agent or by root
-    /// and writable by no one else: the agent looks before each connect. The hello reports
+    /// provider to start). The socket must be as `--mount-provider-user` says: the agent
+    /// looks before each connect. The hello reports
     /// `mount-provider.NAME` where it reports `layered-rootfs`. The directory a provider
     /// mounts trees in is listed as a `--mount-root-ro` (a `--mount-root` for a provider whose
     /// trees a job may write). Repeatable. Needs the crun runtime.
     #[arg(long = "mount-provider", value_name = "NAME=SOCKET", value_parser = crate::cli::named_path)]
     pub mount_providers: Vec<(String, PathBuf)>,
+    /// The user a `--mount-provider` runs as, as `NAME=USER` (a user name or a uid; root when
+    /// not given); repeatable, once for each provider. Before each connect the agent checks
+    /// that the provider's socket belongs to that user or root and that no other user can
+    /// write it (its group may: the agent reaches it through the socket's group), and that its
+    /// directory belongs to root or that user and that no one else can write it.
+    #[arg(long = "mount-provider-user", value_name = "NAME=USER", value_parser = crate::cli::key_value)]
+    pub mount_provider_users: Vec<(String, String)>,
     /// How many seconds a start may wait on its mount providers, from its admission (every
     /// call to prepare and mount a source is inside it); one that has waited this long
     /// fails `input-unavailable`. From 1 to 900; by default 120. Needs `--mount-provider`.
@@ -343,7 +350,7 @@ impl Flags {
     /// the container engine refuses them all (`--allow-host-jobs` and `--egress` above none
     /// are refused where the jobs are made, [`HOST_JOBS_NEED_CRUN`]).
     #[must_use]
-    pub fn crun_flags(&self) -> [(&'static str, bool); 10] {
+    pub fn crun_flags(&self) -> [(&'static str, bool); 11] {
         let [device, mount, env] = self.gpu_flags();
         [
             ("--crun-bin", self.crun_bin.is_some()),
@@ -358,6 +365,10 @@ impl Flags {
                 !self.image_allow_loopback.is_empty(),
             ),
             ("--mount-provider", !self.mount_providers.is_empty()),
+            (
+                "--mount-provider-user",
+                !self.mount_provider_users.is_empty(),
+            ),
             ("--mount-provider-wait", self.mount_provider_wait.is_some()),
         ]
     }
@@ -704,7 +715,12 @@ pub(crate) fn jobs(
         settle: crate::lifecycle::settle(os.settle_ms)?,
         taint_recheck: taint::recheck_every(os.taint_recheck_ms)?,
         allow_host_jobs: os.allow_host_jobs,
-        providers: MountProviders::from_flags(&os.mount_providers, os.mount_provider_wait)?,
+        providers: MountProviders::from_flags(
+            &os.mount_providers,
+            &os.mount_provider_users,
+            os.mount_provider_wait,
+            Path::new(crate::cli_runtime::PASSWD_FILE),
+        )?,
     })
 }
 

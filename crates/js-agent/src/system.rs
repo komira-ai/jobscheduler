@@ -99,7 +99,7 @@ pub trait Machine: Send + Sync {
     }
 
     /// The client of the node-local mount providers `sockets` (`--mount-provider`: each
-    /// provider's name and the socket it serves on), for the agent that registered as
+    /// provider's name, the socket it serves on and the uid it runs as), for the agent that registered as
     /// `host_id`, which names itself to them. Called on the worker thread, once, when the
     /// agent was given providers. By default the agent's own client of the providers'
     /// protocol ([`crate::provider::ProviderClient`]), which connects to a socket only when
@@ -111,10 +111,9 @@ pub trait Machine: Send + Sync {
     fn providers(
         &self,
         host_id: &str,
-        sockets: &[(String, PathBuf)],
+        sockets: &[(String, PathBuf, u32)],
     ) -> std::io::Result<Box<dyn Providers>> {
-        let euid = rustix::process::geteuid().as_raw();
-        let client = crate::provider::ProviderClient::new(host_id, euid, sockets)?;
+        let client = crate::provider::ProviderClient::new(host_id, sockets)?;
         Ok(Box::new(client))
     }
 }

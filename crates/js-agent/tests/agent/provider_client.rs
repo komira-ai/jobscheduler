@@ -72,9 +72,9 @@ fn euid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
-/// The sockets of one provider named [`NAME`].
-fn sockets(path: PathBuf) -> Vec<(String, PathBuf)> {
-    vec![(NAME.to_owned(), path)]
+/// The socket of one provider named [`NAME`] that runs as this test's user.
+fn sockets(path: PathBuf) -> Vec<(String, PathBuf, u32)> {
+    vec![(NAME.to_owned(), path, euid())]
 }
 
 /// Starts a fake provider in a [`Scratch`] directory named `name`, with its socket owner-only
@@ -95,8 +95,7 @@ fn rig(name: &str) -> Rig {
 fn rig_with(name: &str, bounds: CallBounds) -> Rig {
     let (scratch, fake) = start(name);
     let client =
-        ProviderClient::with_bounds(HOST, euid(), &sockets(fake.socket().to_path_buf()), bounds)
-            .unwrap();
+        ProviderClient::with_bounds(HOST, &sockets(fake.socket().to_path_buf()), bounds).unwrap();
     Rig {
         _scratch: scratch,
         fake,
@@ -368,10 +367,9 @@ fn a_provider_the_agent_was_not_given_is_unavailable_and_nothing_is_sent() {
     let socket = fake.socket().to_path_buf();
     let mut client = ProviderClient::new(
         HOST,
-        euid(),
         &[
-            ("zeta".to_owned(), socket.clone()),
-            ("alpha".to_owned(), socket),
+            ("zeta".to_owned(), socket.clone(), euid()),
+            ("alpha".to_owned(), socket, euid()),
         ],
     )
     .unwrap();
@@ -394,7 +392,7 @@ fn a_provider_the_agent_was_not_given_is_unavailable_and_nothing_is_sent() {
 fn a_missing_socket_is_unavailable_and_the_provider_is_reached_once_it_is_there() {
     let scratch = Scratch::new("pc-late");
     let socket = scratch.path("mp.sock");
-    let mut client = ProviderClient::new(HOST, euid(), &sockets(socket.clone())).unwrap();
+    let mut client = ProviderClient::new(HOST, &sockets(socket.clone())).unwrap();
     let call = sweep(&[]);
     assert_unavailable(&settle(&mut client, NAME, &call), "mp.sock");
     let fake = FakeProvider::start(&scratch.path("")).unwrap();
@@ -409,7 +407,7 @@ fn a_missing_socket_is_unavailable_and_the_provider_is_reached_once_it_is_there(
 fn a_path_that_is_not_a_socket_is_unavailable() {
     let scratch = Scratch::new("pc-file");
     let path = scratch.write("mp.sock", "", 0o600);
-    let mut client = ProviderClient::new(HOST, euid(), &sockets(path)).unwrap();
+    let mut client = ProviderClient::new(HOST, &sockets(path)).unwrap();
     assert_unavailable(&settle(&mut client, NAME, &sweep(&[])), ": not a socket");
 }
 
@@ -441,19 +439,20 @@ fn a_socket_others_can_write_is_unavailable_until_it_is_not() {
     );
 }
 
-/// Asserts that a socket in a directory that belongs neither to root nor to the agent's user
-/// is `Unavailable` naming the directory's owner, whoever owns the socket: the agent is told it
-/// runs as another user than the one that owns the test's directory. It catches a socket in a
-/// directory another user could have put it in trusted with the refs of jobs.
+/// Asserts that a socket that belongs neither to root nor to the user the provider was named
+/// to run as (`--mount-provider-user`) is `Unavailable` naming its owner, and that nothing is
+/// sent: the test's socket is its own, and the provider is said to run as another user. It
+/// catches a socket another user could have put in the provider's place trusted with the refs
+/// of jobs.
 #[test]
-fn a_socket_in_a_directory_of_another_user_is_unavailable() {
+fn a_socket_of_another_user_than_the_providers_is_unavailable() {
     let (_scratch, fake) = start("pc-owner");
-    let owner = fs::metadata(fake.socket().parent().unwrap()).unwrap().uid();
-    let mut client =
-        ProviderClient::new(HOST, owner + 1, &sockets(fake.socket().to_path_buf())).unwrap();
+    let owner = fs::metadata(fake.socket()).unwrap().uid();
+    let named = [(NAME.to_owned(), fake.socket().to_path_buf(), owner + 1)];
+    let mut client = ProviderClient::new(HOST, &named).unwrap();
     assert_unavailable(
         &settle(&mut client, NAME, &sweep(&[])),
-        &format!("its directory belongs to user {owner}, neither root nor this agent's user"),
+        &format!("belongs to user {owner}, neither root nor the provider's user"),
     );
     assert!(fake.requests().is_empty());
 }
@@ -466,8 +465,7 @@ fn a_socket_in_a_directory_others_can_write_is_unavailable() {
     let (scratch, fake) = start("pc-dir");
     let dir = scratch.path("");
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
-    let mut client =
-        ProviderClient::new(HOST, euid(), &sockets(fake.socket().to_path_buf())).unwrap();
+    let mut client = ProviderClient::new(HOST, &sockets(fake.socket().to_path_buf())).unwrap();
     assert_unavailable(
         &settle(&mut client, NAME, &sweep(&[])),
         "its directory can be written by its group or by others (mode 777)",
@@ -489,7 +487,7 @@ fn a_socket_nobody_listens_on_is_unavailable() {
     let path = scratch.path("mp.sock");
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    let mut client = ProviderClient::new(HOST, euid(), &sockets(path)).unwrap();
+    let mut client = ProviderClient::new(HOST, &sockets(path)).unwrap();
     assert!(matches!(
         settle(&mut client, NAME, &sweep(&[])),
         ProviderAnswer::Unavailable(_)
@@ -668,8 +666,8 @@ fn a_sweep_releases_the_sources_the_agent_does_not_keep() {
 fn a_sweep_leaves_another_agents_sources_alone() {
     let (_scratch, fake) = start("pc-agents");
     let sockets = sockets(fake.socket().to_path_buf());
-    let mut first = ProviderClient::new("host-a", euid(), &sockets).unwrap();
-    let mut second = ProviderClient::new("host-b", euid(), &sockets).unwrap();
+    let mut first = ProviderClient::new("host-a", &sockets).unwrap();
+    let mut second = ProviderClient::new("host-b", &sockets).unwrap();
     let call = prepare("r1", 0, "k", MountMode::ReadOnly);
     assert_eq!(settle(&mut first, NAME, &call), ProviderAnswer::Done(None));
     assert_eq!(settle(&mut second, NAME, &call), ProviderAnswer::Done(None));

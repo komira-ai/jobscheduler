@@ -3,6 +3,8 @@
 //! adopted what an earlier process left, and a machine that cannot make their client ends the
 //! start of the worker with the reason.
 
+use std::path::Path;
+
 use js_agent::Worker;
 use js_agent::lifecycle::MountProviders;
 
@@ -21,7 +23,7 @@ fn a_worker_given_providers_sweeps_them_as_it_starts() {
     let machine = FakeMachine::new();
     let mut given = plan(&dir, &machine, STEP_NEVER);
     let sockets = [("tier".to_owned(), dir.path("tier.sock"))];
-    given.providers = MountProviders::from_flags(&sockets, Some(30)).unwrap();
+    given.providers = MountProviders::from_flags(&sockets, &[], Some(30), Path::new("/nonexistent")).unwrap();
     let worker = match Worker::start(given) {
         Ok(worker) => worker,
         Err(why) => panic!("the worker did not start: {why}"),
@@ -44,7 +46,7 @@ fn a_machine_that_cannot_make_the_providers_ends_the_start_of_the_worker() {
     let machine = FakeMachine::new().without_providers("no client is made");
     let mut given = plan(&dir, &machine, STEP_NEVER);
     let sockets = [("tier".to_owned(), dir.path("tier.sock"))];
-    given.providers = MountProviders::from_flags(&sockets, None).unwrap();
+    given.providers = MountProviders::from_flags(&sockets, &[], None, Path::new("/nonexistent")).unwrap();
     match Worker::start(given) {
         Ok(_) => panic!("the worker started"),
         Err(why) => assert_eq!(why, "--mount-provider: no client is made"),

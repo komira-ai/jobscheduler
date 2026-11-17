@@ -28,14 +28,15 @@ const OTHERS_ONLY_WRITE: u32 = 0o002;
 /// no use for.
 pub(super) struct UnixConnector {
     socket: PathBuf,
-    euid: u32,
+    /// The uid the provider runs as.
+    user: u32,
 }
 
 impl UnixConnector {
-    /// A connector to `socket`, which must lie in a closed directory of root or of `euid`
+    /// A connector to `socket`, the socket of a provider that runs as `user`
     /// ([`check_socket`]).
-    pub(super) fn new(socket: PathBuf, euid: u32) -> Self {
-        Self { socket, euid }
+    pub(super) fn new(socket: PathBuf, user: u32) -> Self {
+        Self { socket, user }
     }
 }
 
@@ -50,22 +51,21 @@ impl Service<Uri> for UnixConnector {
 
     fn call(&mut self, _: Uri) -> Self::Future {
         let socket = self.socket.clone();
-        let euid = self.euid;
+        let user = self.user;
         Box::pin(async move {
-            check_socket(&socket, euid)?;
+            check_socket(&socket, user)?;
             UnixStream::connect(&socket).await.map(TokioIo::new)
         })
     }
 }
 
-/// Fails unless `path` is a socket in a directory that belongs to root (or to `euid`, the
-/// agent's own user, which is root on a host that runs containers) and that neither group nor
-/// others can write, so that only that user can put a socket there; the socket itself may
-/// belong to the provider's own user and be writable through its group by the agent's, but
-/// not by others. Whoever could put another socket in its place could stand in for the
+/// Fails unless `path` is a socket of `user` (the provider's) or root that no other user can
+/// write (its group may: the agent's user reaches it through the socket's group), in a
+/// directory of root or `user` that no one else can write, so that only root or the provider
+/// can have put it there. Whoever else could put a socket in its place could stand in for the
 /// provider, and the agent would hand it the refs of jobs and trust the directories it
 /// answers.
-fn check_socket(path: &Path, euid: u32) -> io::Result<()> {
+fn check_socket(path: &Path, user: u32) -> io::Result<()> {
     let meta = std::fs::metadata(path)
         .map_err(|why| io::Error::new(why.kind(), format!("{}: {why}", path.display())))?;
     let dir = path.parent().unwrap_or(path);
@@ -74,11 +74,12 @@ fn check_socket(path: &Path, euid: u32) -> io::Result<()> {
         std::fs::metadata(dir).map_or((None, OTHERS_WRITE), |dir| (Some(dir.uid()), dir.mode()));
     let found = Found {
         socket: meta.file_type().is_socket(),
+        uid: meta.uid(),
         mode: meta.mode(),
         dir_uid,
         dir_mode,
     };
-    judge(&found, euid).map_err(|why| io::Error::other(format!("{}: {why}", path.display())))
+    judge(&found, user).map_err(|why| io::Error::other(format!("{}: {why}", path.display())))
 }
 
 /// What [`check_socket`] read of a socket file and its directory.
@@ -86,6 +87,8 @@ fn check_socket(path: &Path, euid: u32) -> io::Result<()> {
 struct Found {
     /// Whether the file is a socket.
     socket: bool,
+    /// The file's owner.
+    uid: u32,
     /// The file's mode.
     mode: u32,
     /// The directory's owner, when it could be read.
@@ -94,14 +97,26 @@ struct Found {
     dir_mode: u32,
 }
 
-/// The rules of [`check_socket`] over what it read, for an agent running as `euid`.
-fn judge(found: &Found, euid: u32) -> Result<(), String> {
+/// The rules of [`check_socket`] over what it read, for a provider that runs as `user`.
+fn judge(found: &Found, user: u32) -> Result<(), String> {
     if !found.socket {
         return Err("not a socket".to_owned());
     }
-    if ![Some(0), Some(euid)].contains(&found.dir_uid) {
+    if ![0, user].contains(&found.uid) {
         return Err(format!(
-            "its directory belongs to {}, neither root nor this agent's user ({euid})",
+            "belongs to user {}, neither root nor the provider's user ({user})",
+            found.uid
+        ));
+    }
+    if found.mode & OTHERS_ONLY_WRITE != 0 {
+        return Err(format!(
+            "can be written by others (mode {:o})",
+            found.mode & 0o7777
+        ));
+    }
+    if ![Some(0), Some(user)].contains(&found.dir_uid) {
+        return Err(format!(
+            "its directory belongs to {}, neither root nor the provider's user ({user})",
             found.dir_uid.map_or_else(
                 || "no user it can read".to_owned(),
                 |uid| format!("user {uid}")
@@ -114,12 +129,6 @@ fn judge(found: &Found, euid: u32) -> Result<(), String> {
             found.dir_mode & 0o7777
         ));
     }
-    if found.mode & OTHERS_ONLY_WRITE != 0 {
-        return Err(format!(
-            "can be written by others (mode {:o})",
-            found.mode & 0o7777
-        ));
-    }
     Ok(())
 }
 
@@ -127,30 +136,38 @@ fn judge(found: &Found, euid: u32) -> Result<(), String> {
 mod tests {
     use super::{Found, judge};
 
-    /// A socket of mode 0660 in a directory of root, mode 0755.
+    /// A socket of the provider's user 7, mode 0660, in a directory of root, mode 0755.
     fn good() -> Found {
         Found {
             socket: true,
+            uid: 7,
             mode: 0o140_660,
             dir_uid: Some(0),
             dir_mode: 0o040_755,
         }
     }
 
-    /// Asserts that a socket is taken, whoever owns it and with its group's write bit, in a
-    /// directory of root or of the agent's user that its group and others cannot write; and
-    /// refused, naming the rule, when it is not a socket, when its directory belongs to
-    /// another user or cannot be read, when its directory can be written by group or others,
-    /// or when others can write the socket. Catches a socket a third user could have put in
-    /// the provider's place taken, and a provider that runs as a user of its own refused.
+    /// Asserts that a socket is taken when it belongs to the provider's user or root, with
+    /// its group's write bit, in a directory of root or the provider's user that its group and
+    /// others cannot write; and refused, naming the rule, when it is not a socket, belongs to
+    /// another user, can be written by others, or lies in a directory of another user, one that
+    /// cannot be read, or one its group or others can write. Catches a socket a third user
+    /// could have put in the provider's place taken, and a provider that binds its own socket
+    /// as its own user refused.
     #[test]
-    fn a_socket_is_taken_only_in_a_closed_directory_of_root_or_the_agent() {
-        assert_eq!(judge(&good(), 9), Ok(()), "root's directory");
-        let of_agent = Found {
-            dir_uid: Some(9),
+    fn a_socket_is_taken_only_from_the_providers_user_in_a_closed_directory() {
+        assert_eq!(
+            judge(&good(), 7),
+            Ok(()),
+            "the provider's socket in root's directory"
+        );
+        let of_root = Found { uid: 0, ..good() };
+        assert_eq!(judge(&of_root, 7), Ok(()), "root's socket");
+        let own_dir = Found {
+            dir_uid: Some(7),
             ..good()
         };
-        assert_eq!(judge(&of_agent, 9), Ok(()), "the agent's directory");
+        assert_eq!(judge(&own_dir, 7), Ok(()), "the provider's directory");
         let refused = [
             (
                 Found {
@@ -160,19 +177,30 @@ mod tests {
                 "not a socket",
             ),
             (
+                Found { uid: 3, ..good() },
+                "belongs to user 3, neither root nor the provider's user (7)",
+            ),
+            (
+                Found {
+                    mode: 0o140_662,
+                    ..good()
+                },
+                "can be written by others (mode 662)",
+            ),
+            (
                 Found {
                     dir_uid: Some(3),
                     ..good()
                 },
-                "its directory belongs to user 3, neither root nor this agent's user (9)",
+                "its directory belongs to user 3, neither root nor the provider's user (7)",
             ),
             (
                 Found {
                     dir_uid: None,
                     ..good()
                 },
-                "its directory belongs to no user it can read, neither root nor this agent's \
-                 user (9)",
+                "its directory belongs to no user it can read, neither root nor the provider's \
+                 user (7)",
             ),
             (
                 Found {
@@ -188,16 +216,9 @@ mod tests {
                 },
                 "its directory can be written by its group or by others (mode 1777)",
             ),
-            (
-                Found {
-                    mode: 0o140_662,
-                    ..good()
-                },
-                "can be written by others (mode 662)",
-            ),
         ];
         for (found, why) in refused {
-            assert_eq!(judge(&found, 9), Err(why.to_owned()), "{found:?}");
+            assert_eq!(judge(&found, 7), Err(why.to_owned()), "{found:?}");
         }
     }
 }
