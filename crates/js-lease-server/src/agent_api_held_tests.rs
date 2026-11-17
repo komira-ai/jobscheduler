@@ -100,6 +100,24 @@ async fn a_reply_with_a_start_a_host_without_held_beat_and_a_draining_host_are_n
     assert_eq!(waits(&rig), 0);
 }
 
+/// Asserts that a reply that carries only the acknowledgement of a result is answered at once,
+/// not held, and still says `beat_now`, so the agent's next heartbeat goes at once and is held.
+/// It catches an agent left to wait a whole interval after each job's end, with no heartbeat
+/// waiting at the server for the next start.
+#[tokio::test]
+async fn a_reply_with_only_an_acknowledgement_is_not_held_and_says_beat_now() {
+    let (rig, mut agent) = held_rig("held_ack", LONG);
+    rig.place("job-1", "host-a");
+    agent.take(&rig.beat(&agent).await.unwrap());
+    agent.run("job-1");
+    agent.end("job-1", js_agent_wire::Outcome::Succeeded, Some(0));
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(reply.commands, []);
+    assert_eq!(reply.job_acks.len(), 1);
+    assert!(reply.beat_now);
+    assert_eq!(waits(&rig), 0);
+}
+
 /// Asserts that a wake that brings nothing to send (no job placed on the host) keeps the reply
 /// held, waiting again, and that the start of a job placed after it still rides on the reply.
 /// It catches a hold that answers empty at the first wake, and one that stops listening after

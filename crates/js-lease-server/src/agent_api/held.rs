@@ -5,7 +5,8 @@
 //!
 //! A reply is held only when it carries nothing at all: no command, no acknowledgement, no
 //! taint acknowledgement and no log credential, so a hold never delays what the beat asked
-//! for. Everything the beat reported was committed and counted before the hold: the listing,
+//! for. A reply that is not held says `beat_now` too when it carries no command, so the
+//! heartbeat after an acknowledgement is held at once rather than an interval later. Everything the beat reported was committed and counted before the hold: the listing,
 //! the taint, the usage. When a wake comes, the stops and starts are built again from the
 //! store over the listing the beat brought ([`per_job::commands_now`]); a reply that now has
 //! a command, or names another whole-host allocation, is answered at once, and one that is
@@ -74,13 +75,18 @@ pub(super) struct Hold {
 
 /// Holds `reply` while it carries nothing (beside the whole-host allocation it names): until a
 /// wake builds a reply with something in it, which replaces its commands and allocation, or
-/// until the bound. A held reply says `beat_now`; any other is left as it is.
+/// until the bound. A held reply says `beat_now`, and so does one that is not held but carries
+/// no command (only acknowledgements, a taint acknowledgement or a log credential).
 pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut HeartbeatReply) {
     let quiet = HeartbeatReply {
         exclusive: reply.exclusive.clone(),
         ..HeartbeatReply::default()
     };
     if *reply != quiet {
+        // Acknowledgements are answered once, so the next heartbeat can go at once and be
+        // held; a command is sent again until the agent acts on it, so a reply with one waits
+        // the interval, and an agent that is slow to act is not asked in a loop.
+        reply.beat_now = reply.commands.is_empty();
         return;
     }
     reply.beat_now = true;

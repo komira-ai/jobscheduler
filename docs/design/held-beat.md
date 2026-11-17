@@ -25,7 +25,10 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    phase is `serving`: a draining, preparing or tainted host takes no new start, and a draining agent
    counts its drain in the waits it asks for, which a held reply would stretch. When the reply has
    nothing to send (no command, acknowledgement, taint acknowledgement or log credential), the route holds
-   it open for the pool's heartbeat interval, at most 5 s, and answers it with `beat_now`. Everything the
+   it open for the pool's heartbeat interval, at most 5 s, and answers it with `beat_now`. A reply that is
+   not held but carries no command (only acknowledgements, which are answered once) says `beat_now` too,
+   so the heartbeat after a job's end is held at once; a reply with a command, which is sent again until
+   the agent acts on it, waits the interval, so a slow agent is not asked in a loop. Everything the
    beat reported was committed and counted before the hold.
 3. **Wake on placement.** Every placement a pass commits wakes the watched heartbeat of its host
    (`JobStarts::placed`). The held reply's stops and starts are built again from the store over the
