@@ -58,10 +58,11 @@ fn a_run_with_no_outputs_puts_none() {
     let node = Node::new("outputs-none");
     let live = Live::new();
     let mut runtime = node.open().with_live_logs(live.logs.clone());
-    let mut spec = node.job("j10-say", 60_000);
-    spec.log_sink = Some(sink("j10-say"));
+    let mut spec = node.job("j8-say", 60_000);
+    spec.log_sink = Some(sink("j8-say"));
     let id = runtime.create_and_start(&spec).expect("started");
     runtime.wait_ended(&id);
+    assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
     run_out(&live.wake(0));
     runtime.remove(&id).expect("removed");
     assert_eq!(live.made(), 1, "only the logs' uploader");
