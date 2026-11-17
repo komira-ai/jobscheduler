@@ -30,7 +30,9 @@ pub fn replay(name: &str, transcript: &Value) -> Vec<String> {
         .unwrap();
     let mut minted = Minted::default();
     let mut problems = Vec::new();
-    let flow = transcript["flow"].as_array().unwrap();
+    // The cell runs on the default pool, which asks 5000.
+    let mut flow = transcript["flow"].as_array().unwrap().clone();
+    super::welcome_interval_as(&mut flow, 5000);
     for (index, step) in flow.iter().chain([&transcript["refusal"]]).enumerate() {
         if let Some(job) = step.get("submitted") {
             minted.learn(job.clone(), Value::String(cell.submit()));
@@ -58,7 +60,7 @@ pub fn replay(name: &str, transcript: &Value) -> Vec<String> {
         let expected = minted.apply(&wanted["body"]);
         let mut body = answer.body.clone();
         if let Some(early) = take_early_start(&expected, &mut body) {
-            if let Some((later, start)) = start_after(flow, index) {
+            if let Some((later, start)) = start_after(&flow, index) {
                 let start = minted.apply(&start);
                 let named = flow[later]["agent"]["path"].as_str().unwrap();
                 for what in uncovered(&start, &early, Some(&mut minted)) {

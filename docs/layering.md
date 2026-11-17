@@ -178,7 +178,10 @@ either side (a release that changed none leaves the transcript as it is):
    agent test harness differs from main's, the module is adapted to it there, not on main).
    The test records that release's conversation, checks that it says everything the
    transcript it replaces said, and writes it to `target/tmp/skew/transcript.json` (cargo's
-   `CARGO_TARGET_TMPDIR` for the test). Its unknown-major hello asks for majors 2 to 3, and
+   `CARGO_TARGET_TMPDIR` for the test). The recording runs on a pool with a 250 ms heartbeat
+   interval (the server holds a quiet heartbeat's reply for up to the interval), so its welcome
+   says 250 where `v0.1.213`'s says 5000; the comparisons take either value
+   (`welcome_interval_as`) and no other. Its unknown-major hello asks for majors 2 to 3, and
    it fails unless the server refuses it; once a server speaks major 2, the majors in
    `record()` (`crates/js-agent/tests/agent/skew/record.rs`) are moved above the newest one
    it speaks in the same pull request.

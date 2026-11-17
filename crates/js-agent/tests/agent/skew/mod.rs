@@ -29,6 +29,23 @@ pub mod record;
 
 use serde_json::Value;
 
+/// Sets the heartbeat interval of the welcome in `steps` (a transcript's flow, the hello
+/// first) to `ms`, the interval of the pool the transcript is compared on. A transcript holds
+/// either the default 5000 (one recorded on the default pool, as `v0.1.213` was) or
+/// [`record::QUICK_INTERVAL_MS`] (one recorded by [`record::record`], which runs on the
+/// quick pool); any other value fails, so a welcome that names another interval is still
+/// caught.
+pub fn welcome_interval_as(steps: &mut [Value], ms: u64) {
+    let welcome = &mut steps[0]["server"]["body"]["heartbeat_interval_ms"];
+    assert!(
+        [5000, record::QUICK_INTERVAL_MS]
+            .map(Value::from)
+            .contains(welcome),
+        "the transcript's welcome: {welcome}"
+    );
+    *welcome = Value::from(ms);
+}
+
 /// The transcript of the previous release, `v0.1.213`.
 pub fn previous() -> Value {
     serde_json::from_str(include_str!("v0.1.213.json")).unwrap()
@@ -47,11 +64,10 @@ pub fn previous() -> Value {
 /// directory cargo gives integration tests for scratch files (`CARGO_TARGET_TMPDIR`, under
 /// the build's own target directory; nothing else writes there), which is where the next
 /// release's transcript is taken from: a path that outlives the test, unlike a [`Scratch`]
-/// directory.
+/// directory. It catches a transcript that no longer matches the conversation [`record`] has
+/// (the other tests would then compare against a conversation that is not the one they run).
 ///
-/// [`Scratch`]: crate::support::Scratch It catches a transcript that no longer matches the
-/// conversation [`record`] has (the other tests would then compare against a conversation
-/// that is not the one they run).
+/// [`Scratch`]: crate::support::Scratch
 #[test]
 #[cfg(target_os = "linux")]
 fn this_version_still_says_what_the_previous_release_said() {
@@ -71,9 +87,7 @@ fn this_version_still_says_what_the_previous_release_said() {
     };
     let (mut then, now) = (steps(&previous), steps(&transcript));
     assert_eq!(then.len(), now.len(), "{transcript}");
-    let welcome = &mut then[0]["server"]["body"]["heartbeat_interval_ms"];
-    assert_eq!(*welcome, 5000, "the previous release's welcome");
-    *welcome = serde_json::json!(record::QUICK_INTERVAL_MS);
+    welcome_interval_as(&mut then, record::QUICK_INTERVAL_MS);
     let mut ahead = std::collections::BTreeMap::new();
     for (index, (old, new)) in then.iter().zip(&now).enumerate() {
         let old = minted.apply(old);
