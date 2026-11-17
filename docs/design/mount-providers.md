@@ -103,10 +103,11 @@ which bounds its providers. A pool's static `[capabilities]` and a provider cata
 
 A provider serves the protocol `jobscheduler.provider.v1.MountProvider`, gRPC over a Unix socket, defined in
 `js-proto` as jobscheduler's own contract (as the CSI spec is Kubernetes'). The socket is the provider's; the operator
-names its path to the agent. The socket's directory must be owned by root and writable by no one else, so only root
-can put a socket there; the socket itself may belong to the provider's own user, and is writable by that user and,
-through its group, by the agent's. The agent checks the directory's owner and mode, and the socket's, before it
-connects, as it checks its flags file; the provider may check the peer's user. No key travels. The agent trusts the provider as part of the host, but not the text of the path it returns
+names its path and the provider's user to the agent (section 4). The provider binds the socket itself, as its own
+user, so the agent checks it against that user: the socket is owned by the provider's user (or root) and writable by no
+other user, the agent's user reaching it through the socket's group; its directory is owned by root or the provider's
+user and writable by no one else. Only root or the provider's user can then put a socket there. The agent checks both
+before it connects, as it checks its flags file; the provider may check the peer's user. No key travels. The agent trusts the provider as part of the host, but not the text of the path it returns
 (rule 3). Every request names its source as `(agent, run, index)`: `agent` is the host id the agent registers with
 (each agent is a host of its own), so several agents on one machine never touch each other's sources, and `run` is sent as `js.<run id>`, so a
 provider shared with other clients keeps jobscheduler's apart.
@@ -207,7 +208,8 @@ Rules a provider keeps:
 ## 4. The agent on Linux
 
 **Configuration** (the host group's flags file, B14, S2): `--mount-provider NAME=SOCKET`, repeatable, as
-`--mount-root NAME=PATH` is, and `--mount-provider-wait SECS` (default 120, 1 to 900): how long a start may wait on its
+`--mount-root NAME=PATH` is, and `--mount-provider-user NAME=USER`, the user the provider runs as (root when not
+given), and `--mount-provider-wait SECS` (default 120, 1 to 900): how long a start may wait on its
 providers, from its admission. The provider's mount directory is listed as an ordinary `--mount-root-ro` (or
 `--mount-root` for a provider that gives writable trees). The agent checks the name's grammar and that the socket's
 directory exists at start; it never waits for a provider to start itself, so a provider restarting does not stop the
