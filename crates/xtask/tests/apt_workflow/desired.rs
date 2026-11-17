@@ -1,22 +1,22 @@
 //! `hostkeeper-desired.yml`: the run that sets the desired version of the hostkeeper service
-//! `js-agent` on the hostkeeper coordinator for a published release, by its targets, after each
-//! release run that published one and by hand, once `cargo xtask release desired` has refused a
-//! release whose .debs the stable index does not list.
+//! `js-agent` on the hostkeeper coordinator for a published release, by its targets, started by
+//! release.yml's job `desired` for the release its run published, or by hand, once `cargo xtask
+//! release desired` has refused a release whose .debs the stable index does not list.
 //!
 //! [`desired_problems`] refuses the file when:
-//! - anything but `workflow_run` and `workflow_dispatch` starts it; the `workflow_run` is not the
-//!   completion of `release` on `main`; or the dispatch's inputs are not the one required string
-//!   `version`;
-//! - its concurrency is not [`GROUP`] with `cancel-in-progress: false` (a run by hand is never
-//!   replaced by the completion of a release run while it waits, nor any run cancelled);
+//! - anything but `workflow_dispatch` starts it (a `workflow_run` trigger is refused: the run is
+//!   started by release.yml's `desired`, in release order), or the dispatch's inputs are not the
+//!   one required string `version`;
+//! - its concurrency is not [`GROUP`] with `cancel-in-progress: false` (one run at a time; a running
+//!   run is never cancelled, and a waiting one is replaced by a newer one);
 //! - its jobs are not `check`, `set-desired` and `set-desired-mac`; `check`'s `if:` is not
 //!   [`DESIRED_IF`] (the repository variable is the gate, at the job level, only `main` runs it,
-//!   and a release run is acted on only when it succeeded, on `main` of this repository),
+//!   and only a dispatch does),
 //!   `set-desired`'s is not [`SET_IF`] (the same gate, and `check` said `set=true`) or
 //!   `set-desired-mac`'s is not [`SET_MAC_IF`] (that, and `check` said `set-mac=true`);
 //! - `check` needs a job, holds other than `actions: read` and `contents: read`, does not run
-//!   [`CHECK`] as its step `desired` with `VERSION` and `RUN_ID` read from the input and from the
-//!   run that started it and `PKG_URL` the package repository's address ([`PKG_URL`]), or does
+//!   [`CHECK`] as its step `desired` with `VERSION` read from the input, `GH_TOKEN` from the
+//!   token (no `RUN_ID`: no run of another workflow is waited for) and `PKG_URL` the package repository's address ([`PKG_URL`]), or does
 //!   not hand on that step's four outputs;
 //! - `set-desired` needs anything but `check` (and `set-desired-mac` anything but `check` and
 //!   `set-desired`, so the Macs are set after the Linux nodes), is not hostkeeper's reusable
@@ -33,7 +33,9 @@
 //! hostkeeper's two variables ([`COORDINATOR_VARS`]) and the tailnet's name: the version is set
 //! through hostkeeper's coordinator and nothing else (release.yml's gamma step reads
 //! `JS_COORDINATOR_URL` and `JS_COORDINATOR_CA`, the kbf coordinator's, and is the one workflow
-//! allowed to). [`caller_problems`] refuses any other workflow that calls this one.
+//! allowed to). [`caller_problems`] refuses any other workflow that calls this one with `uses:`,
+//! and any `gh workflow run` of it outside release.yml's job `desired` (the one job that starts it,
+//! with `actions: write`).
 
 use super::support::{at, entries, entry, job, names, permissions, steps_of};
 use super::yaml::{self, Node};
@@ -41,13 +43,11 @@ use super::yaml::{self, Node};
 /// The workflow's file.
 pub const FILE: &str = "hostkeeper-desired.yml";
 
-/// The `if:` of `check`: a run of `main` while the repository variable is `true`, by hand, or
-/// after a run of `release.yml` that succeeded on `main` of this repository.
-pub const DESIRED_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}";
+/// The `if:` of `check`: a dispatch from `main` while the repository variable is `true`.
+pub const DESIRED_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && github.event_name == 'workflow_dispatch' }}";
 
-/// The concurrency group: one for the runs by hand, one for the runs after a release.
-pub const GROUP: &str =
-    "hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}";
+/// The concurrency group: one for every run.
+pub const GROUP: &str = "hostkeeper-desired";
 
 /// The `if:` of `set-desired`: the gate again, and `check` chose a release.
 pub const SET_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}";
@@ -57,7 +57,7 @@ pub const SET_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_S
 pub const SET_MAC_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' && needs.check.outputs.set-mac == 'true' }}";
 
 /// The command of the step `desired` of `check`.
-pub const CHECK: &str = "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"$VERSION\" --after-run \"$RUN_ID\" --pkg-url \"$PKG_URL\" --dir \"$RUNNER_TEMP/desired\" --output \"$GITHUB_OUTPUT\"";
+pub const CHECK: &str = "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"$VERSION\" --pkg-url \"$PKG_URL\" --dir \"$RUNNER_TEMP/desired\" --output \"$GITHUB_OUTPUT\"";
 
 /// The base of the package repository's public address of the macOS packages
 /// (`<base>/<version>/SHA256SUMS` and the package), read by `--pkg-url`. A release before the
@@ -97,26 +97,15 @@ pub const TAILNET_COORDINATOR: &str = "HOSTKEEPER_TAILNET_COORDINATOR";
 /// The coordinator variables release.yml's gamma step reads: the kbf update coordinator's.
 pub const GAMMA_VARS: [&str; 2] = ["JS_COORDINATOR_URL", "JS_COORDINATOR_CA"];
 
-/// One line per way the triggers of the workflow (its `on`) are not the completion of `release`
-/// on `main` and a dispatch with the one input `version`.
+/// One line per way the triggers of the workflow (its `on`) are not a dispatch with the one input
+/// `version` and nothing else.
 fn trigger_problems(on: Option<&Node>) -> Vec<String> {
     let mut problems = Vec::new();
     let triggers = names(on);
-    if triggers != ["workflow_dispatch", "workflow_run"] {
+    if triggers != ["workflow_dispatch"] {
         problems.push(format!(
-            "triggers are {triggers:?}, not workflow_dispatch and workflow_run"
+            "triggers are {triggers:?}, not workflow_dispatch alone"
         ));
-    }
-    let run = on.and_then(|o| entry(o, "workflow_run"));
-    for (key, want) in [
-        ("workflows", "release"),
-        ("types", "completed"),
-        ("branches", "main"),
-    ] {
-        let got = names(run.and_then(|r| entry(r, key)));
-        if got != [want] {
-            problems.push(format!("workflow_run.{key} is {got:?}, not [{want:?}]"));
-        }
     }
     let inputs = on
         .and_then(|o| entry(o, "workflow_dispatch"))
@@ -208,7 +197,6 @@ fn check_problems(check: Option<&Node>) -> Vec<String> {
     }
     for (var, want) in [
         ("VERSION", "${{ inputs.version }}"),
-        ("RUN_ID", "${{ github.event.workflow_run.id }}"),
         ("GH_TOKEN", "${{ github.token }}"),
         ("PKG_URL", PKG_URL),
     ] {
@@ -217,6 +205,10 @@ fn check_problems(check: Option<&Node>) -> Vec<String> {
                 "check: the step `desired` does not read {var} from {want}"
             ));
         }
+    }
+    // The step reads no run id: it waits for no run of another workflow.
+    if desired.is_some_and(|s| at(s, &["env", "RUN_ID"]).is_some()) {
+        problems.push("check: the step `desired` reads RUN_ID, which it has no use for".to_owned());
     }
     for output in OUTPUTS {
         let got = check.and_then(|j| at(j, &["outputs", output]));
@@ -352,10 +344,15 @@ pub fn coordinator_problems(file: &str, text: &str) -> Vec<String> {
     problems
 }
 
+/// The one job of release.yml that starts [`FILE`], with `gh workflow run`.
+pub const STARTER: (&str, &str) = ("release.yml", "desired");
+
 /// One line per workflow of `files` (name, text), other than [`FILE`], with a job that calls
-/// [`FILE`]: none does; it starts on the completion of `release.yml` by its own trigger.
+/// [`FILE`] (`uses:`): none does; it starts by `workflow_dispatch`. And one line per place that
+/// starts it with `gh workflow run` outside the job [`STARTER`] (release.yml's `desired`), a
+/// comment excepted.
 pub fn caller_problems(files: &[(String, String)]) -> Vec<String> {
-    files
+    let mut problems: Vec<String> = files
         .iter()
         .filter(|(name, _)| name != FILE)
         .filter(|(_, text)| {
@@ -371,5 +368,31 @@ pub fn caller_problems(files: &[(String, String)]) -> Vec<String> {
             })
         })
         .map(|(name, _)| format!("{name}: calls {FILE}, which no other workflow calls"))
-        .collect()
+        .collect();
+    let starts = format!("gh workflow run {FILE}");
+    for (name, text) in files {
+        let mut in_job = "";
+        let mut in_jobs = false;
+        for (n, line) in text.lines().enumerate() {
+            if line == "jobs:" {
+                in_jobs = true;
+            } else if let Some(job) = line
+                .strip_prefix("  ")
+                .and_then(|l| l.strip_suffix(':'))
+                .filter(|l| in_jobs && !l.starts_with([' ', '#']))
+            {
+                in_job = job;
+            }
+            if line.contains(&starts)
+                && !line.trim_start().starts_with('#')
+                && (name.as_str(), in_job) != STARTER
+            {
+                problems.push(format!(
+                    "{name}: line {}: starts {FILE} outside the job `desired` of release.yml",
+                    n + 1
+                ));
+            }
+        }
+    }
+    problems
 }

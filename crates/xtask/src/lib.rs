@@ -28,6 +28,10 @@
 //!   `set=false`; refused unless the release's `.deb`s are in the stable apt index at the digests
 //!   of its `SHA256SUMS`. With `--pkg-url` the published signed Mac package is added as the
 //!   `macos-arm64` target (`set-mac=true`), or left out when it is not published (`set-mac=false`).
+//! - `release turn --repo <owner/repo> --workflow <file> --run-number <N> --version <X.Y.Z> [--poll-seconds <S>]
+//!   [--output <file>]` ([`release::turn`]): the job of `release.yml` before `publish`: waits while an
+//!   older run holds the turn to publish and deploy, and writes `go=false` when a newer release or run
+//!   has overtaken this one, so only the newest of several queued runs deploys.
 //! - `release image-digest --dist <dir> --repo <owner/repo> --version <X.Y.Z> [--output <file>]`
 //!   ([`release::image_digest`]): the manifest digest of the release's linux-x86_64 image of
 //!   js-lease-server, held to `SHA256SUMS`, and the release's addresses of the image and its bundle:
@@ -136,6 +140,9 @@ pub enum Error {
     /// `release desired` set nothing, or could not tell.
     #[error(transparent)]
     Desired(release::desired::Error),
+    /// `release turn` could not decide.
+    #[error(transparent)]
+    Turn(release::turn::Error),
     /// `release image-digest` gave no digest.
     #[error(transparent)]
     ImageDigest(#[from] release::image_digest::Error),
@@ -376,6 +383,8 @@ enum ReleaseVerb {
     /// The manifest digest of the release's linux-x86_64 image of js-lease-server, and the
     /// release's addresses of it and its bundle.
     ImageDigest(release::image_digest::DigestArgs),
+    /// Wait for this run's turn to publish and deploy, or skip it when a newer one has it.
+    Turn(release::turn::TurnArgs),
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -485,6 +494,10 @@ fn run(cli: Cli) -> Result<String, Error> {
                 other => Error::Desired(other),
             })?,
             ReleaseVerb::ImageDigest(args) => release::image_digest::run(&args)?,
+            ReleaseVerb::Turn(args) => release::turn::run(&args).map_err(|e| match e {
+                release::turn::Error::Usage(why) => Error::Usage(why),
+                other => Error::Turn(other),
+            })?,
         }),
     }
 }

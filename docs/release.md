@@ -1,7 +1,10 @@
 # Releasing js-lease-server, js, js-agent, js-bundle, js-mdm and the Mac host tools
 
 Releases are continuous. Nobody tags, and nothing is run by hand: every push to `main` that
-changes code that ships is released as the next version, after the jobs of `ci` have passed on it.
+changes code that ships is released as the next version and deployed, once it has built and its
+unit tests have passed. The rest of `ci` (lint, deny, coverage, the privileged and live jobs) and
+the beta stage (macOS) run beside the release or after it and never hold it back: a failure there
+opens a `RELEASE-RED` issue (step 11) and is fixed forward.
 
 ## What happens on each merge to main
 
@@ -9,12 +12,18 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
 2. `ci-passed` waits for the jobs of the `ci` run of that commit (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
-   and passes when every job succeeded or was skipped.
-   If any job failed, was cancelled or timed out, the release fails with an error naming those jobs and the `ci`
-   run, and nothing is released. It holds `actions: read` and nothing else, and checks out no code.
+   and passes when every job succeeded or was skipped. Nothing waits for it: when a job of `ci`
+   failed, was cancelled or timed out, it fails with an error naming those jobs and the `ci` run,
+   after the release has gone out, and `release-red` reports it (step 11). It holds
+   `actions: read` and nothing else, and checks out no code.
    `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a).
-3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
-   When there is nothing to release, the run ends there, green.
+3. `plan` (`cargo xtask release plan`) decides at once whether to release and as which version
+   (below). When there is nothing to release, the run builds, publishes and deploys nothing
+   (`unit-tests` and `ci-passed`, which start beside `plan`, still run).
+   Beside it, from the push on, `unit-tests` runs the workspace's tests (those `ci`'s `test` job
+   runs with `cargo test --workspace`; not its `--ignored` live steps and not doctests) under
+   cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, starting
+   from the Cargo cache `ci`'s `test` job saves on main (read only).
 4. The `artifacts` job calls `.github/workflows/artifacts.yml` with that version; its jobs run in
    the same run, at the same commit. Its `build` stamps the version into the CI checkout, builds the binaries for
    `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`, for each of the two Linux architectures) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), each target on a GitHub-hosted runner of its own architecture, checks that
@@ -32,12 +41,16 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    from its bundle. The
    signer of every attestation is `.github/workflows/artifacts.yml`, not `release.yml`: the apt jobs
    below publish a package only after checking its attestation by that file.
+5a. `turn` (`cargo xtask release turn`) takes the run's turn at publishing and deploying, once
+   the build and every shard of the unit tests passed (see "Several merges at once" below). When
+   it says the run is superseded, `publish` and everything after it are skipped and the run ends
+   green.
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
    commit), uploads the archives, the Debian packages, the images, their bundles and `SHA256SUMS` to
    it, and publishes it in one call. Publishing creates the tag `vX.Y.Z` on the commit. It refuses a
    Debian package or an image without its bundle. It leaves the macOS archives (`*-aarch64-apple-darwin.tar.gz`) out: step 6a adds them.
 
-6a. The beta stage, the platforms other than Linux x86_64, runs after `artifacts` and beside `publish` and everything after it (nothing of the Linux files, the Debian packages, the apt repository, `gamma` or the control-plane deploy waits for it). On the hosted `macos-15` runners it runs three jobs, each calling a workflow that holds `contents: read`: `beta-macos` (`beta.yml`: the workspace's tests on Apple silicon, all but the Linux-only crates js-contain, js-host-step and js-mdm), `beta-macos-pkg` (`js-agent-macos-pkg.yml`: the installer package of the agent, built unsigned and read back by a job that names no secret, then signed by its `sign` job in the environment `pkg-signing`, the only job that holds the installer certificate's secrets and that skips with a notice when they are not set; `pkg-upload` uploads the signed package, see "macOS" below) and `beta-macos-probe` (`macos-probe.yml`: what the native runtime relies on, probed on the runner). When the three and `publish` succeeded, `promote-macos` (`contents: write` alone, no repository code) adds the macOS archives to the published release; an archive the release already has must equal this run's byte for byte and is kept. `SHA256SUMS` lists them from the start, so until they are added `sha256sum -c --ignore-missing SHA256SUMS` is the check. A beta job that fails leaves the release without the macOS archives and the run red; fix forward, then re-run the failed jobs and `promote-macos` adds them. Following the owner's rule, a pull request runs none of this (`cargo test -p xtask --test pr_linux_only`): a pull request that changes `release.yml` runs `plan` as a dry run on Linux x86_64 and builds nothing, since `artifacts.yml`'s build matrix names the arm64 and macOS runners.
+6a. The beta stage, the platforms other than Linux x86_64, runs after `artifacts` and beside `publish` and everything after it (nothing of the Linux files, the Debian packages, the apt repository, `gamma`, the control-plane deploy or hostkeeper waits for its tests). On the hosted `macos-15` runners it runs three jobs, each calling a workflow that holds `contents: read`: `beta-macos` (`beta.yml`: the workspace's tests on Apple silicon, all but the Linux-only crates js-contain, js-host-step and js-mdm), `beta-macos-pkg` (`js-agent-macos-pkg.yml`: the installer package of the agent, built unsigned and read back by a job that names no secret, then signed by its `sign` job in the environment `pkg-signing`, the only job that holds the installer certificate's secrets and that skips with a notice when they are not set; `pkg-upload` uploads the signed package once this job has ended and `publish` passed, so that the deploy (step 10) gives it to the Macs, and uploads nothing when the package failed, see "macOS" below) and `beta-macos-probe` (`macos-probe.yml`: what the native runtime relies on, probed on the runner). When the three and `publish` succeeded, `promote-macos` (`contents: write` alone, no repository code) adds the macOS archives to the published release; an archive the release already has must equal this run's byte for byte and is kept. `SHA256SUMS` lists them from the start, so until they are added `sha256sum -c --ignore-missing SHA256SUMS` is the check. A beta job that fails leaves the release without the macOS archives and the run red, and `release-red` opens or comments on the RELEASE-RED issue; the release has been deployed already. Fix forward, or re-run the failed jobs and `promote-macos` adds them. Following the owner's rule, a pull request runs none of this (`cargo test -p xtask --test pr_linux_only`): a pull request that changes `release.yml` runs `plan` as a dry run on Linux x86_64 and builds nothing, since `artifacts.yml`'s build matrix names the arm64 and macOS runners.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
@@ -45,14 +58,27 @@ jobs from the run's page (below): the run continues the draft of the version, ad
 lacks, and replaces none of a published release (a differing file there fails the run; a stale or
 differing draft is replaced).
 
-The run releases its own commit even if `main` has moved on while it waited or built: the attestation
+The run releases its own commit even if `main` has moved on while it built: the attestation
 records the commit the run is at, which is the pushed commit, so the files and the provenance agree.
 `plan` refuses a commit that a later `v*` tag is past (a tag at a descendant of the commit): a later
 release covers it, the version stays monotonic, and no tag lands on an older commit. `publish` checks
 this again right before the publishing call: the latest `v*` tag, by version, must be a proper ancestor
-of the commit (the compare API says `ahead`), or nothing is published. That closes the race where two
-runs finish out of order. Releases are one at a time and none is cancelled: while one runs, GitHub keeps
-one waiting run and a newer push replaces an older waiting one, whose change the newer release covers.
+of the commit (the compare API says `ahead`), or nothing is published.
+
+Several merges at once. The workflow has no concurrency group (GitHub keeps one waiting run per group
+and cancels the older one, which would drop releases), so every push starts its run at once and no run
+is cancelled or replaced. The runs build and test side by side, each with its own version (below), and
+take turns at publishing and deploying through `turn`:
+
+- a run holds the turn from the start of its `turn` until its job `deployed` has ended; `deployed`
+  runs whatever the publish and deploy jobs did (`always()`), so a failed deploy frees the turn too;
+- `turn` waits while an older run (a lower run number) holds the turn, polling every 20 seconds;
+- `turn` answers `go=false` when a newer run has reached its turn, or a release newer than its own is
+  published: of several runs waiting, only the newest publishes and deploys, and the others end green
+  without a release (their versions are never published);
+- an older run never waits for a newer one, so the turns cannot deadlock.
+
+A run whose build or unit tests fail never reaches `turn`, and holds nothing.
 
 The two checks read tags differently, on purpose. `plan` looks only at `v*` tags merged into the commit;
 `publish` compares against the highest `vX.Y.Z` tag of the whole repository, so it fails closed: a `v` tag
@@ -66,9 +92,9 @@ headers carry no owner, name or time, and the zstd frame is a fixed encoder's ou
 the same files the first run did; if a build still came out different, the run fails at the
 comparison rather than mix two builds (see Recovery).
 
-A gap to know: a waiting run replaced by a newer push is made up by the newer push's run. If that newer
-push fails `ci` (or its release run fails), nothing releases the replaced change until the next push
-that passes `ci` and ships code. Nothing runs on a timer.
+A gap to know: a run superseded by a newer one is made up by the newer release, which contains its
+change. If that newer run then fails at `publish` or later, nothing releases either change until the
+next push that ships code. Nothing runs on a timer.
 
 7. The apt jobs (off until their settings exist, below) publish the two Debian packages into the
    suite `testing` of the apt repository at `https://packages.komira.ai/apt`; `check-apt` installs
@@ -82,13 +108,23 @@ that passes `ci` and ships code. Nothing runs on a timer.
    through docker-swarm-updater and wait for it to converge ([The control-plane
    deploy](#the-control-plane-deploy)).
 
-After the run, `.github/workflows/hostkeeper-desired.yml` (off until its variable is set) sets the
-release as hostkeeper's desired version of `js-agent` ([Deploying through
-hostkeeper](#deploying-through-hostkeeper)).
+10. `desired` (while the variable JS_AGENT_SETS_DESIRED is `true`) starts
+   `.github/workflows/hostkeeper-desired.yml` with the release's version as soon as the suite
+   `stable` lists the release and `pkg-upload` has ended; that workflow sets the release as
+   hostkeeper's desired version of `js-agent` ([Deploying through
+   hostkeeper](#deploying-through-hostkeeper)). Then `deployed` ends the run's turn.
+11. When any job of the run failed (the deploy path, `ci-passed`, the beta stage), `release-red`
+   opens an issue titled `RELEASE-RED: jobscheduler <first failing job> failed on main at <commit>`
+   with the label `main-red`, its body a `Run:`, a `Head:` and up to five `Failing:` lines, or
+   comments those lines on the RELEASE-RED issue that is open. When a run that released had no job
+   fail, `release-green` closes the open RELEASE-RED issues with a comment naming the commit and the
+   run. Both hold `issues: write` and `actions: read` and run `gh` alone.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums,
 verify, the apt index jobs and `check-apt` (plus `attestations: read` for verify), `id-token` and
-`attestations` write for `attest`, `actions: read` alone for `ci-passed`, `contents` write for
+`attestations` write for `attest`, `actions: read` alone for `ci-passed`, `actions: read` and
+`contents: read` for `turn`, `actions: write` alone for `desired`, `issues: write` and
+`actions: read` for `release-red` and `release-green`, `contents` write for
 `publish` (the tag and the release), `contents: read` and `id-token` write for the apt read and
 write jobs (the token is exchanged for the apt publish role), `id-token` write alone for `gamma`
 and for `cp-deploy` (the call of docker-swarm-updater's deploy workflow), nothing for
@@ -131,20 +167,27 @@ is a change of the crate.
 
 These do not release: `docs/**` and every `*.md`, `.github/**`, a crate's `tests/`, benches and
 examples, and the crates that no shipped binary depends on (`xtask`, `js-coverage`,
-`js-conformance`). A push that changes only those ends the run at `plan`. A later push that does
+`js-conformance`). A push that changes only those releases nothing: its run has `plan`, the unit
+tests and the wait for `ci`, and no build. A later push that does
 ship releases everything since the latest tag, including code an earlier push left unreleased.
 
 ## Which version
 
 The next version is the latest `vX.Y.Z` tag (by version order) that is merged into the commit, with
-its patch number raised by one. A higher tag that is not an ancestor of the commit (on another
+its patch number raised by the number of first-parent commits from that tag to the commit
+(`git rev-list --count --first-parent <tag>..<commit>`): one for the commit right after a release,
+three for the third. Runs that build at once therefore never take the same version, whichever tags
+first, and versions rise along `main`. A version whose run was superseded, or whose commit shipped
+nothing, is never released, so the published versions have gaps. A higher tag that is not an ancestor of the commit (on another
 branch, or pushed by mistake) is not a release of this history and is ignored. With no tag yet it is
 the workspace version.
 
 To release a minor or major version, merge a pull request that raises the workspace version in
 `Cargo.toml` (`[workspace.package] version`) above the latest tag, for example to `0.2.0`. The next
 release that ships code uses that version as it is (the pull request changes `Cargo.toml`, so it
-ships and releases itself), and the releases after it count patches from it: `0.2.1`, `0.2.2`. A
+ships and releases itself), and the releases after it count patches from it, by first-parent commits
+as above. Two runs that start while the workspace version is above the latest tag both take it; the
+later one's `publish` refuses the tag the earlier one made, and the next push releases its change. A
 workspace version at or below the latest tag changes nothing, so the version in `Cargo.toml` need
 not be kept up to date for patch releases.
 
@@ -411,9 +454,13 @@ apt-get update && apt-get install js-agent
 `.github/workflows/hostkeeper-desired.yml` sets the desired version of the hostkeeper service
 `js-agent` on hostkeeper's coordinator, through hostkeeper's reusable workflow `set-desired.yml`
 pinned at a hostkeeper release (its `hkctl` is downloaded and its attestation checked before any
-step holds a token). It starts after every run of `release` on `main` that succeeded (it acts when
-that run's `publish` succeeded, on the newest published release), or by hand from `main` with a
-version (a rollback may name an older one). Its `check` job (`cargo xtask release desired`,
+step holds a token). It is started with a version (`workflow_dispatch`): by the job `desired` of a
+run of `release` on `main`, with the version that run published, as soon as the suite `stable` lists
+it and `pkg-upload` has ended (so the farm moves before the run's beta stage and `ci` have finished,
+and whatever they say), or by hand from `main` (a rollback may name an older version). Its runs share
+one concurrency group: one runs at a time, and a newer waiting run replaces an older waiting one. A
+rollback started while release runs are still deploying can be replaced by theirs, or override them;
+start it again once they have deployed. Its `check` job (`cargo xtask release desired`,
 `crates/xtask/src/release/desired.rs`) refuses a release unless the suite `stable` lists both of
 its Debian packages, read through the CDN as a host reads it, with the digests of its `SHA256SUMS`,
 and writes the release's targets: for each of `linux-x86_64` and `linux-arm64` one `apt` entry
@@ -466,7 +513,7 @@ repository_id = "<gh api repos/komira-ai/jobscheduler --jq .id>"
 repository = "komira-ai/jobscheduler"
 job_workflow_ref = ["komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1"]
 refs = ["refs/heads/main"]
-event_names = ["workflow_run", "workflow_dispatch"]
+event_names = ["workflow_dispatch"]
 runner_environment = "github-hosted"
 services = ["js-agent"]
 host_groups = ["all-in-one", "mac-build"]
@@ -484,7 +531,8 @@ package `js-agent-X.Y.Z-macos-arm64.pkg` (identifier `com.komira.js-agent`, buil
 `.github/workflows/js-agent-macos-pkg.yml`, not notarized). The release publishes it in two steps,
 and `release desired` adds it to the targets only when both happened.
 
-**Publishing.** After the three beta jobs and `promote-macos` passed, the job `pkg-upload` of
+**Publishing.** Once `publish` passed and `beta-macos-pkg` has ended (it waits for no test of the
+beta stage, and a package that failed to build or sign is simply not uploaded), the job `pkg-upload` of
 `release.yml` runs `cargo xtask channels pkg upload --dir <dir> --version X.Y.Z --bucket <b> --work
 <dir>`. It holds the `SHA256SUMS` in `--dir` to list exactly the package, at the digest of the file,
 and refuses before any call otherwise. It then puts the package and, after it, the `SHA256SUMS` to
@@ -601,8 +649,8 @@ until it is set.
   can write to the repository can move or delete a release tag, or push a `v*` tag by hand. A
   hand-pushed tag starts nothing (below), but a tag merged into `main` is the base the next version
   counts from.
-- **Branch protection for `main`**: require a pull request. A push to `main` that passes `ci` is a
-  release, so whoever can push to `main` can cut one. The workflow does not depend on this, but the
+- **Branch protection for `main`**: require a pull request. A push to `main` that ships code is a
+  release once it builds and its unit tests pass (`ci` does not gate it), so whoever can push to `main` can cut one. The workflow does not depend on this, but the
   guarantee that a release is a reviewed change does. Its required status checks name Linux x86_64
   checks only. `macos` (ci.yml) and `js-agent-macos-pkg` (js-agent-macos-pkg.yml) were required
   while every pull request ran them; no pull request runs them now (they are the beta stage of the
@@ -743,7 +791,11 @@ whose upload did not finish is deleted before it is uploaded again.
 |---|---|---|
 | `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
 | An apt job of `testing` failed, or all three attempts lost the race | The release is published; the suite holds this version or not | Re-run failed jobs: a re-run of a read job reads again, and a write never puts other bytes in the pool under a name it holds. A package already in the pool is accepted when its bytes are equal. |
-| `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted and hosts are not ordered it (`hostkeeper-desired.yml` acts only after a run that succeeded). Fix forward: the next release supersedes it in `testing`. |
+| `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted and hosts are not ordered it (`desired` starts `hostkeeper-desired.yml` only once a stable write succeeded). Fix forward: the next release supersedes it in `testing`. |
+| `ci-passed`, a beta job or `promote-macos` failed | The release is published and deployed; RELEASE-RED is open | Fix forward with a new push; its green release run closes the issue. Re-running the failed jobs adds the macOS archives when the beta jobs pass. |
+| A run that `turn` gave the turn failed after it, and a newer release has been published since | The failed run is older than what is deployed | Do not re-run its failed jobs: a re-run keeps its `turn`, and its `gamma` or control-plane deploy would move those back to the older version (`desired` checks and starts nothing for an older release, so hostkeeper is not moved). Fix forward. |
+| `turn` failed or timed out | Nothing published by this run | A newer push releases the change. `turn` fails on an error reading the runs or releases, or after three hours waiting for an older run's `deployed`. |
+| The run was green but `publish` and everything after it were skipped | `turn` said `go=false` | A newer run has the turn, or a newer release is published: it carries this change. Nothing to do. |
 | An apt job of `stable` failed | `testing` holds the version, `stable` may not | Re-run failed jobs. |
 | `publish` failed before the release was published (an upload, the draft) | A draft release, no tag | Re-run failed jobs. The run finds the draft of the version, deletes a half-uploaded file, adds the files it lacks and publishes it. |
 | `main` moved after such a failure and the new push plans the same version | A draft at the older commit | Nothing to do: the new run deletes the stale draft (or one holding a file that differs), makes a new one and publishes it. |
@@ -755,12 +807,12 @@ whose upload did not finish is deleted before it is uploaded again.
 | The run was green but released nothing | `plan` printed why | a later release exists past the commit, or nothing that ships changed. Nothing to do. |
 | "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files and signs them again; `publish` compares each against the release and keeps them, and keeps the release's bundles without comparing them (each signing writes new bytes for the same file). If a file differs the run fails and nothing is changed. |
 
-Runs that wait: a release run starts with its push and waits for the jobs of `ci`; if one fails there, the run fails
-at `ci-passed` (red, with the `ci` run's link and the failed jobs) and the change is released by the next push that passes
-`ci` and ships code. Re-run the failed jobs after re-running `ci`, if the commit should release itself.
+Runs that wait: a release run starts with its push and does not wait for `ci`; it waits only at `turn`, for an older
+run's publish and deploy. If a job of `ci` fails, the run fails at `ci-passed` (red, with the `ci` run's link and the
+failed jobs) after the release went out, and RELEASE-RED says so; the fix is the next push.
 
-There is no dispatch and no tag trigger: a `v*` tag pushed by hand does not start a release, and
-`workflow_dispatch` does not exist. An old run that is re-run with "Re-run all jobs" cannot publish its
+There is no dispatch and no tag trigger for `release.yml`: a `v*` tag pushed by hand does not start a release, and
+it has no `workflow_dispatch`. An old run that is re-run with "Re-run all jobs" cannot publish its
 old commit under a newer release, because `plan` finds a later tag past it, and `publish` checks the tag order again. A re-run of only the failed jobs does not run `plan`
 again; the tag checks in `publish` and the attestation check in artifacts.yml's `verify` are what guard it (the draft
 it finds is replaced when it targets another commit). To release by hand there is nothing to do but merge a change that ships.

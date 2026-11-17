@@ -1,16 +1,15 @@
 # Sets the desired version of the hostkeeper service `js-agent` on the hostkeeper coordinator to a
 # published release, by its targets: each host is ordered the .deb of its own platform from the
 # apt repository https://packages.komira.ai/apt (suite `stable`, which release.yml promotes a
-# release into after its install checks passed). Two ways in:
+# release into after its install checks passed). One way in, `workflow_dispatch` from main, with
+# one input, the released version `X.Y.Z` (its tag without the v), started two ways:
 #
-# - `workflow_run`: the completion of a run of `release.yml` on main of this repository. Only a run
-#   that succeeded is acted on, and of those only one whose job `publish` succeeded: then the
-#   newest published release is set (release runs are one at a time, so it is the release that
-#   run published, or a newer one whose run comes next). Most release runs publish nothing, and
-#   then nothing is set. Since the promotion into `stable` is part of the run of `release.yml`,
-#   the fleet is moved last.
-# - `workflow_dispatch`, from main ("Run workflow"), with one input, the released version `X.Y.Z`
-#   (its tag without the v), an older one included (a rollback).
+# - by release.yml's job `desired`, for the release its run published, as soon as the suite
+#   `stable` lists it (and its macOS package, if any, is uploaded): the farm is moved as part of
+#   the release's deploy, while the run's slower suites (the beta stage, `ci`) still run. Release
+#   runs take turns at deploying (release.yml's `turn`), so the runs it starts come in release
+#   order, and a superseded release run starts none;
+# - by hand ("Run workflow"), any released version, an older one included (a rollback).
 #
 # It is OFF until the repository variable JS_AGENT_SETS_DESIRED is `true`, exactly: unset, or
 # anything else, every job is skipped (their job-level `if:`), whichever way it started. Its
@@ -25,7 +24,8 @@
 #  - HOSTKEEPER_TAILNET_TAG          the tag the join gives the runner's node, the one that
 #                                    identity's trust credential issues (such as `tag:ci`).
 # The coordinator lets the job's OIDC token set the version only through an allow-list entry for
-# this repository (by id), refs/heads/main, the events workflow_run and workflow_dispatch, the
+# this repository (by id), refs/heads/main, the event workflow_dispatch (the entry admits
+# workflow_run too, which this file no longer uses), the
 # audience below, the service js-agent, and the `job_workflow_ref` of the called workflow pinned
 # below (komira-ai/hostkeeper/.github/workflows/set-desired.yml@<that commit>). Moving the pin
 # moves the `job_workflow_ref`, so the entry moves with it.
@@ -40,9 +40,8 @@
 #
 # Three jobs:
 #  - check        holds no token that writes. `cargo xtask release desired` (crates/xtask,
-#                 src/release/desired.rs) decides the release (`--version` by hand,
-#                 `--after-run` after a run of release.yml; one of the two is empty) and hands on
-#                 `set=false` when that run published none. Otherwise it refuses a release unless
+#                 src/release/desired.rs) is given the release (`--version`, from the input)
+#                 and refuses it unless
 #                 its SHA256SUMS lists the two .debs and the index of the suite `stable`, read
 #                 through the CDN as a host reads it, lists each at the digest SHA256SUMS gives.
 #                 It hands on the package version and the release's targets: one `apt` entry of
@@ -71,21 +70,17 @@
 #                 the same version and targets (a version set again with other targets is refused
 #                 by the coordinator, so the Macs are given the targets the Linux nodes were).
 #
-# One run at a time of each way in, never cancelled: the runs after a release share the group
-# `hostkeeper-desired-release`, where a newer waiting run replaces an older one (each derives the
-# newest release itself, so nothing is lost), and the runs by hand share
-# `hostkeeper-desired-dispatch`, so that a rollback waiting for its turn is never replaced by the
-# completion of a release run.
+# One run at a time, never cancelled while it runs: every run shares the group
+# `hostkeeper-desired`, where GitHub keeps one waiting run and a newer one replaces it; the newer
+# names a newer release, or is a rollback started by hand after it. A rollback started while
+# releases are still deploying can replace a waiting release run, or be replaced by a newer one:
+# start it again once the release runs have deployed (docs/release.md, Recovery).
 #
 # The workflow lint (crates/xtask/tests/apt_workflow, desired.rs) holds this file to what is said
 # here.
 name: hostkeeper-desired
 
 on:
-  workflow_run:
-    workflows: [release]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -96,12 +91,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}
+  group: hostkeeper-desired
   cancel-in-progress: false
 
 jobs:
   check:
-    if: ${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.JS_AGENT_SETS_DESIRED == 'true' && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -119,16 +114,14 @@ jobs:
       - run: rustup toolchain install
       - name: Compile xtask
         run: cargo xtask --help
-      # The input and the run id are read as environment variables of the step, never spliced into
-      # a script. One of the two is empty: the input on a workflow_run, the run id on a dispatch.
+      # The input is read as an environment variable of the step, never spliced into a script.
       - name: The release to set, refused when its .debs are not in the stable index
         id: desired
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
           PKG_URL: https://packages.komira.ai/pkg/jobscheduler
-        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --pkg-url "$PKG_URL" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --pkg-url "$PKG_URL" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
 
   set-desired:
     needs: [check]

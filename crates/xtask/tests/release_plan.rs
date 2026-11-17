@@ -218,6 +218,113 @@ fn a_workspace_version_above_the_tag_is_released_as_it_is() {
     assert_eq!(field(&said, "version"), "0.2.1");
 }
 
+/// Catches parallel releases that share a version: runs started for successive pushes to
+/// main, before any of them tags, each take the latest tag's patch raised by their
+/// distance from it, so the versions differ and rise along main; one commit after the tag
+/// is the next patch, and a commit that ships nothing still counts.
+#[test]
+fn the_version_counts_the_commits_since_the_tag() {
+    let repo = Repo::new("count");
+    repo.tag("v0.1.7");
+    repo.write("crates/app/src/lib.rs", "// one\n");
+    repo.commit("one");
+    let said = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&said, "version"), "0.1.8");
+    assert_eq!(field(&said, "tag"), "v0.1.8");
+    repo.write("docs/a.md", "words\n");
+    repo.commit("two, ships nothing");
+    repo.write("crates/app/src/lib.rs", "// three\n");
+    repo.commit("three");
+    let said = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&said, "release"), "true");
+    assert_eq!(field(&said, "version"), "0.1.10");
+    assert_eq!(field(&said, "tag"), "v0.1.10");
+    assert_eq!(field(&said, "tag_exists"), "false");
+}
+
+/// Catches commits of a merged branch counting: only the first-parent line is counted, so
+/// a branch of three commits merged with a merge commit is one step, and the version is
+/// the same whichever side of the merge a run saw.
+#[test]
+fn a_merged_branch_counts_as_one_commit() {
+    let repo = Repo::new("merged");
+    repo.tag("v0.1.0");
+    repo.git(&["checkout", "--quiet", "-b", "side"]);
+    for n in 1..=3 {
+        repo.write("crates/lib/src/lib.rs", &format!("// side {n}\n"));
+        repo.commit("side");
+    }
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.write("crates/app/src/lib.rs", "// main\n");
+    repo.commit("main");
+    repo.git(&["merge", "--quiet", "--no-ff", "-m", "merge", "side"]);
+    let said = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&said, "release"), "true");
+    assert_eq!(field(&said, "version"), "0.1.2");
+}
+
+/// Catches a head behind main being numbered from the tip: the run at an older commit counts
+/// the commits up to itself, so it gets a lower version than the run at the newer one.
+#[test]
+fn a_head_behind_main_counts_up_to_itself() {
+    let repo = Repo::new("count-behind");
+    repo.tag("v0.1.0");
+    repo.write("crates/app/src/lib.rs", "// first\n");
+    let first = repo.commit("first");
+    repo.write("crates/app/src/lib.rs", "// second\n");
+    repo.commit("second");
+    let newer = plan::run(&repo.plan()).expect("plan");
+    repo.git(&["checkout", "--quiet", &first]);
+    let older = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&older, "version"), "0.1.1");
+    assert_eq!(field(&newer, "version"), "0.1.2");
+}
+
+/// Catches a bump that is lost to the count: a workspace version above the tag is the
+/// version however many commits follow the tag, and after its tag the count restarts
+/// from that tag.
+#[test]
+fn a_bump_wins_over_the_count() {
+    let repo = Repo::new("bump-count");
+    repo.tag("v0.1.7");
+    repo.write("crates/app/src/lib.rs", "// one\n");
+    repo.commit("one");
+    repo.write(
+        "Cargo.toml",
+        &std::fs::read_to_string(repo.dir.join("Cargo.toml"))
+            .expect("manifest")
+            .replace("version = \"0.1.0\"", "version = \"0.2.0\""),
+    );
+    repo.commit("raise the version");
+    repo.write("crates/app/src/lib.rs", "// two\n");
+    repo.commit("two");
+    let said = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&said, "version"), "0.2.0");
+    repo.tag("v0.2.0");
+    repo.write("crates/app/src/lib.rs", "// three\n");
+    repo.commit("three");
+    repo.write("crates/app/src/lib.rs", "// four\n");
+    repo.commit("four");
+    let said = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&said, "version"), "0.2.2");
+}
+
+/// Catches a dry run at a tagged commit renumbering it: the run is a re-run, so it keeps
+/// the tag's version and says the tag exists, as the real run would.
+#[test]
+fn a_dry_run_at_a_tagged_commit_keeps_the_tag() {
+    let repo = released("dry-tagged");
+    repo.write("crates/app/src/lib.rs", "// code\n");
+    repo.commit("code");
+    repo.tag("v0.1.1");
+    let mut args = repo.plan();
+    args.dry_run = true;
+    let said = plan::run(&args).expect("plan");
+    assert_eq!(field(&said, "release"), "true");
+    assert_eq!(field(&said, "version"), "0.1.1");
+    assert_eq!(field(&said, "tag_exists"), "true");
+}
+
 /// Catches ordering tags as text or by date: v0.1.10 is above v0.1.9, and the range is
 /// measured from the highest tag, so a shipped change between two old tags is not released
 /// again. Tags that are not releases are ignored.

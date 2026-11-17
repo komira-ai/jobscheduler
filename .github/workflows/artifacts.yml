@@ -19,8 +19,8 @@
 # caller's run, at the caller's commit and ref and under the caller's event, so a release run
 # (a push to main) signs the pushed commit on refs/heads/main, and the dry run of a pull request
 # that changes release.yml builds and sums the same files and signs nothing. It is not started
-# by a push of its own: the version is decided by `plan`, after `ci` has passed, and a build
-# made before that could carry a version a release finished meanwhile has taken.
+# by a push of its own: the version is decided by `plan` (at the push, without waiting for
+# `ci`), and a build made before that could carry a version another release has taken.
 #
 # Only `attest` holds `id-token: write` and `attestations: write`, and only for a push to main
 # (its `if:`; crates/xtask/tests/release_workflow holds both). While it holds them no

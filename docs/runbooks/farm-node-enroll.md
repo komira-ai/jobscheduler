@@ -136,7 +136,7 @@ hostkeeper ctl --endpoint https://hostkeeper.example.com:9443 --ca-file ./ca.pem
 ```
 
 The desired version of `js-agent` is set by this repository's
-`.github/workflows/hostkeeper-desired.yml` after each release that reached the stable suite, once
+`.github/workflows/hostkeeper-desired.yml`, which each release run starts once the release reached the stable suite, once
 the repository variable `JS_AGENT_SETS_DESIRED` is `true` (docs/release.md, "Deploying through
 hostkeeper"). To set a version by hand, rollback included, run that workflow from main with the
 version ("Run workflow"): it checks that the stable suite lists the release's two `.deb`s with the

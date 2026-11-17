@@ -4,7 +4,10 @@
 //! The owner's rule: x86_64 Linux tests are the pull request checks, because there are so many
 //! of those hosts; every other platform (macOS, Linux arm64) is the beta stage of the release
 //! pipeline (`release.yml` on a push to main, which calls `beta.yml` and the other workflows
-//! the stage runs). So no job a pull request starts may name another runner.
+//! the stage runs). So no job a pull request starts may name another runner. On a push to main
+//! the stage holds back the macOS archives (`promote-macos` needs all three jobs) and nothing of
+//! the deploy path: only `pkg-upload` (the package job, passed or not) and the two reports
+//! (`release-red`, `release-green`) need a beta job besides.
 //!
 //! A job is one a pull request starts when
 //!   - its workflow starts on `pull_request` or `pull_request_target`, or it is a job of a
@@ -162,8 +165,62 @@ fn the_beta_stage_workflows_are_called_not_started_by_a_pull_request() {
     );
 }
 
+/// The jobs of release.yml that need a beta job but are not one of the four that may, and the
+/// jobs of the deploy path that need one; what `promote-macos` needs, what `pkg-upload` needs
+/// and that `pkg-upload` runs even when its package job failed.
+fn beta_need_problems(text: &str) -> Vec<String> {
+    let w = Workflow::parse("release.yml", text);
+    let mut problems = Vec::new();
+    let mut waiting = Vec::new();
+    for (name, lines) in &w.jobs {
+        let needs = block(lines, 4, "needs").unwrap_or_default().join(" ");
+        if needs.contains("beta-macos") {
+            waiting.push(name.as_str());
+        }
+        let deploy_path = [
+            "turn",
+            "publish",
+            "gamma",
+            "cp-deploy-digest",
+            "cp-deploy",
+            "desired",
+            "deployed",
+        ]
+        .contains(&name.as_str())
+            || name.contains("-apt-")
+            || name == "check-apt";
+        if deploy_path && needs.contains("beta-macos") {
+            problems.push(format!(
+                "{name} (the deploy path) needs a beta job: {needs}"
+            ));
+        }
+    }
+    if waiting
+        != [
+            "promote-macos",
+            "pkg-upload",
+            "release-red",
+            "release-green",
+        ]
+    {
+        problems.push(format!("jobs that need a beta job: {waiting:?}"));
+    }
+    let find = |name: &str| w.jobs.iter().find(|(n, _)| n == name).map(|(_, l)| l);
+    let upload = find("pkg-upload").expect("pkg-upload");
+    let upload_if = block(upload, 4, "if").unwrap_or_default().join(" ");
+    if block(upload, 4, "needs").unwrap_or_default()
+        != ["[plan, deploy-tool, publish, beta-macos-pkg]"]
+        || !upload_if.contains("!cancelled()")
+    {
+        problems.push(format!("pkg-upload: {upload_if}"));
+    }
+    problems
+}
+
 #[test]
 fn the_beta_stage_runs_after_the_build_and_holds_back_only_the_macos_archives() {
+    // The jobs that need a beta job are `promote-macos`, `pkg-upload`, and the two reports;
+    // the deploy path never does.
     let text = read("release.yml");
     let w = Workflow::parse("release.yml", &text);
     let job = |name: &str| &w.jobs.iter().find(|(n, _)| n == name).expect(name).1;
@@ -196,12 +253,7 @@ fn the_beta_stage_runs_after_the_build_and_holds_back_only_the_macos_archives() 
             "{name}"
         );
     }
-    // Only `promote-macos` waits for the beta jobs; nothing else needs them.
-    for (name, lines) in &w.jobs {
-        let needs = block(lines, 4, "needs").unwrap_or_default().join(" ");
-        let waits = needs.contains("beta-macos");
-        assert_eq!(waits, name == "promote-macos", "{name}: needs {needs}");
-    }
+    assert_eq!(beta_need_problems(&text), Vec::<String>::new());
     let promote = job("promote-macos");
     assert_eq!(
         block(promote, 4, "needs").expect("needs"),
@@ -235,7 +287,7 @@ fn the_package_call_passes_the_release_version_and_asks_for_the_signature() {
 }
 
 #[test]
-fn the_package_upload_waits_for_the_beta_stage_and_runs_for_a_push_alone() {
+fn the_package_upload_waits_for_the_package_job_to_end_and_runs_for_a_push_alone() {
     let text = read("release.yml");
     let w = Workflow::parse("release.yml", &text);
     let upload = &w
@@ -244,10 +296,17 @@ fn the_package_upload_waits_for_the_beta_stage_and_runs_for_a_push_alone() {
         .find(|(n, _)| n == "pkg-upload")
         .expect("job")
         .1;
-    // `promote-macos` waits for the three beta jobs and `publish`, so this waits for them all.
+    // It waits for `publish` and for the end of the package job, passed or not (`!cancelled()`),
+    // and for no test of the beta stage.
     assert_eq!(
         block(upload, 4, "needs").expect("needs"),
-        ["[plan, deploy-tool, promote-macos]"]
+        ["[plan, deploy-tool, publish, beta-macos-pkg]"]
+    );
+    let condition = block(upload, 4, "if").expect("if").join(" ");
+    assert!(condition.contains("!cancelled()"), "{condition}");
+    assert!(
+        condition.contains("needs.publish.result == 'success'"),
+        "{condition}"
     );
     assert_eq!(
         block(upload, 4, "runs-on").expect("runs-on"),
@@ -268,8 +327,8 @@ fn the_package_upload_waits_for_the_beta_stage_and_runs_for_a_push_alone() {
 #[test]
 fn a_package_upload_without_its_push_condition_is_a_pull_request_job() {
     // The lint lists the job once its `if:` no longer keeps a pull request's dry run off it.
-    let gate = "  pkg-upload:\n    needs: [plan, deploy-tool, promote-macos]\n    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}\n";
-    let ungated = "  pkg-upload:\n    needs: [plan, deploy-tool, promote-macos]\n";
+    let gate = "    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' }}\n";
+    let ungated = "";
     let (jobs, _) = lint(&changed("release.yml", gate, ungated));
     assert!(
         jobs.iter().any(|j| j == "release.yml/pkg-upload"),
@@ -289,5 +348,43 @@ fn the_package_workflow_started_by_a_pull_request_is_refused() {
         let want =
             format!("js-agent-macos-pkg.yml/{job}: runs on macos-15, not Linux x86_64 (ubuntu-*)");
         assert!(problems.contains(&want), "{problems:?}");
+    }
+}
+
+#[test]
+fn a_deploy_job_that_needs_a_beta_job_is_refused() {
+    let text = read("release.yml");
+    for (from, to) in [
+        (
+            "    needs: [plan, artifacts, unit-tests, turn]\n",
+            "    needs: [plan, artifacts, unit-tests, turn, beta-macos]\n",
+        ),
+        (
+            "    needs: [plan, deploy-tool, publish, beta-macos-pkg]\n",
+            "    needs: [plan, deploy-tool, publish, beta-macos-pkg, beta-macos-probe]\n",
+        ),
+        (
+            "    needs: [turn, publish, gamma,",
+            "    needs: [turn, beta-macos-probe, publish, gamma,",
+        ),
+    ] {
+        assert_eq!(beta_need_problems(&text), Vec::<String>::new());
+        assert_eq!(text.matches(from).count(), 1, "{from}");
+        let problems = beta_need_problems(&text.replacen(from, to, 1));
+        assert!(!problems.is_empty(), "{to}");
+    }
+    // The package upload that waits for no package job, or runs only after a pass, is refused.
+    for (from, to) in [
+        ("publish, beta-macos-pkg]", "publish]"),
+        (
+            "if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result",
+            "if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result",
+        ),
+    ] {
+        assert_eq!(text.matches(from).count(), 1, "{from}");
+        assert!(
+            !beta_need_problems(&text.replacen(from, to, 1)).is_empty(),
+            "{from}"
+        );
     }
 }
