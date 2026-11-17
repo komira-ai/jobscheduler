@@ -17,16 +17,21 @@ use std::io::Write;
 use std::pin::pin;
 
 use clap::ArgMatches;
-use js_client::jobs::{Piece, WaitError, Waiter, follow_logs, submit_retrying, wait_for_terminal};
-use js_proto::v1::{LogStream, SubmitJobRequest};
+use js_client::jobs::{
+    Outcome, Piece, WaitError, Waiter, follow_logs, submit_retrying, wait_for_terminal,
+};
+use js_proto::v1::{GetResultRequest, LogStream, SubmitJobRequest};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::follow::{put, write};
-use super::wait::{ended, statuses};
-use super::{Command, Connection, Key, decode, request, runtime, unanswered, with_flags};
+use super::wait::{report, statuses, undetermined};
+use super::{
+    Command, Connection, Key, SUBMIT, decode, draw, fresh_id, request, runtime, surface,
+    unanswered, with_flags,
+};
 use crate::Services;
-use crate::events::{ForwardedSignal, Signaller};
+use crate::events::{ForwardedSignal, SignalSource, Signaller};
 use crate::failure::Failure;
 use crate::render::Render;
 
@@ -66,50 +71,93 @@ pub(crate) fn run(
     err: &mut dyn Write,
     services: Services,
 ) -> Result<u8, Failure> {
-    let submit = super::surface()
-        .iter()
-        .find(|command| command.path == super::SUBMIT)
-        .ok_or(Failure::Server(
-            "the job command table has no submit".to_owned(),
-        ))?;
+    let submit = submit_command()?;
     let connection = Connection::of(globals, &services.dialer)?;
     let (encoded, key) = request(submit, args, render, err)?;
     let sent: SubmitJobRequest = decode(&encoded)?;
     let job = sent.spec.clone().unwrap_or_default().job_id;
-    let (signaller, signals) = unbounded_channel();
-    (services.signals)(Signaller::job(signaller))
-        .map_err(|why| Failure::Server(format!("cannot watch for signals: {why}")))?;
+    let signals = watch_signals(services.signals)?;
     let run = Run {
         connection,
         submit,
         key,
-        job,
+        job: job.clone(),
         waiter: &*services.job_waiter,
         render,
     };
-    runtime()?.block_on(run.drive(sent, signals, out, err))
+    let outcome = runtime()?.block_on(run.drive(sent, signals, out, err))?;
+    Ok(report(&job, outcome, render, err))
+}
+
+/// The command of the generated table whose flags `job run` takes, `job submit`.
+fn submit_command() -> Result<&'static Command, Failure> {
+    surface()
+        .iter()
+        .find(|command| command.path == SUBMIT)
+        .ok_or(Failure::Server(
+            "the job command table has no submit".to_owned(),
+        ))
+}
+
+/// Hands `source` the handle it reports signals to, before anything is submitted, and gives
+/// the receiving end a run reads them from.
+pub(crate) fn watch_signals(
+    source: SignalSource,
+) -> Result<UnboundedReceiver<ForwardedSignal>, Failure> {
+    let (signaller, signals) = unbounded_channel();
+    source(Signaller::job(signaller))
+        .map_err(|why| Failure::Server(format!("cannot watch for signals: {why}")))?;
+    Ok(signals)
+}
+
+/// A job id for a submit: `given`, which must not be empty, or 128 random bits in
+/// hexadecimal; with the retry key `job submit` names it by, so that a lost answer says to
+/// run the same command again with `--id <id>`.
+pub(crate) fn job_key(given: Option<&str>) -> Result<(&'static Command, Key), Failure> {
+    let submit = submit_command()?;
+    let flag = submit
+        .retry_key
+        .and_then(|key| submit.flags.iter().find(|flag| flag.field == key))
+        .ok_or(Failure::Server(
+            "the job command table has no retry key for submit".to_owned(),
+        ))?;
+    let id = match given {
+        Some("") => Err(Failure::flag(
+            &format!("--{}", flag.name),
+            "must not be empty: leave the flag out to have js draw an id",
+        )),
+        Some(id) => Ok(id.to_owned()),
+        None => fresh_id(draw()),
+    }?;
+    Ok((submit, (flag, id)))
 }
 
 /// What a run needs once its request is built.
-struct Run<'a> {
-    connection: Connection<'a>,
-    submit: &'static Command,
-    key: Option<Key>,
-    job: String,
-    waiter: &'a dyn Waiter,
-    render: Render,
+pub(crate) struct Run<'a> {
+    /// The connection each call of the run opens its own of.
+    pub(crate) connection: Connection<'a>,
+    /// `job submit`, whose words a lost submit's message names.
+    pub(crate) submit: &'static Command,
+    /// The submit's retry key: the flag and the id.
+    pub(crate) key: Option<Key>,
+    /// The job's id.
+    pub(crate) job: String,
+    /// The pauses of the loops.
+    pub(crate) waiter: &'a dyn Waiter,
+    /// How lines are printed.
+    pub(crate) render: Render,
 }
 
 impl Run<'_> {
     /// Submits `sent` and waits for the job's end while following its streams, until the end
-    /// or a second signal.
-    async fn drive(
+    /// or a second signal. The job's stdout is written to `out` and its stderr to `err`.
+    pub(crate) async fn drive(
         &self,
         sent: SubmitJobRequest,
         signals: UnboundedReceiver<ForwardedSignal>,
         out: &mut dyn Write,
         err: &mut dyn Write,
-    ) -> Result<u8, Failure> {
+    ) -> Result<Outcome, Failure> {
         let (out, err) = (RefCell::new(out), RefCell::new(err));
         let first = Notify::new();
         tokio::select! {
@@ -130,7 +178,7 @@ impl Run<'_> {
         first: &Notify,
         out: &Shared<'_>,
         err: &Shared<'_>,
-    ) -> Result<u8, Failure> {
+    ) -> Result<Outcome, Failure> {
         let mut control = self.connection.client().await?;
         let submitted = submit_retrying(&mut control, self.waiter, sent).await;
         submitted.map_err(|why| unanswered(why.into(), self.submit, self.key.as_ref()))?;
@@ -153,7 +201,18 @@ impl Run<'_> {
             Ok::<(), WaitError>(())
         })
         .map(|(outcome, ())| outcome);
-        ended(&self.job, waited, self.render, &mut **err.borrow_mut())
+        waited.map_err(|why| undetermined(&self.job, &why))
+    }
+
+    /// The exit code of the job, which has ended: the one its result holds, or `None` when the
+    /// process did not exit by itself (it was stopped) or the result cannot be read.
+    pub(crate) async fn exit_code(&self) -> Option<i32> {
+        let mut client = self.connection.client().await.ok()?;
+        let request = GetResultRequest {
+            job_id: self.job.clone(),
+        };
+        let answer = js_client::jobs::JobCalls::get_result(&mut client, request).await;
+        answer.ok()?.result?.exit_code
     }
 
     /// Writes the job's `stream` to `data` (and its gaps to `notes`) to its end, or says on

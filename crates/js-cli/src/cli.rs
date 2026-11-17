@@ -40,10 +40,11 @@ pub struct Cli {
     pub(crate) command: Command,
 }
 
-/// The whole command line: the `join-token` commands of [`Cli`] and the job commands generated
-/// from the job service ([`crate::jobs::commands`]).
+/// The whole command line: the `join-token` commands of [`Cli`], the job commands generated
+/// from the job service ([`crate::jobs::commands`]) and `ci run` ([`crate::ci`]).
 pub(crate) fn command() -> clap::Command {
-    Cli::command().subcommands(crate::jobs::tree())
+    let tree = Cli::command().subcommands(crate::jobs::tree());
+    tree.subcommand(crate::ci::command())
 }
 
 impl Cli {

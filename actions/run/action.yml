@@ -1,0 +1,179 @@
+# Runs one CI step as a job of the job service, on a machine of the farm (macOS on Apple
+# silicon, or Linux in a container), from a GitHub-hosted Linux runner, and brings back the
+# step's outputs as a workflow artifact (docs/ci-runner.md).
+#
+# The runner is not on the private network the job service listens on. The first step joins
+# it to the tailnet as an ephemeral node tagged `tailnet-tag`, authenticating with a GitHub
+# OIDC token exchanged by the tailnet's federated identity: no tailnet secret is stored, and
+# the calling job grants `id-token: write`. The Tailscale tarball is pinned by version and
+# SHA-256. Then a directory of this step's own is made (`mktemp -d` under the runner's
+# temporary directory), so that two steps of one job share no file. `js`, the job service's
+# client, is downloaded there from the release `js-version` and checked against `js-sha256`
+# before it runs; the client token, the token the job fetches the commit with, and the
+# service's CA are written there to owner-only files (never an argument).
+# One `js ci run` submits the job, writes its output to the step's log as it comes, waits for
+# its end, unpacks its outputs, writes the step's outputs, and exits with the step's status.
+# The last step uploads the outputs, whatever the status, unless the run was cancelled.
+name: Run a step on the farm
+description: Runs one CI step as a jobscheduler job on a farm machine (macOS or Linux), streams its log, exits with its status and uploads its outputs.
+
+inputs:
+  run:
+    description: The step's commands, run with bash -e -o pipefail in a checkout of the workflow's commit.
+    required: true
+  os:
+    description: The machine the step runs on, macos (Apple silicon, natively under sandbox-exec) or linux (in a container).
+    required: true
+  image:
+    description: The image, pinned by digest (NAME@sha256:HEX). On Linux the container's, holding sh, mktemp, git, bash and tar; on macOS the bundle the job is named by.
+    required: true
+  outputs:
+    description: The step's outputs, paths relative to the checkout, one per line; uploaded as the artifact artifact-name. Empty, the default, uploads nothing.
+    required: false
+    default: ""
+  artifact-name:
+    description: The name of the artifact the outputs are uploaded as. Empty, the default, is the job's name, then the name input after a dash when it is given, then -outputs.
+    required: false
+    default: ""
+  name:
+    description: A name for this step within its job, needed when one job runs more than one step on the farm; the step's size class is the repository, workflow, job and this name.
+    required: false
+    default: ""
+  size-fallback:
+    description: The size class whose history sizes the step while its own has fewer than five runs. Empty, the default, is the step's kind, ci-macos or ci-linux.
+    required: false
+    default: ""
+  wall-limit:
+    description: The most the step may run, such as 90s, 15m or 2h.
+    required: false
+    default: 1h
+  network:
+    description: What the job may reach, none, allow-list or open. The checkout is fetched over it.
+    required: false
+    default: open
+  commit:
+    description: The commit the job checks out, 40 or 64 lower-case hex digits.
+    required: false
+    default: ${{ github.sha }}
+  source-token:
+    description: The token the job fetches the commit with; it reaches the job as a job file, which no read of the job returns.
+    required: false
+    default: ${{ github.token }}
+  js-version:
+    description: The jobscheduler release whose js runs the step, such as 0.1.400.
+    required: true
+  js-sha256:
+    description: The SHA-256 of that release's js-<version>-x86_64-unknown-linux-musl.tar.gz, 64 lower-case hex digits.
+    required: true
+  server:
+    description: The job service's listener on the tailnet, https://<host>:<port>.
+    required: true
+  ca-cert:
+    description: The PEM certificates of the authority the service's certificate must chain to; no other root is trusted.
+    required: true
+  token:
+    description: The job service's client token for CI (a secret).
+    required: true
+  tailnet-client-id:
+    description: The client ID of the tailnet's federated identity for this repository; not a secret.
+    required: true
+  tailnet-audience:
+    description: The audience of that federated identity; not a secret.
+    required: true
+  tailnet-tag:
+    description: The tag the runner's tailnet node is given, the one the federated identity issues and the tailnet's ACL lets reach the service.
+    required: false
+    default: tag:ci
+  tailnet-ping:
+    description: The service's name or address on the tailnet, which the join pings until it answers.
+    required: true
+
+outputs:
+  job-id:
+    description: The id of the job the step ran as.
+    value: ${{ steps.run.outputs.job-id }}
+  outcome:
+    description: How the job ended, succeeded, failed, cancelled, timed-out, lost or failed-to-start, or the kind of js's own failure (such as rejected or undetermined).
+    value: ${{ steps.run.outputs.outcome }}
+  exit-code:
+    description: The step's own exit code; empty when the job did not exit by itself.
+    value: ${{ steps.run.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Join the tailnet
+      uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+      with:
+        oauth-client-id: ${{ inputs.tailnet-client-id }}
+        audience: ${{ inputs.tailnet-audience }}
+        tags: ${{ inputs.tailnet-tag }}
+        version: 1.94.2
+        sha256sum: c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32
+        use-cache: "false"
+        ping: ${{ inputs.tailnet-ping }}
+
+    - name: Make the step's directory
+      id: dir
+      shell: bash
+      run: echo "path=$(mktemp -d "$RUNNER_TEMP/js-ci.XXXXXXXX")" >> "$GITHUB_OUTPUT"
+
+    - name: Download js
+      shell: bash
+      env:
+        JS_CI_DIR: ${{ steps.dir.outputs.path }}
+        JS_VERSION: ${{ inputs.js-version }}
+      run: curl --proto =https --tlsv1.2 --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$JS_CI_DIR/js.tar.gz" "https://github.com/komira-ai/jobscheduler/releases/download/v$JS_VERSION/js-$JS_VERSION-x86_64-unknown-linux-musl.tar.gz"
+
+    - name: Check js against its pinned SHA-256
+      shell: bash
+      env:
+        JS_CI_DIR: ${{ steps.dir.outputs.path }}
+        JS_SHA256: ${{ inputs.js-sha256 }}
+      run: echo "$JS_SHA256  $JS_CI_DIR/js.tar.gz" | sha256sum --check --strict
+
+    - name: Unpack js
+      shell: bash
+      env:
+        JS_CI_DIR: ${{ steps.dir.outputs.path }}
+      run: tar -xzf "$JS_CI_DIR/js.tar.gz" -C "$JS_CI_DIR" --strip-components 1
+
+    - name: Write the credentials to owner-only files
+      shell: bash
+      env:
+        JS_CI_DIR: ${{ steps.dir.outputs.path }}
+        JS_TOKEN: ${{ inputs.token }}
+        SOURCE_TOKEN: ${{ inputs.source-token }}
+        CA_CERT: ${{ inputs.ca-cert }}
+      run: umask 077 && printf '%s\n' "$JS_TOKEN" > "$JS_CI_DIR/token" && printf '%s\n' "$SOURCE_TOKEN" > "$JS_CI_DIR/source-token" && printf '%s\n' "$CA_CERT" > "$JS_CI_DIR/ca.pem"
+
+    - name: Run the step on the farm
+      id: run
+      shell: bash
+      env:
+        JS_CI_DIR: ${{ steps.dir.outputs.path }}
+        JS_SERVER: ${{ inputs.server }}
+        STEP_OS: ${{ inputs.os }}
+        STEP_IMAGE: ${{ inputs.image }}
+        STEP_NAME: ${{ github.repository }}/${{ github.workflow }}/${{ github.job }}/${{ inputs.name }}
+        STEP_FALLBACK: ${{ inputs.size-fallback || format('ci-{0}', inputs.os) }}
+        STEP_RUN: ${{ inputs.run }}
+        STEP_OUTPUTS: ${{ inputs.outputs }}
+        STEP_WALL_LIMIT: ${{ inputs.wall-limit }}
+        STEP_NETWORK: ${{ inputs.network }}
+        STEP_COMMIT: ${{ inputs.commit }}
+        SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+      run: >-
+        "$JS_CI_DIR/js" --server "$JS_SERVER" --token-file "$JS_CI_DIR/token" --ca-cert "$JS_CI_DIR/ca.pem"
+        ci run --os "$STEP_OS" --image "$STEP_IMAGE" --step "$STEP_NAME" --size-fallback "$STEP_FALLBACK"
+        --run "$STEP_RUN" --source-url "$SOURCE_URL" --source-commit "$STEP_COMMIT" --source-token-file "$JS_CI_DIR/source-token"
+        --outputs "$STEP_OUTPUTS" --outputs-dir "$JS_CI_DIR/outputs" --wall-limit "$STEP_WALL_LIMIT" --network "$STEP_NETWORK"
+        --github-output "$GITHUB_OUTPUT"
+
+    - name: Upload the outputs
+      if: ${{ !cancelled() && inputs.outputs != '' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name || format('{0}{1}-outputs', github.job, inputs.name && format('-{0}', inputs.name) || '') }}
+        path: ${{ steps.dir.outputs.path }}/outputs/
+        if-no-files-found: warn

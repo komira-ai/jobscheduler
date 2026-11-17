@@ -39,6 +39,8 @@ pub mod exit {
     /// `job wait` and `job run`: how the job ended could not be told, because a call failed
     /// or the job is in a state this `js` does not know.
     pub const UNDETERMINED: u8 = 15;
+    /// `ci run`: the job succeeded, but its declared outputs could not be read back.
+    pub const OUTPUTS: u8 = 16;
 }
 
 /// Why a command failed. The text is what `js` prints after `js: `; it never holds the

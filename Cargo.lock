@@ -1257,6 +1257,7 @@ dependencies = [
  "rcgen",
  "rustix",
  "serde_json",
+ "tar",
  "thiserror",
  "tokio",
  "tonic",
