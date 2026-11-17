@@ -4,6 +4,8 @@
 //! host is the module's: eight cores and 16 GiB, where the cold size is two cores and 4 GiB.
 
 use std::collections::BTreeMap;
+use std::io;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_jobs::{ClientName, JobEnd, JobId, JobRecord, JobSpec, Needs, NewJob};
@@ -357,15 +359,73 @@ fn only_a_job_the_history_sizes_has_a_source() {
     assert_eq!(names, ["class", "fallback", "cold", "over-cap"]);
 }
 
+/// What a test's own subscriber writes: every line, kept for [`Lines::take`].
+#[derive(Clone, Default)]
+struct Lines(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for Lines {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        held.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
+    type Writer = Lines;
+
+    fn make_writer(&'a self) -> Lines {
+        self.clone()
+    }
+}
+
+impl Lines {
+    /// The lines written so far, emptied.
+    fn take(&self) -> String {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        String::from_utf8(std::mem::take(&mut *held)).unwrap()
+    }
+}
+
+/// Installs, once per process, a global subscriber that wants every line and writes it
+/// nowhere. Tracing settles whether a line is wanted from the subscribers it knows when a
+/// thread first reaches the line; without this one, a test thread with no subscriber can
+/// settle the placement line as never wanted before the capturing test reaches it.
+fn process_sink() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(io::sink)
+            .try_init();
+    });
+}
+
 /// Asserts the pass end to end: five targets of a kind run once each through the passes
 /// (the first two placed cold, the next three at the kind's one core and, the kind having
 /// fewer than five runs, the cold memory; each freed run taught to its kind), and the pass
 /// then places a new
 /// target of the kind booked one core and 1.5 GiB from the kind's runs, beside a job that
-/// names its size and is placed as it names it. Catches a pass that teaches only the target
-/// class, so every new target of a build stays cold.
+/// names its size and is placed as it names it. Each placement of a job the history sized
+/// logs one line naming the job, its host, its class and what sized it (`cold` for the
+/// first two, `fallback` after), and the job that names its size logs none. Catches a pass
+/// that teaches only the target class, so every new target of a build stays cold, and a
+/// placement log that is lost, names the wrong source or logs a job the history did not size.
 #[test]
 fn a_pass_books_a_new_target_from_the_runs_its_kind_had_in_earlier_passes() {
+    process_sink();
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_ansi(false)
+        .without_time()
+        .with_target(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     let tables = Tables::new();
     let clock = ManualClock::new(Timestamp::from_millis(0));
     let placer = SchedPlacer::new(Settings::default(), clock);
@@ -394,6 +454,27 @@ fn a_pass_books_a_new_target_from_the_runs_its_kind_had_in_earlier_passes() {
     assert_eq!(pass(&placer, &tables).len(), 2);
     assert_eq!(allocation(&tables, "fresh"), booked(1000, 6 * 256 * MIB));
     assert_eq!(allocation(&tables, "named"), booked(500, GIB));
+    let logged: Vec<String> = lines
+        .take()
+        .lines()
+        .filter(|line| line.contains("a job the history sized was placed"))
+        .map(str::to_owned)
+        .collect();
+    let line = |job: &str, from: &str| {
+        format!(
+            " INFO a job the history sized was placed job={job} host=a class={job} \
+             sized_from=\"{from}\""
+        )
+    };
+    let expected = [
+        line("t0", "cold"),
+        line("t1", "cold"),
+        line("t2", "fallback"),
+        line("t3", "fallback"),
+        line("t4", "fallback"),
+        line("fresh", "fallback"),
+    ];
+    assert_eq!(logged, expected);
 }
 
 /// Starts the placed job `id` and ends it after ten seconds with a `peak` and `cpu` of CPU

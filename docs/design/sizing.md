@@ -131,10 +131,12 @@ assumes, and each kind runs many times a minute.
   `N_MIN`), the fallback's estimate takes the place of the cold size for that job: its memory is the booking the job's own class
   may only rise from (its runs, its kill floor and its raise-only window still raise it, exactly as they raise the cold size
   today), and its CPU is booked unless the job's own class has a CPU sample. With five runs of its own, a class is sized from
-  them alone, as before this section. While the fallback class has no CPU sample of its own, the cold CPU stands. A fallback
-  class with no estimate (missing, under two runs with no kill floor, stale, or one that reaches the host) is no fallback; one
-  with two to four runs is, and its memory is then at least the cold memory (the estimator's raise-only rule for few runs): the job is booked as if it named none, the cold size included. A job whose own class reaches the host
-  still books the whole of the largest host.
+  them alone, as before this section. While the fallback class has no CPU sample of its own, the cold CPU stands.
+- A fallback class with no estimate (missing, under two runs with no kill floor, stale, or one that reaches the host) is no
+  fallback: the job is booked as if it named none, the cold size included. A fallback class with two to four runs has an
+  estimate and supplies it: its CPU is booked as above, and its memory is at least the cold memory (the estimator's raise-only
+  rule for a class with fewer than five runs). A job whose own class reaches the host still books the whole of the largest
+  host.
 - The kill floor of the job's own class still applies on every path (raise-only floor semantics are kept); the fallback's own
   floor is part of the fallback's estimate.
 - The fallback's estimate is the estimator's: the largest recent peak of the kind (the statistic is the maximum, not a
