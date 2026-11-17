@@ -5,12 +5,13 @@ use std::io;
 use std::os::fd::{AsRawFd as _, BorrowedFd, OwnedFd};
 use std::path::Path;
 
-use rustix::fs::{CWD, Mode, OFlags, ResolveFlags};
+use rustix::fs::{CWD, FileType, Mode, OFlags, ResolveFlags};
 use rustix::mount::{
     MountFlags, MountPropagationFlags, MoveMountFlags, OpenTreeFlags, UnmountFlags,
 };
+use rustix::thread::{LinkNameSpaceType, UnshareFlags};
 
-use super::{Attributes, MountCalls};
+use super::{Attributes, EnterCalls, MountCalls};
 
 /// The system calls themselves.
 #[derive(Clone, Copy, Debug, Default)]
@@ -65,6 +66,103 @@ impl MountCalls for Kernel {
         let flags = MountPropagationFlags::PRIVATE | MountPropagationFlags::REC;
         rustix::mount::mount_change(dir, flags).map_err(io::Error::from)
     }
+}
+
+impl EnterCalls for Kernel {
+    fn open_source(&self, path: &Path) -> io::Result<OwnedFd> {
+        let flags = OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+        rustix::fs::open(path, flags, Mode::empty()).map_err(io::Error::from)
+    }
+
+    fn is_dir(&self, source: BorrowedFd<'_>) -> io::Result<bool> {
+        rustix::fs::fstat(source)
+            .map(|stat| FileType::from_raw_mode(stat.st_mode).is_dir())
+            .map_err(io::Error::from)
+    }
+
+    fn open_namespace(&self, pid: u32) -> io::Result<OwnedFd> {
+        let flags = OFlags::RDONLY | OFlags::CLOEXEC;
+        rustix::fs::open(format!("/proc/{pid}/ns/mnt"), flags, Mode::empty())
+            .map_err(io::Error::from)
+    }
+
+    fn open_root(&self, pid: u32) -> io::Result<OwnedFd> {
+        let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        rustix::fs::open(format!("/proc/{pid}/root"), flags, Mode::empty()).map_err(io::Error::from)
+    }
+
+    fn unshare_fs(&self) -> io::Result<()> {
+        // SAFETY: `CLONE_FS` only gives this thread its own copy of the root, the working
+        // directory and the umask, which no memory of this process refers to; the thread
+        // then changes them without touching any other thread's.
+        unsafe { rustix::thread::unshare_unsafe(UnshareFlags::FS) }.map_err(io::Error::from)
+    }
+
+    fn join(&self, namespace: BorrowedFd<'_>) -> io::Result<()> {
+        rustix::thread::move_into_link_name_space(namespace, Some(LinkNameSpaceType::Mount))
+            .map_err(io::Error::from)
+    }
+
+    fn change_dir(&self, dir: BorrowedFd<'_>) -> io::Result<()> {
+        rustix::process::fchdir(dir).map_err(io::Error::from)
+    }
+
+    fn change_root(&self) -> io::Result<()> {
+        rustix::process::chroot(".").map_err(io::Error::from)
+    }
+
+    fn set_fs_ids(&self, ids: (u32, u32)) -> io::Result<()> {
+        set_fs_ids(ids, set_fs_gid, set_fs_uid)
+    }
+
+    fn make_dir(&self, path: &Path) -> io::Result<()> {
+        match rustix::fs::mkdir(path, Mode::from_raw_mode(0o755)) {
+            Err(rustix::io::Errno::EXIST) => Ok(()),
+            other => other.map_err(io::Error::from),
+        }
+    }
+
+    fn make_file(&self, path: &Path) -> io::Result<()> {
+        let flags = OFlags::CREATE | OFlags::WRONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+        rustix::fs::open(path, flags, Mode::from_raw_mode(0o644))
+            .map(drop)
+            .map_err(io::Error::from)
+    }
+}
+
+/// Sets the calling thread's file system group id, then user id, to `ids` (user, group),
+/// with the two calls `set_gid` and `set_uid`, each of which answers the id it replaced and
+/// changes nothing when it is refused. Each is called a second time with the same id: that
+/// answers the id now in force, which is the one asked for only if the first call took.
+pub(super) fn set_fs_ids(
+    ids: (u32, u32),
+    set_gid: impl Fn(u32) -> libc::c_int,
+    set_uid: impl Fn(u32) -> libc::c_int,
+) -> io::Result<()> {
+    let (uid, gid) = ids;
+    let took = |set: &dyn Fn(u32) -> libc::c_int, id: u32| {
+        set(id);
+        u32::try_from(set(id)) == Ok(id)
+    };
+    if took(&set_gid, gid) && took(&set_uid, uid) {
+        Ok(())
+    } else {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    }
+}
+
+/// `setfsgid(gid)` for the calling thread: the group id it had.
+fn set_fs_gid(gid: u32) -> libc::c_int {
+    // SAFETY: the call takes an integer and touches no memory; it changes only the calling
+    // thread's file system group id.
+    unsafe { libc::setfsgid(gid) }
+}
+
+/// `setfsuid(uid)` for the calling thread: the user id it had.
+fn set_fs_uid(uid: u32) -> libc::c_int {
+    // SAFETY: the call takes an integer and touches no memory; it changes only the calling
+    // thread's file system user id.
+    unsafe { libc::setfsuid(uid) }
 }
 
 /// The system calls of a job's file system, each made once with arguments that change

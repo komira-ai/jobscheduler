@@ -17,7 +17,11 @@
 //! 3. [`mount_overlay`] mounts an [`Overlay`] of such clones (and of an image's tree) as
 //!    the daemon: `nosuid`, `nodev`, and `noexec` when asked, with fixed options
 //!    ([`OVERLAY_OPTIONS`]).
-//! 4. [`unmount_all`] detaches the points it is given, deepest first; [`make_private_dir`]
+//! 4. [`bind_into`] binds host directories into the mount namespace of a container that is
+//!    already running (a warm sandbox): each is cloned and set here, then a thread of its own
+//!    enters the container's namespace and root, makes the mount points as the job's user
+//!    and attaches the clones there.
+//! 5. [`unmount_all`] detaches the points it is given, deepest first; [`make_private_dir`]
 //!    makes the directory that holds the points a private mount of its own, so that nothing
 //!    mounted below it propagates anywhere.
 //!
@@ -27,9 +31,12 @@
 //! Which paths a job may name, where the points are and who owns the overlay's directories
 //! are the caller's.
 
+mod inject;
 mod kernel;
 mod resolve;
 
+#[cfg(test)]
+mod inject_tests;
 #[cfg(test)]
 mod kernel_tests;
 #[cfg(test)]
@@ -43,6 +50,7 @@ use std::io;
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
+pub use inject::{EnterCalls, Inject, InjectError, InjectStep, bind_into};
 pub use kernel::{Kernel, probe};
 pub use resolve::{ResolveError, open_beneath, open_root};
 
