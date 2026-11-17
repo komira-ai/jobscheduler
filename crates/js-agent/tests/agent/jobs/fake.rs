@@ -17,7 +17,9 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use js_agent::cli_runtime::Mapping;
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
-use js_agent::lifecycle::{Clock, Exit, ProviderAnswer, ProviderCall, Providers, Runtime};
+#[cfg(target_os = "linux")]
+use js_agent::lifecycle::Exit;
+use js_agent::lifecycle::{Clock, ProviderAnswer, ProviderCall, Providers, Runtime};
 #[cfg(target_os = "linux")]
 use js_agent::lifecycle::{Found, RunHandle, RunSpec, RuntimeError, Status, label};
 #[cfg(target_os = "macos")]
@@ -49,6 +51,7 @@ impl Clock for TestClock {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct Container {
     run_id: String,
     #[cfg(target_os = "linux")]
@@ -58,14 +61,18 @@ struct Container {
 
 #[derive(Default)]
 struct State {
+    #[cfg(target_os = "linux")]
     containers: BTreeMap<String, Container>,
     #[cfg(target_os = "linux")]
     next: u32,
     /// Calls to fail: the name of the call and how many more times it fails.
+    #[cfg(target_os = "linux")]
     failing: BTreeMap<&'static str, u32>,
     /// `create_and_start` waits while this is set.
+    #[cfg(target_os = "linux")]
     hold_creates: bool,
     /// `list_labelled` waits while this is set.
+    #[cfg(target_os = "linux")]
     hold_lists: bool,
     /// The host view's process listing (the first thing a post-job check reads) waits while
     /// this is set.
@@ -73,16 +80,20 @@ struct State {
     /// How many process listings have begun, counted again from zero by [`World::hold_checks`].
     checking: u32,
     /// How many `create_and_start` calls have begun.
+    #[cfg(target_os = "linux")]
     entered: u32,
     /// The calls, in order: `create r1`, `stop r1`, `remove r1`, `list`.
+    #[cfg(target_os = "linux")]
     log: Vec<String>,
     /// The run id and isolation of each create, in order. Kept on Linux only: its one
     /// reader, `crun_gpu_hello`, is a Linux-only module.
     #[cfg(target_os = "linux")]
     isolations: Vec<(String, js_agent_wire::Isolation)>,
     /// The call that panics, once.
+    #[cfg(target_os = "linux")]
     panic_at: Option<&'static str>,
     /// The directory every container is in, as `<dir>/docker-<run>.scope`.
+    #[cfg(target_os = "linux")]
     cgroup_base: Option<PathBuf>,
 }
 
@@ -108,6 +119,7 @@ impl World {
     }
 
     /// The container of `run_id` exits with `code`.
+    #[cfg(target_os = "linux")]
     pub fn exit(&self, run_id: &str, code: i32) {
         let mut state = self.lock();
         let found = state.containers.values_mut().find(|c| c.run_id == run_id);
@@ -118,16 +130,19 @@ impl World {
     }
 
     /// Every container is in `<dir>/docker-<run>.scope`.
+    #[cfg(target_os = "linux")]
     pub fn set_cgroup_base(&self, dir: &str) {
         self.lock().cgroup_base = Some(dir.into());
     }
 
     /// The calls so far, in order.
+    #[cfg(target_os = "linux")]
     pub fn log(&self) -> Vec<String> {
         self.lock().log.clone()
     }
 
     /// How many containers exist.
+    #[cfg(target_os = "linux")]
     pub fn alive(&self) -> usize {
         self.lock().containers.len()
     }
@@ -140,6 +155,7 @@ impl World {
     }
 
     /// The run ids of the containers that were created, in order.
+    #[cfg(target_os = "linux")]
     pub fn created(&self) -> Vec<String> {
         let log = self.log();
         let runs = log.iter().filter_map(|call| call.strip_prefix("create "));
@@ -148,16 +164,19 @@ impl World {
 
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove` or
     /// `list`) fail.
+    #[cfg(target_os = "linux")]
     pub fn fail(&self, call: &'static str, times: u32) {
         self.lock().failing.insert(call, times);
     }
 
     /// Makes the next call named `call` panic.
+    #[cfg(target_os = "linux")]
     pub fn panic_at(&self, call: &'static str) {
         self.lock().panic_at = Some(call);
     }
 
     /// From now on `create_and_start` waits for [`World::release`].
+    #[cfg(target_os = "linux")]
     pub fn hold_creates(&self) {
         self.lock().hold_creates = true;
     }
@@ -170,6 +189,7 @@ impl World {
 
     /// From now on a post-job check waits, before it reads anything, for
     /// [`World::release`]; [`World::wait_checking`] counts the checks that began from here.
+    #[cfg(target_os = "linux")]
     pub fn hold_checks(&self) {
         let mut state = self.lock();
         state.hold_checks = true;
@@ -177,6 +197,7 @@ impl World {
     }
 
     /// Lets the held `create_and_start`, `list_labelled` and check calls go on.
+    #[cfg(target_os = "linux")]
     pub fn release(&self) {
         let mut state = self.lock();
         state.hold_creates = false;
@@ -187,6 +208,7 @@ impl World {
     }
 
     /// Waits until `n` `create_and_start` calls have begun.
+    #[cfg(target_os = "linux")]
     pub fn wait_entered(&self, n: u32) {
         let state = self.lock();
         let waited = self
@@ -201,6 +223,7 @@ impl World {
     }
 
     /// Waits until `n` post-job checks have begun since [`World::hold_checks`].
+    #[cfg(target_os = "linux")]
     pub fn wait_checking(&self, n: u32) {
         let state = self.lock();
         let waited = self
@@ -213,6 +236,7 @@ impl World {
 
     /// How many post-job checks have begun in this world (the agent's start takes a baseline
     /// of the host, which counts as one), or since [`World::hold_checks`].
+    #[cfg(target_os = "linux")]
     pub fn checked(&self) -> u32 {
         self.lock().checking
     }
@@ -419,8 +443,10 @@ pub enum Build {
     /// It builds.
     Fine,
     /// The runtime cannot be made.
+    #[cfg(target_os = "linux")]
     RuntimeFails,
     /// The runtime panics while it is made.
+    #[cfg(target_os = "linux")]
     Panics,
     /// The agent cannot see the host the checks read.
     HostNotSeen,
@@ -483,6 +509,7 @@ struct Files {
 
 impl SharedFiles {
     /// The file at `path` holds `text` from now on.
+    #[cfg(target_os = "linux")]
     pub fn set(&self, path: &str, text: &str) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.text.insert(path.to_owned(), text.to_owned());
@@ -582,6 +609,7 @@ impl FakeMachine {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn failing(build: Build) -> Self {
         Self {
             build,
@@ -597,7 +625,9 @@ impl Machine for FakeMachine {
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         match self.build {
+            #[cfg(target_os = "linux")]
             Build::RuntimeFails => Err("the engine does not answer".to_owned()),
+            #[cfg(target_os = "linux")]
             Build::Panics => panic!("the runtime panics while it is made"),
             Build::Fine | Build::HostNotSeen => {
                 // What opening the real runtime does for jobs mapped onto a range: the

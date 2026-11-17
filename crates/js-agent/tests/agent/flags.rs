@@ -3,6 +3,7 @@
 use js_agent::Dialer;
 use serde_json::{Value, json};
 
+#[cfg(target_os = "linux")]
 use crate::jobs::{private, user};
 use crate::support::{
     CountingSleeper, Highest, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
@@ -449,6 +450,7 @@ fn a_low_water_mark_without_a_scratch_root_is_refused() {
 /// ceiling accepted and silently ignored by a runtime that gives jobs no such network, and a
 /// hello that says `egress=open` on an operator's word.
 #[test]
+#[cfg(target_os = "linux")]
 fn egress_allow_list_is_refused_without_the_crun_runtime() {
     let host = linux_host();
     let dir = Scratch::new("flags-egress");
@@ -534,6 +536,7 @@ fn egress_allow_list_is_refused_without_the_crun_runtime() {
 
 /// The flags of an agent that runs the container engine over `dir`: a program that is never
 /// run, the agent's own user, and the roots.
+#[cfg(target_os = "linux")]
 fn container_flags(dir: &Scratch) -> Vec<String> {
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
     let (user, _, _) = user();

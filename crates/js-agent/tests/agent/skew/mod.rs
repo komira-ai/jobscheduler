@@ -23,6 +23,7 @@
 
 pub mod compare;
 pub mod previous_agent;
+#[cfg(target_os = "linux")]
 pub mod previous_server;
 pub mod record;
 
@@ -45,6 +46,7 @@ pub fn previous() -> Value {
 /// conversation [`record`] has (the other tests would then compare against a conversation
 /// that is not the one they run).
 #[test]
+#[cfg(target_os = "linux")]
 fn this_version_still_says_what_the_previous_release_said() {
     let transcript = record::record("skew-this-version");
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("skew");

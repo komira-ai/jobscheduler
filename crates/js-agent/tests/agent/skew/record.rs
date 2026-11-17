@@ -12,20 +12,29 @@
 //! agent wire").
 
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use js_agent::{Answer, Connector, Dialer, Handle, Transport};
-use js_client::{Client, ClientError};
+use js_client::Client;
+#[cfg(target_os = "linux")]
+use js_client::ClientError;
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
 use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 use tokio::runtime::{Builder, Runtime};
 
+#[cfg(target_os = "linux")]
 use crate::jobs::fake::FakeMachine;
+#[cfg(target_os = "linux")]
 use crate::jobs::{private, user};
+#[cfg(target_os = "linux")]
 use crate::server::Agent;
-use crate::support::{Ran, Scratch, linux_host};
+use crate::support::Scratch;
+#[cfg(target_os = "linux")]
+use crate::support::{Ran, linux_host};
 
 /// The wall time the server's clock is set to. The server reads time only through this
 /// clock, which no step of the conversation moves: the frames carry no time.
@@ -39,6 +48,7 @@ const CLIENT: &str = "client-token-S-0123456789-abcdefghijk";
 
 /// The stand-in the transcript holds for the session secret the server drew: the secret
 /// is random, so it is replaced wherever it appears.
+#[cfg(target_os = "linux")]
 pub const SESSION: &str = "previous-release-session";
 
 /// A pool that books a host as 4 CPUs and 4 GiB and asks that it runs Linux on `x86_64`,
@@ -71,6 +81,7 @@ fn job_body() -> Value {
 
 /// What happens between two of the agent's waits.
 #[derive(Clone, Copy, Debug)]
+#[cfg(target_os = "linux")]
 pub enum Act {
     /// The submitter queues the job ([`job_body`]).
     Submit,
@@ -83,6 +94,7 @@ pub enum Act {
 /// The conversation, after the hello: the job is queued, started by the next reply,
 /// reported running, cancelled, stopped by a reply, reported killed and acknowledged; the
 /// last heartbeat holds nothing. The agent is then asked to stop.
+#[cfg(target_os = "linux")]
 pub const SCENARIO: [Act; 8] = [
     Act::Submit,
     Act::Beat,
@@ -96,6 +108,7 @@ pub const SCENARIO: [Act; 8] = [
 
 /// The agent's flags beside `--server`, `--token-file` and `--pool`: a host id, and the
 /// container runtime of the job worker over files under `files`.
+#[cfg(target_os = "linux")]
 pub fn agent_flags(files: &Scratch) -> Vec<String> {
     let exec = files.write("docker", "#!/bin/sh\n", 0o755);
     let (user, _, _) = user();
@@ -121,6 +134,7 @@ pub fn agent_flags(files: &Scratch) -> Vec<String> {
 }
 
 /// The agent program on a thread of its own, its job worker and its machine.
+#[cfg(target_os = "linux")]
 pub struct Spawned {
     pub agent: Agent,
     pub worker: Handle,
@@ -130,6 +144,7 @@ pub struct Spawned {
 
 /// Starts the agent program against `url` through `connector` and waits for the wait after
 /// its hello.
+#[cfg(target_os = "linux")]
 pub fn spawn(
     name: &str,
     url: String,
@@ -161,6 +176,7 @@ pub fn spawn(
 /// then for the worker to be done with the reply; `act` does the submitter's part. Returns
 /// every wait the agent asked for (the first is the one after its hello) and what the
 /// program printed once it was asked to stop.
+#[cfg(target_os = "linux")]
 pub fn play(running: Spawned, mut act: impl FnMut(Act)) -> (Vec<Duration>, Ran) {
     let Spawned {
         agent,
@@ -289,6 +305,7 @@ impl Drop for Cell {
 }
 
 /// One post and its answer as a transcript holds them.
+#[cfg(target_os = "linux")]
 pub fn exchange(path: &str, body: &Value, answer: &Answer) -> Value {
     let mut server = json!({ "status": answer.status, "body": answer.body });
     if let Some(after) = answer.retry_after {
@@ -299,13 +316,16 @@ pub fn exchange(path: &str, body: &Value, answer: &Answer) -> Value {
 
 /// Writes down every post the agent makes through the real transport, and its answer.
 #[derive(Clone, Default)]
+#[cfg(target_os = "linux")]
 pub struct Tape(pub Arc<Mutex<Vec<Value>>>);
 
+#[cfg(target_os = "linux")]
 struct Taping {
     inner: Box<dyn Transport>,
     flow: Arc<Mutex<Vec<Value>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl Connector for Tape {
     fn connect(
         &self,
@@ -321,6 +341,7 @@ impl Connector for Tape {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Transport for Taping {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
         let answer = self.inner.post(path, body);
@@ -338,6 +359,7 @@ impl Transport for Taping {
 }
 
 /// Replaces every string equal to `from` in `value` with `to`.
+#[cfg(target_os = "linux")]
 pub fn replace_text(value: &mut Value, from: &str, to: &str) {
     match value {
         Value::String(text) if text == from => *text = to.to_owned(),
@@ -355,6 +377,7 @@ pub fn replace_text(value: &mut Value, from: &str, to: &str) {
 /// server's refusal (asserted: status 400, `unsupported-protocol`) of a hello that speaks
 /// majors 2 to 3 only, majors above the one server and agent speak (built from the agent's own
 /// hello). The session secret is replaced by [`SESSION`].
+#[cfg(target_os = "linux")]
 pub fn record(name: &str) -> Value {
     let cell = Cell::start(name);
     let tape = Tape::default();

@@ -3,6 +3,11 @@
 //! lease server in the test process. The container runtime is in memory and the clock is
 //! moved by the test; the worker is a real thread, and every wait on it is for an event
 //! (an order done, a call begun) with a hang guard, never for a time.
+//!
+//! The container runtime is the Linux build's alone (crun, or the container engine it falls
+//! back to with `--allow-container-engine`), so the modules that run jobs through it are
+//! compiled on Linux only; the macOS build runs native jobs, whose worker is tested in
+//! `native`.
 
 mod answers;
 #[cfg(target_os = "linux")]
@@ -27,6 +32,7 @@ mod crun_machine;
 mod crun_roots;
 #[cfg(target_os = "linux")]
 mod drain;
+#[cfg(target_os = "linux")]
 mod e2e;
 #[cfg(target_os = "linux")]
 mod ends;
@@ -37,20 +43,24 @@ mod exclusive;
 pub mod fake;
 #[cfg(target_os = "linux")]
 mod files_flags;
+#[cfg(target_os = "linux")]
 mod per_job;
 #[cfg(target_os = "linux")]
 mod providers;
+#[cfg(target_os = "linux")]
 mod quiesce;
 #[cfg(target_os = "linux")]
 mod quota_start;
 #[cfg(target_os = "linux")]
 mod session;
+#[cfg(target_os = "linux")]
 mod silence;
 mod system;
 #[cfg(target_os = "linux")]
 mod unmounted;
 #[cfg(target_os = "linux")]
 mod usage;
+#[cfg(target_os = "linux")]
 mod worker;
 
 use std::fs;
@@ -63,16 +73,23 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use js_agent::Rescue;
 #[cfg(target_os = "linux")]
+use js_agent::Worker;
+#[cfg(target_os = "linux")]
 use js_agent::cli_runtime::Settings;
 use js_agent::lifecycle::{
     Capacity, Config, FilesRoot, MountProviders, MountRoots, ScratchRoot, StateRoot,
 };
 #[cfg(target_os = "linux")]
 use js_agent::usage::Outbox;
-use js_agent::{Backend, Plan, Platform, Worker};
-use js_agent_wire::{Command, HeartbeatReply};
-use serde_json::{Value, json};
+use js_agent::{Backend, Plan, Platform};
+#[cfg(target_os = "linux")]
+use js_agent_wire::Command;
+use js_agent_wire::HeartbeatReply;
+#[cfg(target_os = "linux")]
+use serde_json::Value;
+use serde_json::json;
 
+#[cfg(target_os = "linux")]
 use crate::lifecycle::job;
 use crate::support::Scratch;
 use fake::FakeMachine;
@@ -81,6 +98,7 @@ use fake::FakeMachine;
 pub const STEP_NEVER: Duration = Duration::from_secs(3600);
 
 /// The user containers run as, and the agent's own `(uid, gid)`.
+#[cfg(target_os = "linux")]
 pub fn user() -> (String, u32, u32) {
     let uid = rustix::process::geteuid().as_raw();
     let gid = rustix::process::getegid().as_raw();
@@ -213,6 +231,7 @@ pub fn rescue(dir: &Scratch, machine: &FakeMachine) -> Rescue {
 }
 
 /// A worker over `machine` that steps only when asked.
+#[cfg(target_os = "linux")]
 pub fn start(dir: &Scratch, machine: &FakeMachine) -> Worker {
     match Worker::start(plan(dir, machine, STEP_NEVER)) {
         Ok(worker) => worker,
@@ -221,6 +240,7 @@ pub fn start(dir: &Scratch, machine: &FakeMachine) -> Worker {
 }
 
 /// A reply that starts these runs.
+#[cfg(target_os = "linux")]
 pub fn starts(runs: &[&str]) -> HeartbeatReply {
     let commands = runs
         .iter()
@@ -233,6 +253,7 @@ pub fn starts(runs: &[&str]) -> HeartbeatReply {
 }
 
 /// A reply that stops this run.
+#[cfg(target_os = "linux")]
 pub fn stops(run: &str) -> HeartbeatReply {
     HeartbeatReply {
         commands: vec![Command::Stop {
@@ -249,6 +270,7 @@ pub fn acks(run: &str, verdict: &str) -> HeartbeatReply {
 }
 
 /// The JSON body of a heartbeat answer that starts these runs.
+#[cfg(target_os = "linux")]
 pub fn start_answer(runs: &[&str]) -> Value {
     serde_json::to_value(starts(runs)).unwrap()
 }
