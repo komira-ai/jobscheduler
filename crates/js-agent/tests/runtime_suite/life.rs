@@ -150,7 +150,7 @@ fn names(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .map(|event| match event {
-            Event::Started { run_id } => format!("started {run_id}"),
+            Event::Started { run_id, .. } => format!("started {run_id}"),
             Event::Refused { run_id, code, .. } => format!("refused {run_id} {code}"),
             Event::ResultReady { run_id } => format!("result {run_id}"),
             other => format!("{other:?}"),
@@ -241,23 +241,22 @@ pub fn the_wall_time_kills_a_job_that_ignores_sigterm(s: &mut dyn Subject) {
     assert_eq!(outcome, Outcome::TimedOut);
 }
 
-/// Proves the lifecycle asks the runtime whether its network is as told before every
-/// contained create, not once: two starts give `egress, create` twice in that order, and a
-/// start whose check fails is refused `egress-unchecked` and creates nothing. Catches a
-/// check made once at start-up, after the create, or ignored.
-pub fn egress_is_checked_before_every_create(s: &mut dyn Subject) {
+/// Proves the lifecycle never asks the runtime whether its firewall is as told before the
+/// create of a job whose network is `none` (its namespace has loopback alone and nothing of
+/// the firewall is its): two starts give `create` twice and no check, and a third starts
+/// although the check would fail. Catches a `none` job that pays for, or is refused by, a
+/// firewall it does not use. The check before each create of a wired job is the
+/// lifecycle's own test (`lifecycle::network`), on a runtime whose ceiling carries one.
+pub fn a_none_job_is_created_without_an_egress_check(s: &mut dyn Subject) {
     s.prepared();
     let mut rig = Rig::new(s, LONG);
-    for run in ["r1", "r2"] {
+    rig.egress_fails.set(true);
+    for run in ["r1", "r2", "r3"] {
         let spec = job(s, run, Program::Hold, 600_000);
         assert_eq!(rig.start(spec), [format!("started {run}")]);
         s.after(run, Program::Hold);
     }
-    assert_eq!(rig.taken(), ["egress", "create r1", "egress", "create r2"]);
-    rig.egress_fails.set(true);
-    let spec = job(s, "r3", Program::Hold, 600_000);
-    assert_eq!(rig.start(spec), ["refused r3 egress-unchecked"]);
-    assert_eq!(rig.taken(), ["egress"]);
+    assert_eq!(rig.taken(), ["create r1", "create r2", "create r3"]);
     clean_up(s);
 }
 

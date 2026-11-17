@@ -132,8 +132,8 @@
 //! # Network
 //!
 //! A `none` job has loopback only. Under `--egress allow-list` or `open` the runtime checks the
-//! firewall ([`EgressPort`]) before every create and wires a job that asked for a network after
-//! `Oci::start_supervised` (its init holds it until the route), with a forward from the host
+//! firewall ([`EgressPort`]) before every wired create and wires a job that asked for a network
+//! after `Oci::start_supervised` (its init holds it until the route), with a forward from the host
 //! for each port it declared, releasing it when the run ends or goes. A runtime with such an
 //! egress adopts no run that may still run: the egress removes the wiring of a previous process
 //! when it starts, so such a lease an earlier agent left is removed. A run that ended while no
@@ -252,7 +252,7 @@ use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Whereabouts, check_run_env, label,
+    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, check_run_env, label,
 };
 use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger, Supervisor};
@@ -312,6 +312,8 @@ struct Run {
     logs: RunLogs,
     /// What its file system cloned, for the check after it ends; none without host paths.
     fs: Option<rootfs::RunFs>,
+    /// The steps of its start, until [`Runtime::start_steps`] takes them.
+    marks: make::Marks,
 }
 
 /// A container runtime over `crun`.
@@ -606,15 +608,17 @@ impl CrunRuntime {
         // image's pin among them: the next start removes a pin a dead process left, once it
         // has removed the lease's container.
         let entry = self.entry_for(spec, &name, (&labels, &image.digest));
+        let mut marks = vec![("begin", now)];
         self.ledger
             .record(&entry)
             .map_err(|why| Fault::step("record the lease's labels", &why))?;
+        self.mark(&mut marks, "recorded");
         let (container, lease, cgroup) = match self.make_recorded(
             spec,
             (given, &image),
             (args, assembled.as_ref()),
-            &name,
-            gpu,
+            (&name, gpu),
+            &mut marks,
         ) {
             Ok(made) => made,
             Err(fault) => {
@@ -645,6 +649,7 @@ impl CrunRuntime {
                 entry,
                 logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
                 fs: assembled.map(|made| rootfs::RunFs::new(made.sources)),
+                marks,
             },
         );
         Ok(name)
@@ -670,6 +675,7 @@ impl CrunRuntime {
             .oci
             .start_supervised(&run.spec, run.logs.file_cap(self.logs.as_ref()))
             .map_err(|why| RuntimeError::new(format!("start crun: {why}")))?;
+        run.marks.push(("supervised", (self.hooks.now_ms)()));
         // The capture made both files before the supervisor said it was ready.
         let files = (stdout_path(&run.lease.dir), stderr_path(&run.lease.dir));
         run.logs
@@ -692,6 +698,7 @@ impl CrunRuntime {
         // write it leaves the run started, for the caller to remove.
         run.entry = run.entry.running(now, Supervisor::of(started.id()));
         let recorded = named.and(self.ledger.rewrite(&run.entry));
+        run.marks.push(("running", (self.hooks.now_ms)()));
         run.state = State::Running {
             run: started,
             since_ms: now,
@@ -737,6 +744,17 @@ impl CrunRuntime {
 impl Runtime for CrunRuntime {
     fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
         self.pulls.prepare(image, waited)
+    }
+
+    fn set_wake(&mut self, wake: Wake) {
+        self.pulls.set_wake(wake.clone());
+        self.fs.iter_mut().for_each(|fs| fs.set_wake(wake.clone()));
+    }
+
+    fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
+        let run = self.runs.get_mut(&id.0);
+        run.map(|run| std::mem::take(&mut run.marks))
+            .unwrap_or_default()
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {

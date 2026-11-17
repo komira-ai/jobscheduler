@@ -280,7 +280,7 @@ macro_rules! conformance {
             a_runtime_without_gpus_says_so_and_refuses_one,
             the_wall_time_ends_a_job_with_sigterm,
             the_wall_time_kills_a_job_that_ignores_sigterm,
-            egress_is_checked_before_every_create,
+            a_none_job_is_created_without_an_egress_check,
             a_gpu_request_is_refused_and_nothing_is_created,
         }
     };

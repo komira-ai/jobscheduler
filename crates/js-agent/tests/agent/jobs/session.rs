@@ -110,8 +110,15 @@ fn a_new_epoch_keeps_the_worker_and_lists_its_runs_in_the_hello() {
 }
 
 /// Asserts that the commands of an accepted reply reach the worker in the order the reply
-/// lists them, and that what the worker did is printable by the session thread. It catches
-/// a reply that is not handed over, and one handed over out of order.
+/// lists them, and that what the worker did is printable by the session thread: each start
+/// is logged with its timeline (the steps of the lifecycle on the worker's clock, which the
+/// test does not move, and none of the in-memory runtime's). It catches a reply that is not
+/// handed over, one handed over out of order, and a start logged without its timeline.
+/// The line of the start of `r1`, at the worker's clock's origin.
+const STARTED_R1: &str = "job: Started { run_id: \"r1\", timeline: StartTimeline { \
+    received_ms: 0, steps: [(\"taken\", 0), (\"admitted\", 0), (\"ready\", 0), (\"dirs\", 0), \
+    (\"created\", 0)], runtime: [] } }";
+
 #[test]
 fn the_commands_of_a_reply_reach_the_worker_in_order() {
     let dir = Scratch::new("jobs-session-commands");
@@ -129,11 +136,7 @@ fn the_commands_of_a_reply_reach_the_worker_in_order() {
 
     assert_eq!(machine.world.created(), ["r2", "r1"]);
     let lines = session.job_lines();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "job: Started { run_id: \"r1\" }")
-    );
+    assert!(lines.iter().any(|line| line == STARTED_R1), "{lines:#?}");
     assert!(session.job_lines().is_empty(), "the lines are taken once");
 }
 

@@ -238,6 +238,60 @@ fn a_held_call_stays_pending_then_its_answer_is_handed_over_once_then_it_is_sent
     assert_eq!(rig.fake.prepared().len(), 1, "a prepare is idempotent");
 }
 
+/// Asserts that a client given a wake rings it when a call's answer is in, and only then:
+/// nothing rings while the provider holds the call, one ring comes once it lets it go, and
+/// the answer is there to be handed over when it does. It catches a start that waits on its
+/// provider until the lifecycle's next step though the answer is in.
+#[test]
+fn an_answer_that_comes_in_rings_the_clients_wake() {
+    let mut rig = rig("pc-wake");
+    let (rung, rings) = std::sync::mpsc::channel::<()>();
+    let rung = std::sync::Mutex::new(rung);
+    rig.client.set_wake(js_agent::lifecycle::Wake::new(move || {
+        let _ = rung.lock().map(|rung| rung.send(()));
+    }));
+    let call = prepare("r1", 0, "k", MountMode::ReadOnly);
+    rig.fake.hold(Kind::Prepare);
+    assert_eq!(rig.client.ask(NAME, &call), ProviderAnswer::Pending);
+    assert!(rig.fake.wait_parked(1, GUARD));
+    assert!(rings.try_recv().is_err(), "rung while the call is held");
+    rig.fake.unhold(Kind::Prepare);
+    rings
+        .recv_timeout(GUARD)
+        .expect("rung once the answer was in");
+    assert_eq!(rig.client.ask(NAME, &call), ProviderAnswer::Done(None));
+    assert!(rings.try_recv().is_err(), "one ring for the one answer");
+}
+
+/// Asserts that a call the provider fails rings nothing and the same call answered done after
+/// it rings once: of a release that failed and then succeeded, one ring in all. It catches a
+/// client that rings for a failure, so a lifecycle that asks a failed call again at every step
+/// would ask a provider that fails at once in a loop with no pause.
+#[test]
+fn a_failed_call_rings_nothing_and_a_done_one_rings_once() {
+    let mut rig = rig("pc-wake-fail");
+    let (rung, rings) = std::sync::mpsc::channel::<()>();
+    let rung = std::sync::Mutex::new(rung);
+    rig.client.set_wake(js_agent::lifecycle::Wake::new(move || {
+        let _ = rung.lock().map(|rung| rung.send(()));
+    }));
+    rig.fake.fail_release(1);
+    let call = release("r1", 0);
+    let failed = settle(&mut rig.client, NAME, &call);
+    assert!(
+        matches!(failed, ProviderAnswer::Unavailable(_)),
+        "{failed:?}"
+    );
+    assert_eq!(
+        settle(&mut rig.client, NAME, &call),
+        ProviderAnswer::Done(None)
+    );
+    rings
+        .recv_timeout(GUARD)
+        .expect("rung once the release was done");
+    assert!(rings.try_recv().is_err(), "the failure rang too");
+}
+
 /// Asserts that two calls with different keys (two indexes of one run, and a prepare and a
 /// mount of one source) are each sent and each answered, so one call's answer is never
 /// handed to another's ask. It catches a table keyed by less than the kind, the run and the
