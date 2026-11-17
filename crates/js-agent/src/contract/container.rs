@@ -369,8 +369,9 @@ mod tests {
         let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "report-providers");
         let socket = |name: &str| (name.to_owned(), dir.path().join(format!("{name}.sock")));
         let given = [socket("tierstore"), socket("scratch-cache")];
-        let providers = MountProviders::from_flags(&given, &[], None, std::path::Path::new("/nonexistent"))
-            .expect("sound flags");
+        let providers =
+            MountProviders::from_flags(&given, &[], None, std::path::Path::new("/nonexistent"))
+                .expect("sound flags");
         let mut layered = reported(&Config::none());
         report_mount_providers(&mut layered, &providers, true);
         let named = |hello: &Hello| -> Vec<String> {
