@@ -6,9 +6,11 @@
 //! The job is an apt job in everything but the verb: it holds the role of the environment
 //! `apt-publish` (assumed by one step, through OIDC) and `id-token: write`, no signing key and no
 //! secret, and runs the `xtask` that `deploy-tool` built, so it compiles nothing.
-//! - It needs `plan`, `deploy-tool` and `promote-macos` (so the three beta jobs and `publish`
-//!   passed), runs only for a push to main on the plan's release, and holds `contents: read` and
-//!   `id-token: write`.
+//! - It needs `plan`, `deploy-tool`, `publish` and `beta-macos-pkg`: it runs once the package job
+//!   has ended, passed or failed (`!cancelled()`), and only when `publish` and `deploy-tool`
+//!   succeeded, so it waits for no test of the beta stage and a failed package does not stop it.
+//!   It runs only for a push to main on the plan's release ([`PKG_IF`]), and holds
+//!   `contents: read` and `id-token: write`.
 //! - Its first steps download the tool and make it executable; the gate follows, with the two
 //!   settings the upload needs (the role and the bucket), and every step after it runs only when
 //!   the gate said `enabled=true`.
@@ -18,16 +20,20 @@
 //! - The role is assumed before the upload, which is the one command that writes
 //!   (`channels pkg upload`, which no other job runs).
 
-use super::apt::{GATE_IF, RELEASE_IF, ROLE};
+use super::apt::{GATE_IF, ROLE};
 use super::support::{at, entries, entry, job, mentions, names, permissions, steps};
 use super::yaml::Node;
 
 /// The job's name.
 pub const PKG_JOB: &str = "pkg-upload";
 
-/// The jobs it waits for: the plan, the tool, and the promotion of the macOS archives, which
-/// itself waits for the three beta jobs and `publish`.
-pub const NEEDS: [&str; 3] = ["deploy-tool", "plan", "promote-macos"];
+/// The jobs it waits for: the plan, the tool, `publish`, and the job that builds and signs the
+/// macOS package (whatever its result).
+pub const NEEDS: [&str; 4] = ["beta-macos-pkg", "deploy-tool", "plan", "publish"];
+
+/// The `if:` of the job: it runs after the package job ended, passed or not, for a push to main
+/// on the plan's release, once `publish` and `deploy-tool` succeeded.
+pub const PKG_IF: &str = "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' }}";
 
 /// The `if:` of the steps that need the signed package.
 pub const SIGNED_IF: &str =
@@ -63,8 +69,8 @@ pub fn pkg_upload_problems(doc: &Node) -> Vec<String> {
     if names(entry(found, "needs")) != NEEDS {
         problems.push(format!("{PKG_JOB}: needs are not {NEEDS:?}"));
     }
-    if at(found, &["if"]) != Some(RELEASE_IF) {
-        problems.push(format!("{PKG_JOB}: `if` is not {RELEASE_IF}"));
+    if at(found, &["if"]) != Some(PKG_IF) {
+        problems.push(format!("{PKG_JOB}: `if` is not {PKG_IF}"));
     }
     if at(found, &["environment"]) != Some("apt-publish") {
         problems.push(format!("{PKG_JOB}: environment is not apt-publish"));

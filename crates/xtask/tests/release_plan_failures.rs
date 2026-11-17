@@ -26,7 +26,7 @@ fn fake_git(dir: &std::path::Path, name: &str, needle: &str, reply: &str) -> Pat
 
 /// Catches a plan that carries on, or reports success, when a command it depends on
 /// fails: every command in turn (the checkout, the tags merged into the head, the tags
-/// containing it, the tag's commit, the diff and the workspace metadata) failing is an error naming the command, and one that prints bytes
+/// containing it, the tag's commit, the commit count, the diff and the workspace metadata) failing is an error naming the command, and one that prints bytes
 /// that are not text is refused.
 #[test]
 fn every_failing_command_fails_the_plan() {
@@ -42,7 +42,8 @@ fn every_failing_command_fails_the_plan() {
         "rev-parse",
         "--merged",
         "--contains",
-        "rev-list",
+        "rev-list -n 1",
+        "--count",
         "diff",
         "ls-files",
     ] {
@@ -74,6 +75,38 @@ fn every_failing_command_fails_the_plan() {
         assert!(
             matches!(plan::run(&args), Err(Error::NotUtf8 { .. })),
             "{needle}"
+        );
+    }
+
+    for (name, printed) in [
+        ("words", "many"),
+        ("empty", ""),
+        ("signed", "+2"),
+        ("huge", "99999999999999999999"),
+    ] {
+        let mut args = repo.plan();
+        args.git = fake_git(
+            &bin,
+            &format!("git-count-{name}"),
+            "--count",
+            &format!("echo '{printed}'; exit 0"),
+        );
+        let Err(Error::NotACount { command, got }) = plan::run(&args) else {
+            panic!("a count of {printed:?} should fail the plan")
+        };
+        assert!(
+            command.ends_with(
+                "rev-list --count --first-parent v0.1.0..{}"
+                    .replace("{}", &repo.head())
+                    .as_str()
+            ),
+            "{command}"
+        );
+        assert_eq!(got, printed);
+        assert!(
+            Error::NotACount { command, got }
+                .to_string()
+                .contains("not a count")
         );
     }
 

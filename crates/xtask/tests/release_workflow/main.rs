@@ -1,10 +1,13 @@
 //! The rules the release workflow keeps (the comments at the top of
 //! `.github/workflows/release.yml` and of `.github/workflows/artifacts.yml`, which it calls to
 //! build and sign the files), read from the files as text: actions pinned to commit SHAs, no
-//! permission at the top, hosted runners, a push to main as the only trigger that releases, a
-//! read-only wait for `ci`, `id-token: write` and `contents: write` only where they are meant,
-//! every attestation signed by artifacts.yml, the apt jobs' permissions, and the gamma step's
-//! shape. The shape of each apt job is held by `tests/apt_workflow`.
+//! permission at the top, hosted runners, a push to main as the only trigger that releases, no
+//! wait for `ci` before the release (`plan` needs nothing, only the two reports need `ci-passed`)
+//! and no concurrency group, the read-only wait for `ci`, `id-token: write` and `contents: write`
+//! only where they are meant, every attestation signed by artifacts.yml, the apt jobs'
+//! permissions, and the gamma step's shape. The fast lane's jobs (`unit-tests`, `turn`,
+//! `desired`, `deployed`, `release-red`, `release-green`) are held by `fast_lane`; the shape of
+//! each apt job by `tests/apt_workflow`.
 
 use std::path::Path;
 
@@ -12,6 +15,7 @@ mod apt;
 mod artifacts;
 mod calls;
 mod debs;
+mod fast_lane;
 mod images;
 mod secrets;
 
@@ -126,9 +130,9 @@ fn actions_are_pinned_and_the_top_grants_nothing() {
 }
 
 /// Asserts that a push to main is the only trigger that releases (the other is a pull
-/// request, whose dry run is `plan` alone and builds nothing), that the run's commit is its own `github.sha`, and that every job
-/// that publishes or deploys, and the wait and the plan, tests for a push to main of its own
-/// condition; the call of artifacts.yml follows `plan`'s output (its jobs that attest test for
+/// request, whose dry run is `plan` alone and builds nothing), that the run's commit is its own
+/// `github.sha`, and that every job that publishes, deploys or reports, and the wait, the plan
+/// and the unit tests, tests for a push to main of its own condition; the call of artifacts.yml follows `plan`'s output (its jobs that attest test for
 /// a push to main themselves: `artifacts::attest_and_verify_run_only_for_a_push_to_main`).
 #[test]
 fn a_push_to_main_is_the_only_releasing_trigger() {
@@ -162,6 +166,12 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     let mut gated: Vec<String> = [
         "ci-passed",
         "plan",
+        "unit-tests",
+        "turn",
+        "desired",
+        "deployed",
+        "release-red",
+        "release-green",
         "publish",
         "deploy-tool",
         "gamma",
@@ -184,23 +194,13 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         assert_eq!(ifs.len(), 1, "{name}");
         assert!(ifs[0].contains(push), "{name}: {}", ifs[0]);
     }
-    // The dry run: the wait is skipped on a pull request and `plan` runs anyway.
+    // The dry run: `plan` runs for a pull request too (`fast_lane` holds its condition).
     let plan = job(&jobs, "plan").join("\n");
-    assert!(
-        plan.contains("github.event_name == 'pull_request'"),
-        "{plan}"
-    );
-    assert!(
-        plan.contains("needs.ci-passed.result == 'success'"),
-        "{plan}"
-    );
+    assert!(plan.contains("github.event_name == 'pull_request'"));
     assert!(!plan.contains("--tip"));
-    // One group for the runs that release, never cancelled.
-    assert!(text.contains("group: release-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}"));
-    assert!(text.contains("cancel-in-progress: false"));
 }
 
-/// Asserts the wait for `ci`: a job with exactly `actions: read` and nothing else, no
+/// Asserts the wait for `ci` (which reports, and gates nothing: `fast_lane`): a job with exactly `actions: read` and nothing else, no
 /// checkout (no repository code runs in it), a four-hour limit, a poll every 120 s of the
 /// `ci` run of this commit's push and of its jobs (all of them: ci.yml has no macOS job, the
 /// platforms other than Linux x86_64 are the release's beta stage), and a failure naming the
@@ -235,7 +235,7 @@ fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     assert!(wait.contains(r#"select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped") | "\(.name)=\(.conclusion)""#));
     // Any other job that failed, was cancelled or timed out fails the release at once,
     // naming the jobs and the run, before the pass is considered.
-    assert!(wait.contains("              if [ -n \"$bad\" ]; then\n                echo \"::error::ci did not pass for $COMMIT: $bad, $url; nothing is released\"\n                exit 1\n              fi\n"));
+    assert!(wait.contains("              if [ -n \"$bad\" ]; then\n                echo \"::error::ci did not pass for $COMMIT: $bad, $url; release-red reports it\"\n                exit 1\n              fi\n"));
     // All the jobs finished and none bad passes (exit 0); the pass comes after the failure
     // check.
     assert!(wait.contains("              if [ \"$total\" -gt 0 ] && [ \"$pending\" -eq 0 ]; then\n                echo \"ci passed: $url\"\n                exit 0\n              fi\n"));
@@ -244,7 +244,7 @@ fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
         "{wait}"
     );
     // A finished run with no job is an error, not a pass.
-    assert!(wait.contains("              if [ \"$status\" = completed ]; then\n                echo \"::error::ci did not pass for $COMMIT: no job in the run, $url; nothing is released\"\n                exit 1\n              fi\n"));
+    assert!(wait.contains("              if [ \"$status\" = completed ]; then\n                echo \"::error::ci did not pass for $COMMIT: no job in the run, $url; release-red reports it\"\n                exit 1\n              fi\n"));
     // Otherwise the wait goes on, two minutes at a time.
     assert!(
         wait.contains("echo \"ci is $status: $url ($pending of $total jobs still to finish)\"\n")
@@ -252,20 +252,18 @@ fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     assert!(wait.contains("            sleep 120\n          done"));
     // Ten failed reads in a row (of the runs or of the jobs) fail the job; a good read
     // starts the count again.
-    assert!(wait.contains("failed=$((failed + 1))\n              if [ \"$failed\" -ge 10 ]; then\n                echo \"::error::reading the ci runs of $COMMIT failed $failed times in a row; nothing is released\"\n                exit 1\n              fi\n"));
+    assert!(wait.contains("failed=$((failed + 1))\n              if [ \"$failed\" -ge 10 ]; then\n                echo \"::error::reading the ci runs of $COMMIT failed $failed times in a row; release-red reports it\"\n                exit 1\n              fi\n"));
     assert!(wait.contains(
         "then\n              failed=0\n            else\n              failed=$((failed + 1))\n"
     ));
     assert!(wait.contains("              run=\"\"\n            fi\n"));
-    // Nothing is planned before the wait has passed.
-    assert!(job(&jobs, "plan").join("\n").contains("needs: [ci-passed]"));
+    assert!(!wait.contains("nothing is released"), "{wait}");
 }
 
 /// Asserts that publish, deploy-tool, gamma and the control-plane deploy run only on the plan's
-/// word that a release is
-/// made, and never with a status function that would run them after a failed or skipped job,
-/// and that publish needs the call of artifacts.yml (so a failed attest or verify there stops
-/// it).
+/// word that a release is made, and never with a status function that would run them after a
+/// failed or skipped job, and that publish needs the call of artifacts.yml (so a failed attest
+/// or verify there stops it), the unit tests and the turn (`fast_lane`).
 #[test]
 fn the_release_jobs_need_the_plans_release_and_no_status_function() {
     let text = workflow();
@@ -273,7 +271,7 @@ fn the_release_jobs_need_the_plans_release_and_no_status_function() {
     assert!(
         job(&all, "publish")
             .iter()
-            .any(|l| l == "    needs: [plan, artifacts]")
+            .any(|l| l == "    needs: [plan, artifacts, unit-tests, turn]")
     );
     for name in [
         "publish",
