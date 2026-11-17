@@ -5,7 +5,7 @@
 //! clock and never waits.
 
 use std::collections::VecDeque;
-use std::io::Read as _;
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -69,8 +69,10 @@ impl Transport for Port {
 
 /// One thing to put.
 enum Item {
-    /// An output file, and its bytes with their digest once read.
-    File(Gotten, Option<(Vec<u8>, String)>),
+    /// An output file, and its length and digest once read: each try reads the bytes again
+    /// from the open file, so no more than one try's bytes are held, and a file whose bytes
+    /// changed since the first read is failed `read`.
+    File(Gotten, Option<(u64, String)>),
     /// The manifest, last.
     Manifest,
 }
@@ -154,9 +156,7 @@ impl Upload {
                 let at = now.checked_add(self.limits.backoff_first).unwrap_or(now);
                 return Next::Sleep(at.min(self.deadline));
             };
-            let Some((key, body)) = self.next_put() else {
-                return Next::Done;
-            };
+            let (key, body) = self.next_put();
             match self.put(&key, body, credential) {
                 Ok(()) => {
                     self.failures = 0;
@@ -183,30 +183,31 @@ impl Upload {
         }
     }
 
-    /// The key and the bytes of the next put, reading the next file's bytes once; a file that
-    /// cannot be read is failed and the next taken. `None` when nothing is left.
-    fn next_put(&mut self) -> Option<(String, Vec<u8>)> {
+    /// The key and the bytes of the next put, read from the next file (its length and digest
+    /// kept at the first read and held to at each later one); a file that cannot be read, or
+    /// that changed, is failed and the next taken. The manifest is last, so something is always
+    /// left while the upload goes on.
+    fn next_put(&mut self) -> (String, Vec<u8>) {
         loop {
             let max = self.limits.max_put;
-            match self.items.front_mut()? {
-                Item::Manifest => {
-                    let key = self.prefix.outputs_manifest_key();
-                    return Some((key, self.manifest.encode()));
+            let Some(Item::File(gotten, seen)) = self.items.front_mut() else {
+                return (self.prefix.outputs_manifest_key(), self.manifest.encode());
+            };
+            let read = bytes(gotten, max).and_then(|body| {
+                let len = u64::try_from(body.len()).unwrap_or(u64::MAX);
+                let now = (len, hex(&Sha256::digest(&body)));
+                match seen.get_or_insert_with(|| now.clone()) == &now {
+                    true => Ok(body),
+                    false => Err(READ),
                 }
-                Item::File(gotten, Some((body, _))) => {
-                    return Some((self.prefix.output_key(&gotten.path), body.clone()));
+            });
+            match read {
+                Ok(body) => return (self.prefix.output_key(&gotten.path), body),
+                Err(why) => {
+                    let path = gotten.path.to_string();
+                    self.manifest.failed.push(failure(&path, why));
+                    self.items.pop_front();
                 }
-                Item::File(gotten, read @ None) => match bytes(gotten, max) {
-                    Ok(body) => {
-                        let sha256 = hex(&Sha256::digest(&body));
-                        *read = Some((body, sha256));
-                    }
-                    Err(why) => {
-                        let path = gotten.path.to_string();
-                        self.manifest.failed.push(failure(&path, why));
-                        self.items.pop_front();
-                    }
-                },
             }
         }
     }
@@ -215,8 +216,7 @@ impl Upload {
     /// manifest, so the upload is over.
     fn done_one(&mut self) -> bool {
         match self.items.pop_front() {
-            Some(Item::File(gotten, Some((body, sha256)))) => {
-                let bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
+            Some(Item::File(gotten, Some((bytes, sha256)))) => {
                 tracing::debug!(path = %gotten.path, bytes, "job outputs: put");
                 self.manifest.files.push(OutputFile {
                     path: gotten.path.to_string(),
@@ -298,12 +298,15 @@ impl Upload {
     }
 }
 
-/// The bytes of `gotten`, at most `max`: a file read short or over `max` is refused.
+/// The bytes of `gotten` from its first byte, at most `max`: a file that cannot be read or is
+/// over `max` is refused.
 fn bytes(gotten: &mut Gotten, max: u64) -> Result<Vec<u8>, &'static str> {
     let mut body = Vec::new();
-    let read = (&gotten.file)
-        .take(max.saturating_add(1))
-        .read_to_end(&mut body);
+    let read = (&gotten.file).seek(SeekFrom::Start(0)).and_then(|_| {
+        (&gotten.file)
+            .take(max.saturating_add(1))
+            .read_to_end(&mut body)
+    });
     match read {
         Err(_) => Err(READ),
         Ok(_) if u64::try_from(body.len()).unwrap_or(u64::MAX) > max => Err(TOO_LARGE),

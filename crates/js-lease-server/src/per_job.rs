@@ -95,6 +95,9 @@ pub(crate) struct BeatContext<'a> {
     /// Whether the host's agent reported `layered-rootfs=true` ([`js_caps::LAYERED_ROOTFS`]); a
     /// start with layers, mounts or host ports is built only for one that did.
     pub(crate) layered_rootfs: bool,
+    /// Whether the host's agent reported `job-outputs=true` ([`js_caps::JOB_OUTPUTS`]); a start
+    /// whose job declares outputs is built only for one that did.
+    pub(crate) job_outputs: bool,
     /// The keys `mount-provider.<name>` the host's agent reported with the value `true`
     /// ([`js_caps::mount_provider_key`]); a start whose job requires one of them is built only
     /// for a host that reported it.

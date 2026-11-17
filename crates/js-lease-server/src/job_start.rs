@@ -58,6 +58,10 @@ pub(crate) enum Unsendable {
     /// sources would not read the source, so it is never sent such a job. It names the key.
     #[error("the job requires {0} and the host does not report it")]
     MountProviderNotReported(String),
+    /// The job declares outputs and the host's hello did not report `job-outputs`; an agent
+    /// that does not report it would ignore them, so it is never sent such a job.
+    #[error("the job declares outputs and the host does not report job-outputs")]
+    OutputsNotReported,
     /// The job declares outputs and the start has no log sink to put them under: the server
     /// has no object store, or the host does not upload live logs (`docs/design/job-outputs.md`).
     /// The job's outputs could never be read back, so it is not started there.
@@ -107,8 +111,9 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 /// requires a `mount-provider.<name>` capability is sent only to a host whose agent reported
 /// each such key ([`BeatContext::mount_providers`]). The job's declared outputs go as its
 /// record holds them; a job with outputs whose start has no sink (the agent would have nowhere
-/// to put them) is not sent ([`Unsendable::OutputsWithoutSink`]). Placement sends such a job
-/// only to a host that reports `job-outputs`, which an agent reports only with `log-upload`.
+/// to put them) is not sent ([`Unsendable::OutputsWithoutSink`]), and neither is one whose
+/// host's agent did not report `job-outputs` ([`BeatContext::job_outputs`],
+/// [`Unsendable::OutputsNotReported`]), as placement asks of the host already.
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -125,6 +130,9 @@ pub(crate) fn start_of(
     }
     if spec.uses_layered_rootfs() & !context.layered_rootfs {
         return Err(Unsendable::RootfsNotReported);
+    }
+    if !spec.outputs.is_empty() & !context.job_outputs {
+        return Err(Unsendable::OutputsNotReported);
     }
     let unreported = spec
         .constraints

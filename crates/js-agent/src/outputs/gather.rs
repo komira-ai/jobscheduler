@@ -54,6 +54,10 @@ pub(crate) struct Caps {
     pub(crate) total_bytes: u64,
     /// The most files.
     pub(crate) files: usize,
+    /// The most entries looked at.
+    pub(crate) entries: usize,
+    /// The most failures listed.
+    pub(crate) failures: usize,
     /// The most levels of directories a declared directory's tree may hold, the declared
     /// directory the first: a directory past them is refused, the files above it gathered.
     pub(crate) depth: usize,
@@ -85,6 +89,19 @@ struct Left {
     caps: Caps,
     bytes: u64,
     files: usize,
+    entries: usize,
+}
+
+impl Gathered {
+    /// Lists the failure of `path` for `why`, unless the list is at `cap`: the failure past it
+    /// is listed as `over-limit` (the list was cut there) and later ones are not.
+    fn fail(&mut self, path: &str, why: &str, cap: usize) {
+        match self.failed.len().cmp(&cap) {
+            std::cmp::Ordering::Less => self.failed.push(failure(path, why)),
+            std::cmp::Ordering::Equal => self.failed.push(failure(path, OVER_LIMIT)),
+            std::cmp::Ordering::Greater => {}
+        }
+    }
 }
 
 /// Gathers the outputs `declared` below the directory `root` within `caps`.
@@ -116,6 +133,7 @@ pub(crate) fn gather(root: &Path, declared: &[String], caps: Caps) -> Gathered {
         caps,
         bytes: caps.total_bytes,
         files: caps.files,
+        entries: caps.entries,
     };
     for path in paths {
         one(&top, path, &mut left, &mut found);
@@ -134,14 +152,14 @@ fn one(top: &OwnedFd, path: OutputPath, left: &mut Left, found: &mut Gathered) {
         match open_dir(at, name) {
             Ok(Some(next)) => dir = Some(next),
             Ok(None) => return found.missing.push(text),
-            Err(why) => return found.failed.push(failure(&text, why)),
+            Err(why) => return found.fail(&text, why, left.caps.failures),
         }
     }
     let at = dir.as_ref().unwrap_or(top);
     match entry(at, last, path, left, found, 0) {
         Ok(true) => {}
         Ok(false) => found.missing.push(text),
-        Err((at, why)) => found.failed.push(failure(&at, why)),
+        Err((at, why)) => found.fail(&at, why, left.caps.failures),
     }
 }
 
@@ -156,6 +174,10 @@ fn entry(
     depth: usize,
 ) -> Result<bool, (String, &'static str)> {
     let fail = |why| (path.to_string(), why);
+    if left.entries == 0 {
+        return Err(fail(OVER_LIMIT));
+    }
+    left.entries -= 1;
     // A segment holds no NUL.
     let c_name = CString::new(name).unwrap_or_default();
     let kind = match statat(dir, c_name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
@@ -164,13 +186,15 @@ fn entry(
         Err(_) => return Err(fail(READ)),
     };
     match kind {
+        // Out of files: one past the last is not opened.
+        FileType::RegularFile if left.files == 0 => return Err(fail(OVER_LIMIT)),
         FileType::RegularFile => {
             let file = open_file(dir, &c_name, left).map_err(fail)?;
             found.files.push(Gotten { path, file });
         }
         FileType::Directory if depth == left.caps.depth => return Err(fail(OVER_LIMIT)),
         FileType::Directory => {
-            let (sub, names) = list(dir, &c_name).map_err(|()| fail(READ))?;
+            let (sub, names) = list(dir, &c_name, left.entries).map_err(fail)?;
             walk(&sub, &names, &path, left, found, depth + 1);
         }
         _ => return Err(fail(NOT_A_FILE)),
@@ -179,16 +203,25 @@ fn entry(
 }
 
 /// The directory `name` of `dir`, opened following no link, and its names, sorted, without
-/// `.` and `..`.
-fn list(dir: &OwnedFd, name: &CString) -> Result<(OwnedFd, Vec<Vec<u8>>), ()> {
+/// `.` and `..`; refused `over-limit` when it holds more than `most` names, of which no more
+/// than one past `most` are read.
+fn list(
+    dir: &OwnedFd,
+    name: &CString,
+    most: usize,
+) -> Result<(OwnedFd, Vec<Vec<u8>>), &'static str> {
     let opened = openat(dir, name.as_c_str(), DIR_FLAGS, Mode::empty())
         .and_then(|sub| Dir::read_from(&sub).map(|listed| (sub, listed)));
-    let (sub, listed) = opened.map_err(|_| ())?;
+    let (sub, listed) = opened.map_err(|_| READ)?;
     let mut names: Vec<Vec<u8>> = listed
         .flatten()
         .map(|entry| entry.file_name().to_bytes().to_vec())
         .filter(|name| !matches!(name.as_slice(), b"." | b".."))
+        .take(most.saturating_add(1))
         .collect();
+    if names.len() > most {
+        return Err(OVER_LIMIT);
+    }
     names.sort();
     Ok((sub, names))
 }
@@ -208,11 +241,15 @@ fn walk(
             .and_then(|name| path.join(name).ok().map(|below| (name, below)));
         let Some((name, below)) = below else {
             let shown = format!("{path}/{}", shown(name));
-            found.failed.push(failure(&shown, NAME));
+            found.fail(&shown, NAME, left.caps.failures);
             continue;
         };
         if let Err((at, why)) = entry(dir, name, below, left, found, depth) {
-            found.failed.push(failure(&at, why));
+            found.fail(&at, why, left.caps.failures);
+            if why == OVER_LIMIT && (left.files == 0 || left.entries == 0) {
+                // Out of files or entries: nothing more of this tree can be taken.
+                return;
+            }
         }
     }
 }
@@ -244,7 +281,7 @@ fn open_file(dir: &OwnedFd, name: &CString, left: &mut Left) -> Result<File, &'s
     if len > left.caps.file_bytes {
         return Err(TOO_LARGE);
     }
-    if left.files == 0 || len > left.bytes {
+    if len > left.bytes {
         return Err(OVER_LIMIT);
     }
     left.files -= 1;

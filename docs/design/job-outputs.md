@@ -29,8 +29,8 @@ ends, and how a client reads them back: `GetOutputs`, the generated `js job outp
 - **A job with outputs needs the object store.** A server without `[logs] sink = "object_store"`
   refuses its submit, `FAILED_PRECONDITION` `no-log-sink`, as `GetLogs` answers such a server.
   The job requires the host capability `job-outputs`, which an agent reports only with
-  `log-upload` (it uploads with that credential); it is placed and started only there, and a
-  start that would carry no sink is not sent. Admission at submit does not look at the
+  `log-upload` (it uploads with that credential); it is placed and started only there: a start
+  is not sent to a host whose hello no longer reports it, nor one that would carry no sink. Admission at submit does not look at the
   capability: while no host reports it, such a job waits in the queue and fails to start when
   the pool's queue wait passes.
 
@@ -66,15 +66,27 @@ was opened held to the kind that was looked at):
   name that is not an output path's segment is refused (`name`, each byte outside
   `[A-Za-z0-9._-]` shown as `?`); a tree holds at most 16 levels of directories, the declared one
   the first, and a directory past them is refused (`over-limit`);
-- at most 10,000 files and 1 GiB in all; a file over 64 MiB (one put, the store client's limit)
-  is refused (`too-large`), and files past either total are refused (`over-limit`);
+- at most 256 files and 1 GiB in all; a file over 64 MiB (one put, the store client's limit)
+  is refused (`too-large`); a file past the bytes is refused (`over-limit`) and a smaller one
+  after it still taken; the file past the files is refused (`over-limit`), not opened, and the
+  walk stops there;
+- at most 4,096 entries looked at (files, directories and anything else, every declared path
+  together): a directory with more names than are left is refused whole (`over-limit`; no more
+  than one name past them is read), and once they are spent each further declared path is
+  refused (`over-limit`);
+- at most 256 failures listed; the one past them is listed `over-limit` and the rest are not.
+  With the 256 files and the 64 declared paths, the manifest stays far under the 1 MiB a reader
+  takes;
 - what cannot be looked at, opened or listed is refused (`read`); a declaration the store's rules
   refuse (which the server checks at submit) fails every path (`path`).
 
 The files are opened before the job's files are removed and read from the open descriptors after,
 so the removal never waits for the upload and never cuts it short (as the log uploader holds its
-capture files, live-logs 3.5). One thread per job puts the files in the order of the declaration,
-each in one put (its bytes read and hashed before it is sent), then the manifest. With no
+capture files, live-logs 3.5); the 256 files bound the descriptors one job's upload holds. One
+thread per job puts the files in the order of the declaration, each in one put, then the
+manifest. Each try reads the file again from its first byte, so no more than one try's bytes
+(64 MiB at most) are held; the length and SHA-256 of the first read are kept, and a file whose
+bytes differ at a later try is failed (`read`). With no
 credential held, the upload waits; a put the store answers `Unavailable` is tried again after 1 s,
 doubling to 60 s; one answered `Expired` waits for the host's next credential (or the same
 backoff); one refused otherwise (`Denied`, `NotFound`, `Invalid`) is not tried again and the file

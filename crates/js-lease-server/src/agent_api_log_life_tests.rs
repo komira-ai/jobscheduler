@@ -448,6 +448,7 @@ async fn the_log_lengths_are_stored_with_the_result_and_swept_with_it() {
         metrics: &NoMetrics,
         layered_rootfs: false,
         mount_providers: &[],
+        job_outputs: false,
     };
     let served = per_job::serve(&jobs, &context, &listing, &[], 16).unwrap();
     assert_eq!(served.job_acks.len(), 3);
@@ -489,6 +490,7 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
         metrics: &NoMetrics,
         layered_rootfs: false,
         mount_providers: &[],
+        job_outputs: false,
     };
     let start = crate::job_start::start_of(&job, &allocation, &context).unwrap();
     assert_eq!(start.log_sink, None);
@@ -503,9 +505,10 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
 /// Asserts that a job's declared outputs go in its start, in order, beside the sink they are
 /// put under (`docs/design/job-outputs.md`); that a job with outputs is not sent when its start
 /// would have no sink, neither from a beat without sinks nor when the sink is one the agent
-/// would refuse (`OutputsWithoutSink`); and that a job without outputs is still sent then. It
+/// would refuse (`OutputsWithoutSink`), nor to a host whose hello no longer reports
+/// `job-outputs` (`OutputsNotReported`); and that a job without outputs is still sent then. It
 /// catches outputs dropped from the start, and a job started where its outputs could never be
-/// put.
+/// put, or on an agent that would ignore them.
 #[tokio::test]
 async fn a_jobs_outputs_go_in_its_start_only_beside_a_sink() {
     let (rig, logs) = logging_rig("logs_outputs", LONG_GRACE);
@@ -522,9 +525,20 @@ async fn a_jobs_outputs_go_in_its_start_only_beside_a_sink() {
         metrics: &NoMetrics,
         layered_rootfs: false,
         mount_providers: &[],
+        job_outputs: true,
     };
     let start = crate::job_start::start_of(&job, &allocation, &context).unwrap();
     assert_eq!(start.outputs, ["out", "report.json"]);
+    let unreported = BeatContext {
+        job_outputs: false,
+        ..context
+    };
+    let refused = crate::job_start::start_of(&job, &allocation, &unreported);
+    assert_eq!(refused, Err(Unsendable::OutputsNotReported));
+    assert_eq!(
+        Unsendable::OutputsNotReported.to_string(),
+        "the job declares outputs and the host does not report job-outputs"
+    );
     assert_eq!(start.log_sink, Some(sink_of("host-a", "job-o")));
     let unsinked = BeatContext {
         logs: None,

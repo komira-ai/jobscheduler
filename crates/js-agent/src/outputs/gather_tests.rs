@@ -16,6 +16,8 @@ const ROOMY: Caps = Caps {
     file_bytes: 1 << 20,
     total_bytes: 1 << 30,
     files: 100,
+    entries: 1000,
+    failures: 100,
     depth: 16,
 };
 
@@ -168,7 +170,8 @@ fn pipes_and_names_that_are_not_utf8_are_refused() {
 }
 
 /// Asserts each cap: a file over the most one file may hold is `too-large`; past the most files
-/// and past the most bytes, the next file is `over-limit` and a smaller one after it still fits
+/// the next file is `over-limit` and the walk stops there (the file after it is not listed);
+/// past the most bytes the next file is `over-limit` and a smaller one after it still fits
 /// the bytes; a directory deeper than the tree may go is `over-limit` while the files above it
 /// are gathered. It catches a cap that lets one file or one tree take the whole upload.
 #[test]
@@ -192,6 +195,7 @@ fn each_cap_refuses_what_is_past_it() {
     put(root, "n/1", "a");
     put(root, "n/2", "b");
     put(root, "n/3", "c");
+    put(root, "n/4", "d");
     let two_files = Caps { files: 2, ..ROOMY };
     assert_eq!(
         seen(gather(root, &declared(&["n"]), two_files)),
@@ -309,4 +313,51 @@ fn what_cannot_be_opened_is_failed_read() {
     let found = gather(&unsearched, &declared(&["f"]), ROOMY);
     chmod(&unsearched, 0o700);
     assert_eq!(seen(found), (Vec::new(), Vec::new(), strings(&["f: read"])));
+}
+
+/// Asserts the bounds on what a gathering looks at: a directory with more names than entries
+/// are left is refused `over-limit` whole; once the entries are spent, the next declared path is
+/// `over-limit`; and the failures listed stop at their cap, the one past it `over-limit` and the
+/// rest not listed. It catches a walk, or a manifest, a job could make as large as it likes.
+#[test]
+fn entries_and_failures_are_bounded() {
+    let dir = TestDir::under(std::env::temp_dir(), "outputs-gather-bounds");
+    let root = dir.path();
+    put(root, "e/1", "a");
+    put(root, "e/2", "b");
+    put(root, "e/3", "c");
+    let three = Caps {
+        entries: 3,
+        ..ROOMY
+    };
+    assert_eq!(
+        seen(gather(root, &declared(&["e"]), three)),
+        (Vec::new(), Vec::new(), strings(&["e: over-limit"]))
+    );
+    put(root, "w/a", "a");
+    put(root, "w/b", "b");
+    put(root, "x", "x");
+    assert_eq!(
+        seen(gather(root, &declared(&["w", "x"]), three)),
+        (
+            pairs(&[("w/a", "a"), ("w/b", "b")]),
+            Vec::new(),
+            strings(&["x: over-limit"])
+        )
+    );
+    for name in ["a b", "c d", "e f", "g h"] {
+        put(root, &format!("bad/{name}"), "x");
+    }
+    let two = Caps {
+        failures: 2,
+        ..ROOMY
+    };
+    assert_eq!(
+        seen(gather(root, &declared(&["bad"]), two)),
+        (
+            Vec::new(),
+            Vec::new(),
+            strings(&["bad/a?b: name", "bad/c?d: name", "bad/e?f: over-limit"])
+        )
+    );
 }

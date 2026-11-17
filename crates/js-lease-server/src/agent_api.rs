@@ -88,7 +88,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
-use crate::admit::{reported_mount_providers, reports_host_jobs, reports_layered_rootfs};
+use crate::admit::{
+    reported_mount_providers, reports_host_jobs, reports_job_outputs, reports_layered_rootfs,
+};
 use crate::agent_state::Change;
 use crate::agents::{Agents, Session};
 use crate::api::{BODY_LIMIT, bearer};
@@ -502,6 +504,7 @@ async fn serve_jobs(
         js_agent_wire::NetworkCeiling::from_capabilities(claim.capabilities()).unwrap_or_default();
     let host_jobs = reports_host_jobs(claim.capabilities());
     let layered_rootfs = reports_layered_rootfs(claim.capabilities());
+    let job_outputs = reports_job_outputs(claim.capabilities());
     let mount_providers = reported_mount_providers(claim.capabilities());
     let jobs = Arc::clone(jobs);
     let listed = heartbeat.jobs.clone();
@@ -516,6 +519,7 @@ async fn serve_jobs(
             ceiling: &ceiling,
             host_jobs,
             layered_rootfs,
+            job_outputs,
             mount_providers: &mount_providers,
             shape: Some(&booked),
             logs: logs.as_deref(),

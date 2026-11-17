@@ -27,6 +27,8 @@ const ROOMY: Caps = Caps {
     file_bytes: 1 << 20,
     total_bytes: 1 << 30,
     files: 100,
+    entries: 1000,
+    failures: 100,
     depth: 16,
 };
 
@@ -228,6 +230,25 @@ fn a_store_that_is_down_is_asked_again_after_a_growing_wait() {
     rig.clock.advance(Duration::from_secs(4));
     assert_eq!(upload.step(), Next::Done);
     assert_eq!(manifest(&rig).files, [file("a.txt", "alpha")]);
+}
+
+/// Asserts that a file is read again from its first byte for each try, and that one whose bytes
+/// changed between two tries is failed `read`, the next taken and the manifest put. It catches
+/// a retry that sends what the manifest's digest does not describe.
+#[test]
+fn a_file_that_changed_between_tries_is_failed_read() {
+    let rig = Rig::new("outputs-upload-changed");
+    rig.put("a.txt", "alpha");
+    rig.put("b.txt", "beta");
+    let mut upload = rig.upload(&["a.txt", "b.txt"], limits());
+    rig.store.fail_next(1, Status::SlowDown);
+    assert_eq!(upload.step(), Next::Sleep(rig.at(1)));
+    rig.put("a.txt", "omega");
+    rig.clock.advance(Duration::from_secs(1));
+    assert_eq!(upload.step(), Next::Done);
+    let written = manifest(&rig);
+    assert_eq!(written.files, [file("b.txt", "beta")]);
+    assert_eq!(written.failed, [failure("a.txt", "read")]);
 }
 
 /// Asserts that a credential the store answers as expired is reported refused to the host's

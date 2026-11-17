@@ -38,8 +38,18 @@ use crate::logs::{LiveLogs, Sink};
 /// The most bytes all of a job's output files may hold together (1 GiB).
 pub const MAX_OUTPUT_BYTES: u64 = 1 << 30;
 
-/// The most output files of a job.
-pub const MAX_OUTPUT_FILES: usize = 10_000;
+/// The most output files of a job: each is held open from the gathering until it is put, so
+/// this bounds the descriptors a job's upload holds, and with the paths' length the manifest's.
+pub const MAX_OUTPUT_FILES: usize = 256;
+
+/// The most entries (files, directories and anything else) a gathering looks at, all
+/// declared directories together; a directory with more names than are left is refused whole.
+pub const MAX_OUTPUT_ENTRIES: usize = 4096;
+
+/// The most failures the manifest lists; past them one more, `over-limit`, says the list was
+/// cut. With [`MAX_OUTPUT_FILES`] and the declaration's own bound, the manifest stays far under
+/// the 1 MiB a reader takes.
+pub const MAX_OUTPUT_FAILURES: usize = 256;
 
 /// The most levels of directories below a declared directory.
 pub const MAX_OUTPUT_DEPTH: usize = 16;
@@ -102,6 +112,8 @@ impl Plan {
             file_bytes: self.limits.max_put,
             total_bytes: MAX_OUTPUT_BYTES,
             files: MAX_OUTPUT_FILES,
+            entries: MAX_OUTPUT_ENTRIES,
+            failures: MAX_OUTPUT_FAILURES,
             depth: MAX_OUTPUT_DEPTH,
         };
         let gathered = gather::gather(root, &self.declared, caps);

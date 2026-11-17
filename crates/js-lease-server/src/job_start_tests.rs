@@ -72,6 +72,7 @@ fn build_for(
             metrics: &NoMetrics,
             layered_rootfs: false,
             mount_providers: &[],
+            job_outputs: false,
         },
     )
 }
@@ -294,6 +295,7 @@ fn build_layered(
             metrics: &NoMetrics,
             layered_rootfs,
             mount_providers: &[],
+            job_outputs: false,
         },
     )
 }
@@ -478,6 +480,7 @@ fn build_providers(
             metrics: &NoMetrics,
             layered_rootfs: true,
             mount_providers: reported,
+            job_outputs: false,
         },
     )
 }
