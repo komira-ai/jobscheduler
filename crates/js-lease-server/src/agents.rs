@@ -35,6 +35,7 @@ use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::clock::SharedClock;
 use crate::config::{AgentSetup, CpuSlack, placer, split};
 use crate::error::StartupError;
+use crate::held_beat::{self, Wakes};
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{self, FeedTrim, ServerJobs};
@@ -124,6 +125,11 @@ pub(crate) struct Agents {
     /// The gate of the server's pass over the queued jobs ([`Agents::place_jobs`]): one pass
     /// at a time, from its read of the open hosts to its last taint.
     pub(crate) placing: Mutex<()>,
+    /// The heartbeats held open for a start ([`crate::held_beat`]), which every placement the
+    /// pass commits wakes.
+    pub(crate) wakes: Wakes,
+    /// How long a heartbeat's reply with nothing to send is held ([`held_beat::hold_bound`]).
+    pub(crate) hold_bound: Duration,
     /// The machine providers of the pool's Default platform, first to last, as the bindings of
     /// its hosts name them: the order the pass offers the hosts in
     /// ([`crate::sched::rank`]).
@@ -272,6 +278,7 @@ fn placed_in(
     let pools = (pool, later);
     let registry = Registry::with_pools(pools, clock.clone(), OsSessions, placer.clone())
         .map_err(|err| StartupError::new("--agent-pool-config", err))?;
+    let interval = registry.heartbeat_interval();
     let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
     let (usage, usage_in_job_store) = usage.build(clock, limits, kept.map(ServerStore::store))?;
     // The one job store of the server, when the job service is on. It is opened
@@ -320,6 +327,8 @@ fn placed_in(
         listed_sessions: Mutex::default(),
         meter: OnceLock::new(),
         placing: Mutex::default(),
+        wakes: Wakes::default(),
+        hold_bound: held_beat::hold_bound(interval),
         providers,
     };
     Ok((Arc::new(agents), placer))
@@ -362,6 +371,7 @@ impl Agents {
             interval: std::time::Duration::from_secs(1),
         };
         let providers = static_then(&registry.pool_id());
+        let hold_bound = held_beat::hold_bound(registry.heartbeat_interval());
         Self {
             registry,
             tokens: AgentTokens::open(&tokens, &client).unwrap(),
@@ -387,6 +397,8 @@ impl Agents {
             listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
             placing: Mutex::default(),
+            wakes: Wakes::default(),
+            hold_bound,
             providers,
         }
     }

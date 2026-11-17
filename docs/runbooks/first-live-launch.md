@@ -268,7 +268,7 @@ the Lambda console during the run, and the decisions of "Must land" that are not
 
    Use the GPU model of the pool's instance type: its family (`nvidia-a10` for `gpu_1x_a10`), as the
    provider's catalog table (`crates/js-provider-lambdalabs/src/catalog.rs`) gives it. The answer is the job, `queued`: the machine
-   does not exist yet. Poll `js job get --job-id <id>`; the submit never waits for placement.
+   does not exist yet. Poll `js job get --job-id <id>`; a submit places a job itself only on a host that has room now.
 4. Watch `/v1/pools` every 10 s. `machines[].state` goes `booting`, then `registered` (the record
    begins `planned`/`launching` for the length of a tick). Also watch the Lambda console list.
 5. Leave `boot = "initialise"` until the run is over. When the machine is gone (section 6), check that

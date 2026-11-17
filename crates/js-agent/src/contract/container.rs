@@ -123,7 +123,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use js_agent_wire::{
-        HeldRun, PER_JOB_CAPABILITY, Phase, ProtocolRange, START_FENCE_CAPABILITY, WireShape,
+        HELD_BEAT_CAPABILITY, HeldRun, PER_JOB_CAPABILITY, Phase, ProtocolRange,
+        START_FENCE_CAPABILITY, WireShape,
     };
 
     use super::*;
@@ -196,10 +197,11 @@ mod tests {
         hello
     }
 
-    /// Asserts that `start-fence` is reported as `true`, beside `per-job`, by the hello of an
-    /// agent that runs containers (its lifecycle judges a job start by its fence and stops its
-    /// jobs after a silence), and that the hello still validates. It catches a server never
-    /// told that a container agent enforces the fence.
+    /// Asserts that `start-fence` and `held-beat` are reported as `true`, beside `per-job`, by
+    /// the hello of an agent that runs containers (its lifecycle judges a job start by its fence
+    /// and stops its jobs after a silence; its session beats again at once after a held reply),
+    /// and that the hello still validates. It catches a server never told that a container
+    /// agent enforces fences, and one never told it may hold the agent's heartbeat.
     #[test]
     fn the_hello_reports_start_fence_only_when_enforced() {
         let contained = reported(&Config::none());
@@ -212,21 +214,26 @@ mod tests {
             flag(&contained, PER_JOB_CAPABILITY).as_deref(),
             Some(FLAG_SET)
         );
+        assert_eq!(
+            flag(&contained, HELD_BEAT_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
         assert_eq!(contained.validate(), Ok(()));
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
     }
 
     /// Asserts that the job half of a native agent's hello (`report_native_jobs`, which the
-    /// macOS build calls) is `per-job`, `start-fence` and `layered-rootfs`, each `true`, and
+    /// macOS build calls) is `per-job`, `start-fence`, `held-beat` and `layered-rootfs`, each `true`, and
     /// that the hello still validates. It catches a native agent that hides that it takes
     /// job starts and gives mounts, so no server sends it the kbf action jobs.
     #[test]
-    fn a_native_agents_job_half_reports_per_job_start_fence_and_layered_rootfs() {
+    fn a_native_agents_job_half_reports_per_job_start_fence_held_beat_and_layered_rootfs() {
         let mut native = hello();
         crate::contract::report_native_jobs(&mut native);
         for key in [
             PER_JOB_CAPABILITY,
             START_FENCE_CAPABILITY,
+            HELD_BEAT_CAPABILITY,
             js_caps::LAYERED_ROOTFS,
         ] {
             assert_eq!(

@@ -223,7 +223,8 @@ fn an_agent_killed_for_good_is_a_host_gone_and_not_a_fault() {
 }
 
 /// Asserts that a cut counts `cut_with_unlisted_run` once for an agent that runs a job
-/// it received after its last heartbeat (no hello or heartbeat of its own listed it), and
+/// the server placed when the job was submitted and delivered on the agent's next
+/// heartbeat, so the agent has the run before any heartbeat of its own lists it (no hello or heartbeat of its own listed it), and
 /// not for an agent that runs nothing; and that once the agent has sent a heartbeat
 /// listing the job, it no longer runs a job it never listed. Catches a count that reads
 /// what the server saw rather than what the agent sent, and one bumped for an idle host.
@@ -232,13 +233,13 @@ fn a_cut_agent_that_runs_a_run_it_never_listed_is_counted() {
     let mut cell = cell("cut", 2);
     run_to(&mut cell, 20_000);
     let id = job(&mut cell, "sim-job-cut", 60_000).expect("a job is accepted");
-    run_to(&mut cell, 26_000);
+    run_to(&mut cell, 21_000);
     let (_, read) = call(&mut cell, "GET", &format!("/v1/jobs/{id}"), &Value::Null);
     let host = read["job"]["hostId"]
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    run_to(&mut cell, 27_000);
+    run_to(&mut cell, 22_000);
     let index = index_of(&host);
     assert_eq!(cell.agent(index).map(AgentNode::runs_unlisted), Some(true));
     assert_eq!(
@@ -251,7 +252,7 @@ fn a_cut_agent_that_runs_a_run_it_never_listed_is_counted() {
         (cut(&cell, index), cut(&cell, 1 - index)),
         (Some(1), Some(0))
     );
-    run_to(&mut cell, 32_000);
+    run_to(&mut cell, 40_000);
     assert_eq!(cell.agent(index).map(AgentNode::runs_unlisted), Some(false));
 }
 

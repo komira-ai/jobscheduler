@@ -54,6 +54,8 @@
 //!   fence (the job id with the allocation id), keeps the fences it retired in its state root,
 //!   and stops every job after a silence of the server
 //!   ([`js_agent_wire::START_FENCE_CAPABILITY`]). An operator cannot set it.
+//! - `held-beat` is `true` wherever `per-job` is: the session sends its next heartbeat at
+//!   once after a reply the server held open ([`js_agent_wire::HELD_BEAT_CAPABILITY`]).
 //! - `host-jobs` is `true` for an agent started with `--allow-host-jobs`, which only
 //!   the crun runtime takes: its runtime launches a job with `isolation = host`
 //!   ([`js_agent_wire::HOST_JOBS_CAPABILITY`]). The server taints a host when it places such
@@ -63,7 +65,7 @@
 //!   is a layer or a mount of the job). A server sends a job that names a provider only to a
 //!   host that reports it. An operator cannot set it (`js_caps::is_mount_provider_key`).
 
-use js_agent_wire::{Hello, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
+use js_agent_wire::{HELD_BEAT_CAPABILITY, Hello, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, RUN_FILES};
 
 #[cfg(target_os = "linux")]
@@ -71,9 +73,10 @@ mod container;
 #[cfg(target_os = "linux")]
 pub(crate) use container::{ToolkitHook, report, report_host_jobs, report_mount_providers};
 
-/// Says that the agent takes the job-keyed start and stop, and that it fences them (it
-/// refuses a start whose fence it retired and stops its jobs after a silence): every agent
-/// does, the container runtime and the native one.
+/// Says that the agent takes the job-keyed start and stop, that it fences them (it refuses a
+/// start whose fence it retired and stops its jobs after a silence), and that it beats again
+/// at once after a held reply (`held-beat`, the session's): every agent does, the container
+/// runtime and the native one.
 pub(crate) fn report_per_job(hello: &mut Hello) {
     hello
         .capabilities
@@ -81,6 +84,9 @@ pub(crate) fn report_per_job(hello: &mut Hello) {
     hello
         .capabilities
         .insert(START_FENCE_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    hello
+        .capabilities
+        .insert(HELD_BEAT_CAPABILITY.to_owned(), FLAG_SET.to_owned());
 }
 
 /// Puts `layered-rootfs` into `hello` when the runtime gives jobs mounts of host paths
@@ -94,7 +100,8 @@ pub(crate) fn report_layered(hello: &mut Hello, layered: bool) {
     }
 }
 
-/// The job half of a native agent's hello: `per-job`, `start-fence` and `layered-rootfs`.
+/// The job half of a native agent's hello: `per-job`, `start-fence`, `held-beat` and
+/// `layered-rootfs`.
 /// The native runtime takes the job-keyed start (a bundle image with a `run`) and gives a
 /// job mounts of host paths below `/work`; layers are refused at admission.
 #[cfg(any(target_os = "macos", test))]

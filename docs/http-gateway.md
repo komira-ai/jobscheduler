@@ -458,8 +458,14 @@ answer from what the commit returned; neither holds anything of its own outside 
    failed) may offer, so the job is admitted.
 4. **Commit, then answer.** The job is inserted as queued in one transaction; the answer is
    the job as recorded (201 over the gateway). A failed commit is `state-write-failed` and
-   nothing was recorded. The call does not wait for placement: placement finds the queued job
-   on its own pass.
+   nothing was recorded.
+5. **Place now, when nothing is ahead.** When no queued job had the new job's priority or a
+   higher one, the call runs the placement pass itself before it answers, and the answer is
+   the job as it then stands: `placed` with its host when a host had room, `queued` when none
+   had. The placement wakes the host's held heartbeat, whose reply carries the start
+   ([`design/held-beat.md`](design/held-beat.md)). A job with a queued job of its priority or
+   above ahead of it, and a retry of a job already recorded, is answered as recorded and
+   placed by the next pass.
 
 **`CancelJob`** commits one transaction and answers the job as it then stands. A queued job is
 cancelled at once (it has no allocation), with a result of reason cancelled and its retention

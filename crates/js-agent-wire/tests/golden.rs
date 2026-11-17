@@ -300,6 +300,7 @@ fn heartbeat_reply_wire_form() {
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
         log_grant: None,
+        beat_now: false,
     };
     assert_eq!(
         serde_json::to_value(&reply).unwrap(),
@@ -323,6 +324,27 @@ fn heartbeat_reply_wire_form() {
         serde_json::to_string(&verdicts).unwrap(),
         r#"["ACCEPTED","DUPLICATE","STALE","UNKNOWN_LEASE","MISMATCH"]"#
     );
+}
+
+/// Asserts the exact JSON of a held reply with nothing else to say, and that a reply that was
+/// not held leaves `beat_now` out, and the spelling of the capability that asks for held
+/// replies. It catches a renamed field or capability, and a `beat_now: false` written into
+/// every reply (which would change the bytes every agent already reads).
+#[test]
+fn held_reply_wire_form() {
+    let held = HeartbeatReply {
+        beat_now: true,
+        ..HeartbeatReply::default()
+    };
+    assert_eq!(
+        serde_json::to_value(&held).unwrap(),
+        json!({"commands": [], "result_acks": [], "taint_ack": false, "beat_now": true})
+    );
+    assert_eq!(
+        serde_json::to_value(HeartbeatReply::default()).unwrap(),
+        json!({"commands": [], "result_acks": [], "taint_ack": false})
+    );
+    assert_eq!(js_agent_wire::HELD_BEAT_CAPABILITY, "held-beat");
 }
 
 /// Asserts that a golden heartbeat decodes from literal text with the phase spelled as

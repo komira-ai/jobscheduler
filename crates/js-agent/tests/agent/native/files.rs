@@ -382,7 +382,7 @@ fn world(name: &str) -> TestDir {
 /// Asserts the hello of a native agent: given `--run-files-root` (on a disk, which a native
 /// agent takes and a container agent refuses) it reports `run-files` beside `runtime` and
 /// `exec` as `sandbox-exec`, and the root it made is `0711`; without the flag it reports no
-/// `run-files`. Either way it reports `per-job`, `start-fence` and `layered-rootfs`. Neither
+/// `run-files`. Either way it reports `per-job`, `start-fence`, `held-beat` and `layered-rootfs`. Neither
 /// names the container runtime. It catches a Mac that claims the
 /// capability with nowhere to keep the secrets (the server would send them), one that never
 /// claims it, and a Mac refused for a root that is not a tmpfs, which it cannot have.
@@ -410,6 +410,7 @@ fn a_native_agent_with_a_files_root_reports_run_files_and_without_one_does_not()
         // and the mounts of host paths.
         assert_eq!(caps["per-job"], "true", "{given}");
         assert_eq!(caps["start-fence"], "true", "{given}");
+        assert_eq!(caps["held-beat"], "true", "{given}");
         assert_eq!(caps["layered-rootfs"], "true", "{given}");
     }
     assert_eq!(mode(&files), 0o711);

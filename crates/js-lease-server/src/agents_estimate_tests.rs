@@ -1,6 +1,6 @@
-//! `--estimate-feed` beside files that will not open, in process: the configuration read
-//! from the flags and the agent side assembled from it as the server assembles it. No listener is
-//! bound and no connection is made.
+//! `--estimate-feed` beside files that will not open, and the hold of a heartbeat's reply the
+//! pool's interval sets, in process: the configuration read from the flags and the agent side
+//! assembled from it as the server assembles it. No listener is bound and no connection is made.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -50,6 +50,11 @@ fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
 /// The configuration of a server with agent registration over [`POOL`] and `extra` flags.
 /// Usage is on, in `usage.db` beside the state file.
 fn config(dir: &Path, extra: &[&str]) -> Config {
+    config_over(dir, extra, POOL)
+}
+
+/// [`config`] over the pool file `pool`.
+fn config_over(dir: &Path, extra: &[&str], pool: &str) -> Config {
     let flags = [
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", dir.join("state").into_os_string()),
@@ -61,7 +66,7 @@ fn config(dir: &Path, extra: &[&str]) -> Config {
         ),
         (
             "--agent-pool-config",
-            write(dir, "agent-pool.toml", POOL, 0o644),
+            write(dir, "agent-pool.toml", pool, 0o644),
         ),
     ];
     let mut args: Vec<OsString> = vec!["js-lease-server".into()];
@@ -108,4 +113,31 @@ fn with_the_flag_a_start_over_files_that_will_not_open_is_refused() {
     });
     assert!(!joins.is_empty());
     assert!(!joins.starts_with("--usage-db"), "{joins}");
+}
+
+/// Asserts that the agent side, assembled as the server assembles it, holds a quiet heartbeat's
+/// reply for the pool's heartbeat interval when that is under five seconds (1 s here) and for
+/// five seconds when the interval is longer (the default, 5 s, and 30 s). It catches a server
+/// that holds replies longer than its hosts' interval, which would stretch the gaps its
+/// silence counting assumes, or past the agent's request limit.
+#[test]
+fn the_hold_of_a_reply_is_the_pools_interval_up_to_five_seconds() {
+    for (timing, held) in [
+        ("heartbeat_interval = \"1s\"\ngrace = \"3s\"\n", 1),
+        ("", 5),
+        ("heartbeat_interval = \"30s\"\ngrace = \"90s\"\n", 5),
+    ] {
+        let dir = scratch(&format!("hold_{held}_{}", timing.len()));
+        let config = config_over(dir.path(), &[], &format!("{timing}{POOL}"));
+        let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
+        let assembled = assemble(
+            config.agents,
+            config.usage,
+            &clock,
+            &config.state_file,
+            None,
+        );
+        let agents = assembled.unwrap();
+        assert_eq!(agents.hold_bound, std::time::Duration::from_secs(held));
+    }
 }

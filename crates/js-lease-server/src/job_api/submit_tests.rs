@@ -372,7 +372,8 @@ async fn a_failed_commit_answers_500_and_changes_nothing() {
 /// Asserts that `SubmitJob` answers on its first poll, with the job queued and no allocation,
 /// while the placement pass never runs: the handler awaits nothing but the store and the
 /// hosts' admission, so it cannot be waiting for placement, a launch or a provider. It
-/// catches a handler that awaits placement or anything after the commit.
+/// catches a handler of a service that does not place which awaits placement or anything
+/// after the commit.
 #[test]
 fn submit_does_not_wait_for_placement() {
     let mut rig = clocked_rig("submit_no_wait", true, NEVER);

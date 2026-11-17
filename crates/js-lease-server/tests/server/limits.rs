@@ -11,11 +11,12 @@ use std::io;
 use std::time::Duration;
 
 use js_lease_server::Limits;
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
-use crate::agents_support::{agent_args, job_host_args};
-use crate::jobs_support::{job_agent, per_job_hello, submit};
+use crate::agents_support::{JOIN, agent_args, job_host_args, post};
+use crate::jobs_support::{JobBody, job_agent, per_job_hello, submit, submit_body};
 use crate::support::{Harness, Scratch, TOKEN, config, guard, parse_reply, request, until};
 
 /// A route behind the client token that reads a request body, so a body that stalls holds
@@ -245,8 +246,10 @@ pub(crate) async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
 /// Asserts that a stop is bounded by the drain timeout (the read timeout is long, so it
 /// is not what ends the stall): a request stalled in its body
 /// is cut, the stop still returns and the last tick still runs (a queued job that no tick
-/// has placed is placed on the registered host by it), and the client sees the connection
-/// end with no answer.
+/// has placed, whose only room was a tainted host the operator then cleared, is placed on
+/// that host by it), and the client sees the connection end with no answer. The job is
+/// queued by arrangement, since a submit places a job on a host with room. It catches a
+/// stop that skips the last tick behind a stalled request.
 #[tokio::test]
 async fn a_stalled_request_cannot_hold_up_a_stop() {
     let limits = Limits {
@@ -257,8 +260,28 @@ async fn a_stalled_request_cannot_hold_up_a_stop() {
     let scratch = Scratch::new("limit_drain");
     let config = config(job_host_args(&scratch)).unwrap().with_limits(limits);
     let h = Harness::over(scratch, config).await;
-    job_agent(&h, &per_job_hello("host-1")).await;
+    // `job-q` has to be queued when the stop comes, though a submit places a job on a host
+    // with room. `host-1` reports a taint, so it takes nothing; `job-big` fills `host-2`, so
+    // `job-q` is admitted and queued; the operator then clears the taint, which places
+    // nothing, and only the last tick of the stop places `job-q` on `host-1`.
+    let tainted = job_agent(&h, &per_job_hello("host-1")).await;
+    let mut beat = tainted.beat();
+    beat["taint"] = json!({ "reason": "residue" });
+    let told = post(&h, "/v1/agent/heartbeat", Some(JOIN), &beat).await;
+    assert_eq!(told.json()["taint_ack"], true, "{}", told.body);
+    job_agent(&h, &per_job_hello("host-2")).await;
+    let big = submit_body(&h, &JobBody::new("job-big").needs(8000, 1 << 30).json()).await;
+    assert_eq!(big.json()["job"]["state"], "JOB_STATE_PLACED");
     assert_eq!(submit(&h, "job-q").await.status, 201);
+    let cleared = request(
+        h.running.job_addr().unwrap(),
+        "POST",
+        "/v1/hosts/host-1:cleartaint",
+        Some(TOKEN),
+        Some(b"{}"),
+    )
+    .await;
+    assert_eq!(cleared.status, 200, "{}", cleared.body);
     let mut stalled = stall_in_body(h.addr()).await;
     let jobs = h.scratch.path("leases.toml.jobs");
     assert_eq!(
@@ -271,5 +294,10 @@ async fn a_stalled_request_cannot_hold_up_a_stop() {
     guard(stalled.read_to_end(&mut seen)).await.unwrap();
     assert!(seen.is_empty());
     let placed = crate::restart::stored(&jobs);
-    assert!(placed[0].starts_with("job-q Placed "), "{placed:?}");
+    let job_q = placed
+        .iter()
+        .find(|line| line.starts_with("job-q "))
+        .unwrap();
+    assert!(job_q.starts_with("job-q Placed "), "{placed:?}");
+    assert!(job_q.contains(" host-1 "), "{placed:?}");
 }
