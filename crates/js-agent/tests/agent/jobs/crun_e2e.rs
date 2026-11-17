@@ -37,16 +37,23 @@ use serde_json::json;
 
 use super::crun_machine::CrunMachine;
 use crate::crun_host::Fixture;
-use crate::server::{Agent, POOL_RUNS_TOML, Redirect, Server};
+use crate::server::{Agent, POOL_RUNS_QUICK_TOML, POOL_RUNS_TOML, Redirect, Server};
 use crate::support::{Host, code, linux_host};
 
 /// Held by a test while it opens runtimes or runs an agent on the node: the backend makes
 /// its helper directories in the node's store, which two openings at once would fight over.
 pub(super) static NODE_IN_USE: Mutex<()> = Mutex::new(());
 
+/// The heartbeat interval of every pool a [`Rig`] runs on ([`POOL_RUNS_QUICK_TOML`],
+/// [`POOL_QUOTA_TOML`]): the server holds the reply of a quiet heartbeat for up to the
+/// interval, and the default 5 s would hold each quiet beat of these tests that long.
+const INTERVAL: Duration = Duration::from_millis(250);
+
 /// The pool of an agent that bounds its runs' disk: it names the quota capability, so a host
 /// joins it only by reporting one, and books 4 GiB for each host.
 const POOL_QUOTA_TOML: &str = r#"
+heartbeat_interval = "250ms"
+grace = "1m"
 name = "macs"
 class = "mac"
 max_machines = 4
@@ -461,9 +468,10 @@ fn end_leftovers(scratch: &Path) {
 }
 
 impl Rig {
-    /// Starts the server and the agent, and waits until the agent has said hello.
+    /// Starts the server and the agent, and waits until the agent has said hello; the pool
+    /// beats every [`INTERVAL`].
     pub(super) fn new(name: &str, extra: &[&str]) -> Self {
-        Self::on_pool(name, extra, POOL_RUNS_TOML)
+        Self::on_pool(name, extra, POOL_RUNS_QUICK_TOML)
     }
 
     /// [`Rig::new`] over the pool `pool` describes.
@@ -495,7 +503,7 @@ impl Rig {
                 agent.finish().err
             ),
         };
-        assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
+        assert_eq!(agent.next_wait(), INTERVAL, "the hello");
         Self {
             server,
             agent,
@@ -525,10 +533,13 @@ impl Rig {
         Self::spawn(&self.server, &self.address, flags, &CrunMachine::new()).finish()
     }
 
-    /// One heartbeat of the agent, and the worker done with the reply to it.
+    /// One heartbeat of the agent, and the worker done with the reply to it, which went
+    /// through: the agent then waits the pool's interval, or nothing after a reply that says
+    /// `beat_now` (a held reply, or one with no command), never a backoff after a failure.
     fn beat(&self) {
         self.agent.elapse();
-        assert_eq!(self.agent.next_wait(), Duration::from_secs(5));
+        let wait = self.agent.next_wait();
+        assert!(wait == INTERVAL || wait.is_zero(), "{wait:?}");
         assert!(self.worker.settle());
     }
 

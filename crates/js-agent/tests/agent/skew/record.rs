@@ -436,10 +436,11 @@ pub fn record(name: &str) -> Value {
     });
     let interval = Duration::from_millis(QUICK_INTERVAL_MS);
     let held = Duration::ZERO;
-    // After the hello and each beat: the interval, but after a reply the server held open
-    // for the beat (nothing to send, `beat_now`), none. The replies that carry something
-    // are the start (the job is placed by its submit), the stop, and the acknowledgement.
-    let expected = [interval, interval, held, held, interval, interval, held];
+    // After the hello and each beat: the interval, but none after a reply that says
+    // `beat_now`: one the server held open for the beat (nothing to send), or one that
+    // carries only an acknowledgement. The replies with a command are the start (the job is
+    // placed by its submit) and the stop.
+    let expected = [interval, interval, held, held, interval, held, held];
     assert_eq!(waits, expected, "{waits:?}");
     assert!(ran.err.contains("registered, epoch 1"), "{}", ran.err);
     let mut flow = std::mem::take(&mut *flow.lock().unwrap());

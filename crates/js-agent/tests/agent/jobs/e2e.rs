@@ -6,7 +6,8 @@
 //! The rigs use a pool with the shortest heartbeat interval (250 ms, [`POOL_RUNS_QUICK_TOML`]):
 //! the server holds the reply of a heartbeat that has nothing to send for up to that long, to
 //! an agent that reports `held-beat`, and says `beat_now`, after which the agent beats at once
-//! ([`HELD`]); a reply that carries something is followed by the interval ([`INTERVAL`]). With
+//! ([`HELD`]); so does a reply with acknowledgements and no command; a reply with a command is
+//! followed by the interval ([`INTERVAL`]). With
 //! the default 5 s each quiet beat would hold the test for 5 s of real time.
 //!
 //! The jobs here are submitted through the v1 job API (`POST /v1/jobs` on `--job-listen`) and
@@ -30,9 +31,9 @@ use crate::support::{Ran, Scratch, code, linux_host};
 /// The heartbeat interval of the pool the rigs use ([`POOL_RUNS_QUICK_TOML`]).
 const INTERVAL: Duration = Duration::from_millis(250);
 
-/// The wait after a reply the server held and answered `beat_now`: the agent beats again at
-/// once. A reply that carries something (a start, a stop, an acknowledgement) is not held and
-/// is followed by [`INTERVAL`].
+/// The wait after a reply that says `beat_now`: the agent beats again at once. The server says
+/// it for a reply it held (nothing to send) and for one that carries acknowledgements and no
+/// command. A reply with a command (a start, a stop) is followed by [`INTERVAL`].
 const HELD: Duration = Duration::ZERO;
 
 /// The state of a job that is running, as the job service names it.
@@ -188,7 +189,7 @@ fn a_job_goes_through_the_agent_and_its_result_comes_back() {
 
     rig.machine.world.exit(&job, 0);
     assert!(rig.worker.settle());
-    rig.beat(INTERVAL);
+    rig.beat(HELD);
     assert_eq!(
         rig.view(&job),
         (
@@ -221,7 +222,7 @@ fn a_cancel_is_delivered_and_the_job_is_stopped() {
     assert_eq!(asked.status, 200, "{}", asked.body);
     assert_eq!(asked.body["job"]["cancelRequested"], true, "{}", asked.body);
     rig.beat(INTERVAL);
-    rig.beat(INTERVAL);
+    rig.beat(HELD);
     assert_eq!(rig.view(&job).0, "JOB_STATE_CANCELLED");
     let log = rig.machine.world.log();
     let order: Vec<&String> = log.iter().filter(|call| call.ends_with(&job)).collect();
@@ -390,7 +391,7 @@ fn a_taint_is_reported_acknowledged_and_new_jobs_are_not_placed() {
     rig.machine.world.exit(&run, 0);
     assert!(rig.worker.settle());
     assert!(rig.worker.snapshot().taint.is_some());
-    rig.beat(INTERVAL);
+    rig.beat(HELD);
 
     let host = rig.server.host("h1");
     assert_eq!(host["taint"]["reason"], "cleanup-failed");
