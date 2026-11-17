@@ -33,13 +33,18 @@ pub const POOL_NAME: &str = "burst";
 
 /// The pool's file: one host's shape that the agent's offer covers, the architecture the
 /// `js-sched` placement needs to know, and room for one host booked whole (a mixed pool:
-/// jobs share its hosts, or take one whole).
+/// jobs share its hosts, or take one whole). Its heartbeat interval is the shortest the server
+/// takes (250 ms): the agent is driven a beat at a time by the test, and the server holds a
+/// quiet reply to a `held-beat` agent for up to the interval of real time, so the default
+/// 5 s would make every quiet beat of a case wait 5 s.
 fn pool() -> String {
     format!(
         r#"
 name = "{POOL_NAME}"
 class = "whole-node"
 max_machines = 2
+heartbeat_interval = "250ms"
+grace = "1m"
 
 [shape]
 cpu_millis = 8000

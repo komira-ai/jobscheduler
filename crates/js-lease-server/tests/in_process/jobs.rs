@@ -35,11 +35,13 @@ fn job_config(scratch: &Scratch, jobs: bool) -> Config {
 
 /// Asserts that a job submitted without an id through the job router is answered 201 under
 /// the id the given source minted (its bits as 32 hex digits), queued at the given store
-/// clock's time (42 s), and that the tables `jobs()` reads hold that job, queued, stamped
-/// with the same time; and that the router refuses a call without the bearer token. It
-/// catches a seam that mints from the system's random source or stamps with the system's
-/// clock whatever it is given, a job router that is not the one the tables serve, and one
-/// served without the token.
+/// clock's time (42 s) and, the registered host having room, placed on it by the submit
+/// itself (`JOB_STATE_PLACED`, host `host-a`, placed at the same time); and that the tables
+/// `jobs()` read hold that job, placed, stamped with the same time; and that the router
+/// refuses a call without the bearer token. It catches a seam that mints from the system's
+/// random source or stamps with the system's clock whatever it is given (for the queueing or
+/// the placement), a job router that is not the one the tables serve, a submit that leaves a
+/// job queued over a host with room, and one served without the token.
 #[tokio::test]
 async fn the_job_service_is_served_through_the_seam_on_the_given_clock_and_ids() {
     let scratch = Scratch::new("jobs-seam");
@@ -72,13 +74,15 @@ async fn the_job_service_is_served_through_the_seam_on_the_given_clock_and_ids()
     assert_eq!(submitted.status, 201, "{:?}", submitted.body);
     let minted = "07".repeat(16);
     assert_eq!(submitted.body["job"]["id"], minted.as_str());
-    assert_eq!(submitted.body["job"]["state"], "JOB_STATE_QUEUED");
+    assert_eq!(submitted.body["job"]["state"], "JOB_STATE_PLACED");
+    assert_eq!(submitted.body["job"]["hostId"], "host-a");
     assert_eq!(submitted.body["job"]["times"]["queuedAtMs"], "42000");
+    assert_eq!(submitted.body["job"]["times"]["placedAtMs"], "42000");
 
     let jobs = server.jobs().expect("the job tables are open");
     let id = JobId::parse(&minted).unwrap();
     let record = jobs.get_job(&id).unwrap().expect("the job is stored");
-    assert_eq!(record.state, JobState::Queued);
+    assert_eq!(record.state, JobState::Placed);
     assert_eq!(
         record.submitted_at,
         StoreTime::from_duration(Duration::from_secs(42))
