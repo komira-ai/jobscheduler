@@ -24,6 +24,7 @@ fn held(node: &Node, pair: &str) -> bool {
 fn open(node: &Node, budget: u64, source: &Arc<Keeping>) -> CrunRuntime {
     let settings = js_agent::crun::CrunSettings {
         image_budget: Some(budget),
+        warm_sandboxes: 0,
         ..node.settings("/root")
     };
     CrunRuntime::open_with(settings, Arc::clone(source) as _, Node::hooks(LONG, LONG))

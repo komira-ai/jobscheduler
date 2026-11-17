@@ -32,6 +32,9 @@ pub(super) struct CrunMachine {
     /// The image budget (`--image-budget-gib`, in bytes) of the crun settings of every runtime
     /// opened, in order.
     pub(super) image_budgets: Arc<Mutex<Vec<Option<u64>>>>,
+    /// The warm sandbox count (`--warm-sandboxes`) of the crun settings of every runtime
+    /// opened, in order.
+    pub(super) warm_sandboxes: Arc<Mutex<Vec<u32>>>,
     /// The host ports (`--host-port`) of the crun settings of every runtime opened, beside the
     /// ones the runtime opened from them allows ([`Runtime::host_ports`]), in order.
     pub(super) host_ports: Arc<Mutex<Vec<HostPortsSeen>>>,
@@ -53,6 +56,7 @@ impl CrunMachine {
             stops: Arc::default(),
             log_file_caps: Arc::default(),
             image_budgets: Arc::default(),
+            warm_sandboxes: Arc::default(),
             host_ports: Arc::default(),
         })
     }
@@ -126,6 +130,8 @@ impl Machine for CrunMachine {
         self.log_file_caps.lock().expect("caps").extend(caps);
         let budgets = settings.crun().map(|plan| plan.image_budget);
         self.image_budgets.lock().expect("budgets").extend(budgets);
+        let warm = settings.crun().map(|plan| plan.warm_sandboxes);
+        self.warm_sandboxes.lock().expect("warm").extend(warm);
         let planned = settings.crun().map(|plan| plan.host_ports.clone());
         let (inner, warnings) = self.system.runtime(build)?;
         if let Some(planned) = planned {

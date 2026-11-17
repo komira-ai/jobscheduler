@@ -220,7 +220,9 @@ use dirs::{cgroup_dir, legacy_lease, make_helper_cgroup};
 use fault::Fault;
 pub(crate) use net::port_of;
 pub use net::{EgressPort, Wired, start_egress};
-pub use settings::{CgroupSettings, CrunError, CrunSettings, Hooks, HostPorts};
+pub use settings::{
+    CgroupSettings, CrunError, CrunSettings, DEFAULT_WARM_SANDBOXES, Hooks, HostPorts,
+};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
 pub use gpu::{

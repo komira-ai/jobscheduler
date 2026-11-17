@@ -168,6 +168,7 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         egress: None,
         gpus: None,
         image_budget: None,
+        warm_sandboxes: 0,
         host_jobs: false,
         host_ports: HostPorts::default(),
         fs: None,

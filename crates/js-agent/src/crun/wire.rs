@@ -259,6 +259,7 @@ pub fn open(
             read: read_node,
         }),
         image_budget: plan.image_budget,
+        warm_sandboxes: plan.warm_sandboxes,
         host_jobs: plan.host_jobs,
         host_ports: HostPorts {
             allowed: plan.host_ports.clone(),

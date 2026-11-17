@@ -31,6 +31,8 @@ mod crun_machine;
 #[cfg(target_os = "linux")]
 mod crun_roots;
 #[cfg(target_os = "linux")]
+mod crun_warm;
+#[cfg(target_os = "linux")]
 mod drain;
 #[cfg(target_os = "linux")]
 mod e2e;

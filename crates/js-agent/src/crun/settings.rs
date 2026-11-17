@@ -17,6 +17,10 @@ use crate::cli_runtime::{Chown, ProcRead, read_proc};
 use crate::host_ports::{Kernel, Listen};
 use crate::lifecycle::FilesRoot;
 
+/// The most containers made ahead of their jobs kept for one image when `--warm-sandboxes` is
+/// not given.
+pub const DEFAULT_WARM_SANDBOXES: u32 = 2;
+
 /// Where the agent's cgroups are.
 #[derive(Debug, Clone)]
 pub struct CgroupSettings {
@@ -51,6 +55,8 @@ pub struct CrunSettings {
     pub gpus: Option<GpuSettings>,
     /// The most bytes the unpacked images may take (`--image-budget-gib`); none for no budget.
     pub image_budget: Option<u64>,
+    /// The most containers made ahead of their jobs the runtime keeps for one image; 0: none.
+    pub warm_sandboxes: u32,
     /// Whether a host job (`isolation = host`) is launched (`--allow-host-jobs`); without it
     /// one is refused before anything is made.
     pub host_jobs: bool,

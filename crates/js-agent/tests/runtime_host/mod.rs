@@ -246,6 +246,7 @@ impl RuntimeHost {
             egress: port,
             gpus: None,
             image_budget: None,
+            warm_sandboxes: 0,
             host_jobs: false,
             host_ports: HostPorts::default(),
             fs: None,

@@ -122,6 +122,18 @@ pub struct Flags {
     /// 0; by default there is no budget and no image is evicted. Needs the crun runtime.
     #[arg(long, value_name = "GIB")]
     pub image_budget_gib: Option<u64>,
+    /// The most containers the crun runtime keeps made ahead of their jobs for one image:
+    /// each image that was started in the last 10 minutes gets up to this many, sized by how
+    /// many of it started recently, so a job's start only binds its directories into one and
+    /// runs its program. 0 turns warm sandboxes off. From 0 to 64; by default 2. Needs the
+    /// crun runtime.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = crate::crun::DEFAULT_WARM_SANDBOXES,
+        value_parser = clap::value_parser!(u32).range(0..=64)
+    )]
+    pub warm_sandboxes: u32,
     /// The dedicated non-root user every `crun` command of the crun runtime runs as, such as
     /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
     /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a
@@ -350,11 +362,16 @@ impl Flags {
     /// the container engine refuses them all (`--allow-host-jobs` and `--egress` above none
     /// are refused where the jobs are made, [`HOST_JOBS_NEED_CRUN`]).
     #[must_use]
-    pub fn crun_flags(&self) -> [(&'static str, bool); 11] {
+    pub fn crun_flags(&self) -> [(&'static str, bool); 12] {
         let [device, mount, env] = self.gpu_flags();
         [
             ("--crun-bin", self.crun_bin.is_some()),
             ("--image-budget-gib", self.image_budget_gib.is_some()),
+            // A flag with a default is given when it is not the default.
+            (
+                "--warm-sandboxes",
+                self.warm_sandboxes != crate::crun::DEFAULT_WARM_SANDBOXES,
+            ),
             ("--job-user", self.job_user.is_some()),
             device,
             mount,
@@ -585,7 +602,9 @@ pub(crate) fn check(
     let settings = ready
         .settings(image_allow)
         .with_log_file_cap(cli.log_file_cap);
-    let settings = settings.with_image_budget(budget);
+    let settings = settings
+        .with_image_budget(budget)
+        .with_warm_sandboxes(os.warm_sandboxes);
     Ok(Start {
         crun: Some(settings.with_gpus(passthrough)),
         toolkit: None,

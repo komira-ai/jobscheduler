@@ -60,3 +60,5 @@ mod support;
 mod update_hook;
 mod usage;
 mod vm;
+#[cfg(target_os = "linux")]
+mod warm_sandboxes;

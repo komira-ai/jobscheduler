@@ -465,6 +465,8 @@ max_follow      = 256                                   # most GetLogs calls wai
 The agent's one flag for it is `--log-file-cap` (default 64 MiB, from 1 MiB to 1 GiB): the local file of each stream of a `crun` job
 whose start carries a log sink, and for a native job with a sink the most bytes of each of its log files that are uploaded.
 
+The agent's flag for warm sandboxes is `--warm-sandboxes <n>` (default 2, from 0 to 64, `0` off; the crun runtime only, so it is refused with `--allow-container-engine` and `--no-jobs` when not 2, and by name in a macOS build): the most containers the crun runtime keeps made and started ahead of their jobs for one image. Each image that was started in the last 10 minutes gets up to `n` of them, sized by how many of it started recently, so a job's start only binds its directories into one and runs its program.
+
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 
 ```toml

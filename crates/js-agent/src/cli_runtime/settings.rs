@@ -224,6 +224,9 @@ pub struct CrunPlan {
     /// The most bytes the unpacked images may take (`--image-budget-gib`), none for no
     /// budget, set by [`Settings::with_image_budget`].
     pub image_budget: Option<u64>,
+    /// The most containers made ahead of their jobs the runtime keeps for one image
+    /// (`--warm-sandboxes`), 0 for none, set by [`Settings::with_warm_sandboxes`].
+    pub warm_sandboxes: u32,
     /// Whether the runtime launches host jobs (`--allow-host-jobs`), set by
     /// [`Settings::with_host_jobs`].
     pub host_jobs: bool,
@@ -361,6 +364,7 @@ impl Settings {
                 gpus: None,
                 logs: crate::logs::LogPlan::new(crate::logs::DEFAULT_FILE_CAP),
                 image_budget: None,
+                warm_sandboxes: crate::crun::DEFAULT_WARM_SANDBOXES,
                 host_jobs: false,
                 host_ports: Vec::new(),
                 mount_roots: crate::lifecycle::MountRoots::default(),
@@ -420,6 +424,17 @@ impl Settings {
         self.crun_mut()
             .into_iter()
             .for_each(|plan| plan.image_budget = budget);
+        self
+    }
+
+    /// These settings with `count` as the most containers the crun runtime keeps made ahead of
+    /// their jobs for one image (`--warm-sandboxes`); the settings of another runtime are as
+    /// they were.
+    #[must_use]
+    pub fn with_warm_sandboxes(mut self, count: u32) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.warm_sandboxes = count);
         self
     }
 
