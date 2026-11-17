@@ -652,8 +652,8 @@ impl Machine for FakeMachine {
         &self,
         host_id: &str,
         sockets: &[(String, PathBuf)],
-    ) -> Result<Box<dyn Providers>, String> {
-        let calls = self.providers.clone()?;
+    ) -> std::io::Result<Box<dyn Providers>> {
+        let calls = self.providers.clone().map_err(std::io::Error::other)?;
         let names = sockets.iter().map(|(name, _)| name.clone()).collect();
         Ok(Box::new(AskedProviders {
             host_id: host_id.to_owned(),

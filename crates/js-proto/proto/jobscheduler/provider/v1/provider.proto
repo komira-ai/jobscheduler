@@ -78,8 +78,9 @@ message PrepareRequest {
   string ref = 2;
   // How the job will use the tree.
   MountMode mode = 3;
-  // The host the agent runs on: the id it registered under.
-  string host = 4;
+  // Not used: the agent's id in `source` is the host's, as each agent registers as a host
+  // of its own.
+  reserved 4;
 }
 
 // The answer to Prepare: the work has begun.

@@ -47,7 +47,7 @@ fn a_machine_that_cannot_make_the_providers_ends_the_start_of_the_worker() {
     given.providers = MountProviders::from_flags(&sockets, None).unwrap();
     match Worker::start(given) {
         Ok(_) => panic!("the worker started"),
-        Err(why) => assert_eq!(why, "no client is made"),
+        Err(why) => assert_eq!(why, "--mount-provider: no client is made"),
     }
     assert!(machine.provider_calls().is_empty());
 }

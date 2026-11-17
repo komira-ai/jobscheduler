@@ -43,7 +43,7 @@ fn labels(run: &str, broken: bool) -> Vec<(&'static str, &str)> {
 /// provider, and restarted, sweeps its provider keeping the run it adopted, releases the
 /// source of the run it did not (and removes its record), keeps the adopted run's record, and
 /// releases the adopted run's source when that run ends; and that a record that cannot be read
-/// and one that names a provider the agent was not given are removed and reported, a record
+/// (a directory, or text that is not a record) and one that names a provider the agent was not given are removed and reported, a record
 /// whose write did not finish is removed without a word, and a start that comes after the
 /// restart is not held by the sweep once it is answered. Catches a source of a crashed run
 /// held at the provider for ever, a run released while it still runs, and a sweep that keeps
@@ -57,6 +57,9 @@ fn a_restart_releases_the_sources_of_runs_it_did_not_adopt() {
     h.apply(vec![job_start(with_layer("j2"))]);
     let dir = h.dir.path("state/providers");
     assert!(dir.join("j1.json").is_file() && dir.join("j2.json").is_file());
+    // A record that cannot be read at all (a directory where a file should be), then one that
+    // is not a record.
+    fs::create_dir(dir.join("dirent.json")).unwrap();
     fs::write(dir.join("garbage.json"), "not json").unwrap();
     fs::write(dir.join("stale.json.tmp"), "{").unwrap();
     let elsewhere = r#"{"sources":[{"provider":"elsewhere","index":0}]}"#;
@@ -71,10 +74,21 @@ fn a_restart_releases_the_sources_of_runs_it_did_not_adopt() {
         names(&events),
         [
             "finding - provider-record-failed",
+            "finding - provider-record-failed",
             "finding - provider-record-failed"
         ]
     );
-    let Event::Finding(unreadable) = &events[0] else {
+    let Event::Finding(directory) = &events[0] else {
+        panic!("a finding");
+    };
+    assert!(
+        directory
+            .message
+            .starts_with("the provider record dirent.json: "),
+        "{}",
+        directory.message
+    );
+    let Event::Finding(unreadable) = &events[1] else {
         panic!("a finding");
     };
     assert!(
@@ -84,7 +98,7 @@ fn a_restart_releases_the_sources_of_runs_it_did_not_adopt() {
         "{}",
         unreadable.message
     );
-    let Event::Finding(unknown) = &events[1] else {
+    let Event::Finding(unknown) = &events[2] else {
         panic!("a finding");
     };
     assert_eq!(

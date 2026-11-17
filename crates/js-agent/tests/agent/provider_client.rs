@@ -46,7 +46,11 @@ struct Scratch(TestDir);
 impl Scratch {
     /// A new, empty directory `<temp>/<name>-<pid>-<n>`.
     fn new(name: &str) -> Self {
-        Self(TestDir::under(std::env::temp_dir(), name))
+        let dir = TestDir::under(std::env::temp_dir(), name);
+        // Closed to group and others whatever the umask, as the client wants a socket's
+        // directory.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        Self(dir)
     }
 
     /// The path of `name` in the directory.
@@ -406,7 +410,7 @@ fn a_path_that_is_not_a_socket_is_unavailable() {
     let scratch = Scratch::new("pc-file");
     let path = scratch.write("mp.sock", "", 0o600);
     let mut client = ProviderClient::new(HOST, euid(), &sockets(path)).unwrap();
-    assert_unavailable(&settle(&mut client, NAME, &sweep(&[])), "is not a socket");
+    assert_unavailable(&settle(&mut client, NAME, &sweep(&[])), ": not a socket");
 }
 
 /// Asserts that a socket a group or others can write is `Unavailable` with that reason, that
@@ -431,23 +435,43 @@ fn a_socket_others_can_write_is_unavailable_until_it_is_not() {
     );
 }
 
-/// Asserts that a socket owned by a user that is neither the agent's nor root is
-/// `Unavailable` with that reason. The socket is the test's own, so the agent is told it runs
-/// as another user (when the test runs as root it first gives the socket to another user, as
-/// root may). It catches an owner check that is missing or that compares the wrong ids.
+/// Asserts that a socket owned by a user that is neither the agent's nor root is taken when
+/// that user also owns the socket's directory, as a provider that runs as a user of its own
+/// (tierstore) binds its socket in its own directory: the agent is told it runs as another
+/// user than the one that owns both. It catches the check that refuses every provider not run
+/// as root or as the agent's user.
 #[test]
-fn a_socket_owned_by_another_user_is_unavailable() {
+fn a_socket_of_its_directorys_owner_is_taken_from_another_user() {
     let (_scratch, fake) = start("pc-owner");
-    // Root may give the socket away; any other user cannot, and keeps owning it.
-    let _gave = std::os::unix::fs::chown(fake.socket(), Some(65534), None);
     let owner = fs::metadata(fake.socket()).unwrap().uid();
     let mut client =
         ProviderClient::new(HOST, owner + 1, &sockets(fake.socket().to_path_buf())).unwrap();
+    assert_eq!(
+        settle(&mut client, NAME, &sweep(&[])),
+        ProviderAnswer::Done(None)
+    );
+}
+
+/// Asserts that a socket in a directory its group or others can write is `Unavailable`
+/// naming that, until the directory is closed: whoever may write the directory could put
+/// another socket in the provider's place. It catches a check of the socket file alone.
+#[test]
+fn a_socket_in_a_directory_others_can_write_is_unavailable() {
+    let (scratch, fake) = start("pc-dir");
+    let dir = scratch.path("");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+    let mut client =
+        ProviderClient::new(HOST, euid(), &sockets(fake.socket().to_path_buf())).unwrap();
     assert_unavailable(
         &settle(&mut client, NAME, &sweep(&[])),
-        &format!("belongs to user {owner}"),
+        "its directory can be written by its group or by others (mode 777)",
     );
     assert!(fake.requests().is_empty());
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        settle(&mut client, NAME, &sweep(&[])),
+        ProviderAnswer::Done(None)
+    );
 }
 
 /// Asserts that a socket file nobody listens on (a provider that died and left its file) is
@@ -555,8 +579,8 @@ fn the_client_can_move_to_another_thread() {
     is_send::<ProviderClient>();
 }
 
-/// Asserts what the provider received for each call: the agent's host id as `Source.agent`,
-/// `PrepareRequest.host` and `SweepRequest.agent`, `js.` before every run id (in the keep list
+/// Asserts what the provider received for each call: the agent's host id as `Source.agent`
+/// and `SweepRequest.agent`, `js.` before every run id (in the keep list
 /// of a sweep too), the index, the ref untouched, and each mode of the wire as the protocol's
 /// mode. It catches an id sent without its prefix, a ref altered on the way, a mode mapped to
 /// another, and a call that names another source than the one asked.
@@ -583,7 +607,6 @@ fn the_provider_sees_the_agents_id_the_prefixed_run_the_index_the_ref_and_the_mo
             source: source("js.run-a", index),
             r#ref: reference,
             mode: protocol as i32,
-            host: HOST.to_owned(),
         }));
     }
     settle(&mut rig.client, NAME, &mount("run-a", 3));

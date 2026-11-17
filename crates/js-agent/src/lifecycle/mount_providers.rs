@@ -106,7 +106,9 @@ impl MountProviders {
         if self.is_empty() {
             return Ok(Vec::new());
         }
-        let client = machine.providers(host_id, &self.sockets)?;
+        let client = machine
+            .providers(host_id, &self.sockets)
+            .map_err(|why| format!("--mount-provider: {why}"))?;
         Ok(life.attach_providers(client, self.wait_ms()))
     }
 }

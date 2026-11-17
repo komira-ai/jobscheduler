@@ -409,8 +409,16 @@ fn a_previous_agent_reads_a_start_with_a_provider_as_unknown() {
     let reply = json!({
         "commands": [
             {"type": "job_stop", "job_id": "job-0"},
-            start_text(|s| s.mounts.truncate(1)),
-            start_text(|s| s.layers.truncate(2)),
+            start_text(|s| {
+                s.job_id = "job-2".into();
+                s.booked.gpu_indices.clear();
+                s.mounts.truncate(1);
+            }),
+            start_text(|s| {
+                s.job_id = "job-3".into();
+                s.booked.gpu_indices.clear();
+                s.layers.truncate(2);
+            }),
             start_text(plain)
         ]
     });

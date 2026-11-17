@@ -137,7 +137,6 @@ fn prepare_request() -> PrepareRequest {
         source: Some(source()),
         r#ref: "toolchains/clang-18".to_owned(),
         mode: MountMode::CopyOnWrite as i32,
-        host: "host-1".to_owned(),
     }
 }
 

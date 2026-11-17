@@ -208,8 +208,8 @@ async fn a_job_naming_a_provider_no_pool_has_is_refused_no_capable_host() {
         StatusCode::UNPROCESSABLE_ENTITY,
         json!({ "error": "no-capable-host" }),
     );
+    // The pool takes four hosts: this one and the three that report providers below.
     rig.register("host-a", true);
-    rig.register_layered_rootfs("host-b", "true");
     rig.register_mount_providers("host-c", &["cache"]);
     for via in Via::BOTH {
         for spec in [layered("job-t"), two_providers("job-t")] {

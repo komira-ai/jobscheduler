@@ -107,16 +107,15 @@ pub trait Machine: Send + Sync {
     ///
     /// # Errors
     ///
-    /// The client cannot be made; the text says why.
+    /// The client cannot be made (its runtime cannot start).
     fn providers(
         &self,
         host_id: &str,
         sockets: &[(String, PathBuf)],
-    ) -> Result<Box<dyn Providers>, String> {
+    ) -> std::io::Result<Box<dyn Providers>> {
         let euid = rustix::process::geteuid().as_raw();
-        crate::provider::ProviderClient::new(host_id, euid, sockets)
-            .map(|client| Box::new(client) as Box<dyn Providers>)
-            .map_err(|why| format!("--mount-provider: {why}"))
+        let client = crate::provider::ProviderClient::new(host_id, euid, sockets)?;
+        Ok(Box::new(client))
     }
 }
 

@@ -8,26 +8,30 @@
 //!   over once. It runs the calls on a tokio runtime of its own (two threads named
 //!   `js-provide`), as the image pulls of `lifecycle::prefetch` do.
 //! - Each channel connects lazily, on its first call, and again after a connection is lost.
-//!   Before every connect it checks the socket file: a socket, owned by the agent's user or
-//!   root, that neither group nor others can write (`socket`).
+//!   Before every connect it checks the socket file: a socket that neither group nor others
+//!   can write, in a directory they cannot write either, owned by the agent's user, root or
+//!   that directory's owner (`socket`).
 //! - Each call has a bound ([`CallBounds`]); a provider that does not answer within it is
 //!   answered `Unavailable`, and the lifecycle asks again when it chooses.
 //! - A reply of `INVALID_ARGUMENT` or `FAILED_PRECONDITION` is a refusal; every other failure
 //!   is `Unavailable`.
 //!
+//! - The messages are the agent's own declarations of the protocol's ([`wire`]), so the
+//!   agent does not link `js-proto`.
+//!
 //! The calls carry the agent's own id (the host id it registered under) in every `Source` and
-//! in `PrepareRequest.host` and `SweepRequest.agent`, and `js.` before every run id.
+//! in `SweepRequest.agent`, and `js.` before every run id.
 
 mod call;
 mod flight;
 mod socket;
+pub mod wire;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_proto::provider::v1::mount_provider_client::MountProviderClient;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tonic::transport::{Channel, Endpoint};
 
@@ -81,8 +85,8 @@ pub struct ProviderClient {
     /// The id the agent's host registered under.
     agent: String,
     bounds: CallBounds,
-    /// One lazily connected client for each provider, by name.
-    clients: BTreeMap<String, MountProviderClient<Channel>>,
+    /// One lazily connected channel for each provider, by name.
+    clients: BTreeMap<String, Channel>,
     flights: Arc<Flights>,
     /// Kept to be shut down on drop; calls are spawned through `handle`.
     runtime: Option<Runtime>,
@@ -91,8 +95,8 @@ pub struct ProviderClient {
 
 impl ProviderClient {
     /// A client of the providers `sockets` names (name and socket path), for the agent whose
-    /// host id is `host_id`, which runs as the user `euid`: a socket must belong to `euid` or
-    /// to root. The bounds are [`CallBounds::default`]. No socket is opened until a call is
+    /// host id is `host_id`, which runs as the user `euid`: a socket must belong to `euid`, to
+    /// root or to the owner of its directory. The bounds are [`CallBounds::default`]. No socket is opened until a call is
     /// asked of its provider.
     ///
     /// # Errors
@@ -124,7 +128,7 @@ impl ProviderClient {
                 .map(|(name, socket)| {
                     let channel = Endpoint::from_static("http://provider.invalid")
                         .connect_with_connector_lazy(UnixConnector::new(socket.clone(), euid));
-                    (name.clone(), MountProviderClient::new(channel))
+                    (name.clone(), channel)
                 })
                 .collect()
         };

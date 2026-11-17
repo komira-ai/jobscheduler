@@ -249,9 +249,7 @@ impl FakeProvider {
             }),
             UnixListenerStream::new(listener),
         );
-        runtime.spawn(async move {
-            let _ended = server.await;
-        });
+        drop(runtime.spawn(server));
         Ok(Self {
             socket,
             shared,

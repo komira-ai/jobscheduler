@@ -352,7 +352,7 @@ fn a_start_naming_a_provider_the_agent_was_not_given_is_refused_at_admission() {
     );
     let mut none = bare("prov-none");
     let events = none.apply(vec![job_start(with_layer("j1"))]);
-    assert_eq!(refused(&events), [want.clone()]);
+    assert_eq!(refused(&events), std::slice::from_ref(&want));
     assert!(!none.dir.path("state/providers").exists(), "no record");
     assert!(none.fake.created().is_empty());
 

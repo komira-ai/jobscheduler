@@ -6,11 +6,14 @@ use std::iter::{once, successors};
 use std::time::Duration;
 
 use js_agent_wire::MountMode;
-use js_proto::provider::v1 as pb;
-use js_proto::provider::v1::mount_provider_client::MountProviderClient;
+use prost::Message;
+use tonic::client::Grpc;
+use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::Channel;
-use tonic::{Code, Status};
+use tonic::{Code, Request, Response, Status};
+use tonic_prost::ProstCodec;
 
+use super::wire;
 use crate::lifecycle::{ProviderAnswer, ProviderCall};
 
 /// The id a run has in a provider's calls: the job's id after `js.`, so a provider that other
@@ -20,77 +23,98 @@ fn run_name(run_id: &str) -> String {
 }
 
 /// The source a call names.
-fn source(agent: &str, run_id: &str, index: u32) -> Option<pb::Source> {
-    Some(pb::Source {
+fn source(agent: &str, run_id: &str, index: u32) -> Option<wire::Source> {
+    Some(wire::Source {
         agent: agent.to_owned(),
         run: run_name(run_id),
         index,
     })
 }
 
-/// The protocol's name for a mode.
-fn mode(mode: MountMode) -> pb::MountMode {
+/// The protocol's number for a mode.
+fn mode(mode: MountMode) -> i32 {
     match mode {
-        MountMode::ReadOnly => pb::MountMode::ReadOnly,
-        MountMode::ReadWrite => pb::MountMode::ReadWrite,
-        MountMode::CopyOnWrite => pb::MountMode::CopyOnWrite,
+        MountMode::ReadOnly => wire::MODE_READ_ONLY,
+        MountMode::ReadWrite => wire::MODE_READ_WRITE,
+        MountMode::CopyOnWrite => wire::MODE_COPY_ON_WRITE,
     }
 }
 
 /// Sends `call` for `agent` and answers what the provider answered, or that it did not
 /// within `bound`.
 pub(super) async fn run(
-    client: MountProviderClient<Channel>,
+    channel: Channel,
     agent: String,
     call: ProviderCall,
     bound: Duration,
 ) -> ProviderAnswer {
-    match tokio::time::timeout(bound, transact(client, &agent, call)).await {
+    match tokio::time::timeout(bound, transact(channel, &agent, call)).await {
         Ok(answer) => answer,
         Err(_) => ProviderAnswer::Unavailable(format!("no answer within {bound:?}")),
     }
 }
 
+/// One request and its response at `path`, as the generated client of a unary call makes it.
+async fn unary<Q, R>(channel: Channel, path: &'static str, request: Q) -> Result<R, Status>
+where
+    Q: Message + Send + Sync + 'static,
+    R: Message + Default + Send + Sync + 'static,
+{
+    let mut grpc = Grpc::new(channel);
+    grpc.ready()
+        .await
+        .map_err(Into::into)
+        .map_err(Status::from_error)?;
+    let codec = ProstCodec::<Q, R>::default();
+    let path = PathAndQuery::from_static(path);
+    grpc.unary(Request::new(request), path, codec)
+        .await
+        .map(Response::into_inner)
+}
+
 /// The request-response exchange of `call`, with no bound of its own.
-async fn transact(
-    mut client: MountProviderClient<Channel>,
-    agent: &str,
-    call: ProviderCall,
-) -> ProviderAnswer {
+async fn transact(channel: Channel, agent: &str, call: ProviderCall) -> ProviderAnswer {
     let result: Result<Option<String>, Status> = match call {
         ProviderCall::Prepare {
             run_id,
             index,
             reference,
             mode: how,
-        } => client
-            .prepare(pb::PrepareRequest {
+        } => {
+            let request = wire::PrepareRequest {
                 source: source(agent, &run_id, index),
                 r#ref: reference,
-                mode: mode(how) as i32,
-                host: agent.to_owned(),
-            })
-            .await
-            .map(|_| None),
-        ProviderCall::Mount { run_id, index } => client
-            .mount(pb::MountRequest {
+                mode: mode(how),
+            };
+            unary::<_, wire::PrepareResponse>(channel, wire::PREPARE, request)
+                .await
+                .map(|_| None)
+        }
+        ProviderCall::Mount { run_id, index } => {
+            let request = wire::MountRequest {
                 source: source(agent, &run_id, index),
-            })
-            .await
-            .map(|response| Some(response.into_inner().path)),
-        ProviderCall::Release { run_id, index } => client
-            .release(pb::ReleaseRequest {
+            };
+            unary::<_, wire::MountResponse>(channel, wire::MOUNT, request)
+                .await
+                .map(|response| Some(response.path))
+        }
+        ProviderCall::Release { run_id, index } => {
+            let request = wire::ReleaseRequest {
                 source: source(agent, &run_id, index),
-            })
-            .await
-            .map(|_| None),
-        ProviderCall::Sweep { keep } => client
-            .sweep(pb::SweepRequest {
+            };
+            unary::<_, wire::ReleaseResponse>(channel, wire::RELEASE, request)
+                .await
+                .map(|_| None)
+        }
+        ProviderCall::Sweep { keep } => {
+            let request = wire::SweepRequest {
                 agent: agent.to_owned(),
                 keep: keep.iter().map(|run_id| run_name(run_id)).collect(),
-            })
-            .await
-            .map(|_| None),
+            };
+            unary::<_, wire::SweepResponse>(channel, wire::SWEEP, request)
+                .await
+                .map(|_| None)
+        }
     };
     answer(result)
 }
