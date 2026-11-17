@@ -336,4 +336,4 @@ marked settled. The ids run D1 to D67 with no gaps. D26 is open. Superseded deci
   that provider reads. The agent of the host the job is placed on calls the provider's `Prepare(ref)` as soon as it has admitted the
   start, `Mount` for the directory while it readies the container, and `Release` after the job's file system is taken
   apart, over a local protocol jobscheduler defines; a provider name is a capability placement requires. jobscheduler reads nothing of
-  the ref and stays no storage system's client. Design for the owner's review; text in [mount-providers.md](mount-providers.md).
+  the ref and stays no storage system's client. Approved; text in [mount-providers.md](mount-providers.md).

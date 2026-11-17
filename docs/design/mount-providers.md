@@ -1,6 +1,6 @@
 # Mount providers: a job's tree prepared by a node-local provider from the moment the job is assigned
 
-Status: **design for the owner's review; nothing here is built, and no code lands until the owner has answered.** It
+Status: **approved by the owner; build items (section 10) in progress, none built yet.** It
 adds a public interface (a new source of a layer and of a mount in the job spec, a capability, an agent flag, and a
 local protocol a provider serves), and it amends [job-rootfs.md](job-rootfs.md) (decisions LR6, LR12, LR18, LR22 and
 section 7.4) and D66, as section 9 lists. Its first provider is tierstore's (komira-ai/tierstore), for kbf's action
@@ -35,7 +35,7 @@ earliest moment code on that host can act, and the first a client could not reac
 The shape is the one Kubernetes' CSI node plugin and Docker's volume plugins have, cut to what a job needs: a provider
 is a process on the host that the operator installs and names; the agent calls it at three moments of a job and
 passes an opaque reference; the provider does the storage work and returns a directory. A source is named in every call
-by `(agent, run, index)`: the agent's instance, the run, and the source's place in the job, so no call needs an answer
+by `(agent, run, index)`: the agent (its host id), the run, and the source's place in the job, so no call needs an answer
 of an earlier one to name what it is about. Three calls, all idempotent:
 
 | Call | When | The provider | Returns |
@@ -106,27 +106,75 @@ A provider serves the protocol `jobscheduler.provider.v1.MountProvider`, gRPC ov
 names its path to the agent. The socket must be owned by root or by the agent's user and writable by no one else; the
 agent checks its owner and mode before it connects, as it checks its flags file, and the provider may check the peer's
 user. No key travels. The agent trusts the provider as part of the host, but not the text of the path it returns
-(rule 3). Every request names its source as `(agent, run, index)`: `agent` is the agent's instance id (its state
-root's), so several agents on one host never touch each other's sources, and `run` is sent as `js.<run id>`, so a
+(rule 3). Every request names its source as `(agent, run, index)`: `agent` is the host id the agent registers with
+(each agent is a host of its own), so several agents on one machine never touch each other's sources, and `run` is sent as `js.<run id>`, so a
 provider shared with other clients keeps jobscheduler's apart.
 
+The file is `crates/js-proto/proto/jobscheduler/provider/v1/provider.proto`, exactly:
+
 ```proto
+// The protocol a node-local mount provider serves to the host's agent, over a Unix socket
+// (docs/design/mount-providers.md). It grows by additions only; a provider ignores fields it
+// does not know.
+
+syntax = "proto3";
+
+package jobscheduler.provider.v1;
+
+import "jobscheduler/v1/job.proto";
+
 service MountProvider {
+  // Begins making the source's tree, and answers within 10 s; the work goes on after.
   rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  // The tree's directory, once it can be opened; UNAVAILABLE within 30 s while it cannot.
   rpc Mount(MountRequest) returns (MountResponse);
+  // Gives up what the source held; within 5 s. A source it does not know is success.
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  // Releases every source of `agent` whose run is not in `keep`.
   rpc Sweep(SweepRequest) returns (SweepResponse);
 }
-message Source { string agent = 1; string run = 2; uint32 index = 3; }   // run: "js.<run id>"
-message PrepareRequest { Source source = 1; string ref = 2; MountMode mode = 3; string host = 4; }
+
+// One provider source of one run: what every call is about.
+message Source {
+  // The host id the agent registers with: 1 to 128 bytes of [A-Za-z0-9._-].
+  string agent = 1;
+  // "js." and the run id: at most 131 bytes of [A-Za-z0-9._-].
+  string run = 2;
+  // The source's place among the job's provider sources, from 0.
+  uint32 index = 3;
+}
+
+message PrepareRequest {
+  Source source = 1;
+  // The job's ProviderSource.ref, as the client wrote it: 1 to 1024 bytes of UTF-8.
+  string ref = 2;
+  // How the job mounts the tree: READ_ONLY, READ_WRITE or COPY_ON_WRITE, never unspecified.
+  jobscheduler.v1.MountMode mode = 3;
+}
 message PrepareResponse {}
+
 message MountRequest { Source source = 1; }
-message MountResponse { string path = 1; }            // an absolute host path, a directory
+message MountResponse {
+  // An absolute path of a directory on the host, below a mount root the agent lists.
+  string path = 1;
+}
+
 message ReleaseRequest { Source source = 1; }
 message ReleaseResponse {}
-message SweepRequest { string agent = 1; repeated string keep = 2; }   // keep: run ids, "js.<run id>"
-message SweepResponse { uint32 released = 1; }
+
+message SweepRequest {
+  // The agent's host id, as in Source.
+  string agent = 1;
+  // The runs whose sources stay, each "js.<run id>".
+  repeated string keep = 2;
+}
+message SweepResponse {
+  // How many sources were released.
+  uint32 released = 1;
+}
 ```
+
+Every refusal is a gRPC status with a message of at most 256 bytes; the codes are those of the rules below.
 
 Rules a provider keeps:
 

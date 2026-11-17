@@ -7,7 +7,7 @@ items: jobscheduler does not know that a node-local cache exists, let alone whic
 jobscheduler is met here by things any container runtime offers (layers, mounts, and access to a host port or socket),
 and the pieces of its wire that already merged (komira-ai/jobscheduler#842) are retired additively (section 6). A layer or a
 mount that names a node-local provider, which the agent asks at assignment, is designed in [mount-providers.md](mount-providers.md)
-(D67, for the owner's review), which amends LR6, LR12, LR18, LR22 and section 7.4.
+(D67), which amends LR6, LR12, LR18, LR22 and section 7.4.
 
 **What changes for a user.** Today a job's file system is one image, read-only, with an empty writable `/work` in which
 it runs (section 1). After this design a job can also say, as it would to Docker:

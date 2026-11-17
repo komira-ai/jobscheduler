@@ -973,7 +973,7 @@ D67 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   D51 host jobs only in a whole-node lease. D52 the lease clock starts at the token. D53 measurement is the consumer's. D54 typed readiness refusals, own cap. D55 reservations persist. Text in [design/whole-node.md](design/whole-node.md).
 - D56 to D61 hosts that run many jobs, spot hosts, price and capacity data, several clouds (D56 amends D7). D62 to D65 the swap at the machine cap (launch the biggest, drain the smallest to finish its jobs within a grace; evictions charge no budget) and scale-down. Text in [design/hosts.md](design/hosts.md).
 - D66 a job's file system is assembled generically: layers, mounts of a source with named options, and host loopback ports (host sockets designed), each a kind Docker, the OCI runtime or Kubernetes has, bounded by the host's mount roots, `--image-allow` and `--host-port`; supersedes the tree inputs design. Text in [design/job-rootfs.md](design/job-rootfs.md).
-- D67 a layer or a mount may name a node-local provider by name with an opaque ref; the agent calls it to prepare the tree at assignment, for its directory while the container is readied, and to release it at the end; amends D66 and job-rootfs LR6, LR12, LR18, LR22 (for the owner's review). Text in [design/mount-providers.md](design/mount-providers.md).
+- D67 a layer or a mount may name a node-local provider by name with an opaque ref; the agent calls it to prepare the tree at assignment, for its directory while the container is readied, and to release it at the end; amends D66 and job-rootfs LR6, LR12, LR18, LR22. Text in [design/mount-providers.md](design/mount-providers.md).
 
 ## 16. Risks
 
