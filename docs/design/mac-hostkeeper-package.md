@@ -144,8 +144,9 @@ as owner), any script, and another identifier or version.
    `<base>/<V>/SHA256SUMS` and the package and checks the package's sha256 against it. When they are there it adds the
    `macos-arm64` entry, `{"installer":"macos-pkg","repository":"komira-stable","packageVersion":V,"digest":<sha256 of
    the signed package>,"bytes":"<size>","manifest":<the Mac manifest>}`, and writes `set-mac=true`. When the SHA256SUMS
-   is absent (404, or the 403 CloudFront over a bucket it may not list answers for a missing object) it writes `set-mac=false` and the targets have no `macos-arm64`, so the Linux entries are
-   unaffected; any other failure is an error.
+   is absent (404, or the 403 CloudFront over a bucket it may not list answers for a missing object) it writes
+   `set-mac=false` and the targets have no `macos-arm64`, so the Linux entries are unaffected; any other failure is
+   an error.
 5. `hostkeeper-desired.yml`'s `check` job outputs `set-mac`. Its job `set-desired-mac` calls the same reusable workflow
    at the same pin with `host_group: mac-build` and the same version and targets (a version set again with other
    targets is refused `release_exists`), after `set-desired`, and runs only when both `set` and `set-mac` are `true`.

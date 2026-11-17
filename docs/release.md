@@ -510,9 +510,9 @@ to `targets` under `macos-arm64`:
 
 When `SHA256SUMS` does not exist (an answer `404`, or `403`: `packages.komira.ai` is CloudFront
 over an S3 bucket it may not list, which answers every missing object with `403`) it writes
-`set-mac=false`, and `targets` is exactly what it is without `--pkg-url`: the Linux platforms alone. Any other failure to read it, sums
-that do not list the package, or a package whose digest is not the listed one is an error and nothing
-is set. A second call of the reusable workflow, with the host group `mac-build`, sets the same
+`set-mac=false`, and `targets` is exactly what it is without `--pkg-url`: the Linux platforms
+alone. Any other failure to read it, sums that do not list the package, or a package whose digest
+is not the listed one is an error and nothing is set. A second call of the reusable workflow, with the host group `mac-build`, sets the same
 version and targets when `set-mac` is `true`.
 
 The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook's bounds and the

@@ -5,9 +5,9 @@
 //! A directory with no `SHA256SUMS` means the release has no Mac package yet: the release is then
 //! set for the Linux platforms alone. The host answers a file that is not there with a `404`, or
 //! with a `403` when it is a CDN over an object store it may not list (`packages.komira.ai` is
-//! CloudFront over S3, which answers every missing object so), and both mean no sums. Any other failure to read it is an error,
-//! and so is a package whose SHA-256 is not the one the sums list, so a half-published or
-//! replaced package is never pinned.
+//! CloudFront over S3, which answers every missing object so), and both mean no sums. Any other
+//! failure to read it is an error, and so is a package whose SHA-256 is not the one the sums
+//! list, so a half-published or replaced package is never pinned.
 
 use std::path::Path;
 
