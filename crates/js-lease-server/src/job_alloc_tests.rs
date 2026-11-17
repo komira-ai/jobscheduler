@@ -556,3 +556,28 @@ fn a_repeat_run_of_one_build_writes_its_row_under_the_same_name() {
     let (odd, _) = placed(&jobs, "odd", "host-a", odd, BOOKED);
     assert_eq!(profile_of(&odd), None, "no profile key");
 }
+
+/// Asserts that a job labelled with the class of a build target
+/// ([`js_types::SizeClass::of_target`]) keeps its history row under exactly that name, for a
+/// short target and for one long enough to be cut and hashed. Catches a target's class that is
+/// no profile key, so that its rows would carry no name at all.
+#[test]
+fn a_build_targets_class_names_its_history_row() {
+    let (_, _, jobs) = timed();
+    let long = format!("root//{}:integration_test", "deep/".repeat(20));
+    for (id, target) in [
+        ("target-1", "root//crates/js-sched:js-sched".to_owned()),
+        ("target-2", long),
+    ] {
+        let class = js_types::SizeClass::of_target(&target).unwrap();
+        let mut spec = spec();
+        let map = std::collections::BTreeMap::from([(
+            js_types::SIZE_CLASS_LABEL.to_owned(),
+            class.as_str().to_owned(),
+        )]);
+        spec.labels = js_types::Labels::from_caller(&map).unwrap();
+        let (job, _) = placed(&jobs, id, "host-a", spec, BOOKED);
+        let name = ProfileKey::parse(class.as_str()).unwrap();
+        assert_eq!(profile_of(&job), Some(name), "{target}");
+    }
+}

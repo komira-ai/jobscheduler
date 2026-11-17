@@ -6,7 +6,7 @@ use crate::ids::is_id_char;
 pub const RESERVED_PREFIX: &str = "jobscheduler.dev/";
 
 /// Longest label value, in bytes.
-const MAX_VALUE_LEN: usize = 63;
+pub(crate) const MAX_VALUE_LEN: usize = 63;
 
 /// The reserved label keys the scheduler writes itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -47,6 +47,7 @@ mod request;
 mod resources;
 pub mod sched;
 mod shape;
+mod size_class;
 mod start;
 pub mod text;
 
@@ -74,4 +75,5 @@ pub use queue::{JobEventKind, QueueCode, QueueNote};
 pub use request::{Request, RequestError};
 pub use resources::{Dim, Dims, Resources, TypeError};
 pub use shape::{Capabilities, Shape};
+pub use size_class::{SIZE_CLASS_LABEL, SizeClass};
 pub use start::{RefusalCode, StartSpec};
