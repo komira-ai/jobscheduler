@@ -103,9 +103,10 @@ which bounds its providers. A pool's static `[capabilities]` and a provider cata
 
 A provider serves the protocol `jobscheduler.provider.v1.MountProvider`, gRPC over a Unix socket, defined in
 `js-proto` as jobscheduler's own contract (as the CSI spec is Kubernetes'). The socket is the provider's; the operator
-names its path to the agent. The socket must be owned by root or by the agent's user and writable by no one else; the
-agent checks its owner and mode before it connects, as it checks its flags file, and the provider may check the peer's
-user. No key travels. The agent trusts the provider as part of the host, but not the text of the path it returns
+names its path to the agent. The socket's directory must be owned by root and writable by no one else, so only root
+can put a socket there; the socket itself may belong to the provider's own user, and is writable by that user and,
+through its group, by the agent's. The agent checks the directory's owner and mode, and the socket's, before it
+connects, as it checks its flags file; the provider may check the peer's user. No key travels. The agent trusts the provider as part of the host, but not the text of the path it returns
 (rule 3). Every request names its source as `(agent, run, index)`: `agent` is the host id the agent registers with
 (each agent is a host of its own), so several agents on one machine never touch each other's sources, and `run` is sent as `js.<run id>`, so a
 provider shared with other clients keeps jobscheduler's apart.
