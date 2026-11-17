@@ -199,6 +199,22 @@ pub enum Status {
     Gone,
 }
 
+/// Where a running run's container is, asked of a runtime that places its containers in
+/// control groups ([`Runtime::places_in_cgroup`]) once [`Runtime::cgroup`] has named no group
+/// for the run for a settle wait ([`Runtime::whereabouts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Whereabouts {
+    /// The container's control group, made since the runtime last named none.
+    Grouped(PathBuf),
+    /// No process of the container runs: it is not made yet, or it has ended and its group
+    /// went with it. The agent is not blind to a container that is not there.
+    NoProcess,
+    /// The container's first process runs, and not in the group the runtime made for it: the
+    /// agent is blind to that container. The text is that process's control group, as its
+    /// `/proc/<pid>/cgroup` names it.
+    Elsewhere(String),
+}
+
 /// A labelled container found on the host, for re-adoption after a restart. Whether it
 /// still runs is found by polling it, like any other.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -760,11 +776,22 @@ pub trait Runtime {
 
     /// Whether every container this runtime starts is in a control group the agent can
     /// read ([`Runtime::cgroup`]). A runtime that says so and then cannot name a run's
-    /// control group is blind to that run: the lifecycle taints the host as unchecked
-    /// when it watches the run. The default is `false`: a runtime that keeps no control groups
-    /// of its own is never blind for lack of one.
+    /// control group for a settle wait is asked where that run's container is
+    /// ([`Runtime::whereabouts`]), and the lifecycle taints the host as unchecked when its
+    /// first process runs outside its group. The default is `false`: a runtime that keeps no
+    /// control groups of its own is never blind for lack of one.
     fn places_in_cgroup(&self) -> bool {
         false
+    }
+
+    /// Where the container of the run `id` is, which [`Runtime::poll`] answers as running and
+    /// [`Runtime::cgroup`] named no group for: asked only by the lifecycle, a settle wait after
+    /// it first found no group. A group that is missing because the container is not made
+    /// yet, or because it ended and was removed with its group, is [`Whereabouts::NoProcess`];
+    /// only a first process that runs outside the group is [`Whereabouts::Elsewhere`]. The
+    /// default, for a runtime that cannot name a container's process, is `NoProcess`.
+    fn whereabouts(&mut self, _id: &RunHandle) -> Whereabouts {
+        Whereabouts::NoProcess
     }
 }
 

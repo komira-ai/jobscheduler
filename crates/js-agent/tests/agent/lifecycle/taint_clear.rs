@@ -198,7 +198,8 @@ fn an_unchecked_taint_clears_too() {
 }
 
 /// Asserts that a crun run whose container group was not found a settle wait after the first
-/// sighting taints the host as unchecked with `cgroup-not-found`, and that the taint clears
+/// sighting, while its first process ran in another group, taints the host as unchecked with
+/// `cgroup-not-found`, and that the taint clears
 /// after two clean re-checks of the idle host and the server's acknowledgement of the clear.
 /// Catches a group that was slow to appear leaving a node out of service until an operator
 /// moves the marker aside.
@@ -206,6 +207,7 @@ fn an_unchecked_taint_clears_too() {
 fn a_cgroup_not_found_taint_clears_after_two_clean_rechecks() {
     let mut h = Harness::new("cgroup-not-found-clears");
     h.fake.promise_cgroups(true);
+    h.fake.run_elsewhere("r1", "/actions/other");
     h.start(job("r1"));
     h.life.step();
     h.clock.advance(1000);

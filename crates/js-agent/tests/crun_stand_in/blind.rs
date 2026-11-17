@@ -1,20 +1,24 @@
 //! `CrunRuntime` under the lifecycle: the runtime puts every container in a control group
-//! the agent can read, so a running run whose group the agent cannot name leaves the host
-//! unchecked.
+//! the agent can read, so a running run whose group the agent cannot name, and whose first
+//! process runs in another group, leaves the host unchecked; one whose process is gone does
+//! not. And `CrunRuntime::whereabouts` itself, on the stand-in.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use js_agent::cli_runtime::ProcRead;
+use js_agent::crun::Hooks;
 use js_agent::lifecycle::taint::reason;
 use js_agent::lifecycle::{
-    Capacity, CheckFinding, CheckHook, Clock, Config, DEFAULT_SETTLE, Finished, Lifecycle,
-    MountRoots, Prepared, Runtime, ScratchRoot, StateRoot, code,
+    Capacity, CheckFinding, CheckHook, Clock, Config, DEFAULT_SETTLE, Event, Finished, Lifecycle,
+    MountRoots, Prepared, RunHandle, Runtime, ScratchRoot, StateRoot, Status, Whereabouts, code,
 };
 use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, Taint};
 
-use crate::node::{LONG, Node};
+use crate::node::{ELSEWHERE, LONG, NoImages, Node, no_process};
 
 struct Pass;
 
@@ -71,15 +75,12 @@ fn job(node: &Node, run_id: &str) -> JobSpec {
     }
 }
 
-/// Proves the wiring of the blind-runtime taint to `CrunRuntime`: a run that holds (it never
-/// ends by itself) whose container cgroup the stand-in never makes is seen by the lifecycle
-/// while it runs, and the host is tainted as unchecked for that run by the first step a
-/// settle wait after the first sighting (the first sighting alone taints nothing), as for a
-/// start the agent cannot see. Catches a crun runtime that does not say it places its runs in
-/// cgroups (a run no one can sample would pass unnoticed).
-#[test]
-fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
-    let node = Node::new("blind-group");
+/// Runs the holding run `r1-hold`, whose container cgroup the stand-in never makes, under the
+/// lifecycle on a node whose `/proc` is `proc_read`: one step, then one a settle wait after the
+/// first sighting. Returns the taint the lifecycle holds then and the `cgroup-not-found`
+/// findings of that step, and stops the run.
+fn past_the_wait(name: &str, proc_read: ProcRead) -> (Option<Taint>, Vec<String>) {
+    let node = Node::new(name);
     let config = Config {
         capacity: Capacity {
             cpu_millis: 4000,
@@ -96,9 +97,13 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
         bundle: None,
         quota: None,
     };
+    let hooks = Hooks {
+        proc_read,
+        ..Node::hooks(LONG, LONG)
+    };
     // The image is fetched and unpacked before the lifecycle asks, so that its start does
     // not wait on a pull running in the background.
-    let mut runtime = node.open();
+    let mut runtime = node.open_with(hooks, Arc::new(NoImages));
     let _ = runtime.prepare(&node.image(), None);
     assert_eq!(runtime.wait_prepared(&node.image()), Prepared::Ready);
     // The stand-in says it is up through a pipe named for the container, which must exist
@@ -120,7 +125,7 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
         commands: vec![Command::Start(Box::new(spec))],
         ..HeartbeatReply::default()
     };
-    let started = life.apply(&start(job(&node, "r1-hold")));
+    life.apply(&start(job(&node, "r1-hold")));
     assert!(!life.is_tainted(), "the start alone says nothing");
     let first = life.step();
     assert!(
@@ -130,16 +135,17 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
     // The settle wait after the first sighting: the second look comes that long after it.
     let wait: u64 = DEFAULT_SETTLE.as_millis().try_into().expect("small");
     clock.0.set(wait);
-    let stepped = life.step();
-    assert_eq!(
-        life.pending_taint(),
-        Some(Taint {
-            reason: reason::UNCHECKED.to_owned(),
-            run_id: Some("r1-hold".to_owned()),
-            check: Some(code::CGROUP_NOT_FOUND.to_owned()),
-        }),
-        "start: {started:?}; step: {stepped:?}"
-    );
+    let findings = life
+        .step()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Finding(finding) if finding.code == code::CGROUP_NOT_FOUND => {
+                Some(format!("{}: {}", finding.code, finding.message))
+            }
+            _ => None,
+        })
+        .collect();
+    let taint = life.pending_taint();
     node.up(&probe);
     life.apply(&HeartbeatReply {
         commands: vec![Command::Stop {
@@ -148,4 +154,78 @@ fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
         ..HeartbeatReply::default()
     });
     life.step();
+    (taint, findings)
+}
+
+/// Proves the wiring of the blind-runtime taint to `CrunRuntime`: a run that holds (it never
+/// ends by itself) whose container cgroup the stand-in never makes, and whose first process
+/// (the pid the stand-in's `crun state` names) runs in another group, is seen by the lifecycle
+/// while it runs, and the host is tainted as unchecked for that run by the first step a settle
+/// wait after the first sighting (the first sighting alone taints nothing), as for a start the
+/// agent cannot see, with a finding that names that group. Catches a crun runtime that does
+/// not say it places its runs in cgroups, or does not say where a container is (a run no one
+/// can sample would pass unnoticed).
+#[test]
+fn a_crun_run_whose_group_is_never_seen_taints_the_host() {
+    let (taint, findings) = past_the_wait("blind-group", crate::node::elsewhere);
+    assert_eq!(
+        taint,
+        Some(Taint {
+            reason: reason::UNCHECKED.to_owned(),
+            run_id: Some("r1-hold".to_owned()),
+            check: Some(code::CGROUP_NOT_FOUND.to_owned()),
+        })
+    );
+    assert_eq!(
+        findings,
+        [format!(
+            "cgroup-not-found: run r1-hold: its container group was not found within the settle \
+             wait of 1000 ms, and its first process runs in {ELSEWHERE}"
+        )]
+    );
+}
+
+/// Proves that the same run, whose container cgroup is not there a settle wait after the first
+/// sighting, taints nothing when the process `crun state` names is not in the agent's `/proc`:
+/// the container ended (or `crun` names a process that is gone), and a group removed with it
+/// says nothing against the host. Catches the farm's taint of a host whose job ran clean.
+#[test]
+fn a_crun_run_whose_process_is_gone_is_not_blind() {
+    let (taint, findings) = past_the_wait("gone-process", no_process);
+    assert_eq!(taint, None);
+    assert_eq!(findings, Vec::<String>::new());
+}
+
+/// Proves what `CrunRuntime::whereabouts` answers on the stand-in: for a running container
+/// whose group is not there, `Elsewhere` with the group its first process (the pid `crun
+/// state` names) runs in; once the group is made, `Grouped` with it; for a container `crun
+/// state` does not know though it runs, `NoProcess`; and for a run that ended, and a run the
+/// runtime does not hold, `NoProcess` without asking `crun`. Catches a runtime that asks the
+/// wrong place, or names a container that is not there as one that runs elsewhere.
+#[test]
+fn where_a_crun_container_is() {
+    let node = Node::new("whereabouts");
+    let mut runtime = node.open();
+    let id = runtime.stage(&node.spec("r1-hold")).expect("staged");
+    node.pipe(&id.0);
+    runtime.start_staged(&id).expect("started");
+    node.up(&id);
+    assert_eq!(
+        runtime.whereabouts(&id),
+        Whereabouts::Elsewhere(ELSEWHERE.to_owned())
+    );
+    let ctr = node.cgroup_of(&id.0).join("ctr");
+    std::fs::create_dir(&ctr).expect("the container's cgroup");
+    assert_eq!(runtime.whereabouts(&id), Whereabouts::Grouped(ctr));
+
+    let deaf = runtime
+        .create_and_start(&node.spec("r2-deaf"))
+        .expect("started");
+    assert_eq!(runtime.whereabouts(&deaf), Whereabouts::NoProcess);
+
+    assert_eq!(runtime.stop(&id, LONG), Ok(()));
+    assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
+    assert_eq!(runtime.whereabouts(&id), Whereabouts::NoProcess);
+    let unknown = RunHandle("js-nobody-r9".to_owned());
+    assert_eq!(runtime.whereabouts(&unknown), Whereabouts::NoProcess);
 }

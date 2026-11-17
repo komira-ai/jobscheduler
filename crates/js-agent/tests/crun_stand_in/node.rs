@@ -21,6 +21,21 @@ use js_testkit::dir::TestDir;
 pub const SUB_UID: u32 = 100_000;
 /// The pid the stand-in's `crun state` names for a container.
 pub const PID: u32 = 4321;
+/// The control group [`elsewhere`] says the process [`PID`] runs in.
+pub const ELSEWHERE: &str = "/actions/elsewhere";
+
+/// The node's `/proc` by default: the process [`PID`] (which the stand-in's `crun state`
+/// names) runs in the control group [`ELSEWHERE`], and the test asserts the path asked for.
+/// No test reads the host's own `/proc`, where that pid may be anything.
+pub fn elsewhere(path: &str) -> Option<String> {
+    assert_eq!(path, format!("/proc/{PID}/cgroup"));
+    Some(format!("0::{ELSEWHERE}\n"))
+}
+
+/// A `/proc` with no process in it: the process the stand-in's `crun state` names is gone.
+pub fn no_process(_path: &str) -> Option<String> {
+    None
+}
 /// The first host gid of the subordinate range.
 pub const SUB_GID: u32 = 200_000;
 
@@ -335,7 +350,8 @@ impl Node {
         }
     }
 
-    /// The hooks: nothing is given away, the clock reads 5000, the waits are as given.
+    /// The hooks: nothing is given away, the clock reads 5000, the waits are as given, and
+    /// the `/proc` of the node is [`elsewhere`]'s.
     pub fn hooks(kill_wait: Duration, pull_limit: Duration) -> Hooks {
         Hooks {
             chown: note,
@@ -343,6 +359,7 @@ impl Node {
             kill_wait,
             pull_limit,
             call_limit: LONG,
+            proc_read: elsewhere,
         }
     }
 

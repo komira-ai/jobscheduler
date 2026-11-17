@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use js_agent::lifecycle::{
     CheckFinding, CheckHook, Clock, Exit, Finished, Found, FsPrepared, JobFs, NativeRefusal,
-    Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, label,
+    Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Whereabouts, label,
 };
 use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 
@@ -72,6 +72,14 @@ struct State {
     reports: BTreeMap<String, LogReport>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
+    /// The control group the first process of the container of a run runs in, outside the
+    /// group made for it (see [`FakeRuntime::run_elsewhere`]).
+    elsewhere: BTreeMap<String, String>,
+    /// How many times `whereabouts` was asked about each run, by run id.
+    where_asks: BTreeMap<String, u32>,
+    /// The group `whereabouts` names for a run (and `cgroup` from then on) though `cgroup`
+    /// named none before it was asked (see [`FakeRuntime::group_when_asked`]).
+    grouped_when_asked: BTreeMap<String, PathBuf>,
     /// How many times the scripted checks were told the host is idle.
     idles: u32,
     /// When set, the log notes at every create whether this says the scratch directory has
@@ -454,6 +462,37 @@ impl FakeRuntime {
             .borrow_mut()
             .cgroups
             .insert(run_id.to_owned(), dir);
+    }
+
+    /// The first process of the container of `run_id` runs in the control group `group`,
+    /// not in the one made for it: `whereabouts` answers `Elsewhere(group)` while `cgroup`
+    /// names no group for the run. Without this, a run with no group has no process to find
+    /// (`NoProcess`).
+    pub fn run_elsewhere(&self, run_id: &str, group: &str) {
+        self.state
+            .borrow_mut()
+            .elsewhere
+            .insert(run_id.to_owned(), group.to_owned());
+    }
+
+    /// The group of the container of `run_id` is made when `whereabouts` is asked about it:
+    /// `cgroup` names none until then, `whereabouts` answers `Grouped(dir)`, and `cgroup`
+    /// names `dir` from then on.
+    pub fn group_when_asked(&self, run_id: &str, dir: &str) {
+        self.state
+            .borrow_mut()
+            .grouped_when_asked
+            .insert(run_id.to_owned(), PathBuf::from(dir));
+    }
+
+    /// How many times `whereabouts` was asked about `run_id`.
+    pub fn where_asks(&self, run_id: &str) -> u32 {
+        self.state
+            .borrow()
+            .where_asks
+            .get(run_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The container of `run_id` exits with `code`.
@@ -854,6 +893,24 @@ impl Runtime for FakeRuntime {
         let state = self.state.borrow();
         let run = &state.containers.get(&id.0)?.run_id;
         state.cgroups.get(run).cloned()
+    }
+
+    fn whereabouts(&mut self, id: &RunHandle) -> Whereabouts {
+        let mut state = self.state.borrow_mut();
+        let Some(run) = state.containers.get(&id.0).map(|c| c.run_id.clone()) else {
+            return Whereabouts::NoProcess;
+        };
+        *state.where_asks.entry(run.clone()).or_default() += 1;
+        if let Some(dir) = state.grouped_when_asked.remove(&run) {
+            state.cgroups.insert(run.clone(), dir);
+        }
+        if let Some(dir) = state.cgroups.get(&run) {
+            return Whereabouts::Grouped(dir.clone());
+        }
+        match state.elsewhere.get(&run) {
+            Some(group) => Whereabouts::Elsewhere(group.clone()),
+            None => Whereabouts::NoProcess,
+        }
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {

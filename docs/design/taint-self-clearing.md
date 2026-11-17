@@ -44,9 +44,13 @@ state the host really holds and a re-check that sees no difference does not prov
   `unchecked` with `host-not-visible` (that taint says the agent cannot see the host its jobs run on; a re-check of
   what the agent can see does not show that it now can). `cgroup-not-found` is the crun runtime's own blindness and is
   different: a run the runtime reports running whose container group (`<lease cgroup>/ctr`) does not exist a settle
-  wait (`--settle-ms`) after the agent first saw it. The run is running from the moment its supervisor says it is
-  ready, before crun has made the container, so a slow creation on a loaded node, or a crun that failed before making
-  the group and whose end is read late, shows this way. The post-job checks do not depend on that group (they judge
+  wait (`--settle-ms`) after the agent first saw it, while the container's first process (the pid `crun state` names,
+  still in the agent's `/proc`) runs in another group; the finding names that group. A group that is missing because
+  the container is not there taints nothing: the run is running from the moment its supervisor says it is ready,
+  before crun has made the container (a slow creation on a loaded node, or a crun that fails before making the group,
+  where `crun state` names no process), and it is still read as running after the container ended and crun removed
+  its group, until the supervisor's exit record is read (the named process is gone). The agent asks again a settle
+  wait after each such answer (`Runtime::whereabouts`). The post-job checks do not depend on that group (they judge
   processes by user, parent and cgroup against the baseline taken before the job, and mounts, users, groups, modules
   and watched directories), so what such a job leaves is found by them and by a re-check, and the taint clears after
   two clean re-checks of an idle host. It is a new value of the open `check` string; `host-not-visible` keeps its
