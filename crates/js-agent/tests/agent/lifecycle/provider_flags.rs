@@ -177,11 +177,11 @@ fn provider_flags_are_refused_without_jobs_and_the_capability_cannot_be_set_by_h
     let given = format!("tier={}", dir.path("tier.sock").display());
     let cases: [(&[&str], &str); 3] = [
         (
-            &["--mount-provider", &given],
+            &["--no-jobs", "--mount-provider", &given],
             "--mount-provider: not with --no-jobs (an agent that runs no job)",
         ),
         (
-            &["--mount-provider-wait", "5"],
+            &["--no-jobs", "--mount-provider-wait", "5"],
             "--mount-provider-wait: not with --no-jobs (an agent that runs no job)",
         ),
         (

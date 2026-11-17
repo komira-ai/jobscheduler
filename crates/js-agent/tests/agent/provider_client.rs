@@ -19,7 +19,7 @@ use js_agent_wire::MountMode;
 use js_proto::provider::v1 as pb;
 use js_testkit::mount_provider::{FakeProvider, Kind, Seen, mount_path};
 
-use crate::support::Scratch;
+use js_testkit::dir::TestDir;
 
 /// How long a test waits for an answer before it fails: far above any answer, and no test
 /// passes by it.
@@ -38,6 +38,31 @@ struct Rig {
     client: ProviderClient,
 }
 
+/// A directory for a test's sockets, under the system's temporary directory rather than the
+/// target directory: a socket's path is at most 107 bytes, which a deep checkout and a long
+/// pid or counter would pass under the target directory. Removed when dropped.
+struct Scratch(TestDir);
+
+impl Scratch {
+    /// A new, empty directory `<temp>/<name>-<pid>-<n>`.
+    fn new(name: &str) -> Self {
+        Self(TestDir::under(std::env::temp_dir(), name))
+    }
+
+    /// The path of `name` in the directory.
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.path().join(name)
+    }
+
+    /// Writes `text` to `name` in the directory with the mode `mode`, and answers its path.
+    fn write(&self, name: &str, text: &str, mode: u32) -> PathBuf {
+        let path = self.path(name);
+        fs::write(&path, text).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+}
+
 /// The effective user of this test process.
 fn euid() -> u32 {
     rustix::process::geteuid().as_raw()
@@ -48,9 +73,8 @@ fn sockets(path: PathBuf) -> Vec<(String, PathBuf)> {
     vec![(NAME.to_owned(), path)]
 }
 
-/// Starts a fake provider in a scratch directory whose name is `name` (kept short: a socket's
-/// path is at most about 108 bytes, and `CARGO_TARGET_TMPDIR/js-agent/<name>-<pid>-<n>/mp.sock`
-/// must fit), with its socket owner-only whatever the umask is.
+/// Starts a fake provider in a [`Scratch`] directory named `name`, with its socket owner-only
+/// whatever the umask is.
 fn start(name: &str) -> (Scratch, FakeProvider) {
     let scratch = Scratch::new(name);
     let fake = FakeProvider::start(&scratch.path("")).unwrap();
@@ -579,9 +603,8 @@ fn the_provider_sees_the_agents_id_the_prefixed_run_the_index_the_ref_and_the_mo
 }
 
 /// Asserts that a sweep releases the sources of the agent that sweeps whose run it does not
-/// keep, and only those: a source of a kept run stays, and so does a source of a run that
-/// another agent also named. It catches a sweep that releases a kept run or a run that is
-/// not the agent's own.
+/// keep, and only those: every source of a kept run stays. It catches a sweep that releases a
+/// kept run, or keeps one it was not told to keep.
 #[test]
 fn a_sweep_releases_the_sources_the_agent_does_not_keep() {
     let mut rig = rig("pc-sweep");

@@ -126,7 +126,8 @@ pub mod code {
     /// for each provider.
     pub const PROVIDER_SWEEP_FAILED: &str = "provider-sweep-failed";
     /// The record of a run's provider sources (`providers/<run>.json` in the state root) could
-    /// not be written, so the start failed, or could not be read when the agent started, so it
-    /// was removed.
+    /// not be written, so the start failed; or, when the agent started, a record could not be
+    /// read, or named a provider this agent was not given (either is removed, its sources left
+    /// to the provider's own collection), or the directory of records could not be listed.
     pub const PROVIDER_RECORD_FAILED: &str = "provider-record-failed";
 }

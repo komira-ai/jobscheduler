@@ -542,6 +542,7 @@ impl FakeMachine {
     }
 
     /// The same machine, which cannot make the client of the mount providers: `why`.
+    #[cfg(target_os = "linux")]
     pub fn without_providers(self, why: &str) -> Self {
         Self {
             providers: Err(why.to_owned()),
@@ -550,6 +551,7 @@ impl FakeMachine {
     }
 
     /// The calls the mount providers were sent so far, each as `<host id> <provider> <call>`.
+    #[cfg(target_os = "linux")]
     pub fn provider_calls(&self) -> Vec<String> {
         match &self.providers {
             Ok(calls) => calls.lock().unwrap_or_else(PoisonError::into_inner).clone(),

@@ -161,11 +161,12 @@ impl ProviderView {
 /// A host is capable when it is neither tainted nor draining, what the pool books of it holds
 /// `req`'s resources, and its facts satisfy `req`'s `os`, `arch`, `isa_level`, `disk-gib`,
 /// `exec`, `layered-rootfs` and each `mount-provider.<name>` (as [`Shape::satisfies`] compares
-/// them), and the network ceiling its facts advertise
-/// ([`ceiling_of`]) covers `req`'s network level and host ports ([`within_ceiling`]; a host that
-/// advertises none has the level `none` and no port). Whether it is busy, lost or cordoned does not
-/// matter. A provider may offer only if it forwards host ports when `req` declares any; its level
-/// is not checked, and it is not asked for `layered-rootfs` or a `mount-provider.<name>` key. A pool with no provider that launches admits only through a capable host.
+/// them), and the network ceiling its facts advertise ([`ceiling_of`]) covers `req`'s network
+/// level and host ports ([`within_ceiling`]; a host that advertises none has the level `none`
+/// and no port). Whether it is busy, lost or cordoned does not matter. A provider may offer
+/// only if it forwards host ports when `req` declares any; its level is not checked, and it is
+/// not asked for `layered-rootfs` or a `mount-provider.<name>` key. A pool with no provider
+/// that launches admits only through a capable host.
 pub fn can_ever_serve(
     req: &Requirements,
     hosts: &[HostView],

@@ -114,7 +114,7 @@ fn answer(result: Result<Option<String>, Status>) -> ProviderAnswer {
 /// of the socket it failed and not only "transport error".
 fn why(status: &Status) -> String {
     let mut parts: Vec<String> = once(status.message().to_owned())
-        .chain(successors(status.source(), |cause| cause.source()).map(ToString::to_string))
+        .chain(successors(status.source(), |&cause| cause.source()).map(ToString::to_string))
         .collect();
     parts.dedup();
     parts.join(": ")

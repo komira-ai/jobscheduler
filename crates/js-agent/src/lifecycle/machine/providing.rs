@@ -272,7 +272,7 @@ impl Providing {
         let paths: BTreeMap<u32, &str> = self
             .sources
             .iter()
-            .filter_map(|source| Some((source.index, source.path.as_deref()?)))
+            .filter_map(|source| source.path.as_deref().map(|path| (source.index, path)))
             .collect();
         for (index, layer) in (0u32..).zip(fs.layers.iter_mut()) {
             if let Some(path) = paths.get(&index) {
