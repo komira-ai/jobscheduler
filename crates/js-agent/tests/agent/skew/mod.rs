@@ -36,7 +36,14 @@ pub fn previous() -> Value {
 
 /// Asserts that this release's agent and server, met as [`record`] meets them, say
 /// everything their previous release said, with the fresh values paired as the replay
-/// pairs them; and writes this release's transcript to `skew/transcript.json` under the
+/// pairs them, in two respects that are not a field added: the recording's pool asks a
+/// heartbeat interval of [`record::QUICK_INTERVAL_MS`] where the previous release's asked
+/// 5000 (the one value of the transcript set to it), and the job start comes in the reply
+/// to the heartbeat after the submit, one before the previous release's (the server
+/// places the job in the submit call), and is then compared field by field at the step
+/// the previous release has it, where this release sends none ([`compare::take_early_start`]);
+/// any other command, or a start the previous release never sent, is a difference. It also
+/// writes this release's transcript to `skew/transcript.json` under the
 /// directory cargo gives integration tests for scratch files (`CARGO_TARGET_TMPDIR`, under
 /// the build's own target directory; nothing else writes there), which is where the next
 /// release's transcript is taken from: a path that outlives the test, unlike a [`Scratch`]
@@ -62,11 +69,37 @@ fn this_version_still_says_what_the_previous_release_said() {
         all.push(of["refusal"].clone());
         all
     };
-    let (then, now) = (steps(&previous), steps(&transcript));
+    let (mut then, now) = (steps(&previous), steps(&transcript));
     assert_eq!(then.len(), now.len(), "{transcript}");
+    let welcome = &mut then[0]["server"]["body"]["heartbeat_interval_ms"];
+    assert_eq!(*welcome, 5000, "the previous release's welcome");
+    *welcome = serde_json::json!(record::QUICK_INTERVAL_MS);
+    let mut ahead = std::collections::BTreeMap::new();
     for (index, (old, new)) in then.iter().zip(&now).enumerate() {
         let old = minted.apply(old);
-        let found = compare::uncovered(&old, new, Some(&mut minted));
+        let mut new = new.clone();
+        let body = new
+            .get_mut("server")
+            .and_then(|server| server.get_mut("body"));
+        if let Some(start) =
+            body.and_then(|body| compare::take_early_start(&old["server"]["body"], body))
+        {
+            match compare::start_after(&then, index) {
+                Some((later, _)) => {
+                    ahead.insert(later, start);
+                }
+                None => problems.push(format!(
+                    "{index} a job start the previous release never sent"
+                )),
+            }
+        }
+        if let Some(start) = ahead.remove(&index) {
+            let commands = &mut new["server"]["body"]["commands"];
+            if commands.as_array().is_some_and(Vec::is_empty) {
+                *commands = serde_json::json!([start]);
+            }
+        }
+        let found = compare::uncovered(&old, &new, Some(&mut minted));
         problems.extend(found.into_iter().map(|what| format!("{index} {what}")));
     }
     assert_eq!(problems, Vec::<String>::new());

@@ -40,6 +40,34 @@ use crate::support::{Ran, linux_host};
 /// clock, which no step of the conversation moves: the frames carry no time.
 const T0: u64 = 1_000_000;
 
+/// [`POOL`] with the least heartbeat interval a pool takes, [`QUICK_INTERVAL_MS`]. The
+/// recording uses it: a server holds the reply of a heartbeat that has nothing to send, to an
+/// agent that reports `held-beat` (this build's does), for the interval at most, in real time,
+/// and the conversation has four such beats, which the default 5 s would make twenty seconds
+/// of the test. The previous release's transcript says 5000 where this one says
+/// [`QUICK_INTERVAL_MS`]; that is the one difference the comparison allows itself
+/// ([`super::this_version_still_says_what_the_previous_release_said`]). The replay of the
+/// previous agent runs against [`POOL`], whose hello is not `held-beat`.
+#[cfg(target_os = "linux")]
+const QUICK_POOL: &str = r#"
+heartbeat_interval = "250ms"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+"#;
+
+/// The heartbeat interval of [`QUICK_POOL`], in milliseconds, as its welcome carries it.
+#[cfg(target_os = "linux")]
+pub const QUICK_INTERVAL_MS: u64 = 250;
+
 /// The pool's join token (a test value: the server reads it from a file of the scratch).
 const JOIN: &str = "join-token-S-0123456789-abcdefghijklmnop";
 
@@ -211,10 +239,20 @@ pub struct Cell {
 impl Cell {
     /// A server on a first boot over the pool [`POOL`].
     pub fn start(name: &str) -> Self {
+        Self::start_over(name, POOL)
+    }
+
+    /// A server on a first boot over the pool [`QUICK_POOL`].
+    #[cfg(target_os = "linux")]
+    pub fn start_quick(name: &str) -> Self {
+        Self::start_over(name, QUICK_POOL)
+    }
+
+    fn start_over(name: &str, pool: &str) -> Self {
         let scratch = Scratch::new(name);
         let client = scratch.write("client-token", CLIENT, 0o600);
         let join = scratch.write("join-token", JOIN, 0o600);
-        let pool = scratch.write("agent-pool.toml", POOL, 0o644);
+        let pool = scratch.write("agent-pool.toml", pool, 0o644);
         let path = |p: &Path| p.to_str().unwrap().to_owned();
         let argv = [
             "js-lease-server",
@@ -379,7 +417,7 @@ pub fn replace_text(value: &mut Value, from: &str, to: &str) {
 /// hello). The session secret is replaced by [`SESSION`].
 #[cfg(target_os = "linux")]
 pub fn record(name: &str) -> Value {
-    let cell = Cell::start(name);
+    let cell = Cell::start_quick(name);
     let tape = Tape::default();
     let flow = tape.0.clone();
     let running = spawn(name, cell.url(), &cell.join_file(), tape);
@@ -396,10 +434,13 @@ pub fn record(name: &str) -> Value {
         };
         flow.lock().unwrap().push(event);
     });
-    assert!(
-        waits.iter().all(|wait| *wait == Duration::from_secs(5)),
-        "{waits:?}"
-    );
+    let interval = Duration::from_millis(QUICK_INTERVAL_MS);
+    let held = Duration::ZERO;
+    // After the hello and each beat: the interval, but after a reply the server held open
+    // for the beat (nothing to send, `beat_now`), none. The replies that carry something
+    // are the start (the job is placed by its submit), the stop, and the acknowledgement.
+    let expected = [interval, interval, held, held, interval, interval, held];
+    assert_eq!(waits, expected, "{waits:?}");
     assert!(ran.err.contains("registered, epoch 1"), "{}", ran.err);
     let mut flow = std::mem::take(&mut *flow.lock().unwrap());
 

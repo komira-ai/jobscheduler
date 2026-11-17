@@ -328,6 +328,26 @@ os = "linux"
 arch = "x86_64"
 "#;
 
+/// [`POOL_RUNS_TOML`] with the shortest heartbeat interval a pool takes, 250 ms (and a grace of a
+/// minute): a server holds the reply of a quiet heartbeat for up to that long, so the tests that
+/// beat many times against a real server hold each quiet reply for 250 ms and not for 5 s.
+#[cfg(target_os = "linux")]
+pub const POOL_RUNS_QUICK_TOML: &str = r#"
+heartbeat_interval = "250ms"
+grace = "1m"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+"#;
+
 /// Opens the waits of an agent one at a time.
 struct Gate {
     slept: Sender<Duration>,
