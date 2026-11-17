@@ -51,7 +51,7 @@ const HELD_DIR: &str = "held";
 const RESULT_SUFFIX: &str = ".json";
 
 /// The end of the name of a file that is being written, before it is renamed.
-const TEMP_SUFFIX: &str = ".tmp";
+pub(super) const TEMP_SUFFIX: &str = ".tmp";
 
 /// The file of the retired list, in the state root.
 const RETIRED_FILE: &str = "retired.json";
@@ -123,7 +123,7 @@ fn mark_of(result: &RunResult) -> Mark {
 
 /// The text of the file at `path`, at most `max` bytes of it: a longer file is cut, and
 /// what is left of a file that is longer than any record is no record.
-fn read_capped(path: &Path, max: u64) -> io::Result<String> {
+pub(super) fn read_capped(path: &Path, max: u64) -> io::Result<String> {
     File::open(path).and_then(|file| {
         let mut text = String::new();
         file.take(max).read_to_string(&mut text).map(|_| text)
@@ -137,7 +137,7 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 
 /// Writes `body` as the file `name` of `dir`: to a temporary file, synced, renamed over the
 /// file, and the directory synced. The file is the old one or the new one, never a part.
-fn write_whole(dir: &Path, name: &str, body: &[u8]) -> io::Result<()> {
+pub(super) fn write_whole(dir: &Path, name: &str, body: &[u8]) -> io::Result<()> {
     let temp = dir.join(format!("{name}{TEMP_SUFFIX}"));
     OpenOptions::new()
         .write(true)

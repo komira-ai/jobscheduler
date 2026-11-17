@@ -141,6 +141,7 @@ fn a_launch_is_planned_for_the_floor() {
         network: Default::default(),
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     };
     let asked = wanted(&floor);
     assert_eq!(

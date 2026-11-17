@@ -363,6 +363,11 @@ pub(crate) fn jobs(
 }
 
 impl Jobs {
+    /// The mount providers the flags name: none, a macOS build has no such flag.
+    pub(crate) fn providers(&self) -> crate::lifecycle::MountProviders {
+        crate::lifecycle::MountProviders::default()
+    }
+
     /// The native settings of `cli`'s flags, checked: `denied` are the agent's own roots and
     /// files, which no run may read, and the lease journal is kept in `state`. A native agent
     /// must be root (`euid`): it gives each run's directory to the run's user.

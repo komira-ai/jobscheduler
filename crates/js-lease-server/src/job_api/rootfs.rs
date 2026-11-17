@@ -12,9 +12,13 @@
 //! | `spec.layers[i]` | exactly one source this server knows | `field: spec.layers[i]: no source this server knows` |
 //! | `spec.layers[i].hostPath` | absolute, in normal form, at most 4096 bytes, no control character ([`path::absolute`]) | `field: spec.layers[i].hostPath` |
 //! | `spec.layers[i].image` | `NAME[:TAG]@sha256:<64 hex>`, as `spec.image` | `field: spec.layers[i].image` |
+//! | `spec.layers[i].provider.provider` | 1 to 32 bytes of `[a-z0-9-]`, the first a letter ([`is_provider_name`]) | `field: spec.layers[i].provider.provider` |
+//! | `spec.layers[i].provider.ref` | 1 to 1024 bytes, no control or format character ([`hidden`]) | `field: spec.layers[i].provider.ref` |
 //! | `spec.mounts` | at most 64 | `field: spec.mounts` |
 //! | `spec.mounts[i]` | exactly one source this server knows | `field: spec.mounts[i]: no source this server knows` |
 //! | `spec.mounts[i].hostPath` | as a layer's | `field: spec.mounts[i].hostPath` |
+//! | `spec.mounts[i].provider.provider` | as a layer's | `field: spec.mounts[i].provider.provider` |
+//! | `spec.mounts[i].provider.ref` | as a layer's | `field: spec.mounts[i].provider.ref` |
 //! | `spec.mounts[i].target` | absolute, in normal form, not `/`, ASCII, no `:`, `,` or `\`, at most 4096 bytes, outside the runtime's places ([`path::target`]); no two equal in lower case | `field: spec.mounts[i].target` |
 //! | `spec.mounts[i].mode` | a known value | `field: spec.mounts[i].mode` |
 //! | `spec.mounts[i].subPath` | empty, or relative in normal form, at most 4096 bytes, no control character ([`path::relative`]) | `field: spec.mounts[i].subPath` |
@@ -24,6 +28,13 @@
 //! | `spec.hostPorts[i].containerPort` | absent or 1 to 65535; no job port twice for one protocol, and none the `containerPort` of one of `spec.ports` | `field: spec.hostPorts[i].containerPort` |
 //! | `spec.hostPorts[i].protocol` | a known value | `field: spec.hostPorts[i].protocol` |
 //!
+//! A provider source (`docs/design/mount-providers.md`) is a message in the entry's `provider`
+//! member, so a refusal names the field as the gateway's JSON spells it, through that member:
+//! `field: spec.layers[0].provider.provider` for a bad name and
+//! `field: spec.layers[0].provider.ref` for a bad ref. A refusal never repeats the name or the
+//! ref. A job that names providers records one required capability per distinct name
+//! ([`providers`]).
+//!
 //! The path rules are `js-types`' ([`js_types::path`]), the ones the agent holds a start to,
 //! and the bounds are the agent wire's ([`limits`]), so a job the server takes is a start the
 //! wire carries.
@@ -31,11 +42,12 @@
 use std::collections::BTreeSet;
 
 use js_agent_wire::{
-    HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation, limits,
+    HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation, is_provider_name,
+    limits,
 };
 use js_jobs::DeclaredPort;
 use js_proto::v1;
-use js_types::{ImageDigestRef, path};
+use js_types::{ImageDigestRef, path, text::hidden};
 
 use super::validate::Fault;
 
@@ -56,6 +68,12 @@ pub(super) fn layers(layers: &[v1::Layer]) -> Result<Vec<Layer>, Fault> {
                         image: text.clone(),
                     })
                     .map_err(|_| entry("image")),
+                Some(v1::layer::Source::Provider(source)) => provided(source)
+                    .map(|(provider, reference)| Layer::Provider {
+                        provider,
+                        reference,
+                    })
+                    .map_err(entry),
                 None => Err(Fault::NoSource("layers", at)),
             }
         })
@@ -77,6 +95,12 @@ pub(super) fn mounts(mounts: &[v1::Mount]) -> Result<Vec<JobMount>, Fault> {
                 Some(v1::mount::Source::HostPath(text)) => path::absolute(text)
                     .map(|()| MountSource::HostPath { path: text.clone() })
                     .map_err(|_| entry("hostPath"))?,
+                Some(v1::mount::Source::Provider(source)) => provided(source)
+                    .map(|(provider, reference)| MountSource::Provider {
+                        provider,
+                        reference,
+                    })
+                    .map_err(entry)?,
                 None => return Err(Fault::NoSource("mounts", at)),
             };
             let unique = targets.insert(mount.target.to_ascii_lowercase());
@@ -106,6 +130,42 @@ pub(super) fn mounts(mounts: &[v1::Mount]) -> Result<Vec<JobMount>, Fault> {
                 propagation,
             })
         })
+        .collect()
+}
+
+/// The name and the ref of the provider source `source`, or the JSON path, below the entry,
+/// of the field that is not valid: `provider.provider` when the name is not
+/// [`is_provider_name`], else `provider.ref` when the ref is empty, longer than
+/// [`limits::MAX_PROVIDER_REF_LEN`] bytes or holds a character the wire refuses ([`hidden`]).
+/// Neither is repeated in the refusal.
+fn provided(source: &v1::ProviderSource) -> Result<(String, String), &'static str> {
+    let reference = &source.r#ref;
+    let usable = !reference.is_empty()
+        & (reference.len() <= limits::MAX_PROVIDER_REF_LEN)
+        & !reference.chars().any(hidden);
+    match (is_provider_name(&source.provider), usable) {
+        (false, _) => Err("provider.provider"),
+        (true, false) => Err("provider.ref"),
+        (true, true) => Ok((source.provider.clone(), reference.clone())),
+    }
+}
+
+/// The names of the providers of `layers` and of `mounts`, sorted, each once: the
+/// capabilities `mount-provider.<name>` the job requires.
+pub(super) fn providers(layers: &[Layer], mounts: &[JobMount]) -> Vec<String> {
+    let from_layers = layers.iter().filter_map(|layer| match layer {
+        Layer::Provider { provider, .. } => Some(provider),
+        Layer::HostPath { .. } | Layer::Image { .. } => None,
+    });
+    let from_mounts = mounts.iter().filter_map(|mount| match &mount.source {
+        MountSource::Provider { provider, .. } => Some(provider),
+        MountSource::HostPath { .. } => None,
+    });
+    from_layers
+        .chain(from_mounts)
+        .cloned()
+        .collect::<BTreeSet<String>>()
+        .into_iter()
         .collect()
 }
 
@@ -172,3 +232,7 @@ fn count(field: &'static str, len: usize, most: usize) -> Result<(), Fault> {
 #[cfg(test)]
 #[path = "rootfs_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rootfs_provider_tests.rs"]
+mod provider_tests;

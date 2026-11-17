@@ -443,7 +443,7 @@ pub fn removed_flag(args: &[OsString]) -> Option<String> {
 }
 
 /// `name=path` split at the first `=`.
-fn named_path(text: &str) -> Result<(String, PathBuf), String> {
+pub(crate) fn named_path(text: &str) -> Result<(String, PathBuf), String> {
     key_value(text).map(|(name, path)| (name, PathBuf::from(path)))
 }
 

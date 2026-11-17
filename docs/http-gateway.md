@@ -424,15 +424,18 @@ answer from what the commit returned; neither holds anything of its own outside 
    mounts and host ports (`docs/design/job-rootfs.md`, section 2.5) are at most 16, 64 and
    16; each layer and mount has one source this server knows (else refused naming
    `spec.layers[<i>]` or `spec.mounts[<i>]`, "no source this server knows"); a host path is
-   absolute and in normal form, a mount's target absolute, in normal form, outside the
-   runtime's own places and unique in lower case, a `subPath` relative, a mode, propagation
-   and protocol known; a host port and a job port are 1 to 65535, and no job port is given
+   absolute and in normal form, a provider source (`docs/design/mount-providers.md`) has a
+   name of 1 to 32 bytes of lower-case letters, digits and `-` that starts with a letter and
+   a ref of 1 to 1024 bytes with no control character, a mount's target absolute, in normal
+   form, outside the runtime's own places and unique in lower case, a `subPath` relative, a
+   mode, propagation and protocol known; a host port and a job port are 1 to 65535, and no job port is given
    twice or is the container port of one of `ports` (each refused naming the entry's field,
    such as `spec.mounts[<i>].target` or `spec.hostPorts[<i>].containerPort`). A job with any
    of them is refused with host isolation (naming `spec.constraints.isolation`) and with the
    whole host (naming `spec.needs`), and records
-   `layered-rootfs=true` among its capabilities, which admission and placement ask a host
-   for; one with layers, or a host port at a job port of its own, records the execution mode
+   `layered-rootfs=true` among its capabilities, and each provider it names
+   `mount-provider.<name>=true`, which admission and placement ask a host for; one with
+   layers, or a host port at a job port of its own, records the execution mode
    `container` when it gave none, and is refused with `sandbox-exec` (naming
    `spec.constraints.exec`). Each default is recorded in its explicit form (read-only,
    private, TCP, the job port of a host port), so a resubmit that spells a default either way

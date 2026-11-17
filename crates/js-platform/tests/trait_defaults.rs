@@ -53,6 +53,7 @@ fn spec() -> SubmitSpec {
         network: JobNetwork::None,
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     };
     SubmitSpec::new(
         "submit-1",

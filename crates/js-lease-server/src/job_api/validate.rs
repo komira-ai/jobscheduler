@@ -34,6 +34,12 @@
 //! agent reports it; one with layers, or a host port at a job port of its own, records
 //! `exec=container` when it left `exec` unspecified.
 //!
+//! A job that names a provider for a layer or a mount (`docs/design/mount-providers.md`) also
+//! records `mount-provider.<name>=true` for each distinct provider name
+//! ([`js_caps::mount_provider_key`]) and lists the names in [`Requirements::mount_providers`], so
+//! admission refuses at submit a job no host or catalog could serve, and it is placed and
+//! started only on a host whose agent reports each key.
+//!
 //! A field is named by its JSON name, as the gateway names it. A refusal never repeats a
 //! value of the request: not the id, not the image, not a file.
 //!
@@ -47,7 +53,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{Layer, RunFile, validate_files};
-use js_caps::{FLAG_SET, LAYERED_ROOTFS};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS, mount_provider_key};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
 };
@@ -88,8 +94,9 @@ pub(crate) enum Fault {
     Field(&'static str),
     /// The field, by its JSON name, of the port at this index of `spec.ports`.
     Port(usize, &'static str),
-    /// The field, by its JSON name, of the entry at this index of the list `spec.<list>`
-    /// (`layers`, `mounts`, `hostPorts`).
+    /// The field, by its JSON name (a path below the entry for a provider source's field:
+    /// `provider.provider`, `provider.ref`), of the entry at this index of the list
+    /// `spec.<list>` (`layers`, `mounts`, `hostPorts`).
     Entry(&'static str, usize, &'static str),
     /// The entry at this index of the list `spec.<list>` has no source this server knows: none
     /// was given, or one a later release added.
@@ -139,6 +146,10 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         }
         capabilities.insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
     }
+    let mount_providers = rootfs::providers(&layers, &mounts);
+    for name in &mount_providers {
+        capabilities.insert(mount_provider_key(name), FLAG_SET.to_owned());
+    }
     let isolation = isolation(constraints.isolation)?;
     if layered & (isolation == Isolation::Host) {
         return Err(Fault::Field("spec.constraints.isolation"));
@@ -159,6 +170,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
             .into_iter()
             .collect(),
         layered_rootfs: layered,
+        mount_providers,
     };
     let command = Some(spec.command.clone()).filter(|command| !command.is_empty());
     let job = JobSpec {

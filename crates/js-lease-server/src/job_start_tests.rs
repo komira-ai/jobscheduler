@@ -71,6 +71,7 @@ fn build_for(
             logs: None,
             metrics: &NoMetrics,
             layered_rootfs: false,
+            mount_providers: &[],
         },
     )
 }
@@ -292,6 +293,7 @@ fn build_layered(
             logs: None,
             metrics: &NoMetrics,
             layered_rootfs,
+            mount_providers: &[],
         },
     )
 }
@@ -453,5 +455,92 @@ fn a_layer_the_wire_refuses_is_unsendable_naming_the_code_and_field() {
             code: "invalid-job",
             field: "layers.path",
         })
+    );
+}
+
+/// The start of `job` for `allocation` to `host-a`, whose agent reports `layered-rootfs` and,
+/// as `mount-provider.<name>` capabilities, the keys `reported`.
+fn build_providers(
+    job: &JobRecord,
+    allocation: &AllocationRecord,
+    reported: &[String],
+) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
+    let host = HostId::new("host-a").unwrap();
+    start_of(
+        job,
+        allocation,
+        &BeatContext {
+            host: &host,
+            ceiling: &allow_list(),
+            host_jobs: false,
+            shape: None,
+            logs: None,
+            metrics: &NoMetrics,
+            layered_rootfs: true,
+            mount_providers: reported,
+        },
+    )
+}
+
+/// A job that requires the capabilities of the providers `names`, as a submit records them,
+/// with a provider layer of each.
+fn provided(job: &JobRecord, names: &[&str]) -> JobRecord {
+    let mut job = job.clone();
+    for name in names {
+        job.spec
+            .constraints
+            .capabilities
+            .insert(js_caps::mount_provider_key(name), "true".to_owned());
+        job.spec.layers.push(Layer::Provider {
+            provider: (*name).to_owned(),
+            reference: "trees/0123".to_owned(),
+        });
+    }
+    job
+}
+
+/// A job whose layers or mounts name providers is not sent to a host whose agent did not report
+/// each `mount-provider.<name>` the job requires, with the text the log and the start timeout
+/// show, whatever else the host reports (a different provider, `layered-rootfs`); sent to one
+/// that reports them all, with the provider layers as the record holds them. A job that requires
+/// no provider is sent to a host that reports none. It catches a start that an agent without
+/// the provider would fail, or that one from before provider sources would not read, and a
+/// host that reports one provider of two taken as enough.
+#[test]
+fn a_job_requiring_a_provider_is_not_sent_to_a_host_that_does_not_report_it() {
+    let (plain, allocation) = records();
+    let both = provided(&plain, &["cache", "tierstore"]);
+    let key = js_caps::mount_provider_key;
+    assert_eq!(
+        build_providers(&both, &allocation, &[]),
+        Err(Unsendable::MountProviderNotReported(key("cache")))
+    );
+    assert_eq!(
+        build_providers(&both, &allocation, &[key("other"), key("tierstore")]),
+        Err(Unsendable::MountProviderNotReported(key("cache")))
+    );
+    assert_eq!(
+        build_providers(&both, &allocation, &[key("cache")]),
+        Err(Unsendable::MountProviderNotReported(key("tierstore")))
+    );
+    let start = build_providers(&both, &allocation, &[key("cache"), key("tierstore")]).unwrap();
+    assert_eq!(
+        start.layers,
+        [
+            Layer::Provider {
+                provider: "cache".to_owned(),
+                reference: "trees/0123".to_owned(),
+            },
+            Layer::Provider {
+                provider: "tierstore".to_owned(),
+                reference: "trees/0123".to_owned(),
+            },
+        ]
+    );
+    assert!(build_providers(&plain, &allocation, &[]).is_ok());
+    assert!(build_providers(&plain, &allocation, &[key("tierstore")]).is_ok());
+    assert_eq!(
+        Unsendable::MountProviderNotReported(key("cache")).to_string(),
+        "the job requires mount-provider.cache and the host does not report it"
     );
 }

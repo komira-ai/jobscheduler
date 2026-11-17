@@ -8,7 +8,7 @@
 //! thing both threads read: the session thread stamps a reply with it when the reply
 //! arrives, and the lifecycle counts the reply's `valid_for_ms` from that stamp.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,7 @@ use js_vm_lease::VmDriver;
 
 use crate::facts::{FileReader, Platform, SystemFiles};
 use crate::integrity::{HostView, ProcHost};
-use crate::lifecycle::{Clock, Runtime};
+use crate::lifecycle::{Clock, Providers, Runtime};
 use crate::quota::{self, ScratchQuota};
 use crate::usage::UsageClock;
 use crate::vm::VmSettings;
@@ -96,6 +96,27 @@ pub trait Machine: Send + Sync {
     /// The machine cannot run VMs; the text says why.
     fn vm_driver(&self, settings: &VmSettings) -> Result<Arc<dyn VmDriver>, String> {
         crate::vm::system_driver(settings)
+    }
+
+    /// The client of the node-local mount providers `sockets` (`--mount-provider`: each
+    /// provider's name and the socket it serves on), for the agent that registered as
+    /// `host_id`, which names itself to them. Called on the worker thread, once, when the
+    /// agent was given providers. By default the agent's own client of the providers'
+    /// protocol ([`crate::provider::ProviderClient`]), which connects to a socket only when
+    /// a call is made.
+    ///
+    /// # Errors
+    ///
+    /// The client cannot be made; the text says why.
+    fn providers(
+        &self,
+        host_id: &str,
+        sockets: &[(String, PathBuf)],
+    ) -> Result<Box<dyn Providers>, String> {
+        let euid = rustix::process::geteuid().as_raw();
+        crate::provider::ProviderClient::new(host_id, euid, sockets)
+            .map(|client| Box::new(client) as Box<dyn Providers>)
+            .map_err(|why| format!("--mount-provider: {why}"))
     }
 }
 

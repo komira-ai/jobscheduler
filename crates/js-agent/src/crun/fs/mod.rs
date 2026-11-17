@@ -333,7 +333,9 @@ impl Fs {
             .layers
             .iter()
             .map(|layer| match layer {
-                Layer::HostPath { .. } => Some(Lower::Source),
+                // A layer a provider makes was replaced by its host path before the lookups
+                // (`lifecycle`), so it is a source like any host path.
+                Layer::HostPath { .. } | Layer::Provider { .. } => Some(Lower::Source),
                 Layer::Image { .. } => trees.next().map(Lower::Image),
             })
             .collect::<Option<Vec<Lower>>>()

@@ -10,6 +10,7 @@ use super::job::{
     Booking, Job, Retired, Stuck, cleanup_taint, host_taint, host_taint_of, label_id,
     may_change_host, slot_label,
 };
+use super::provided::Attached;
 use super::{Lifecycle, MAX_JOBS, SLOTS, Slots};
 use crate::lifecycle::quota::QuotaHealth;
 use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status};
@@ -102,6 +103,7 @@ impl Lifecycle {
             silence: None,
             blind_wait: DEFAULT_SETTLE,
             taint_recheck: DEFAULT_TAINT_RECHECK,
+            providers: Attached::none(),
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);
@@ -350,8 +352,11 @@ impl Lifecycle {
             stuck,
             runtime,
             config,
+            providers,
+            clock,
             ..
         } = self;
+        let now = clock.now_ms();
         stuck.retain(|held| {
             let _ = runtime.stop(&held.id, config.stop_grace);
             let gone = runtime.remove(&held.id).is_ok();
@@ -361,6 +366,8 @@ impl Lifecycle {
                     code: code::UNADOPTABLE,
                     message: format!("container {}: removed on a later attempt", held.id.0),
                 }));
+                // The run it stood for holds nothing now: its sources are released.
+                held.run_id.iter().for_each(|run| providers.leave(run, now));
             }
             !gone
         });

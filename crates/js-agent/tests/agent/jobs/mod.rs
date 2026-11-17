@@ -38,6 +38,8 @@ pub mod fake;
 #[cfg(target_os = "linux")]
 mod files_flags;
 mod per_job;
+#[cfg(target_os = "linux")]
+mod providers;
 mod quiesce;
 #[cfg(target_os = "linux")]
 mod quota_start;
@@ -62,7 +64,9 @@ use std::time::Duration;
 use js_agent::Rescue;
 #[cfg(target_os = "linux")]
 use js_agent::cli_runtime::Settings;
-use js_agent::lifecycle::{Capacity, Config, FilesRoot, MountRoots, ScratchRoot, StateRoot};
+use js_agent::lifecycle::{
+    Capacity, Config, FilesRoot, MountProviders, MountRoots, ScratchRoot, StateRoot,
+};
 #[cfg(target_os = "linux")]
 use js_agent::usage::Outbox;
 use js_agent::{Backend, Plan, Platform, Worker};
@@ -160,6 +164,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         config,
         backend: backend(dir),
         host_id: "h1".to_owned(),
+        providers: MountProviders::default(),
         platform: Platform {
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),

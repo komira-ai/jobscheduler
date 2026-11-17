@@ -14,7 +14,7 @@
 //! ([`CatalogView`]) and the pool's limits on it ([`PoolLimits`]). It reads no clock and
 //! calls no provider; the caller reads the catalogs before it asks.
 
-use js_caps::{FLAG_SET, LAYERED_ROOTFS};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS, mount_provider_key};
 use js_elastic::{Offer, ProviderCaps};
 use js_types::{Capabilities, DISK_GIB_KEY, EXEC_KEY, HostId, Requirements, Resources, Shape};
 
@@ -160,11 +160,12 @@ impl ProviderView {
 ///
 /// A host is capable when it is neither tainted nor draining, what the pool books of it holds
 /// `req`'s resources, and its facts satisfy `req`'s `os`, `arch`, `isa_level`, `disk-gib`,
-/// `exec` and `layered-rootfs` (as [`Shape::satisfies`] compares them), and the network ceiling its facts advertise
+/// `exec`, `layered-rootfs` and each `mount-provider.<name>` (as [`Shape::satisfies`] compares
+/// them), and the network ceiling its facts advertise
 /// ([`ceiling_of`]) covers `req`'s network level and host ports ([`within_ceiling`]; a host that
 /// advertises none has the level `none` and no port). Whether it is busy, lost or cordoned does not
 /// matter. A provider may offer only if it forwards host ports when `req` declares any; its level
-/// is not checked. A pool with no provider that launches admits only through a capable host.
+/// is not checked, and it is not asked for `layered-rootfs` or a `mount-provider.<name>` key. A pool with no provider that launches admits only through a capable host.
 pub fn can_ever_serve(
     req: &Requirements,
     hosts: &[HostView],
@@ -210,7 +211,8 @@ fn inside(caps: &ProviderCaps, req: &Requirements) -> bool {
 /// The capabilities a host must report for `req`, as a lease request names them: `os`,
 /// `arch`, `disk-gib` (rounded up to a whole GiB), `isa_level` and `exec`, each only when
 /// `req` names it, and `layered-rootfs=true` when `req` names layers, mounts or host ports
-/// ([`Requirements::layered_rootfs`]).
+/// ([`Requirements::layered_rootfs`]), and `mount-provider.<name>=true` for each provider
+/// `req` names ([`Requirements::mount_providers`]).
 fn required(req: &Requirements) -> Capabilities {
     let named = [
         ("os", req.os.clone()),
@@ -229,6 +231,11 @@ fn required(req: &Requirements) -> Capabilities {
     named
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
+        .chain(
+            req.mount_providers
+                .iter()
+                .map(|name| (mount_provider_key(name), FLAG_SET.to_owned())),
+        )
         .collect()
 }
 

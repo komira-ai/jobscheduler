@@ -11,6 +11,7 @@
 //! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind` | exact |
 //! | `exec` | exact, and a mode name: `container` or `sandbox-exec` |
 //! | `layered-rootfs` | exact: a job with layers, mounts or host ports asks for `true` |
+//! | `mount-provider.<name>` | exact: a job with a layer or a mount from the provider `<name>` asks for `true` |
 //! | `xcode` | membership: the node reports a set (one entry per installed Xcode build) and the request names one |
 //! | `vm.image` | membership on the digest: the request names `<name>@sha256:<64 hex>`, the node reports one entry in that form per image it holds, and only the `sha256:<hex>` parts are compared |
 //! | `ios.device` (`1`) with `ios.device.<attribute>` | one device: the node reports one `ios.device` entry per ready device, and **one** of them must satisfy every attribute (exact) |
@@ -153,9 +154,10 @@ pub(crate) fn is_ios_device_key(key: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
-/// Whether `key` is compared as an exact string: one of the exact keys.
+/// Whether `key` is compared as an exact string: one of the exact keys, or a mount
+/// provider's key ([`crate::is_mount_provider_key`]).
 pub(crate) fn is_exact_key(key: &str) -> bool {
-    EXACT_KEYS.contains(&key)
+    EXACT_KEYS.contains(&key) || crate::host::is_mount_provider_key(key)
 }
 
 /// Whether `key` names a set the node reports, matched by membership.

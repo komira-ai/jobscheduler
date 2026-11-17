@@ -1095,6 +1095,7 @@ dependencies = [
  "hex",
  "hostkeeper-hook",
  "hostkeeper-steps",
+ "hyper-util",
  "js-agent-usage",
  "js-agent-wire",
  "js-bundle",
@@ -1110,6 +1111,7 @@ dependencies = [
  "js-mac-provision",
  "js-mac-session",
  "js-oci",
+ "js-proto",
  "js-provider-ec2",
  "js-provider-gce",
  "js-registry",
@@ -1129,6 +1131,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tonic",
  "tracing",
  "tracing-subscriber",
  "ureq",
@@ -1870,6 +1873,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "js-oci",
+ "js-proto",
  "js-testkit",
  "libc",
  "postgres",
@@ -1878,6 +1882,7 @@ dependencies = [
  "rustls",
  "tokio",
  "tokio-rustls",
+ "tonic",
 ]
 
 [[package]]

@@ -138,6 +138,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         network: Reach::Open,
         host_ports: vec![8080],
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     };
     let expected = Valid {
         id: Some(JobId::parse("job-1").unwrap()),
@@ -743,4 +744,115 @@ fn a_job_with_layers_mounts_and_host_ports_becomes_the_explicit_record() {
         layered_capabilities()
     );
     assert!(checked.wanted.layered_rootfs);
+}
+
+/// A layer from the provider `name`, asked for `reference`.
+fn provider_layer(name: &str, reference: &str) -> v1::Layer {
+    v1::Layer {
+        source: Some(v1::layer::Source::Provider(v1::ProviderSource {
+            provider: name.to_owned(),
+            r#ref: reference.to_owned(),
+        })),
+    }
+}
+
+/// A mount at `target` from the provider `name`, asked for `reference`.
+fn provider_mount(name: &str, reference: &str, target: &str) -> v1::Mount {
+    v1::Mount {
+        source: Some(v1::mount::Source::Provider(v1::ProviderSource {
+            provider: name.to_owned(),
+            r#ref: reference.to_owned(),
+        })),
+        target: target.to_owned(),
+        ..v1::Mount::default()
+    }
+}
+
+/// Asserts that a job whose layers and mounts name providers records the capability
+/// `mount-provider.<name>=true` once for each distinct name (two layers of one provider, and a
+/// mount of it, are one key), beside `layered-rootfs`, lists the names sorted in what admission
+/// asks, and keeps the sources in the record as given; and that a job that names none, and a
+/// job of host paths, records no provider key. Catches a provider named twice recorded twice, a
+/// provider of a mount missed, a name that reaches placement but not admission, and a plain
+/// job that asks for a provider.
+#[test]
+fn a_job_naming_providers_records_a_capability_for_each_distinct_one() {
+    let checked = valid(|spec| {
+        spec.layers = vec![
+            provider_layer("tierstore", "trees/a"),
+            provider_layer("tierstore", "trees/b"),
+        ];
+        spec.mounts = vec![
+            provider_mount("cache", "inputs", "/cache"),
+            provider_mount("tierstore", "trees/c", "/more"),
+        ];
+    });
+    let mut expected = layered_capabilities();
+    for name in ["cache", "tierstore"] {
+        expected.insert(format!("mount-provider.{name}"), FLAG_SET.to_owned());
+    }
+    assert_eq!(checked.spec.constraints.capabilities, expected);
+    assert_eq!(checked.wanted.mount_providers, ["cache", "tierstore"]);
+    assert!(checked.wanted.layered_rootfs);
+    assert_eq!(
+        checked.spec.layers,
+        [
+            Layer::Provider {
+                provider: "tierstore".to_owned(),
+                reference: "trees/a".to_owned(),
+            },
+            Layer::Provider {
+                provider: "tierstore".to_owned(),
+                reference: "trees/b".to_owned(),
+            },
+        ]
+    );
+    assert_eq!(
+        checked.spec.mounts[0].source,
+        MountSource::Provider {
+            provider: "cache".to_owned(),
+            reference: "inputs".to_owned(),
+        }
+    );
+    assert_eq!(checked.spec.constraints.exec, Some(ExecMode::Container));
+    let hosted = valid(|spec| spec.mounts = one_mount());
+    assert_eq!(hosted.spec.constraints.capabilities, layered_capabilities());
+    assert!(hosted.wanted.mount_providers.is_empty());
+    assert!(valid(|_| {}).wanted.mount_providers.is_empty());
+}
+
+/// Asserts that a provider mount alone, with no layer, records its provider's capability and
+/// leaves `exec` unspecified (a mount needs no container of its own), and that a provider
+/// source is refused with a whole-host need (`spec.needs`) and with host isolation
+/// (`spec.constraints.isolation`), as any layer or mount is. Catches a provider job that the
+/// whole-host pass or a host-isolated run would take without its tree.
+#[test]
+fn a_provider_source_is_held_to_the_rules_of_any_rootfs_field() {
+    let alone = valid(|spec| spec.mounts = vec![provider_mount("tierstore", "k", "/in")]);
+    assert_eq!(alone.wanted.mount_providers, ["tierstore"]);
+    assert_eq!(alone.spec.constraints.exec, None);
+    let changes: Vec<Change> = vec![
+        Box::new(|spec| spec.layers = vec![provider_layer("tierstore", "k")]),
+        Box::new(|spec| spec.mounts = vec![provider_mount("tierstore", "k", "/in")]),
+    ];
+    let whole = Some(v1::Needs {
+        whole_host: true,
+        ..v1::Needs::default()
+    });
+    let host = Some(constraints(|c| c.isolation = v1::Isolation::Host.into()));
+    for change in changes {
+        let mut spec = wire("job-1");
+        change(&mut spec);
+        let wholly = v1::JobSpec {
+            needs: whole.clone(),
+            ..spec.clone()
+        };
+        assert_eq!(checked(&wholly).unwrap_err(), Fault::Field("spec.needs"));
+        let hosted = v1::JobSpec {
+            constraints: host.clone(),
+            ..spec
+        };
+        let refused = checked(&hosted).unwrap_err();
+        assert_eq!(refused, Fault::Field("spec.constraints.isolation"));
+    }
 }

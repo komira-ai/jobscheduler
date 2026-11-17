@@ -1,7 +1,8 @@
 //! A start between its admission and its container: it waits for its images (the image and
-//! the image of each image layer), and for the lookups and then the assembly of its file
-//! system ([`Runtime::resolve_fs`], [`Runtime::assemble_fs`]), each off the worker, asking
-//! the runtime again at every step; then its directories are made and its container
+//! the image of each image layer), for the directories its providers make for the layers
+//! and mounts that name one (`providing`), and for the lookups and then the assembly of its
+//! file system ([`Runtime::resolve_fs`], [`Runtime::assemble_fs`]), each off the worker,
+//! asking the runtime again at every step; then its directories are made and its container
 //! created, unless the run was stopped or its lease ended first.
 //!
 //! A start with layers or mounts has its scratch directory, and the lease directory beside
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 use js_agent_wire::{Isolation, JobSpec};
 
 use super::job::{Given, Keyed, Phase, Stage, Waiting, run_spec};
+use super::providing::{Follow, follow};
 use super::{Failure, Lifecycle, runtime_failure};
 use crate::lifecycle::runtime::{
     FsPrepared, JobFs, Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError, Ticket,
@@ -83,15 +85,26 @@ impl Lifecycle {
         received: u64,
         events: &mut Vec<Event>,
     ) {
+        let at = (None, u64::MAX);
+        // The providers are asked first, before the images: a provider fetches while the
+        // image is pulled and the container made.
+        let now = self.clock.now_ms();
+        let providing = match self.provide(&spec.run_id, &given.fs, now) {
+            Ok(providing) => providing,
+            Err(failure) => {
+                self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
+                return;
+            }
+        };
         let images = match (spec.isolation, given.vm) {
             (Isolation::Host, _) | (_, true) => Vec::new(),
             (Isolation::Contained, false) => images_of(spec, &given.fs),
         };
-        let phase = match given.fs.is_empty() {
-            true => Phase::Images,
-            false => Phase::Resolving,
+        let phase = match (providing, given.fs.is_empty()) {
+            (Some(providing), _) => Phase::Providing(providing),
+            (None, true) => Phase::Images,
+            (None, false) => Phase::Resolving,
         };
-        let at = (None, u64::MAX);
         match (ask(self.runtime.as_mut(), images), phase) {
             (Err(why), _) => {
                 let failure = runtime_failure(&why);
@@ -140,14 +153,24 @@ impl Lifecycle {
     /// `failed_to_start`; otherwise it waits on.
     pub(super) fn advance(&mut self, index: usize, events: &mut Vec<Event>) {
         let now = self.clock.now_ms();
-        let Self { jobs, runtime, .. } = self;
+        let Self {
+            jobs,
+            runtime,
+            config,
+            providers,
+            ..
+        } = self;
         let job = &mut jobs[index];
         let Stage::Preparing(waiting) = &mut job.stage else {
             return;
         };
         let next = match job.cause.is_some() || now >= waiting.lease_end_ms {
             true => ending(runtime.as_mut(), waiting, now),
-            false => step(runtime.as_mut(), waiting, now),
+            false => match follow(waiting, (providers, &config.mounts), now) {
+                Follow::Go => step(runtime.as_mut(), waiting, now),
+                Follow::Wait => images_only(runtime.as_mut(), waiting),
+                Follow::Fail(failure) => Next::Fail(failure),
+            },
         };
         let keyed = job.keyed;
         let (spec, given, mounts) = (
@@ -276,8 +299,24 @@ fn ending(runtime: &mut dyn Runtime, waiting: &Waiting, now: u64) -> Next {
     }
 }
 
-/// A step of a start that waits on: its images asked again, and its file system's
-/// preparation followed.
+/// A step of a start that waits for its providers: its images asked again, and nothing else
+/// yet.
+fn images_only(runtime: &mut dyn Runtime, waiting: &mut Waiting) -> Next {
+    let images = std::mem::take(&mut waiting.tickets)
+        .into_iter()
+        .map(|(image, ticket)| (image, Some(ticket)))
+        .collect();
+    match ask(runtime, images) {
+        Err(why) => Next::Fail(runtime_failure(&why)),
+        Ok(tickets) => {
+            waiting.tickets = tickets;
+            Next::Wait
+        }
+    }
+}
+
+/// A step of a start that waits on, once its providers have answered (`providing`): its
+/// images asked again, and its file system's preparation followed.
 fn step(runtime: &mut dyn Runtime, waiting: &mut Waiting, now: u64) -> Next {
     let images = std::mem::take(&mut waiting.tickets)
         .into_iter()
@@ -286,7 +325,8 @@ fn step(runtime: &mut dyn Runtime, waiting: &mut Waiting, now: u64) -> Next {
     let asked = ask(runtime, images);
     let run_id = waiting.spec.run_id.as_str();
     let fs = match &waiting.phase {
-        Phase::Images => FsPrepared::Ready,
+        // A start that waits for its providers never gets here (`follow`).
+        Phase::Images | Phase::Providing(_) => FsPrepared::Ready,
         Phase::Resolving => runtime.resolve_fs(run_id, &waiting.spec.image, &waiting.given.fs, now),
         Phase::Assembling(_) => runtime.assemble_fs(run_id, now),
     };
@@ -306,7 +346,7 @@ fn step(runtime: &mut dyn Runtime, waiting: &mut Waiting, now: u64) -> Next {
         return Next::Wait;
     }
     match &waiting.phase {
-        Phase::Images => Next::Begin(None),
+        Phase::Images | Phase::Providing(_) => Next::Begin(None),
         Phase::Resolving => Next::Dirs,
         Phase::Assembling(scratch) => Next::Begin(Some(scratch.clone())),
     }

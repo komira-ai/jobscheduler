@@ -26,7 +26,7 @@ compile_error!("js-agent builds for Linux (the crun runtime) and macOS (the nati
 /// The flags only a Linux build has (its [`Flags`] there), without the leading `--`. A macOS
 /// build refuses each by name; a test of the Linux build holds the list to the flags clap
 /// knows there.
-pub const LINUX_ONLY: [&str; 30] = [
+pub const LINUX_ONLY: [&str; 32] = [
     "allow-host-jobs",
     "watch-dir",
     "container-bin",
@@ -57,6 +57,8 @@ pub const LINUX_ONLY: [&str; 30] = [
     "image-allow-loopback",
     "settle-ms",
     "taint-recheck-ms",
+    "mount-provider",
+    "mount-provider-wait",
 ];
 
 /// The flags only a macOS build has (its [`Flags`] there), without the leading `--`. A Linux

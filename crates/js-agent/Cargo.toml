@@ -38,6 +38,8 @@ js-mac-pool = { path = "../js-mac-pool" }
 js-mac-provision = { path = "../js-mac-provision" }
 js-mac-session = { path = "../js-mac-session" }
 js-oci = { path = "../js-oci" }
+# The mount providers' protocol (src/provider).
+js-proto = { path = "../js-proto" }
 js-treestore = { path = "../js-treestore" }
 js-types = { path = "../js-types" }
 # The update hook's service-independent parts (src/update_hook).
@@ -49,6 +51,8 @@ async-trait.workspace = true
 clap.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+# `TokioIo`, the stream a provider channel's connector hands tonic (src/provider).
+hyper-util = { workspace = true, features = ["tokio"] }
 # The project-quota calls (`ioctl`, `quotactl`) of src/quota: rustix has no form of them.
 libc.workspace = true
 # `net` and `thread`: the listeners of a job's host ports, bound in its network namespace
@@ -64,6 +68,8 @@ thiserror.workspace = true
 # (src/host_ports).
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
+# `channel`: the lazily connected client of a mount provider's socket (src/provider).
+tonic = { workspace = true, features = ["channel"] }
 tracing.workspace = true
 # The metadata service of `--identity-source` (src/identity), over plain HTTP.
 ureq.workspace = true
@@ -96,7 +102,8 @@ js-jobs = { path = "../js-jobs", features = ["test-support"] }
 js-sched-placer = { path = "../js-sched-placer" }
 # The in-memory store under those job tables.
 js-state = { path = "../js-state", features = ["test-support"] }
-js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
+# `mount-provider`: the fake provider the client's tests ask (tests/agent/provider_client.rs).
+js-testkit = { path = "../js-testkit", features = ["mount-provider", "oci-registry"] }
 # The recording VM driver the VM runtime's tests drive (tests/agent/vm).
 js-vm-lease = { path = "../js-vm-lease", features = ["fake"] }
 clap.workspace = true

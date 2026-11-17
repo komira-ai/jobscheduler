@@ -64,6 +64,7 @@ pub fn start(
     let quota = seams.quota.map(|quota| local.run_quota(quota));
     let Local {
         mounts,
+        providers,
         scratch,
         files,
         files_warning: _,
@@ -108,6 +109,7 @@ pub fn start(
         config,
         backend,
         host_id: hello.host_id.clone(),
+        providers,
         platform: platform.clone(),
         watch,
         settle,

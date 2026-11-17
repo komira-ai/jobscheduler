@@ -219,9 +219,8 @@ pub struct JobStartSpec {
     /// [`Isolation::Host`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<Layer>,
-    /// What the job sees at paths of its file system ([`JobMount`]; today host
-    /// directories), made after the
-    /// root, parents before children. At most [`limits::MAX_MOUNTS`]; left out when there
+    /// What the job sees at paths of its file system ([`JobMount`]; host directories and
+    /// trees of node-local providers), made after the root, parents before children. At most [`limits::MAX_MOUNTS`]; left out when there
     /// are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<JobMount>,

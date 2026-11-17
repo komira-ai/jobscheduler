@@ -1,6 +1,7 @@
 //! The host contract of an agent that runs containers (the Linux build's runtimes): `runtime`
 //! and `exec` are `container`, with `per-job`, `start-fence`, `gpu-toolkit`, `gpu-passthrough`,
-//! the scratch quota, `host-jobs` and `layered-rootfs` (see [`super`]).
+//! the scratch quota, `host-jobs`, `layered-rootfs` and `mount-provider.<name>` (see
+//! [`super`]).
 
 use std::path::Path;
 
@@ -10,12 +11,13 @@ use js_agent_wire::{
 };
 use js_caps::{
     EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, LAYERED_ROOTFS, RUNTIME, SCRATCH_DEFAULT_GIB,
-    SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
+    SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT, mount_provider_key,
 };
 use js_types::ExecMode;
 
 use super::report_run_files;
 use crate::facts::CommandRunner;
+use crate::lifecycle::MountProviders;
 
 /// The `PATH` the toolkit hook runs with; it inherits nothing else.
 const HOOK_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -64,6 +66,20 @@ pub(crate) fn report_layered(hello: &mut Hello, layered: bool) {
         hello
             .capabilities
             .insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
+    }
+}
+
+/// Puts `mount-provider.<name>` into `hello` for each provider the agent was given
+/// (`--mount-provider`), where it reports `layered-rootfs` (`layered`): a provider's tree is
+/// a layer or a mount of the job, which a host that gives neither cannot give, so a server
+/// never places a job that names the provider there.
+pub(crate) fn report_mount_providers(hello: &mut Hello, providers: &MountProviders, layered: bool) {
+    if layered {
+        for (name, _) in providers.sockets() {
+            hello
+                .capabilities
+                .insert(mount_provider_key(name), FLAG_SET.to_owned());
+        }
     }
 }
 
@@ -341,5 +357,38 @@ mod tests {
         report_host_jobs(&mut refused, false);
         assert!(!refused.capabilities.contains_key(HOST_JOBS_CAPABILITY));
         assert_eq!(HOST_JOBS_CAPABILITY, "host-jobs");
+    }
+
+    /// Asserts that `mount-provider.<name>` is reported as `true` for each provider the agent
+    /// was given where it reports layered rootfs, and for none where it does not (the kernel
+    /// lacks the calls) or where it was given none, and that such a hello validates. Catches
+    /// a server told to place a job that names a provider on a host that cannot give the
+    /// layer or mount, and a provider the agent was given that its hello never names.
+    #[test]
+    fn mount_providers_are_reported_only_where_layered_rootfs_is() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "report-providers");
+        let socket = |name: &str| (name.to_owned(), dir.path().join(format!("{name}.sock")));
+        let given = [socket("tierstore"), socket("scratch-cache")];
+        let providers = MountProviders::from_flags(&given, None).expect("sound flags");
+        let mut layered = reported(&Config::none());
+        report_mount_providers(&mut layered, &providers, true);
+        let named = |hello: &Hello| -> Vec<String> {
+            let keys = hello.capabilities.keys();
+            keys.filter(|key| key.starts_with("mount-provider."))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            named(&layered),
+            ["mount-provider.scratch-cache", "mount-provider.tierstore"]
+        );
+        assert_eq!(layered.capabilities["mount-provider.tierstore"], FLAG_SET);
+        assert_eq!(layered.validate(), Ok(()));
+        let mut bare = reported(&Config::none());
+        report_mount_providers(&mut bare, &providers, false);
+        assert!(named(&bare).is_empty());
+        let mut none = reported(&Config::none());
+        report_mount_providers(&mut none, &MountProviders::default(), true);
+        assert!(named(&none).is_empty());
     }
 }

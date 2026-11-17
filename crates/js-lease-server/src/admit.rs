@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_agent_wire::HOST_JOBS_CAPABILITY;
-use js_caps::{FLAG_SET, LAYERED_ROOTFS};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS, is_mount_provider_key};
 use js_elastic::CapacityProvider;
 use js_jobs::Isolation;
 use js_registry::{HostMark, HostState as RegistryState, HostView as RegistryView, Registry};
@@ -124,6 +124,16 @@ pub(crate) fn reports_layered_rootfs(capabilities: &BTreeMap<String, String>) ->
     capabilities.get(LAYERED_ROOTFS).map(String::as_str) == Some(FLAG_SET)
 }
 
+/// The keys `mount-provider.<name>` of `capabilities`, those a host's hello reported, that
+/// hold exactly [`FLAG_SET`], in key order: the node-local providers its agent was given.
+pub(crate) fn reported_mount_providers(capabilities: &BTreeMap<String, String>) -> Vec<String> {
+    capabilities
+        .iter()
+        .filter(|(key, value)| is_mount_provider_key(key) & (value.as_str() == FLAG_SET))
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
 /// `one`'s provider as admission sees it at `now`: enabled (no key turns a provider off),
 /// with its share and limits, its capabilities, and its catalog as `catalogs` holds it. A
 /// provider that launches nothing (`static`) has no catalog, and none is read.
@@ -233,5 +243,31 @@ mod tests {
         }
         let host_jobs = BTreeMap::from([(HOST_JOBS_CAPABILITY.to_owned(), "true".to_owned())]);
         assert!(!reports_layered_rootfs(&host_jobs));
+    }
+
+    /// Asserts that a hello reports a mount provider only by a `mount-provider.<name>` key
+    /// whose value is exactly `true`, the keys come back in key order, and every other
+    /// capability (the key with no name, `layered-rootfs`, a near-miss prefix) is not one.
+    /// Catches a host sent a job for a provider it did not report, and one that reports a
+    /// provider as `false` taken for having it.
+    #[test]
+    fn mount_providers_are_reported_only_by_keys_of_the_value_true() {
+        let caps: BTreeMap<String, String> = [
+            ("mount-provider.tierstore", "true"),
+            ("mount-provider.cache", "true"),
+            ("mount-provider.off", "false"),
+            ("mount-provider.padded", "true "),
+            ("mount-provider.", "true"),
+            ("mount-providers.other", "true"),
+            ("layered-rootfs", "true"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        assert_eq!(
+            reported_mount_providers(&caps),
+            ["mount-provider.cache", "mount-provider.tierstore"]
+        );
+        assert!(reported_mount_providers(&BTreeMap::new()).is_empty());
     }
 }

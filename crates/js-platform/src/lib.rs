@@ -390,6 +390,7 @@ mod tests {
             network: JobNetwork::None,
             host_ports: Vec::new(),
             layered_rootfs: false,
+            mount_providers: Vec::new(),
         }
     }
 

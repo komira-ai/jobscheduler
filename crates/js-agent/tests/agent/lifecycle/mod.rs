@@ -12,6 +12,7 @@ mod cleanup;
 mod disk;
 mod exclusive;
 pub mod fake;
+mod fake_providers;
 mod fence;
 mod files;
 #[cfg(target_os = "linux")]
@@ -28,6 +29,11 @@ mod network;
 mod owed;
 mod per_job;
 mod prepare;
+#[cfg(target_os = "linux")]
+mod provider_flags;
+mod providers;
+mod providers_end;
+mod providers_restart;
 pub mod quota;
 mod quota_health;
 mod reach;

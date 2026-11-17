@@ -53,6 +53,10 @@
 //!   the crun runtime takes: its runtime launches a job with `isolation = host`
 //!   ([`js_agent_wire::HOST_JOBS_CAPABILITY`]). The server taints a host when it places such
 //!   a job, so no other agent reports it. An operator cannot set it.
+//! - `mount-provider.<name>` is `true` for each node-local mount provider a crun agent was
+//!   given (`--mount-provider`), where the agent reports `layered-rootfs` (a provider's tree
+//!   is a layer or a mount of the job). A server sends a job that names a provider only to a
+//!   host that reports it. An operator cannot set it (`js_caps::is_mount_provider_key`).
 
 use js_agent_wire::Hello;
 use js_caps::{FLAG_SET, RUN_FILES};
@@ -60,7 +64,9 @@ use js_caps::{FLAG_SET, RUN_FILES};
 #[cfg(target_os = "linux")]
 mod container;
 #[cfg(target_os = "linux")]
-pub(crate) use container::{ToolkitHook, report, report_host_jobs, report_layered};
+pub(crate) use container::{
+    ToolkitHook, report, report_host_jobs, report_layered, report_mount_providers,
+};
 
 /// Says that the agent writes a start's run files, when it has a files root (`run_files`);
 /// an older agent would ignore them, and one without a root refuses them.

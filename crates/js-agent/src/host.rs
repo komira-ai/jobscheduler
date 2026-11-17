@@ -10,7 +10,7 @@ use js_agent_wire::{
 };
 
 use js_agent_wire::{HOST_JOBS_CAPABILITY, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
-use js_caps::{DETECTED_KEYS, DISK_GIB, REPORT_ONLY_KEYS};
+use js_caps::{DETECTED_KEYS, DISK_GIB, REPORT_ONLY_KEYS, is_mount_provider_key};
 use js_types::normalise_arch;
 
 use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
@@ -58,7 +58,8 @@ fn class(
 /// The capabilities to report: the operator's, and `os` and `arch` as detected, the
 /// architecture in the one spelling (`arm64`, never `aarch64`). The keys of the host
 /// contract and the network ceiling (`egress`, `egress-ports`) are detected too and cannot be
-/// given.
+/// given, nor can `mount-provider.<name>`: a host reports the providers its `--mount-provider`
+/// flags name.
 fn capabilities(
     platform: &Platform,
     given: &[(String, String)],
@@ -74,6 +75,7 @@ fn capabilities(
                 | EGRESS_PORTS_CAPABILITY
         ) || DETECTED_KEYS.contains(key)
             || REPORT_ONLY_KEYS.contains(key)
+            || is_mount_provider_key(key)
     });
     match clash {
         Some(key) => Err(format!("--capability: {key} is detected and cannot be set")),

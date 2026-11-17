@@ -88,6 +88,19 @@
 //!   `failed_to_start`. Nothing bounds the wait but those and the runtime's own limit on
 //!   a fetch, and an agent that restarts while a run waits has nothing on the host to
 //!   adopt: the run is lost like any run the agent no longer holds.
+//! - **A layer or a mount may come from a node-local provider**
+//!   (`docs/design/mount-providers.md`, [`Providers`]). Such a start names a provider the
+//!   agent was given or is refused (`input-not-allowed`); it writes a record of its sources in
+//!   the state root, asks each provider to `Prepare` its source when the start is admitted,
+//!   beside the image pull, and waits (as `starting`) for each provider's `Mount` answer, the
+//!   directory being held to the agent's mount roots as a host path is, for at most
+//!   `--mount-provider-wait` from its admission (`input-unavailable`; a provider that refuses
+//!   the ref fails it `provider-refused`). Each source is then a host path, and the start goes
+//!   on as above. When the run's file system is taken apart, on every end path, each source is
+//!   released; a release that fails is asked again every step for a minute and then left to
+//!   the provider with a `provider-release-failed` finding, never tainting the host or holding
+//!   the slot. An agent that restarts releases the sources its records name for the runs it
+//!   did not adopt and sweeps each provider ([`Lifecycle::attach_providers`]).
 //! - **A result says what happened.** It is sent as soon as the container has exited,
 //!   before any cleanup, and it stays in the heartbeat until the server acknowledges it. An
 //!   acknowledgement of a kind this version does not know keeps it. A container that
@@ -246,8 +259,10 @@ mod codes;
 mod event;
 mod finding;
 mod machine;
+mod mount_providers;
 mod mounts;
 mod prefetch;
+mod provider;
 mod quota;
 mod quota_flags;
 pub(crate) mod run_files;
@@ -278,8 +293,10 @@ pub use finding::{CHECK_DETAIL_MAX, CheckFinding};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
+pub use mount_providers::{DEFAULT_PROVIDER_WAIT_SECS, MAX_PROVIDER_WAIT_SECS, MountProviders};
 pub use mounts::{Beneath, MountError, MountRoots};
 pub use prefetch::{Forgetter, Prefetcher, PullFuture};
+pub use provider::{ProviderAnswer, ProviderCall, Providers};
 pub use quota::RunQuota;
 use quota_flags::scratch_quota_limits;
 pub use quota_flags::{
@@ -435,6 +452,9 @@ impl Config {
 pub struct Local {
     /// The `--mount-root` and `--mount-root-ro` flags, canonicalised.
     pub mounts: MountRoots,
+    /// The `--mount-provider` and `--mount-provider-wait` flags, checked: none for an agent
+    /// given none (and for a macOS build, which has no such flag).
+    pub providers: MountProviders,
     /// `--scratch-quota` was given.
     pub scratch_quota: bool,
     /// `--scratch-default-gib`, or [`DEFAULT_SCRATCH_GIB`]: the GiB a run without
@@ -642,9 +662,11 @@ impl Local {
         let taint_recheck = jobs.taint_recheck;
         let egress = std::mem::take(&mut jobs.egress);
         let allow_host_jobs = jobs.allow_host_jobs;
+        let providers = jobs.providers();
         Ok(Self {
             watch,
             mounts,
+            providers,
             scratch_quota: cli.scratch_quota,
             scratch_default_gib: default_gib,
             scratch_max_inodes: max_inodes,

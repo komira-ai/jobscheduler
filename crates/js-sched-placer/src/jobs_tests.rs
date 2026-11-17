@@ -889,6 +889,30 @@ fn a_job_that_needs_layered_rootfs_is_placed_only_on_a_host_that_reports_it() {
     assert_eq!(read(&rig, &id).state, JobState::Queued);
 }
 
+/// Catches: a job that needs a node-local mount provider (`mount-provider.<name>`, as
+/// admission records it among its capabilities) placed on a host that does not report that
+/// provider, or on one that reports only another. Of `a`, which reports `tierstore`, and `b`,
+/// which reports only `cache`, the job is placed on `a`; with `b` and a host that reports the
+/// provider as `false` it stays queued.
+#[test]
+fn a_job_that_needs_a_mount_provider_is_placed_only_on_a_host_that_reports_it() {
+    let needs_tierstore = |spec: &mut JobSpec| {
+        let caps = &mut spec.constraints.capabilities;
+        caps.insert("mount-provider.tierstore".to_owned(), "true".to_owned());
+    };
+    let rig = Rig::reporting([&[("mount-provider.tierstore", "true")], &[]]);
+    let id = share_with(&rig, "j", needs_tierstore);
+    assert_eq!(placed_on(&rig, &id), Some(host("a")));
+
+    let rig = Rig::reporting([
+        &[("mount-provider.cache", "true")],
+        &[("mount-provider.tierstore", "false")],
+    ]);
+    let id = share_with(&rig, "j", needs_tierstore);
+    assert_eq!(placed_on(&rig, &id), None);
+    assert_eq!(read(&rig, &id).state, JobState::Queued);
+}
+
 /// An edit of a job spec.
 type Edit = fn(&mut JobSpec);
 
