@@ -100,8 +100,12 @@ pub(super) fn container_spec(
         working_directory: String::new(),
         env: Vec::new(),
         argv: Vec::new(),
+        // The booking again on the container's own cgroup, which the job reads as its
+        // `/sys/fs/cgroup`: the lease's (`LeasePolicy::Hard`) is what bounds it.
         limits: ContainerLimits {
             pids: run.pids.unwrap_or(DEFAULT_PIDS),
+            cpu_millis: Some(run.cpu_millis),
+            memory_bytes: Some(run.memory_bytes),
             ..ContainerLimits::DEFAULT
         },
         shared: Vec::new(),

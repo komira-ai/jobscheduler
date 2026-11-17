@@ -14,7 +14,7 @@ use js_contain::oci::{LeaseDirs, LogTail as Captured, StreamTail};
 use super::config_dir;
 use super::settings::system_now_ms;
 use super::spec::{
-    EXEC_ROOT, NOT_RUN, container_spec, ctr_of, end_of, exit_of, job_env, log_tail_of,
+    EXEC_ROOT, NOT_RUN, container_spec, ctr_of, end_of, exit_of, host_spec, job_env, log_tail_of,
     not_run_words, pinned,
 };
 use crate::cli_runtime::DEFAULT_PIDS;
@@ -141,8 +141,10 @@ fn a_job_env_goes_over_the_image_env_once_applied() {
 /// image, directories and cgroup; the run's scratch read-write at `/scratch` first, then
 /// its mounts with the access they asked, then its files read-only; the job starting at the
 /// exec root; no shared trees; the process limit the run named, or the default for one that
-/// named none; no program or environment (the image config gives them); and the job ports
-/// of its host ports, in order, as the ports its init waits to be listening (none without).
+/// named none; the run's booked CPU and memory as its container cgroup's own limits (without
+/// them the job reads `max` in `/sys/fs/cgroup/cpu.max`); no program or environment (the
+/// image config gives them); and the job ports of its host ports, in order, as the ports its
+/// init waits to be listening (none without).
 #[test]
 fn a_run_becomes_the_container_it_asked_for() {
     let image = PinnedImage {
@@ -171,6 +173,8 @@ fn a_run_becomes_the_container_it_asked_for() {
         spec.limits,
         ContainerLimits {
             pids: 77,
+            cpu_millis: Some(1500),
+            memory_bytes: Some(1 << 30),
             ..ContainerLimits::DEFAULT
         }
     );
@@ -192,6 +196,10 @@ fn a_run_becomes_the_container_it_asked_for() {
     );
     let plain = container_spec("js-x-r1", &run(None, None), &image, &lease(), "/c");
     assert_eq!(plain.limits.pids, DEFAULT_PIDS);
+    assert_eq!(
+        (plain.limits.cpu_millis, plain.limits.memory_bytes),
+        (Some(1500), Some(1 << 30))
+    );
     assert_eq!(plain.mounts.len(), 3);
     assert!(
         plain.listen_ports.is_empty(),
@@ -666,4 +674,24 @@ fn allow_list_sets_the_resolv_conf_and_the_route_wait() {
     assert_eq!(none.route_wait, None);
     assert_eq!(none.runtime, crun.to_owned());
     assert_eq!(none.job_user, Some((7, 8)));
+}
+
+/// Catches a default process limit that a build sized to the node runs into: busybox
+/// `nproc` reports all of an 88-CPU node to a job that booked a few, so `make -j$(nproc)`
+/// runs 88 compilers, and with 4096 tasks (threads count) between them their forks failed
+/// with `EAGAIN` ("can't fork"). A run that names no limit gets 32768, the same on the crun
+/// runtime and the engines (`--pids-limit`), and a run that names one keeps its own.
+#[test]
+fn a_run_that_names_no_process_limit_gets_room_for_a_build_sized_to_the_node() {
+    assert_eq!(DEFAULT_PIDS, 32_768);
+    let image = PinnedImage {
+        reference: format!("registry.example/job@{}", digest()),
+        digest: digest(),
+    };
+    let plain = container_spec("js-x-r1", &run(None, None), &image, &lease(), "/c");
+    assert_eq!(plain.limits.pids, 32_768);
+    let host = host_spec("js-x-r1", &run(None, None), &image, &lease(), "/c");
+    assert_eq!(host.limits, plain.limits);
+    let named = container_spec("js-x-r1", &run(Some(512), None), &image, &lease(), "/c");
+    assert_eq!(named.limits.pids, 512);
 }

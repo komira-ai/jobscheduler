@@ -122,8 +122,9 @@ fn a_host_job_holds_every_capability() {
 
 /// Proves a host container keeps what accounts and ends it: its cgroup is `ctr` below the
 /// lease's, with the pids limit and `memory.oom.group`, no memory or CPU limit of its own
-/// (the lease's apply), and the same rlimits as a contained job. Catches a host job placed
-/// outside its lease's cgroup, where the lease's limits and `cgroup.kill` do not reach it.
+/// when its limits name no booking (the lease's apply), and the same rlimits as a
+/// contained job. Catches a host job placed outside its lease's cgroup, where the lease's
+/// limits and `cgroup.kill` do not reach it.
 #[test]
 fn a_host_container_is_in_its_leases_cgroup_with_the_contained_limits() {
     let host = config_of(&host());
@@ -143,6 +144,34 @@ fn a_host_container_is_in_its_leases_cgroup_with_the_contained_limits() {
     );
     assert_eq!(host["process"]["rlimits"], contained["process"]["rlimits"]);
     assert_eq!(host["process"]["oomScoreAdj"], 0);
+}
+
+/// Catches a host job whose cgroup reads `max` for `cpu.max` and `memory.max` while a
+/// contained job's reads its booking: a host container's own cgroup gets the same files as
+/// a contained one's for the same limits (a host job has no cgroup namespace, but a tool
+/// that follows `/proc/self/cgroup` reads the `ctr` cgroup's files).
+#[test]
+fn a_host_container_repeats_the_booking_like_a_contained_one() {
+    let mut contained = contained();
+    contained.limits.cpu_millis = Some(2500);
+    contained.limits.memory_bytes = Some(3 << 30);
+    let host = ContainerSpec {
+        isolation: Isolation::Host,
+        exec_root: "/scratch/runs/r1".to_owned(),
+        working_directory: String::new(),
+        mounts: Vec::new(),
+        ..contained.clone()
+    };
+    let unified = |spec: &ContainerSpec| config_of(spec)["linux"]["resources"]["unified"].clone();
+    assert_eq!(
+        unified(&host),
+        json!({
+            "memory.oom.group": "1",
+            "cpu.max": "250000 100000",
+            "memory.max": (3u64 << 30).to_string(),
+        })
+    );
+    assert_eq!(unified(&host), unified(&contained));
 }
 
 /// Proves a host job starts in its exec root (the run's scratch directory on the host) as
