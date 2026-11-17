@@ -154,7 +154,7 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   requests queued meanwhile use it. The waiting request goes to the freed host at once (providers.md).
 - **D41. What counts as capable, and queued requests when capability goes.** Capable: in the host table, not tainted, not denied, not
   draining, not `releasing`, total shape and facts meeting the request. Busy, lost (inside the retention window), cordoned and quarantined
-  hosts are capable; **tainted hosts are not**, because a taint ends only by an operator reimaging the machine, an unbounded human wait. A
+  hosts are capable; **tainted hosts are not**, because a taint ends only by the agent's own acknowledged clear (taint-self-clearing.md) or by the operator's `ClearHostTaint` after moving the agent's marker aside, which may be an unbounded human wait. A
   queued request whose last capable host leaves (and no elastic provider could serve it) waits `regain_grace` (default 5 minutes on the
   injected clock) and is then refused with `no-capable-host`; a new submission gets no grace. Alternatives: refuse at once (a routine agent
   restart would refuse every queued request), or wait for ever (a wait nobody can end). Recommend the grace.

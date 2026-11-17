@@ -47,7 +47,9 @@ impl Lifecycle {
 
     /// Re-checks a taint that may clear itself, when the host is idle and a re-check is due.
     /// The check is the post-job one with nothing live, against the baseline taken before
-    /// the job that tainted the host.
+    /// the job that tainted the host; for a taint read from the marker at start it is
+    /// [`CheckHook::run_restored`](crate::lifecycle::CheckHook::run_restored), which also
+    /// judges the processes the restart baseline holds.
     pub(super) fn recheck_taint(&mut self) {
         if !self.taint.rechecks() {
             return;
@@ -60,13 +62,17 @@ impl Lifecycle {
         if !self.taint.recheck_due(now, self.taint_recheck) {
             return;
         }
-        let verdict = self.checks.run(&Finished {
+        let finished = Finished {
             run_id: RECHECK_RUN,
             live: &[],
             slot: None,
             live_slots: &[],
             held_mounts: &[],
-        });
+        };
+        let verdict = match self.taint.restored() {
+            true => self.checks.run_restored(&finished),
+            false => self.checks.run(&finished),
+        };
         let now = self.clock.now_ms();
         self.taint
             .rechecked(verdict.is_ok(), now, self.taint_recheck);

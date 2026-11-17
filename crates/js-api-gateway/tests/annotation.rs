@@ -278,6 +278,13 @@ fn the_job_service_routes_pass_the_checks() {
                 true,
                 200
             ),
+            (
+                "ClearHostTaint",
+                "POST",
+                "/v1/hosts/{host_id}:cleartaint",
+                true,
+                200
+            ),
             ("ListPools", "GET", "/v1/pools", false, 200),
             ("ListProviders", "GET", "/v1/providers", false, 200),
             ("GetUsage", "GET", "/v1/usage", false, 200),

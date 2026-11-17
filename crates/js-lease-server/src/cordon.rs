@@ -21,6 +21,11 @@ pub(crate) const INVALID_CORDON: &str = "invalid-cordon";
 /// it over a restart could not be written.
 pub(crate) const CORDON_UNSAVED: &str = "cordon-unsaved";
 
+/// The answer when the clear of a host's taint was not committed (the store failed, or holds
+/// another taint than this server's), or holds on this server but the bindings that keep it
+/// over a restart could not be written.
+pub(crate) const TAINT_UNSAVED: &str = "taint-unsaved";
+
 /// The answer for a host the registry does not hold.
 pub(crate) const UNKNOWN_HOST: &str = "unknown-host";
 

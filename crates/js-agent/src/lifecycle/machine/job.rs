@@ -138,6 +138,17 @@ pub(super) fn blind_taint(run_id: &str) -> Taint {
     }
 }
 
+/// The taint of a running run whose container group was not found a settle wait after the
+/// agent first saw it: the agent cannot sample that run, but the checks after the job do not
+/// depend on its group, so a re-check can speak for what it leaves.
+pub(super) fn cgroup_not_found_taint(run_id: &str) -> Taint {
+    Taint {
+        reason: reason::UNCHECKED.to_owned(),
+        run_id: Some(run_id.to_owned()),
+        check: Some(code::CGROUP_NOT_FOUND.to_owned()),
+    }
+}
+
 /// Why the agent is ending a job. It decides the result only when the agent's stop is what
 /// ended the container (or the container is gone); a container that exited before a stop
 /// reached it is reported as it exited.

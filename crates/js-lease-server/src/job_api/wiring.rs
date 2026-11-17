@@ -47,7 +47,7 @@ use crate::status::Status;
 /// (`cargo xtask gen-job-surface` writes that text), and a test of this file sends every call
 /// to the service `from_server` builds and fails when one answers otherwise than this list
 /// says.
-pub const SERVED_CALLS: [Rpc; 12] = [
+pub const SERVED_CALLS: [Rpc; 13] = [
     Rpc::SubmitJob,
     Rpc::GetJob,
     Rpc::ListJobs,
@@ -57,6 +57,7 @@ pub const SERVED_CALLS: [Rpc; 12] = [
     Rpc::ListHosts,
     Rpc::CordonHost,
     Rpc::UncordonHost,
+    Rpc::ClearHostTaint,
     Rpc::ListPools,
     Rpc::ListProviders,
     Rpc::GetUsage,

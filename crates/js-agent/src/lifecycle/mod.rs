@@ -152,7 +152,7 @@
 //!   cleanup where it is, the container included; one that cannot be removed holds the
 //!   slot. **A restart or a `SIGTERM` inside the cleanup window therefore taints the host
 //!   at the next start**, and the agent never clears that taint (see below); an operator's
-//!   clear must remove the `owed-*` records as well as `taint.json`, or the next start
+//!   clear must remove the `owed-*` records and `taint.pinned` as well as `taint.json`, or the next start
 //!   taints the host again (see [`taint`]).
 //! - **A taint a check judged clears itself.** A taint of a process a job left, or of an
 //!   input the checks could not read, is re-checked while the host is idle (every run over,
@@ -161,7 +161,10 @@
 //!   taint, frees the blocked runs and their slots, and keeps the marker as
 //!   `taint.json.cleared-<time>`. A process still there keeps the host tainted; a failed
 //!   removal, owed checks, a host job and a change of mounts, users, groups, modules or a
-//!   watched directory are never cleared by the agent. See [`taint`] for the rules and
+//!   watched directory are never cleared by the agent. A residue of a process read from the
+//!   marker at start is re-checked too, with rules that need no baseline
+//!   ([`CheckHook::run_restored`]); any other restored taint stays until an operator moves
+//!   the marker. See [`taint`] for the rules and
 //!   `docs/design/taint-self-clearing.md` for the reasons.
 //! - **A `host-tainted` refusal is final for that `Start`, and the host's.** The run did
 //!   not start on this host and will not; the server must not send it to this host again
@@ -241,6 +244,7 @@
 
 mod codes;
 mod event;
+mod finding;
 mod machine;
 mod mounts;
 mod prefetch;
@@ -270,6 +274,7 @@ use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
 pub use event::{Event, Finding, Skip};
+pub use finding::{CHECK_DETAIL_MAX, CheckFinding};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
@@ -335,80 +340,23 @@ pub trait CheckHook {
     /// is tainted.
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding>;
 
+    /// Checks the host at a re-check of a taint read from the marker at start. The baseline
+    /// this process took already holds what the tainting job left, so a hook that can must
+    /// also judge what the baseline cannot clear (see [`crate::integrity`]). The default is
+    /// [`CheckHook::run`].
+    ///
+    /// # Errors
+    ///
+    /// As [`CheckHook::run`].
+    fn run_restored(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
+        self.run(job)
+    }
+
     /// The host is idle: a job is about to start, and no other job's container, scratch
     /// directory or checks are on it, nor a container the agent could not remove. Nothing a
     /// job did can change the host now, so a hook may take its baseline again. The default
     /// does nothing.
     fn idle(&mut self) {}
-}
-
-/// The most bytes of detail a [`CheckFinding`] keeps.
-pub const CHECK_DETAIL_MAX: usize = 256;
-
-/// What a post-job check reports when the host is not known to be clean: a short code the
-/// check owns, and a detail cut to [`CHECK_DETAIL_MAX`] bytes so that a check cannot fill
-/// the agent's memory or its log with the output of a program. The code becomes the code
-/// of the run's [`Finding`], so it is one finding for each code of a run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckFinding {
-    /// The run left something behind on the host.
-    Residue {
-        /// What kind, as a short code of the check.
-        code: &'static str,
-        /// What the check saw.
-        detail: String,
-    },
-    /// The check could not run, so the host is not known to be clean.
-    Unchecked {
-        /// Which check, as a short code.
-        code: &'static str,
-        /// Why it could not run.
-        detail: String,
-    },
-}
-
-impl CheckFinding {
-    /// A [`CheckFinding::Residue`] of `code`; `detail` is cut to [`CHECK_DETAIL_MAX`]
-    /// bytes, at a character boundary.
-    pub fn residue(code: &'static str, detail: &str) -> Self {
-        Self::Residue {
-            code,
-            detail: bounded(detail).to_owned(),
-        }
-    }
-
-    /// A [`CheckFinding::Unchecked`] of `code`; `detail` is cut to [`CHECK_DETAIL_MAX`]
-    /// bytes, at a character boundary.
-    pub fn unchecked(code: &'static str, detail: &str) -> Self {
-        Self::Unchecked {
-            code,
-            detail: bounded(detail).to_owned(),
-        }
-    }
-
-    /// The short code.
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::Residue { code, .. } | Self::Unchecked { code, .. } => code,
-        }
-    }
-
-    /// The detail, at most [`CHECK_DETAIL_MAX`] bytes: cut here too, so a finding built
-    /// as a struct literal, which skips the constructors, is bounded where it is read.
-    pub fn detail(&self) -> &str {
-        match self {
-            Self::Residue { detail, .. } | Self::Unchecked { detail, .. } => bounded(detail),
-        }
-    }
-}
-
-/// `text` cut to at most [`CHECK_DETAIL_MAX`] bytes, at a character boundary.
-fn bounded(text: &str) -> &str {
-    let end = (0..=CHECK_DETAIL_MAX.min(text.len()))
-        .rev()
-        .find(|&at| text.is_char_boundary(at))
-        .unwrap_or(0);
-    &text[..end]
 }
 
 /// The hook with no checks: every job passes.
