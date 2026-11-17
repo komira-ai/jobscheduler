@@ -333,7 +333,7 @@ pub(super) fn read(table: toml::Table, client: &LiveClients) -> Result<Read, Sta
         plan: None,
         pool,
         tokens,
-        mint_provider: Some(joined.name.clone()),
+        mint_provider: std::collections::BTreeSet::from([joined.name.clone()]),
         job_limits: crate::job_expiry::JobLimits::default(),
     };
     Ok(Read {

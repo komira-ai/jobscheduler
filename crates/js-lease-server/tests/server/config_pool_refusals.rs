@@ -419,9 +419,10 @@ fn a_floor_that_no_host_can_meet_is_refused() {
     assert!(said.starts_with("pool \"gpu\": provider: "), "{said}");
 }
 
-/// Asserts that pools may not share a name, and that a file with a second pool that
-/// registers agents (joined or elastic) is valid and the server refuses to start on it,
-/// naming that pool. It catches a second registry built from one file.
+/// Asserts that pools may not share a name, that a second joined pool is held to the first
+/// pool's rules (here: no whole-node settings), and that a file with two elastic pools is
+/// valid and the server refuses to start on it, naming the second. It catches a second
+/// pool of one name, or a second elastic pool's scaler, served from one file.
 #[test]
 fn pools_are_counted() {
     let scratch = Scratch::new("pool_counts");
@@ -435,7 +436,7 @@ fn pools_are_counted() {
     let other = PoolText::joined("other");
     assert_eq!(
         refusal(&scratch, &file(&server, &[&one, &other])),
-        "pool \"other\": several pools register agents; this version runs one, as the server keeps one registry of agents"
+        "pool \"other\": whole-node settings are the first pool's alone: give this pool a class that is not whole-node, and no whole-node keys"
     );
     let first = PoolText::elastic(&scratch);
     let second = PoolText::elastic(&scratch).set("name", &quote("b"));

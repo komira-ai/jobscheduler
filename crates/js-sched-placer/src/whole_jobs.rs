@@ -49,7 +49,9 @@ use js_types::Timestamp;
 use js_types::sched::{
     FarmTime, LeaseKind, OperationId, Qos, Resources, WaiterId, WorkKey, WorkerId,
 };
+use tracing::warn;
 
+use super::jobs::job_capabilities;
 use super::{Engine, Placed};
 use crate::map;
 
@@ -187,6 +189,17 @@ impl Engine {
             if self.whole_jobs.contains_key(&job.id) {
                 continue;
             }
+            // A host of another platform cannot run it: the job asks for its `os`, `arch` and
+            // `exec` as a queued job does. One whose constraints are no platform requirements
+            // is not queued, as a queued job of such constraints is not placed.
+            let none = js_types::Resources::default();
+            let needs = match map::needs_of(&job_capabilities(job), &none) {
+                Ok(needs) => needs,
+                Err(error) => {
+                    warn!(job = %job.id, %error, "a whole-host job's constraints are no platform requirements; it is not placed");
+                    continue;
+                }
+            };
             let held = match stored.get(&job.id).copied() {
                 Some(mark) if input.hello.contains(&mark.host) => Some(mark),
                 Some(_) if now < input.claim_by => continue,
@@ -196,18 +209,18 @@ impl Engine {
                 }
                 None => None,
             };
-            let operation = self.submit_job(job, held, now);
+            let operation = self.submit_job((job, needs), held, now);
             self.whole_jobs.insert(job.id.clone(), operation);
         }
         steps
     }
 
-    /// Queues `job`, a whole-host job, at the back of the scheduler's queue as a whole-machine
-    /// request held to the time it was submitted, with the bars its failed
-    /// prepares set and those of `mark`, and `mark` itself: its operation.
+    /// Queues `job`, a whole-host job that requires `needs` of its host, at the back of the
+    /// scheduler's queue as a whole-machine request held to the time it was submitted, with
+    /// the bars its failed prepares set and those of `mark`, and `mark` itself: its operation.
     fn submit_job(
         &mut self,
-        job: &JobRecord,
+        (job, needs): (&JobRecord, js_caps::Request),
         mark: Option<&MarkRecord>,
         now: FarmTime,
     ) -> OperationId {
@@ -216,10 +229,9 @@ impl Engine {
             key: WorkKey::new("job", job.id.as_str()),
             qos: Qos::Batch,
             kind: LeaseKind::WholeMachine,
-            // Every host is booked whole, and the pass queues only a job the pool's hosts
-            // can run: any worker fits it.
+            // Every host is booked whole: any worker of its platform fits it.
             resources: Resources::new(0, 0),
-            needs: js_caps::Request::default(),
+            needs,
             hermetic: false,
             do_not_cache: true,
             whole_worker: false,
