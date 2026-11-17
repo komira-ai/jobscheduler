@@ -863,3 +863,6 @@ fn a_repeat_run_of_a_build_target_is_booked_from_that_targets_runs_only() {
         "another target: cold"
     );
 }
+
+#[path = "sizes_cold_tests.rs"]
+mod cold;

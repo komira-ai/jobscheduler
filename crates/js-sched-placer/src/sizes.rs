@@ -24,8 +24,12 @@
 //!   floor); the CPU is the 90th percentile of the CPU the runs used per second of wall time,
 //!   rounded up to a quarter core.
 //! - **Cold.** A class with no estimate yet ([`js_sizing::Fallback::Missing`], `Cold` or
-//!   `Stale`) books the cold size: a quarter of the most bookable memory and a quarter of the
-//!   most cores a known host has ([`Bounds`] of [`bounds_of`]), and at least the class's memory floor.
+//!   `Stale`) books the cold size ([`ColdSize`]): the server's `cold_cpu_millis` and
+//!   `cold_memory_bytes` when it sets them, else a quarter of the most cores and a quarter of
+//!   the most bookable memory a known host has ([`Bounds`] of [`bounds_of`]); never more than
+//!   the most a known host has, and at least the class's memory floor. The cold memory is
+//!   also the estimator's default booking: before five runs a class's memory may only rise
+//!   from it.
 //! - **Too large.** A class whose estimate reaches the most bookable memory a host has
 //!   ([`js_sizing::Fallback::OverCap`]) books all of that memory, and the cold CPU: it waits
 //!   for a host with nothing else on it.
@@ -97,10 +101,47 @@ const DAY_MILLIS: u64 = 86_400_000;
 
 /// A peak within this many hundredths of its booking hit the booking.
 const AT_LIMIT_PERCENT: u64 = 95;
+/// What a class with no estimate books ([`JobSizes::sized`]): the server's `cold_cpu_millis`
+/// and `cold_memory_bytes`. A dimension left `None` books a quarter of the most a known host
+/// has (the default, for both); a value above the most a known host has books that most.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ColdSize {
+    /// The CPU a cold class books, in millicores; at least 250 (a quarter core) when the
+    /// server reads it from its file.
+    pub cpu_millis: Option<u64>,
+    /// The memory a cold class books, in bytes, and the least a class books before five runs;
+    /// at least 1 GiB when the server reads it from its file.
+    pub memory_bytes: Option<u64>,
+}
+
+impl ColdSize {
+    /// `bounds` with this cold memory as its default booking, held at the host's memory.
+    fn applied(self, bounds: Bounds) -> Bounds {
+        let given = self
+            .memory_bytes
+            .map(|memory| memory.min(bounds.host_memory));
+        Bounds {
+            default_memory: given.unwrap_or(bounds.default_memory),
+            ..bounds
+        }
+    }
+
+    /// The CPU a cold class books under `bounds`: this cold CPU, else a quarter of the most
+    /// cores a host has rounded down to a quarter core; held at those cores, and at least a
+    /// quarter core.
+    fn cpu(self, bounds: &Bounds) -> u64 {
+        let node = u64::from(bounds.node_cpu_millis);
+        let quarter = node / COLD_SHARE / CPU_STEP * CPU_STEP;
+        self.cpu_millis.unwrap_or(quarter).min(node).max(CPU_STEP)
+    }
+}
+
 /// The history of every class the server has seen, and the job allocations live at the last
 /// pass.
 #[derive(Debug, Default)]
 pub struct JobSizes {
+    /// What a class with no estimate books.
+    cold: ColdSize,
     summaries: Summaries,
     /// Each job whose allocation was live at the last pass, with what it booked.
     live: BTreeMap<JobId, Booked>,
@@ -113,10 +154,19 @@ pub struct JobSizes {
 }
 
 impl JobSizes {
-    /// No history.
+    /// No history, a class with no estimate booking a quarter of the largest known host.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// No history, a class with no estimate booking `cold`.
+    #[must_use]
+    pub fn with_cold(cold: ColdSize) -> Self {
+        Self {
+            cold,
+            ..Self::default()
+        }
     }
 
     /// The estimator's key of `job`'s class.
@@ -137,11 +187,13 @@ impl JobSizes {
     }
 
     /// The bounds the next sizes and runs are taken against, when `bounds` knows a host (else
-    /// the last ones stay); the runs observed before any bounds were known are taught now.
+    /// the last ones stay), with the cold memory as their default booking; the runs observed
+    /// before any bounds were known are taught now.
     pub fn set_bounds(&mut self, bounds: Option<Bounds>) {
         let Some(bounds) = bounds else {
             return;
         };
+        let bounds = self.cold.applied(bounds);
         self.bounds = Some(bounds);
         for (key, run, day) in std::mem::take(&mut self.pending) {
             let _ = self.summaries.observe(&key, &run, day, &bounds);
@@ -175,8 +227,7 @@ impl JobSizes {
     /// The CPU and memory the history of `job`'s class books on `day`, under `bounds`.
     fn size_of(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> (u64, u64) {
         let key = Self::key_of(job);
-        let cold_cpu = u64::from(bounds.node_cpu_millis) / COLD_SHARE / CPU_STEP * CPU_STEP;
-        let cold_cpu = cold_cpu.max(CPU_STEP);
+        let cold_cpu = self.cold.cpu(bounds);
         match self.summaries.estimate(&key, day, bounds, &Hint::default()) {
             Ok(estimate) => (u64::from(estimate.cpu_millis), estimate.memory_bytes),
             Err(Fallback::OverCap) => (cold_cpu, bounds.host_memory),

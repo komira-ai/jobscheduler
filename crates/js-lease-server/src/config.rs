@@ -8,6 +8,7 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use js_alert::AlertSink;
 use js_jobs::Retention;
+use js_sched_placer::sizes::ColdSize;
 use js_system_clock::{SystemClock, SystemMonotonic};
 use js_types::Monotonic;
 
@@ -179,6 +180,17 @@ pub struct Cli {
     /// the flag the engine's own default is used, which is 1.1.
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
+    /// The CPU, in millicores from 250, a queued job that names no CPU books while the
+    /// history of its class gives no estimate; above the most cores a registered host has, that
+    /// most. Without the flag, a quarter of those cores. Needs `--agent-pool-config`.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(250..=u64::from(u32::MAX)))]
+    pub cold_cpu_millis: Option<u64>,
+    /// The memory, in bytes from 1073741824 (1 GiB), a queued job that names no memory books
+    /// while the history of its class gives no estimate, and the least its class books before
+    /// five runs; above the most bookable memory a registered host has, that most. Without the
+    /// flag, a quarter of that memory. Needs `--agent-pool-config`.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1_073_741_824..))]
+    pub cold_memory_bytes: Option<u64>,
     /// Deprecated, and does nothing: no lease is costed by an estimate any more. The flag
     /// is accepted with a warning. Needs `--agent-pool-config`; not allowed with
     /// `--usage-off`.
@@ -629,6 +641,7 @@ impl Config {
             hello_limit: server.agents.hello_limit(),
             require_host_credential: server.agents.require_host_credential(),
             cpu_slack,
+            cold: server.agents.cold(),
             max_lease_wall: server.max_lease_wall,
             job_limits,
             jobs: server.agents.job_store(server.job_store_windows()),
@@ -900,6 +913,10 @@ fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>, StartupEr
                 },
                 require_host_credential: cli.require_host_credential,
                 cpu_slack,
+                cold: ColdSize {
+                    cpu_millis: cli.cold_cpu_millis,
+                    memory_bytes: cli.cold_memory_bytes,
+                },
                 max_lease_wall: None,
                 job_limits: JobLimits::default(),
                 jobs: listen::job_store(cli),

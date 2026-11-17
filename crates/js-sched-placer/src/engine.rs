@@ -32,7 +32,7 @@ use js_types::sched::{
 use js_types::{HostId, Shape};
 
 use crate::map;
-use crate::sizes::JobSizes;
+use crate::sizes::{ColdSize, JobSizes};
 
 #[path = "jobs.rs"]
 pub mod jobs;
@@ -63,6 +63,9 @@ pub struct Settings {
     pub load: LoadConfig,
     /// The share of each host's memory the engine may book (`memory_schedulable_percent`).
     pub memory: MemoryPercent,
+    /// What a job that books nothing books while its class has no estimate
+    /// (`server.cold_cpu_millis`, `server.cold_memory_bytes`).
+    pub cold: ColdSize,
 }
 
 /// The scheduler form of a host: its capacity and the capabilities its node report gives.
@@ -122,7 +125,7 @@ impl Engine {
             jobs: BTreeMap::new(),
             whole_jobs: BTreeMap::new(),
             whole_settings: None,
-            sizes: JobSizes::new(),
+            sizes: JobSizes::with_cold(settings.cold),
             whole_seq: 0,
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
