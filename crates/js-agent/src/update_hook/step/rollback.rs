@@ -45,7 +45,9 @@
 //!    and the cordon left to lapse: the SIGTERM would land on a job of unknown phase;
 //! 6. stop (`rb.stop_begun` first, then the stop and a wait for the unit to be down), the mark
 //!    that the link is on the previous release (`rb.link_restored`, first), the start
-//!    (`rb.start_issued` first) and the wait for the previous agent's hello, and then
+//!    (`rb.start_issued` first, and before it, with a `helper_unit` in the params, the helper
+//!    booted out and bootstrapped from the previous release's tree and started, as `cutover`
+//!    does for the staged one) and the wait for the previous agent's hello, and then
 //!    `rb.hello_ok`, after it;
 //! 7. the cordon is lifted if this update placed it and it has not lapsed or been left
 //!    unconfirmed, and the record is deleted. A lease server that does not answer the lift
@@ -102,6 +104,7 @@ use crate::update_hook::{
 use super::cutover::{
     Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause, show,
 };
+use super::helper;
 use super::prepare::{place, refuse_host, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
 use crate::cordon::CREDENTIAL_CODES;
@@ -264,6 +267,12 @@ fn restore(
     refuse_host(env)?;
     if !record.rb.link_restored {
         mark_act(env, params, held, record, set_link_restored)?;
+    }
+    refuse_host(env)?;
+    // The helper of the previous release runs before its agent starts; a rerun that finds the
+    // start issued has done this already.
+    if !record.rb.start_issued {
+        helper::replace(env, held, record, params, previous)?;
     }
     refuse_host(env)?;
     if !record.rb.start_issued {

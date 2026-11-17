@@ -12,6 +12,7 @@
 
 mod cleanup;
 mod cutover;
+mod helper;
 mod prepare;
 mod rollback;
 mod supersede;
@@ -115,6 +116,7 @@ fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), 
 
 /// [`open_state`] without the rules: the record as it was loaded, for `prepare` to judge.
 fn open_unchecked(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), Done> {
+    helper::refuse_without_launchd(env, params)?;
     let held = Held::open_or_make(&params.settings.state_dir, env.stat).map_err(state_failure)?;
     let record = held.load().map_err(state_failure)?;
     Ok((held, record))

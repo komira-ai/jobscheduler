@@ -94,6 +94,7 @@ fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
             settings: Settings {
                 state_dir: PathBuf::from("/var/lib/js-agent-update"),
                 unit: "js-agent-crun.service".to_owned(),
+                helper_unit: None,
                 runtime: "crun".to_owned(),
                 timeouts: Timeouts {
                     prepare: 3900,
@@ -589,4 +590,35 @@ fn the_verify_deadline_covers_the_verify_bound_and_the_rollback_bound() {
         error.to_string(),
         "verify_deadline_secs 8834 is less than the verify bound 615 plus the rollback bound 8220"
     );
+}
+
+#[test]
+fn the_helper_unit_is_optional_and_read_as_given() {
+    let with_helper = good_but(
+        "unit",
+        "unit = \"js-agent\"\nhelper_unit = \"js-agent.session\"",
+    );
+    let params = Params::parse(&with_helper).unwrap();
+    assert_eq!(params.settings.unit, "js-agent");
+    assert_eq!(
+        params.settings.helper_unit.as_deref(),
+        Some("js-agent.session")
+    );
+    assert_eq!(Params::parse(&good()).unwrap().settings.helper_unit, None);
+}
+
+#[test]
+fn a_helper_unit_that_is_not_a_plain_file_name_or_not_text_is_refused() {
+    for name in ["", ".", "..", "a/b", "/js-agent.session", "../js-agent"] {
+        let text = good_but(
+            "unit",
+            &format!("unit = \"js-agent\"\nhelper_unit = \"{name}\""),
+        );
+        assert!(
+            matches!(refused(&text), ParamsError::NotFileName(key) if key == "helper_unit"),
+            "{name:?}"
+        );
+    }
+    let text = good_but("unit", "unit = \"js-agent\"\nhelper_unit = 7");
+    assert!(matches!(refused(&text), ParamsError::NotText(key) if key == "helper_unit"));
 }

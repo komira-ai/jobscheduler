@@ -71,15 +71,17 @@ fn the_apt_jobs_are_gated_on_the_release_and_the_promotion_on_the_install_check(
 }
 
 /// Asserts that in release.yml `id-token: write` is held by `artifacts` (the call, whose grant
-/// is the most its jobs can hold), `gamma`, `cp-deploy` (the call of docker-swarm-updater's
+/// is the most its jobs can hold), `pkg-upload` (the macOS package's upload, in file order after
+/// `artifacts`), `gamma`, `cp-deploy` (the call of docker-swarm-updater's
 /// deploy workflow) and the apt jobs that read and write (never the index jobs, which hold the
 /// signing key, nor `check-apt`), and `attestations: write` by `artifacts` alone; and that in
 /// artifacts.yml both are held by `attest` and by no other job.
 #[test]
-fn only_attest_gamma_cp_deploy_and_the_apt_read_and_write_jobs_hold_id_token() {
+fn only_attest_pkg_upload_gamma_cp_deploy_and_the_apt_read_and_write_jobs_hold_id_token() {
     let release = workflow();
     let mut want = vec![
         "artifacts".to_owned(),
+        "pkg-upload".to_owned(),
         "gamma".to_owned(),
         "cp-deploy".to_owned(),
     ];
@@ -88,7 +90,7 @@ fn only_attest_gamma_cp_deploy_and_the_apt_read_and_write_jobs_hold_id_token() {
             .into_iter()
             .filter(|name| name.contains("-apt-read") || name.contains("-apt-write")),
     );
-    assert_eq!(want.len(), 15, "{want:?}");
+    assert_eq!(want.len(), 16, "{want:?}");
     assert_eq!(holders(&release, "id-token: write"), want);
     assert_eq!(holders(&release, "attestations: write"), ["artifacts"]);
     let artifacts = artifacts_workflow();

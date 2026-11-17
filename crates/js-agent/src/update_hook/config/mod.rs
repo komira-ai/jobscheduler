@@ -7,7 +7,7 @@
 //! ```
 //!
 //! The package manifest names `hook.command = ["/usr/bin/js-agent", "config-hook"]` (on a Mac,
-//! the agent under `/usr/local/js-agent/link/current`), and hostkeeper runs it as the update hook
+//! `/Library/Application Support/js-agent/bin/js-agent`), and hostkeeper runs it as the update hook
 //! is run: the same exit statuses and last line ([`Report`]), the same flock on a state
 //! directory for the whole step, every step safe to run twice, nothing from the environment.
 //! The agent reads its flags once, at its start, so the hand-over of new flags is a restart:

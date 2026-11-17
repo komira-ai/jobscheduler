@@ -3,16 +3,14 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.komira.js-agent</string>
+	<string>js-agent</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/js-agent/link/current/js-agent</string>
-		<string>--server</string>
-		<string>https://leases.example:7300</string>
+		<string>/Library/Application Support/js-agent/bin/js-agent</string>
+		<string>--flags-file</string>
+		<string>/etc/js-agent/flags</string>
 		<string>--token-file</string>
 		<string>/etc/js-agent/token</string>
-		<string>--pool</string>
-		<string>mac</string>
 		<string>--state-root</string>
 		<string>/var/db/js-agent/state</string>
 		<string>--scratch-root</string>
@@ -37,8 +35,8 @@
 	<key>ExitTimeOut</key>
 	<integer>120</integer>
 	<key>StandardOutPath</key>
-	<string>/Library/Logs/js-agent/js-agent.log</string>
+	<string>/Library/Application Support/js-agent/log/js-agent.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Library/Logs/js-agent/js-agent.err.log</string>
+	<string>/Library/Application Support/js-agent/log/js-agent.err.log</string>
 </dict>
 </plist>

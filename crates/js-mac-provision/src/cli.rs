@@ -10,11 +10,10 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::daemon::{Daemon, UNSET_SERVER};
+use crate::daemon::Daemon;
 use crate::launchd::render_plist;
 use crate::pfctl::{Pfctl, SYSTEM_PFCTL, SystemPfctl};
 use crate::policy::{AnchorName, Endpoint, PolicyError, UidRange};
-use crate::postinstall::{self, LAUNCHCTL, Launchctl, SystemLaunchctl};
 use crate::probe::{Probe, probe};
 use crate::provision::{ProvisionError, Provisioner};
 use crate::render::render;
@@ -81,43 +80,14 @@ pub enum Verb {
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
         interval: u32,
     },
-    /// Print the property list of the js-agent LaunchDaemon.
-    AgentPlist {
-        /// The lease server's address, the agent's `--server`. Required unless `--flags-file`
-        /// is given.
-        #[arg(
-            long,
-            required_unless_present = "flags_file",
-            conflicts_with = "flags_file"
-        )]
-        server: Option<String>,
-        /// The pool the host asks to join, the agent's `--pool`.
-        #[arg(long, default_value = "default", conflicts_with = "flags_file")]
-        pool: String,
-        /// The agent's `--flags-file`: the file that gives it the server, the pool and the
-        /// rest, as `/etc/js-agent/flags`. The plist then names neither `--server` nor `--pool`.
-        #[arg(long)]
-        flags_file: Option<String>,
-    },
-    /// Print the property list of the js-mac-session LaunchDaemon.
+    /// Print the property list of the js-agent LaunchDaemon: fixed, the host's own flags are
+    /// in the flags file.
+    AgentPlist,
+    /// Print the property list of the js-agent.session LaunchDaemon.
     SessionPlist {
         /// The code requirement the helper holds its caller to.
         #[arg(long)]
         daemon_requirement: String,
-        /// The group that may reach the helper's socket.
-        #[arg(long)]
-        socket_group: String,
-    },
-    /// What the installer package does after it has laid its files down (root): make the
-    /// release link when there is none, install the plists that are not installed, and
-    /// load the daemons that are not loaded. Never stops or restarts anything.
-    Postinstall {
-        /// The release the package laid down.
-        #[arg(long)]
-        version: String,
-        /// The volume the package was installed on; daemons are loaded only for `/`.
-        #[arg(long, default_value = "/")]
-        volume: PathBuf,
     },
     /// Connect once and print the outcome: connected, refused, timed out or failed.
     /// Run it as a pool user. Exits 1 unless it connected.
@@ -139,9 +109,6 @@ pub enum CliError {
     /// A step of install, check or remove failed.
     #[error(transparent)]
     Provision(#[from] ProvisionError),
-    /// The postinstall stopped.
-    #[error(transparent)]
-    Postinstall(#[from] postinstall::Error),
     /// The output could not be written.
     #[error("cannot write the output: {0}")]
     Write(#[from] io::Error),
@@ -185,15 +152,6 @@ fn install_args(cli: &Cli, uids: UidRange, endpoints: &[Endpoint]) -> Vec<String
     args
 }
 
-/// `launchctl` for the volume the package was installed on: only the running system, `/`,
-/// has daemons to load.
-fn launchctl_for<'a>(
-    volume: &std::path::Path,
-    real: &'a SystemLaunchctl,
-) -> Option<&'a dyn Launchctl> {
-    (volume == std::path::Path::new("/")).then_some(real)
-}
-
 /// Runs the verb of `cli` over `pf`, printing to `out`. `Ok(false)` is a verb that ran
 /// and answered no: a probe that did not connect.
 ///
@@ -232,32 +190,11 @@ pub fn execute(cli: &Cli, pf: &dyn Pfctl, out: &mut dyn Write) -> Result<bool, C
             let args = install_args(cli, uids, &endpoints);
             out.write_all(render_plist(program, &args, *interval).as_bytes())?;
         }
-        Verb::AgentPlist {
-            server,
-            pool,
-            flags_file,
-        } => {
-            let daemon = match flags_file {
-                Some(file) => Daemon::agent_from_flags_file(file),
-                // clap requires `--server` without `--flags-file`; the placeholder is the
-                // value the agent refuses.
-                None => Daemon::agent(server.as_deref().unwrap_or(UNSET_SERVER), pool),
-            };
-            out.write_all(daemon.render().as_bytes())?;
+        Verb::AgentPlist => {
+            out.write_all(Daemon::agent().render().as_bytes())?;
         }
-        Verb::SessionPlist {
-            daemon_requirement,
-            socket_group,
-        } => {
-            let daemon = Daemon::session(daemon_requirement, socket_group);
-            out.write_all(daemon.render().as_bytes())?;
-        }
-        Verb::Postinstall { version, volume } => {
-            let real = SystemLaunchctl::new(LAUNCHCTL);
-            let lines = postinstall::run(volume, version, launchctl_for(volume, &real))?;
-            for line in lines {
-                writeln!(out, "{line}")?;
-            }
+        Verb::SessionPlist { daemon_requirement } => {
+            out.write_all(Daemon::session(daemon_requirement).render().as_bytes())?;
         }
         Verb::Probe { addr, timeout_ms } => {
             let outcome = probe(*addr, Duration::from_millis(*timeout_ms));
@@ -325,85 +262,22 @@ mod tests {
     }
 
     #[test]
-    fn agent_plist_prints_the_agents_daemon_for_the_server_and_pool() {
+    fn agent_plist_prints_the_fixed_agent_daemon() {
         let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-cli-agent-plist");
         let pf = Fake::new(dir.path());
-        let c = parse(
-            dir.path(),
-            &[
-                "agent-plist".to_owned(),
-                "--server".to_owned(),
-                "https://leases.example:7300".to_owned(),
-                "--pool".to_owned(),
-                "mac".to_owned(),
-            ],
-        );
+        let c = parse(dir.path(), &["agent-plist".to_owned()]);
         let (r, text) = run(&c, &pf);
         assert!(r.unwrap());
-        assert_eq!(
-            text,
-            Daemon::agent("https://leases.example:7300", "mac").render()
-        );
-        assert!(text.contains("<string>mac</string>"));
+        assert_eq!(text, Daemon::agent().render());
+        assert!(text.contains("<string>/etc/js-agent/flags</string>"));
     }
 
     #[test]
-    fn agent_plist_joins_the_default_pool_when_none_is_named() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-cli-agent-pool");
-        let pf = Fake::new(dir.path());
-        let c = parse(
-            dir.path(),
-            &[
-                "agent-plist".to_owned(),
-                "--server".to_owned(),
-                "https://x:1".to_owned(),
-            ],
+    fn agent_plist_takes_no_flags() {
+        assert!(
+            Cli::try_parse_from(["js-mac-provision", "agent-plist", "--server", "https://x:1"])
+                .is_err()
         );
-        let (r, text) = run(&c, &pf);
-        assert!(r.unwrap());
-        assert_eq!(text, Daemon::agent("https://x:1", "default").render());
-    }
-
-    /// `agent-plist --flags-file F` prints the flags-file daemon: the file is named, and the
-    /// plist carries neither `--server` nor `--pool`. It catches a verb that still demands a
-    /// server, or one that prints the old form.
-    #[test]
-    fn agent_plist_with_a_flags_file_prints_the_flags_file_daemon() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-cli-agent-flags");
-        let pf = Fake::new(dir.path());
-        let c = parse(
-            dir.path(),
-            &[
-                "agent-plist".to_owned(),
-                "--flags-file".to_owned(),
-                "/etc/js-agent/flags".to_owned(),
-            ],
-        );
-        let (r, text) = run(&c, &pf);
-        assert!(r.unwrap());
-        assert_eq!(
-            text,
-            Daemon::agent_from_flags_file("/etc/js-agent/flags").render()
-        );
-        assert!(!text.contains("--server"));
-        assert!(!text.contains("--pool"));
-    }
-
-    /// `--flags-file` with `--server` or `--pool` is a usage error, and so is giving none of
-    /// them: one of the two forms is required. It catches a plist that would carry the flag
-    /// twice, or a verb that prints a plist with no server at all.
-    #[test]
-    fn agent_plist_takes_one_form_only() {
-        for extra in [
-            &["--flags-file", "/f", "--server", "https://x:1"][..],
-            &["--flags-file", "/f", "--pool", "mac"][..],
-            &[][..],
-            &["--pool", "mac"][..],
-        ] {
-            let mut args = vec!["js-mac-provision", "agent-plist"];
-            args.extend_from_slice(extra);
-            assert!(Cli::try_parse_from(args).is_err(), "{extra:?}");
-        }
     }
 
     #[test]
@@ -416,72 +290,34 @@ mod tests {
                 "session-plist".to_owned(),
                 "--daemon-requirement".to_owned(),
                 "cdhash H\"abc\"".to_owned(),
-                "--socket-group".to_owned(),
-                "_jsagent".to_owned(),
             ],
         );
         let (r, text) = run(&c, &pf);
         assert!(r.unwrap());
-        assert_eq!(
-            text,
-            Daemon::session("cdhash H\"abc\"", "_jsagent").render()
-        );
+        assert_eq!(text, Daemon::session("cdhash H\"abc\"").render());
     }
 
     #[test]
-    fn postinstall_on_a_volume_that_is_not_the_running_system_prints_what_it_did() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-cli-postinstall");
-        let root = dir.path().join("vol");
-        std::fs::create_dir_all(root.join("usr/local/js-agent/releases/1.0.0")).unwrap();
-        std::fs::create_dir_all(root.join("usr/local/js-agent/share")).unwrap();
-        std::fs::create_dir_all(root.join("Library/LaunchDaemons")).unwrap();
-        for label in [crate::daemon::AGENT_LABEL, crate::daemon::SESSION_LABEL] {
-            std::fs::write(
-                root.join(format!("usr/local/js-agent/share/{label}.plist")),
+    fn session_plist_needs_the_requirement_and_takes_no_socket_group() {
+        assert!(Cli::try_parse_from(["js-mac-provision", "session-plist"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "js-mac-provision",
+                "session-plist",
+                "--daemon-requirement",
                 "x",
-            )
-            .unwrap();
-        }
-        let pf = Fake::new(dir.path());
-        let args = [
-            "postinstall".to_owned(),
-            "--version".to_owned(),
-            "1.0.0".to_owned(),
-            "--volume".to_owned(),
-            root.to_str().unwrap().to_owned(),
-        ];
-        let (r, text) = run(&parse(dir.path(), &args), &pf);
-        assert!(r.unwrap());
-        assert!(
-            text.starts_with("linked /usr/local/js-agent/link/current to "),
-            "{text}"
-        );
-        assert!(
-            text.ends_with("the volume is not the running system: nothing was loaded\n"),
-            "{text}"
+                "--socket-group",
+                "g",
+            ])
+            .is_err()
         );
     }
 
     #[test]
-    fn postinstall_with_a_release_that_is_not_there_is_an_error() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-mac-provision-cli-postinstall-bad");
-        let pf = Fake::new(dir.path());
-        let args = [
-            "postinstall".to_owned(),
-            "--version".to_owned(),
-            "1.0.0".to_owned(),
-            "--volume".to_owned(),
-            dir.path().to_str().unwrap().to_owned(),
-        ];
-        let (r, _) = run(&parse(dir.path(), &args), &pf);
-        assert!(matches!(r, Err(CliError::Postinstall(_))));
-    }
-
-    #[test]
-    fn only_the_running_system_has_a_launchctl() {
-        let real = SystemLaunchctl::new("true");
-        assert!(launchctl_for(std::path::Path::new("/"), &real).is_some());
-        assert!(launchctl_for(std::path::Path::new("/Volumes/Other"), &real).is_none());
+    fn the_postinstall_verb_is_gone() {
+        assert!(
+            Cli::try_parse_from(["js-mac-provision", "postinstall", "--version", "1"]).is_err()
+        );
     }
 
     #[test]

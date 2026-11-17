@@ -70,14 +70,26 @@ of its class gives (`crates/js-sched-placer/src/sizes.rs`). A dimension the job 
   image's name (not its digest) and command. The arguments are never part of it: a client's arguments name what one run works on (an
   action's digest, a lease, a deadline), so a class that held them would hold one run and never learn. A client that runs different
   work under one image and command names each work's class in the label. The estimator's shape is the first eight bytes of the
-  class's SHA-256.
+  class's SHA-256. A label value is 1 to 63 bytes of `[a-z0-9._-]`, which a build target's name is not, so
+  `js_types::SizeClass::of_target` (`crates/js-types/src/size_class.rs`) writes one as a class: letters lowered, each run of other
+  bytes one `.` (`root//crates/js-sched:js-sched` is `root.crates.js-sched.js-sched`), and a class over 63 bytes cut to its last
+  whole words within 46 bytes plus `-` and the 16 hex digits of the FNV-1a hash of the whole class. Targets that differ only in case
+  or separators share a class. A build farm labels each action's job with its target's class and leaves the CPU and memory at 0.
 - **partition**: the client that submitted the job; **platform**: the job's `os` and `arch` as it names them; **basis**: cgroup.
 
 The estimator is `js-sizing` unchanged: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the 90th
-percentile of CPU used per second of wall time rounded up to a quarter core. A class with too few runs books the cold size: a quarter
-of the most cores and of the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows, and
-at least the class's kill floor. Before five runs the memory may only rise from there. A class whose estimate reaches the largest
-host's bookable memory books all of it and waits for an empty host.
+percentile of CPU used per second of wall time rounded up to a quarter core. A class with too few runs books the cold size:
+`server.cold_cpu_millis` and `server.cold_memory_bytes` when the server's file sets them, each one left out a quarter of the most
+cores or of the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows; never more
+than those most, and at least the class's kill floor. A class that has an estimate but no CPU sample yet (its only runs were
+memory kills) books the estimator's own unlearned CPU, two cores, and not the cold CPU. Before five runs the memory may only rise from the cold memory. A class whose
+estimate reaches the largest host's bookable memory books all of it and waits for an empty host.
+
+On a farm whose hosts have 88 cores and 251 GiB, a quarter is 22 cores and 62.75 GiB, so a host holds four cold jobs; a client
+that books every build target by its history (CPU and memory 0, the target's name as `size-class`) would run four jobs a host until
+each target had five runs. Such a farm sets the cold size to what an unlearned build step uses (two cores and 8 GiB: 31 a host by
+memory), and a target that needs more is raised by its runs: a memory kill at the cold size books twice it next, and runs that
+come near it raise the next booking after two runs.
 
 The size is decided by the placement pass, not at submit, and is not written on the job: its needs stay as submitted, so a retried
 submit with the same id is still the same job. What it was booked is its allocation's `booked`. A contained job's booking is its

@@ -4,7 +4,8 @@
 
 use super::desired::{
     AUDIENCE, CHECK, CLIENT_COMMIT, CLIENT_RELEASE, COORDINATOR_VARS, DESIRED_IF, FILE, HOST_GROUP,
-    SET_DESIRED, SET_IF, caller_problems, coordinator_problems, desired_problems, with_wanted,
+    HOST_GROUP_MAC, PKG_URL, SET_DESIRED, SET_IF, SET_MAC_IF, caller_problems,
+    coordinator_problems, desired_problems, with_wanted,
 };
 use super::support::{in_job, text_of, workflows};
 
@@ -22,11 +23,13 @@ fn the_variable_gate_is_the_job_level_if_of_both_jobs() {
     // a gate on another variable or on a value other than `true`, a job that runs from a branch
     // other than main, and a release run acted on although it failed, ran on another branch or
     // came from a fork.
-    for condition in [DESIRED_IF, SET_IF] {
+    for condition in [DESIRED_IF, SET_IF, SET_MAC_IF] {
         assert!(condition.contains("github.ref == 'refs/heads/main'"));
         assert!(condition.contains("vars.JS_AGENT_SETS_DESIRED == 'true'"));
     }
     assert!(SET_IF.contains("needs.check.outputs.set == 'true'"));
+    assert!(SET_MAC_IF.contains("needs.check.outputs.set == 'true'"));
+    assert!(SET_MAC_IF.contains("needs.check.outputs.set-mac == 'true'"));
     let text = text_of(FILE);
     let check_if = |with: &str| in_job(&text, "check", DESIRED_IF, with);
     for (part, with) in [
@@ -63,7 +66,25 @@ fn the_variable_gate_is_the_job_level_if_of_both_jobs() {
             .any(|p| p.starts_with("set-desired: `if` is")),
         "set-desired whatever check said"
     );
-    for (job, condition) in [("check", DESIRED_IF), ("set-desired", SET_IF)] {
+    // The Macs are set only for a release that has a package, and only when `check` chose it.
+    for (part, with) in [
+        (" && needs.check.outputs.set-mac == 'true'", ""),
+        (" && needs.check.outputs.set == 'true'", ""),
+        ("vars.JS_AGENT_SETS_DESIRED == 'true'", "true"),
+    ] {
+        let spoiled = in_job(&text, "set-desired-mac", part, with);
+        assert!(
+            desired_problems(&spoiled)
+                .iter()
+                .any(|p| p.starts_with("set-desired-mac: `if` is")),
+            "set-desired-mac without {part:?}"
+        );
+    }
+    for (job, condition) in [
+        ("check", DESIRED_IF),
+        ("set-desired", SET_IF),
+        ("set-desired-mac", SET_MAC_IF),
+    ] {
         let spoiled = in_job(&text, job, &format!("    if: {condition}\n"), "");
         assert!(
             desired_problems(&spoiled)
@@ -161,7 +182,26 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "check",
         "      targets: ${{ steps.desired.outputs.targets }}\n",
         "      targets: ${{ steps.desired.outputs.targets }}\n      release-index: ${{ steps.desired.outputs.release-index }}\n",
-        "check: it hands on 4 outputs, not the 3 of the step `desired`",
+        "check: it hands on 5 outputs, not the 4 of the step `desired`",
+    ),
+    (
+        "check",
+        "set-mac: ${{ steps.desired.outputs.set-mac }}",
+        "set-mac: 'true'",
+        "check: output set-mac is",
+    ),
+    // The package repository is not looked in: no release would ever have a Mac entry.
+    (
+        "check",
+        " --pkg-url \"$PKG_URL\"",
+        "",
+        "check: the step `desired` does not run",
+    ),
+    (
+        "check",
+        "PKG_URL: https://packages.komira.ai/pkg/jobscheduler",
+        "PKG_URL: https://example.test/pkg",
+        "check: the step `desired` does not read PKG_URL from https://packages.komira.ai/pkg/jobscheduler",
     ),
     (
         "set-desired",
@@ -250,6 +290,67 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "      wait: false\n",
         "      wait: false\n      max_polls: 180\n",
         "set-desired: with.max_polls is not an input it gives",
+    ),
+    // The Macs: after the Linux nodes, their own group, the same version and targets, the same pin.
+    (
+        "set-desired-mac",
+        "needs: [check, set-desired]",
+        "needs: [check]",
+        "set-desired-mac: needs are [\"check\"], not [\"check\", \"set-desired\"]",
+    ),
+    (
+        "set-desired-mac",
+        "host_group: mac-build",
+        "host_group: all-in-one",
+        "set-desired-mac: with.host_group is Some(\"all-in-one\"), not \"mac-build\"",
+    ),
+    (
+        "set-desired-mac",
+        "      host_group: mac-build\n",
+        "",
+        "set-desired-mac: with.host_group is None, not \"mac-build\"",
+    ),
+    (
+        "set-desired-mac",
+        "targets: ${{ needs.check.outputs.targets }}",
+        "targets: '{}'",
+        "set-desired-mac: with.targets is",
+    ),
+    (
+        "set-desired-mac",
+        "version: ${{ needs.check.outputs.package-version }}",
+        "version: ${{ inputs.version }}",
+        "set-desired-mac: with.version",
+    ),
+    (
+        "set-desired-mac",
+        "set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
+        "set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47",
+        "set-desired-mac: `uses` is not",
+    ),
+    (
+        "set-desired-mac",
+        " # v0.1.317",
+        "",
+        "set-desired-mac: the pin's comment names None, not v0.1.317",
+    ),
+    (
+        "set-desired-mac",
+        "      contents: read\n",
+        "",
+        "set-desired-mac: permissions are [\"id-token: write\"], not contents: read and id-token: write",
+    ),
+    (
+        "set-desired-mac",
+        "      wait: false\n",
+        "      wait: false\n      max_polls: 180\n",
+        "set-desired-mac: with.max_polls is not an input it gives",
+    ),
+    (
+        "set-desired-mac",
+        "wait: false",
+        "wait: true",
+        "set-desired-mac: with.wait is Some(\"true\"), not \"false\"",
     ),
     // The call names no host group, or another: it would set each group that lists js-agent.
     (
@@ -428,7 +529,7 @@ fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
         (
             "jobs:\n  check:\n",
             "jobs:\n  publish:\n    runs-on: ubuntu-24.04\n  check:\n",
-            "jobs are [\"check\", \"publish\", \"set-desired\"], not check and set-desired",
+            "jobs are [\"check\", \"publish\", \"set-desired\", \"set-desired-mac\"], not check, set-desired and set-desired-mac",
         ),
     ] {
         assert!(text.contains(replace), "{replace:?} is not in {FILE}");
@@ -453,7 +554,10 @@ fn the_check_runs_the_verb_and_the_call_pins_the_client_hostkeeper_releases_with
         "    uses: {SET_DESIRED}@{CLIENT_COMMIT} # v{CLIENT_RELEASE}\n"
     )));
     assert!(text.contains(&format!("      audience: {AUDIENCE}\n")));
-    let wanted = with_wanted();
+    let wanted = with_wanted(HOST_GROUP);
+    assert!(text.contains(&format!("      host_group: {HOST_GROUP_MAC}\n")));
+    assert!(text.contains(&format!("          PKG_URL: {PKG_URL}\n")));
+    assert!(with_wanted(HOST_GROUP_MAC).contains(&("host_group", HOST_GROUP_MAC)));
     assert!(wanted.contains(&("hostkeeper_commit", CLIENT_COMMIT)));
     assert!(wanted.contains(&("hostkeeper_version", CLIENT_RELEASE)));
     assert!(wanted.contains(&("service", "js-agent")));

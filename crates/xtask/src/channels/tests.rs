@@ -181,6 +181,20 @@ fn the_verbs_are_dispatched_with_their_flags() {
         },
     }));
     assert!(what.ends_with("no-aws"), "{what}");
+
+    let what = missing(run(Verb::Pkg {
+        verb: pkg::Verb::Upload {
+            dir: dir.join("release"),
+            version: "1.2.3".to_owned(),
+            bucket: "apt-bucket".to_owned(),
+            work: dir.join("work"),
+            aws: absent(&dir, "no-pkg-aws"),
+        },
+    }));
+    assert!(
+        what.starts_with("read ") && what.ends_with("js-agent-1.2.3-macos-arm64.pkg"),
+        "{what}"
+    );
 }
 
 /// What the three real-program wrappers say of `program` run with `args`: its answer, or the

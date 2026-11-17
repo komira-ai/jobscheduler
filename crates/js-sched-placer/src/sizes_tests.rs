@@ -823,3 +823,46 @@ fn a_class_is_named_by_its_label_else_by_the_hash_of_its_command() {
         "another command"
     );
 }
+
+/// Asserts that jobs labelled with the class of one build target
+/// ([`js_types::SizeClass::of_target`]) share that target's history across passes, and that a
+/// job of another target in the same pass is still booked cold. Catches a target's runs that
+/// teach another target, or a repeat run of a target that is not booked from its own runs.
+#[test]
+fn a_repeat_run_of_a_build_target_is_booked_from_that_targets_runs_only() {
+    let tables = Tables::new();
+    let placer = placer();
+    let class = |target: &str| {
+        js_types::SizeClass::of_target(target)
+            .unwrap()
+            .as_str()
+            .to_owned()
+    };
+    let built = class("root//crates/js-sched:js-sched");
+    for run in 0..5 {
+        let id = format!("js-sched-{run}");
+        submit(&tables, &id, &built);
+        pass(&placer, &tables);
+        finish(&tables, &id);
+    }
+    submit(&tables, "js-sched-again", &built);
+    submit(
+        &tables,
+        "js-state-first",
+        &class("root//crates/js-state:js-state"),
+    );
+    pass(&placer, &tables);
+    assert_eq!(
+        allocation(&tables, "js-sched-again"),
+        booked(3000, 11 * 256 * MIB),
+        "the target's own runs"
+    );
+    assert_eq!(
+        allocation(&tables, "js-state-first"),
+        booked(2000, 4 * GIB),
+        "another target: cold"
+    );
+}
+
+#[path = "sizes_cold_tests.rs"]
+mod cold;

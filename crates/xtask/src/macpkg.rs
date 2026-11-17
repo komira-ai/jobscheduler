@@ -1,12 +1,11 @@
 //! The js-agent installer package for macOS (`packaging/js-agent-macos`).
 //!
-//! `pkg stage-macos` lays the payload and the scripts down in a directory from the built
-//! programs, the licence and the files of the package; the workflow gives that directory to
-//! `pkgbuild` and `productbuild`. `pkg check-macos` reads the package back with Apple's
-//! `pkgutil` and `lsbom` and refuses it unless it holds exactly [`entries`], each with its
-//! mode and root as owner, the one script [`postinstall_script`] and the identifier and
-//! version of the release. The logic of the postinstall is not in the script, which only runs
-//! `js-mac-provision postinstall` from the release it installed.
+//! The package is a hostkeeper `macos-pkg` service: it lays its files down and runs no script.
+//! `pkg stage-macos` lays the payload down in a directory from the built programs, the
+//! licence and the two plists; the workflow gives that directory to `pkgbuild` without
+//! `--scripts`. `pkg check-macos` reads the package back with Apple's `pkgutil` and `lsbom`
+//! and refuses it unless it holds exactly [`entries`], each with its mode and root as owner,
+//! no script at all, and the identifier and version of the release.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,44 +35,37 @@ pub struct Entry {
     pub mode: u32,
 }
 
-/// The release directory of `version`, below the volume.
-fn release_dir(version: &str) -> String {
-    format!("usr/local/js-agent/releases/{version}")
-}
+/// The directory of the package's own files, below the volume.
+const PREFIX: &str = "Library/Application Support/js-agent";
 
 /// The files of the payload: path, mode.
-fn files(version: &str) -> Vec<(String, u32)> {
-    let release = release_dir(version);
+fn files() -> Vec<(String, u32)> {
     vec![
-        (format!("{release}/js-agent"), 0o755),
-        (format!("{release}/js-mac-session"), 0o755),
-        (format!("{release}/js-mac-provision"), 0o755),
-        (format!("{release}/LICENSE"), 0o644),
+        (format!("{PREFIX}/bin/js-agent"), 0o755),
+        (format!("{PREFIX}/bin/js-mac-session"), 0o755),
+        (format!("{PREFIX}/bin/js-mac-provision"), 0o755),
+        (format!("{PREFIX}/LICENSE"), 0o644),
+        ("Library/LaunchDaemons/js-agent.plist".to_owned(), 0o644),
         (
-            "usr/local/js-agent/share/com.komira.js-agent.plist".to_owned(),
-            0o644,
-        ),
-        (
-            "usr/local/js-agent/share/com.komira.js-mac-session.plist".to_owned(),
+            "Library/LaunchDaemons/js-agent.session.plist".to_owned(),
             0o644,
         ),
     ]
 }
 
-/// The directories the package makes that hold no file of its own: the link's directory
-/// (`postinstall` makes `current` in it), the log directory and the update hook's state
-/// directory (`state_dir` of the hostkeeper package's params).
-const EMPTY_DIRS: [(&str, u32); 3] = [
-    ("usr/local/js-agent/link", 0o755),
-    ("Library/Logs/js-agent", 0o755),
-    ("var/db/js-agent-update", 0o700),
+/// The directories the package makes that hold no file of its own: the log directory the
+/// daemons write to and the update hook's state directory (`state_dir` of the hostkeeper
+/// package's params).
+const EMPTY_DIRS: [(&str, u32); 2] = [
+    ("Library/Application Support/js-agent/log", 0o755),
+    ("Library/Application Support/js-agent/update", 0o700),
 ];
 
-/// The payload of the package of `version`: every file and every directory, parents first.
+/// The payload of the package: every file and every directory, parents first.
 #[must_use]
-pub fn entries(version: &str) -> Vec<Entry> {
+pub fn entries() -> Vec<Entry> {
     let mut all: BTreeMap<String, Entry> = BTreeMap::new();
-    let leaves = files(version)
+    let leaves = files()
         .into_iter()
         .map(|(path, mode)| (path, Kind::File, mode))
         .chain(
@@ -97,17 +89,6 @@ pub fn entries(version: &str) -> Vec<Entry> {
     all.into_values().collect()
 }
 
-/// The `postinstall` script of the package of `version`.
-#[must_use]
-pub fn postinstall_script(version: &str) -> String {
-    format!(
-        "#!/bin/sh\n\
-         # Written by `cargo xtask pkg stage-macos`. The logic is `js-mac-provision postinstall`.\n\
-         exec \"${{3%/}}/{}/js-mac-provision\" postinstall --version {version} --volume \"$3\"\n",
-        release_dir(version)
-    )
-}
-
 /// The arguments of `pkg stage-macos`.
 #[derive(clap::Args)]
 pub struct StageArgs {
@@ -126,7 +107,7 @@ pub struct StageArgs {
     /// The helper's plist.
     #[arg(long)]
     pub session_plist: PathBuf,
-    /// The directory to make, which must not exist: `root/` and `scripts/` go in it.
+    /// The directory to make, which must not exist: `root/` goes in it.
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -146,8 +127,8 @@ pub struct CheckArgs {
 pub struct Inspected {
     /// `lsbom` of the component's bill of materials.
     pub bom: String,
-    /// The files of the component's scripts: name and bytes.
-    pub scripts: Vec<(String, Vec<u8>)>,
+    /// The names of the files of the component's scripts: none in the package.
+    pub scripts: Vec<String>,
     /// The component's `PackageInfo`.
     pub package_info: String,
 }
@@ -183,30 +164,32 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), Error> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(failure(path))
 }
 
-/// Lays the payload and the scripts down in `args.out`: the line to print.
+/// Lays the payload down in `args.out`: the line to print.
 ///
 /// # Errors
 /// [`Error`]: a source is unreadable, or the output directory exists.
 pub fn stage(args: &StageArgs) -> Result<String, Error> {
     let version = args.version.to_string();
-    let release = release_dir(&version);
     let sources: Vec<(String, PathBuf)> = vec![
-        (format!("{release}/js-agent"), args.bin_dir.join("js-agent")),
         (
-            format!("{release}/js-mac-session"),
+            format!("{PREFIX}/bin/js-agent"),
+            args.bin_dir.join("js-agent"),
+        ),
+        (
+            format!("{PREFIX}/bin/js-mac-session"),
             args.bin_dir.join("js-mac-session"),
         ),
         (
-            format!("{release}/js-mac-provision"),
+            format!("{PREFIX}/bin/js-mac-provision"),
             args.bin_dir.join("js-mac-provision"),
         ),
-        (format!("{release}/LICENSE"), args.license.clone()),
+        (format!("{PREFIX}/LICENSE"), args.license.clone()),
         (
-            "usr/local/js-agent/share/com.komira.js-agent.plist".to_owned(),
+            "Library/LaunchDaemons/js-agent.plist".to_owned(),
             args.agent_plist.clone(),
         ),
         (
-            "usr/local/js-agent/share/com.komira.js-mac-session.plist".to_owned(),
+            "Library/LaunchDaemons/js-agent.session.plist".to_owned(),
             args.session_plist.clone(),
         ),
     ];
@@ -221,7 +204,7 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
         ));
     }
     let root = args.out.join("root");
-    let all = entries(&version);
+    let all = entries();
     for e in &all {
         let at = root.join(&e.path);
         match e.kind {
@@ -230,11 +213,6 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
         }
         set_mode(&at, e.mode)?;
     }
-    let scripts = args.out.join("scripts");
-    std::fs::create_dir_all(&scripts).map_err(failure(&scripts))?;
-    let script = scripts.join("postinstall");
-    std::fs::write(&script, postinstall_script(&version)).map_err(failure(&script))?;
-    set_mode(&script, 0o755)?;
     Ok(format!(
         "staged js-agent {version} with {} files and {} directories in {}",
         bytes.len(),
@@ -261,10 +239,8 @@ fn bom_line(line: &str) -> Option<(String, u32, u32, u32)> {
 #[must_use]
 pub fn problems(inspected: &Inspected, version: &str) -> Vec<String> {
     let mut found = Vec::new();
-    let expected: BTreeMap<String, Entry> = entries(version)
-        .into_iter()
-        .map(|e| (e.path.clone(), e))
-        .collect();
+    let expected: BTreeMap<String, Entry> =
+        entries().into_iter().map(|e| (e.path.clone(), e)).collect();
     let mut listed = BTreeMap::new();
     for line in inspected.bom.lines().filter(|l| !l.trim().is_empty()) {
         let Some((path, mode, uid, gid)) = bom_line(line) else {
@@ -311,19 +287,11 @@ pub fn problems(inspected: &Inspected, version: &str) -> Vec<String> {
     for path in expected.keys().filter(|p| !listed.contains_key(*p)) {
         found.push(format!("missing from the package: {path}"));
     }
-    let mut names: Vec<&str> = inspected.scripts.iter().map(|(n, _)| n.as_str()).collect();
+    let mut names: Vec<&str> = inspected.scripts.iter().map(String::as_str).collect();
     names.sort_unstable();
-    if names != ["postinstall"] {
-        found.push(format!("the scripts are {names:?}, not [\"postinstall\"]"));
-    }
-    let script = postinstall_script(version);
-    if inspected
-        .scripts
-        .iter()
-        .any(|(n, b)| n == "postinstall" && b.as_slice() != script.as_bytes())
-    {
+    if !names.is_empty() {
         found.push(format!(
-            "postinstall is not the script of version {version}"
+            "the package holds scripts, and must hold none: {names:?}"
         ));
     }
     if !inspected
@@ -387,8 +355,7 @@ fn inspect(pkg: &Path) -> Result<Inspected, Error> {
         let mut scripts = Vec::new();
         if let Ok(items) = std::fs::read_dir(component.join("Scripts")) {
             for item in items.flatten() {
-                let bytes = std::fs::read(item.path()).map_err(|e| io(&item.path(), e))?;
-                scripts.push((item.file_name().to_string_lossy().into_owned(), bytes));
+                scripts.push(item.file_name().to_string_lossy().into_owned());
             }
         }
         let info = component.join("PackageInfo");
@@ -421,7 +388,7 @@ pub fn verdict(inspected: &Inspected, version: &str, pkg: &Path) -> Result<Strin
     Ok(format!(
         "{}: js-agent {version} with {} entries",
         pkg.display(),
-        entries(version).len()
+        entries().len()
     ))
 }
 

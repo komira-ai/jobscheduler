@@ -361,8 +361,17 @@ fn a_release_with_a_tree_is_read_in_the_native_layout_and_one_without_in_the_arc
         Manager::Systemd.path_in(&archive, UNIT),
         archive.join("units/js-agent-crun.service")
     );
-    assert_eq!(agent_in(&native), native.join("tree/usr/bin/js-agent"));
-    assert_eq!(agent_in(&archive), archive.join("bin/js-agent"));
+    assert_eq!(
+        agent_in(Manager::Systemd, &native),
+        native.join("tree/usr/bin/js-agent")
+    );
+    assert_eq!(
+        agent_in(Manager::Launchd, &native),
+        native.join("tree/Library/Application Support/js-agent/bin/js-agent")
+    );
+    for manager in [Manager::Systemd, Manager::Launchd] {
+        assert_eq!(agent_in(manager, &archive), archive.join("bin/js-agent"));
+    }
 }
 
 /// A native staged release is compared with the archive release that runs now: the same

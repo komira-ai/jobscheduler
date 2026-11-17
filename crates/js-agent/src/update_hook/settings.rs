@@ -39,6 +39,10 @@ pub struct Settings {
     /// The unit that runs the agent (a systemd unit name or a launchd label); a record's unit
     /// must be this one.
     pub unit: String,
+    /// The launchd job of the agent's root helper (`js-agent.session` on a Mac), when the package
+    /// has one. `cutover` and `rollback` boot it out after the agent is stopped and bootstrap
+    /// it from the release being started, before the agent is. Only a launchd host has one.
+    pub helper_unit: Option<String>,
     /// The runtime the unit's agent must have (`crun`, `docker` or `native`): the staged agent
     /// must list it, and the agent that says hello after the cutover runs jobs the way it
     /// does.

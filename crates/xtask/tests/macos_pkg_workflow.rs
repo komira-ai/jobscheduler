@@ -1,9 +1,12 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
 //! read as it is in the repository. Two jobs: `build` runs in the release's beta stage and by hand
-//! (never on a pull request), holds no secret and signs nothing; `sign` runs only by hand from main, in the protected
-//! environment `macos-signing`, takes the checked unsigned package from `build` without
-//! rebuilding, and is the only place a secret is named, on the steps that sign and
-//! notarize and nowhere else. Neither job publishes anything.
+//! (never on a pull request), holds no secret and signs nothing, and builds a hostkeeper
+//! `macos-pkg` package (no script, the file `js-agent-<version>-macos-arm64.pkg`, the helper's
+//! plist naming the agent of the same package by its cdhash); `sign` runs only on main (by hand,
+//! or in the release's call that asks for it), in the protected environment `pkg-signing`, takes
+//! the checked unsigned package from `build` without rebuilding, and is the only place a secret
+//! is named, on the step that signs and nowhere else. Nothing is notarized. Neither job
+//! publishes anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -96,6 +99,17 @@ fn the_workflow_is_called_by_the_release_and_started_by_hand_but_never_by_a_pull
         on,
         [
             "workflow_call:",
+            "inputs:",
+            "version:",
+            "description: The package version, MAJOR.MINOR.PATCH",
+            "required: false",
+            "type: string",
+            "default: 0.0.0",
+            "sign:",
+            "description: Sign the package (on main, for a push)",
+            "required: false",
+            "type: boolean",
+            "default: false",
             "workflow_dispatch:",
             "inputs:",
             "version:",
@@ -105,7 +119,7 @@ fn the_workflow_is_called_by_the_release_and_started_by_hand_but_never_by_a_pull
         ]
     );
     assert!(!text.contains("pull_request"));
-    // The release's call builds version 0.0.0.
+    // A call without a version builds version 0.0.0.
     assert!(
         text.contains("  VERSION: ${{ inputs.version || '0.0.0' }}\n"),
         "the version"
@@ -236,9 +250,7 @@ fn a_secret_is_named_only_in_the_environment_of_the_step_that_uses_it() {
             );
             assert_eq!(indent(line), 10, "not an entry of a step's env: {line}");
             assert!(
-                step == "Check the signing secrets"
-                    || step.starts_with("Sign")
-                    || step.starts_with("Notarize"),
+                step == "Check the signing secrets" || step.starts_with("Sign"),
                 "{step} names a secret"
             );
         }
@@ -252,17 +264,10 @@ fn a_secret_is_named_only_in_the_environment_of_the_step_that_uses_it() {
             }
         }
     }
-    let want: BTreeSet<String> = [
-        "MACOS_INSTALLER_CERT_P12",
-        "MACOS_INSTALLER_CERT_PASSWORD",
-        "MACOS_INSTALLER_IDENTITY",
-        "MACOS_NOTARY_ISSUER_ID",
-        "MACOS_NOTARY_KEY_ID",
-        "MACOS_NOTARY_KEY_P8",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
+    let want: BTreeSet<String> = ["MACOS_INSTALLER_P12", "MACOS_INSTALLER_P12_PASSWORD"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     assert_eq!(named, want);
     let readme = read(README);
     for name in &named {
@@ -274,7 +279,7 @@ fn a_secret_is_named_only_in_the_environment_of_the_step_that_uses_it() {
 }
 
 #[test]
-fn the_sign_job_runs_only_by_hand_from_main_in_the_protected_environment() {
+fn the_sign_job_runs_only_on_main_by_hand_or_when_the_release_asks_in_the_protected_environment() {
     let text = read(WORKFLOW);
     let sign = jobs(&text)["sign"].clone();
     let at_four: Vec<&str> = sign
@@ -282,16 +287,8 @@ fn the_sign_job_runs_only_by_hand_from_main_in_the_protected_environment() {
         .filter(|l| indent(l) == 4)
         .map(|l| l.trim())
         .collect();
-    assert!(
-        at_four.contains(
-            &"if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}"
-        ),
-        "{at_four:?}"
-    );
-    assert!(
-        at_four.contains(&"environment: macos-signing"),
-        "{at_four:?}"
-    );
+    assert!(at_four.contains(&SIGN_IF), "{at_four:?}");
+    assert!(at_four.contains(&"environment: pkg-signing"), "{at_four:?}");
     assert!(at_four.contains(&"needs: [build]"), "{at_four:?}");
 }
 
@@ -312,18 +309,22 @@ fn the_sign_job_runs_no_cargo_and_rebuilds_nothing() {
 
 const PRESENT: &str = "steps.signing.outputs.state == 'present'";
 
+/// The `if:` of the sign job: a manual run on main, or the release's call that sets `sign` (a
+/// push to main); a pull request is neither.
+const SIGN_IF: &str = "if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}";
+
 #[test]
-fn signing_and_notarizing_are_steps_gated_on_the_presence_check() {
+fn signing_is_one_step_gated_on_the_presence_check_and_nothing_is_notarized() {
     let text = read(WORKFLOW);
     let sign = jobs(&text)["sign"].clone();
     let all = steps(&sign);
     let gated: Vec<_> = all
         .iter()
-        .filter(|(name, _)| name.starts_with("Sign") || name.starts_with("Notarize"))
+        .filter(|(name, _)| name.starts_with("Sign"))
         .collect();
     assert_eq!(
         gated.len(),
-        2,
+        1,
         "{:?}",
         all.iter().map(|s| &s.0).collect::<Vec<_>>()
     );
@@ -335,11 +336,10 @@ fn signing_and_notarizing_are_steps_gated_on_the_presence_check() {
         assert!(cond.contains(PRESENT), "{name}: {cond}");
     }
     let build = jobs(&text)["build"].clone();
-    assert!(
-        steps(&build)
-            .iter()
-            .all(|(n, _)| !n.starts_with("Sign") && !n.starts_with("Notarize"))
-    );
+    assert!(steps(&build).iter().all(|(n, _)| !n.starts_with("Sign")));
+    for word in ["notarytool", "stapler", "xcrun", "Notarize"] {
+        assert!(!code(&text).join("\n").contains(word), "{word}");
+    }
 }
 
 #[test]
@@ -353,11 +353,11 @@ fn the_presence_check_comes_first_and_every_later_signing_step_waits_for_it() {
     assert!(lines.iter().any(|l| l.trim() == "id: signing"), "{body}");
     // All six secrets reach it through the step's environment, and the script prints a
     // state and never a value.
-    assert_eq!(body.matches("secrets.").count(), 6, "{body}");
+    assert_eq!(body.matches("secrets.").count(), 2, "{body}");
     assert!(body.contains("state=present"), "{body}");
     assert!(body.contains("state=absent"), "{body}");
     assert!(body.contains("::notice::"), "{body}");
-    assert!(body.contains("macos-signing"), "{body}");
+    assert!(body.contains("pkg-signing"), "{body}");
     assert!(body.contains(">> \"$GITHUB_OUTPUT\""), "{body}");
     for line in lines
         .iter()
@@ -425,7 +425,7 @@ fn the_package_is_built_checked_summed_and_checked_again_after_signing() {
     assert_eq!(
         sign.matches("pkg check-macos").count(),
         1,
-        "once, after signing and notarizing"
+        "once, after signing"
     );
     assert!(sign.contains("/usr/bin/shasum -a 256 --check"));
 }
@@ -457,12 +457,12 @@ fn nothing_built_from_the_repository_runs_in_the_sign_job_before_the_secret_step
 }
 
 #[test]
-fn the_checker_runs_in_the_sign_job_only_after_signing_and_notarizing() {
+fn the_checker_runs_in_the_sign_job_only_after_signing() {
     let text = read(WORKFLOW);
     let sign = jobs(&text)["sign"].clone();
     let all = steps(&sign);
     let at = |prefix: &str| all.iter().position(|(n, _)| n.starts_with(prefix)).unwrap();
-    let notarize = at("Notarize");
+    let notarize = at("Sign");
     let checks: Vec<usize> = all
         .iter()
         .enumerate()
@@ -519,4 +519,202 @@ fn no_command_expands_an_expression() {
             assert!(!line.contains("${{"), "{line}");
         }
     }
+}
+
+/// One line per way the workflow `text` is not the build of a hostkeeper `macos-pkg` package that
+/// is then signed with `productsign` alone: the package has no script and the file name of the
+/// design, the root helper's plist names the agent of the same package by its cdhash, the agent's
+/// plist is the fixed one, the signing is one `productsign --timestamp` with the identity found
+/// in the temporary keychain, nothing is notarized, and the artifacts are the two the release
+/// reads.
+fn package_problems(text: &str) -> Vec<String> {
+    let all = jobs(text);
+    let build = all.get("build").map_or(String::new(), |j| j.join("\n"));
+    let sign = all.get("sign").map_or(String::new(), |j| j.join("\n"));
+    let body = code(text).join("\n");
+    let mut problems = Vec::new();
+    let mut want = |ok: bool, what: &str| {
+        if !ok {
+            problems.push(what.to_owned());
+        }
+    };
+    want(
+        !build.contains("--scripts") && !body.contains("stage/scripts"),
+        "the package has scripts",
+    );
+    want(
+        build.contains("pkgbuild --root stage/root --identifier com.komira.js-agent --version \"$VERSION\" --install-location / --ownership recommended stage/component.pkg"),
+        "pkgbuild does not build the component of com.komira.js-agent from stage/root",
+    );
+    want(
+        build.contains("\"dist/js-agent-$VERSION-macos-arm64.pkg\"")
+            && !body.contains("aarch64-apple-darwin.pkg"),
+        "the package is not named js-agent-<version>-macos-arm64.pkg",
+    );
+    want(
+        build.contains("target/release/js-mac-provision agent-plist > inputs/agent.plist")
+            && !body.contains("--server")
+            && !body.contains("SET-THE"),
+        "the agent's plist is not the fixed one",
+    );
+    want(
+        build.contains(
+            "session-plist --daemon-requirement \"cdhash H\\\"$cdhash\\\"\" > inputs/session.plist",
+        ),
+        "the helper's plist does not name the agent by its cdhash",
+    );
+    want(
+        build.contains("cdhash=\"$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')\""),
+        "the cdhash is not read from the js-agent binary that is built",
+    );
+    want(
+        build.contains("[[ \"$cdhash\" =~ ^[0-9a-f]{40}$ ]]"),
+        "the cdhash is not checked to be 40 hex digits",
+    );
+    want(
+        build.contains("if [ \"$staged\" != \"$cdhash\" ]"),
+        "the cdhash of the staged js-agent is not compared with the one in the plist",
+    );
+    want(
+        !body.contains("notarytool") && !body.contains("stapler") && !body.contains("xcrun"),
+        "something is notarized",
+    );
+    want(
+        sign.contains("/usr/bin/productsign --timestamp --sign \"$identity\" --keychain \"$keychain\" \"$pkg\" \"$pkg.signed\""),
+        "the package is not signed by productsign --timestamp with the identity of the keychain",
+    );
+    want(
+        sign.contains("/usr/bin/security find-identity -v -p basic \"$keychain\"")
+            && sign.contains("'/Developer ID Installer/ { print $2 }'")
+            && sign.contains("[[ \"$identity\" =~ ^[0-9A-F]{40}$ ]]"),
+        "the identity is not the one Developer ID Installer certificate of the keychain, by its SHA-1",
+    );
+    want(
+        !body.contains("Installer:") && !body.contains("secrets.MACOS_INSTALLER_IDENTITY"),
+        "an identity name is written or given as a secret",
+    );
+    want(
+        build.contains("name: js-agent-macos-pkg-unsigned")
+            && sign.contains("name: js-agent-macos-pkg-unsigned")
+            && sign.contains("name: js-agent-macos-pkg-signed")
+            && !build.contains("js-agent-macos-pkg-signed"),
+        "the artifacts are not the unsigned one from build and the signed one from sign",
+    );
+    problems
+}
+
+#[test]
+fn the_workflow_builds_a_script_free_hostkeeper_package_and_signs_it_with_productsign_alone() {
+    assert_eq!(package_problems(&read(WORKFLOW)), Vec::<String>::new());
+}
+
+#[test]
+fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
+    let text = read(WORKFLOW);
+    for (from, to, says) in [
+        (
+            "--install-location / --ownership recommended stage/component.pkg",
+            "--install-location / --scripts stage/scripts --ownership recommended stage/component.pkg",
+            "the package has scripts",
+        ),
+        (
+            "pkgbuild --root stage/root --identifier com.komira.js-agent",
+            "pkgbuild --root stage/root --identifier js-agent",
+            "pkgbuild does not build the component",
+        ),
+        (
+            "\"dist/js-agent-$VERSION-macos-arm64.pkg\"\n      - name: The unsigned",
+            "\"dist/js-agent-$VERSION-aarch64-apple-darwin.pkg\"\n      - name: The unsigned",
+            "the package is not named js-agent-<version>-macos-arm64.pkg",
+        ),
+        (
+            "agent-plist > inputs/agent.plist",
+            "agent-plist --server SET-THE-SERVER > inputs/agent.plist",
+            "the agent's plist is not the fixed one",
+        ),
+        (
+            "--daemon-requirement \"cdhash H\\\"$cdhash\\\"\"",
+            "--daemon-requirement SET-THE-DAEMON-REQUIREMENT",
+            "the helper's plist does not name the agent by its cdhash",
+        ),
+        (
+            "codesign --display --verbose=4 target/release/js-agent 2>&1",
+            "codesign --display --verbose=4 target/release/js-mac-session 2>&1",
+            "the cdhash is not read from the js-agent binary that is built",
+        ),
+        (
+            "[[ \"$cdhash\" =~ ^[0-9a-f]{40}$ ]]",
+            "[ -n \"$cdhash\" ]",
+            "the cdhash is not checked to be 40 hex digits",
+        ),
+        (
+            "if [ \"$staged\" != \"$cdhash\" ]",
+            "if [ -z \"$staged\" ]",
+            "the cdhash of the staged js-agent is not compared",
+        ),
+        (
+            "/usr/bin/productsign --timestamp --sign",
+            "/usr/bin/productsign --sign",
+            "the package is not signed by productsign --timestamp",
+        ),
+        (
+            "--sign \"$identity\"",
+            "--sign \"Developer ID Installer: Someone (TEAM)\"",
+            "an identity name is written",
+        ),
+        (
+            "find-identity -v -p basic",
+            "find-identity -p basic",
+            "the identity is not the one Developer ID Installer certificate",
+        ),
+        (
+            "      - name: The signed package is the package\n",
+            "      - name: Notarize\n        run: /usr/bin/xcrun notarytool submit x\n      - name: The signed package is the package\n",
+            "something is notarized",
+        ),
+        (
+            "name: js-agent-macos-pkg-signed",
+            "name: js-agent-macos-pkg",
+            "the artifacts are not the unsigned one from build and the signed one from sign",
+        ),
+    ] {
+        assert!(text.contains(from), "{from:?}");
+        let problems = package_problems(&text.replacen(from, to, 1));
+        assert!(
+            problems.iter().any(|p| p.contains(says)),
+            "{from:?} -> {to:?} must say {says:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn the_sign_condition_refuses_a_pull_request_and_a_push_that_does_not_ask() {
+    // A manual run counts on main alone, and the release's call counts when it asks (`sign`),
+    // on main, for a push: no part of the condition is optional.
+    let text = read(WORKFLOW);
+    let sign = jobs(&text)["sign"].clone();
+    let line = sign
+        .iter()
+        .find(|l| indent(l) == 4 && l.trim().starts_with("if:"))
+        .expect("the sign job's condition")
+        .trim();
+    assert_eq!(line, SIGN_IF);
+    for part in [
+        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+        "inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push'",
+    ] {
+        assert!(line.contains(part), "{part}");
+    }
+    // The condition is a disjunction of those two parts and nothing looser.
+    assert_eq!(line.matches("||").count(), 1, "{line}");
+    assert!(!line.contains("pull_request"));
+    // The release's call is the one that sets `sign`, and the other callers do not.
+    let release = std::fs::read_to_string(
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .join(".github/workflows/release.yml"),
+    )
+    .expect("release.yml");
+    assert!(release.contains(
+        "    uses: ./.github/workflows/js-agent-macos-pkg.yml\n    with:\n      version: ${{ needs.plan.outputs.version }}\n      sign: true\n"
+    ));
 }

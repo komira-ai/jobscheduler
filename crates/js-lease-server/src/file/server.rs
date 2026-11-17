@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use js_elastic::SchedulerId;
 use js_jobs::Retention;
+use js_sched_placer::sizes::ColdSize;
 
 use super::{Load, Section};
 use crate::config::{
@@ -46,6 +47,8 @@ const SERVER_KEYS: &[&str] = &[
     "placement",
     "estimate_feed",
     "cpu_slack",
+    "cold_cpu_millis",
+    "cold_memory_bytes",
     "usage_db",
     "usage_off",
     "profile_store_bytes",
@@ -139,6 +142,7 @@ pub(crate) struct AgentKeys {
     placement: Option<Placement>,
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
+    cold: ColdSize,
     job_listen: Option<SocketAddr>,
 }
 
@@ -171,6 +175,13 @@ impl AgentKeys {
     /// The CPU slack the file gives, if it gives one; absent, the engine's default.
     pub(crate) fn cpu_slack(&self) -> Option<CpuSlack> {
         self.cpu_slack
+    }
+
+    /// What a job that books nothing books while its class has no estimate:
+    /// `cold_cpu_millis` and `cold_memory_bytes` as the file gives them, each absent one a
+    /// quarter of the largest host.
+    pub(crate) fn cold(&self) -> ColdSize {
+        self.cold
     }
 
     /// Where the job service is served, when the file turns it on.
@@ -244,6 +255,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         placement: read_placement(&mut s)?,
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
+        cold: read_cold(&mut s)?,
         job_listen: s.address("job_listen")?,
     };
     let usage = read_usage(&mut s)?;
@@ -447,6 +459,23 @@ fn read_cpu_slack(s: &mut Section) -> Result<Option<CpuSlack>, StartupError> {
     Ok(Some(slack))
 }
 
+/// The least `cold_cpu_millis`: a quarter core, the least CPU the estimator books.
+const COLD_CPU_LEAST: u64 = 250;
+
+/// The least `cold_memory_bytes`: 1 GiB, the least memory the estimator books.
+const COLD_MEMORY_LEAST: u64 = 1 << 30;
+
+/// `cold_cpu_millis` and `cold_memory_bytes`: whole numbers, the CPU from a quarter core
+/// (250) to the most millicores a host can report, the memory from 1 GiB (the least memory
+/// the estimator books). Each left out is `None`.
+fn read_cold(s: &mut Section) -> Result<ColdSize, StartupError> {
+    let most_cpu = u64::from(u32::MAX);
+    Ok(ColdSize {
+        cpu_millis: s.bounded_given("cold_cpu_millis", COLD_CPU_LEAST, most_cpu)?,
+        memory_bytes: s.bounded_given("cold_memory_bytes", COLD_MEMORY_LEAST, u64::MAX)?,
+    })
+}
+
 /// The usage keys. The rules are the flags': a budget and a retention of at least 1, and no
 /// `usage_db` beside `usage_off = true`.
 fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
@@ -515,6 +544,74 @@ mod tests {
     fn refusal(text: &str) -> String {
         let table: toml::Table = text.parse().unwrap();
         read_server(table).err().unwrap().to_string()
+    }
+
+    /// The cold size the `[server]` table with its required keys and `extra` gives.
+    fn cold_of(extra: &str) -> Result<ColdSize, String> {
+        let required = "state_file = \"js\"\nboot = \"initialise\"\nclient_token_file = \"t\"";
+        let table: toml::Table = format!("{required}\n{extra}").parse().unwrap();
+        let server = read_server(table).map_err(|err| err.to_string())?;
+        Ok(server.agents.cold())
+    }
+
+    /// Asserts that `cold_cpu_millis` and `cold_memory_bytes` are read as given, each on its
+    /// own, from their least (250 and 1 GiB) up to the most CPU (4294967295); that left out they are `None` (a quarter of
+    /// the largest host); and that a value under the least, negative or not an integer is
+    /// refused at start naming the key and what it must be. Catches a key that is not read, a
+    /// key read into the other dimension, and a cold size of no CPU or under the estimator's
+    /// least memory.
+    #[test]
+    fn the_cold_size_keys_are_read_each_on_its_own_and_refused_out_of_range() {
+        let none = ColdSize::default();
+        assert_eq!(cold_of(""), Ok(none));
+        let farm = "cold_cpu_millis = 2000\ncold_memory_bytes = 8589934592";
+        let read = cold_of(farm).unwrap();
+        assert_eq!(
+            (read.cpu_millis, read.memory_bytes),
+            (Some(2000), Some(8 << 30))
+        );
+        let least = cold_of("cold_cpu_millis = 250\ncold_memory_bytes = 1073741824").unwrap();
+        assert_eq!(
+            (least.cpu_millis, least.memory_bytes),
+            (Some(250), Some(1 << 30))
+        );
+        let most = cold_of("cold_cpu_millis = 4294967295").unwrap();
+        assert_eq!(most.cpu_millis, Some(u64::from(u32::MAX)));
+        let cpu = cold_of("cold_cpu_millis = 2000").unwrap();
+        assert_eq!((cpu.cpu_millis, cpu.memory_bytes), (Some(2000), None));
+        let memory = cold_of("cold_memory_bytes = 8589934592").unwrap();
+        assert_eq!(
+            (memory.cpu_millis, memory.memory_bytes),
+            (None, Some(8 << 30))
+        );
+        let cpu_range = "server.cold_cpu_millis: must be from 250 to 4294967295";
+        let memory_range =
+            "server.cold_memory_bytes: must be from 1073741824 to 18446744073709551615";
+        for (extra, said) in [
+            ("cold_cpu_millis = 249", cpu_range),
+            ("cold_cpu_millis = 0", cpu_range),
+            ("cold_cpu_millis = 4294967296", cpu_range),
+            (
+                "cold_cpu_millis = -1",
+                "server.cold_cpu_millis: must not be negative",
+            ),
+            (
+                "cold_cpu_millis = \"2000\"",
+                "server.cold_cpu_millis: must be an integer",
+            ),
+            (
+                "cold_cpu_millis = 2.5",
+                "server.cold_cpu_millis: must be an integer",
+            ),
+            ("cold_memory_bytes = 1073741823", memory_range),
+            ("cold_memory_bytes = 0", memory_range),
+            (
+                "cold_memory_bytes = \"8GiB\"",
+                "server.cold_memory_bytes: must be an integer",
+            ),
+        ] {
+            assert_eq!(cold_of(extra), Err(said.to_owned()), "{extra}");
+        }
     }
 
     /// Asserts that `server.default_ttl` and `server.max_ttl` are told as unknown keys, as

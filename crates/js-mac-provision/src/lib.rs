@@ -12,7 +12,6 @@
 //! - [`counters`]: the per-rule packet counters of the anchor, which show pf blocked a packet.
 //! - [`launchd`]: the property list of the LaunchDaemon that keeps the anchor loaded.
 //! - [`daemon`]: the property lists of the js-agent package's two LaunchDaemons.
-//! - [`postinstall`]: what the package's postinstall does, over a `launchctl` trait.
 //! - [`probe()`]: one connect and its outcome, for the operator and the root test.
 //! - [`cli`]: the verbs of the `js-mac-provision` program.
 //!
@@ -25,7 +24,6 @@ pub mod daemon;
 pub mod launchd;
 pub mod pfctl;
 pub mod policy;
-pub mod postinstall;
 pub mod probe;
 pub mod provision;
 pub mod render;
