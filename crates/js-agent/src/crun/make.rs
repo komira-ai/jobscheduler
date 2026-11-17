@@ -1,5 +1,6 @@
 //! The making of a lease once its sidecar is recorded: the image pinned and made sure of,
-//! the container's spec, and the lease's directories, hand-overs, cgroup and bundle.
+//! the container's spec, and the lease's directories, hand-overs, cgroup and bundle, each
+//! step marked done ([`Marks`]).
 
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy};
 use js_contain::container::ContainerSpec;
@@ -15,7 +16,23 @@ use super::{CrunRuntime, gpu, net};
 use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::RunSpec;
 
+/// The steps of a lease's start done so far, each with the wall clock time it was done at
+/// (milliseconds since the Unix epoch), for
+/// [`Runtime::start_steps`](crate::lifecycle::Runtime::start_steps): `begin` (the lease is
+/// named and labelled), `recorded` (its sidecar is written and synced), `image` (its image
+/// is pinned and made sure of, and its config read), `dirs` (its directories made and given
+/// away), `cgroup` (its cgroup made, limited and given to the job user), `bundle` (its
+/// bundle written), then, in the start, `supervised` (the supervisor made its files and said
+/// it is ready: `crun run` starts after this) and `running` (its sidecar says it runs, and
+/// its network is wired).
+pub(super) type Marks = Vec<(&'static str, u64)>;
+
 impl CrunRuntime {
+    /// Marks `step` done now, on the runtime's clock.
+    pub(super) fn mark(&self, marks: &mut Marks, step: &'static str) {
+        marks.push((step, (self.hooks.now_ms)()));
+    }
+
     /// The pinned image (`given`, parsed as `image`; none for a root of layers alone, whose
     /// digest is empty), the container spec with `args`, what the run's assembly made and
     /// what its GPUs give it, and the resources of the lease `name`, whose sidecar is
@@ -25,13 +42,14 @@ impl CrunRuntime {
         spec: &RunSpec,
         (given, image): (&str, &PinnedImage),
         (args, assembled): (&[String], Option<&Assembled>),
-        name: &str,
-        gpu: gpu::Wiring,
+        (name, gpu): (&str, gpu::Wiring),
+        marks: &mut Marks,
     ) -> Result<(ContainerSpec, LeaseDirs, LeaseCgroup), Fault> {
         let config = match image.digest.is_empty() {
             true => None,
             false => Some(self.image_config(given, image, name, assembled)?),
         };
+        self.mark(marks, "image");
         let rootfs = js_contain::oci::image::published_root(&self.store, &image.digest);
         gpu.check_targets(&rootfs).map_err(Fault::Gpu)?;
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
@@ -51,7 +69,7 @@ impl CrunRuntime {
         }
         job_env(&mut container, &spec.env);
         gpu.apply(&mut container);
-        self.make_resources(spec, &container, &lease, &cgroup)?;
+        self.make_resources(spec, &container, (&lease, &cgroup), marks)?;
         Ok((container, lease, cgroup))
     }
 
@@ -99,8 +117,8 @@ impl CrunRuntime {
         &self,
         spec: &RunSpec,
         container: &ContainerSpec,
-        lease: &LeaseDirs,
-        cgroup: &LeaseCgroup,
+        (lease, cgroup): (&LeaseDirs, &LeaseCgroup),
+        marks: &mut Marks,
     ) -> Result<(), Fault> {
         let chown = self.hooks.chown;
         let host = container.isolation == js_contain::Isolation::Host;
@@ -137,6 +155,7 @@ impl CrunRuntime {
                 .hand_over_with(&spec.run_id, job_id.0, job_id.1, &chown)
                 .map_err(|why| Fault::step("give the run's files to the job", &why))?;
         }
+        self.mark(marks, "dirs");
         let booking = Resources::new(spec.cpu_millis, spec.memory_bytes, 0, None)?;
         cgroup
             .create_with(&booking, None, LeasePolicy::Hard)
@@ -145,8 +164,11 @@ impl CrunRuntime {
             chown(&owned(cgroup.dir(), file), job.0, job.1)
                 .map_err(|why| Fault::step("give the lease's cgroup to the job user", &why))?;
         }
+        self.mark(marks, "cgroup");
         self.rt
             .block_on(net::create(&self.oci, container, network))
-            .map_err(|why| Fault::step("write the bundle", &why))
+            .map_err(|why| Fault::step("write the bundle", &why))?;
+        self.mark(marks, "bundle");
+        Ok(())
     }
 }

@@ -73,11 +73,18 @@ fn a_job_above_the_ceiling_is_refused_with_a_code_naming_it() {
             results[0].detail.as_deref(),
             Some(refusal::NETWORK_ABOVE_CEILING)
         );
-        // The egress check was not reached: its failure is still owed to the next start.
+        // The egress check was not reached: its failure is still owed to the next start
+        // the firewall carries. Under the ceiling `none` there is none: a `none` job is never
+        // checked, and starts.
+        assert_eq!(h.fake.egress_asks(), 0);
         let mut within = job("r2");
         within.network = top;
         let names_of = names(&h.start(within));
-        assert_eq!(names_of, ["refused r2 egress-unchecked"]);
+        let expected = match top {
+            JobNetwork::None => "started r2",
+            _ => "refused r2 egress-unchecked",
+        };
+        assert_eq!(names_of, [expected]);
     }
 
     for (n, top) in [JobNetwork::None, JobNetwork::AllowList, JobNetwork::Open]
@@ -196,4 +203,35 @@ fn a_job_with_a_listed_port_is_admitted_and_forwarded() {
         [format!("refused r5 {}", refusal::NETWORK_ABOVE_CEILING)]
     );
     assert!(h.fake.created().is_empty());
+}
+
+/// Proves the firewall is checked before each create of a job it carries and never for a
+/// `none` job: under the ceiling `open`, with every check failing, a `none` job starts and
+/// the check was not asked; an `allow-list` and an `open` job are each refused
+/// `egress-unchecked` after one check each, creating nothing; once the check passes again an
+/// `allow-list` job is checked once more and starts. Catches a `none` job that pays for (or is
+/// refused by) a firewall it does not use, and a wired job started without its check.
+#[test]
+fn the_firewall_is_checked_before_a_wired_jobs_create_and_never_for_a_none_job() {
+    let mut h = Harness::new("net-check-wired");
+    h.fake.set_ceiling(ceiling(JobNetwork::Open, &[]));
+    h.fake.fail("egress", u32::MAX);
+    assert_eq!(names(&h.start(job("r1"))), ["started r1"]);
+    assert_eq!(h.fake.egress_asks(), 0);
+    for (run, level) in [("r2", JobNetwork::AllowList), ("r3", JobNetwork::Open)] {
+        let mut spec = job(run);
+        spec.network = level;
+        assert_eq!(
+            names(&h.start(spec)),
+            [format!("refused {run} egress-unchecked")]
+        );
+    }
+    assert_eq!(h.fake.egress_asks(), 2);
+    h.fake.fail("egress", 0);
+    let mut spec = job("r4");
+    spec.network = JobNetwork::AllowList;
+    assert_eq!(names(&h.start(spec)), ["started r4"]);
+    assert_eq!(h.fake.egress_asks(), 3);
+    let created: Vec<String> = h.fake.created().iter().map(|r| r.run_id.clone()).collect();
+    assert_eq!(created, ["r1", "r4"]);
 }

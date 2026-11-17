@@ -37,6 +37,28 @@ pub enum Skip {
     Clash,
 }
 
+/// When each step of a container's start was done, carried by [`Event::Started`] and so
+/// logged with it: where the time from a start's arrival to its container went. Its
+/// container's command is started by the container's init after the runtime's create has
+/// returned (`crun run` makes the container then), so the last step here comes before it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartTimeline {
+    /// When the reply that carried the start arrived, on the lifecycle's clock (milliseconds
+    /// from its origin, which on a node is the agent's start).
+    pub received_ms: u64,
+    /// The lifecycle's steps, each with the milliseconds after `received_ms` at which it was
+    /// done, in the order they were: `taken` (the worker began on the start), `admitted` (its
+    /// checks passed and its slot is booked), `resolved` (a start with layers or mounts: its
+    /// images are here and its host paths found), `dirs` (its scratch directory, and the
+    /// runtime's beside it, made and put under its quota), `ready` (all it waited for is
+    /// here) and `created` (the runtime's create returned).
+    pub steps: Vec<(&'static str, u64)>,
+    /// The runtime's own steps inside the create, each with the wall clock time it was done
+    /// at (milliseconds since the Unix epoch), in order; empty for a runtime that keeps none
+    /// ([`Runtime::start_steps`](super::Runtime::start_steps)).
+    pub runtime: Vec<(&'static str, u64)>,
+}
+
 /// What [`Lifecycle`](super::Lifecycle) did, in order. The caller logs these; a test reads them as the
 /// record of the order of things.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +72,8 @@ pub enum Event {
     Started {
         /// The run.
         run_id: String,
+        /// When each step of the start was done.
+        timeline: StartTimeline,
     },
     /// The start was refused and nothing was created; a `failed_to_start` result is held.
     Refused {
