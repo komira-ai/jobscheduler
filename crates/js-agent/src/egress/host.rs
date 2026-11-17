@@ -424,7 +424,8 @@ impl Egress {
     /// [`forward::all`] reads them), every acceptance ahead of the other rules of `forward`,
     /// and no other rule under the prefix (a forward missing, left over, changed or twice).
     /// Counters and the members of the sets of wired interfaces are not compared. Mode none
-    /// has nothing to check. The lifecycle asks before every create.
+    /// has nothing to check. The lifecycle asks before every create of a wired job, and never
+    /// for a `none` job.
     ///
     /// # Errors
     ///

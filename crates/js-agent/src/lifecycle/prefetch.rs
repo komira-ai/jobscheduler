@@ -47,6 +47,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use tokio::runtime::{Builder, Handle, Runtime as PullRuntime};
 
+use super::Wake;
 use super::runtime::{Prepared, RuntimeError, Ticket};
 
 /// What a pull function returns: the image is on the host, or why it is not.
@@ -70,6 +71,8 @@ struct State {
     next: u64,
     /// How many pulls have had their result offered to `finish`, kept or ignored.
     offered: u64,
+    /// Rung when a pull ends ([`Prefetcher::set_wake`]).
+    wake: Wake,
 }
 
 #[derive(Default)]
@@ -95,8 +98,10 @@ impl Shared {
         {
             entry.phase = Phase::Done(result);
         }
+        let wake = state.wake.clone();
         drop(state);
         self.changed.notify_all();
+        wake.wake();
     }
 }
 
@@ -210,6 +215,12 @@ impl Prefetcher {
             shared.finish(&name, ticket, result);
         });
         Prepared::Pending(ticket)
+    }
+
+    /// Rings `wake` whenever a pull ends from now on, whether it succeeded, failed or was let
+    /// go: a start that waits on the image is asked again at once.
+    pub fn set_wake(&self, wake: Wake) {
+        self.shared.lock().wake = wake;
     }
 
     /// Blocks until `count` pulls, counted over every image since this prefetcher was made

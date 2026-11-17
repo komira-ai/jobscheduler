@@ -182,32 +182,38 @@ impl Lifecycle {
         let at = (Some(index), lease_end_ms);
         match next {
             Next::Wait => {}
-            Next::End => job.end_unstarted(events),
+            Next::End => {
+                job.end_unstarted(events);
+                self.drop_timeline(&spec.run_id);
+            }
             Next::Fail(failure) => {
                 self.settle((&spec, keyed), Err(failure), (slot, booked), at, events);
             }
-            Next::Dirs => match self.make_dirs(&spec.run_id, (slot, booked), events) {
-                Ok(scratch) => {
-                    // Its images and host paths are here: its assembly is asked for at once,
-                    // so a start that is ending is never asked to assemble, and it waits.
-                    // An answer it gives at once is asked again at the next step.
-                    let _ = self.runtime.assemble_fs(&spec.run_id, now);
-                    let waiting = Waiting {
-                        spec,
-                        given,
-                        mounts,
-                        slot,
-                        booked,
-                        tickets: Vec::new(),
-                        phase: Phase::Assembling(scratch),
-                        lease_end_ms,
-                    };
-                    self.jobs[index].stage = Stage::Preparing(Box::new(waiting));
+            Next::Dirs => {
+                self.mark(&spec.run_id, "resolved");
+                match self.make_dirs(&spec.run_id, (slot, booked), events) {
+                    Ok(scratch) => {
+                        // Its images and host paths are here: its assembly is asked for at once,
+                        // so a start that is ending is never asked to assemble, and it waits.
+                        // An answer it gives at once is asked again at the next step.
+                        let _ = self.runtime.assemble_fs(&spec.run_id, now);
+                        let waiting = Waiting {
+                            spec,
+                            given,
+                            mounts,
+                            slot,
+                            booked,
+                            tickets: Vec::new(),
+                            phase: Phase::Assembling(scratch),
+                            lease_end_ms,
+                        };
+                        self.jobs[index].stage = Stage::Preparing(Box::new(waiting));
+                    }
+                    Err(failure) => {
+                        self.settle((&spec, keyed), Err(failure), (slot, booked), at, events);
+                    }
                 }
-                Err(failure) => {
-                    self.settle((&spec, keyed), Err(failure), (slot, booked), at, events);
-                }
-            },
+            }
             Next::Begin(scratch) => {
                 let started = self.begin(
                     (&spec, keyed),
@@ -232,6 +238,7 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) -> Result<RunHandle, Failure> {
         let run_id = &spec.run_id;
+        self.mark(run_id, "ready");
         let scratch = match scratch {
             Some(scratch) => scratch,
             None => self.make_dirs(run_id, (slot, booked), events)?,
@@ -276,6 +283,7 @@ impl Lifecycle {
             self.bind(dir, slot, booked, events)
                 .map_err(|why| scratch_failure(why.into()))?;
         }
+        self.mark(run_id, "dirs");
         Ok(scratch)
     }
 }

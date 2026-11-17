@@ -659,3 +659,35 @@ fn what_cannot_be_unmounted_or_pinned_is_kept_and_said() {
     );
     assert!(format!("{:?}", js_agent::crun::MountSeam::default()).contains("/run/js-agent/mounts"));
 }
+
+/// Proves the runtime rings the wake it was given when a lookup or an assembly it ran off
+/// the caller has answered: every `Pending` of the lookups and of the assembly is followed by
+/// a ring, without the test sleeping, until each is ready. Catches a layered start that waits
+/// for the lifecycle's next step (up to a second on a node) at each of its two waits.
+#[test]
+fn the_lookups_and_the_assembly_ring_the_wake_when_they_answer() {
+    let node = Node::new("layered-wake");
+    let calls = Arc::new(Calls::default());
+    let mut runtime = open(settings(&node, &calls, Paths::default()));
+    let (rung, rings) = std::sync::mpsc::channel::<()>();
+    let rung = Mutex::new(rung);
+    runtime.set_wake(js_agent::lifecycle::Wake::new(move || {
+        let _ = rung.lock().map(|rung| rung.send(()));
+    }));
+    let spec = node.spec("l1-wake");
+    let (run, image, fs) = (spec.run_id.clone(), node.image(), job_fs(&node));
+    let guard = std::time::Duration::from_secs(120);
+    let rung_until = |what: &mut dyn FnMut() -> FsPrepared| loop {
+        match what() {
+            FsPrepared::Pending => rings.recv_timeout(guard).expect("rung"),
+            other => return other,
+        }
+    };
+    let found = rung_until(&mut || runtime.resolve_fs(&run, &image, &fs, 5000));
+    assert_eq!(found, FsPrepared::Ready);
+    let lease = runtime.lease_dir(&run).expect("beside the runs");
+    std::fs::create_dir_all(&lease).expect("the lease directory");
+    let assembled = rung_until(&mut || runtime.assemble_fs(&run, 5000));
+    assert_eq!(assembled, FsPrepared::Ready);
+    runtime.discard_fs(&run).expect("discarded");
+}
