@@ -64,10 +64,10 @@ pub(crate) mod crun;
 mod devices;
 mod gc;
 pub(crate) mod hardening;
-pub mod helper;
 mod held;
 #[cfg(test)]
 mod held_tests;
+pub mod helper;
 mod host_spec;
 pub mod image;
 pub mod init;

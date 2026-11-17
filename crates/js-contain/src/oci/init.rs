@@ -386,4 +386,177 @@ mod tests {
         assert_eq!(code, Some(2));
         assert!(!ran, "the program must not run");
     }
+
+    /// Starts the installed init held on a new pipe in a scratch directory named `name` (with
+    /// `extra` after `--`), writes `job` to the pipe (the write waits for the init's open), and
+    /// returns the exit code, the report's text and the scratch directory.
+    fn run_held(name: &str, extra: &[&str], job: &[u8]) -> (Option<i32>, String, PathBuf) {
+        let dir = scratch(name);
+        let init = install(&dir).expect("install");
+        let pipe = dir.join("job");
+        let mode = rustix::fs::Mode::from_raw_mode(0o600);
+        rustix::fs::mknodat(rustix::fs::CWD, &pipe, rustix::fs::FileType::Fifo, mode, 0)
+            .expect("the pipe");
+        let report = create_report(&dir).expect("report");
+        let mut running = std::process::Command::new(&init)
+            .arg("--wait-job")
+            .arg(&pipe)
+            .arg("--")
+            .args(extra)
+            .stdin(report)
+            .env("PATH", "/nowhere")
+            .spawn()
+            .expect("the init runs");
+        if extra.is_empty() {
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&pipe)
+                .expect("the init opens the pipe");
+            writer.write_all(job).expect("the job");
+        }
+        let status = running.wait().expect("the init ends");
+        let said = std::fs::read_to_string(report_path(&dir)).expect("report text");
+        (status.code(), said, dir)
+    }
+
+    /// The bytes of `fields`, each ended by a NUL byte: a job's form.
+    fn job_of(fields: &[&str]) -> Vec<u8> {
+        fields
+            .iter()
+            .flat_map(|f| [f.as_bytes(), b"\0"].concat())
+            .collect()
+    }
+
+    /// Proves a held init runs the job it reads from its pipe: in the job's working
+    /// directory, with the job's whole environment and none of its own, the program found on
+    /// the job's `PATH` (the init's own names a directory with nothing in it), and exits with
+    /// the program's code. Catches an init that keeps its own environment or directory, or
+    /// looks the program up on its own `PATH`.
+    #[test]
+    fn a_held_init_runs_the_job_it_reads_in_the_jobs_directory_and_environment() {
+        let dir = scratch("held-runs");
+        let work = dir.join("work");
+        std::fs::create_dir_all(&work).expect("work");
+        let out = dir.join("out");
+        let script = format!("pwd > {o}; env | sort >> {o}; exit 7", o = out.display());
+        let job = job_of(&[
+            "js-job/1",
+            work.to_str().expect("utf-8"),
+            "3",
+            "sh",
+            "-c",
+            &script,
+            "2",
+            "PATH=/usr/bin:/bin",
+            "B=x=y",
+        ]);
+        let (code, said, _) = run_held("held-runs-init", &[], &job);
+        assert_eq!(code, Some(7));
+        assert_eq!(said, "");
+        let seen = std::fs::read_to_string(&out).expect("the program's output");
+        let lines: Vec<&str> = seen
+            .lines()
+            .filter(|l| !l.starts_with("PWD=") && !l.starts_with("SHLVL=") && !l.starts_with("_="))
+            .collect();
+        assert_eq!(
+            lines,
+            [work.to_str().expect("utf-8"), "B=x=y", "PATH=/usr/bin:/bin"]
+        );
+    }
+
+    /// Proves a job that is not well formed, or whose directory cannot be entered, is the
+    /// node's failure: exit 126, the program never run, and the report says why. Each malformed
+    /// job breaks one rule of the form: the form's name, a relative directory, no arguments, a
+    /// count that is not a number, fewer fields than counted, a variable with no `=` or no
+    /// name, a field after the last, and no NUL at the end. Catches an init that runs a job it
+    /// misread.
+    #[test]
+    fn a_job_that_is_not_well_formed_is_refused_and_nothing_runs() {
+        let dir = scratch("held-bad");
+        let marker = dir.join("ran");
+        let ran = format!("touch {}", marker.display());
+        let good = |cwd: &str| -> Vec<String> {
+            ["js-job/1", cwd, "3", "/bin/sh", "-c", &ran, "0"]
+                .map(str::to_owned)
+                .to_vec()
+        };
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        let field =
+            |fields: Vec<String>| job_of(&fields.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut form = good("/");
+        form[0] = "js-job/2".to_owned();
+        cases.push(field(form));
+        cases.push(field(good("relative")));
+        let mut no_args = good("/");
+        no_args.splice(2..6, ["0".to_owned()]);
+        cases.push(field(no_args));
+        let mut nan = good("/");
+        nan[2] = "three".to_owned();
+        cases.push(field(nan));
+        let mut short = good("/");
+        short.truncate(4);
+        cases.push(field(short));
+        for var in ["NOEQUALS", "=value"] {
+            let mut bad = good("/");
+            bad[6] = "1".to_owned();
+            bad.push(var.to_owned());
+            cases.push(field(bad));
+        }
+        let mut extra = good("/");
+        extra.push("more".to_owned());
+        cases.push(field(extra));
+        let mut unended = field(good("/"));
+        unended.pop();
+        cases.push(unended);
+        for (n, job) in cases.iter().enumerate() {
+            let (code, said, _) = run_held(&format!("held-bad-{n}"), &[], job);
+            assert_eq!(code, Some(126), "case {n}");
+            assert_eq!(
+                said, "js-init: the job could not be read: it is not well formed\n",
+                "case {n}"
+            );
+        }
+        let gone = dir.join("gone");
+        let (code, said, _) = run_held(
+            "held-bad-dir",
+            &[],
+            &field(good(gone.to_str().expect("utf-8"))),
+        );
+        assert_eq!(code, Some(126));
+        assert_eq!(
+            said,
+            format!(
+                "js-init: the working directory {} cannot be entered: No such file or directory\n",
+                gone.display()
+            )
+        );
+        assert!(!marker.exists(), "no program ran");
+    }
+
+    /// Proves a held init that names a program, or names no pipe, is the usage error, as is
+    /// an init that is not held and names no program; and a program the job's `PATH` does not
+    /// have is not found (127), with `crun`'s words. Catches an init that runs a program of its
+    /// own arguments when held, or looks a job's program up on its own `PATH`.
+    #[test]
+    fn a_held_init_takes_its_program_from_the_job_alone() {
+        let (code, _, _) = run_held("held-usage", &["/bin/true"], b"");
+        assert_eq!(code, Some(2));
+        let dir = scratch("held-usage-plain");
+        let init = install(&dir).expect("install");
+        for options in [&["--wait-job"][..], &["--wait-job", "", "--"], &["--"]] {
+            let status = std::process::Command::new(&init)
+                .args(options)
+                .stdin(std::process::Stdio::null())
+                .status()
+                .expect("the init runs");
+            assert_eq!(status.code(), Some(2), "{options:?}");
+        }
+        let job = job_of(&["js-job/1", "/", "1", "true", "1", "PATH=/nowhere"]);
+        let (code, said, _) = run_held("held-not-found", &[], &job);
+        assert_eq!(code, Some(127));
+        assert_eq!(
+            said,
+            "executable file `true` not found in $PATH: No such file or directory\n"
+        );
+    }
 }

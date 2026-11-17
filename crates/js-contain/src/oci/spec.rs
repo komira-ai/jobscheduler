@@ -316,7 +316,11 @@ fn held_argv(init_dest: &str, waits: (u64, &[u16])) -> Vec<String> {
 fn with_job_pipe(mut mounts: Vec<Mount>, spec: &ContainerSpec, held: bool) -> Vec<Mount> {
     if held {
         let pipe = spec.dir.join(JOB_PIPE);
-        mounts.push(bind(&pipe, JOB_PIPE_DEST, &["bind", "ro", "nosuid", "noexec", "nodev"]));
+        mounts.push(bind(
+            &pipe,
+            JOB_PIPE_DEST,
+            &["bind", "ro", "nosuid", "noexec", "nodev"],
+        ));
     }
     mounts
 }
@@ -422,7 +426,10 @@ pub(crate) fn action_config(
                 UserBuilder::default().uid(ACTION_ID).gid(ACTION_ID).build(),
             ))
             .args(match placement.held {
-                true => held_argv(placement.init_dest, (placement.route_wait_secs, &spec.listen_ports)),
+                true => held_argv(
+                    placement.init_dest,
+                    (placement.route_wait_secs, &spec.listen_ports),
+                ),
                 false => init_argv(
                     placement.init_dest,
                     (placement.route_wait_secs, &spec.listen_ports),

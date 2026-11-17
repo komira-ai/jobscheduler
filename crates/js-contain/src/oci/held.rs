@@ -64,7 +64,10 @@ pub(super) fn make_pipe(lease: &Path) -> Result<(), JobError> {
     at(&pipe, made.map_err(std::io::Error::from))?;
     // The umask may have taken bits: the mode is set again by the path, in a directory that
     // is the daemon's.
-    at(&pipe, rustix::fs::chmod(&pipe, mode).map_err(std::io::Error::from))
+    at(
+        &pipe,
+        rustix::fs::chmod(&pipe, mode).map_err(std::io::Error::from),
+    )
 }
 
 /// The bytes of the job of `spec` ([`FORM`] and its fields, each ended by a NUL byte).
@@ -109,22 +112,19 @@ pub fn job_bytes(spec: &ContainerSpec) -> Result<Vec<u8>, HandError> {
 pub fn hand_job(spec: &ContainerSpec) -> Result<(), HandError> {
     let bytes = job_bytes(spec)?;
     let path = job_pipe(&spec.dir);
-    let io = |source: rustix::io::Errno| HandError::Io {
+    let io = |source: std::io::Error| HandError::Io {
         path: path.clone(),
-        source: source.into(),
+        source,
     };
     let flags = OFlags::WRONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let pipe = match rustix::fs::open(&path, flags, Mode::empty()) {
         Err(rustix::io::Errno::NXIO) => return Err(HandError::NotWaiting(path.clone())),
-        opened => opened.map_err(io)?,
+        opened => opened.map_err(|errno| io(errno.into()))?,
     };
     // Written whole, waiting for the reader as it reads: a job longer than the pipe holds
     // is not cut short.
-    rustix::fs::fcntl_setfl(&pipe, OFlags::empty()).map_err(io)?;
-    std::fs::File::from(pipe)
-        .write_all(&bytes)
-        .map_err(|source| HandError::Io {
-            path: path.clone(),
-            source,
-        })
+    let blocking = rustix::fs::fcntl_setfl(&pipe, OFlags::empty());
+    blocking.map_err(|errno| io(errno.into()))?;
+    let mut pipe = std::fs::File::from(pipe);
+    pipe.write_all(&bytes).map_err(io)
 }

@@ -201,7 +201,8 @@ impl Oci {
             super::held::make_pipe(&spec.dir)?;
         }
         let rootfs = self.images.rootfs_of(&spec.image_digest);
-        self.write_config(spec, &rootfs, (route_wait_secs, held)).await
+        self.write_config(spec, &rootfs, (route_wait_secs, held))
+            .await
     }
 
     /// Writes `bundle/config.json` of `spec` over `rootfs`, the init waiting

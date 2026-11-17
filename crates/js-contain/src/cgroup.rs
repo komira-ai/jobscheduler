@@ -315,6 +315,22 @@ impl LeaseCgroup {
         self.write("cgroup.subtree_control", subtree)?;
         // Before the container exists, so nothing in the lease ever runs without it.
         self.write("memory.oom.group", "1")?;
+        self.set_limits(resources, policy)?;
+        if let Some(pin) = pin {
+            self.write("cpuset.cpus", &pin.cpus().to_string())?;
+            self.write("cpuset.mems", &pin.node().to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Sets the memory and CPU limits `policy` derives from the booking `resources`, on a
+    /// cgroup that exists: what [`LeaseCgroup::create_with`] writes, and what a lease made
+    /// ahead of its job with a booking of its own is given when the job's booking is known.
+    /// A booking that sets no limit of a kind leaves that limit as it was.
+    ///
+    /// # Errors
+    /// A limit could not be written.
+    pub fn set_limits(&self, resources: &Resources, policy: LeasePolicy) -> io::Result<()> {
         match policy {
             LeasePolicy::BuildHost => {
                 if let Some(max) = memory_max(resources.memory_bytes()) {
@@ -335,10 +351,6 @@ impl LeaseCgroup {
                     self.write("cpu.max", &cpu)?;
                 }
             }
-        }
-        if let Some(pin) = pin {
-            self.write("cpuset.cpus", &pin.cpus().to_string())?;
-            self.write("cpuset.mems", &pin.node().to_string())?;
         }
         Ok(())
     }

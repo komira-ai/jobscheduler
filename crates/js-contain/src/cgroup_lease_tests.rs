@@ -430,3 +430,33 @@ fn the_build_host_policy_is_unchanged_and_the_default() {
     assert_eq!(read("memory.swap.max"), None);
     assert_eq!(read("cpu.max"), None);
 }
+
+/// Proves a lease made with one booking takes another's limits when they are set again, and
+/// a booking that sets no limit of a kind leaves that kind as it was; a cgroup that is not
+/// there is an error. Catches a lease made ahead of its job that keeps its own small booking
+/// as the job's limits.
+#[test]
+fn the_limits_of_a_lease_are_set_again_from_another_booking() {
+    let root = mount("set-limits");
+    std::fs::create_dir(root.join("actions")).expect("mkdir");
+    let lease = LeaseCgroup::at(&root, "/actions", "lease-1-2");
+    lease
+        .create_with(&booking(1000, 64 << 20), None, LeasePolicy::Hard)
+        .expect("created");
+    let read = |file: &str| std::fs::read_to_string(lease.dir().join(file)).expect(file);
+    lease
+        .set_limits(&booking(3000, 2 << 30), LeasePolicy::Hard)
+        .expect("set");
+    assert_eq!(read("memory.max"), (2u64 << 30).to_string());
+    assert_eq!(read("memory.swap.max"), "0");
+    assert_eq!(read("cpu.max"), "300000 100000");
+    lease
+        .set_limits(&Resources::default(), LeasePolicy::Hard)
+        .expect("nothing to set");
+    assert_eq!(read("cpu.max"), "300000 100000");
+    let gone = LeaseCgroup::at(&root, "/actions", "never-made");
+    assert!(
+        gone.set_limits(&booking(1000, 1 << 30), LeasePolicy::Hard)
+            .is_err()
+    );
+}
