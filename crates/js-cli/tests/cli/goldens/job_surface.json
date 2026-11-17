@@ -362,7 +362,7 @@
         "required": false
       },
       {
-        "doc": "The client's labels, by key. A listing can filter by them. The label size-class names the job's class, whose history sizes what Needs leaves at 0.",
+        "doc": "The client's labels, by key. A listing can filter by them. The label size-class names the job's class, whose history sizes what Needs leaves at 0; the label size-fallback names a class whose history sizes it while the job's own class has fewer than five runs.",
         "field": [
           "spec",
           "labels"
