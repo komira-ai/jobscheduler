@@ -291,9 +291,9 @@ job-rootfs.md section 9).
 
 - **The tree's manifest is one object kbf writes before it submits.** kbf resolves the action's input root itself, as
   it does today, and writes the tree's flat list of files as **one object in tierstore, over S3**: for each file, its
-  path in the tree, the key of the object that holds its bytes (a pack), its offset and size there, and its mode, with
-  the SHA-256 of every file that is not empty, which tierstore verifies as each span fills. The object is named by the hash of its content and written
-  create-only, so a retry or another build with the same inputs finds it written and writes nothing. Its format is a
+  path in the tree, the key of the object that holds its bytes (a pack), its offset and size there, and its mode,
+  with the SHA-256 of every file that is not empty, which tierstore verifies as each span fills. The object is named
+  by the hash of its content and written create-only, so a retry or another build with the same inputs finds it written and writes nothing. Its format is a
   plain, documented tierstore format, a list of files; tierstore reads no build digest and walks no tree of manifests.
 - **The ref is that object's key.** The job's layer is `{provider: "tierstore", ref: <the manifest object's key>}`.
 - **tierstore** (komira-ai/tierstore) ships the provider in its own package, serving the socket: `Prepare(<key>)`
