@@ -122,8 +122,9 @@ fn a_host_job_holds_every_capability() {
 
 /// Proves a host container keeps what accounts and ends it: its cgroup is `ctr` below the
 /// lease's, with the pids limit and `memory.oom.group`, no memory or CPU limit of its own
-/// when the limits name no booking (the lease's apply), and the same rlimits as a contained job. Catches a host job placed
-/// outside its lease's cgroup, where the lease's limits and `cgroup.kill` do not reach it.
+/// when its limits name no booking (the lease's apply), and the same rlimits as a
+/// contained job. Catches a host job placed outside its lease's cgroup, where the lease's
+/// limits and `cgroup.kill` do not reach it.
 #[test]
 fn a_host_container_is_in_its_leases_cgroup_with_the_contained_limits() {
     let host = config_of(&host());

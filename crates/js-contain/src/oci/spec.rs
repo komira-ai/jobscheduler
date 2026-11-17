@@ -303,7 +303,6 @@ pub(crate) fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
     )
 }
 
-/// The namespaces a container gets, each new (the network namespace has loopback only).
 /// The `unified` cgroup files of the container's own cgroup (`<lease cgroup>/ctr`):
 /// `memory.oom.group` 1, so an out-of-memory kill takes the whole container, and, when
 /// `limits` name a booking, the lease's `cpu.max` ([`cpu_max`]) and `memory.max`
@@ -327,6 +326,7 @@ pub(crate) fn unified(limits: ContainerLimits) -> HashMap<String, String> {
     files
 }
 
+/// The namespaces a container gets, each new (the network namespace has loopback only).
 pub(crate) fn namespaces() -> Vec<LinuxNamespace> {
     use LinuxNamespaceType::{Cgroup, Ipc, Mount, Network, Pid, User, Uts};
     [Pid, Network, Ipc, Uts, User, Cgroup, Mount]
