@@ -4,6 +4,9 @@ use super::*;
 
 #[derive(Debug)]
 pub(super) struct Record {
+    /// The index of the pool the host's last hello joined ([`Registry::pool_of`]); `None`
+    /// for a host put back after a restart that has not said hello since.
+    pub(super) pool: Option<usize>,
     pub(super) binding: Option<Binding>,
     pub(super) epoch: u64,
     /// The digest of the secret issued at the hello that began this epoch; `None` for a
@@ -52,6 +55,7 @@ impl Record {
             .and_then(Binding::cordon_until_ms)
             .map(Timestamp::from_millis);
         Self {
+            pool: None,
             binding: binding.map(|bound| bound.with_taint(None).with_cordon(None)),
             taint,
             cordon,

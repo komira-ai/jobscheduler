@@ -33,7 +33,7 @@ impl Registry {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
         let record = state.records.get(host)?;
-        record.silent_since(now, self.grace_ms())
+        record.silent_since(now, self.pool_of(record).grace_ms())
     }
 
     pub(super) fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
@@ -45,14 +45,12 @@ impl Registry {
             .collect()
     }
 
-    /// The listing's view of one host, given the parts of the state that it reads. The reads
-    /// that are the same for every host are made once, here.
+    /// The listing's view of one host, given the parts of the state that it reads: the
+    /// shape, the memory and the timing are those of the host's pool.
     pub(super) fn viewer(&self, now: Timestamp) -> impl Fn(&HostId, &Record) -> HostView + '_ {
-        let shape = self.shared.config.fit();
-        let memory = self.shared.config.memory_headroom();
-        let by_hello = self.shared.config.places_by_hello();
         move |id, record| {
-            let state = record.state(now, self.grace_ms());
+            let pool = self.pool_of(record);
+            let state = record.state(now, pool.grace_ms());
             HostView {
                 id: id.clone(),
                 state,
@@ -64,10 +62,10 @@ impl Registry {
                 phase: record.phase,
                 lease: None,
                 leases: Vec::new(),
-                shape: shape.clone(),
-                memory,
+                shape: pool.fit().clone(),
+                memory: pool.memory_headroom(),
                 claim: record.claim.clone(),
-                by_hello,
+                by_hello: pool.places_by_hello(),
                 labels: record.labels.clone(),
                 agent_version: record.agent_version.clone(),
                 epoch: record.epoch,
