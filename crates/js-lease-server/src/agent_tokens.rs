@@ -18,6 +18,10 @@ pub(crate) const MAX_AGENT_TOKENS: usize = 16;
 /// The flag the file comes from, for the refusals.
 const FLAG: &str = "--agent-token-file";
 
+/// Why a client's token is refused that is a shared join token of a pool after the first.
+const LATER_POOL: &str =
+    "holds a join token of a later pool's join_token_file: the two must differ";
+
 /// One accepted token and the credential a host admitted with it is bound to.
 struct Accepted {
     token: Token,
@@ -77,25 +81,40 @@ impl AgentTokens {
     }
 
     /// Reads the token file of every named client again ([`LiveClients::reload`]), each
-    /// token checked to be none of the join tokens in force; whether the clients' tokens
-    /// changed. A refusal keeps the clients in force and names the entry, never a token.
-    pub(crate) fn reload_clients(&self) -> Result<bool, String> {
-        self.reload_clients_with(&read_private_reason)
+    /// token checked to be none of the join tokens in force, these and those of the later
+    /// pools `beside`; whether the clients' tokens changed. A refusal keeps the clients in
+    /// force and names the entry, never a token.
+    pub(crate) fn reload_clients(&self, beside: &[&AgentTokens]) -> Result<bool, String> {
+        self.reload_clients_with(&read_private_reason, beside)
     }
 
     /// [`AgentTokens::reload_clients`] reading each file with `read`.
     pub(crate) fn reload_clients_with(
         &self,
         read: &dyn Fn(&Path) -> Result<Vec<u8>, String>,
+        beside: &[&AgentTokens],
     ) -> Result<bool, String> {
         let taken = |token: &Token| {
-            let accepted = self.accepted.read().unwrap_or_else(PoisonError::into_inner);
-            accepted
-                .iter()
-                .any(|each| each.token.same_as(token))
-                .then(|| format!("holds a join token of {FLAG}: the two must differ"))
+            let first = self.holds(token);
+            let later = beside.iter().any(|set| set.holds(token));
+            let (_, reason) = [
+                (
+                    first,
+                    format!("holds a join token of {FLAG}: the two must differ"),
+                ),
+                (later, LATER_POOL.to_owned()),
+            ]
+            .into_iter()
+            .find(|(held, _)| *held)?;
+            Some(reason)
         };
         self.clients.reload(read, &taken)
+    }
+
+    /// Whether `token` is one of the tokens in force.
+    fn holds(&self, token: &Token) -> bool {
+        let accepted = self.accepted.read().unwrap_or_else(PoisonError::into_inner);
+        accepted.iter().any(|each| each.token.same_as(token))
     }
 
     /// The credentials of the tokens in force.
@@ -217,5 +236,56 @@ mod tests {
         assert!(none.credentials().is_empty());
         assert!(none.reload().is_ok());
         assert!(none.identify(A).is_none());
+    }
+
+    /// Asserts that a client's token reloaded at a tick is refused when it is a shared join
+    /// token of the first pool, or of a later pool beside it, each with its own reason, and is
+    /// taken when it is neither. It catches a client token rotated to a later pool's join
+    /// token, which would give one secret both the client's routes and that pool's hellos.
+    #[test]
+    fn a_client_token_must_be_none_of_any_pools_join_tokens() {
+        use crate::config::{Clients, Entry, Role};
+        const C: &str = "client-token-C-0123456789-abcdefghijklm";
+        let default = parse_token(&[b'd'; 40]).unwrap();
+        let mut clients = Clients::only(&default, "--token-file");
+        let entry = Entry {
+            name: js_jobs::ClientName::parse("ci").unwrap(),
+            role: Role::Client,
+            place: "--client-token ci".to_owned(),
+            file: std::path::PathBuf::from("ci"),
+        };
+        clients
+            .add(entry, &parse_token(C.as_bytes()).unwrap())
+            .unwrap();
+        let clients = LiveClients::new(clients);
+        let first = AgentTokens {
+            file: None,
+            clients: clients.clone(),
+            accepted: RwLock::new(Arc::new(vec![accepted(A)])),
+        };
+        let later = AgentTokens {
+            file: None,
+            clients: clients.clone(),
+            accepted: RwLock::new(Arc::new(vec![accepted(B)])),
+        };
+        let reading = |text: &'static str| move |_: &Path| Ok(text.as_bytes().to_vec());
+        let refused = first.reload_clients_with(&reading(A), &[&later]);
+        let flag =
+            "--client-token ci: holds a join token of --agent-token-file: the two must differ";
+        assert_eq!(refused, Err(flag.to_owned()));
+        let refused = first.reload_clients_with(&reading(B), &[&later]);
+        let pool = format!("--client-token ci: {LATER_POOL}");
+        assert_eq!(refused, Err(pool));
+        assert_eq!(first.reload_clients_with(&reading(B), &[]), Ok(true));
+        assert_eq!(first.reload_clients_with(&reading(C), &[&later]), Ok(true));
+    }
+
+    /// The accepted token `text`.
+    fn accepted(text: &str) -> Accepted {
+        let token = parse_token(text.as_bytes()).unwrap();
+        Accepted {
+            credential: token.credential(),
+            token,
+        }
     }
 }

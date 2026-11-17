@@ -1,6 +1,5 @@
 //! The flags, and the checks that decide whether the server may start.
 
-use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,24 +8,20 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use js_alert::AlertSink;
 use js_jobs::Retention;
-use js_sched_placer::sizes::ColdSize;
 use js_system_clock::{SystemClock, SystemMonotonic};
 use js_types::Monotonic;
 
 use js_registry::{OsSessions, SessionSource};
 
-use crate::agent_pool;
-use crate::agent_tokens::{AgentTokens, PoolTokens};
+use crate::agent_tokens::PoolTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, Registering, UsageKeys};
 use crate::flags;
-use crate::job_expiry::JobLimits;
 use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
-use crate::rate::HelloLimit;
 use crate::sched::rank;
 use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
 use crate::usage::UsageSink;
@@ -45,7 +40,7 @@ mod retention;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
-use agent_setup::{MorePool, check_more};
+use agent_setup::{MorePool, agents, check_more};
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use feed_retention::FeedRetention;
 pub(crate) use feed_retention::{
@@ -906,83 +901,6 @@ impl Config {
 /// `--config` is given, so a missing one means a `Cli` built by hand.
 fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> {
     value.ok_or_else(|| StartupError::new(flag, "required unless --config is given"))
-}
-
-/// The registering side the flags name: `--agent-pool-config` is required (a server serves
-/// the hosts that run `js-agent` and register), and the shared join token file needs it.
-/// Each further `--agent-pool-config` is one more pool, with the shared tokens its file's
-/// `join_token_file` names, or none.
-fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>, StartupError> {
-    let Some((first, later)) = cli.agent_pool_config.split_first() else {
-        return Err(match cli.agent_token_file {
-            None => StartupError::new(
-                "--agent-pool-config",
-                "required: a server serves the hosts that run js-agent and register",
-            ),
-            Some(_) => StartupError::new("--agent-pool-config", "required with --agent-token-file"),
-        });
-    };
-    let file = agent_pool::read(first)?;
-    let place = |path: &Path| format!("--agent-pool-config {}", path.display());
-    check_pool(&file.pool, "--agent-pool-config")?;
-    let tokens = match (&cli.agent_token_file, &file.join_token_file) {
-        (Some(_), Some(_)) => {
-            let reason = "join_token_file and --agent-token-file both name the first pool's tokens: give one";
-            return Err(StartupError::at(place(first), reason));
-        }
-        (Some(path), None) => AgentTokens::open(path, clients)?,
-        (None, Some(path)) => pool_tokens(path, clients, &place(first))?,
-        (None, None) => AgentTokens::none(clients),
-    };
-    let pool = file.pool;
-    let mut more = Vec::new();
-    for path in later {
-        let file = agent_pool::read(path)?;
-        check_pool(&file.pool, &place(path))?;
-        check_more(&pool, &more, (&file.pool, &place(path)))?;
-        let tokens = match &file.join_token_file {
-            Some(tokens) => pool_tokens(tokens, clients, &place(path))?,
-            None => AgentTokens::none(clients),
-        };
-        let name = file.pool.name().to_string();
-        more.push(MorePool {
-            pool: file.pool,
-            tokens: PoolTokens { pool: name, tokens },
-        });
-    }
-    let cpu_slack = cli.cpu_slack.unwrap_or_default();
-    Ok(Box::new(AgentSetup {
-        tokens,
-        pool,
-        more,
-        mint_provider: BTreeSet::new(),
-        hello_limit: HelloLimit {
-            burst: cli.agent_hello_burst,
-            interval: cli.agent_hello_interval,
-        },
-        require_host_credential: cli.require_host_credential,
-        cpu_slack,
-        cold: ColdSize {
-            cpu_millis: cli.cold_cpu_millis,
-            memory_bytes: cli.cold_memory_bytes,
-        },
-        max_lease_wall: None,
-        job_limits: JobLimits::default(),
-        jobs: listen::job_store(cli),
-        job_sources: JobSources::default(),
-        providers: None,
-    }))
-}
-
-/// The shared join tokens of the file at `path`, which `place` names: a refusal names it,
-/// not `--agent-token-file`.
-fn pool_tokens(
-    path: &Path,
-    clients: &LiveClients,
-    place: &str,
-) -> Result<AgentTokens, StartupError> {
-    AgentTokens::open(path, clients)
-        .map_err(|err| StartupError::at(format!("{place}: join_token_file"), err.reason()))
 }
 
 /// The fewest bytes a bearer token may have after its trailing whitespace is dropped.

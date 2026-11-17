@@ -813,7 +813,12 @@ impl Agents {
         let credentials = self.every_tokens().flat_map(AgentTokens::credentials);
         self.limiter.retain(&credentials.collect::<Vec<_>>());
         let this = Arc::clone(self);
-        match blocking(move || this.tokens.reload_clients()).await {
+        let reload = move || {
+            let beside: Vec<&AgentTokens> =
+                this.more_tokens.iter().map(|more| &more.tokens).collect();
+            this.tokens.reload_clients(&beside)
+        };
+        match blocking(reload).await {
             Ok(true) => info!("the client tokens changed: the new tokens are in force"),
             Ok(false) => {}
             Err(error) => {

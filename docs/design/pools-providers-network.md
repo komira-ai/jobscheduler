@@ -81,9 +81,11 @@ Deviations a reviewer should see (each is also under Open questions 20):
   The lease request carries them as the capabilities `disk-gib` and `exec` (3.1), beside `os`
   and `arch`, and `Offer::fit` refuses an offer whose os, arch, mode or disk differs from or
   falls short of the request's, naming the dimension.
-- Requirement 14 says "elastic pools" (plural). The first slice serves one registering pool because
-  `Registry::new` takes one `PoolConfig` (`crates/js-registry/src/registry.rs`). `js-scaler`
-  takes a list of pools; the registry is the limit (6.5, PR 12).
+- Requirement 14 says "elastic pools" (plural). The first slice serves one elastic pool, alone:
+  the registry serves several joined pools (`Registry::with_pools`,
+  `crates/js-registry/src/registry.rs`), but an elastic pool's scaler counts every host of the
+  registry as its own. `js-scaler` takes a list of pools; the scaler's view of the registry is
+  the limit (6.5, PR 12).
 - Requirement 13: the GPU facts of a Lambda type come from the provider crate's table in code, not
   from the catalog's free text (3.5); a type the table does not know cannot be used until a
   release adds it.
@@ -1760,8 +1762,9 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
 18. Several elastic pools and part-host classes (6.5). Recommendation: after the live proof.
 19. Modes beyond `default` and `tailscale` are Later (section 12). Recommendation: none until a pool
     needs one.
-20. Deviations from requirements (1.1): one registering pool instead of several, gpu class from a
-    `types` row (disk and `exec` on the job were deviations too, and PR 11 has landed them).
+20. Deviations from requirements (1.1): one elastic pool instead of several (joined pools may be
+    several), gpu class from a `types` row (disk and `exec` on the job were deviations too, and
+    PR 11 has landed them).
     Recommendation: accept for the first slice; PR 12 lifts the first.
 21. A reservation counts as covering however long its `drain_deadline` is (6.2). Alternative: launch
     when the reservation's deadline is further away than `boot_timeout`. Recommendation: covering
