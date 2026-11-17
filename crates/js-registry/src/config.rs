@@ -401,11 +401,11 @@ impl PoolConfig {
 /// (`os_version` is matched as at least), so a host is placed by the version it runs. A host
 /// without a claim keeps the pool's.
 pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>, by_hello: bool) -> Shape {
-    let replaced = |key: &String| ACCEL_KEYS.contains(&key.as_str()) || key == OS_VERSION_KEY;
+    let is_accel = |key: &String| ACCEL_KEYS.contains(&key.as_str());
+    let replaced = |key: &String| is_accel(key) || key == OS_VERSION_KEY;
     let mut capabilities = booked.capabilities().clone();
-    let claimed_version =
-        claim.is_some_and(|claim| claim.capabilities().contains_key(OS_VERSION_KEY));
-    capabilities.retain(|key, _| !replaced(key) || (key == OS_VERSION_KEY && !claimed_version));
+    // The claim's `os_version`, when it has one, is written over the pool's below.
+    capabilities.retain(|key, _| !is_accel(key));
     // Read against the pool's capabilities before any of the claim's is added.
     let added: Vec<(String, String)> = claim
         .into_iter()

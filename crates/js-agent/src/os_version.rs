@@ -74,11 +74,7 @@ mod tests {
 
     impl CommandRunner for Fixed {
         fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
-            self.asked.borrow_mut().push((
-                program.to_owned(),
-                args.iter().map(|arg| (*arg).to_owned()).collect(),
-            ));
-            self.answer.clone()
+            self.run_in(program, args, &[])
         }
 
         fn run_in(
@@ -87,7 +83,11 @@ mod tests {
             args: &[&str],
             _env: &[(&str, &str)],
         ) -> Result<String, String> {
-            self.run(program, args)
+            self.asked.borrow_mut().push((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            self.answer.clone()
         }
     }
 
