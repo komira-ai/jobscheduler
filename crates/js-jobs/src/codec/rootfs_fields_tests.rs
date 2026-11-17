@@ -3,9 +3,13 @@
 //! image; their round trips, what a job without them writes, and every way their values can
 //! fail to parse.
 
+use js_agent_wire::{JobMount, Layer, MountMode, MountSource, Propagation};
+
 use super::{FORMAT_NO_IMAGE, job_rootfs_tag as t};
 use crate::codec::tests::{bare_job, full_job, job_row, with, without};
-use crate::codec::{DecodeError, FORMAT, decode_job, field_of, job_tag, list, rearranged};
+use crate::codec::{
+    DecodeError, FORMAT, decode_job, field_of, items_of, job_tag, list, rearranged,
+};
 use crate::record::{JobRecord, JobState, StartFailure};
 
 /// A list value of `items`.
@@ -135,8 +139,9 @@ fn only_the_second_format_byte_may_lack_an_image() {
 fn a_kind_value_or_option_this_build_does_not_know_is_newer() {
     let row = job_row(&plain_job());
     let later = [
-        (t::LAYERS, items(&[b"\x02/srv/a"])),
+        (t::LAYERS, items(&[b"\x03/srv/a"])),
         (t::MOUNTS, items(&[&items(&parts_with(0, b"\x01/srv/a"))])),
+        (t::MOUNTS, items(&[&items(&parts_with(0, b"\x03/srv/a"))])),
         (t::MOUNTS, items(&[&items(&parts_with(2, &[3]))])),
         (t::MOUNTS, items(&[&items(&parts_with(5, &[1]))])),
         (
@@ -314,4 +319,201 @@ fn the_rootfs_fields_are_pinned_byte_for_byte() {
             with(&row, *tag, &value)
         });
     assert_eq!(decode_job(&rebuilt), Ok(full_job()));
+}
+
+/// A provider's layer and mount source, as a job names them.
+fn provider_layer(provider: &str, reference: &str) -> Layer {
+    Layer::Provider {
+        provider: provider.into(),
+        reference: reference.into(),
+    }
+}
+
+/// A mount of the provider `provider`'s `reference` at `target`, with no option set.
+fn provider_mount(provider: &str, reference: &str, target: &str) -> JobMount {
+    JobMount {
+        source: MountSource::Provider {
+            provider: provider.into(),
+            reference: reference.into(),
+        },
+        target: target.into(),
+        mode: MountMode::ReadOnly,
+        sub_path: None,
+        no_exec: false,
+        propagation: Propagation::Private,
+    }
+}
+
+/// [`plain_job`] with `layers` and `mounts`.
+fn provider_job(layers: Vec<Layer>, mounts: Vec<JobMount>) -> JobRecord {
+    let mut job = plain_job();
+    job.spec.layers = layers;
+    job.spec.mounts = mounts;
+    job
+}
+
+// Catches a provider source written and not read back, a name and a ref run together or
+// split in the wrong place, and a ref that does not survive its length: a job with provider
+// layers and mounts among host-path and image ones reads back as written, with a ref of
+// 200 bytes (a list's length prefix would then not be UTF-8), one with non-ASCII letters, one
+// that is empty and one with a NUL, which the first separator keeps whole.
+#[test]
+fn a_provider_layer_and_mount_read_back_as_written() {
+    let long = "r".repeat(200);
+    let mut job = provider_job(
+        vec![
+            Layer::HostPath {
+                path: "/srv/a".into(),
+            },
+            provider_layer("tierstore", &long),
+            provider_layer("scratch-2", "caf\u{e9}/\u{4e2d}"),
+            provider_layer("a", ""),
+            provider_layer("b", "x\0y\0"),
+        ],
+        vec![
+            provider_mount("tierstore", &long, "/data"),
+            provider_mount("scratch-2", "cache", "/data/cache"),
+        ],
+    );
+    job.spec.mounts[1].mode = MountMode::ReadWrite;
+    job.spec.mounts[1].sub_path = Some("lib".into());
+    job.spec.mounts[1].no_exec = true;
+    assert_eq!(decode_job(&job_row(&job)), Ok(job));
+}
+
+// Catches a change to the bytes of a provider source: its kind byte, the byte between the
+// name and the ref, or the place of a mount's source. The values are written out here with
+// literal bytes, independent of the codec: a layer is `\x02`, the name, a NUL and the ref; a
+// mount is the six parts with that as the first.
+#[test]
+fn a_provider_source_is_pinned_byte_for_byte() {
+    let job = provider_job(
+        vec![provider_layer("tierstore", "toolchains/clang-18")],
+        vec![provider_mount("tierstore", "datasets/v3", "/data")],
+    );
+    let row = job_row(&job);
+    let layer = b"\x02tierstore\x00toolchains/clang-18";
+    assert_eq!(field_of(&row, t::LAYERS), Some(framed(&[layer])));
+    let parts = [
+        b"\x02tierstore\x00datasets/v3".as_slice(),
+        b"/data",
+        &[0],
+        &[],
+        &[0],
+        &[0],
+    ];
+    assert_eq!(field_of(&row, t::MOUNTS), Some(framed(&[&framed(&parts)])));
+}
+
+// Catches a provider source of no separator read as one, an empty text of a kind read as one,
+// and a source that is not text read as one: each names its tag.
+#[test]
+fn a_malformed_provider_source_is_refused_by_its_tag() {
+    let row = job_row(&plain_job());
+    let bad = |tag| DecodeError::BadValue { tag };
+    let utf8 = |tag| DecodeError::NotUtf8 { tag };
+    let cases = [
+        (t::LAYERS, items(&[b"\x02tierstore"]), bad(t::LAYERS)),
+        (t::LAYERS, items(&[b"\x02"]), bad(t::LAYERS)),
+        (t::LAYERS, items(&[b"\x02a\x00\xff"]), utf8(t::LAYERS)),
+        (
+            t::MOUNTS,
+            items(&[&items(&parts_with(0, b"\x02tierstore"))]),
+            bad(t::MOUNTS),
+        ),
+        (
+            t::MOUNTS,
+            items(&[&items(&parts_with(0, b"\x02a\x00\xff"))]),
+            utf8(t::MOUNTS),
+        ),
+    ];
+    for (tag, value, error) in cases {
+        assert_eq!(
+            decode_job(&with(&row, tag, &value)),
+            Err(error),
+            "tag {tag}: {value:?}"
+        );
+    }
+}
+
+/// The error the build before the provider kind gave an item of `LAYERS` or the source part
+/// of a mount of `MOUNTS`, its `layer_of` and `mount_of` as they were: the kind byte, the
+/// rest as text (a fault in it before the kind is looked at), and a kind that is not a host
+/// path or, for a layer, an image is a later build's. `Ok` when it reads the item.
+fn previous_build_reads(tag: u16, item: &[u8]) -> Result<(), DecodeError> {
+    let (&kind, rest) = item.split_first().ok_or(DecodeError::BadValue { tag })?;
+    std::str::from_utf8(rest).map_err(|_| DecodeError::NotUtf8 { tag })?;
+    match (tag, kind) {
+        (_, 0) | (t::LAYERS, 1) => Ok(()),
+        _ => Err(DecodeError::Newer),
+    }
+}
+
+// Catches a provider source a build from before kind 2 would not take for a later build's
+// row: that build reads each item of the layers, and the source of each mount, as a kind and
+// a text, and a kind it does not know is [`DecodeError::Newer`], so the store answers the row
+// as an unknown one instead of failing it as corrupt. The refs here are of every length around
+// the 128 bytes at which a list's length prefix stops being UTF-8, and each is read as `Newer`.
+#[test]
+fn a_build_before_the_provider_kind_reads_a_provider_row_as_newer() {
+    for len in [0, 1, 127, 128, 200, 255, 256, 1024] {
+        let reference = "r".repeat(len);
+        let job = provider_job(
+            vec![provider_layer("tierstore", &reference)],
+            vec![provider_mount("tierstore", &reference, "/data")],
+        );
+        let row = job_row(&job);
+        let layers = field_of(&row, t::LAYERS).expect("written");
+        for item in items_of(t::LAYERS, &layers).expect("a list") {
+            assert_eq!(
+                previous_build_reads(t::LAYERS, item),
+                Err(DecodeError::Newer),
+                "layer, ref of {len} bytes"
+            );
+        }
+        let mounts = field_of(&row, t::MOUNTS).expect("written");
+        for item in items_of(t::MOUNTS, &mounts).expect("a list") {
+            let parts = items_of(t::MOUNTS, item).expect("a list");
+            assert_eq!(
+                previous_build_reads(t::MOUNTS, parts[0]),
+                Err(DecodeError::Newer),
+                "mount, ref of {len} bytes"
+            );
+        }
+    }
+    let plain = [b"\x00/srv/a".as_slice(), b"\x01img@sha256:x"];
+    for item in plain {
+        assert_eq!(previous_build_reads(t::LAYERS, item), Ok(()));
+    }
+    assert_eq!(previous_build_reads(t::MOUNTS, b"\x00/srv/a"), Ok(()));
+    assert_eq!(
+        previous_build_reads(t::MOUNTS, b"\x01/srv/a"),
+        Err(DecodeError::Newer)
+    );
+    assert_eq!(
+        previous_build_reads(t::LAYERS, b""),
+        Err(DecodeError::BadValue { tag: t::LAYERS })
+    );
+    assert_eq!(
+        previous_build_reads(t::LAYERS, b"\x00\xff"),
+        Err(DecodeError::NotUtf8 { tag: t::LAYERS })
+    );
+}
+
+// Catches a row of a job with host-path and image sources only changing with the provider
+// kind: it is the bytes the build before wrote, with no kind 2 byte at the start of any layer
+// or of a mount's source.
+#[test]
+fn a_job_without_a_provider_writes_no_provider_kind() {
+    let job = full_job();
+    let row = job_row(&job);
+    let layers = field_of(&row, t::LAYERS).expect("written");
+    for item in items_of(t::LAYERS, &layers).expect("a list") {
+        assert_ne!(item.first(), Some(&2));
+    }
+    let mounts = field_of(&row, t::MOUNTS).expect("written");
+    for item in items_of(t::MOUNTS, &mounts).expect("a list") {
+        let parts = items_of(t::MOUNTS, item).expect("a list");
+        assert_ne!(parts[0].first(), Some(&2));
+    }
 }

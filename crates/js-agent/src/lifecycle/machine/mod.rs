@@ -2,8 +2,9 @@
 //! reply ([`Lifecycle::apply`]) and by the passing of time ([`Lifecycle::step`]).
 //!
 //! The jobs and what they book are in `job`, a restart in `adopt`, the end of a job
-//! (watching its container and the cleanup in order) in `cleanup`, and the stop after a
-//! silence of the server in `silence`.
+//! (watching its container and the cleanup in order) in `cleanup`, the stop after a
+//! silence of the server in `silence`, and the mount providers a start waits on and a run
+//! releases in `providing` and `provided`.
 
 mod adopt;
 mod cleanup;
@@ -13,6 +14,9 @@ mod held;
 mod job;
 mod per_job;
 mod prepare;
+mod provided;
+mod provider_record;
+mod providing;
 mod rootfs;
 mod silence;
 mod slots;
@@ -127,6 +131,9 @@ pub struct Lifecycle {
     /// The wait between the re-checks of a taint that may clear itself
     /// ([`Lifecycle::with_taint_recheck`]).
     taint_recheck: Duration,
+    /// The mount providers the agent was given and the sources the runs hold of them (see
+    /// `provided`, `providing`).
+    providers: provided::Attached,
 }
 
 impl Lifecycle {
@@ -232,6 +239,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
+        self.retry_providers(&mut events);
         self.recheck_taint();
         self.retry_parked(&mut events);
         self.watch_quota(&mut events);

@@ -17,7 +17,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use js_agent::cli_runtime::Mapping;
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
-use js_agent::lifecycle::{Clock, Exit, Runtime};
+use js_agent::lifecycle::{Clock, Exit, ProviderAnswer, ProviderCall, Providers, Runtime};
 #[cfg(target_os = "linux")]
 use js_agent::lifecycle::{Found, RunHandle, RunSpec, RuntimeError, Status, label};
 #[cfg(target_os = "macos")]
@@ -442,6 +442,33 @@ pub struct FakeMachine {
     /// The VM driver of the VM backend; none for a machine that runs no VMs (the default
     /// driver, which runs none off macOS).
     pub vms: Option<Arc<FakeDriver>>,
+    /// What `providers` makes for an agent given mount providers: stand-ins that write what
+    /// they are asked in the shared list, or why the machine cannot make them.
+    pub providers: Result<Arc<Mutex<Vec<String>>>, String>,
+}
+
+/// The mount providers of a worker test: they have the names they were made for, write each
+/// call they are sent as one line, and answer every call that it is done.
+struct AskedProviders {
+    host_id: String,
+    names: Vec<String>,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl Providers for AskedProviders {
+    fn has(&self, name: &str) -> bool {
+        self.names.iter().any(|have| have == name)
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.names.clone()
+    }
+
+    fn ask(&mut self, provider: &str, call: &ProviderCall) -> ProviderAnswer {
+        let mut calls = self.calls.lock().unwrap_or_else(PoisonError::into_inner);
+        calls.push(format!("{} {provider} {call:?}", self.host_id));
+        ProviderAnswer::Done(None)
+    }
 }
 
 /// Cgroup files the test writes and the worker thread reads, and the threads that read.
@@ -510,6 +537,25 @@ impl FakeMachine {
             #[cfg(target_os = "macos")]
             bundles_seen: Arc::default(),
             vms: None,
+            providers: Ok(Arc::default()),
+        }
+    }
+
+    /// The same machine, which cannot make the client of the mount providers: `why`.
+    #[cfg(target_os = "linux")]
+    pub fn without_providers(self, why: &str) -> Self {
+        Self {
+            providers: Err(why.to_owned()),
+            ..self
+        }
+    }
+
+    /// The calls the mount providers were sent so far, each as `<host id> <provider> <call>`.
+    #[cfg(target_os = "linux")]
+    pub fn provider_calls(&self) -> Vec<String> {
+        match &self.providers {
+            Ok(calls) => calls.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -600,6 +646,20 @@ impl Machine for FakeMachine {
             Some(driver) => Ok(driver.clone()),
             None => js_agent::vm::system_driver(settings),
         }
+    }
+
+    fn providers(
+        &self,
+        host_id: &str,
+        sockets: &[(String, PathBuf, u32)],
+    ) -> std::io::Result<Box<dyn Providers>> {
+        let calls = self.providers.clone().map_err(std::io::Error::other)?;
+        let names = sockets.iter().map(|(name, _, _)| name.clone()).collect();
+        Ok(Box::new(AskedProviders {
+            host_id: host_id.to_owned(),
+            names,
+            calls,
+        }))
     }
 
     fn view(&self) -> Box<dyn HostView> {

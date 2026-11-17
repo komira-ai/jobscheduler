@@ -88,6 +88,23 @@ with (`Job.spec`) holds every default spelled out (`MOUNT_MODE_READ_ONLY`,
 `MOUNT_PROPAGATION_PRIVATE`, `PORT_PROTOCOL_TCP`, a `containerPort` equal to the `hostPort`),
 so a client can check that the server kept each list it sent.
 
+A layer or a mount may also come from a node-local provider the host's operator named
+(`docs/design/mount-providers.md`): its source is a `provider` member holding the provider's
+name (1 to 32 bytes of `a-z`, `0-9` and `-`, the first a letter) and a `ref` (1 to 1024 bytes,
+no control character) that only the provider reads. A layers file with one such layer is
+
+```json
+[{"provider": {"provider": "tierstore", "ref": "<key of the manifest object>"}}]
+```
+
+and a mount from the same provider is
+`{"provider": {"provider": "tierstore", "ref": "<key>"}, "target": "/work/in"}`. The job then
+requires the capability `mount-provider.tierstore`, one per distinct provider it names: a submit
+is refused `no-capable-host` when no registered host reports it and no machine provider may
+launch one, and the job is placed and started only on a host that reports it. A refusal of the
+name or the ref names the field (`field: spec.layers[0].provider.ref`) and never repeats its
+value; the ref is not secret, since every read of the job returns it.
+
 The subject rule has one limit: a request whose one singular scalar field is really optional
 gets a required flag. The fix is to mark the field `optional` in the definition, which is
 additive.

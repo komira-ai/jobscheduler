@@ -113,6 +113,8 @@ struct State {
     /// What a job's file system answers (see [`FakeRuntime::give_layers`]); none: the
     /// runtime gives no layers, as the trait's default, and says nothing of them.
     fs: Option<FsScript>,
+    /// The file system each run's lookups were last asked with, by run id.
+    looked_up: BTreeMap<String, JobFs>,
 }
 
 /// What the fake answers of a native body.
@@ -229,6 +231,12 @@ impl FakeRuntime {
     /// `resolve_fs` answers `answer` for `run_id` from now on.
     pub fn resolve_answers(&self, run_id: &str, answer: FsPrepared) {
         self.script().resolved.insert(run_id.to_owned(), answer);
+    }
+
+    /// The file system `resolve_fs` was last asked about for `run_id`: what its lookups were
+    /// to open.
+    pub fn looked_up(&self, run_id: &str) -> Option<JobFs> {
+        self.state.borrow().looked_up.get(run_id).cloned()
     }
 
     /// `assemble_fs` answers `answer` for `run_id` from now on.
@@ -576,6 +584,10 @@ impl Runtime for FakeRuntime {
             fs.layers.len(),
             fs.mounts.len()
         ));
+        self.state
+            .borrow_mut()
+            .looked_up
+            .insert(run_id.to_owned(), fs.clone());
         let answer = self.script().resolved.get(run_id).cloned();
         answer.unwrap_or(FsPrepared::Ready)
     }

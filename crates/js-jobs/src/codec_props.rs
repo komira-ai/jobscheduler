@@ -104,16 +104,36 @@ fn labels() -> impl Strategy<Value = Labels> {
         })
 }
 
+/// A provider's name as the wire holds one: a letter, then letters, digits and dashes. It
+/// never holds the NUL that the row puts between a name and a ref.
+fn provider_name() -> impl Strategy<Value = String> {
+    "[a-z][a-z0-9-]{0,31}"
+}
+
 fn layer() -> impl Strategy<Value = Layer> {
     prop_oneof![
         any_text().prop_map(|path| Layer::HostPath { path }),
         any_text().prop_map(|image| Layer::Image { image }),
+        (provider_name(), any_text()).prop_map(|(provider, reference)| Layer::Provider {
+            provider,
+            reference
+        }),
+    ]
+}
+
+fn mount_source() -> impl Strategy<Value = MountSource> {
+    prop_oneof![
+        any_text().prop_map(|path| MountSource::HostPath { path }),
+        (provider_name(), any_text()).prop_map(|(provider, reference)| MountSource::Provider {
+            provider,
+            reference
+        }),
     ]
 }
 
 fn mount() -> impl Strategy<Value = JobMount> {
     (
-        any_text(),
+        mount_source(),
         any_text(),
         prop::sample::select(vec![
             MountMode::ReadOnly,
@@ -123,8 +143,8 @@ fn mount() -> impl Strategy<Value = JobMount> {
         proptest::option::of(any_text()),
         any::<bool>(),
     )
-        .prop_map(|(path, target, mode, sub_path, no_exec)| JobMount {
-            source: MountSource::HostPath { path },
+        .prop_map(|(source, target, mode, sub_path, no_exec)| JobMount {
+            source,
             target,
             mode,
             sub_path,

@@ -502,6 +502,21 @@ impl Rig {
         self.register_with(host, capabilities);
     }
 
+    /// Registers `host` past the route, as an agent that reports the `per-job` capability, the
+    /// `container` exec mode, `layered-rootfs` and `mount-provider.<name>` for each of `names`.
+    pub(crate) fn register_mount_providers(&mut self, host: &str, names: &[&str]) {
+        let mut capabilities = json!({
+            "per-job": "true",
+            "exec": "container",
+            "layered-rootfs": "true",
+            "arch": "x86_64",
+        });
+        for name in names {
+            capabilities[js_caps::mount_provider_key(name).as_str()] = json!("true");
+        }
+        self.register_with(host, capabilities);
+    }
+
     /// Says hello for `host` through the route, as an agent that reports the `per-job`
     /// capability and, when `uploads`, the `log-upload` capability.
     pub(crate) async fn join(&mut self, host: &str, uploads: bool) {

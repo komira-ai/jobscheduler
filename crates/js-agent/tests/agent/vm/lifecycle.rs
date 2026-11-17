@@ -152,8 +152,9 @@ fn a_vm_job_runs_in_a_vm_beside_an_action_job() {
 /// Asserts that a VM start that asks for what a VM does not give is refused before anything
 /// is made, each with its own code: a `run` body, run files, a GPU, network above `none`, a
 /// declared port, a host port (`input-not-allowed`, though the agent's other runtime allows
-/// every host port), a layer or a mount (`rootfs-unsupported-here`, though the agent's other
-/// runtime gives them). Catches a VM start run with less than it asked for.
+/// every host port), a layer or a mount, a provider's tree among them (`rootfs-unsupported-here`,
+/// though the agent's other runtime gives them). Catches a VM start run with less than it asked
+/// for.
 #[test]
 fn a_vm_start_that_asks_for_what_a_vm_lacks_is_refused() {
     let cases = [
@@ -186,6 +187,15 @@ fn a_vm_start_that_asks_for_what_a_vm_lacks_is_refused() {
         ),
         (
             json!({ "mounts": [{ "source": { "type": "host_path", "path": "/data/m" }, "target": "/work/m" }] }),
+            refusal::ROOTFS_UNSUPPORTED_HERE,
+        ),
+        // Nor a tree a provider makes, as a layer or as a mount.
+        (
+            json!({ "layers": [{ "type": "provider", "provider": "tierstore", "ref": "k1" }] }),
+            refusal::ROOTFS_UNSUPPORTED_HERE,
+        ),
+        (
+            json!({ "mounts": [{ "source": { "type": "provider", "provider": "tierstore", "ref": "k2" }, "target": "/work/m" }] }),
             refusal::ROOTFS_UNSUPPORTED_HERE,
         ),
     ];

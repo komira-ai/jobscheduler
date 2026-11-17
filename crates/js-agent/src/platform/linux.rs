@@ -16,7 +16,7 @@ use crate::cli_runtime::{CliRuntime, Flags as EngineFlags, Settings, system_runn
 use crate::contract::{self, ToolkitHook};
 use crate::integrity::Integrity;
 use crate::lifecycle::CheckHook;
-use crate::lifecycle::{Local, Runtime};
+use crate::lifecycle::{Local, MountProviders, Runtime};
 use crate::registry_credentials::RegistryCredentials;
 use crate::system::{Machine, RuntimeBuild, System};
 use crate::{Failure, Services, crun, crun_host, disk, integrity};
@@ -308,6 +308,30 @@ pub struct Flags {
     /// with `--no-jobs`.
     #[arg(long, value_name = "MILLISECONDS")]
     pub taint_recheck_ms: Option<u64>,
+    /// A node-local mount provider, `NAME=SOCKET`: a process on this host that makes the tree
+    /// a job's layer or mount names as `{provider, ref}` (`docs/design/mount-providers.md`),
+    /// serving the protocol `jobscheduler.provider.v1.MountProvider` on the Unix socket
+    /// `SOCKET`. The name is 1 to 32 bytes of `a-z`, `0-9` and `-`, the first a letter, and
+    /// is given once; the directory of the socket must exist (the agent does not wait for the
+    /// provider to start). The socket must be as `--mount-provider-user` says: the agent
+    /// looks before each connect. The hello reports
+    /// `mount-provider.NAME` where it reports `layered-rootfs`. The directory a provider
+    /// mounts trees in is listed as a `--mount-root-ro` (a `--mount-root` for a provider whose
+    /// trees a job may write). Repeatable. Needs the crun runtime.
+    #[arg(long = "mount-provider", value_name = "NAME=SOCKET", value_parser = crate::cli::named_path)]
+    pub mount_providers: Vec<(String, PathBuf)>,
+    /// The user a `--mount-provider` runs as, as `NAME=USER` (a user name or a uid; root when
+    /// not given); repeatable, once for each provider. Before each connect the agent checks
+    /// that the provider's socket belongs to that user or root and that no other user can
+    /// write it (its group may: the agent reaches it through the socket's group), and that its
+    /// directory belongs to root or that user and that no one else can write it.
+    #[arg(long = "mount-provider-user", value_name = "NAME=USER", value_parser = crate::cli::key_value)]
+    pub mount_provider_users: Vec<(String, String)>,
+    /// How many seconds a start may wait on its mount providers, from its admission (every
+    /// call to prepare and mount a source is inside it); one that has waited this long
+    /// fails `input-unavailable`. From 1 to 900; by default 120. Needs `--mount-provider`.
+    #[arg(long, value_name = "SECS")]
+    pub mount_provider_wait: Option<u64>,
 }
 
 impl Flags {
@@ -326,7 +350,7 @@ impl Flags {
     /// the container engine refuses them all (`--allow-host-jobs` and `--egress` above none
     /// are refused where the jobs are made, [`HOST_JOBS_NEED_CRUN`]).
     #[must_use]
-    pub fn crun_flags(&self) -> [(&'static str, bool); 8] {
+    pub fn crun_flags(&self) -> [(&'static str, bool); 11] {
         let [device, mount, env] = self.gpu_flags();
         [
             ("--crun-bin", self.crun_bin.is_some()),
@@ -340,6 +364,12 @@ impl Flags {
                 "--image-allow-loopback",
                 !self.image_allow_loopback.is_empty(),
             ),
+            ("--mount-provider", !self.mount_providers.is_empty()),
+            (
+                "--mount-provider-user",
+                !self.mount_provider_users.is_empty(),
+            ),
+            ("--mount-provider-wait", self.mount_provider_wait.is_some()),
         ]
     }
 
@@ -576,9 +606,16 @@ pub(crate) struct Jobs {
     pub(crate) taint_recheck: Duration,
     /// `--allow-host-jobs`.
     pub(crate) allow_host_jobs: bool,
+    /// `--mount-provider` and `--mount-provider-wait`, checked.
+    providers: MountProviders,
 }
 
 impl Jobs {
+    /// The mount providers the flags name.
+    pub(crate) fn providers(&self) -> MountProviders {
+        self.providers.clone()
+    }
+
     /// Nothing is left to check once the roots are known: the native runtime's checks are
     /// macOS's.
     ///
@@ -678,6 +715,12 @@ pub(crate) fn jobs(
         settle: crate::lifecycle::settle(os.settle_ms)?,
         taint_recheck: taint::recheck_every(os.taint_recheck_ms)?,
         allow_host_jobs: os.allow_host_jobs,
+        providers: MountProviders::from_flags(
+            &os.mount_providers,
+            &os.mount_provider_users,
+            os.mount_provider_wait,
+            Path::new(crate::cli_runtime::PASSWD_FILE),
+        )?,
     })
 }
 
@@ -808,7 +851,9 @@ pub(crate) fn report(
         (passthrough, &local.egress.ceiling(), crun.is_some()),
     );
     contract::report_host_jobs(hello, local.allow_host_jobs);
-    contract::report_layered(hello, crun.is_some_and(|plan| plan.layered));
+    let layered = crun.is_some_and(|plan| plan.layered);
+    contract::report_layered(hello, layered);
+    contract::report_mount_providers(hello, &local.providers, layered);
     Ok(Some(found))
 }
 

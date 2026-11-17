@@ -454,7 +454,25 @@ message Layer {
     // own layers are flattened into one tree (whiteouts applied), which is the layer; its
     // configuration (entrypoint, command, environment) is not used.
     string image = 2;
+    // A tree a node-local provider of the host makes (docs/design/mount-providers.md). The
+    // job is placed only on a host whose agent was given that provider.
+    ProviderSource provider = 3;
   }
+}
+
+// A tree a node-local provider makes for the job (docs/design/mount-providers.md): the
+// agent of the host the job is placed on asks the provider for it as soon as it has the
+// job, and uses the directory the provider answers as it uses a host path. jobscheduler
+// reads nothing of the ref. A job that names a provider requires the capability
+// `mount-provider.<provider>`, so it is placed only on a host that reports it.
+message ProviderSource {
+  // The provider's name, as the hosts' operators name it: 1 to 32 bytes of [a-z0-9-],
+  // starting with a letter.
+  string provider = 1;
+  // What the provider is asked for: a name only the provider reads (for tierstore, the key
+  // of an object holding the tree's list of files), passed to it untouched. 1 to 1024 bytes
+  // of UTF-8, no control character. It is not secret: every read of the job returns it.
+  string ref = 2;
 }
 
 // How a mount's tree appears in the job.
@@ -489,6 +507,8 @@ message Mount {
   oneof source {
     // An absolute path of a directory on the host, held to the rules of Layer.host_path.
     string host_path = 1;
+    // A tree a node-local provider of the host makes, held to the rules of Layer.provider.
+    ProviderSource provider = 4;
   }
   // Where it appears: an absolute path in the job's file system in normal form, not "/",
   // ASCII, with no `:`, `,` or `\`, at most 4096 bytes, and not in a place the runtime keeps

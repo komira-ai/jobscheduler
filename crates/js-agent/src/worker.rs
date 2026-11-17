@@ -103,7 +103,7 @@ use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunRes
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
 
-use crate::lifecycle::{Config, Contact, Event, Lifecycle, Status, fits_grace};
+use crate::lifecycle::{Config, Contact, Event, Lifecycle, MountProviders, Status, fits_grace};
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
@@ -154,6 +154,9 @@ pub struct Plan {
     pub backend: Backend,
     /// The id the agent registered under.
     pub host_id: String,
+    /// The mount providers the agent was given (`--mount-provider`); none for an agent
+    /// given none.
+    pub providers: MountProviders,
     /// The platform the agent runs on.
     pub platform: Platform,
     /// The directories the post-job checks watch.
@@ -773,6 +776,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
         config,
         backend,
         host_id,
+        providers,
         platform,
         watch,
         settle,
@@ -799,10 +803,13 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     let (checks, actions) = crate::platform::checks(&backend, &*machine, watch, settle)?;
     let (life, events) = Lifecycle::adopt(config, runtime, checks, Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
-    let life = life
+    let mut life = life
         .with_blind_wait(settle)
         .with_taint_recheck(taint_recheck);
     lines.extend(describe(&events));
+    // The mount providers, once the earlier process's runs are adopted: what it left of
+    // theirs is released.
+    lines.extend(describe(&providers.attach(&mut life, &*machine, &host_id)?));
     let collector = usage.and_then(|outbox| match actions {
         Ok(dir) => Some(Collector::new(
             machine.cgroup_files(),

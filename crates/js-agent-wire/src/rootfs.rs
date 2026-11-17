@@ -16,6 +16,12 @@
 //! which is why a server sends these fields only to a host that reports
 //! `layered-rootfs`.
 //!
+//! A layer or a mount may also come from a node-local provider (`Provider`, with its name
+//! and a ref only the provider reads; `docs/design/mount-providers.md`): the agent asks the
+//! provider it was given by that name for the tree and uses the directory it answers as the
+//! source's host path. A server sends such a source only to a host that reports
+//! `mount-provider.<name>`.
+//!
 //! The path rules are `js-types`' ([`js_types::path`]), the ones the server holds a job to
 //! when it takes it; the host's allow-lists are the agent's, which refuses a start that
 //! names a path or port outside them ([`crate::refusal::INPUT_NOT_ALLOWED`]).
@@ -46,6 +52,45 @@ pub enum Layer {
         /// The image reference, `name[:tag]@sha256:<64 hex>`.
         image: String,
     },
+    /// A tree the node-local provider `provider` makes: the agent asks that provider for
+    /// `reference` and uses the directory it answers.
+    Provider {
+        /// The provider's name, as [`is_provider_name`] has it.
+        provider: String,
+        /// What the provider is asked for, untouched: 1 to [`limits::MAX_PROVIDER_REF_LEN`]
+        /// bytes with no control or format character. `ref` in the text.
+        #[serde(rename = "ref")]
+        reference: String,
+    },
+}
+
+/// Whether `name` is a provider's name: 1 to [`limits::MAX_PROVIDER_NAME_LEN`] bytes of
+/// `[a-z0-9-]`, the first a letter. The server, the agent's flags and the wire hold a name
+/// to this one rule.
+#[must_use]
+pub fn is_provider_name(name: &str) -> bool {
+    let leads = name
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase());
+    let inside = name
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'));
+    leads & inside & (name.len() <= limits::MAX_PROVIDER_NAME_LEN)
+}
+
+/// A provider source's name (the first `At`, as [`is_provider_name`] has it, else
+/// [`Rule::BadChars`]) and ref (the second, as [`check::text`] has it up to
+/// [`limits::MAX_PROVIDER_REF_LEN`]), each under its own field.
+fn check_provider(
+    (name, reference): (At, At),
+    provider: &str,
+    text: &str,
+) -> Result<(), ValidationError> {
+    if !is_provider_name(provider) {
+        return Err(name.fail(Rule::BadChars));
+    }
+    check::text(reference, text, limits::MAX_PROVIDER_REF_LEN)
 }
 
 /// How a host directory appears in the job. Read-only is the default, left out of the
@@ -81,6 +126,15 @@ pub enum MountSource {
     HostPath {
         /// The directory's path on the host.
         path: String,
+    },
+    /// A tree the node-local provider `provider` makes, held to the rules of a
+    /// [`Layer::Provider`].
+    Provider {
+        /// The provider's name, as [`is_provider_name`] has it.
+        provider: String,
+        /// What the provider is asked for, untouched. `ref` in the text.
+        #[serde(rename = "ref")]
+        reference: String,
     },
 }
 
@@ -138,7 +192,9 @@ impl Propagation {
 
 /// The layers of a start: at most [`limits::MAX_LAYERS`] (`layers`, `invalid-job`); a host
 /// path as [`path::absolute`] has it (`layers.path`, `invalid-job`); an image in the image
-/// grammar (`layers.image`, `invalid-image`). Its digest is checked by [`pin_layers`].
+/// grammar (`layers.image`, `invalid-image`); a provider's name and ref as
+/// [`check_provider`] has them (`layers.provider`, `layers.ref`, `invalid-job`). Its digest
+/// is checked by [`pin_layers`].
 pub(crate) fn check_layers(layers: &[Layer]) -> Result<(), ValidationError> {
     let at = At::new("layers", refusal::INVALID_JOB);
     check::count(at, layers.len(), limits::MAX_LAYERS)?;
@@ -149,6 +205,13 @@ pub(crate) fn check_layers(layers: &[Layer]) -> Result<(), ValidationError> {
             }
             Layer::Image { image } => {
                 image::image(At::new("layers.image", refusal::INVALID_IMAGE), image)?;
+            }
+            Layer::Provider {
+                provider,
+                reference,
+            } => {
+                let fields = (at.field("layers.provider"), at.field("layers.ref"));
+                check_provider(fields, provider, reference)?;
             }
         }
     }
@@ -169,18 +232,29 @@ pub(crate) fn pin_layers(layers: &[Layer]) -> Result<(), ValidationError> {
 
 /// The mounts of a start, refused `invalid-mount`: at most [`limits::MAX_MOUNTS`]
 /// (`mounts`); each host-path source as [`path::absolute`] has it (`mounts.source.path`),
-/// each target as [`path::target`] has it (`mounts.target`), each `sub_path` as
-/// [`path::relative`] has it, empty allowed (`mounts.sub_path`); and no two targets equal
-/// in lower case ([`path::distinct`], `mounts.target`).
+/// each provider source's name and ref as [`check_provider`] has them
+/// (`mounts.source.provider`, `mounts.source.ref`), each target as [`path::target`] has it
+/// (`mounts.target`), each `sub_path` as [`path::relative`] has it, empty allowed
+/// (`mounts.sub_path`); and no two targets equal in lower case ([`path::distinct`],
+/// `mounts.target`).
 pub(crate) fn check_mounts(mounts: &[JobMount]) -> Result<(), ValidationError> {
     let at = At::new("mounts", refusal::INVALID_MOUNT);
     check::count(at, mounts.len(), limits::MAX_MOUNTS)?;
     let source = at.field("mounts.source.path");
     let target = at.field("mounts.target");
     let sub_path = at.field("mounts.sub_path");
+    let provided = (
+        at.field("mounts.source.provider"),
+        at.field("mounts.source.ref"),
+    );
     for mount in mounts {
-        let MountSource::HostPath { path } = &mount.source;
-        check::path(source, path::absolute(path))?;
+        match &mount.source {
+            MountSource::HostPath { path } => check::path(source, path::absolute(path))?,
+            MountSource::Provider {
+                provider,
+                reference,
+            } => check_provider(provided, provider, reference)?,
+        }
         check::path(target, path::target(&mount.target))?;
         if let Some(sub) = &mount.sub_path {
             check::path(sub_path, path::relative(sub, true))?;

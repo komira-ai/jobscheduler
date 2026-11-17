@@ -84,10 +84,11 @@ struct LaterMount {
     propagation: i32,
 }
 
-/// A `Layer` as a later release could send it: a source this release does not know (field 3).
+/// A `Layer` as a later release could send it: a source this release does not know (field 4,
+/// after the provider's, which is 3).
 #[derive(Clone, PartialEq, Message)]
 struct LaterLayer {
-    #[prost(string, tag = "3")]
+    #[prost(string, tag = "4")]
     registry: String,
 }
 
@@ -267,12 +268,14 @@ fn the_schema_numbers_the_rootfs_fields_and_values() {
         [
             ("host_path".to_owned(), 1, source()),
             ("image".to_owned(), 2, source()),
+            ("provider".to_owned(), 3, source()),
         ]
     );
     assert_eq!(
         fields(&set, "Mount"),
         [
             ("host_path".to_owned(), 1, source()),
+            ("provider".to_owned(), 4, source()),
             ("target".to_owned(), 10, None),
             ("mode".to_owned(), 11, None),
             ("sub_path".to_owned(), 12, None),

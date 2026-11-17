@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use js_agent_wire::{Ack, BookedResources, HeldState, JobStartSpec, Layer, Outcome};
 use js_jobs::{AllocationStep, EndReason, JobEnd, JobId, JobState, NewJob};
 
-use super::job_rig::{FakeAgent, image, placing_rig, rig, spec, starts, stops};
+use super::job_rig::{BOOKED, FakeAgent, image, placing_rig, rig, spec, starts, stops};
 use super::*;
 
 /// A placed job's start is in every reply, the same each time, with the allocation's booked
@@ -430,4 +430,78 @@ fn rig_with_placed_layered_job() -> (super::job_rig::Rig, JobId) {
         super::job_rig::BOOKED,
     );
     (rig, job.id)
+}
+
+/// A job spec with a layer from each of the providers `names`, with the capabilities the job
+/// service records for it (`layered-rootfs` and one `mount-provider.<name>` each).
+fn provider_spec(names: &[&str]) -> js_jobs::JobSpec {
+    let mut provided = spec();
+    let capabilities = &mut provided.constraints.capabilities;
+    capabilities.insert("layered-rootfs".to_owned(), "true".to_owned());
+    for name in names {
+        capabilities.insert(js_caps::mount_provider_key(name), "true".to_owned());
+        provided.layers.push(Layer::Provider {
+            provider: (*name).to_owned(),
+            reference: format!("trees/{name}"),
+        });
+    }
+    provided
+}
+
+/// A job that names a provider is placed on, and started on, only a host whose hello reported
+/// `mount-provider.<name>` as `true`: with a host that reports nothing of providers, one that
+/// reports another provider and one that reports it, the job lands on the last and its start
+/// carries the provider layer, and the others are sent no start. A job already placed on a host
+/// that does not report the provider (a placement from before the host's agent changed) is
+/// sent no start and stays placed, while a job placed on a host that reports it is started.
+/// It catches a provider job placed on a host that cannot make its tree, and a start sent to
+/// an agent that would not read the source.
+#[tokio::test]
+async fn a_job_naming_a_provider_is_started_only_on_a_host_that_reports_it() {
+    let mut placing = placing_rig("provider_capable");
+    placing.register_layered_rootfs("host-a", "true");
+    placing.register_mount_providers("host-b", &["cache"]);
+    placing.register_mount_providers("host-c", &["cache", "tierstore"]);
+    let new = NewJob {
+        id: Some(JobId::parse("job-p").unwrap()),
+        spec: provider_spec(&["tierstore"]),
+        priority: 0,
+        client: None,
+    };
+    let id = placing.jobs.insert_queued(new).unwrap().record.id;
+    for host in ["host-a", "host-b", "host-c"] {
+        let reply = placing.beat(&FakeAgent::new(host)).await.unwrap();
+        assert!(reply.commands.is_empty() | (host == "host-c"), "{host}");
+    }
+    assert_eq!(placing.allocation(&id).host.as_str(), "host-c");
+    let reply = placing.beat(&FakeAgent::new("host-c")).await.unwrap();
+    let sent = starts(&reply);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].layers,
+        [Layer::Provider {
+            provider: "tierstore".to_owned(),
+            reference: "trees/tierstore".to_owned(),
+        }]
+    );
+    for host in ["host-a", "host-b"] {
+        assert!(starts(&placing.beat(&FakeAgent::new(host)).await.unwrap()).is_empty());
+    }
+
+    let mut stale = rig("provider_placed_elsewhere", true);
+    stale.register_layered_rootfs("host-a", "true");
+    stale.register_mount_providers("host-c", &["tierstore"]);
+    let provided = || provider_spec(&["tierstore"]);
+    let (elsewhere, _) = super::job_rig::placed(&stale.jobs, "job-w", "host-a", provided(), BOOKED);
+    let (fitting, _) = super::job_rig::placed(&stale.jobs, "job-f", "host-c", provided(), BOOKED);
+    let reply = stale.beat(&FakeAgent::new("host-a")).await.unwrap();
+    assert_eq!(starts(&reply), Vec::new());
+    assert_eq!(
+        stale.states(&elsewhere.id),
+        (JobState::Placed, AllocationStep::Booked)
+    );
+    let reply = stale.beat(&FakeAgent::new("host-c")).await.unwrap();
+    let sent = starts(&reply);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].job_id, fitting.id.to_string());
 }

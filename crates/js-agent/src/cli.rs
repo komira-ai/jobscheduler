@@ -443,12 +443,12 @@ pub fn removed_flag(args: &[OsString]) -> Option<String> {
 }
 
 /// `name=path` split at the first `=`.
-fn named_path(text: &str) -> Result<(String, PathBuf), String> {
+pub(crate) fn named_path(text: &str) -> Result<(String, PathBuf), String> {
     key_value(text).map(|(name, path)| (name, PathBuf::from(path)))
 }
 
 /// `key=value` split at the first `=`.
-fn key_value(text: &str) -> Result<(String, String), String> {
+pub(crate) fn key_value(text: &str) -> Result<(String, String), String> {
     text.split_once('=')
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .ok_or_else(|| format!("{text:?} is not key=value"))

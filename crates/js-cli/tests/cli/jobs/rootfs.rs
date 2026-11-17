@@ -3,8 +3,8 @@
 //! reads wrongly.
 
 use js_proto::v1::{
-    HostPort, Layer, Mount, MountMode, MountPropagation, PortProtocol, SubmitJobRequest, layer,
-    mount,
+    HostPort, Layer, Mount, MountMode, MountPropagation, PortProtocol, ProviderSource,
+    SubmitJobRequest, layer, mount,
 };
 
 use super::{call, js, only};
@@ -130,4 +130,71 @@ fn a_mounts_file_with_an_unknown_enum_name_is_usage_exit_2() {
         got.err
     );
     assert!(fake.seen().is_empty());
+}
+
+/// Asserts that `--spec.layers-file` and `--spec.mounts-file` read a source from a node-local
+/// provider in proto3 JSON (`provider` as the oneof member, holding the provider's name and
+/// its `ref`), beside a host path, and that the request's spec holds exactly those sources in
+/// order. It catches a file flag that loses the provider member, reads `ref` under another
+/// name or drops the source of a mount that has a target.
+#[test]
+fn a_provider_source_in_the_files_fills_the_spec() {
+    let scratch = Scratch::new("jobs_rootfs_provider");
+    let fake = Fake::new();
+    let layers = scratch.write(
+        "layers.json",
+        r#"[{"hostPath": "/srv/base"},
+            {"provider": {"provider": "tierstore", "ref": "toolchains/clang-18"}}]"#,
+        0o600,
+    );
+    let mounts = scratch.write(
+        "mounts.json",
+        r#"[{"provider": {"provider": "tierstore", "ref": "datasets/v3"}, "target": "/data",
+             "mode": "MOUNT_MODE_READ_WRITE"}]"#,
+        0o600,
+    );
+    let got = js(
+        &scratch,
+        fake.dialer(),
+        &[
+            "job",
+            "submit",
+            "--id",
+            "rootfs-2",
+            "--spec.command",
+            "/bin/run",
+            "--spec.layers-file",
+            layers.to_str().unwrap(),
+            "--spec.mounts-file",
+            mounts.to_str().unwrap(),
+        ],
+    );
+    assert_eq!((got.code, got.err.as_str()), (0, ""));
+    let (path, request) = only::<SubmitJobRequest>(&fake);
+    assert_eq!(path, call("SubmitJob"));
+    let spec = request.spec.unwrap();
+    let tierstore = |reference: &str| ProviderSource {
+        provider: "tierstore".to_owned(),
+        r#ref: reference.to_owned(),
+    };
+    assert_eq!(
+        spec.layers,
+        vec![
+            Layer {
+                source: Some(layer::Source::HostPath("/srv/base".to_owned())),
+            },
+            Layer {
+                source: Some(layer::Source::Provider(tierstore("toolchains/clang-18"))),
+            },
+        ]
+    );
+    assert_eq!(
+        spec.mounts,
+        vec![Mount {
+            source: Some(mount::Source::Provider(tierstore("datasets/v3"))),
+            target: "/data".to_owned(),
+            mode: MountMode::ReadWrite.into(),
+            ..Mount::default()
+        }]
+    );
 }

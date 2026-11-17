@@ -920,3 +920,60 @@ async fn the_layered_rootfs_capability_is_not_shown() {
     assert_eq!(shown.constraints, Some(v1::Constraints::default()));
     assert!(!format!("{shown:?}").contains("layered-rootfs"));
 }
+
+/// Asserts that a record whose layer and mount come from providers is shown with each
+/// source's provider and ref as recorded, the mount's other fields explicit, and the
+/// `mount-provider.<name>` capability the submit recorded shown in no field. Catches a provider
+/// source dropped or shown as another kind of source on the way out of the record, and a
+/// requirement the server adds for itself that leaks into the constraints a client reads.
+#[tokio::test]
+async fn a_provider_source_is_shown_as_recorded_and_its_capability_is_not() {
+    let clock = clock();
+    let rig = Rig::over(over_fake(&clock), clock).await;
+    let provided = JobSpec {
+        constraints: Constraints {
+            capabilities: BTreeMap::from([
+                ("layered-rootfs".to_owned(), "true".to_owned()),
+                ("mount-provider.tierstore".to_owned(), "true".to_owned()),
+            ]),
+            ..Constraints::default()
+        },
+        layers: vec![Layer::Provider {
+            provider: "tierstore".to_owned(),
+            reference: "trees/0123".to_owned(),
+        }],
+        mounts: vec![JobMount {
+            source: MountSource::Provider {
+                provider: "tierstore".to_owned(),
+                reference: "trees/4567".to_owned(),
+            },
+            target: "/in".to_owned(),
+            mode: MountMode::ReadWrite,
+            sub_path: Some("sub".to_owned()),
+            no_exec: true,
+            propagation: Propagation::Private,
+        }],
+        ..spec(&[])
+    };
+    queue(&rig.jobs, "provided-1", provided);
+    let shown = rig.get_job("provided-1").await.expect("read").spec.unwrap();
+    let source = |reference: &str| v1::ProviderSource {
+        provider: "tierstore".to_owned(),
+        r#ref: reference.to_owned(),
+    };
+    let layer = v1::Layer {
+        source: Some(v1::layer::Source::Provider(source("trees/0123"))),
+    };
+    assert_eq!(shown.layers, vec![layer]);
+    let mount = v1::Mount {
+        source: Some(v1::mount::Source::Provider(source("trees/4567"))),
+        target: "/in".to_owned(),
+        mode: v1::MountMode::ReadWrite.into(),
+        sub_path: "sub".to_owned(),
+        no_exec: true,
+        propagation: v1::MountPropagation::Private.into(),
+    };
+    assert_eq!(shown.mounts, vec![mount]);
+    assert_eq!(shown.constraints, Some(v1::Constraints::default()));
+    assert!(!format!("{shown:?}").contains("mount-provider"));
+}

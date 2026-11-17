@@ -49,8 +49,13 @@ async-trait.workspace = true
 clap.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+# `TokioIo`, the stream a provider channel's connector hands tonic (src/provider).
+hyper-util = { workspace = true, features = ["tokio"] }
 # The project-quota calls (`ioctl`, `quotactl`) of src/quota: rustix has no form of them.
 libc.workspace = true
+# The messages of the mount providers' protocol, declared in src/provider/wire.rs: the agent
+# does not link js-proto, the job service's crate.
+prost.workspace = true
 # `net` and `thread`: the listeners of a job's host ports, bound in its network namespace
 # (src/host_ports).
 rustix = { workspace = true, features = ["fs", "net", "process", "thread"] }
@@ -64,6 +69,10 @@ thiserror.workspace = true
 # (src/host_ports).
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
+# `channel`: the lazily connected client of a mount provider's socket (src/provider).
+tonic = { workspace = true, features = ["channel"] }
+# The protobuf codec of a provider call (src/provider).
+tonic-prost.workspace = true
 tracing.workspace = true
 # The metadata service of `--identity-source` (src/identity), over plain HTTP.
 ureq.workspace = true
@@ -96,7 +105,11 @@ js-jobs = { path = "../js-jobs", features = ["test-support"] }
 js-sched-placer = { path = "../js-sched-placer" }
 # The in-memory store under those job tables.
 js-state = { path = "../js-state", features = ["test-support"] }
-js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
+# The generated messages of the mount providers' protocol, which the agent's own declarations
+# are held to (tests/agent/provider_wire.rs).
+js-proto = { path = "../js-proto" }
+# `mount-provider`: the fake provider the client's tests ask (tests/agent/provider_client.rs).
+js-testkit = { path = "../js-testkit", features = ["mount-provider", "oci-registry"] }
 # The recording VM driver the VM runtime's tests drive (tests/agent/vm).
 js-vm-lease = { path = "../js-vm-lease", features = ["fake"] }
 clap.workspace = true

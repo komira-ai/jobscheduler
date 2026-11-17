@@ -13,6 +13,7 @@
 //! else the job's.
 
 use js_agent_wire::{BookedResources, Isolation, JobStartSpec, RunFile};
+use js_caps::is_mount_provider_key;
 use js_jobs::{AllocationRecord, Booked, JobRecord};
 use js_types::{PortMap, Resources};
 
@@ -51,6 +52,12 @@ pub(crate) enum Unsendable {
         "the job names layers, mounts or host ports and the host does not report layered-rootfs"
     )]
     RootfsNotReported,
+    /// The job requires the capability of a node-local mount provider (`mount-provider.<name>`,
+    /// from a layer or a mount that names the provider) and the host's hello did not report it;
+    /// an agent without the provider cannot make the tree, and one from before provider
+    /// sources would not read the source, so it is never sent such a job. It names the key.
+    #[error("the job requires {0} and the host does not report it")]
+    MountProviderNotReported(String),
     /// The wall limit in milliseconds overflows.
     #[error("the wall limit overflows")]
     WallLimit,
@@ -91,7 +98,9 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 ///
 /// A job that runs on the machine itself is sent only to a host whose agent reported
 /// `host-jobs` ([`BeatContext::host_jobs`]), and one with layers, mounts or host ports only to
-/// a host whose agent reported `layered-rootfs` ([`BeatContext::layered_rootfs`]).
+/// a host whose agent reported `layered-rootfs` ([`BeatContext::layered_rootfs`]); a job that
+/// requires a `mount-provider.<name>` capability is sent only to a host whose agent reported
+/// each such key ([`BeatContext::mount_providers`]).
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -108,6 +117,15 @@ pub(crate) fn start_of(
     }
     if spec.uses_layered_rootfs() & !context.layered_rootfs {
         return Err(Unsendable::RootfsNotReported);
+    }
+    let unreported = spec
+        .constraints
+        .capabilities
+        .keys()
+        .filter(|key| is_mount_provider_key(key))
+        .find(|key| !context.mount_providers.contains(key));
+    if let Some(key) = unreported {
+        return Err(Unsendable::MountProviderNotReported(key.clone()));
     }
     let booked = match allocation.booked {
         Booked::WholeHost => whole_host(context.shape)?,

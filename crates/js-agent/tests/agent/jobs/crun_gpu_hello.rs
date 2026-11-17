@@ -320,6 +320,54 @@ fn the_hello_reports_layered_rootfs_only_where_the_kernel_has_its_calls() {
     assert_eq!(hello, Value::Null);
 }
 
+/// Proves a crun agent given `--mount-provider NAME=SOCKET` reports `mount-provider.NAME=true`
+/// for each provider where it reports `layered-rootfs`, and none where the kernel has not the
+/// calls of a job's layers and mounts, and that `--capability mount-provider.NAME=true` is
+/// refused naming the key before a hello is sent. Catches a server that places a job naming a
+/// provider on a host that could not give it, a provider the agent was given and never
+/// reports, and a provider an operator could claim by hand.
+#[test]
+fn the_hello_reports_a_mount_provider_only_where_layered_rootfs_is() {
+    let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "hello-providers");
+    let socket = |name: &str| format!("{name}={}/{name}.sock", dir.path().display());
+    let (first, second) = (socket("tierstore"), socket("cache"));
+    let given = [
+        "--mount-provider",
+        &first,
+        "--mount-provider",
+        &second,
+        "--mount-provider-wait",
+        "30",
+    ];
+    let (ran, hello) = crun_hello("hello-provider", &given);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let caps = &hello["capabilities"];
+    assert_eq!(
+        caps["mount-provider.tierstore"], "true",
+        "{hello} {}",
+        ran.err
+    );
+    assert_eq!(caps["mount-provider.cache"], "true", "{hello}");
+    assert_eq!(caps["layered-rootfs"], "true", "{hello}");
+
+    let (ran, hello) = crun_hello_on("hello-provider-old", &given, |host| {
+        host.kernel_calls = no_calls
+    });
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let caps = hello["capabilities"].as_object().expect("capabilities");
+    assert!(
+        !caps.keys().any(|key| key.starts_with("mount-provider.")),
+        "{hello}"
+    );
+
+    let claimed = ["--capability", "mount-provider.tierstore=true"];
+    let (ran, hello) = crun_hello("hello-provider-claimed", &claimed);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let said = "--capability: mount-provider.tierstore is detected and cannot be set";
+    assert!(ran.err.contains(said), "{}", ran.err);
+    assert_eq!(hello, Value::Null);
+}
+
 /// A heartbeat reply that starts the job `j1` with `isolation = host`.
 fn host_start() -> crate::support::Reply {
     let start = JobStartSpec {

@@ -28,6 +28,13 @@
 //! [`refusal`] makes one and reads one back. [`FILE_DESCRIPTOR_SET`] is the encoded
 //! descriptor set of the package, with its comments, for reflection and for the tests.
 //!
+//! [`provider::v1`] is a second, separate package: `jobscheduler.provider.v1`
+//! (`proto/jobscheduler/provider/v1/provider.proto`), the service
+//! [`provider::v1::mount_provider_server::MountProvider`] a node-local mount provider
+//! serves to the agent of its host over a Unix socket (`docs/design/mount-providers.md`),
+//! with its client [`provider::v1::mount_provider_client::MountProviderClient`]. It is not in
+//! [`FILE_DESCRIPTOR_SET`] and grows by additions alone, as the job service does.
+//!
 //! [`request_need`] converts a job's needs and constraints, with its optional accelerator,
 //! into the booking and the `accelerator.*` capability keys, through `js_caps`.
 
@@ -40,6 +47,16 @@ pub mod refusal;
 /// comment of its `.proto` file as its documentation.
 pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/jobscheduler.v1.rs"));
+}
+
+/// The service a node-local mount provider serves to the agent of its host.
+pub mod provider {
+    /// The messages, enum, client and server of package `jobscheduler.provider.v1`,
+    /// generated from `provider.proto` by the build script, each documented by the comment
+    /// of its `.proto` file.
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/jobscheduler.provider.v1.rs"));
+    }
 }
 
 /// A job file's contents are secret (they can hold presigned URLs or tokens), so `Debug`

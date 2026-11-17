@@ -293,7 +293,7 @@ pub use settings::{
     Pull, Settings, SettingsError,
 };
 pub use subid::{
-    CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, RANGE_LEN, RangeClaim, SubidError,
+    CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, PASSWD_FILE, RANGE_LEN, RangeClaim, SubidError,
 };
 
 use crate::facts::{CommandRunner, FileReader, Platform, SystemCommands, SystemFiles};

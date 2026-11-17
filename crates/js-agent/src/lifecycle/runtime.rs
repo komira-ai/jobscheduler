@@ -333,7 +333,9 @@ impl JobFs {
 
     /// The host paths the start names, each with the `sub_path` of its mount and whether
     /// the job may write through it (a read-write mount's), in the order a runtime counts
-    /// its sources: the layers' first, in their order, then the mounts'.
+    /// its sources: the layers' first, in their order, then the mounts'. A source a
+    /// provider makes has no path until the provider answers one, and is not here: the
+    /// lifecycle replaces it by the path before the runtime is asked to look anything up.
     #[must_use]
     pub fn host_paths(&self) -> Vec<HostSource<'_>> {
         let layers = self.layers.iter().filter_map(|layer| match layer {
@@ -342,15 +344,15 @@ impl JobFs {
                 sub_path: None,
                 writes: false,
             }),
-            Layer::Image { .. } => None,
+            Layer::Image { .. } | Layer::Provider { .. } => None,
         });
-        let mounts = self.mounts.iter().map(|mount| {
-            let MountSource::HostPath { path } = &mount.source;
-            HostSource {
+        let mounts = self.mounts.iter().filter_map(|mount| match &mount.source {
+            MountSource::HostPath { path } => Some(HostSource {
                 path,
                 sub_path: mount.sub_path.as_deref(),
                 writes: mount.mode == js_agent_wire::MountMode::ReadWrite,
-            }
+            }),
+            MountSource::Provider { .. } => None,
         });
         layers.chain(mounts).collect()
     }
@@ -366,7 +368,7 @@ impl JobFs {
 fn layer_image(layer: &Layer) -> Option<&str> {
     match layer {
         Layer::Image { image } => Some(image),
-        Layer::HostPath { .. } => None,
+        Layer::HostPath { .. } | Layer::Provider { .. } => None,
     }
 }
 
@@ -846,7 +848,9 @@ mod tests {
 
     /// Catches the host paths of a start counted in another order than the runtime's sources
     /// (a layer's after a mount's), a read-write mount not marked as writing, a `sub_path`
-    /// lost, and an image layer taken for a host path or the other way round.
+    /// lost, an image layer taken for a host path or the other way round, and a layer or a
+    /// mount a provider makes listed as a host path (it has none until the provider answers)
+    /// or taken for an image.
     #[test]
     fn a_starts_host_paths_are_its_layers_then_its_mounts() {
         use js_agent_wire::{MountMode, Propagation};
@@ -865,12 +869,23 @@ mod tests {
                 Layer::Image {
                     image: "registry.example/a@sha256:0".to_owned(),
                 },
+                Layer::Provider {
+                    provider: "tier".to_owned(),
+                    reference: "k1".to_owned(),
+                },
                 Layer::HostPath {
                     path: "/l".to_owned(),
                 },
             ],
             mounts: vec![
                 mount("/rw", MountMode::ReadWrite, Some("sub")),
+                JobMount {
+                    source: MountSource::Provider {
+                        provider: "tier".to_owned(),
+                        reference: "k2".to_owned(),
+                    },
+                    ..mount("/unused", MountMode::ReadWrite, None)
+                },
                 mount("/cow", MountMode::CopyOnWrite, None),
             ],
         };

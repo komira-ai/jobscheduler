@@ -16,6 +16,9 @@
 //! - `oci_registry` (feature `oci-registry`): the registry in this process that js-oci's own
 //!   tests pull from (TLS on a loopback socket, with a token challenge, redirects and
 //!   tampered bytes on demand), for the tests of a crate that pulls through js-oci.
+//! - `mount_provider` (feature `mount-provider`): a node-local mount provider served on a Unix
+//!   socket in this process, with the contract's idempotence and a script for refusals,
+//!   failures and calls that are never answered, for the tests of a crate that asks one.
 //! - [`s3`]: the S3-compatible store with STS that the live-log tests write to, named by
 //!   `JS_TEST_S3_URL` and `JS_TEST_S3_REGION` (a test without them fails), and unique names
 //!   for what a test puts there.
@@ -68,6 +71,8 @@ pub mod dir;
 pub mod fake;
 pub mod forked;
 pub mod m2;
+#[cfg(feature = "mount-provider")]
+pub mod mount_provider;
 pub mod node_view;
 #[cfg(feature = "oci-registry")]
 pub mod oci_registry;

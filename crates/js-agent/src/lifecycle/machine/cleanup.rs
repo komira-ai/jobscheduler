@@ -176,6 +176,7 @@ impl Lifecycle {
             slots,
             quota_health,
             clock,
+            providers,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -231,6 +232,10 @@ impl Lifecycle {
                     .and_then(|()| remove_run_dirs(config, &run_id, lease.as_deref()))
                 {
                     Ok(()) => {
+                        // What the run's providers made for it is given up now that nothing
+                        // mounts it. A failed release is tried at every step (`provided`)
+                        // and never taints the host or holds the slot.
+                        providers.leave(&run_id, clock.now_ms());
                         // The tree is gone; now the bound comes off its project, and the
                         // slot stays held until the project reads no usage (the file system
                         // frees the inodes of a removed tree in the background, and a run

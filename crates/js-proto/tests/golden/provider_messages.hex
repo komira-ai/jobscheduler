@@ -1,0 +1,23 @@
+# The encodings of one fully populated message of each kind of package jobscheduler.provider.v1,
+# written by hand from the field numbers of provider.proto: a line is `Name: bytes` in hex pairs, and
+# what follows `#` on a line is a comment. A provider in another repository is built against these
+# messages, so a change here is a break of the protocol: a field is added with a new number, never
+# renumbered, retyped or removed (tests/provider_service.rs).
+# Source: agent "host-1", run "js.job-1", index 2
+Source: 0a 06 68 6f 73 74 2d 31 12 08 6a 73 2e 6a 6f 62 2d 31 18 02
+# PrepareRequest: source, ref "toolchains/clang-18", mode COPY_ON_WRITE (3)
+PrepareRequest: 0a 14 0a 06 68 6f 73 74 2d 31 12 08 6a 73 2e 6a 6f 62 2d 31 18 02 12 13 74 6f 6f 6c 63 68 61 69 6e 73 2f 63 6c 61 6e 67 2d 31 38 18 03
+# PrepareResponse: no fields
+PrepareResponse: 
+# MountRequest: source
+MountRequest: 0a 14 0a 06 68 6f 73 74 2d 31 12 08 6a 73 2e 6a 6f 62 2d 31 18 02
+# MountResponse: path "/srv/tier/job-1/2"
+MountResponse: 0a 11 2f 73 72 76 2f 74 69 65 72 2f 6a 6f 62 2d 31 2f 32
+# ReleaseRequest: source
+ReleaseRequest: 0a 14 0a 06 68 6f 73 74 2d 31 12 08 6a 73 2e 6a 6f 62 2d 31 18 02
+# ReleaseResponse: no fields
+ReleaseResponse: 
+# SweepRequest: agent "host-1", keep "js.job-1" and "js.job-2"
+SweepRequest: 0a 06 68 6f 73 74 2d 31 12 08 6a 73 2e 6a 6f 62 2d 31 12 08 6a 73 2e 6a 6f 62 2d 32
+# SweepResponse: released 5
+SweepResponse: 08 05

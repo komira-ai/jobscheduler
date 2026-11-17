@@ -21,6 +21,9 @@
 //!   the job is queued, and on a job past the queue only when it is `placed`: a job that ended
 //!   without being placed shows none, since its last wait no longer holds ([`queue_status`]).
 //!   Its attempts and events are shown in every state.
+//! - A layer or a mount from a provider shows its provider's name and its ref as recorded; the
+//!   `mount-provider.<name>` capabilities a submit records beside them have no field and are not
+//!   shown.
 //! - A job without an image (a root of layers alone) shows an empty image.
 //! - The record keeps every mode, propagation and protocol of a job's mounts and host ports
 //!   in its explicit form, and every host port's job port, as a submit recorded them: they are
@@ -169,16 +172,34 @@ fn layer(layer: &Layer) -> v1::Layer {
     let source = match layer {
         Layer::HostPath { path } => v1::layer::Source::HostPath(path.clone()),
         Layer::Image { image } => v1::layer::Source::Image(image.clone()),
+        Layer::Provider {
+            provider,
+            reference,
+        } => v1::layer::Source::Provider(provider_source(provider, reference)),
     };
     v1::Layer {
         source: Some(source),
     }
 }
 
+/// A provider source as the job service shows it: the name and the ref as recorded.
+fn provider_source(provider: &str, reference: &str) -> v1::ProviderSource {
+    v1::ProviderSource {
+        provider: provider.to_owned(),
+        r#ref: reference.to_owned(),
+    }
+}
+
 /// A mount as the job service shows it: its mode and propagation explicit, an absent
 /// `sub_path` empty.
 fn mount(mount: &JobMount) -> v1::Mount {
-    let MountSource::HostPath { path } = &mount.source;
+    let source = match &mount.source {
+        MountSource::HostPath { path } => v1::mount::Source::HostPath(path.clone()),
+        MountSource::Provider {
+            provider,
+            reference,
+        } => v1::mount::Source::Provider(provider_source(provider, reference)),
+    };
     let mode = match mount.mode {
         MountMode::ReadOnly => v1::MountMode::ReadOnly,
         MountMode::ReadWrite => v1::MountMode::ReadWrite,
@@ -186,7 +207,7 @@ fn mount(mount: &JobMount) -> v1::Mount {
     };
     let Propagation::Private = mount.propagation;
     v1::Mount {
-        source: Some(v1::mount::Source::HostPath(path.clone())),
+        source: Some(source),
         target: mount.target.clone(),
         mode: mode.into(),
         sub_path: mount.sub_path.clone().unwrap_or_default(),

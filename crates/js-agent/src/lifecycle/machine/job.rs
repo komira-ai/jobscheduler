@@ -11,6 +11,7 @@ use js_agent_wire::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::providing::Providing;
 use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{
     Body, Exit, Found, JobFs, ResolvedMount, RunHandle, RunSpec, Ticket,
@@ -64,6 +65,9 @@ pub(super) struct Given {
 pub(super) enum Phase {
     /// Nothing else: a start with no layer and no mount.
     Images,
+    /// The directories its providers make for the layers and mounts that name one
+    /// (`providing`); each is then a host path, and the start is in [`Phase::Resolving`].
+    Providing(Providing),
     /// The lookups of its host paths.
     Resolving,
     /// The assembly of its file system, once its directories are made: `scratch` is the

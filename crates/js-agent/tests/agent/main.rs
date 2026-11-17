@@ -44,6 +44,8 @@ mod join_round_trip;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod native;
+mod provider_client;
+mod provider_wire;
 mod quota;
 mod readiness;
 mod retired;

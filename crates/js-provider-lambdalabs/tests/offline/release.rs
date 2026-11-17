@@ -318,6 +318,7 @@ fn request(gpus: u64) -> Demand {
         network: Default::default(),
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     }
 }
 

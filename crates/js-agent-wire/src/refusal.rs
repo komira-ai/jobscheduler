@@ -227,6 +227,11 @@ pub const INPUT_NOT_ALLOWED: &str = "input-not-allowed";
 /// mount's source the job's user cannot reach. The host's state: another host or a later
 /// try may succeed.
 pub const INPUT_UNAVAILABLE: &str = "input-unavailable";
+/// As the detail of a `failed_to_start` result: the node-local provider of a layer or a
+/// mount refused its ref (it answered `INVALID_ARGUMENT` or `FAILED_PRECONDITION` to
+/// `Prepare` or `Mount`), so the tree will never be made from it. The client's to fix:
+/// another host's provider reads the same ref.
+pub const PROVIDER_REFUSED: &str = "provider-refused";
 /// As the detail of a `failed_to_start` result: a start with `layers` on an agent whose
 /// runtime has no root to replace (the macOS native runtime). Nothing was created.
 pub const ROOTFS_UNSUPPORTED_HERE: &str = "rootfs-unsupported-here";
