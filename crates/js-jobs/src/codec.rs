@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_state::StoreTime;
-use js_types::{HostId, ImageDigestRef, Labels, RESERVED_PREFIX, ReservedKey, Resources};
+use js_types::{HostId, ImageDigestRef, Resources};
 
 use crate::error::JobStoreError;
 use crate::ids::{AllocationId, ClientName, JobId};
@@ -42,6 +42,7 @@ use crate::record::{
 
 mod file_fields;
 mod host_fields;
+mod label_fields;
 mod mark_fields;
 mod queue_fields;
 mod result_fields;
@@ -685,36 +686,6 @@ fn host_ports_of(tag: u16, value: Vec<u8>) -> Result<Vec<u16>, DecodeError> {
         .ok_or(DecodeError::BadValue { tag })
 }
 
-/// The reserved label keys a row may hold.
-const RESERVED: [ReservedKey; 5] = [
-    ReservedKey::Tenant,
-    ReservedKey::Run,
-    ReservedKey::ValidationRun,
-    ReservedKey::Definition,
-    ReservedKey::Instance,
-];
-
-/// A label set as a row holds it: the caller's labels, and the reserved ones the scheduler
-/// set, each checked as when it was first made. A reserved key this build does not know is
-/// one a later build sets: the row is [`DecodeError::Newer`], as for an enum value.
-fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError> {
-    let bad = DecodeError::BadValue { tag };
-    let (reserved, caller): (BTreeMap<String, String>, BTreeMap<String, String>) =
-        text_map_of(tag, value)?
-            .into_iter()
-            .partition(|(key, _)| key.starts_with(RESERVED_PREFIX));
-    let labels = Labels::from_caller(&caller).map_err(|_| bad)?;
-    reserved
-        .into_iter()
-        .try_fold(labels, |labels, (key, value)| {
-            let known = RESERVED
-                .into_iter()
-                .find(|reserved| reserved.key() == key)
-                .ok_or(DecodeError::Newer)?;
-            labels.with_reserved(known, &value).map_err(|_| bad)
-        })
-}
-
 fn job_id_of(tag: u16, value: Vec<u8>) -> Result<JobId, DecodeError> {
     JobId::parse(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
 }
@@ -877,12 +848,27 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let network = fields.opt(t::NETWORK, network_of)?.unwrap_or_default();
     let ports = fields.opt(t::PORTS, ports_of)?.unwrap_or_default();
     let files = file_fields::take_files(fields)?;
-    let labels = fields.opt(t::LABELS, labels_of)?.unwrap_or_default();
+    let labels = fields
+        .opt(t::LABELS, label_fields::labels_of)?
+        .unwrap_or_default();
     let (layers, mounts, host_ports, outputs) = rootfs_fields::take_spec(fields)?;
-    #[rustfmt::skip]
-    let spec = JobSpec { image, command, args, env, needs, constraints, wall_limit_secs, network,
-        ports, files, labels, layers, mounts, host_ports, outputs };
-    Ok(spec)
+    Ok(JobSpec {
+        image,
+        command,
+        args,
+        env,
+        needs,
+        constraints,
+        wall_limit_secs,
+        network,
+        ports,
+        files,
+        labels,
+        layers,
+        mounts,
+        host_ports,
+        outputs,
+    })
 }
 
 /// The job a row holds.

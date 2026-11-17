@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
-use js_types::ExecMode;
+use js_types::{ExecMode, Labels, ReservedKey};
 use proptest::collection::{btree_map, vec};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
