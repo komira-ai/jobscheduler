@@ -65,6 +65,9 @@ mod devices;
 mod gc;
 pub(crate) mod hardening;
 pub mod helper;
+mod held;
+#[cfg(test)]
+mod held_tests;
 mod host_spec;
 pub mod image;
 pub mod init;
@@ -105,6 +108,7 @@ use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
 pub use crun::{EnvScrub, JobDrop, RunEnd};
 pub use gc::GcReport;
+pub use held::{HandError, hand_job, job_bytes, job_pipe};
 pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 pub use supervise::{

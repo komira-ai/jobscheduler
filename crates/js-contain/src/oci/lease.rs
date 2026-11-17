@@ -169,7 +169,11 @@ impl Oci {
     /// its root is the host's `/`) and the [`HOST_LEASE_MARKER`](super::HOST_LEASE_MARKER),
     /// and only in a lease directory that is the daemon's own: `crun` then runs as the daemon
     /// for it ([`Oci::lease_user`]).
-    async fn write_bundle(&self, spec: &ContainerSpec, wired: bool) -> Result<(), JobError> {
+    async fn write_bundle(
+        &self,
+        spec: &ContainerSpec,
+        (wired, held): (bool, bool),
+    ) -> Result<(), JobError> {
         open_dir(&spec.dir).await?;
         if spec.isolation == Isolation::Host {
             if super::owner_of(&spec.dir, true) != Some(self.own_ids().0) {
@@ -181,7 +185,7 @@ impl Oci {
             }
             let marker = spec.dir.join(super::HOST_LEASE_MARKER);
             write_open(&marker, b"").await?;
-            return self.write_config(spec, Path::new("/"), 0).await;
+            return self.write_config(spec, Path::new("/"), (0, false)).await;
         }
         let etc = spec.dir.join("etc");
         open_dir(&etc).await?;
@@ -193,17 +197,20 @@ impl Oci {
             false => (RESOLV_CONF, 0),
         };
         write_open(&etc.join("resolv.conf"), resolv_conf.as_bytes()).await?;
+        if held {
+            super::held::make_pipe(&spec.dir)?;
+        }
         let rootfs = self.images.rootfs_of(&spec.image_digest);
-        self.write_config(spec, &rootfs, route_wait_secs).await
+        self.write_config(spec, &rootfs, (route_wait_secs, held)).await
     }
 
     /// Writes `bundle/config.json` of `spec` over `rootfs`, the init waiting
-    /// `route_wait_secs` for a route.
+    /// `route_wait_secs` for a route, and for its job when `held`.
     async fn write_config(
         &self,
         spec: &ContainerSpec,
         rootfs: &Path,
-        route_wait_secs: u64,
+        (route_wait_secs, held): (u64, bool),
     ) -> Result<(), JobError> {
         let placement = spec::Placement {
             rootfs,
@@ -213,6 +220,7 @@ impl Oci {
             init: &self.init,
             init_dest: &self.init_dest,
             route_wait_secs,
+            held,
         };
         // A rootless daemon cannot give a job a process limit above its own hard one.
         let mut job = spec.clone();
@@ -291,7 +299,7 @@ impl Oci {
     /// # Errors
     /// A file of the bundle could not be written.
     pub async fn create(&self, spec: &ContainerSpec) -> Result<(), String> {
-        Ok(self.write_bundle(spec, true).await?)
+        Ok(self.write_bundle(spec, (true, false)).await?)
     }
 
     /// Writes the bundle of `spec` for a container with loopback only, whatever the
@@ -302,7 +310,24 @@ impl Oci {
     /// # Errors
     /// A file of the bundle could not be written.
     pub async fn create_loopback(&self, spec: &ContainerSpec) -> Result<(), String> {
-        Ok(self.write_bundle(spec, false).await?)
+        Ok(self.write_bundle(spec, (false, false)).await?)
+    }
+
+    /// Writes the bundle of `spec` for a container made ahead of its job (a warm sandbox),
+    /// with loopback only as [`Oci::create_loopback`] writes it: its init, once started,
+    /// waits for the job on the lease's named pipe ([`job_pipe`](super::job_pipe), made here,
+    /// `0600` and the daemon's: the caller gives it to the job's id in the container,
+    /// [`Owner::Container`], before the start) instead of running `spec.argv`, and the caller
+    /// hands it the job with [`hand_job`](super::hand_job) once it has bound the job's
+    /// directories into the container. A host container is never held.
+    ///
+    /// # Errors
+    /// A file of the bundle or the pipe could not be made, or `spec` is a host container's.
+    pub async fn create_held(&self, spec: &ContainerSpec) -> Result<(), String> {
+        if spec.isolation == Isolation::Host {
+            return Err("a host container is never made ahead of its job".to_owned());
+        }
+        Ok(self.write_bundle(spec, (false, true)).await?)
     }
 
     /// `crun run` on a thread of its own; it ends when the container does. The

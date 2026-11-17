@@ -7,10 +7,19 @@
 //! reap; without this program the job itself was the container's first process and
 //! did not.
 //!
-//! Usage: `js-init [--wait-route <seconds>] [--wait-listen <seconds> <port,...>]
-//! [--end-descendants] -- <program> [argument...]`, the options in that order, with the
-//! working directory and the environment the program is to have.
+//! Usage: `js-init [--wait-job <path>] [--wait-route <seconds>] [--wait-listen <seconds>
+//! <port,...>] [--end-descendants] -- [<program> [argument...]]`, the options in that order,
+//! with the working directory and the environment the program is to have.
 //!
+//! - With `--wait-job` (a container made ahead of its job, a warm sandbox) no program follows
+//!   `--`: the program, its arguments, its working directory and its whole environment are
+//!   read from the named pipe at `<path>` once the host's agent writes them, after it has
+//!   bound the job's directories into the container (`oci::held`, which writes them, says
+//!   the form: `js-job/1`, the directory, the count and the arguments, the count and the
+//!   `NAME=VALUE` variables, each ended by a NUL byte). The open blocks until the agent
+//!   opens the other end; nothing runs before then. A job that is not well formed, or a
+//!   pipe that cannot be read, is the node's failure (exit 126, a line in the report, no
+//!   program started), as is a working directory that cannot be entered.
 //! - With `--wait-route` the program is not started until the container's network namespace
 //!   has a default route (a line of `/proc/net/route` with destination and mask 0 and the
 //!   route up), for at most that many seconds: the host's agent wires the namespace from
@@ -106,6 +115,15 @@ struct Refused {
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut first = args.next();
+    let mut wait_job = None;
+    if first.as_deref() == Some(OsStr::new("--wait-job")) {
+        wait_job = Some(
+            args.next()
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| usage()),
+        );
+        first = args.next();
+    }
     let mut wait_route = None;
     if first.as_deref() == Some(OsStr::new("--wait-route")) {
         wait_route = Some(
@@ -130,13 +148,14 @@ fn main() {
     if end_descendants {
         first = args.next();
     }
-    let (Some(dashes), Some(program)) = (first, args.next()) else {
-        usage();
-    };
-    if dashes != "--" {
+    if first.as_deref() != Some(OsStr::new("--")) {
         usage();
     }
-    let arguments: Vec<OsString> = args.collect();
+    let given: Vec<OsString> = args.collect();
+    // A held init takes its program from the job; any other needs one here.
+    if wait_job.is_some() != given.is_empty() {
+        usage();
+    }
 
     // Nothing but stdin (the report file), stdout and stderr reaches the program: a
     // descriptor the runtime left open is closed before anything else is done.
@@ -168,6 +187,41 @@ fn main() {
         }
     }
 
+    // The job of a held init: read once, before any other wait. Nothing else reaches the
+    // program from here on.
+    let job = match &wait_job {
+        Some(path) => match read_job(Path::new(path)) {
+            Ok(job) => Some(job),
+            Err(why) => {
+                let words = format!("js-init: the job could not be read: {why}");
+                eprintln!("{words}");
+                report(&words);
+                std::process::exit(126);
+            }
+        },
+        None => None,
+    };
+    let (program, arguments, env) = match job {
+        Some(job) => {
+            if let Err(error) = std::env::set_current_dir(&job.cwd) {
+                let words = format!(
+                    "js-init: the working directory {} cannot be entered: {}",
+                    job.cwd.to_string_lossy(),
+                    strip(&error)
+                );
+                eprintln!("{words}");
+                report(&words);
+                std::process::exit(126);
+            }
+            (job.program, job.arguments, Some(job.env))
+        }
+        None => {
+            let mut given = given.into_iter();
+            let program = given.next().unwrap_or_else(|| usage());
+            (program, given.collect(), None)
+        }
+    };
+
     if let Some(secs) = wait_route {
         if !default_route_within(secs) {
             let words =
@@ -188,7 +242,7 @@ fn main() {
         }
     }
 
-    let child = match start(&program, &arguments) {
+    let child = match start(&program, &arguments, env.as_deref()) {
         Ok(child) => child,
         Err(refused) => {
             report(&refused.words);
@@ -298,8 +352,8 @@ fn listens(table: &str, port: u16) -> bool {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: js-init [--wait-route <seconds>] [--wait-listen <seconds> <port,...>] \
-         [--end-descendants] -- <program> [argument...]"
+        "usage: js-init [--wait-job <path>] [--wait-route <seconds>] \
+         [--wait-listen <seconds> <port,...>] [--end-descendants] -- [<program> [argument...]]"
     );
     std::process::exit(2);
 }
@@ -358,11 +412,26 @@ fn children_of(parent: u32) -> Vec<i32> {
         .collect()
 }
 
-/// Starts `program`, with the mask of signals a process starts with.
-fn start(program: &OsStr, arguments: &[OsString]) -> Result<std::process::Child, Refused> {
-    let path = lookup(program)?;
+/// Starts `program`, with the mask of signals a process starts with, and with `env` as
+/// its whole environment when given (a held init's job), this program's own otherwise.
+fn start(
+    program: &OsStr,
+    arguments: &[OsString],
+    env: Option<&[(OsString, OsString)]>,
+) -> Result<std::process::Child, Refused> {
+    let search = match env {
+        Some(env) => env
+            .iter()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, value)| value.clone()),
+        None => std::env::var_os("PATH"),
+    };
+    let path = lookup(program, search.unwrap_or_default())?;
     let mut command = Command::new(path);
     command.arg0(program).args(arguments).stdin(Stdio::null());
+    if let Some(env) = env {
+        command.env_clear().envs(env.iter().map(|(n, v)| (n, v)));
+    }
     // SAFETY: the closure runs between fork and exec and makes two async-signal-safe
     // calls on a local; it allocates nothing.
     unsafe {
@@ -376,12 +445,11 @@ fn start(program: &OsStr, arguments: &[OsString]) -> Result<std::process::Child,
     command.spawn().map_err(|e| refusal(program, &e))
 }
 
-/// What file to run for `program`, as `crun` decides it.
-fn lookup(program: &OsStr) -> Result<PathBuf, Refused> {
+/// What file to run for `program`, as `crun` decides it, on the search path `path`.
+fn lookup(program: &OsStr, path: OsString) -> Result<PathBuf, Refused> {
     if program.as_bytes().contains(&b'/') {
         return Ok(PathBuf::from(program));
     }
-    let path = std::env::var_os("PATH").unwrap_or_default();
     for directory in path.as_bytes().split(|b| *b == b':') {
         let directory = if directory.is_empty() {
             b"."
@@ -446,4 +514,76 @@ fn report(words: &str) {
     let line = format!("{words}\n");
     // SAFETY: the buffer is valid for its length.
     unsafe { write(0, line.as_ptr().cast(), line.len()) };
+}
+
+/// The most bytes of a job a held init reads: the kernel's own bound on a program's
+/// arguments and environment is below it.
+const MAX_JOB_BYTES: u64 = 16 << 20;
+
+/// The first field of a job, which names its form.
+const JOB_FORM: &[u8] = b"js-job/1";
+
+/// What a held init runs: read from its pipe ([`read_job`]).
+struct Job {
+    cwd: OsString,
+    program: OsString,
+    arguments: Vec<OsString>,
+    env: Vec<(OsString, OsString)>,
+}
+
+/// Reads the job from the pipe at `path` (the open waits for the writer) to its end, and
+/// parses it ([`parse_job`]).
+fn read_job(path: &Path) -> Result<Job, String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).map_err(|e| strip(&e))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_JOB_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| strip(&e))?;
+    if bytes.len() as u64 > MAX_JOB_BYTES {
+        return Err(format!("it is longer than {MAX_JOB_BYTES} bytes"));
+    }
+    parse_job(&bytes).ok_or_else(|| "it is not well formed".to_owned())
+}
+
+/// A job's fields: [`JOB_FORM`], the working directory (absolute), the count of arguments
+/// (at least one: the program) and each, the count of variables and each (`NAME=VALUE`, the
+/// name not empty), every field ended by a NUL byte and nothing after the last.
+fn parse_job(bytes: &[u8]) -> Option<Job> {
+    let body = bytes.strip_suffix(&[0])?;
+    let mut fields = body.split(|b| *b == 0);
+    if fields.next()? != JOB_FORM {
+        return None;
+    }
+    let cwd = fields.next().filter(|cwd| cwd.first() == Some(&b'/'))?;
+    let count = |field: Option<&[u8]>| -> Option<usize> {
+        std::str::from_utf8(field?).ok()?.parse().ok()
+    };
+    let argc = count(fields.next()).filter(|argc| *argc > 0)?;
+    let mut argv = Vec::with_capacity(argc);
+    for _ in 0..argc {
+        argv.push(OsStr::from_bytes(fields.next()?).to_owned());
+    }
+    let envc = count(fields.next())?;
+    let mut env = Vec::with_capacity(envc);
+    for _ in 0..envc {
+        let field = fields.next()?;
+        let at = field.iter().position(|b| *b == b'=').filter(|at| *at > 0)?;
+        let (name, value) = (&field[..at], &field[at + 1..]);
+        env.push((
+            OsStr::from_bytes(name).to_owned(),
+            OsStr::from_bytes(value).to_owned(),
+        ));
+    }
+    if fields.next().is_some() {
+        return None;
+    }
+    let mut argv = argv.into_iter();
+    let program = argv.next()?;
+    Some(Job {
+        cwd: OsStr::from_bytes(cwd).to_owned(),
+        program,
+        arguments: argv.collect(),
+        env,
+    })
 }

@@ -30,6 +30,7 @@ fn config_with(spec: &ContainerSpec) -> Result<Value, SpecError> {
         init: Path::new("/scratch/oci-bin/js-init"),
         init_dest: "/dev/js-init",
         route_wait_secs: 0,
+        held: false,
     };
     let config = action_config(spec, &placement)?;
     Ok(serde_json::from_slice(&render(&config).expect("render")).expect("json"))

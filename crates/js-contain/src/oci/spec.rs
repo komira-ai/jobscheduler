@@ -142,7 +142,17 @@ pub(crate) struct Placement<'a> {
     /// Whole seconds the init waits for a default route in the container's network
     /// namespace before it starts the job; 0 for not waiting.
     pub route_wait_secs: u64,
+    /// The container is made ahead of its job (`super::held`): its init waits for the job on
+    /// the lease's pipe, bound at [`JOB_PIPE_DEST`], and the spec's own argv is not run.
+    pub held: bool,
 }
+
+/// The lease's named pipe a held container's init reads its job from (`super::held`).
+pub(crate) const JOB_PIPE: &str = "job";
+
+/// Where a held container's init sees [`JOB_PIPE`]: in its own `/dev`, a `tmpfs` made for
+/// the container, as the init is.
+pub(crate) const JOB_PIPE_DEST: &str = "/dev/js-job";
 
 /// The job's tmpfs at `destination` (`/tmp`, `/var/tmp`, `/run`), of `size_mib`, that holds no program (`noexec`), no set-uid
 /// file and no device node, and that anyone may write to (`mode=1777`). It counts against
@@ -292,6 +302,25 @@ fn init_argv(
     args
 }
 
+/// The `process.args` of a held container: the init waiting for its job on
+/// [`JOB_PIPE_DEST`] (`--wait-job`), then its other waits as [`init_argv`] gives them, and
+/// `--` with no program: the job names it.
+fn held_argv(init_dest: &str, waits: (u64, &[u16])) -> Vec<String> {
+    let mut args = init_argv(init_dest, waits, &[]);
+    args.splice(1..1, ["--wait-job".to_owned(), JOB_PIPE_DEST.to_owned()]);
+    args
+}
+
+/// `mounts` with, for a held container, the lease's [`JOB_PIPE`] bound read-only at
+/// [`JOB_PIPE_DEST`] last (into the container's own `/dev`).
+fn with_job_pipe(mut mounts: Vec<Mount>, spec: &ContainerSpec, held: bool) -> Vec<Mount> {
+    if held {
+        let pipe = spec.dir.join(JOB_PIPE);
+        mounts.push(bind(&pipe, JOB_PIPE_DEST, &["bind", "ro", "nosuid", "noexec", "nodev"]));
+    }
+    mounts
+}
+
 pub(crate) fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
     built(
         PosixRlimitBuilder::default()
@@ -392,11 +421,14 @@ pub(crate) fn action_config(
             .user(built(
                 UserBuilder::default().uid(ACTION_ID).gid(ACTION_ID).build(),
             ))
-            .args(init_argv(
-                placement.init_dest,
-                (placement.route_wait_secs, &spec.listen_ports),
-                &spec.argv,
-            ))
+            .args(match placement.held {
+                true => held_argv(placement.init_dest, (placement.route_wait_secs, &spec.listen_ports)),
+                false => init_argv(
+                    placement.init_dest,
+                    (placement.route_wait_secs, &spec.listen_ports),
+                    &spec.argv,
+                ),
+            })
             .env(environment(&spec.env))
             .cwd(PathBuf::from(cwd))
             .capabilities(capabilities)
@@ -449,7 +481,11 @@ pub(crate) fn action_config(
             .root(root)
             .hostname(HOSTNAME)
             .process(process)
-            .mounts(mounts(spec, placement.init, placement.init_dest))
+            .mounts(with_job_pipe(
+                mounts(spec, placement.init, placement.init_dest),
+                spec,
+                placement.held,
+            ))
             .linux(linux)
             .build(),
     ))
@@ -504,6 +540,7 @@ mod tests {
             init: Path::new("/scratch/oci-bin/js-init"),
             init_dest: "/dev/js-init",
             route_wait_secs: 0,
+            held: false,
         };
         let config = action_config(spec, &placement).expect("config");
         serde_json::from_slice(&render(&config).expect("render")).expect("json")
@@ -544,6 +581,7 @@ mod tests {
                 init: Path::new("/scratch/oci-bin/js-init"),
                 init_dest: "/dev/js-init",
                 route_wait_secs: 0,
+                held: false,
             };
             render(&action_config(&spec(), &placement).expect("config")).expect("render")
         };
@@ -594,6 +632,7 @@ mod tests {
             init: Path::new("/scratch/oci-bin/js-init"),
             init_dest,
             route_wait_secs: 0,
+            held: false,
         };
         let config = action_config(spec, &placement)?;
         Ok(serde_json::from_slice(&render(&config).expect("render")).expect("json"))

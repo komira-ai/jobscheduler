@@ -40,6 +40,7 @@ fn config_with(spec: &ContainerSpec) -> Result<Value, SpecError> {
         init: Path::new("/scratch/oci-bin/js-init"),
         init_dest: "/dev/js-init",
         route_wait_secs: 7,
+        held: false,
     };
     let config = action_config(spec, &placement)?;
     Ok(serde_json::from_slice(&render(&config).expect("render")).expect("json"))
@@ -252,6 +253,7 @@ fn a_host_containers_exec_root_and_init_must_be_normalized() {
         init: Path::new("oci-bin/js-init"),
         init_dest: "/dev/js-init",
         route_wait_secs: 0,
+        held: false,
     };
     let why = action_config(&host(), &placement).expect_err("relative init");
     assert!(why.to_string().starts_with("init path "), "{why}");
