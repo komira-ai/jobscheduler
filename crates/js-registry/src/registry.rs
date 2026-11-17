@@ -8,7 +8,7 @@ use js_types::sched::usage::NodeLoad;
 use js_types::{Clock, Timestamp};
 use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, Shape};
 
-use crate::config::{PoolConfig, quota_default};
+use crate::config::{ConfigError, PoolConfig, quota_default};
 use crate::credential::{Binding, Credential};
 use crate::load;
 use crate::refusal::{Refusal, ShapeFault};
@@ -145,16 +145,19 @@ struct State {
 impl State {
     /// Forgets every host that has been lost for longer than the retention and that `held`
     /// says holds no work, binding included, and answers which. A host `held` says holds work
-    /// stays however long it is silent.
+    /// stays however long it is silent. `timing` is the grace and the retention of the pool
+    /// a record is in.
     fn forget_lost(
         &mut self,
-        (now, grace_ms, retention_ms): (Timestamp, u64, u64),
+        now: Timestamp,
+        timing: &dyn Fn(&Record) -> (u64, u64),
         held: &dyn Fn(&HostId) -> bool,
     ) -> Vec<HostId> {
         let lost = self
             .records
             .iter()
             .filter(|(id, record)| {
+                let (grace_ms, retention_ms) = timing(record);
                 record.out_of_retention(now, grace_ms, retention_ms) && !held(id)
             })
             .map(|(id, _)| id.clone())
@@ -169,7 +172,11 @@ impl State {
 }
 
 struct Shared {
-    config: PoolConfig,
+    /// The first pool: the one [`Registry::pool_id`] and [`Registry::whole_node`] name, and
+    /// the one a host put back after a restart is counted in until it says hello.
+    first: PoolConfig,
+    /// The pools after the first, in the order they were given ([`Registry::with_pools`]).
+    more: Vec<PoolConfig>,
     clock: Arc<dyn Clock + Send + Sync>,
     sessions: Box<dyn SessionSource>,
     state: Mutex<State>,
@@ -178,7 +185,14 @@ struct Shared {
     placer: Arc<dyn crate::Placer>,
 }
 
-/// The hosts of one pool that registered themselves.
+/// The hosts of one pool, or of a few, that registered themselves.
+///
+/// A registry serves one pool ([`Registry::new`]) or several ([`Registry::with_pools`]),
+/// each with its own name, shape, execution mode, machine limit and timing. A hello names
+/// its pool and is checked against that pool alone; the host stays in it until it is
+/// forgotten, and a hello for its id in another pool is refused (`host-listed`). Everything
+/// else (the bindings, the views, the marks, the cordons and the taints) is over the hosts
+/// of every pool, keyed by host id, so a host id is one host in one pool.
 ///
 /// A handle: clones share one registry. The transport calls [`Registry::hello`] and
 /// [`Registry::heartbeat`] from the agent's requests. Every call takes the one
@@ -233,6 +247,44 @@ impl Registry {
         sessions: impl SessionSource + 'static,
         placer: Arc<dyn crate::Placer>,
     ) -> Self {
+        Self::build(
+            (config, Vec::new()),
+            Arc::new(clock),
+            Box::new(sessions),
+            placer,
+        )
+    }
+
+    /// As [`Registry::with_sessions`], serving the pool `first` and the pools `more`
+    /// beside it: a hello is admitted into the pool it names. `first` is the pool
+    /// [`Registry::pool_id`] and [`Registry::whole_node`] answer for.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::PoolNamedTwice`] when two of the pools have one name: a hello could
+    /// not say which it joins.
+    pub fn with_pools(
+        (first, more): (PoolConfig, Vec<PoolConfig>),
+        clock: impl Clock + Send + Sync + 'static,
+        sessions: impl SessionSource + 'static,
+        placer: Arc<dyn crate::Placer>,
+    ) -> Result<Self, ConfigError> {
+        let mut names = BTreeSet::new();
+        for pool in std::iter::once(&first).chain(&more) {
+            if !names.insert(pool.name().clone()) {
+                return Err(ConfigError::PoolNamedTwice(pool.name().to_string()));
+            }
+        }
+        let (clock, sessions) = (Arc::new(clock), Box::new(sessions));
+        Ok(Self::build((first, more), clock, sessions, placer))
+    }
+
+    fn build(
+        (first, more): (PoolConfig, Vec<PoolConfig>),
+        clock: Arc<dyn Clock + Send + Sync>,
+        sessions: Box<dyn SessionSource>,
+        placer: Arc<dyn crate::Placer>,
+    ) -> Self {
         let state = State {
             book: HostBook::new(),
             records: BTreeMap::new(),
@@ -241,9 +293,10 @@ impl Registry {
         };
         Self {
             shared: Arc::new(Shared {
-                config,
-                clock: Arc::new(clock),
-                sessions: Box::new(sessions),
+                first,
+                more,
+                clock,
+                sessions,
                 state: Mutex::new(state),
                 placer,
             }),
@@ -254,21 +307,39 @@ impl Registry {
         self.lock_at(self.shared.clock.now())
     }
 
-    /// The name of the pool this registry serves: the provider the bindings of the machines
-    /// launched for it name.
+    /// The name of the pool this registry serves (the first, when it serves several): the
+    /// provider the bindings of the machines launched for it name.
     pub fn pool_id(&self) -> ProviderId {
-        self.shared.config.name().clone()
+        self.shared.first.name().clone()
     }
 
-    /// The whole-node settings of the pool this registry serves, when it has them: the one
-    /// source of the prepare timeout and the other whole-node figures for everything that
-    /// counts them (the job engine, the scaler).
+    /// The whole-node settings of the pool this registry serves (the first, when it serves
+    /// several), when it has them: the one source of the prepare timeout and the other
+    /// whole-node figures for everything that counts them (the job engine, the scaler).
     pub fn whole_node(&self) -> Option<&crate::WholeNodeConfig> {
-        self.shared.config.whole_node()
+        self.shared.first.whole_node()
     }
 
-    fn grace_ms(&self) -> u64 {
-        self.shared.config.grace_ms()
+    /// The pool at `index`: 0 is the first, 1 the first of the others, and so on. An index
+    /// past the end is the first pool, which no record holds.
+    fn pool_at(&self, index: usize) -> &PoolConfig {
+        let more = index.checked_sub(1).and_then(|at| self.shared.more.get(at));
+        more.unwrap_or(&self.shared.first)
+    }
+
+    /// The pool `record` is in: the one its last hello joined, or the first for a host put
+    /// back after a restart that has not said hello since.
+    fn pool_of(&self, record: &Record) -> &PoolConfig {
+        self.pool_at(record.pool.unwrap_or(0))
+    }
+
+    /// The index of the pool named `name`, if the registry serves one of that name.
+    fn pool_named(&self, name: &str) -> Option<usize> {
+        let pools = std::iter::once(&self.shared.first).chain(&self.shared.more);
+        pools
+            .enumerate()
+            .find(|(_, pool)| pool.name().as_str() == name)
+            .map(|(index, _)| index)
     }
 
     /// Admits a host, or says why not. `credential` is what the transport authenticated
@@ -276,13 +347,15 @@ impl Registry {
     ///
     /// The hello is checked as the wire rules say first ([`Hello::negotiate`] and
     /// [`Hello::validate`], which include the reserved label prefix), then in this
-    /// order: the pool is this one; the host id is not reserved to another source
-    /// ([`Registry::reserve`]); the host id is not bound to another credential, nor
+    /// order: the pool is one this registry serves, and every later check is that pool's;
+    /// the host id is not reserved to another source ([`Registry::reserve`]) and is not
+    /// a host of another of the registry's pools (both `host-listed`); the host id is not bound to another credential, nor
     /// to another instance when its binding names one; the host id is not live; when
     /// the pool declares an execution mode ([`PoolConfig::with_exec`]), the host meets its
     /// contract ([`Refusal::HostContract`] and [`Refusal::ExecutionMismatch`] name the
     /// capability at fault); the shape claimed offers at least the pool's shape; the pool has room for a host it
-    /// does not know (hosts forgotten after the lost-host retention do not count); a
+    /// does not know (its own hosts only; hosts forgotten after the lost-host retention do
+    /// not count); a
     /// session secret can be made. A
     /// refused hello creates and changes nothing. An admitted one starts a new session:
     /// the epoch is one more than the host's last, the host is live, and the id is bound
@@ -320,16 +393,19 @@ impl Registry {
         let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
         let protocol = hello.negotiate().map_err(Refusal::Invalid)?;
         hello.validate().map_err(Refusal::Invalid)?;
-        let config = &self.shared.config;
-        if hello.pool != config.name().as_str() {
-            return Err(Refusal::UnknownPool);
-        }
+        let pool = self.pool_named(&hello.pool).ok_or(Refusal::UnknownPool)?;
+        let config = self.pool_at(pool);
         let now = self.shared.clock.now();
         let mut state = self.lock_at(now);
         if state.reserved.contains(&host) {
             return Err(Refusal::HostListed);
         }
         let known = state.records.get(&host);
+        // A host put back after a restart is in no pool until it says hello: its binding
+        // says who may.
+        if known.is_some_and(|record| record.pool.is_some_and(|held| held != pool)) {
+            return Err(Refusal::HostListed);
+        }
         let kept_binding = known.and_then(|record| record.binding.clone());
         let kept_taint = known.and_then(|record| record.taint.clone());
         let kept_cordon = known.and_then(|record| record.cordon);
@@ -345,8 +421,9 @@ impl Registry {
         if bound_elsewhere {
             return Err(Refusal::HostBound);
         }
-        let live =
-            known.is_some_and(|record| record.state(now, self.grace_ms()) == HostState::Live);
+        let live = known.is_some_and(|record| {
+            record.state(now, self.pool_of(record).grace_ms()) == HostState::Live
+        });
         if live {
             return Err(Refusal::HostLive);
         }
@@ -383,7 +460,12 @@ impl Registry {
         {
             return Err(Refusal::ShapeNotAccepted(ShapeFault::QuotaWithoutPoolDisk));
         }
-        let room = state.records.len() < config.max_machines();
+        let held = state.records.values();
+        // A host put back after a restart counts as the first pool's, as it is listed.
+        let in_pool = held
+            .filter(|record| record.pool.unwrap_or(0) == pool)
+            .count();
+        let room = in_pool < config.max_machines();
         if ![prior_epoch.is_some(), room].into_iter().any(|ok| ok) {
             return Err(Refusal::PoolFull);
         }
@@ -399,6 +481,7 @@ impl Registry {
         state.records.insert(
             host.clone(),
             Record {
+                pool: Some(pool),
                 binding: Some(
                     kept_binding
                         .unwrap_or_else(|| Binding::new(credential.clone(), instance.cloned())),
@@ -549,7 +632,10 @@ impl Registry {
     /// awaiting host, bound as it was, tainted or cordoned as it was, that counts toward the
     /// pool's limit and is not forgotten for being silent. A host the registry already knows
     /// is left as it is. `binding` is what [`Registry::bindings`] returned for it; one that
-    /// carries no taint and no cordon that is still in force is ignored.
+    /// carries no taint and no cordon that is still in force is ignored. The host is in no
+    /// pool until it says hello (a binding does not name one): it is listed and timed as
+    /// the first pool's, which matters little, as an awaiting host takes no job, and its
+    /// hello may join any pool its binding's credential is let into.
     pub fn restore_tainted(&self, host: &HostId, binding: Binding) {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
@@ -563,7 +649,7 @@ impl Registry {
         if !kept || records.contains_key(host) {
             return;
         }
-        self.shared.config.list_in(book, host.clone());
+        self.shared.first.list_in(book, host.clone());
         records.insert(host.clone(), Record::awaiting(Some(binding), now));
     }
 

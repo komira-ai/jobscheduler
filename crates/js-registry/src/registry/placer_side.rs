@@ -8,6 +8,7 @@ use js_types::Timestamp;
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, Shape};
 
+use super::record::Record;
 use super::{Registry, State};
 use crate::Placer;
 
@@ -26,11 +27,13 @@ impl Registry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let config = &self.shared.config;
         let placer = self.placer();
         let held = |host: &HostId| placer.holds_work_on(host);
-        let timing = (now, config.grace_ms(), config.lost_retention_ms());
-        let forgotten = state.forget_lost(timing, &held);
+        let timing = |record: &Record| {
+            let pool = self.pool_of(record);
+            (pool.grace_ms(), pool.lost_retention_ms())
+        };
+        let forgotten = state.forget_lost(now, &timing, &held);
         forgotten.iter().for_each(|host| self.tell_gone(host));
         state
     }

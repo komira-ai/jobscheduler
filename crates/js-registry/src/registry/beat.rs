@@ -183,14 +183,13 @@ impl Registry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let config = &self.shared.config;
         // As the housekeeping, a host its placer holds work on is kept however long silent.
         let placer = self.placer();
         let held = |host: &HostId| placer.holds_work_on(host);
-        let kept = state
-            .records
-            .get(&host)
-            .filter(|record| !forgotten(&state.book, (&host, *record), now, config) || held(&host));
+        let kept = state.records.get(&host).filter(|record| {
+            let config = self.pool_of(record);
+            !forgotten(&state.book, (&host, *record), now, config) || held(&host)
+        });
         let record = admitted(kept, heartbeat, credential)?;
         let cleared = clears(record, heartbeat);
         let taint = match (record.taint.is_some(), cleared) {

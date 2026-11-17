@@ -155,23 +155,28 @@ async fn the_shared_pool_token_still_admits_hosts() {
     assert_eq!(client.status, 401, "{}", client.body);
 }
 
-/// Asserts that a joined pool counts as a pool that registers agents: beside another joined
-/// pool or an elastic pool the file is valid, and the server refuses to start on it, naming
-/// the later pool. It catches two registries built from one file.
+/// Asserts that joined pools register agents together: a second joined pool that is not
+/// whole-node loads beside the first; one of class `whole-node` is refused naming it, as the
+/// server's whole-node settings are the first pool's; an elastic pool beside a joined one is
+/// valid and the server refuses to start on it, naming the later pool. It catches a second
+/// joined pool refused, and an elastic pool's scaler given another pool's hosts.
 #[test]
-fn two_registering_pools_are_refused() {
+fn joined_pools_load_together_and_an_elastic_pool_beside_one_is_refused() {
     let scratch = Scratch::new("joined_two");
     let server = server_with_agents(&scratch);
-    let message = "pool \"second\": several pools register agents; this version runs one, as the server keeps one registry of agents";
-    let second = PoolText::joined("second");
+    let second = PoolText::joined("second").set("class", &quote("mac-host"));
+    assert!(load(&scratch, &file(&server, &[&joined(), &second])).is_ok());
+    let third = PoolText::joined("third").set("class", &quote("mac-host"));
+    assert!(load(&scratch, &file(&server, &[&joined(), &second, &third])).is_ok());
+    let whole = PoolText::joined("second");
     assert_eq!(
-        refusal(&scratch, &file(&server, &[&joined(), &second])),
-        message
+        refusal(&scratch, &file(&server, &[&joined(), &whole])),
+        "pool \"second\": whole-node settings are the first pool's alone: give this pool a class that is not whole-node, and no whole-node keys"
     );
     let elastic = PoolText::elastic(&scratch).set("name", &quote("second"));
     assert_eq!(
         refusal(&scratch, &file(&server, &[&joined(), &elastic])),
-        message
+        "pool \"second\": an elastic pool is served alone; this version runs several pools only when every one is joined"
     );
     assert!(load(&scratch, &file(&server, &[&joined()])).is_ok());
 }
