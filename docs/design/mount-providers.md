@@ -121,7 +121,7 @@ syntax = "proto3";
 
 package jobscheduler.provider.v1;
 
-import "jobscheduler/v1/job.proto";
+// The file imports nothing, so a provider builds it alone.
 
 service MountProvider {
   // Begins making the source's tree, and answers within 10 s; the work goes on after.
@@ -148,8 +148,16 @@ message PrepareRequest {
   Source source = 1;
   // The job's ProviderSource.ref, as the client wrote it: 1 to 1024 bytes of UTF-8.
   string ref = 2;
-  // How the job mounts the tree: READ_ONLY, READ_WRITE or COPY_ON_WRITE, never unspecified.
-  jobscheduler.v1.MountMode mode = 3;
+  // How the job mounts the tree, never unspecified.
+  MountMode mode = 3;
+}
+
+// jobscheduler.v1.MountMode, number for number.
+enum MountMode {
+  MOUNT_MODE_UNSPECIFIED = 0;
+  MOUNT_MODE_READ_ONLY = 1;
+  MOUNT_MODE_READ_WRITE = 2;
+  MOUNT_MODE_COPY_ON_WRITE = 3;
 }
 message PrepareResponse {}
 
@@ -284,7 +292,7 @@ job-rootfs.md section 9).
 - **The tree's manifest is one object kbf writes before it submits.** kbf resolves the action's input root itself, as
   it does today, and writes the tree's flat list of files as **one object in tierstore, over S3**: for each file, its
   path in the tree, the key of the object that holds its bytes (a pack), its offset and size there, and its mode, with
-  an optional SHA-256 only to verify the bytes. The object is named by the hash of its content and written
+  the SHA-256 of every file that is not empty, which tierstore verifies as each span fills. The object is named by the hash of its content and written
   create-only, so a retry or another build with the same inputs finds it written and writes nothing. Its format is a
   plain, documented tierstore format, a list of files; tierstore reads no build digest and walks no tree of manifests.
 - **The ref is that object's key.** The job's layer is `{provider: "tierstore", ref: <the manifest object's key>}`.
