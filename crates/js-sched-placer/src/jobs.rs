@@ -759,6 +759,7 @@ impl SchedPlacer {
             let capacity = capacity_of(hosts, &host);
             match jobs.place_claimed(&job, &host, booked, &placement, capacity) {
                 Ok((record, _)) => {
+                    self.log_sized(&record, &host, now);
                     told(&record, &host, (starts, metrics));
                     placed.push(job);
                 }

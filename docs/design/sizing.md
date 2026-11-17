@@ -110,3 +110,39 @@ A failed read at the start is logged and every class starts cold. Each job's usa
 used beside what it booked, and is kept under the name of the job's class as its `profile`: the `size-class` label as it is, else
 `run-` and the 16 hex digits of the class's shape. The name is what the job builds (for example `kbf.cargo-test.kbf-server`), the
 same for every run of it and never its job id or image digest, so the rows of one build read side by side.
+
+## 7.8 The fallback class
+**Why.** A build farm's remote cache answers every action whose inputs did not change, so an action runs again only when its
+inputs change, and a build target gathers runs slowly. On one farm, in thirty minutes of work, every job that booked nothing was
+booked the cold size, across 753 classes most of which were new targets: per-target history alone rarely reaches an estimate.
+The work of one kind (a Mojo compile, a `zig cc`, a `cargo test`, a genrule) is far more alike across targets than the cold size
+assumes, and each kind runs many times a minute.
+
+**What.** A job may name a second class in its label `size-fallback` (`js_types::SIZE_FALLBACK_LABEL`, a value like any
+`size-class`): the class whose history sizes it while its own class has too few runs. A build farm sends the target as
+`size-class` and the action's kind as `size-fallback`.
+
+- The fallback class is keyed exactly as a `size-class` of that name is (the same client, platform and basis), so a job whose
+  `size-class` is `zig-cc` and one whose `size-fallback` is `zig-cc` read and teach one history.
+- Every run a job teaches is taught to its own class and to its fallback class (once, when they are the same class). The kind
+  therefore learns from every target of the kind, and each target from its own runs, so the target takes over as its runs come.
+- **Booking.** When the fallback class has an estimate and the job's own class has fewer than five runs (the estimator's
+  `N_MIN`), the fallback's estimate takes the place of the cold size for that job: its memory is the booking the job's own class
+  may only rise from (its runs, its kill floor and its raise-only window still raise it, exactly as they raise the cold size
+  today), and its CPU is booked unless the job's own class has a CPU sample. With five runs of its own, a class is sized from
+  them alone, as before this section. A fallback class with no estimate (missing, too few runs, stale, or one that reaches the
+  host) is no fallback: the job is booked as if it named none, the cold size included. A job whose own class reaches the host
+  still books the whole of the largest host.
+- The kill floor of the job's own class still applies on every path (raise-only floor semantics are kept); the fallback's own
+  floor is part of the fallback's estimate.
+- The fallback's estimate is the estimator's: the largest recent peak of the kind (the statistic is the maximum, not a
+  percentile), and a kind whose recent peaks are mixed (the largest over four times the median) gives the cold memory. A kind
+  whose targets differ widely therefore books no less than the cold size, and a kind whose targets are alike books what they use.
+  The CPU of a kind, like any class's, is learned from runs capped at their bookings, so it never exceeds what its runs were
+  given (7.7).
+- **Measuring.** Each placement of a job that booked nothing is logged with what sized it: `class` (its own class's estimate),
+  `fallback` (its fallback class's estimate), `cold` (the cold size) or `over-cap` (the whole of the largest host's memory). The
+  share of each over a window of farm work is how this section is judged.
+
+The label is optional and additive: a job without it is sized as before, and a server that predates it ignores it (a label is
+opaque to it), so a client may send it to any server.

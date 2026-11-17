@@ -28,6 +28,13 @@ use crate::labels::MAX_VALUE_LEN;
 /// command shares one.
 pub const SIZE_CLASS_LABEL: &str = "size-class";
 
+/// The label whose value names a job's fallback class (`size-fallback`): a class, written as a
+/// [`SIZE_CLASS_LABEL`] value is, whose history sizes the job while its own class has too few
+/// runs, such as the kind of build step (`zig-cc`, `cargo-test`) a target's action is. The
+/// fallback class is the class of that name: a job whose `size-class` is `zig-cc` and one whose
+/// `size-fallback` is `zig-cc` read and teach one history (`docs/design/sizing.md`, 7.8).
+pub const SIZE_FALLBACK_LABEL: &str = "size-fallback";
+
 /// The bytes a long name keeps: a label value's 63, less `-` and 16 hex digits.
 const KEPT_LEN: usize = MAX_VALUE_LEN - 17;
 

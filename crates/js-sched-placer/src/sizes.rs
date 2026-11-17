@@ -33,6 +33,17 @@
 //! - **Too large.** A class whose estimate reaches the most bookable memory a host has
 //!   ([`js_sizing::Fallback::OverCap`]) books all of that memory, and the cold CPU: it waits
 //!   for a host with nothing else on it.
+//! - **Fallback.** A job may name a second class in its label [`SIZE_FALLBACK_LABEL`] (a
+//!   build farm names the kind of step, where its `size-class` names the target). While the
+//!   job's own class has fewer than [`js_sizing::N_MIN`] runs and the fallback class has an
+//!   estimate, that estimate takes the place of the cold size: its memory is what the class's
+//!   memory may only rise from (the class's runs and kill floor still raise it), and its CPU is
+//!   booked unless the class has a CPU sample of its own. A fallback class with no estimate
+//!   (or one that reaches the host) is no fallback. The fallback class is the class of that
+//!   name, under the same client and platform (`docs/design/sizing.md`, section 7.8).
+//!
+//! [`JobSizes::sized_from`] says which of these sized a job, and each placement of a job the
+//! history sized is logged with it.
 //!
 //! A dimension the job names is booked as named, and the history never changes it. The size is
 //! decided at each pass, not stored on the job: the job's own needs stay as submitted, so a
@@ -50,7 +61,8 @@
 //! [`JobSizes::observe`] feeds each one that ended with a result, with what its allocation
 //! booked. At a server's start, [`JobSizes::observe`] is fed every ended job the job store
 //! still holds, in the order they ended ([`crate::place::SchedPlacer::learn_ended`]): the job
-//! records are the history, and nothing else is stored.
+//! records are the history, and nothing else is stored. A run is taught to the job's class
+//! and, when the job names one, to its fallback class (once, when the two are one class).
 //!
 //! A run is one sample of [`js_sizing::Run`]:
 //!
@@ -75,16 +87,17 @@ use js_jobs::{
     MAX_PAGE, Needs, ResultReason,
 };
 use js_sizing::{
-    Basis, Bounds, Day, Fallback, Hint, Instance, Key, Outcome, PlatformClass, Run, Shape,
-    Summaries,
+    Basis, Bounds, Day, Estimate, Fallback, Hint, Instance, Key, N_MIN, Outcome, PlatformClass,
+    Run, STALE_DAYS, Shape, Summaries, Summary,
 };
+use js_types::HostId;
 use js_types::sched::FarmTime;
 use sha2::{Digest as _, Sha256};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::place::SchedPlacer;
 
-pub use js_types::SIZE_CLASS_LABEL;
+pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
 
 /// The share a cold class books of the most cores and the most bookable memory a host has: a
 /// quarter.
@@ -136,6 +149,33 @@ impl ColdSize {
     }
 }
 
+/// Which history sized a job that books nothing ([`JobSizes::sized_from`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizedFrom {
+    /// Its own class's estimate.
+    Class,
+    /// Its fallback class's estimate, in place of the cold size, raised by its own class's
+    /// runs and floor.
+    Fallback,
+    /// The cold size: neither its class nor a fallback class has an estimate.
+    Cold,
+    /// The whole of the most bookable memory a host has: its class's runs reach it.
+    OverCap,
+}
+
+impl SizedFrom {
+    /// The name a placement's log gives it: `class`, `fallback`, `cold` or `over-cap`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Fallback => "fallback",
+            Self::Cold => "cold",
+            Self::OverCap => "over-cap",
+        }
+    }
+}
+
 /// The history of every class the server has seen, and the job allocations live at the last
 /// pass.
 #[derive(Debug, Default)]
@@ -172,18 +212,17 @@ impl JobSizes {
     /// The estimator's key of `job`'s class.
     #[must_use]
     pub fn key_of(job: &JobRecord) -> Key {
-        let spec = &job.spec;
-        let client = job.client.as_ref().map_or("", |client| client.as_str());
-        let constraints = &spec.constraints;
-        let os = constraints.os.as_deref().unwrap_or("");
-        let arch = constraints.arch.as_deref().unwrap_or("");
-        Key::new(
-            Instance::new(client),
-            PlatformClass::new(format!("{os}/{arch}")),
-            Basis::Cgroup,
-            Shape(class_hash(job)),
-            None,
-        )
+        key_under(job, class_hash(job))
+    }
+
+    /// The estimator's key of `job`'s fallback class, the class named by its label
+    /// [`SIZE_FALLBACK_LABEL`] (keyed as a [`SIZE_CLASS_LABEL`] of that name is, under `job`'s
+    /// client and platform); `None` when it names none, or names its own class.
+    #[must_use]
+    pub fn fallback_key_of(job: &JobRecord) -> Option<Key> {
+        let fallback = job.spec.labels.get(SIZE_FALLBACK_LABEL)?;
+        let key = key_under(job, label_hash(fallback));
+        (key != Self::key_of(job)).then_some(key)
     }
 
     /// The bounds the next sizes and runs are taken against, when `bounds` knows a host (else
@@ -212,7 +251,7 @@ impl JobSizes {
         if (cpu != 0) & (memory != 0) {
             return job.clone();
         }
-        let (sized_cpu, sized_memory) = self.size_of(job, day, bounds);
+        let (sized_cpu, sized_memory, _) = self.size_of(job, day, bounds);
         let cpu = if cpu == 0 { sized_cpu } else { cpu };
         let memory = if memory == 0 { sized_memory } else { memory };
         let mut sized = job.clone();
@@ -224,19 +263,75 @@ impl JobSizes {
         sized
     }
 
-    /// The CPU and memory the history of `job`'s class books on `day`, under `bounds`.
-    fn size_of(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> (u64, u64) {
+    /// What sized `job` on `day` when it leaves its CPU or its memory at zero and a host is
+    /// known (the module docs); `None` for any other job, which [`JobSizes::sized`] leaves as
+    /// it is.
+    #[must_use]
+    pub fn sized_from(&self, job: &JobRecord, day: Day) -> Option<SizedFrom> {
+        let (Needs::Shape(resources), Some(bounds)) = (&job.spec.needs, &self.bounds) else {
+            return None;
+        };
+        let named = (resources.cpu_millis() != 0) & (resources.memory_bytes() != 0);
+        (!named).then(|| self.size_of(job, day, bounds).2)
+    }
+
+    /// The CPU and memory the history of `job`'s class books on `day`, under `bounds`, and
+    /// which history that was: with fewer than [`N_MIN`] fresh runs of its own (a class idle
+    /// over [`STALE_DAYS`] has none) and a fallback class with an estimate, that estimate
+    /// stands where the cold size would.
+    fn size_of(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> (u64, u64, SizedFrom) {
         let key = Self::key_of(job);
-        let cold_cpu = self.cold.cpu(bounds);
-        match self.summaries.estimate(&key, day, bounds, &Hint::default()) {
-            Ok(estimate) => (u64::from(estimate.cpu_millis), estimate.memory_bytes),
-            Err(Fallback::OverCap) => (cold_cpu, bounds.host_memory),
+        let own = self.summaries.get(&key);
+        let fresh = |own: &&Summary| day.0.saturating_sub(own.last_seen().0) <= STALE_DAYS;
+        let settled = own.filter(fresh).is_some_and(|own| own.samples() >= N_MIN);
+        let fallback = self
+            .fallback_estimate(job, day, bounds)
+            .filter(|_| !settled);
+        // What a class with no estimate of its own books, and the name of each path.
+        let (bounds, unlearned_cpu, learned, unlearned) = match fallback {
+            Some(fallback) => {
+                let bounds = Bounds {
+                    default_memory: fallback.memory_bytes,
+                    ..*bounds
+                };
+                let cpu = u64::from(fallback.cpu_millis);
+                (bounds, cpu, SizedFrom::Fallback, SizedFrom::Fallback)
+            }
+            None => (
+                *bounds,
+                self.cold.cpu(bounds),
+                SizedFrom::Class,
+                SizedFrom::Cold,
+            ),
+        };
+        match self
+            .summaries
+            .estimate(&key, day, &bounds, &Hint::default())
+        {
+            Ok(estimate) => {
+                let own_cpu = fallback.is_none() || own.is_some_and(Summary::has_cpu_sample);
+                let cpu = if own_cpu {
+                    u64::from(estimate.cpu_millis)
+                } else {
+                    unlearned_cpu
+                };
+                (cpu, estimate.memory_bytes, learned)
+            }
+            Err(Fallback::OverCap) => (unlearned_cpu, bounds.host_memory, SizedFrom::OverCap),
             // Missing, cold or stale (a summary that does not decode is never stored here).
             Err(_) => {
-                let floor = self.summaries.key_floor(&key, bounds);
-                (cold_cpu, bounds.default_memory.max(floor))
+                let floor = self.summaries.key_floor(&key, &bounds);
+                (unlearned_cpu, bounds.default_memory.max(floor), unlearned)
             }
         }
+    }
+
+    /// The estimate of `job`'s fallback class on `day` under `bounds`; `None` when it names
+    /// none or that class has no estimate (it reaching the host included).
+    fn fallback_estimate(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> Option<Estimate> {
+        let key = Self::fallback_key_of(job)?;
+        let hint = Hint::default();
+        self.summaries.estimate(&key, day, bounds, &hint).ok()
     }
 
     /// The jobs whose allocations were live at the last call and are not in `live` now, each
@@ -259,14 +354,18 @@ impl JobSizes {
         self.live.insert(job.clone(), booked);
     }
 
-    /// Teaches the history of `job`'s class the run of `job`, which ended booked as `booked`,
-    /// on the day `job` ended (held until bounds are known). A job that has not ended, ended
-    /// with no result (lost, failed to start), booked the whole host or never started teaches
-    /// nothing. Answers whether the run was taken.
+    /// Teaches the history of `job`'s class, and of its fallback class when it names one, the
+    /// run of `job`, which ended booked as `booked`, on the day `job` ended (held until bounds
+    /// are known). A job that has not ended, ended with no result (lost, failed to start),
+    /// booked the whole host or never started teaches nothing. Answers whether the run was
+    /// taken.
     pub fn observe(&mut self, job: &JobRecord, booked: Booked) -> bool {
         let Some((run, day)) = run_of(job, booked) else {
             return false;
         };
+        if let Some(fallback) = Self::fallback_key_of(job) {
+            self.pending.push((fallback, run, day));
+        }
         self.pending.push((Self::key_of(job), run, day));
         self.set_bounds(self.bounds);
         true
@@ -355,18 +454,43 @@ pub fn class_name(job: &JobRecord) -> String {
     }
 }
 
+/// The estimator's key of the class whose hash is `hash`, under `job`'s client and platform,
+/// on the cgroup basis.
+fn key_under(job: &JobRecord, hash: u64) -> Key {
+    let client = job.client.as_ref().map_or("", |client| client.as_str());
+    let constraints = &job.spec.constraints;
+    let os = constraints.os.as_deref().unwrap_or("");
+    let arch = constraints.arch.as_deref().unwrap_or("");
+    Key::new(
+        Instance::new(client),
+        PlatformClass::new(format!("{os}/{arch}")),
+        Basis::Cgroup,
+        Shape(hash),
+        None,
+    )
+}
+
 /// The first 8 bytes, big-endian, of the SHA-256 of `job`'s class text: `label`, NUL and its
 /// `size-class` label, else `run`, NUL, its image name, NUL and its command joined by NUL.
 fn class_hash(job: &JobRecord) -> u64 {
     let spec = &job.spec;
-    let class = match spec.labels.get(SIZE_CLASS_LABEL) {
-        Some(class) => format!("label\0{class}"),
+    match spec.labels.get(SIZE_CLASS_LABEL) {
+        Some(class) => label_hash(class),
         None => {
             let image = spec.image.as_ref().map_or("", |image| image.name());
-            format!("run\0{image}\0{}", spec.command.join("\0"))
+            text_hash(&format!("run\0{image}\0{}", spec.command.join("\0")))
         }
-    };
-    let digest = Sha256::digest(class.as_bytes());
+    }
+}
+
+/// The hash of the class named `class` by a label: that of `label`, NUL and `class`.
+fn label_hash(class: &str) -> u64 {
+    text_hash(&format!("label\0{class}"))
+}
+
+/// The first 8 bytes, big-endian, of the SHA-256 of `text`.
+fn text_hash(text: &str) -> u64 {
+    let digest = Sha256::digest(text.as_bytes());
     let mut first = [0u8; 8];
     first.copy_from_slice(&digest[..8]);
     u64::from_be_bytes(first)
@@ -383,6 +507,17 @@ fn micros(duration: Duration) -> u64 {
 }
 
 impl SchedPlacer {
+    /// Logs the placement of `job` on `host` at `now` with what sized it ([`SizedFrom`]), when
+    /// the history sized it: the record of which history books the farm's jobs.
+    pub(crate) fn log_sized(&self, job: &JobRecord, host: &HostId, now: FarmTime) {
+        let from = self.engine().sizes().sized_from(job, day_of(now));
+        if let Some(from) = from {
+            let class = class_name(job);
+            let sized_from = from.as_str();
+            info!(job = %job.id, %host, %class, sized_from, "a job the history sized was placed");
+        }
+    }
+
     /// Teaches the history the jobs whose allocations `live` (the live allocations a pass read)
     /// no longer holds since the last pass: each is read from `jobs` once, and taught what it
     /// ran ([`JobSizes::observe`]). A job the store no longer holds teaches nothing; a read that
