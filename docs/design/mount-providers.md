@@ -10,7 +10,7 @@ inputs (komira-ai/kbf); each of those repositories designs its own half against 
 storage system has to have made it before the job's host looks it up: a client that wants the files local before the
 job runs has to learn the host from a read of the job and call the storage system on that host itself (job-rootfs.md
 7.3), and the job's sandbox is readied while nothing fetches. After this design a job may name a layer or a mount as
-`{provider, ref}`: a provider name and bytes only that provider reads. The agent of the host the job is placed on
+`{provider, ref}`: a provider name and a short name only that provider reads. The agent of the host the job is placed on
 hands the ref to its local provider **as soon as it has the job**, so the provider fetches while the agent pulls the
 image and readies the container; the agent then asks the provider for the directory, mounts it as it mounts a host
 path, and tells the provider when the job has ended. jobscheduler reads nothing of the ref and knows no storage system.
@@ -57,13 +57,10 @@ message ProviderSource {
   // The provider's name, as the hosts' operators name it: 1 to 32 bytes of [a-z0-9-],
   // starting with a letter.
   string provider = 1;
-  // What the provider is asked for; read by the provider alone and passed to it untouched.
-  // At most 16 MiB, and at most 16 MiB for all of a job's refs together.
-  bytes ref = 2;
-  // Set by the server in what it returns, never read from a request: the SHA-256 and the
-  // length of `ref`, which a read of the job returns in place of its bytes.
-  bytes ref_sha256 = 3;
-  uint64 ref_size = 4;
+  // What the provider is asked for: a name the provider alone reads (for tierstore, the key of
+  // an object holding the tree's file list), passed to it untouched. 1 to 1024 bytes of UTF-8,
+  // no control character.
+  string ref = 2;
 }
 
 message Layer { oneof source { string host_path = 1; string image = 2; ProviderSource provider = 3; } }
@@ -72,28 +69,24 @@ message Mount { oneof source { string host_path = 1; /* tmpfs = 2, image = 3 des
 
 A layer is the job's root tree (kbf's input tree is one); a mount is a tree at a path. Both take the same source.
 
-**How big a ref is, and where its bytes go.** A ref is sized to carry a whole tree as a list of its files: for kbf's
-inputs, every file's path, the key of the object its bytes are in, its offset and size there, and its mode (section 8).
-At about 150 bytes a file (inferred: a path of about 60 bytes, a key of about 50, three numbers), 100,000 files are
-about 15 MB, so the cap is **16 MiB per job** (chosen here), for all of its refs together. A client whose list is
-larger stores the list as one object and sends a ref that names it (section 8); jobscheduler does not tell the two
-apart. The bytes never ride a path whose limit is smaller:
+**A ref names; it does not carry.** A provider source has one form: the ref is a short name of something the provider
+reads with its own credentials. For tierstore it is the key of one object holding the tree's flat list of files
+(section 8), which the client wrote before it submitted the job. The tree itself never travels through jobscheduler,
+so a ref is at most 1024 bytes (an object key's own limit, not a limit on the tree), and it rides every path of a job
+spec as any other field does: `SubmitJob` within its 64 KiB request (`js_api_gateway::BODY_LIMIT`), the job's row, the
+reads of the job, the start in a heartbeat reply (1 MiB, `REPLY_BODY_BUDGET`), and the agent's call to the provider.
+An earlier version of this design also let a ref carry the list itself, up to 16 MiB; it is dropped, for three reasons:
+one path to build, test and reason about instead of two; no cap on a tree's size anywhere in jobscheduler (a list of any
+length is one object); and the list's object, named by the hash of its content and written create-only, is written
+once for every retry and every build that has the same inputs, where an inline list would be stored again in every
+job's row.
 
-| Path | Today's limit (read) | With a provider source |
-|---|---|---|
-| `SubmitJob`, gRPC and its HTTP gateway route | 64 KiB a request (`js_api_gateway::BODY_LIMIT`, `job_api/mod.rs`) | `SubmitJob` alone decodes up to 64 KiB plus 16 MiB; every other call keeps 64 KiB |
-| the job's row (`js-jobs`, a `bytea` value of `js-state`), read by every queue load and placement pass | no cap of its own | the row keeps `{provider, ref_sha256, ref_size}`; the bytes go to one row per ref (`refs/<job id>/<index>`), written in the job's transaction and deleted with it |
-| `GetJob`, `ListJobs` | the spec as submitted | `ref` empty, `ref_sha256` and `ref_size` set; a resubmit of the same job id is the same job when every `ref_sha256` matches |
-| the start in a heartbeat reply | 1 MiB a reply (`REPLY_BODY_BUDGET`, `js-agent-wire/src/limits.rs`) | the ref inline when the start's refs total at most 64 KiB; else its digest and size, and the agent reads each ref from `GET /agent/v1/jobs/<job id>/refs/<index>` (a body of up to 16 MiB, for a job started on that host only) and checks its SHA-256 |
-| the agent to the provider | none yet | `Prepare` carries the bytes; the protocol's messages are allowed 16 MiB plus 64 KiB |
+**The ref is not secret.** It is part of the spec: kept in the service's state, returned by every read of the job, and
+it may appear in findings. It names something the provider reads with its own credentials; it never carries one.
 
-**The ref is not secret.** It is kept in the service's state, and its digest is in every read of the job; its bytes
-go only to the agent that runs the job and to that agent's provider. A ref names things the provider reads with its own
-credentials; it never carries one.
-
-**Server.** `js-lease-server` checks the shape (`job_api/rootfs.rs`): the name's grammar and the refs' sizes, by name,
-as `INVALID_ARGUMENT` on the field, as every other shape fault is, and it refuses a request that sets `ref_sha256` or
-`ref_size`. It reads nothing else of the ref. Each provider a
+**Server.** `js-lease-server` checks the shape (`job_api/rootfs.rs`): the name's grammar and the ref's length and
+characters, by name, as `INVALID_ARGUMENT` on the field, as every other shape fault is. It reads nothing else of the
+ref. Each provider a
 job names becomes a required capability of the job, `mount-provider.<name>` = `true`, inserted where
 `layered-rootfs` is today (`job_api/validate.rs`). So the existing checks do the rest: at submit, `can_ever_serve`
 refuses a job no pool can ever serve `NO_CAPABLE_HOST` (the name is not one any pool's hosts or catalogs have); at
@@ -125,7 +118,7 @@ service MountProvider {
   rpc Sweep(SweepRequest) returns (SweepResponse);
 }
 message Source { string agent = 1; string run = 2; uint32 index = 3; }   // run: "js.<run id>"
-message PrepareRequest { Source source = 1; bytes ref = 2; MountMode mode = 3; string host = 4; }
+message PrepareRequest { Source source = 1; string ref = 2; MountMode mode = 3; string host = 4; }
 message PrepareResponse {}
 message MountRequest { Source source = 1; }
 message MountResponse { string path = 1; }            // an absolute host path, a directory
@@ -240,21 +233,21 @@ job-rootfs.md section 9).
 
 ## 8. The first provider and its client
 
-- **The ref is a list of files, never a name to resolve.** kbf resolves the action's input root itself, as it does
-  today, and the ref it sends is the full list of the tree's files: for each, its path in the tree, the key of the
-  object in tierstore that holds its bytes (a pack), its offset and size in that object, and its mode, with an
-  optional SHA-256 only to verify the bytes. tierstore reads no build digest and walks no manifest of any kind. A list
-  over the cap of section 2 is written by kbf as **one plain object** in tierstore, and the ref names that object's key:
-  the object holds the same list of files, read as it is, not a digest tierstore interprets. The list's encoding is
-  agreed by kbf and tierstore; jobscheduler passes it through.
-- **tierstore** (komira-ai/tierstore) ships the provider in its own package, serving the socket: `Prepare` reads the
-  list (from the ref, or from the one object it names), creates the node-local tree from exactly that list, and begins
-  ranged reads of every file's bytes in parallel, one read per span in flight; `Mount` returns the tree's path under
-  tierstore's mount once the tree is placed; `Release` drops the placement. Its design is tierstore's; this document
-  asks only the contract of section 3.
-- **kbf** (komira-ai/kbf) would build that list, send it inline while it fits under the cap and as one object above it,
-  name the tree as the job's one layer, `{provider: "tierstore", ref}`, and no longer call a node itself; its
-  `docs/design/trees-for-action-inputs.md` (a client-side create after a read shows the host) is to be revised to this.
+- **The tree's manifest is one object kbf writes before it submits.** kbf resolves the action's input root itself, as
+  it does today, and writes the tree's flat list of files as **one object in tierstore, over S3**: for each file, its
+  path in the tree, the key of the object that holds its bytes (a pack), its offset and size there, and its mode, with
+  an optional SHA-256 only to verify the bytes. The object is named by the hash of its content and written
+  create-only, so a retry or another build with the same inputs finds it written and writes nothing. Its format is a
+  plain, documented tierstore format, a list of files; tierstore reads no build digest and walks no tree of manifests.
+- **The ref is that object's key.** The job's layer is `{provider: "tierstore", ref: <the manifest object's key>}`.
+- **tierstore** (komira-ai/tierstore) ships the provider in its own package, serving the socket: `Prepare(<key>)`
+  fetches that one object, creates the node-local tree (its mount) from exactly that list, and begins ranged reads of
+  every file's bytes in parallel while the agent readies the container; `Mount` returns the tree's path under
+  tierstore's mount once the tree is placed; `Release` drops it. Its design is tierstore's; this document asks only
+  the contract of section 3.
+- **kbf** (komira-ai/kbf) would write the manifest object, name it as the job's one layer, and no longer call a node
+  itself; its `docs/design/trees-for-action-inputs.md` (a client-side create after a read shows the host) is to be
+  revised to this.
 - **The host group's configuration package** would add `--mount-provider tierstore=<socket>` and the provider's mount
   root.
 
@@ -277,10 +270,9 @@ job-rootfs.md section 9).
 
 ## 10. Build items and tests
 
-1. The spec, the shape checks, the capability prefix in `js-caps`, `SubmitJob`'s own decode limit, the ref rows and
-   their read route, the agent wire's limits, and a provider example in `docs/job-surface.md` (server); tests:
-   `a_ref_of_sixteen_mib_is_accepted_and_one_byte_more_refused`, `a_queue_load_reads_no_ref_bytes`,
-   `a_read_of_the_job_returns_the_refs_digest_not_its_bytes`, `an_agent_reads_a_large_ref_by_its_route_and_checks_it`,
+1. The spec, the shape checks, the capability prefix in `js-caps`, the agent wire's limits, and a provider example in
+   `docs/job-surface.md` (server); tests: `a_ref_of_1024_bytes_is_accepted_and_one_byte_more_refused`,
+   `a_ref_with_a_control_character_is_refused_naming_the_field`,
    `a_provider_source_is_refused_by_an_earlier_server_by_name`,
    `a_job_naming_a_provider_no_pool_has_is_refused_no_capable_host`.
 2. The protocol in `js-proto`, a fake provider in `js-testkit`, and the agent's client and flag; tests:
@@ -309,13 +301,14 @@ Each is decided here; the owner may overturn any.
   backstop.
 - **MP6. The agent writes what it may have to release before it asks for it,** on both platforms, and names a source
   by `(agent, run, index)`, so no release depends on an answer that may have been lost.
+- **MP7. A ref names what the provider reads; it never carries the tree.** One path, no cap on a tree's size in
+  jobscheduler, and a tree's manifest written once, create-only, for every job with the same inputs (section 2).
 
 ## 12. Open questions
 
 - **Q1. A Unix socket served by the provider, or a binary the agent runs per call?** Recommendation: the socket (MP3).
-- **Q2. A ref cap of 16 MiB per job, its bytes kept out of the job's row?** Recommendation: yes. It carries the file
-  list of a tree of about 100,000 files inline; a larger list goes as one object the ref names. Keeping the bytes in
-  rows of their own keeps the queue's loads and the reads of jobs as small as they are today.
+- **Q2. A ref is a name of at most 1024 bytes, never the tree itself?** Recommendation: yes (section 2): one path, no
+  cap on a tree's size, and a manifest written once for every job with the same inputs.
 - **Q3. The provider wait: 120 s, a flag of the agent?** Recommendation: yes, below the 900 s start timeout and above
   a cold create's expected time (to be measured with the first provider).
 - **Q4. macOS in the first build, or after Linux?** Recommendation: after: the native runtime needs its `prepare`
