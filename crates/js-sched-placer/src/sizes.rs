@@ -31,15 +31,18 @@
 //!   also the estimator's default booking: before five runs a class's memory may only rise
 //!   from it.
 //! - **Too large.** A class whose estimate reaches the most bookable memory a host has
-//!   ([`js_sizing::Fallback::OverCap`]) books all of that memory, and the cold CPU: it waits
-//!   for a host with nothing else on it.
+//!   ([`js_sizing::Fallback::OverCap`]) books all of that memory, and the cold CPU (its
+//!   fallback class's CPU when one stands in, below): it waits for a host with nothing else
+//!   on it.
 //! - **Fallback.** A job may name a second class in its label [`SIZE_FALLBACK_LABEL`] (a
 //!   build farm names the kind of step, where its `size-class` names the target). While the
 //!   job's own class has fewer than [`js_sizing::N_MIN`] runs and the fallback class has an
 //!   estimate, that estimate takes the place of the cold size: its memory is what the class's
 //!   memory may only rise from (the class's runs and kill floor still raise it), and its CPU is
-//!   booked unless the class has a CPU sample of its own. A fallback class with no estimate
-//!   (or one that reaches the host) is no fallback. The fallback class is the class of that
+//!   booked unless the class has a CPU sample of its own (the cold CPU while the fallback
+//!   class has none either). A fallback class with no estimate (fewer than two runs and no
+//!   kill floor, idle over 60 days, or one that reaches the host) is no fallback; one with two
+//!   to four runs is, its memory then at least the cold memory. The fallback class is the class of that
 //!   name, under the same client and platform (`docs/design/sizing.md`, section 7.8).
 //!
 //! [`JobSizes::sized_from`] says which of these sized a job, and each placement of a job the
@@ -87,8 +90,8 @@ use js_jobs::{
     MAX_PAGE, Needs, ResultReason,
 };
 use js_sizing::{
-    Basis, Bounds, Day, Estimate, Fallback, Hint, Instance, Key, N_MIN, Outcome, PlatformClass,
-    Run, STALE_DAYS, Shape, Summaries, Summary,
+    Basis, Bounds, Day, Fallback, Hint, Instance, Key, N_MIN, Outcome, PlatformClass, Run,
+    STALE_DAYS, Shape, Summaries, Summary,
 };
 use js_types::HostId;
 use js_types::sched::FarmTime;
@@ -289,12 +292,12 @@ impl JobSizes {
             .filter(|_| !settled);
         // What a class with no estimate of its own books, and the name of each path.
         let (bounds, unlearned_cpu, learned, unlearned) = match fallback {
-            Some(fallback) => {
+            Some((cpu, memory)) => {
                 let bounds = Bounds {
-                    default_memory: fallback.memory_bytes,
+                    default_memory: memory,
                     ..*bounds
                 };
-                let cpu = u64::from(fallback.cpu_millis);
+                let cpu = cpu.unwrap_or_else(|| self.cold.cpu(&bounds));
                 (bounds, cpu, SizedFrom::Fallback, SizedFrom::Fallback)
             }
             None => (
@@ -326,12 +329,25 @@ impl JobSizes {
         }
     }
 
-    /// The estimate of `job`'s fallback class on `day` under `bounds`; `None` when it names
-    /// none or that class has no estimate (it reaching the host included).
-    fn fallback_estimate(&self, job: &JobRecord, day: Day, bounds: &Bounds) -> Option<Estimate> {
+    /// The CPU and memory the estimate of `job`'s fallback class gives on `day` under
+    /// `bounds`, the CPU `None` while that class has no CPU sample (the cold CPU stands, not
+    /// the estimator's unlearned two cores); `None` when it names none or that class has no
+    /// estimate (it reaching the host included).
+    fn fallback_estimate(
+        &self,
+        job: &JobRecord,
+        day: Day,
+        bounds: &Bounds,
+    ) -> Option<(Option<u64>, u64)> {
         let key = Self::fallback_key_of(job)?;
         let hint = Hint::default();
-        self.summaries.estimate(&key, day, bounds, &hint).ok()
+        let estimate = self.summaries.estimate(&key, day, bounds, &hint).ok()?;
+        let sampled = self
+            .summaries
+            .get(&key)
+            .is_some_and(Summary::has_cpu_sample);
+        let cpu = sampled.then_some(u64::from(estimate.cpu_millis));
+        Some((cpu, estimate.memory_bytes))
     }
 
     /// The jobs whose allocations were live at the last call and are not in `live` now, each

@@ -81,7 +81,8 @@ The estimator is `js-sizing` unchanged: memory is `1.2 x` the largest recent pea
 percentile of CPU used per second of wall time rounded up to a quarter core. A class with too few runs books the cold size:
 `server.cold_cpu_millis` and `server.cold_memory_bytes` when the server's file sets them, each one left out a quarter of the most
 cores or of the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows; never more
-than those most, and at least the class's kill floor. A class that has an estimate but no CPU sample yet (its only runs were
+than those most, and at least the class's kill floor. (A class that names a fallback class books that class's estimate in
+place of the cold size: 7.8.) A class that has an estimate but no CPU sample yet (its only runs were
 memory kills) books the estimator's own unlearned CPU, two cores, and not the cold CPU. Before five runs the memory may only rise from the cold memory. A class whose
 estimate reaches the largest host's bookable memory books all of it and waits for an empty host.
 
@@ -130,8 +131,9 @@ assumes, and each kind runs many times a minute.
   `N_MIN`), the fallback's estimate takes the place of the cold size for that job: its memory is the booking the job's own class
   may only rise from (its runs, its kill floor and its raise-only window still raise it, exactly as they raise the cold size
   today), and its CPU is booked unless the job's own class has a CPU sample. With five runs of its own, a class is sized from
-  them alone, as before this section. A fallback class with no estimate (missing, too few runs, stale, or one that reaches the
-  host) is no fallback: the job is booked as if it named none, the cold size included. A job whose own class reaches the host
+  them alone, as before this section. While the fallback class has no CPU sample of its own, the cold CPU stands. A fallback
+  class with no estimate (missing, under two runs with no kill floor, stale, or one that reaches the host) is no fallback; one
+  with two to four runs is, and its memory is then at least the cold memory (the estimator's raise-only rule for few runs): the job is booked as if it named none, the cold size included. A job whose own class reaches the host
   still books the whole of the largest host.
 - The kill floor of the job's own class still applies on every path (raise-only floor semantics are kept); the fallback's own
   floor is part of the fallback's estimate.

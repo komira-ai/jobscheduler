@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_jobs::{ClientName, JobEnd, JobId, JobRecord, JobSpec, NewJob};
+use js_jobs::{ClientName, JobEnd, JobId, JobRecord, JobSpec, Needs, NewJob};
 use js_sizing::Day;
 use js_types::{Labels, ManualClock, Resources, Shape, Timestamp};
 
@@ -417,4 +417,102 @@ fn finish(tables: &Tables, id: &str, peak: u64, cpu: Duration) {
         .jobs
         .end_and_free(&id, end, EndReason::Exited)
         .unwrap();
+}
+
+/// Asserts that a fallback class with an estimate but no CPU sample (its only run a memory
+/// kill) gives its memory and the server's cold CPU (half a core here), not the estimator's
+/// unlearned two cores. Catches a fallback that books more CPU than the job would have booked
+/// cold.
+#[test]
+fn a_fallback_with_no_cpu_sample_gives_the_cold_cpu() {
+    let tables = Tables::new();
+    let killed = JobEnd::Memory {
+        exit_code: None,
+        output: output(2 * GIB, Duration::from_secs(5)),
+    };
+    let oom = ran(
+        &tables,
+        ("k0-run", None),
+        of_kind("k0", KIND, needs(0, 0)),
+        booked(2000, 2 * GIB),
+        killed,
+    );
+    let cold = super::super::ColdSize {
+        cpu_millis: Some(500),
+        memory_bytes: None,
+    };
+    let mut sizes = JobSizes::with_cold(cold);
+    sizes.set_bounds(Some(bounds()));
+    assert!(sizes.observe(&oom, booked(2000, 2 * GIB)));
+    let fresh = step("fresh", "fresh");
+    let (cpu, memory) = size(&sizes, &fresh);
+    assert_eq!(cpu, 500, "the cold CPU");
+    assert!(memory >= 4 * GIB, "at least the kill's floor");
+    assert_eq!(sizes.sized_from(&fresh, Day(0)), Some(SizedFrom::Fallback));
+}
+
+/// Asserts that a fallback class idle over 60 days is no fallback: its five runs on day 0
+/// size a new target on day 60 and leave it cold on day 61. Catches a stale kind trusted.
+#[test]
+fn a_stale_fallback_class_is_no_fallback() {
+    let tables = Tables::new();
+    let jobs = five_targets(&tables, GIB, Duration::from_secs(10));
+    let sizes = taught(&jobs, booked(2000, 4 * GIB));
+    let fresh = step("fresh", "fresh");
+    assert_eq!(sizes.sized_from(&fresh, Day(60)), Some(SizedFrom::Fallback));
+    assert_eq!(sizes.sized_from(&fresh, Day(61)), Some(SizedFrom::Cold));
+}
+
+/// Asserts that a class whose runs are stale keeps its kill floor when its kind sizes it: a
+/// target killed at 4 GiB on day 0 (floor 8 GiB) whose kind, fresh on day 61, books 1.5 GiB
+/// books 8 GiB on day 61. Catches a floor dropped on the fallback path.
+#[test]
+fn a_stale_class_keeps_its_kill_floor_under_its_kind() {
+    let tables = Tables::new();
+    let killed = JobEnd::Memory {
+        exit_code: None,
+        output: output(4 * GIB, Duration::from_secs(5)),
+    };
+    let oom = ran(
+        &tables,
+        ("old-run", None),
+        of_class("old", needs(0, 0)),
+        booked(2000, 4 * GIB),
+        killed,
+    );
+    tables.set_ms(61 * DAY_MS);
+    let mut jobs = vec![oom];
+    jobs.extend(five_targets(&tables, GIB, Duration::from_secs(10)));
+    let sizes = taught(&jobs, booked(2000, 4 * GIB));
+    let next = step("old-next", "old");
+    let Needs::Shape(sized) = sizes.sized(&next, Day(61)).spec.needs else {
+        panic!("a share is sized as a share");
+    };
+    assert_eq!((sized.cpu_millis(), sized.memory_bytes()), (1000, 8 * GIB));
+    assert_eq!(sizes.sized_from(&next, Day(61)), Some(SizedFrom::Fallback));
+}
+
+/// Asserts that a server's start teaches the kind from the ended jobs the store holds
+/// ([`SchedPlacer::learn_ended`], taught before any host is known): after five ended targets
+/// of a kind, the first pass places a new target of the kind at the kind's size. Catches a
+/// restart that forgets every kind until its targets run again.
+#[test]
+fn a_start_teaches_each_kind_from_the_ended_jobs_of_its_targets() {
+    let tables = Tables::new();
+    five_targets(&tables, GIB, Duration::from_secs(10));
+    let clock = ManualClock::new(Timestamp::from_millis(0));
+    let placer = SchedPlacer::new(Settings::default(), clock);
+    assert_eq!(placer.learn_ended(&tables.jobs).unwrap(), 5);
+    let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
+    let shape = Shape::new(Resources::new(8000, 16 * GIB, 0, None).unwrap(), caps);
+    placer.engine().host_up(&host("a"), &shape, super::at(0));
+    let new = NewJob {
+        id: Some(JobId::parse("fresh").unwrap()),
+        spec: of_kind("fresh", KIND, needs(0, 0)),
+        priority: 0,
+        client: None,
+    };
+    tables.jobs.insert_queued(new).unwrap();
+    assert_eq!(pass(&placer, &tables).len(), 1);
+    assert_eq!(allocation(&tables, "fresh"), booked(1000, 6 * 256 * MIB));
 }
