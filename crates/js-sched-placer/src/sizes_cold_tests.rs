@@ -192,3 +192,33 @@ fn a_pass_books_the_cold_size_the_engine_is_built_with() {
         assert_eq!(allocation.booked, each, "{cold:?}");
     }
 }
+
+/// Asserts that a class's kill floor wins over a cold memory below it: with the setting at
+/// 4 GiB, a class killed at an 8 GiB booking books 16 GiB next, and a class with no runs
+/// books 4 GiB. And that the cold size follows the largest host the engine knows: a setting of
+/// 8 GiB held at a 4 GiB host books 8 GiB once a 251 GiB host is known. Catches a setting
+/// that overrides the floor a kill left, and a held value kept after a larger host appears.
+#[test]
+fn the_kill_floor_and_a_larger_host_win_over_the_cold_memory() {
+    let tables = Tables::new();
+    let killed = || JobEnd::Memory {
+        exit_code: None,
+        output: output(8 * GIB, Duration::from_secs(5)),
+    };
+    let kills = runs(&tables, "killed", 1, "big", booked(2000, 8 * GIB), killed);
+    let low = ColdSize {
+        cpu_millis: Some(2000),
+        memory_bytes: Some(4 * GIB),
+    };
+    let sizes = cold_taught(low, &kills, booked(2000, 8 * GIB));
+    let big = queued("big", of_class("big", needs(0, 0)));
+    assert_eq!(size(&sizes, &big), (2000, 16 * GIB));
+    let fresh = queued("fresh", of_class("fresh", needs(0, 0)));
+    assert_eq!(size(&sizes, &fresh), (2000, 4 * GIB));
+
+    let mut growing = JobSizes::with_cold(FARM);
+    growing.set_bounds(bounds_of([capacity(1000, 4 * GIB)]));
+    assert_eq!(size(&growing, &fresh), (1000, 4 * GIB));
+    growing.set_bounds(farm_bounds());
+    assert_eq!(size(&growing, &fresh), (2000, 8 * GIB));
+}

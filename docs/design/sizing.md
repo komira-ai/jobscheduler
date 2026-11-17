@@ -81,7 +81,8 @@ The estimator is `js-sizing` unchanged: memory is `1.2 x` the largest recent pea
 percentile of CPU used per second of wall time rounded up to a quarter core. A class with too few runs books the cold size:
 `server.cold_cpu_millis` and `server.cold_memory_bytes` when the server's file sets them, each one left out a quarter of the most
 cores or of the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows; never more
-than those most, and at least the class's kill floor. Before five runs the memory may only rise from the cold memory. A class whose
+than those most, and at least the class's kill floor. A class that has an estimate but no CPU sample yet (its only runs were
+memory kills) books the estimator's own unlearned CPU, two cores, and not the cold CPU. Before five runs the memory may only rise from the cold memory. A class whose
 estimate reaches the largest host's bookable memory books all of it and waits for an empty host.
 
 On a farm whose hosts have 88 cores and 251 GiB, a quarter is 22 cores and 62.75 GiB, so a host holds four cold jobs; a client

@@ -181,14 +181,14 @@ pub struct Cli {
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
     /// The CPU, in millicores from 250, a queued job that names no CPU books while the
-    /// history of its class gives no estimate. Without the flag, a quarter of the most cores
-    /// a registered host has. Needs `--agent-pool-config`.
+    /// history of its class gives no estimate; above the most cores a registered host has, that
+    /// most. Without the flag, a quarter of those cores. Needs `--agent-pool-config`.
     #[arg(long, value_parser = clap::value_parser!(u64).range(250..=u64::from(u32::MAX)))]
     pub cold_cpu_millis: Option<u64>,
     /// The memory, in bytes from 1073741824 (1 GiB), a queued job that names no memory books
     /// while the history of its class gives no estimate, and the least its class books before
-    /// five runs. Without the flag, a quarter of the most bookable memory a registered host
-    /// has. Needs `--agent-pool-config`.
+    /// five runs; above the most bookable memory a registered host has, that most. Without the
+    /// flag, a quarter of that memory. Needs `--agent-pool-config`.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1_073_741_824..))]
     pub cold_memory_bytes: Option<u64>,
     /// Deprecated, and does nothing: no lease is costed by an estimate any more. The flag

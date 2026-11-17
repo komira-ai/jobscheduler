@@ -555,7 +555,7 @@ mod tests {
     }
 
     /// Asserts that `cold_cpu_millis` and `cold_memory_bytes` are read as given, each on its
-    /// own, from their least (250 and 1 GiB) up; that left out they are `None` (a quarter of
+    /// own, from their least (250 and 1 GiB) up to the most CPU (4294967295); that left out they are `None` (a quarter of
     /// the largest host); and that a value under the least, negative or not an integer is
     /// refused at start naming the key and what it must be. Catches a key that is not read, a
     /// key read into the other dimension, and a cold size of no CPU or under the estimator's
@@ -575,6 +575,8 @@ mod tests {
             (least.cpu_millis, least.memory_bytes),
             (Some(250), Some(1 << 30))
         );
+        let most = cold_of("cold_cpu_millis = 4294967295").unwrap();
+        assert_eq!(most.cpu_millis, Some(u64::from(u32::MAX)));
         let cpu = cold_of("cold_cpu_millis = 2000").unwrap();
         assert_eq!((cpu.cpu_millis, cpu.memory_bytes), (Some(2000), None));
         let memory = cold_of("cold_memory_bytes = 8589934592").unwrap();
