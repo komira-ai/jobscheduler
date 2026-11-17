@@ -318,7 +318,7 @@ impl js_agent::lifecycle::CheckHook for Probe {
         Ok(())
     }
 
-    fn idle(&mut self) {
+    fn idle(&mut self, _live: &[js_agent::lifecycle::RunHandle]) {
         let held: usize = self
             .roots
             .borrow()

@@ -62,9 +62,10 @@ impl Lifecycle {
         if !self.taint.recheck_due(now, self.taint_recheck) {
             return;
         }
+        let idle = self.runtime.idle_handles();
         let finished = Finished {
             run_id: RECHECK_RUN,
-            live: &[],
+            live: &idle,
             slot: None,
             live_slots: &[],
             held_mounts: &[],

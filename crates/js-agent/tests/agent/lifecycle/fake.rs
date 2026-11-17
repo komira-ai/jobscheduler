@@ -163,6 +163,8 @@ pub struct FakeRuntime {
     state: Rc<RefCell<State>>,
     log: Log,
     clock: ManualClock,
+    /// The hooks for containers made ahead of their jobs.
+    pub ahead: super::ahead::Ahead,
 }
 
 fn err(call: &str) -> RuntimeError {
@@ -179,6 +181,7 @@ impl FakeRuntime {
             state: Rc::new(RefCell::new(state)),
             log: Rc::clone(log),
             clock: clock.clone(),
+            ahead: Default::default(),
         }
     }
 
@@ -597,6 +600,18 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
+    fn tend(&mut self, now_ms: u64) {
+        self.ahead.tend(now_ms);
+    }
+
+    fn idle_handles(&self) -> Vec<RunHandle> {
+        self.ahead.idle()
+    }
+
+    fn started_warm(&self, id: &RunHandle) -> bool {
+        self.ahead.is_warm(id)
+    }
+
     fn layered_rootfs(&self) -> bool {
         self.state.borrow().fs.is_some()
     }
@@ -957,7 +972,7 @@ impl ScriptedChecks {
 }
 
 impl CheckHook for ScriptedChecks {
-    fn idle(&mut self) {
+    fn idle(&mut self, _live: &[RunHandle]) {
         self.runtime.state.borrow_mut().idles += 1;
     }
 

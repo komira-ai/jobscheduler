@@ -223,7 +223,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cli_runtime::{IdRange, JobUsers};
-use crate::lifecycle::{CheckFinding, CheckHook, Finished};
+use crate::lifecycle::{CheckFinding, CheckHook, Finished, RunHandle};
 
 pub use proc::{DirLister, Entry, Listing, PROCESS_CAP, ProcHost, SystemDirs, WATCH_ENTRY_CAP};
 pub use view::{FakeHost, HostView, Mount, Process, Watched, input};
@@ -936,9 +936,17 @@ impl CheckHook for Integrity {
     /// clean check (an operator's login, a timer's service, a package upgrade) is the
     /// host's. A host that cannot be read keeps the baseline it had; the check after the job
     /// finds it unreadable.
-    fn idle(&mut self) {
+    fn idle(&mut self, live: &[RunHandle]) {
         if let Ok(now) = self.observe() {
-            self.baseline = now;
+            // What the containers made ahead of any job hold is left out of the baseline,
+            // as what a job's neighbours hold is after a check.
+            self.baseline = now.without_live(&Finished {
+                run_id: "",
+                live,
+                slot: None,
+                live_slots: &[],
+                held_mounts: &[],
+            });
         }
     }
 

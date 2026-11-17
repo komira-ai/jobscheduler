@@ -110,6 +110,18 @@ impl Runtime for Noting {
         self.inner.cgroup(id)
     }
 
+    fn tend(&mut self, now_ms: u64) {
+        self.inner.tend(now_ms);
+    }
+
+    fn idle_handles(&self) -> Vec<RunHandle> {
+        self.inner.idle_handles()
+    }
+
+    fn started_warm(&self, id: &RunHandle) -> bool {
+        self.inner.started_warm(id)
+    }
+
     fn host_ports(&self) -> Vec<PortRange> {
         self.inner.host_ports()
     }

@@ -2,6 +2,7 @@
 //! after the container and scratch of each job are gone.
 
 use js_agent::integrity::{FakeHost, Integrity, input};
+use js_agent::lifecycle::Quiet;
 
 use serde_json::json;
 
@@ -332,4 +333,92 @@ fn a_restored_taint_clears_on_a_host_with_only_its_own_processes() {
     let mut h = restarted_with_marker("restored-quiet", &host);
     wait_rechecks(&mut h, 2);
     assert!(h.life.pending_taint_clear().is_some());
+}
+
+/// Asserts that a process of the job user in the control group of a container the runtime
+/// made ahead of any job (an idle handle) is not the finished job's leftover, and one in the
+/// group of a container that is no one's is: the first job ends and frees its slot, the
+/// second is found `process-as-job-user`. It catches post-job checks that are not told the
+/// idle containers, which would taint the host for every job beside a warm sandbox.
+#[test]
+fn a_process_in_an_idle_containers_group_is_not_a_leftover_of_the_job() {
+    for (group, found) in [
+        ("0::/docker/warm-1/ctr", None),
+        (
+            "0::/docker/cold-9/ctr",
+            Some("finding r1 process-as-job-user"),
+        ),
+    ] {
+        let host = FakeHost::quiet();
+        let mut h = checked("idle-post-job", &host);
+        h.fake.ahead.hold_idle(&["warm-1"]);
+        h.start(job("r1"));
+        host.start_process(process(700, 600, JOB_UID, 2000, group));
+        h.fake.exit("r1", 0);
+        let events = names(&h.life.step());
+        assert_eq!(
+            events.last().map(String::as_str),
+            found.or(Some("freed r1"))
+        );
+        assert_eq!(h.life.is_tainted(), found.is_some(), "{group}");
+    }
+}
+
+/// Asserts that the re-check of a restored taint does not count the processes of an idle
+/// container: a process of the job user in a warm container's group lets the taint clear
+/// after two clean re-checks, and the same process in another group keeps it. It catches a
+/// re-check with nothing live, which would hold a taint for ever on a host with a sandbox.
+#[test]
+fn the_recheck_of_a_taint_does_not_count_an_idle_containers_processes() {
+    for (group, clears) in [
+        ("0::/docker/warm-1/ctr", true),
+        ("0::/docker/cold-9/ctr", false),
+    ] {
+        let host = FakeHost::quiet();
+        host.start_process(process(300, 100, JOB_UID, 900, group));
+        let mut h = restarted_with_marker("idle-recheck", &host);
+        h.fake.ahead.hold_idle(&["warm-1"]);
+        wait_rechecks(&mut h, 3);
+        assert_eq!(h.life.pending_taint_clear().is_some(), clears, "{group}");
+    }
+}
+
+/// Asserts that the check that hands the host to an exclusive lease does not count the
+/// processes of an idle container: a warm container's process leaves the host ready, and
+/// the same process in another group makes it unsafe. It catches a quiet check with nothing
+/// live, which would refuse every whole-node lease on a host with a sandbox.
+#[test]
+fn the_exclusive_check_does_not_count_an_idle_containers_processes() {
+    for (group, ready) in [
+        ("0::/docker/warm-1/ctr", true),
+        ("0::/docker/cold-9/ctr", false),
+    ] {
+        let host = FakeHost::quiet();
+        let mut h = checked("idle-exclusive", &host);
+        h.fake.ahead.hold_idle(&["warm-1"]);
+        host.start_process(process(700, 600, JOB_UID, 2000, group));
+        h.life
+            .apply(&reply_json(&json!({ "exclusive": "whole-1" })));
+        let mut events = Vec::new();
+        let verdict = h.life.prepare("whole-1", &mut events);
+        assert_eq!(verdict == Quiet::Ready, ready, "{group}: {verdict:?}");
+    }
+}
+
+/// Asserts that the baseline taken when a job starts on an idle host leaves out the
+/// processes of an idle container: a sandbox's init is in the baseline of no job, so once
+/// that container is a job's and is gone, an init of it that is left is found. It catches a
+/// baseline that holds the sandbox's processes, which would hide what its job left of them.
+#[test]
+fn the_idle_baseline_leaves_out_an_idle_containers_processes() {
+    let host = FakeHost::quiet();
+    host.start_process(process(500, 1, 0, 800, "0::/docker/warm-1/ctr"));
+    let mut h = checked("idle-baseline", &host);
+    h.fake.ahead.hold_idle(&["warm-1"]);
+    h.start(job("r1"));
+    // The sandbox is no longer idle: it was taken for the job, and its init outlives it.
+    h.fake.ahead.hold_idle(&[]);
+    h.fake.exit("r1", 0);
+    let events = names(&h.life.step());
+    assert_eq!(events.last().unwrap(), "finding r1 daemonised-child");
 }

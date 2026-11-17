@@ -149,7 +149,7 @@ impl Lifecycle {
         if matches!(self.jobs[index].stage, Stage::Preparing(_)) {
             return;
         }
-        let live: Vec<RunHandle> = self
+        let mut live: Vec<RunHandle> = self
             .jobs
             .iter()
             .enumerate()
@@ -157,6 +157,8 @@ impl Lifecycle {
             .filter_map(|(_, job)| job.stage.container().cloned())
             .chain(self.stuck.iter().map(|held| held.id.clone()))
             .collect();
+        // The containers the runtime made ahead of any job are no job's leftovers.
+        live.extend(self.runtime.idle_handles());
         // The slots of the other jobs whose containers are still on the host.
         let live_slots: Vec<u32> = self
             .jobs

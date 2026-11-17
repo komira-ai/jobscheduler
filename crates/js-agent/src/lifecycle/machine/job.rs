@@ -17,7 +17,7 @@ use crate::lifecycle::runtime::{
     Body, Exit, Found, JobFs, ResolvedMount, RunHandle, RunSpec, Ticket,
 };
 use crate::lifecycle::taint::{TaintState, reason};
-use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, detail, label};
+use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, StartSteps, code, detail, label};
 use crate::logs::Sink;
 
 /// Where a job is. The container's id travels with the stages that need it.
@@ -75,6 +75,35 @@ pub(super) enum Phase {
     Assembling(PathBuf),
 }
 
+/// The steps of a start reached so far, with the moment its reply was received, on the
+/// agent's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Stamp {
+    received: u64,
+    pub(super) steps: StartSteps,
+}
+
+impl Stamp {
+    /// A start received at `received` and admitted at `now`: it is ready at once, until a
+    /// step says it was not.
+    pub(super) fn admitted(received: u64, now: u64) -> Self {
+        let at = now.saturating_sub(received);
+        Self {
+            received,
+            steps: StartSteps {
+                admitted: at,
+                ready: at,
+                ..StartSteps::default()
+            },
+        }
+    }
+
+    /// Milliseconds from receipt to `now`.
+    pub(super) fn since(&self, now: u64) -> u64 {
+        now.saturating_sub(self.received)
+    }
+}
+
 /// What a start that waits (for its images, or its file system) keeps to finish starting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Waiting {
@@ -93,6 +122,8 @@ pub(super) struct Waiting {
     /// When the lease the start named ends, on the agent's clock (`u64::MAX` when the
     /// start named none): the run's wall time never reaches past it.
     pub(super) lease_end_ms: u64,
+    /// The steps it has reached.
+    pub(super) stamp: Stamp,
 }
 
 impl Stage {

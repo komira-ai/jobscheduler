@@ -37,6 +37,29 @@ pub enum Skip {
     Clash,
 }
 
+/// When each step of a start was reached, in milliseconds after the agent received the
+/// reply that carried the start (the `received` of [`Lifecycle::apply_at`](super::Lifecycle::apply_at);
+/// for [`Lifecycle::apply`](super::Lifecycle::apply), the moment it was called). A start
+/// that did not wait reaches its first steps at once, so those are 0 or close to it. It is
+/// logged with [`Event::Started`] to show where the time of a start went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StartSteps {
+    /// The start was admitted and its slot taken.
+    pub admitted: u64,
+    /// Its images, providers and file system were all ready: for a start that waited, the
+    /// step that found them so; for one that did not, the moment it was admitted.
+    pub ready: u64,
+    /// Its scratch and lease directories were made.
+    pub dirs: u64,
+    /// The runtime was asked to create and start its container.
+    pub create: u64,
+    /// The runtime answered that the container started.
+    pub started: u64,
+    /// The container was made ahead of the job
+    /// ([`Runtime::started_warm`](super::Runtime::started_warm)).
+    pub warm: bool,
+}
+
 /// What [`Lifecycle`](super::Lifecycle) did, in order. The caller logs these; a test reads them as the
 /// record of the order of things.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +73,8 @@ pub enum Event {
     Started {
         /// The run.
         run_id: String,
+        /// When each step of the start was reached.
+        steps: StartSteps,
     },
     /// The start was refused and nothing was created; a `failed_to_start` result is held.
     Refused {

@@ -134,9 +134,10 @@ impl Lifecycle {
     /// Runs the post-job checks once with nothing live. A finding taints the host and is
     /// returned with its text.
     fn recheck(&mut self, run_id: &str, events: &mut Vec<Event>) -> Result<(), String> {
+        let idle = self.runtime.idle_handles();
         let verdict = self.checks.run(&Finished {
             run_id,
-            live: &[],
+            live: &idle,
             slot: None,
             live_slots: &[],
             held_mounts: &[],

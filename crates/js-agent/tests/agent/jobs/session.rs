@@ -132,7 +132,7 @@ fn the_commands_of_a_reply_reach_the_worker_in_order() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "job: Started { run_id: \"r1\" }")
+            .any(|line| line.starts_with("job: Started { run_id: \"r1\", steps: StartSteps {"))
     );
     assert!(session.job_lines().is_empty(), "the lines are taken once");
 }

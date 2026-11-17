@@ -763,6 +763,26 @@ pub trait Runtime {
         None
     }
 
+    /// Called once at every step of the lifecycle, after that step's starts were handled,
+    /// with the lifecycle's clock: a runtime that makes containers ahead of their jobs
+    /// (crun's warm sandboxes) makes those it lacks here, off any start's path. The default
+    /// does nothing.
+    fn tend(&mut self, _now_ms: u64) {}
+
+    /// The handles of the containers this runtime made ahead of any job and holds idle
+    /// (crun's warm sandboxes). They are the runtime's own, no job's: the post-job checks
+    /// and the taint checks count their processes and mounts as live, never as a job's
+    /// leftovers. The default is none.
+    fn idle_handles(&self) -> Vec<RunHandle> {
+        Vec::new()
+    }
+
+    /// Whether the run `id` was started in a container made ahead of it (reported in
+    /// [`Event::Started`](crate::lifecycle::Event::Started)). The default is false.
+    fn started_warm(&self, _id: &RunHandle) -> bool {
+        false
+    }
+
     /// The directory, directly below the scratch root, where this runtime keeps the writable
     /// state of the container of `run_id` that is not in the run's own scratch directory (a
     /// container's `/work` overlay and home), or `None` when it keeps none there. The
@@ -871,6 +891,17 @@ mod tests {
         assert_eq!(bare.mounts_of("r1"), None);
         assert_eq!(bare.input_failure(&id), None);
         assert!(!bare.ends_held(&id));
+    }
+
+    /// Catches a runtime that says nothing of containers made ahead of their jobs holding
+    /// some: it has no idle container, none of its runs started in one, and tending it
+    /// changes nothing.
+    #[test]
+    fn a_runtime_that_makes_nothing_ahead_holds_no_idle_container() {
+        let mut bare = Bare;
+        bare.tend(1_000);
+        assert_eq!(bare.idle_handles(), Vec::new());
+        assert!(!bare.started_warm(&RunHandle("c1".to_owned())));
     }
 
     /// Catches the host paths of a start counted in another order than the runtime's sources

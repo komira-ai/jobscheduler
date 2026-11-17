@@ -177,6 +177,24 @@ impl Runtime for WithVms {
         self.other.lease_dir(run_id)
     }
 
+    fn tend(&mut self, now_ms: u64) {
+        self.vms.tend(now_ms);
+        self.other.tend(now_ms);
+    }
+
+    fn idle_handles(&self) -> Vec<RunHandle> {
+        let mut idle = self.vms.idle_handles();
+        idle.extend(self.other.idle_handles());
+        idle
+    }
+
+    fn started_warm(&self, id: &RunHandle) -> bool {
+        match self.vms.holds(id) {
+            true => self.vms.started_warm(id),
+            false => self.other.started_warm(id),
+        }
+    }
+
     fn places_in_cgroup(&self) -> bool {
         self.other.places_in_cgroup()
     }

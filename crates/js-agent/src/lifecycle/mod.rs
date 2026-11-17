@@ -288,7 +288,7 @@ use crate::platform::Backend;
 use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
-pub use event::{Event, Finding, Skip};
+pub use event::{Event, Finding, Skip, StartSteps};
 pub use finding::{CHECK_DETAIL_MAX, CheckFinding};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
@@ -372,8 +372,9 @@ pub trait CheckHook {
     /// The host is idle: a job is about to start, and no other job's container, scratch
     /// directory or checks are on it, nor a container the agent could not remove. Nothing a
     /// job did can change the host now, so a hook may take its baseline again. The default
-    /// does nothing.
-    fn idle(&mut self) {}
+    /// does nothing. `live` are the containers the runtime made ahead of any job
+    /// ([`Runtime::idle_handles`]): they are on the host, and are no job's.
+    fn idle(&mut self, _live: &[RunHandle]) {}
 }
 
 /// The hook with no checks: every job passes.

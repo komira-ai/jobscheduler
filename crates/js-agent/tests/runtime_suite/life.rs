@@ -150,7 +150,7 @@ fn names(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .map(|event| match event {
-            Event::Started { run_id } => format!("started {run_id}"),
+            Event::Started { run_id, .. } => format!("started {run_id}"),
             Event::Refused { run_id, code, .. } => format!("refused {run_id} {code}"),
             Event::ResultReady { run_id } => format!("result {run_id}"),
             other => format!("{other:?}"),

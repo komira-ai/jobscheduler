@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use js_agent_wire::{Isolation, JobSpec};
 
-use super::job::{Given, Keyed, Phase, Stage, Waiting, run_spec};
+use super::job::{Given, Keyed, Phase, Stage, Stamp, Waiting, run_spec};
 use super::providing::{Follow, follow};
 use super::{Failure, Lifecycle, runtime_failure};
 use crate::lifecycle::runtime::{
@@ -81,10 +81,11 @@ impl Lifecycle {
         &mut self,
         (spec, keyed): (&JobSpec, Keyed),
         given: &Given,
-        (mounts, slot, booked): (Vec<ResolvedMount>, u32, u64),
-        received: u64,
+        (made, received): ((Vec<ResolvedMount>, u32, u64), u64),
+        stamp: Stamp,
         events: &mut Vec<Event>,
     ) {
+        let (mounts, slot, booked) = made;
         let at = (None, u64::MAX);
         // The providers are asked first, before the images: a provider fetches while the
         // image is pulled and the container made.
@@ -92,7 +93,13 @@ impl Lifecycle {
         let providing = match self.provide(&spec.run_id, &given.fs, now) {
             Ok(providing) => providing,
             Err(failure) => {
-                self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
+                self.settle(
+                    (spec, keyed),
+                    Err(failure),
+                    (slot, booked),
+                    (at, stamp),
+                    events,
+                );
                 return;
             }
         };
@@ -108,12 +115,25 @@ impl Lifecycle {
         match (ask(self.runtime.as_mut(), images), phase) {
             (Err(why), _) => {
                 let failure = runtime_failure(&why);
-                self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
+                self.settle(
+                    (spec, keyed),
+                    Err(failure),
+                    (slot, booked),
+                    (at, stamp),
+                    events,
+                );
             }
             (Ok(tickets), Phase::Images) if tickets.is_empty() => {
-                let started =
-                    self.begin((spec, keyed), given, (mounts, None), (slot, booked), events);
-                self.settle((spec, keyed), started, (slot, booked), at, events);
+                let mut stamp = stamp;
+                let started = self.begin(
+                    (spec, keyed),
+                    given,
+                    (mounts, None),
+                    (slot, booked),
+                    &mut stamp,
+                    events,
+                );
+                self.settle((spec, keyed), started, (slot, booked), (at, stamp), events);
             }
             (Ok(tickets), phase) => {
                 // The lease the start names ends `valid_for_ms` after the reply came; a run
@@ -131,6 +151,7 @@ impl Lifecycle {
                     tickets,
                     phase,
                     lease_end_ms,
+                    stamp,
                 };
                 let mut job = super::Job::of(
                     spec,
@@ -179,15 +200,28 @@ impl Lifecycle {
             waiting.mounts.clone(),
         );
         let (slot, booked, lease_end_ms) = (waiting.slot, waiting.booked, waiting.lease_end_ms);
+        let mut stamp = waiting.stamp;
+        // Everything it waited for is here at the step that finds it so; an assembly it
+        // then waits on is not waited for again.
+        if matches!(next, Next::Dirs | Next::Begin(None)) {
+            stamp.steps.ready = stamp.since(now);
+        }
         let at = (Some(index), lease_end_ms);
         match next {
             Next::Wait => {}
             Next::End => job.end_unstarted(events),
             Next::Fail(failure) => {
-                self.settle((&spec, keyed), Err(failure), (slot, booked), at, events);
+                self.settle(
+                    (&spec, keyed),
+                    Err(failure),
+                    (slot, booked),
+                    (at, stamp),
+                    events,
+                );
             }
             Next::Dirs => match self.make_dirs(&spec.run_id, (slot, booked), events) {
                 Ok(scratch) => {
+                    stamp.steps.dirs = stamp.since(self.clock.now_ms());
                     // Its images and host paths are here: its assembly is asked for at once,
                     // so a start that is ending is never asked to assemble, and it waits.
                     // An answer it gives at once is asked again at the next step.
@@ -201,11 +235,18 @@ impl Lifecycle {
                         tickets: Vec::new(),
                         phase: Phase::Assembling(scratch),
                         lease_end_ms,
+                        stamp,
                     };
                     self.jobs[index].stage = Stage::Preparing(Box::new(waiting));
                 }
                 Err(failure) => {
-                    self.settle((&spec, keyed), Err(failure), (slot, booked), at, events);
+                    self.settle(
+                        (&spec, keyed),
+                        Err(failure),
+                        (slot, booked),
+                        (at, stamp),
+                        events,
+                    );
                 }
             },
             Next::Begin(scratch) => {
@@ -214,9 +255,10 @@ impl Lifecycle {
                     &given,
                     (mounts, scratch),
                     (slot, booked),
+                    &mut stamp,
                     events,
                 );
-                self.settle((&spec, keyed), started, (slot, booked), at, events);
+                self.settle((&spec, keyed), started, (slot, booked), (at, stamp), events);
             }
         }
     }
@@ -229,12 +271,17 @@ impl Lifecycle {
         given: &Given,
         (mounts, scratch): (Vec<ResolvedMount>, Option<PathBuf>),
         (slot, booked): (u32, u64),
+        stamp: &mut Stamp,
         events: &mut Vec<Event>,
     ) -> Result<RunHandle, Failure> {
         let run_id = &spec.run_id;
         let scratch = match scratch {
             Some(scratch) => scratch,
-            None => self.make_dirs(run_id, (slot, booked), events)?,
+            None => {
+                let made = self.make_dirs(run_id, (slot, booked), events)?;
+                stamp.steps.dirs = stamp.since(self.clock.now_ms());
+                made
+            }
         };
         // The files are written before the container exists, and only here: a start that
         // is sent again finds its job above and never reaches this point. `admit` has
@@ -245,6 +292,7 @@ impl Lifecycle {
         };
         let files = written.map_err(scratch_failure)?;
         let run = run_spec((spec, keyed), given, (mounts, scratch, files), slot, booked);
+        stamp.steps.create = stamp.since(self.clock.now_ms());
         self.runtime
             .create_and_start(&run)
             .map_err(|why| runtime_failure(&why))

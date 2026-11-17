@@ -34,13 +34,13 @@ use js_agent_wire::{
 
 pub use self::exclusive::{Quiet, Restored};
 use self::held::Records;
-use self::job::{Given, Job, Keyed, Retired, Stage, Stuck, blind_taint, host_taint};
+use self::job::{Given, Job, Keyed, Retired, Stage, Stamp, Stuck, blind_taint, host_taint};
 pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
 use super::runtime::{ResolvedMount, RunHandle, Runtime, RuntimeError};
 use super::taint::TaintState;
-use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
+use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, StartSteps, code, detail};
 use crate::quota::QuotaError;
 
 /// How many fences of finished or stopped work the agent remembers (a run id, or a job id
@@ -225,7 +225,8 @@ impl Lifecycle {
     /// Lets the jobs make progress: stops every job when the server has been silent for the
     /// bound ([`Lifecycle::stop_on_silence`]), watches each running container and its
     /// wall-time limit, then takes each finished job as far through its cleanup as it will
-    /// go, and tries again to remove the containers no job stands for that could not be
+    /// go, lets the runtime make the containers it keeps ahead of jobs
+    /// ([`Runtime::tend`]), and tries again to remove the containers no job stands for that could not be
     /// removed. Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
@@ -238,6 +239,7 @@ impl Lifecycle {
             self.supervise(index, &mut events);
             self.clean(index, &mut events);
         }
+        self.runtime.tend(self.clock.now_ms());
         self.retry_stuck(&mut events);
         self.retry_providers(&mut events);
         self.recheck_taint();
@@ -814,6 +816,7 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
+        let stamp = Stamp::admitted(received, self.clock.now_ms());
         // A job that may change the host taints it before it exists: whatever it does, and
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
@@ -833,7 +836,7 @@ impl Lifecycle {
         // The baseline is retaken before this run's scratch directory and files exist, so
         // neither becomes part of it.
         if self.jobs.iter().all(|job| job.stage == Stage::Freed) {
-            self.checks.idle();
+            self.checks.idle(&self.runtime.idle_handles());
         }
         // The slot is held from here until the run's cleanup has passed (`clean`); `admit`
         // found one free.
@@ -852,7 +855,7 @@ impl Lifecycle {
         // prepared, waits as `starting`, holding its booking, and costs the worker nothing
         // until it is ready (see `Runtime::prepare` and `prepare`).
         let made = (mounts, slot, booked);
-        self.prepare_or_begin((spec, keyed), given, made, received, events);
+        self.prepare_or_begin((spec, keyed), given, (made, received), stamp, events);
     }
 
     /// Records how a start went: a running job (its wall-time limit begins now, after any
@@ -864,7 +867,7 @@ impl Lifecycle {
         (spec, keyed): (&JobSpec, Keyed),
         started: Result<RunHandle, Failure>,
         (slot, booked): (u32, u64),
-        (replace, cap): (Option<usize>, u64),
+        ((replace, cap), stamp): ((Option<usize>, u64), Stamp),
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
@@ -873,11 +876,17 @@ impl Lifecycle {
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
                 let cgroup = self.runtime.cgroup(&id);
+                let steps = StartSteps {
+                    started: stamp.since(now),
+                    warm: self.runtime.started_warm(&id),
+                    ..stamp.steps
+                };
                 let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
                 job.started_at(now);
                 job.cgroup = cgroup;
                 events.push(Event::Started {
                     run_id: run_id.clone(),
+                    steps,
                 });
                 job
             }

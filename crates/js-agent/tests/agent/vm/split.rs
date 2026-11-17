@@ -95,6 +95,30 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     assert!(fake.gone("run-plain"));
 }
 
+/// Asserts that the hooks for containers made ahead of their jobs reach the other runtime,
+/// which makes them: it is tended with the clock, its idle containers are the router's, and
+/// a run is warm when the runtime that holds it says so (a VM run, held by the VM runtime,
+/// is not, whatever the handle). Catches a router that tends nothing, hides the idle
+/// containers from the checks, or asks the wrong runtime whether a run started warm.
+#[test]
+fn the_hooks_for_containers_made_ahead_are_the_other_runtimes() {
+    let driver = Arc::new(FakeDriver::new());
+    let (mut with, fake) = split(&driver);
+    with.tend(1_500);
+    assert_eq!(fake.ahead.tended(), [1_500]);
+    fake.ahead.hold_idle(&["warm-1"]);
+    assert_eq!(with.idle_handles(), [RunHandle("warm-1".to_owned())]);
+    let in_vm = with.create_and_start(&spec("run-vm", &["make"])).unwrap();
+    let mut plain = spec("run-plain", &["make"]);
+    plain.labels.remove(label::KIND);
+    let on_host = with.create_and_start(&plain).unwrap();
+    fake.ahead.started_in(&in_vm.0);
+    assert!(!with.started_warm(&in_vm));
+    assert!(!with.started_warm(&on_host));
+    fake.ahead.started_in(&on_host.0);
+    assert!(with.started_warm(&on_host));
+}
+
 /// Asserts that every question about the host is the other runtime's answer (the image
 /// fetch, the listing, the checks of a body, the network ceiling and egress, the host ports
 /// allowed and lost, the lease
