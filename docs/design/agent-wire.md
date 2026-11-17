@@ -76,7 +76,9 @@ A run start is fenced by its run id alone, as before.
 `DEFAULT_GRACE_MS` 15,000, and a grace must exceed two intervals (`grace_covers_heartbeats`). `Welcome::validate` holds the interval
 between `MIN_HEARTBEAT_INTERVAL_MS` 250 and `MAX_HEARTBEAT_INTERVAL_MS` 3,600,000 and the grace to at most `MAX_GRACE_MS`
 86,400,000. A start rides on the reply to the host's next heartbeat and is resent on every reply until the host lists it (section
-5.7, step 3). On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
+5.7, step 3). To an agent that reported `held-beat` the server holds a reply with nothing to send open for up to the interval (at
+most 5 s) and answers it as soon as a job is placed on the host; such a reply says `beat_now`, and the agent sends its next
+heartbeat at once ([held-beat.md](held-beat.md)). On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
 says hello again at once if its last heartbeat was accepted (`verdict` in `crates/js-agent/src/session.rs`). Every other 4xx except
 403 `pool-full`, 408 and 429 is fatal: 401, 413 `body-too-large`, 400 `invalid-hello` or `invalid-heartbeat`, `unsupported-protocol`
 and the other 403s end the session and the agent exits with status 2, because the same message would be refused again (the test
@@ -438,8 +440,9 @@ previous-release side of those tests is a copy of that release's structs and its
   for ids and more only for escaped tails.
 - *A second implementation of the agent* in another language, or a third party writing one. Then a `.proto` with generated types
   is the cheapest way to hold two codebases to one schema, and (B) is the move.
-- *A latency goal* for delivering a start or stop below one heartbeat interval. The first answer is a shorter interval within the
-  limits (down to 250 ms) and its cost in exchanges; a stream (C) only if that cost is measured to be too high.
+- *A latency goal* for delivering a start or stop below one heartbeat interval. Such a goal came (a submit on an idle host
+  starting within a fraction of a second); the answer taken is a held reply inside JSON polling, a long poll
+  ([held-beat.md](held-beat.md)): no stream, no new encoding, one connection per agent held while its reply waits.
 - *A measured cost of the per-exchange handshake.* The answer is connection reuse in `js-client` for the agent (it opens a new
   connection per request today; the listener's 10 s `header_timeout` would keep a connection open across 5 s beats), not an
   encoding change.

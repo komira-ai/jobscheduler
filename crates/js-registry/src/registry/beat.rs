@@ -96,6 +96,7 @@ pub(super) fn answer(heartbeat: &Heartbeat) -> HeartbeatReply {
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
         log_grant: None,
+        beat_now: false,
     }
 }
 

@@ -320,6 +320,16 @@ impl Registry {
         self.shared.first.whole_node()
     }
 
+    /// The shortest heartbeat interval of the pools this registry serves (each welcome names
+    /// its own pool's): the longest a server holds a heartbeat's reply open, so that no host's
+    /// beats arrive further apart than its own interval.
+    pub fn heartbeat_interval(&self) -> std::time::Duration {
+        let first = self.shared.first.heartbeat_interval_ms();
+        let more = self.shared.more.iter();
+        let ms = more.fold(first, |ms, pool| ms.min(pool.heartbeat_interval_ms()));
+        std::time::Duration::from_millis(ms)
+    }
+
     /// The pool at `index`: 0 is the first, 1 the first of the others, and so on. An index
     /// past the end is the first pool, which no record holds.
     fn pool_at(&self, index: usize) -> &PoolConfig {

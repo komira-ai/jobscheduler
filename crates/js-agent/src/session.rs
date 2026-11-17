@@ -10,7 +10,9 @@
 //!
 //! *Unregistered* sends a hello. A welcome makes the session *registered* with the
 //! epoch, the heartbeat interval and the session secret the server chose. *Registered*
-//! sends a heartbeat that names the epoch and carries the secret, once per interval.
+//! sends a heartbeat that names the epoch and carries the secret, once per interval; after a
+//! reply that says `beat_now` (the server held it open, `held-beat`) it sends the next one at
+//! once instead, so one heartbeat is always waiting at the server for a start to ride on.
 //!
 //! # What an answer does
 //!
@@ -871,9 +873,18 @@ impl<'a> Session<'a> {
                 });
                 let refused = self.hold.as_mut().and_then(Hold::take_note);
                 self.keep_log_grant(&reply);
-                let accepted = self.accept(reply);
+                // A reply the server held open asks for the next heartbeat at once, so one is
+                // always waiting there for a start to ride on (`held-beat`).
+                let after = match reply.beat_now {
+                    true => Duration::ZERO,
+                    false => interval,
+                };
+                let accepted = self.accept(HeartbeatReply {
+                    beat_now: false,
+                    ..reply
+                });
                 Step::Wait {
-                    after: interval,
+                    after,
                     note: followed.or(refused).or(accepted),
                 }
             }

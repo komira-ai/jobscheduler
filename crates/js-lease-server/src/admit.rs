@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use js_agent_wire::HOST_JOBS_CAPABILITY;
+use js_agent_wire::{HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY};
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, is_mount_provider_key};
 use js_elastic::CapacityProvider;
 use js_jobs::Isolation;
@@ -116,6 +116,13 @@ fn reports(claim: &Shape) -> bool {
 /// ([`HOST_JOBS_CAPABILITY`] is exactly `"true"`).
 pub(crate) fn reports_host_jobs(capabilities: &BTreeMap<String, String>) -> bool {
     capabilities.get(HOST_JOBS_CAPABILITY).map(String::as_str) == Some("true")
+}
+
+/// Whether `capabilities`, those a host's hello reported, say its agent beats again at once
+/// after a held reply ([`HELD_BEAT_CAPABILITY`] is exactly [`FLAG_SET`]), so its heartbeat's
+/// reply may be held open ([`crate::held_beat`]).
+pub(crate) fn reports_held_beat(capabilities: &BTreeMap<String, String>) -> bool {
+    capabilities.get(HELD_BEAT_CAPABILITY).map(String::as_str) == Some(FLAG_SET)
 }
 
 /// Whether `capabilities`, those a host's hello reported, say its agent gives a job layers,

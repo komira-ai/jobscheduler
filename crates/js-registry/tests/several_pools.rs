@@ -281,3 +281,18 @@ fn the_first_pool_names_the_registry_and_gives_its_whole_node_settings() {
     assert_eq!(registry.pool_id().as_str(), "farm");
     assert!(registry.whole_node().is_some());
 }
+
+/// Asserts that a registry of several pools gives the shortest of their heartbeat intervals,
+/// whichever pool has it: 2 s for the default 5 s pool with the 2 s `farm` beside it, and 2 s
+/// with the two the other way round. It catches a server that holds a heartbeat's reply for
+/// the first pool's interval, longer than the interval a host of another pool beats at.
+#[test]
+fn the_heartbeat_interval_of_several_pools_is_the_shortest() {
+    let fx = two_pools(4);
+    assert_eq!(fx.registry.heartbeat_interval(), Duration::from_secs(2));
+    let pools = (linux_pool(4), vec![config(4)]);
+    let placer: Arc<dyn js_registry::Placer> = fx.placer.clone();
+    let sessions = SequentialSessions::new();
+    let registry = Registry::with_pools(pools, fx.clock.clone(), sessions, placer).unwrap();
+    assert_eq!(registry.heartbeat_interval(), Duration::from_secs(2));
+}
