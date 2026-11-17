@@ -3,11 +3,13 @@
 //! recording driver of `js-vmm` (`FakeDriver`), so no VM is made; a test waits for the
 //! driver's calls, never for time.
 
+#[cfg(target_os = "macos")]
 mod agent;
 mod helper;
 mod lifecycle;
 mod rescue;
 mod runtime;
+mod settings;
 mod split;
 
 use std::collections::BTreeMap;

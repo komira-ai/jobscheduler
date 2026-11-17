@@ -3,10 +3,14 @@
 //! thing: the monotonic clock, this machine's `/proc`, and a program that prints what
 //! Docker prints.
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
-use js_agent::{Backend, Machine, Platform, RuntimeBuild, System};
+#[cfg(target_os = "linux")]
+use js_agent::{Backend, Platform, RuntimeBuild};
+use js_agent::{Machine, System};
 
+#[cfg(target_os = "linux")]
 use crate::support::Scratch;
 
 /// Asserts that the system clock only goes forward and starts near zero, and that two
@@ -66,6 +70,7 @@ fn the_system_view_reads_this_machines_processes() {
 /// Asserts that the system opens an engine by the program's own `--version`: a program that
 /// prints what Docker prints is a runtime, with no warning needed; one that prints something
 /// else is refused with its path. It catches an agent that takes any program for an engine.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_system_opens_a_runtime_by_its_version_text() {
     let dir = Scratch::new("jobs-system-engine");
@@ -109,6 +114,7 @@ fn the_system_opens_a_runtime_by_its_version_text() {
 }
 
 /// The container flags with the program `script`.
+#[cfg(target_os = "linux")]
 fn settings_with(dir: &Scratch, script: &str) -> js_agent::cli_runtime::Settings {
     let exec = dir.write("engine", script, 0o755);
     let (user, uid, gid) = super::user();

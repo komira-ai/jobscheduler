@@ -7,9 +7,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    DEFAULT_SETTLE, DEFAULT_SILENCE_STOP, DEFAULT_STOP_GRACE, HOST_JOBS_NEED_CRUN, MAX_SETTLE_MS,
-    MAX_SILENCE_STOP_SECS, SILENCE_STOP_GRACE_RATIO, fits_grace, settle, silence_stop,
+    DEFAULT_SETTLE, DEFAULT_SILENCE_STOP, DEFAULT_STOP_GRACE, MAX_SETTLE_MS, MAX_SILENCE_STOP_SECS,
+    SILENCE_STOP_GRACE_RATIO, fits_grace, settle, silence_stop,
 };
+use js_agent::platform::HOST_JOBS_NEED_CRUN;
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, RETRY_AFTER_CAP};
 use js_oci::Allow;
 
@@ -52,10 +53,10 @@ fn good_job_flags_start_the_agent() {
 }
 
 /// Asserts that `--allow-host-jobs` ends the agent with status 2, before anything is sent
-/// and with the words of `HOST_JOBS_NEED_CRUN`, on every runtime but crun: a Mac (native
-/// jobs), `--runtime none`, and the container engine (`--runtime docker`). Catches an agent
-/// that reports `host-jobs` while its runtime cannot launch one, so the server would taint
-/// the host for a job that never starts.
+/// on every runtime but crun: with the words of `HOST_JOBS_NEED_CRUN` on the container engine
+/// (`--allow-container-engine`), and naming `--no-jobs` on an agent that runs no job. Catches
+/// an agent that reports `host-jobs` while its runtime cannot launch one, so the server would
+/// taint the host for a job that never starts.
 #[test]
 fn allow_host_jobs_is_refused_on_every_runtime_but_crun() {
     let dir = Scratch::new("life-flags-host-jobs");
@@ -70,8 +71,6 @@ fn allow_host_jobs_is_refused_on_every_runtime_but_crun() {
     let (exec, state, scratch) = (s(&exec), s(&state), s(&scratch));
     let docker = [
         "--allow-host-jobs",
-        "--runtime",
-        "docker",
         "--allow-container-engine",
         "--container-bin",
         &exec,
@@ -84,25 +83,28 @@ fn allow_host_jobs_is_refused_on_every_runtime_but_crun() {
         "--scratch-root",
         &scratch,
     ];
-    let cases: [(&[&str], crate::support::Host); 3] = [
-        (&["--allow-host-jobs"], crate::support::mac_host()),
-        (&["--allow-host-jobs", "--runtime", "none"], linux_host()),
-        (&docker, linux_host()),
-    ];
-    for (extra, host) in cases {
-        let (ran, sent, _) = run_scripted(extra, &host, vec![welcome(1)], 1);
-        assert_eq!(ran.status(), code(2), "{extra:?}: {}", ran.err);
-        assert!(
-            ran.err.contains(HOST_JOBS_NEED_CRUN),
-            "{extra:?}: {}",
-            ran.err
-        );
-        assert!(sent.borrow().is_empty(), "{extra:?}");
-    }
+    let (ran, sent, _) = run_scripted(&docker, &linux_host(), vec![welcome(1)], 1);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(ran.err.contains(HOST_JOBS_NEED_CRUN), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
+    let (ran, sent, _) = run_scripted(
+        &["--allow-host-jobs", "--no-jobs"],
+        &linux_host(),
+        vec![welcome(1)],
+        1,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err
+            .contains("--allow-host-jobs: not with --no-jobs (an agent that runs no job)"),
+        "{}",
+        ran.err
+    );
+    assert!(sent.borrow().is_empty());
     assert_eq!(
         HOST_JOBS_NEED_CRUN,
-        "--allow-host-jobs: only --runtime crun launches a host job; the container engine \
-         (--container-bin) and native runtimes run contained jobs only"
+        "--allow-host-jobs: only the crun runtime launches a host job; the container engine \
+         (--allow-container-engine) runs contained jobs only"
     );
 }
 
@@ -145,7 +147,7 @@ fn start_on(host: &crate::support::Host, extra: &[&str]) -> (String, String, usi
 
 /// Asserts that the state root and the watched directories are checked when the agent
 /// starts, each wrong one ending it with status 2 before anything is sent and naming the
-/// flag: containers without a state root, a watched directory without containers, a state
+/// flag: containers without a state root, a watched directory with no jobs (`--no-jobs`), a state
 /// root other users can enter, a watched path that is relative (one that exists too),
 /// missing or a file, and a
 /// watched directory that is, holds or lies in the state root, the scratch root or a mount
@@ -178,8 +180,6 @@ fn the_state_root_and_the_watched_directories_are_checked_at_start() {
     let (data_s, inner) = (format!("data={}", data.display()), s(&data.join("inner")));
     let missing = s(&dir.path("missing"));
     let containers: Vec<&str> = vec![
-        "--runtime",
-        "docker",
         "--allow-container-engine",
         "--container-bin",
         &exec,
@@ -202,15 +202,15 @@ fn the_state_root_and_the_watched_directories_are_checked_at_start() {
         ),
         (
             vec!["--watch-dir", &watched],
-            "--watch-dir: needs --container-bin",
+            "--watch-dir: not with --no-jobs (an agent that runs no job)",
         ),
         (
             vec!["--stop-grace", "5"],
-            "--stop-grace and --drain-wait: need --container-bin",
+            "--stop-grace and --drain-wait: not with --no-jobs (an agent that runs no job)",
         ),
         (
             vec!["--drain-wait", "5"],
-            "--stop-grace and --drain-wait: need --container-bin",
+            "--stop-grace and --drain-wait: not with --no-jobs (an agent that runs no job)",
         ),
         (
             with(
@@ -383,103 +383,6 @@ fn a_state_root_inside_a_directory_a_job_can_write_is_refused() {
     }
     let (status, err, _) = start(&["--mount-root", &held_mount, "--state-root", &held_s]);
     assert_eq!(status, code(0), "a state root may hold a mount root: {err}");
-}
-
-/// Asserts that on a system other than Linux (this test is built only there, so the macOS
-/// job runs it) the agent, with the platform this binary was built for, refuses
-/// `--container-bin` when it starts: status 2, the flag named, the reason given, nothing
-/// sent. It catches a Mac build whose own platform is not what the refusal tests, so that
-/// it would run container jobs where the post-job checks, which read `/proc`, cannot work.
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn this_platform_refuses_container_jobs() {
-    let dir = Scratch::new("life-flags-this-platform");
-    let state = dir.path("state");
-    let scratch = dir.path("scratch");
-    for path in [&state, &scratch] {
-        fs::create_dir(path).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
-    let (state, exec, user, scratch) = (
-        state.display().to_string(),
-        exec.display().to_string(),
-        container_user(),
-        scratch.display().to_string(),
-    );
-    let mut host = crate::support::mac_host();
-    host.platform = js_agent::Platform::current();
-    let args = [
-        "--runtime",
-        "docker",
-        "--allow-container-engine",
-        "--container-bin",
-        &exec,
-        "--container-user",
-        &user,
-        "--state-root",
-        &state,
-        "--scratch-root",
-        &scratch,
-    ];
-    let (status, err, sent) = start_on(&host, &args);
-    assert_eq!(status, code(2), "{err}");
-    assert!(
-        err.contains("--container-bin: container jobs are Linux-only"),
-        "{err}"
-    );
-    assert_eq!(sent, 0);
-}
-
-/// Asserts that a Mac refuses `--container-bin` when it starts, with status 2 and nothing
-/// sent, saying why (the checks read `/proc`), and that the same flags start the agent on a
-/// Linux host. It catches a Mac agent that would run container jobs with no post-job check.
-#[test]
-fn container_jobs_are_refused_on_a_mac() {
-    let dir = Scratch::new("life-flags-mac");
-    let state = dir.path("state");
-    fs::create_dir(&state).unwrap();
-    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-    let scratch = dir.path("scratch");
-    fs::create_dir(&scratch).unwrap();
-    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
-    let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
-    let (state, exec, user, scratch) = (
-        state.display().to_string(),
-        exec.display().to_string(),
-        container_user(),
-        scratch.display().to_string(),
-    );
-    let args = [
-        "--runtime",
-        "docker",
-        "--allow-container-engine",
-        "--container-bin",
-        &exec,
-        "--container-user",
-        &user,
-        "--container-subuid",
-        "jobmap",
-        "--state-root",
-        &state,
-        "--scratch-root",
-        &scratch,
-    ];
-    let (status, err, sent) = start_on(&crate::support::mac_host(), &args);
-    assert_eq!(status, code(2), "{err}");
-    assert!(
-        err.contains("--container-bin: container jobs are Linux-only"),
-        "{err}"
-    );
-    assert_eq!(sent, 0);
-    let (status, err, _) = start_on(&crate::support::mac_host(), &["--state-root", &state]);
-    assert_eq!(
-        status,
-        code(0),
-        "a Mac without containers runs no checks: {err}"
-    );
-    let (status, err, _) = start_on(&linux_host(), &args);
-    assert_eq!(status, code(0), "{err}");
 }
 
 /// Asserts that a taint marker that is already in the state root is told to the operator
@@ -745,7 +648,7 @@ fn the_silence_stop_flag_is_bounded() {
     let (status, err, sent) = start(&["--silence-stop", "300"]);
     assert_eq!(status, code(2), "{err}");
     assert!(
-        err.contains("--silence-stop: needs --container-bin or --native-helper-socket"),
+        err.contains("--silence-stop: not with --no-jobs (an agent that runs no job)"),
         "{err}"
     );
     assert_eq!(sent, 0);
@@ -769,8 +672,6 @@ fn a_stop_grace_the_silence_bound_does_not_outlast_is_refused_at_start() {
     let s = |path: &std::path::Path| path.display().to_string();
     let (exec, state, scratch) = (s(&exec), s(&state), s(&scratch));
     let (status, err, sent) = start(&[
-        "--runtime",
-        "docker",
         "--allow-container-engine",
         "--container-bin",
         &exec,
@@ -795,9 +696,9 @@ fn a_stop_grace_the_silence_bound_does_not_outlast_is_refused_at_start() {
 /// Asserts the bounds of `--settle-ms`: it is one second when not given, 1 and 60000 are
 /// taken, 0 (a judgement that does not wait is the one that blamed jobs for the host's own
 /// processes) and 60001 are refused naming the flag, the job flags carry the default, and the
-/// flag on an agent that runs no container ends it with status 2 before anything is sent.
-/// It catches a wait that can be switched off, one without a ceiling, and a flag taken where
-/// nothing would wait.
+/// flag on an agent that runs no job (`--no-jobs`) ends it with status 2 before anything is
+/// sent. It catches a wait that can be switched off, one without a ceiling, and a flag taken
+/// where nothing would wait.
 #[test]
 fn the_settle_flag_is_bounded() {
     assert_eq!(DEFAULT_SETTLE, Duration::from_millis(1000));
@@ -817,7 +718,10 @@ fn the_settle_flag_is_bounded() {
 
     let (status, err, sent) = start(&["--settle-ms", "500"]);
     assert_eq!(status, code(2), "{err}");
-    assert!(err.contains("--settle-ms: needs --container-bin"), "{err}");
+    assert!(
+        err.contains("--settle-ms: not with --no-jobs (an agent that runs no job)"),
+        "{err}"
+    );
     assert_eq!(sent, 0);
 }
 
@@ -842,8 +746,6 @@ fn container_local(name: &str, extra: &[&str]) -> Result<js_agent::lifecycle::Lo
         "/nonexistent/token",
         "--pool",
         "p",
-        "--runtime",
-        "docker",
         "--allow-container-engine",
         "--container-bin",
         &exec,
@@ -864,11 +766,11 @@ fn container_local(name: &str, extra: &[&str]) -> Result<js_agent::lifecycle::Lo
 
 /// Asserts `--taint-recheck-ms` end to end: the job flags of an agent that runs containers
 /// carry a minute when it is not given and the value when it is, the bounds are refused
-/// naming the flag, and the flag on an agent that runs no container ends it with status 2
+/// naming the flag, and the flag on an agent that runs no job (`--no-jobs`) ends it with status 2
 /// before anything is sent. It catches a flag that is read and dropped, one without
 /// bounds, and one taken where nothing would re-check.
 #[test]
-fn the_taint_recheck_flag_is_read_bounded_and_needs_a_container() {
+fn the_taint_recheck_flag_is_read_bounded_and_refused_with_no_jobs() {
     let default = container_local("recheck-default", &[]).unwrap();
     assert_eq!(default.taint_recheck, Duration::from_secs(60));
     let given = container_local("recheck-given", &["--taint-recheck-ms", "5000"]).unwrap();
@@ -881,7 +783,7 @@ fn the_taint_recheck_flag_is_read_bounded_and_needs_a_container() {
     let (status, err, sent) = start(&["--taint-recheck-ms", "500"]);
     assert_eq!(status, code(2), "{err}");
     assert!(
-        err.contains("--taint-recheck-ms: needs --container-bin"),
+        err.contains("--taint-recheck-ms: not with --no-jobs (an agent that runs no job)"),
         "{err}"
     );
     assert_eq!(sent, 0);

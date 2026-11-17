@@ -54,7 +54,7 @@ mod tests {
             printf '%s' 'other' > /etc/jobscheduler/key\n\
             printf '%s' 'it'\\''s-a-token' > /etc/jobscheduler/token\n\
             chmod 0600 -- /etc/jobscheduler/token\n\
-            ExecStart=/usr/local/bin/js-agent --pool \"burst\" --host-id \"js-1-2\" --runtime crun\n";
+            ExecStart=/usr/local/bin/js-agent --pool \"burst\" --host-id \"js-1-2\"\n";
         let read = Payload::read(script).expect("a payload");
         assert_eq!(read.token, "it's-a-token");
         assert_eq!(read.host, "js-1-2");

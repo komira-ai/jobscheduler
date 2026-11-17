@@ -181,7 +181,7 @@ addresses only for an `allow-list` job (an `open` job reaches them through its o
   an allow-list that cannot be set up ends the agent with status 2. The start-up sweep of the
   leases an earlier process left needs no call of its own: no `Attachment` of that process
   exists, and the egress start has already removed its interfaces and tables. Only
-  `--runtime crun` enforces a ceiling, so another runtime is refused `allow-list` and `open` at
+  the crun runtime enforces a ceiling, so the container engine is refused `allow-list` and `open` at
   start (its jobs get `none` only). Declared ports are forwarded through the DNAT rules of
   "Declared ports". The old Podman flags (`--container-network`, `--container-egress-allow`,
   `--container-nft`), their check and the operator script that set up the Podman network were

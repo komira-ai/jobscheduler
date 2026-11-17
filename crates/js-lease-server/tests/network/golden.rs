@@ -109,7 +109,6 @@ fn the_agent_unit_names_its_roots_and_requires_the_scratch_mount() {
         .find(|line| line.starts_with("ExecStart="))
         .unwrap();
     for (flag, value) in [
-        ("--runtime", js_elastic::RUNTIME),
         ("--container-bin", js_elastic::CONTAINER_BIN),
         ("--state-root", js_elastic::STATE_ROOT),
         ("--scratch-root", js_elastic::SCRATCH_ROOT),
@@ -126,12 +125,14 @@ fn the_agent_unit_names_its_roots_and_requires_the_scratch_mount() {
     assert!(made < agent_unit_at(&script));
 }
 
-/// Asserts that the agent's unit names the engine runtime with its opt-in, side by side, and
-/// that the agent's own parser reads its `ExecStart` as `--runtime docker` with
-/// `--allow-container-engine` set: `crun` is the agent's default Linux runtime and it refuses
-/// `--runtime docker` without the opt-in (exit status 2), so every machine the payload boots
-/// would otherwise restart its agent forever. It catches a payload that drops the opt-in, or
-/// spells it as a flag the agent does not know.
+/// Asserts that the agent's unit names the container engine's opt-in once, beside
+/// `--container-bin`, and that the agent's own parser reads its `ExecStart` with
+/// `--allow-container-engine` set and the engine at [`js_elastic::CONTAINER_BIN`]: `crun` is
+/// the runtime of the agent's Linux build, and without the opt-in the agent refuses the engine
+/// flags (exit status 2), so every machine the payload boots would otherwise restart its agent
+/// forever. It catches a payload that drops the opt-in, names the removed `--runtime` (which
+/// the agent refuses by name), or spells either as a flag the agent does not know.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_boot_payload_unit_names_the_engine_runtime_and_its_opt_in() {
     use clap::Parser as _;
@@ -142,19 +143,24 @@ fn the_boot_payload_unit_names_the_engine_runtime_and_its_opt_in() {
         .find_map(|line| line.strip_prefix("ExecStart="))
         .unwrap();
     let pair = format!(
-        "--runtime {} {}",
-        js_elastic::RUNTIME,
-        js_elastic::ENGINE_OPT_IN
+        "{} --container-bin {}",
+        js_elastic::ENGINE_OPT_IN,
+        js_elastic::CONTAINER_BIN
     );
-    assert_eq!(pair, "--runtime docker --allow-container-engine");
+    assert_eq!(
+        pair,
+        "--allow-container-engine --container-bin /usr/bin/docker"
+    );
     assert_eq!(exec.matches(&pair).count(), 1, "{exec}");
     assert_eq!(exec.matches(js_elastic::ENGINE_OPT_IN).count(), 1, "{exec}");
+    assert!(!exec.contains("--runtime"), "{exec}");
     // The unit quotes its values; systemd hands the agent the words without the quotes.
     let words = exec.split_whitespace().map(|word| word.trim_matches('"'));
     let cli = js_agent::Cli::try_parse_from(words)
         .unwrap_or_else(|why| panic!("ExecStart is not a command line of js-agent: {why}"));
-    assert_eq!(cli.runtime, Some(js_agent::RuntimeKind::Docker));
-    assert!(cli.allow_container_engine, "{exec}");
+    assert!(cli.os.allow_container_engine, "{exec}");
+    let bin = cli.os.container_bin.as_deref().map(std::path::Path::to_str);
+    assert_eq!(bin, Some(Some(js_elastic::CONTAINER_BIN)), "{exec}");
 }
 
 /// The masked tailscale script as lines.

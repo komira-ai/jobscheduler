@@ -8,7 +8,7 @@ use std::time::Duration;
 use js_agent::lifecycle::{Body, Exit, RunHandle, Runtime, Status};
 use js_agent::vm::{NoVmSlot, VM_SLOTS, VmRuntime};
 use js_agent_wire::limits::{MAX_LOG_STREAM_LEN, MAX_WALL_MS};
-use js_agent_wire::{LogTail, refusal};
+use js_agent_wire::{LogTail, NativeSpec, NetworkLevel, refusal};
 use js_vm_lease::fake::{Call, FakeDriver};
 use js_vm_lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
 
@@ -451,7 +451,16 @@ fn what_is_refused_before_a_vm_is_made() {
     let driver = Arc::new(FakeDriver::new().holding());
     let mut rt = runtime(&driver);
     let mut native = spec("run-n", &[]);
-    native.body = Body::Native(super::super::native::native("/bin/true", &[]));
+    native.body = Body::Native(NativeSpec {
+        program: "/bin/true".to_owned(),
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: NetworkLevel::Off,
+        ports: Vec::new(),
+    });
     assert_eq!(
         rt.create_and_start(&native).unwrap_err().to_string(),
         "a VM runs a command, not a native body"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# crun_host_setup.sh: sets up a Linux host to run js-agent with `--runtime crun`. Run it as root, on one host at a
+# crun_host_setup.sh: sets up a Linux host to run js-agent with the crun runtime (the runtime of the agent's Linux build). Run it as root, on one host at a
 # time, with the agent stopped and the host drained.
 #
-# What a host needs before `js-agent --runtime crun` can start (the agent's own start check lists the same pieces and
+# What a host needs before the crun runtime of `js-agent` can start (the agent's own start check lists the same pieces and
 # exits 2 naming each one that is missing):
 #   1. packages    crun and uidmap from the distribution (apt), /usr/bin/crun owned by the crun package (never a
 #                  copy: the distribution's AppArmor profile attaches to that path), crun 1.14 or newer
@@ -1009,7 +1009,7 @@ main() {
     say "  $JS_AGENT prints '$WIRED_LINE': a build wired for crun."
     say "NEXT: on this host, drain it, then systemctl stop js-agent and systemctl start js-agent-crun."
   else
-    say "do NOT switch units yet: $JS_AGENT does not print '$WIRED_LINE' in --version (this build exits 2 at start with --runtime crun, or an older one does not know the flag)."
+    say "do NOT switch units yet: $JS_AGENT does not print '$WIRED_LINE' in --version (this build exits 2 at start on a host check of the crun runtime, or an older one does not know the flag)."
     say "NEXT: install an agent build wired for crun, run this script again, and only then switch units."
   fi
   exit 0

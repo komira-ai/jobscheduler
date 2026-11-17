@@ -229,7 +229,8 @@ enum Kind {
     /// The agent cannot see the host ([`RuntimeError::blind`]).
     Blind,
     /// A removal that ended everything of the run and could not copy a declared output
-    /// ([`RuntimeError::outputs`]).
+    /// ([`RuntimeError::outputs`]): the native runtime's (a macOS build's).
+    #[cfg(target_os = "macos")]
     Outputs,
 }
 
@@ -254,12 +255,15 @@ impl RuntimeError {
 
     /// A removal that did everything a removal does (the run's processes and its user are
     /// gone) but could not copy one or more of the run's declared outputs. Nothing of the
-    /// run is left on the host, so the lifecycle reports it and does not taint the host.
+    /// run is left on the host, so the lifecycle reports it and does not taint the host. Only
+    /// the native runtime copies outputs.
+    #[cfg(target_os = "macos")]
     pub(crate) fn outputs(text: impl Into<String>) -> Self {
         Self(text.into(), Kind::Outputs)
     }
 
     /// Whether the failure is only that outputs were not copied ([`RuntimeError::outputs`]).
+    #[cfg(target_os = "macos")]
     pub(crate) fn is_outputs(&self) -> bool {
         self.1 == Kind::Outputs
     }
@@ -785,6 +789,31 @@ mod tests {
         fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
             Ok(Vec::new())
         }
+    }
+
+    /// Asserts the defaults of a runtime that says nothing of native bodies and image starts:
+    /// it refuses a native body `native-unsupported` (every runtime but the Mac one), runs a
+    /// start named by its image (every container runtime) and runs no image run. Catches a
+    /// default that would let a Linux runtime take a native job, or refuse the image starts
+    /// every container runtime runs.
+    #[test]
+    fn a_runtime_that_says_nothing_runs_images_and_no_native_body() {
+        let bare = Bare;
+        let native = NativeSpec {
+            program: "/bin/true".to_owned(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: String::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            network: NetworkLevel::Off,
+            ports: Vec::new(),
+        };
+        let refused = bare.check_native(&native).unwrap_err();
+        assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
+        assert_eq!(refused.why, "this agent runs no native jobs");
+        assert!(bare.check_image().is_ok());
+        assert!(!bare.runs_image_runs());
     }
 
     /// Catches a runtime that gives no layers (the container engine's, a Mac's, a VM's)

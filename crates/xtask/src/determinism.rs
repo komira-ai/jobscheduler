@@ -750,18 +750,18 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the native runtime's wall clock, set by NativeRuntime::open; the cell's real agents run the in-memory runtime",
     },
     Allowed {
+        file: "crates/js-agent/src/platform/macos.rs",
+        item: "runtime",
+        token: Token::Getrandom,
+        sites: 1,
+        reason: "the native runtime's lease-user term (the macOS build's); the cell's real agents run the in-memory runtime",
+    },
+    Allowed {
         file: "crates/js-agent/src/quota/xfs.rs",
         item: "probe_name",
         token: Token::Getrandom,
         sites: 1,
         reason: "names the XFS quota probe's directory; the cell configures no XFS quota",
-    },
-    Allowed {
-        file: "crates/js-agent/src/system.rs",
-        item: "native_runtime",
-        token: Token::Getrandom,
-        sites: 1,
-        reason: "the native runtime's lease-user term; the cell's real agents run the in-memory runtime",
     },
     Allowed {
         file: "crates/js-agent/src/system.rs",
