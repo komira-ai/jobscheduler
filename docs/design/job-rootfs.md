@@ -571,7 +571,7 @@ All flags, in the agent's flags file (B14, S2):
 
 | Flag | Meaning |
 |---|---|
-| `--mount-root NAME=PATH`, `--mount-root-ro NAME=PATH` | **existing**, now accepted with `--runtime crun`. Each root is a prefix: a job may name any directory beneath it (after links are followed), read-only beneath either kind, read-write only beneath a `--mount-root`. The names stay for the legacy `Mount` form and for the log; a host path never names a root. |
+| `--mount-root NAME=PATH`, `--mount-root-ro NAME=PATH` | **existing**, now accepted with the crun runtime. Each root is a prefix: a job may name any directory beneath it (after links are followed), read-only beneath either kind, read-write only beneath a `--mount-root`. The names stay for the legacy `Mount` form and for the log; a host path never names a root. |
 | `--image-allow HOST[:PORT]/PREFIX` | **existing**; an image layer is allowed as the job's image is. |
 | `--image-allow-loopback 127.0.0.1:PORT/PREFIX` (or `[::1]:PORT/PREFIX`) | **new**: a registry on the host's own loopback, over plain HTTP, with its port given. It builds `Allow::plain_http_loopback()`; `--registry-credentials` may name it as any other entry. |
 | `--host-port PORT` or `LO-HI` | **new**, repeatable, at most 16: the host loopback ports a job may reach (a `HostPort.host_port`; the job's own port is not bounded, since it is in the job's network alone). |
@@ -1138,7 +1138,7 @@ port 0.
   and each outcome; the start failure detail round-trips through the stored row and `GetJob`;
 - the tree wire's tests of section 6 pass unchanged; the removed key of section 6 is an unknown key to a request.
 - flags: `--host-port` with 16 entries accepted and 17 refused, a range `LO-HI` accepted, a reversed range, a port 0
-  and a port 65536 refused at start; `--mount-root` and `--mount-root-ro` accepted with `--runtime crun`;
+  and a port 65536 refused at start; `--mount-root` and `--mount-root-ro` accepted with the crun runtime;
 
 **Agent, Linux** (`js-agent`, with fakes):
 

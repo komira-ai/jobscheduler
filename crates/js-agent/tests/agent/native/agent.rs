@@ -9,7 +9,7 @@ use clap::Parser as _;
 use js_agent::lifecycle::Local;
 use js_agent::native::{self, NativeFlags, NativeSettings, PfFlags};
 use js_agent::{Backend, Cli, Machine, RuntimeBuild, System};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::Path;
 
 use super::fake_helper::FakeHelper;
@@ -18,7 +18,7 @@ use crate::bundle::fixture::{no_registry, placer};
 use crate::jobs::fake::FakeMachine;
 use crate::support::{
     CountingSleeper, Host, Jobs, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
-    linux_host, mac_host, reply, run_on, run_with_store, welcome,
+    mac_host, run_on, run_on_defaulted, run_with_store, welcome,
 };
 
 /// A private directory `name` under `dir`.
@@ -67,12 +67,10 @@ pub(crate) fn hello_on(
 
 /// Asserts that a Mac agent given the helper's socket starts its worker (the helper is
 /// asked for its boot reset first) and reports `runtime` and `exec` as `sandbox-exec`
-/// beside `os` and `arch`, and that a Linux agent given the same flags is refused with
-/// status 2, before anything is sent, saying that native jobs are for a Mac. It catches an
-/// agent that runs native jobs while reporting no mode (every pool with a mode would refuse
-/// it), and a Linux host that accepts a flag it can never serve.
+/// beside `os` and `arch`. It catches an agent that runs native jobs while reporting no
+/// mode (every pool with a mode would refuse it).
 #[test]
-fn a_mac_agent_reports_sandbox_exec_and_a_linux_one_is_refused() {
+fn a_mac_agent_reports_sandbox_exec() {
     let dir = Scratch::new("native-agent-hello");
     let fake = FakeHelper::start(&dir);
     let extra = native_flags(&dir, &fake);
@@ -82,20 +80,75 @@ fn a_mac_agent_reports_sandbox_exec_and_a_linux_one_is_refused() {
     assert_eq!(hello["capabilities"]["runtime"], "sandbox-exec");
     assert_eq!(hello["capabilities"]["exec"], "sandbox-exec");
     assert_eq!(hello["capabilities"]["os"], "macos");
+}
 
-    let again = Scratch::new("native-agent-linux");
-    let other = FakeHelper::start(&again);
-    let extra = native_flags(&again, &other);
-    let (ran, hello) = hello_on(&linux_host(), &extra, reply(200, json!({})));
+/// Asserts that a Mac start with neither `--native-helper-socket` nor `--no-jobs` ends with
+/// status 2, before anything is sent, naming `--native-helper-socket` and the `--no-jobs` that
+/// an agent running no job gives. It catches a Mac agent that registers with no way to run a
+/// job, and one that is silently a no-job agent for want of a flag.
+#[test]
+fn a_mac_start_with_no_socket_and_no_no_jobs_is_refused() {
+    let args = flags(&[]);
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+    let ran = run_on_defaulted(
+        &args,
+        &mac_host(),
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(
-        ran.err
-            .contains("--native-helper-socket: native jobs run on macOS only"),
+        ran.err.contains(
+            "--native-helper-socket: required: this macOS build runs native jobs through the \
+             root helper (give --no-jobs for an agent that runs no job)"
+        ),
         "{}",
         ran.err
     );
-    assert_eq!(hello, Value::Null, "nothing was sent");
-    assert!(other.verbs().is_empty(), "the helper was not asked");
+    assert!(sent.borrow().is_empty(), "something was sent");
+}
+
+/// Asserts that `--no-jobs` refuses each flag of the macOS build's runtime, the native socket
+/// first among them: through the agent's own entry point, a start with `--no-jobs` and one such
+/// flag ends with status 2 before anything is sent, naming the flag and `--no-jobs`. It catches
+/// an agent that runs no job yet takes a runtime flag it would ignore, so that a flags file
+/// written for a native agent starts one that silently runs nothing.
+#[test]
+fn no_jobs_refuses_every_native_flag_by_name() {
+    let rows: [(&str, &str); 5] = [
+        ("--native-helper-socket", "/var/run/js-mac-session/socket"),
+        ("--native-network", "on"),
+        ("--native-pf-uid-start", "600"),
+        ("--vm-driver", "/usr/local/bin/js-vmm"),
+        ("--vm-store", "/var/db/js-vm"),
+    ];
+    for (flag, value) in rows {
+        let args = flags(&["--no-jobs", flag, value]);
+        let (script, sent) = Script::new(vec![welcome(1)]);
+        let connector = ScriptConnector::of(script);
+        let mut sleeper = CountingSleeper::stopping_at(1);
+        let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+        let ran = run_on_defaulted(
+            &args,
+            &mac_host(),
+            &connector,
+            &mut sleeper,
+            &mut Lowest,
+            jobs,
+        );
+        assert_eq!(ran.status(), code(2), "{flag}: {}", ran.err);
+        assert_eq!(
+            ran.err,
+            format!("js-agent: {flag}: not with --no-jobs (an agent that runs no job)\n"),
+            "{flag}"
+        );
+        assert!(sent.borrow().is_empty(), "{flag}: something was sent");
+    }
 }
 
 /// Asserts that a Mac agent's hello reports its `--native-network` as the job level a
@@ -144,11 +197,10 @@ fn an_agent_whose_helper_is_not_there_ends_before_the_hello() {
 }
 
 /// Asserts what the job flags require of a native agent: a state root and a scratch root
-/// (the taint marker and each run's logs are kept there), no container engine beside it,
-/// and a `--stop-grace` that is accepted. It catches a native agent that starts with no
-/// place for its taint marker and one that is also a container agent.
+/// (the taint marker and each run's logs are kept there) and a `--stop-grace` that is
+/// accepted. It catches a native agent that starts with no place for its taint marker.
 #[test]
-fn a_native_agent_needs_its_roots_and_no_engine() {
+fn a_native_agent_needs_its_roots() {
     let dir = Scratch::new("native-agent-roots");
     let fake = FakeHelper::start(&dir);
     let socket = fake.socket().display().to_string();
@@ -179,31 +231,10 @@ fn a_native_agent_needs_its_roots_and_no_engine() {
     );
     let both = ["--state-root", &state, "--scratch-root", &scratch];
     let local = Local::from_cli(&cli(&both), 0).unwrap();
-    assert!(local.native.is_some() && local.container.is_none());
+    assert!(matches!(local.backend, Some(Backend::Native(_))));
     let graced = [&both[..], &["--stop-grace", "5"]].concat();
     let local = Local::from_cli(&cli(&graced), 0).unwrap();
     assert_eq!(local.stop_grace.as_secs(), 5);
-
-    let engine = fake.homes().join("engine");
-    fs::write(&engine, "#!/bin/sh\n").unwrap();
-    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-    let engine = engine.display().to_string();
-    let user = format!(
-        "{}:{}",
-        rustix::process::geteuid().as_raw().max(1),
-        rustix::process::getegid().as_raw().max(1)
-    );
-    let with_engine = [
-        &both[..],
-        &["--container-bin", &engine, "--container-user", &user],
-        &["--container-subuid", "jobmap"],
-    ]
-    .concat();
-    let why = Local::from_cli(&cli(&with_engine), 0).unwrap_err();
-    assert!(
-        why.starts_with("--native-helper-socket: not with --container-bin"),
-        "{why}"
-    );
 }
 
 /// Asserts that the system machine makes the native runtime for the native backend: over a
@@ -301,7 +332,8 @@ fn a_native_agent_must_be_root_and_denies_its_secret_files() {
         "{why}"
     );
     let local = Local::from_cli(&cli, 0).unwrap();
-    let native = local.native.unwrap();
+    let native = local.backend.unwrap();
+    let native = native.settings();
     let denied: Vec<&str> = native
         .config()
         .read_denies

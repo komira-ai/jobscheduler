@@ -370,7 +370,7 @@ fn generate(
         (host.read)(&args.dev_root.join(node))
             .map_err(|why| GpuFlagError::Node(why).to_string())?;
     }
-    GpuPassthrough::from_cli(&cli, &indices, read_already).map_err(|why| why.to_string())?;
+    GpuPassthrough::from_cli(&cli.os, &indices, read_already).map_err(|why| why.to_string())?;
     let command = line.join(" ");
     write_atomic(&args.out, &dropin(&command))
         .map_err(|why| format!("{}: {why}", args.out.display()))?;

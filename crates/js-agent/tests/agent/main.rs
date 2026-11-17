@@ -42,6 +42,7 @@ mod integrity;
 mod jobs;
 mod join_round_trip;
 mod lifecycle;
+#[cfg(target_os = "macos")]
 mod native;
 mod quota;
 mod readiness;

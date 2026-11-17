@@ -12,7 +12,7 @@ use super::super::native::fake_helper::FakeHelper;
 use crate::jobs::fake::FakeMachine;
 use crate::support::{
     CountingSleeper, Host, Jobs, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
-    linux_host, mac_host, run_on, welcome,
+    mac_host, run_on, welcome,
 };
 
 /// Runs the whole agent on `host` over `machine` with `extra` flags until the server's
@@ -81,7 +81,7 @@ fn the_hello_reports_two_vm_slots_with_the_flags_and_none_without() {
 }
 
 /// Asserts that each wrong use of the VM flags exits 2 before anything is sent, with the
-/// exact reason: one without the other, a Linux host, no native jobs, a relative driver, a
+/// exact reason: one without the other, a relative driver, a
 /// store without a base image, and a `--capability` that names a VM key. Catches a backend
 /// turned on half-configured, and an operator who forges the VM capabilities.
 #[test]
@@ -107,17 +107,6 @@ fn a_wrong_vm_flag_exits_2_naming_it() {
             mac_host(),
             with(&["--vm-driver", &driver]),
             "--vm-driver: needs --vm-store".to_owned(),
-        ),
-        (
-            mac_host(),
-            vec![
-                "--vm-driver".to_owned(),
-                driver.clone(),
-                "--vm-store".to_owned(),
-                store.clone(),
-            ],
-            "--vm-driver: needs --native-helper-socket (the VMs run beside the native jobs)"
-                .to_owned(),
         ),
         (
             mac_host(),
@@ -153,63 +142,4 @@ fn a_wrong_vm_flag_exits_2_naming_it() {
         assert!(ran.err.contains(&said), "{said}: {}", ran.err);
         assert_eq!(hello, Value::Null, "{said}: nothing was sent");
     }
-    // A Linux agent is refused for the platform before the native flags are judged.
-    let linux = vec![
-        "--vm-driver".to_owned(),
-        driver,
-        "--vm-store".to_owned(),
-        store,
-    ];
-    let (ran, _) = hello_with(&linux_host(), &linux, FakeMachine::new());
-    assert_eq!(ran.status(), code(2), "{}", ran.err);
-    assert!(
-        ran.err.contains("--vm-driver: VM leases run on macOS only"),
-        "{}",
-        ran.err
-    );
-}
-
-/// Asserts that an agent whose machine runs no VMs (the default driver, off macOS) does not
-/// start with the backend on, saying so, and sends no hello. Catches an agent that reports
-/// `vm.slots` while it cannot make one VM. (On a Mac the default driver is the real one.)
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn a_machine_that_runs_no_vms_keeps_the_agent_from_starting() {
-    let dir = Scratch::new("vm-agent-nodriver");
-    let fake = FakeHelper::start(&dir);
-    let mut extra = native_flags(&dir, &fake);
-    extra.extend(vm_flags(&dir));
-    let (ran, hello) = hello_with(&mac_host(), &extra, FakeMachine::new());
-    assert_ne!(ran.status(), code(0), "{}", ran.err);
-    assert!(
-        ran.err.contains("VM leases run on macOS only"),
-        "{}",
-        ran.err
-    );
-    assert_eq!(hello, Value::Null);
-}
-
-/// Asserts that the machine itself (not a test's) runs no VM off macOS: its VM driver is
-/// refused with the reason. Catches a Linux agent that would report `vm.slots` over a driver
-/// that cannot boot anything.
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn the_system_machine_runs_no_vms_off_macos() {
-    use clap::Parser as _;
-    use js_agent::vm::VmSettings;
-    use js_agent::{Cli, Machine, Platform, System};
-
-    let dir = Scratch::new("vm-agent-system");
-    let vm = vm_flags(&dir);
-    let mut args = vec!["js-agent".to_owned()];
-    args.extend(flags(&[]).iter().map(|flag| (*flag).to_owned()));
-    args.extend(vm);
-    let cli = Cli::try_parse_from(&args).unwrap();
-    let mac = Platform {
-        os: "macos".to_owned(),
-        arch: "arm64".to_owned(),
-    };
-    let settings = VmSettings::from_cli(&cli, &mac, true).unwrap().unwrap();
-    let refused = System::new().vm_driver(&settings).map(|_| ());
-    assert_eq!(refused, Err("VM leases run on macOS only".to_owned()));
 }

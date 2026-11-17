@@ -296,9 +296,10 @@ fn usage_of(http: &crate::http::Gateway, js: &crate::cli::Js, id: &str) -> Value
     got.body
 }
 
-/// Asserts the default runtime (ported from the lease path of the agent's crun tests): an
-/// agent given no `--runtime` registers, runs a job through the stand-in and reports it
-/// succeeded. It catches a default that is not crun, or a crun agent that runs no job.
+/// Asserts the Linux build's runtime (ported from the lease path of the agent's crun tests): an
+/// agent given no runtime flag registers, runs a job through crun's stand-in and reports it
+/// succeeded. It catches a Linux agent whose runtime is not crun, or a crun agent that runs no
+/// job.
 fn an_agent_with_no_runtime_flag_runs_a_job_through_crun(kind: Kind) {
     let rig = Rig::with_agent(&name("default", kind, None), kind, |node, server, token| {
         Agent::start_defaulted(node, server, token, "h1")

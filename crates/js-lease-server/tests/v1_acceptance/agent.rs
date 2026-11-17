@@ -209,44 +209,40 @@ impl Agent {
     /// `server`, as the host `host_id`, with `extra` flags after its own; returns once it has
     /// said hello and waits for its first heartbeat.
     pub fn start(node: &Node, server: &str, token: &Path, host_id: &str, extra: &[&str]) -> Self {
-        Self::spawn(node, Self::args(node, server, token, host_id, extra, true)).unwrap_or_else(
-            |ran| {
-                panic!(
-                    "the agent ended before its worker started ({}):\n{}",
-                    ran.status, ran.err
-                )
-            },
-        )
+        Self::spawn(node, Self::args(node, server, token, host_id, extra)).unwrap_or_else(|ran| {
+            panic!(
+                "the agent ended before its worker started ({}):\n{}",
+                ran.status, ran.err
+            )
+        })
     }
 
-    /// [`Agent::start`] with no `--runtime`: the default runtime of a Linux agent, `crun`.
+    /// [`Agent::start`] with no extra flags: the runtime of a Linux build, `crun`, is the only one
+    /// a start with none of `--no-jobs` and `--allow-container-engine` has.
     pub fn start_defaulted(node: &Node, server: &str, token: &Path, host_id: &str) -> Self {
-        Self::spawn(node, Self::args(node, server, token, host_id, &[], false)).unwrap_or_else(
-            |ran| {
-                panic!(
-                    "the agent ended before its worker started ({}):\n{}",
-                    ran.status, ran.err
-                )
-            },
-        )
+        Self::spawn(node, Self::args(node, server, token, host_id, &[])).unwrap_or_else(|ran| {
+            panic!(
+                "the agent ended before its worker started ({}):\n{}",
+                ran.status, ran.err
+            )
+        })
     }
 
     /// An agent that is expected to end before its worker starts: how it ended.
     pub fn refused(node: &Node, server: &str, token: &Path, host_id: &str, extra: &[&str]) -> Ran {
-        match Self::spawn(node, Self::args(node, server, token, host_id, extra, true)) {
+        match Self::spawn(node, Self::args(node, server, token, host_id, extra)) {
             Ok(agent) => panic!("the agent started: {}", agent.stop().err),
             Err(ran) => ran,
         }
     }
 
-    /// The command line of an agent of `node`, with `--runtime crun` when `crun`.
+    /// The command line of an agent of `node`, for the crun runtime.
     fn args(
         node: &Node,
         server: &str,
         token: &Path,
         host_id: &str,
         extra: &[&str],
-        crun: bool,
     ) -> Vec<OsString> {
         let mut words = vec![
             "js-agent",
@@ -257,9 +253,6 @@ impl Agent {
             "--host-id",
             host_id,
         ];
-        if crun {
-            words.extend(["--runtime", "crun"]);
-        }
         words.extend(["--job-user", JOB_USER]);
         words
             .iter()

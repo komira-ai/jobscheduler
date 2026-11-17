@@ -121,14 +121,12 @@ impl Machine for CrunMachine {
     }
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
-        let mut planned = None;
-        if let Backend::Container(settings) = build.backend {
-            let caps = settings.crun().map(|plan| plan.logs.file_cap);
-            self.log_file_caps.lock().expect("caps").extend(caps);
-            let budgets = settings.crun().map(|plan| plan.image_budget);
-            self.image_budgets.lock().expect("budgets").extend(budgets);
-            planned = settings.crun().map(|plan| plan.host_ports.clone());
-        }
+        let Backend::Container(settings) = build.backend;
+        let caps = settings.crun().map(|plan| plan.logs.file_cap);
+        self.log_file_caps.lock().expect("caps").extend(caps);
+        let budgets = settings.crun().map(|plan| plan.image_budget);
+        self.image_budgets.lock().expect("budgets").extend(budgets);
+        let planned = settings.crun().map(|plan| plan.host_ports.clone());
         let (inner, warnings) = self.system.runtime(build)?;
         if let Some(planned) = planned {
             let allowed = inner.host_ports();

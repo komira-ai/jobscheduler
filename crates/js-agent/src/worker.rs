@@ -102,13 +102,12 @@ use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunRes
 
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
-use crate::integrity::Integrity;
-use crate::lifecycle::{CheckHook, Config, Contact, Event, Lifecycle, Status, fits_grace};
+
+use crate::lifecycle::{Config, Contact, Event, Lifecycle, Status, fits_grace};
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
 
-use crate::native::NativeChecks;
 use crate::system::{Backend, Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
 use crate::vm::VmSettings;
@@ -797,21 +796,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
     // alone, so a firewall that has gone never keeps it from stopping the containers.
     runtime.check_egress().map_err(|why| why.to_string())?;
-    let (checks, actions): (Box<dyn CheckHook>, Result<String, &str>) = match &backend {
-        Backend::Container(settings) => {
-            let integrity =
-                Integrity::start(machine.view(), settings.uid(), watch)?.with_settle(settle);
-            // The engines give each slot a user of its own; every crun job runs as the one id
-            // of the job user's range, so there are no slots to tell apart.
-            let integrity = match settings.crun() {
-                Some(_) => integrity,
-                None => integrity.with_slots(settings.slot_ids(0).0),
-            };
-            let actions = settings.actions_cgroup().map(str::to_owned);
-            (Box::new(integrity), actions.ok_or(NO_ACTIONS_CGROUP))
-        }
-        Backend::Native(_) => (Box::new(NativeChecks), Err(NO_NATIVE_USAGE)),
-    };
+    let (checks, actions) = crate::platform::checks(&backend, &*machine, watch, settle)?;
     let (life, events) = Lifecycle::adopt(config, runtime, checks, Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
     let life = life
@@ -832,13 +817,6 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     });
     Ok((life, collector, lines))
 }
-
-/// Why the heartbeat of a native agent carries no load.
-const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartbeat carries none";
-
-/// Why the heartbeat carries no load.
-const NO_ACTIONS_CGROUP: &str =
-    "usage: --actions-cgroup is not given: the heartbeat carries no load";
 
 /// The worker's loop: an order or a step interval, then a step, then a publication.
 fn work(

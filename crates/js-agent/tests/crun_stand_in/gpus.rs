@@ -91,7 +91,7 @@ fn passthrough(flags: &[&str]) -> GpuPassthrough {
     let mut args = vec!["js-agent", "--server", "http://127.0.0.1:1", "--pool", "p"];
     args.extend_from_slice(flags);
     let cli = Cli::try_parse_from(args).expect("the flags parse");
-    let checked = GpuPassthrough::from_cli(&cli, &REPORTED, four_gpus).expect("good flags");
+    let checked = GpuPassthrough::from_cli(&cli.os, &REPORTED, four_gpus).expect("good flags");
     checked.expect("a device list")
 }
 
@@ -642,7 +642,7 @@ fn the_runtime_opened_from_the_settings_passes_the_gpus_and_reads_the_host() {
         NO_SUCH_NODE,
     ])
     .expect("the flags parse");
-    let listed = GpuPassthrough::from_cli(&cli, &REPORTED, any_node).expect("good flags");
+    let listed = GpuPassthrough::from_cli(&cli.os, &REPORTED, any_node).expect("good flags");
     let gpus = settings(listed);
     let plan = gpus.crun().expect("crun settings");
     let (mut runtime, _, _) = open_for_plan(plan, "node-1", &seams).expect("opens");

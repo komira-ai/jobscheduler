@@ -93,18 +93,18 @@ fn a_watch_dir_over_the_files_root_is_refused() {
     assert_eq!(sent, 0);
 }
 
-/// Asserts that `--run-files-root` without `--container-bin` or `--native-helper-socket` is
-/// refused like the other job flags. It catches a misspelt unit file that reads as
-/// configured while delivering no files.
+/// Asserts that `--run-files-root` on an agent that runs no job (`--no-jobs`) is refused like
+/// the other job flags. It catches a misspelt unit file that reads as configured while
+/// delivering no files.
 #[test]
-fn a_files_root_needs_containers() {
+fn a_files_root_needs_jobs() {
     let dir = Scratch::new("files-flags-needs");
     let root = private(&dir, "files");
     let owned = vec!["--run-files-root".to_owned(), root.display().to_string()];
     let (status, err, sent) = start(&owned);
     assert_eq!(status, code(2), "{err}");
     assert!(
-        err.contains("--run-files-root: needs --container-bin or --native-helper-socket"),
+        err.contains("--run-files-root: not with --no-jobs (an agent that runs no job)"),
         "{err}"
     );
     assert_eq!(sent, 0);

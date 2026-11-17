@@ -42,7 +42,7 @@ use js_contain::container::{ContainerSpec, DeviceNode, HostMount};
 use rustix::fs::{FileType, Mode, OFlags};
 
 use super::spec::EXEC_ROOT;
-use crate::Cli;
+
 use crate::cli_runtime::SCRATCH_TARGET;
 
 /// What a `--gpu-device` path that is one GPU's node holds where the GPU's index goes.
@@ -347,7 +347,7 @@ impl GpuPassthrough {
     /// # Errors
     /// See [`GpuFlagError`]: each names the flag at fault.
     pub fn from_cli(
-        cli: &Cli,
+        cli: &crate::platform::Flags,
         reported: &[u32],
         read: ReadNode,
     ) -> Result<Option<Self>, GpuFlagError> {

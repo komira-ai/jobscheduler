@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use js_agent::Cli;
 use js_agent::lifecycle::DirLayout;
-use js_agent::{Cli, RuntimeKind};
 
 const UNIT: &str = "packaging/js-agent/js-agent-crun.service";
 const TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
@@ -106,17 +106,18 @@ fn directories() -> Vec<(PathBuf, u32)> {
         .collect()
 }
 
-/// The unit runs the agent with `--runtime crun`, the distribution's crun by its path, a job
+/// The unit runs the agent with the crun runtime (the Linux build's: no opt-in to the engine),
+/// the distribution's crun by its path, a job
 /// user and the roots the packaged unit and the elastic payload use, and none of the engine's
 /// flags; the combination passes the check the agent applies before it registers, so a unit that
 /// lacks a flag fails here and not as a restart loop on a node.
 #[test]
 fn the_unit_runs_the_agent_with_the_crun_runtime_and_flags_the_agent_accepts() {
     let cli = agent_cli();
-    assert_eq!(cli.runtime, Some(RuntimeKind::Crun));
-    assert!(!cli.allow_container_engine, "the opt-in to the engine");
-    assert_eq!(cli.crun_bin.as_deref(), Some(Path::new("/usr/bin/crun")));
-    assert_eq!(cli.job_user.as_deref(), Some("jsjob"));
+    assert!(!cli.no_jobs, "an agent that runs no job");
+    assert!(!cli.os.allow_container_engine, "the opt-in to the engine");
+    assert_eq!(cli.os.crun_bin.as_deref(), Some(Path::new("/usr/bin/crun")));
+    assert_eq!(cli.os.job_user.as_deref(), Some("jsjob"));
     assert_eq!(
         cli.state_root.as_deref(),
         Some(Path::new(js_elastic::STATE_ROOT))

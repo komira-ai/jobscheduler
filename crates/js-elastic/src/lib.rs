@@ -62,8 +62,7 @@ pub use answer::{
     Acquired, Claim, Extra, Held, HostStatus, Observed, Reason, Refusal, RefusalCode, Released,
 };
 pub use boot::{
-    Artifact, BootPlan, BootStep, CONTAINER_BIN, ENGINE_OPT_IN, RUNTIME, SCRATCH_ROOT, STATE_ROOT,
-    SlotName,
+    Artifact, BootPlan, BootStep, CONTAINER_BIN, ENGINE_OPT_IN, SCRATCH_ROOT, STATE_ROOT, SlotName,
 };
 pub use cache::{Catalog, CatalogCache, Cooldowns, Instant, OfferKey, Recorded};
 pub use caps::{Capacity, ProviderCaps};

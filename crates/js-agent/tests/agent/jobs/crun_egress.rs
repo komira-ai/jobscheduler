@@ -1,4 +1,4 @@
-//! The egress flags of an agent started with `--runtime crun`: the runtime takes them, and an
+//! The egress flags of an agent of the crun runtime: the runtime takes them, and an
 //! allow-list the host cannot set up ends the agent before it registers. The node and the
 //! stand-in `crun` are `crun_e2e`'s.
 
@@ -11,18 +11,17 @@ use super::crun_e2e::{NODE_IN_USE, crun_flags, host};
 use super::crun_machine::CrunMachine;
 use crate::crun_host::{Fixture, cli};
 use crate::support::{
-    CountingSleeper, Lowest, Script, ScriptConnector, code, flags as agent_flags, run_on, welcome,
+    CountingSleeper, Lowest, Script, ScriptConnector, code, flags as agent_flags, run_on_defaulted,
+    welcome,
 };
 
-/// Asserts that `--runtime crun` takes the egress flags: `--egress none` and an allow-list
+/// Asserts that the crun runtime takes the egress flags: `--egress none` and an allow-list
 /// pass the runtime's own flag check (the allow-list's flags are checked, and its firewall
 /// set up, later in the agent's start). It catches an allow-list still refused as a flag the
 /// crun runtime does not take, which would leave a crun job no way to reach anything.
 #[test]
 fn crun_accepts_egress_allow_list() {
     let ok = [
-        "--runtime",
-        "crun",
         "--job-user",
         Fixture::USER,
         "--state-root",
@@ -64,7 +63,7 @@ fn an_allow_list_that_cannot_be_set_up_ends_the_crun_agent_with_status_2() {
     let (script, sent) = Script::new(vec![welcome(1)]);
     let mut sleeper = CountingSleeper::stopping_at(1);
     let machine: Arc<dyn Machine> = CrunMachine::new();
-    let ran = run_on(
+    let ran = run_on_defaulted(
         &agent_flags(&given),
         &host(),
         &ScriptConnector::of(script),
