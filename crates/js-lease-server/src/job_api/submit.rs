@@ -45,13 +45,26 @@
 //!    nothing to roll back. A second writer that recorded a different job under the id
 //!    between the lookup and the commit is `job-id-conflict`.
 //!
-//! The call never waits for placement: after the commit it calls no engine, scheduler or
-//! provider. The engine finds the queued row on its own pass.
+//! 5. **Place now, when nothing is ahead** (design komira-ai/jobscheduler#903). When the
+//!    service places jobs ([`Ctx::placing`]) and, before the commit, no queued job had a
+//!    priority equal to or above the new job's, the call runs the server's pass over the queued
+//!    jobs itself, after the commit and before the answer
+//!    ([`Agents::place_jobs`](crate::agents::Agents::place_jobs)): the pass claims the host's
+//!    room in the store's own transaction, as every pass does, so it stays right with several
+//!    servers. A placement wakes the host's heartbeat this server holds open
+//!    ([`crate::held_beat`]), whose reply carries the start at once. The answer is the job as
+//!    the store holds it after the pass: `placed` with its host when a host had room, `queued`
+//!    otherwise, and the queued record of the commit when that read fails. A job that has a
+//!    queued job of its priority or above ahead of it, a retry of a job already held, and every
+//!    job of a service that does not place, are only committed: the tick's pass, or a
+//!    heartbeat's, finds the queued row. A failed read of the queue counts as a job ahead.
+//!
+//! The call calls no provider.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_jobs::{Isolation, JobStoreError, NewJob};
+use js_jobs::{Isolation, JobRecord, JobStoreError, NewJob};
 use js_proto::refusal::refusal_status;
 use js_proto::v1::{RefusalCode, SubmitJobRequest, SubmitJobResponse};
 use js_types::Requirements;
@@ -62,6 +75,8 @@ use super::fleet::Handle;
 use super::read::view;
 use super::roles::Caller;
 use super::validate::{self, Fault};
+use crate::agents::Agents;
+use crate::util::blocking;
 
 /// The ceiling on a job's wall limit when `--max-job-wall` (or `server.max_job_wall`) is not
 /// given: 30 days, the longest `server.max_lease_wall` accepts (it has no default of its own).
@@ -98,6 +113,9 @@ struct Served {
     ceiling: Duration,
     /// Where admission is asked.
     admission: Handle<dyn Admission>,
+    /// The agent side whose pass places a job with nothing ahead of it in the call (step 5);
+    /// `None`: the call only commits.
+    placing: Option<Handle<Agents>>,
 }
 
 impl Ctx {
@@ -110,8 +128,20 @@ impl Ctx {
             served: Some(Served {
                 ceiling,
                 admission: Handle(admission),
+                placing: None,
             }),
         }
+    }
+
+    /// This context, placing a job that has nothing ahead of it in the call, with the pass of
+    /// `agents` (step 5 of the module docs). Nothing for a context that is not served.
+    #[must_use]
+    pub(crate) fn placing(mut self, agents: Arc<Agents>) -> Ctx {
+        self.served = self.served.map(|served| Served {
+            placing: Some(Handle(agents)),
+            ..served
+        });
+        self
     }
 }
 
@@ -209,6 +239,12 @@ pub(super) async fn submit_job(
         Some(id) => api.jobs.get_job(id).map_err(not_written())?.is_some(),
         None => false,
     };
+    // Read before the commit, so two jobs submitted together into an empty queue are both
+    // placed in their calls (the passes take turns), not both left to the tick.
+    let placing = served
+        .placing
+        .as_ref()
+        .filter(|_| !held && nothing_ahead(api, valid.priority));
     let isolation = valid.spec.constraints.isolation;
     if !held
         && !served
@@ -229,11 +265,37 @@ pub(super) async fn submit_job(
     if !caller.owns(&inserted.record) {
         return Err(id_conflict());
     }
+    let record = match placing {
+        Some(Handle(agents)) => place_now(api, agents, inserted.record).await,
+        None => inserted.record,
+    };
     Ok(Response::new(SubmitJobResponse {
-        job: Some(view::job(&inserted.record)),
+        job: Some(view::job(&record)),
     }))
+}
+
+/// Whether no queued job has a priority equal to or above `priority`; `false` when the queue
+/// cannot be read.
+fn nothing_ahead(api: &JobApi, priority: i32) -> bool {
+    let queued = api.jobs.queued();
+    queued.is_ok_and(|queued| queued.iter().all(|job| job.priority < priority))
+}
+
+/// Runs the server's pass over the queued jobs for the job `record` just committed, keeps the
+/// taints of the hosts it gave to host jobs, and answers the job as the store holds it then
+/// (`record` when that read fails).
+async fn place_now(api: &JobApi, agents: &Arc<Agents>, record: JobRecord) -> JobRecord {
+    let placing = Arc::clone(agents);
+    let tainted = blocking(move || placing.place_jobs()).await;
+    agents.keep_taints(tainted).await;
+    let now = api.jobs.get_job(&record.id).ok().flatten();
+    now.unwrap_or(record)
 }
 
 #[cfg(test)]
 #[path = "submit_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "submit_place_tests.rs"]
+mod place_tests;

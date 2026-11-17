@@ -201,6 +201,44 @@ fn the_worker_samples_once_per_window_on_its_own_thread() {
     );
 }
 
+/// Asserts that a lease that ends between two windows has its open minute closed and reported
+/// once in the next reading, and is then neither covered nor clocked: the worker samples it
+/// running for two windows, its container exits, and the reading of the next window carries
+/// its minute 0 and nothing of it beside. It catches an ended lease whose last minute is lost
+/// (the server never learns its tail) and one still reported as running.
+#[test]
+fn a_lease_that_ends_between_windows_has_its_open_minute_reported_once() {
+    let dir = Scratch::new("jobs-usage-ended");
+    let machine = FakeMachine::new();
+    machine.world.set_cgroup_base(SLICE);
+    counters(&machine, 0);
+    let outbox = Arc::new(Outbox::new());
+    let worker = start_with_usage(&dir, &machine, &outbox, Some(SLICE));
+    outbox.set_window(Duration::from_secs(30));
+    assert_eq!(worker.try_deliver(long_reply()), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    let first = outbox.take().expect("the first window's reading");
+    let clocked: Vec<&str> = first.clocks.iter().map(|c| c.lease_id.as_str()).collect();
+    assert_eq!(clocked, ["lease-r1"]);
+    machine.clock.advance(30_000);
+    counters(&machine, 1);
+    assert!(worker.handle().settle());
+    let second = outbox.take().expect("the second window's reading");
+    assert_eq!(second.covered, ["lease-r1"]);
+    assert!(second.minutes.is_empty());
+
+    machine.world.exit("r1", 0);
+    assert!(worker.handle().settle());
+    machine.clock.advance(30_000);
+    counters(&machine, 2);
+    assert!(worker.handle().settle());
+    let ended = outbox.take().expect("the reading after the end");
+    let minutes = serde_json::to_value(&ended.minutes).unwrap();
+    assert_eq!(minutes, json!([minute(0)]));
+    assert!(ended.covered.is_empty());
+    assert!(ended.clocks.is_empty());
+}
+
 /// Asserts that without an actions control group nothing is sampled and the worker says why
 /// once: no file is read, the outbox stays empty, and the line names the flag. It catches a
 /// load made of files nobody pointed the agent at, and a silent absence.

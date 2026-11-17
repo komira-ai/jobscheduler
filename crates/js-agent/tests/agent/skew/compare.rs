@@ -131,6 +131,32 @@ fn walk(
     }
 }
 
+/// The first step after `index` of `flow` (a transcript's steps, or the steps of one
+/// conversation) whose reply starts a job, and that start.
+pub fn start_after(flow: &[Value], index: usize) -> Option<(usize, Value)> {
+    let later = flow.iter().enumerate().skip(index + 1);
+    let mut commands = later.filter_map(|(at, step)| {
+        let first = step["server"]["body"]["commands"].as_array()?.first()?;
+        Some((at, first.clone()))
+    });
+    commands.find(|(_, command)| command["type"] == "job_start")
+}
+
+/// A job start this release's server sends one heartbeat before the previous server did
+/// (it places the job in the submit call, where the previous server placed it at the next
+/// heartbeat): when the previous release's reply `then` held no command and the reply `now`
+/// holds exactly one, a `job_start`, takes that command out of `now` and returns it. Any
+/// other extra command, a second one, or an extra one where the previous reply held some, is
+/// left in `now` for [`uncovered`] to report.
+pub fn take_early_start(then: &Value, now: &mut Value) -> Option<Value> {
+    let none = then["commands"].as_array().is_some_and(Vec::is_empty);
+    let commands = now.get_mut("commands")?.as_array_mut()?;
+    match commands.as_slice() {
+        [only] if none && only["type"] == "job_start" => Some(commands.remove(0)),
+        _ => None,
+    }
+}
+
 /// Asserts what [`uncovered`] reports of a frame that lost a field, renamed one, changed a
 /// value, or holds another number of items, and that a frame with a field added, or with
 /// another `agent_version` string, is covered while a missing or non-string version is
@@ -228,4 +254,49 @@ fn a_minted_value_is_paired_once_and_compared_after() {
         uncovered(&number, &other, Some(&mut minted)),
         ["$.job_id: was 1, now 2"]
     );
+}
+
+/// Asserts that [`take_early_start`] takes a lone `job_start` out of a reply the previous
+/// release left without commands, and nothing else: not a stop, not two commands, not a start
+/// where the previous reply held a command, and not a reply without a command list; and that
+/// [`start_after`] finds the next reply that starts a job, skipping the ones before it. It
+/// catches an acceptance of an early start that would also pass any other extra command.
+#[test]
+fn only_a_lone_start_the_previous_reply_lacked_is_taken_early() {
+    let start = serde_json::json!({ "type": "job_start", "job_id": "j1" });
+    let stop = serde_json::json!({ "type": "job_stop", "job_id": "j1" });
+    let none = serde_json::json!({ "commands": [] });
+    let mut now = serde_json::json!({ "commands": [start], "result_acks": [] });
+    assert_eq!(take_early_start(&none, &mut now), Some(start.clone()));
+    assert_eq!(
+        now,
+        serde_json::json!({ "commands": [], "result_acks": [] })
+    );
+    for commands in [
+        vec![stop.clone()],
+        vec![start.clone(), start.clone()],
+        vec![],
+    ] {
+        let mut now = serde_json::json!({ "commands": commands });
+        let before = now.clone();
+        assert_eq!(take_early_start(&none, &mut now), None);
+        assert_eq!(now, before);
+    }
+    let mut now = serde_json::json!({ "commands": [start] });
+    let had = serde_json::json!({ "commands": [stop] });
+    assert_eq!(take_early_start(&had, &mut now), None);
+    let mut bare = serde_json::json!({});
+    assert_eq!(take_early_start(&none, &mut bare), None);
+
+    let step =
+        |commands: Value| serde_json::json!({ "server": { "body": { "commands": commands } } });
+    let flow = [
+        step(serde_json::json!([start])),
+        step(serde_json::json!([])),
+        step(serde_json::json!([stop])),
+        step(serde_json::json!([start])),
+    ];
+    assert_eq!(start_after(&flow, 0), Some((3, start.clone())));
+    assert_eq!(start_after(&flow, 3), None);
+    assert_eq!(start_after(&flow[..3], 0), None);
 }

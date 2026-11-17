@@ -81,6 +81,7 @@ mod scaler_status;
 mod scaler_store;
 mod scaler_support;
 mod scaler_unremoved;
+mod several_pools;
 mod startup;
 mod store;
 mod store_postgres;

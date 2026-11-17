@@ -657,7 +657,8 @@ model:
   `duplicate` on. A result or a stop sent again is not modelled by the cell.
 - **Heartbeats in flight together, and answers read after their request timed out.** The
   real agent has one call in flight at a time: it sends its next heartbeat an interval after
-  it read the answer to the last, gives a call `REQUEST_LIMIT` (10 s), and drops the answer
+  it read the answer to the last (at once after a reply that says `beat_now`, which the cell's
+  server never sends: its agent does not report `held-beat`), gives a call `REQUEST_LIMIT` (10 s), and drops the answer
   to a call it gave up. The cell's agent does the same (`agent/process.rs`): after a call
   with no answer in 10 s it waits the shortest backoff (1 s) and sends the next, and an
   answer that comes later is ignored. A heartbeat is therefore never sent before the reply

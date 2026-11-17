@@ -302,5 +302,6 @@ fn round_trip_of_every_message() {
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
         log_grant: None,
+        beat_now: false,
     });
 }

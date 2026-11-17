@@ -83,15 +83,17 @@ async fn a_tainted_host_is_shown_acknowledged_and_sent_no_start() {
 }
 
 /// Asserts that a taint report is not acknowledged while it cannot be written: the host is
-/// tainted at once (it is sent no start), the reply says `taint_ack` false and the failure
-/// is counted, and once the file can be written the next report is acknowledged, a tick
-/// having placed nothing on the host meanwhile. It
-/// catches an agent told to stop reporting a taint the server could lose in a restart.
+/// tainted at once (it is sent no start: the job submitted after the report is placed by its
+/// submit on a second, clean host and started there), the reply says `taint_ack` false and the
+/// failure is counted, and once the file can be written the next report is acknowledged, a tick
+/// having placed nothing on the tainted host meanwhile. It catches an agent told to stop
+/// reporting a taint the server could lose in a restart, and a host unwritable for its taint
+/// that the placement in `SubmitJob` still takes as clean.
 #[tokio::test]
 async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
     let h = placing_server("host_taint_write", Kept::Files).await;
     let me = job_agent(&h, &cpu_hello("burst-1")).await;
-    submit_job(&h, "taint-write").await;
+    let clean = job_agent(&h, &cpu_hello("burst-2")).await;
     let blocker = h.scratch.path("leases.toml.agents.tmp");
     fs::create_dir(&blocker).unwrap();
     let errors = h.running.agent_errors();
@@ -105,6 +107,7 @@ async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
         entry(&hosts(&h).await, "burst-1")["taint"]["reason"],
         "residue"
     );
+    submit_job(&h, "taint-write").await;
 
     fs::remove_dir(&blocker).unwrap();
     h.ticks.step().await;
@@ -113,6 +116,10 @@ async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
     assert_eq!(commands(&reply), (vec![], vec![]), "{reply}");
     let text = fs::read_to_string(agent_file(&h)).unwrap();
     assert!(text.contains("taint_reason = \"residue\""), "{text}");
+    let (starts, stops) = commands(&beat_with(&h, &clean, json!({})).await);
+    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    assert_eq!(jobs, ["taint-write"]);
+    assert!(stops.is_empty());
 }
 
 /// Asserts that a taint outlives a restart: two tainted hosts are put back awaiting with

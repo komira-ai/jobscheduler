@@ -1,0 +1,120 @@
+//! Held heartbeats (design komira-ai/jobscheduler#903): the wakes that end the hold of a
+//! heartbeat's reply as soon as a job is placed on its host.
+//!
+//! A heartbeat of a host whose agent reported [`js_agent_wire::HELD_BEAT_CAPABILITY`] is
+//! watched ([`Wakes::watch`]) from before the store is read for its reply. When that reply has
+//! nothing to send, the route holds it open ([`crate::agent_api`]) for at most [`hold_bound`];
+//! a placement on the host ([`Wakes::wake`], which the pass calls for every placement it
+//! commits) ends the hold, the reply is built again from the store and carries the start. A
+//! wake that comes between the read and the hold is kept by the watch, so the hold ends at
+//! once and none is lost. The agent sends its next heartbeat as soon as a held reply reaches
+//! it, so one heartbeat of the host is nearly always waiting here.
+//!
+//! The wakes are this process's: a placement made by another server is not seen here, and
+//! its start goes out on the host's next heartbeat, at most one hold later.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+use js_types::HostId;
+use tokio::sync::{Notify, watch};
+
+/// The longest a reply is held, whatever the interval: well inside the agent's ten-second
+/// request limit (`js_agent::REQUEST_LIMIT`).
+pub(crate) const MAX_HOLD: Duration = Duration::from_secs(5);
+
+/// How long a reply with nothing to send is held: the pool's heartbeat `interval`, at most
+/// [`MAX_HOLD`]. Beats arrive at most this far apart while they are held, never further apart
+/// than the interval, so a host's silence is counted as it was.
+pub(crate) fn hold_bound(interval: Duration) -> Duration {
+    interval.min(MAX_HOLD)
+}
+
+/// The heartbeats being watched, one per host, and how often a held reply began to wait.
+#[derive(Clone)]
+pub(crate) struct Wakes {
+    /// The wake of each host whose heartbeat is watched. Its lock is a leaf.
+    watched: Arc<Mutex<BTreeMap<HostId, Arc<Notify>>>>,
+    /// How many times a held reply began to wait for a wake: the progress a test waits for.
+    waits: Arc<watch::Sender<u64>>,
+}
+
+impl Default for Wakes {
+    fn default() -> Self {
+        Wakes {
+            watched: Arc::default(),
+            waits: Arc::new(watch::Sender::new(0)),
+        }
+    }
+}
+
+impl Wakes {
+    fn watched(&self) -> MutexGuard<'_, BTreeMap<HostId, Arc<Notify>>> {
+        self.watched.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Watches the heartbeat of `host` until the watch is dropped. A later watch of the same
+    /// host (a second heartbeat while one is held) takes over; the first is then woken no more
+    /// and ends its hold at the bound.
+    pub(crate) fn watch(&self, host: &HostId) -> Watch {
+        let wake = Arc::new(Notify::new());
+        self.watched().insert(host.clone(), Arc::clone(&wake));
+        Watch {
+            wakes: self.clone(),
+            host: host.clone(),
+            wake,
+        }
+    }
+
+    /// Wakes the watched heartbeat of `host`, if there is one: a hold under way ends now, and
+    /// one that has not begun ends as soon as it begins. Nothing for a host not watched.
+    pub(crate) fn wake(&self, host: &HostId) {
+        if let Some(wake) = self.watched().get(host) {
+            wake.notify_one();
+        }
+    }
+
+    /// Counts that a held reply begins to wait for a wake: when its hold begins, and again
+    /// after each wake that brought nothing to send.
+    pub(crate) fn waiting(&self) {
+        self.waits.send_modify(|waits| *waits += 1);
+    }
+
+    /// How many times a held reply began to wait, as a receiver a test waits on.
+    #[cfg(test)]
+    pub(crate) fn waits(&self) -> watch::Receiver<u64> {
+        self.waits.subscribe()
+    }
+}
+
+/// The watch of one host's heartbeat ([`Wakes::watch`]).
+pub(crate) struct Watch {
+    wakes: Wakes,
+    host: HostId,
+    wake: Arc<Notify>,
+}
+
+impl Watch {
+    /// Waits for a placement on the host since the watch began, or since the last wake this
+    /// returned for.
+    pub(crate) async fn woken(&self) {
+        self.wake.notified().await;
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        let mut watched = self.wakes.watched();
+        let ours = watched
+            .get(&self.host)
+            .is_some_and(|wake| Arc::ptr_eq(wake, &self.wake));
+        if ours {
+            watched.remove(&self.host);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "held_beat_tests.rs"]
+mod tests;

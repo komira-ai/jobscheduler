@@ -580,6 +580,7 @@ fn busy_reply() -> HeartbeatReply {
             .collect(),
         retired_acks: (300..396).map(wide).collect(),
         log_grant: None,
+        beat_now: true,
     }
 }
 

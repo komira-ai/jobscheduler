@@ -271,10 +271,10 @@ pub(crate) struct Registering {
     pub(crate) plan: Option<ElasticPlan>,
     pub(crate) pool: PoolConfig,
     pub(crate) tokens: AgentTokens,
-    /// The one `provider` the mint route accepts, when the pool is the only thing that
-    /// admits hosts by hand: a joined pool's name. `None` takes any provider, as an
-    /// elastic pool's launches are minted for under the provider kind's name.
-    pub(crate) mint_provider: Option<String>,
+    /// The `provider` the mint route accepts, when the pool is the only thing that admits
+    /// hosts by hand: a joined pool's name. Empty takes any provider, as an elastic pool's
+    /// launches are minted for under the provider kind's name.
+    pub(crate) mint_provider: BTreeSet<String>,
     /// The pool's `max_queue_wait` and `start_timeout`: an elastic pool's settings, and the
     /// defaults for a joined pool, which has no keys for them.
     pub(crate) job_limits: JobLimits,
@@ -288,13 +288,15 @@ pub(crate) struct Loaded {
     /// The pool the hosts that run `js-agent` register into (the first, when the file has
     /// several; see `unrunnable`).
     pub(crate) registering: Box<Registering>,
+    /// The joined pools after the first, each with its message head, `pool "<name>"`.
+    pub(crate) more: Vec<(String, Box<Registering>)>,
     pub(crate) warnings: Vec<String>,
     /// Where live logs go: the `[logs]` table, or no sink.
     pub(crate) logs: LogsConfig,
     /// The machine providers, platforms and pools, however each pool was written.
     pub(crate) resolved: Resolved,
-    /// Why the server cannot start on the file although it is valid: it has more than one
-    /// pool that registers agents, which this version cannot run.
+    /// Why the server cannot start on the file although it is valid: it has an elastic pool
+    /// beside another pool that registers agents, which this version cannot run.
     pub(crate) unrunnable: Option<StartupError>,
 }
 
@@ -375,11 +377,14 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         check_live(&server, plan)?;
     }
     let unrunnable = unrunnable(&registering);
-    let Some(registering) = registering.into_iter().next().map(|(_, pool)| pool) else {
+    let mut registering = registering.into_iter();
+    let Some((_, first)) = registering.next() else {
         let reason =
             "required: add a [[pool]] whose hosts register agents (a joined or an elastic pool)";
         return Err(StartupError::at("pool", reason));
     };
+    let more = registering.collect();
+    let registering = first;
     let mut warnings = check_listeners(&server)?;
     let now = Millis::new(ld.clock.now().millis());
     warnings.extend(budget::notes(&registering, &budgets, now));
@@ -388,6 +393,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         client_token,
         clients,
         registering,
+        more,
         warnings,
         logs,
         resolved,
@@ -396,13 +402,15 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
 }
 
 /// Why the server cannot run the registering pools `registering` (each with its message
-/// head, `pool "<name>"`): this version runs one, since the server keeps one registry.
+/// head, `pool "<name>"`): several joined pools share the server's one registry, but an
+/// elastic pool, whose scaler counts every host of the registry as its own, runs alone.
 /// The refusal names the second pool.
 fn unrunnable(registering: &[(String, Box<Registering>)]) -> Option<StartupError> {
     let (second, _) = registering.get(1)?;
     let elastic = registering.iter().filter(|(_, pool)| pool.plan.is_some());
     let reason = match elastic.count() {
-        0 | 1 => SEVERAL_REGISTERING,
+        0 => return None,
+        1 => SEVERAL_REGISTERING,
         _ => SEVERAL_ELASTIC,
     };
     Some(StartupError::at(second, reason))
@@ -411,8 +419,8 @@ fn unrunnable(registering: &[(String, Box<Registering>)]) -> Option<StartupError
 /// Why a file with two elastic pools does not start.
 const SEVERAL_ELASTIC: &str = "several elastic pools are parsed; this version runs one, as the server keeps one registry of agents";
 
-/// Why a file with two pools that register agents, not both elastic, does not start.
-const SEVERAL_REGISTERING: &str = "several pools register agents; this version runs one, as the server keeps one registry of agents";
+/// Why a file with an elastic pool and a joined one does not start.
+const SEVERAL_REGISTERING: &str = "an elastic pool is served alone; this version runs several pools only when every one is joined";
 
 /// A pool of the file, built.
 struct Read {
@@ -804,7 +812,7 @@ impl Elastic<'_> {
             plan: Some(plan),
             pool,
             tokens,
-            mint_provider: None,
+            mint_provider: BTreeSet::new(),
             job_limits: JobLimits::default(),
         })
     }

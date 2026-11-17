@@ -31,10 +31,11 @@ use tracing::{error, info, warn};
 
 use self::taints::restore_job_taints;
 use crate::agent_state::{self, BindingStore, Change};
-use crate::agent_tokens::AgentTokens;
+use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::clock::SharedClock;
 use crate::config::{AgentSetup, CpuSlack, placer, split};
 use crate::error::StartupError;
+use crate::held_beat::{self, Wakes};
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{self, FeedTrim, ServerJobs};
@@ -53,12 +54,18 @@ use crate::util::blocking;
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
 /// nothing else of the server's.
 pub(crate) struct Agents {
+    /// The hosts of every pool ([`Registry::with_pools`]): the first pool's and the later
+    /// ones'.
     pub(crate) registry: Registry,
+    /// The first pool's shared join tokens.
     pub(crate) tokens: AgentTokens,
+    /// The shared join tokens of each pool after the first, with its name; empty for a
+    /// server of one pool.
+    pub(crate) more_tokens: Vec<PoolTokens>,
     /// The one-time tokens minted for launched instances.
     pub(crate) joins: JoinTokens,
-    /// The one provider the mint route accepts, or `None` for any.
-    pub(crate) mint_provider: Option<String>,
+    /// The providers the mint route accepts, or none for any.
+    pub(crate) mint_provider: BTreeSet<String>,
     pub(crate) limiter: HelloLimiter,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
@@ -118,6 +125,11 @@ pub(crate) struct Agents {
     /// The gate of the server's pass over the queued jobs ([`Agents::place_jobs`]): one pass
     /// at a time, from its read of the open hosts to its last taint.
     pub(crate) placing: Mutex<()>,
+    /// The heartbeats held open for a start ([`crate::held_beat`]), which every placement the
+    /// pass commits wakes.
+    pub(crate) wakes: Wakes,
+    /// How long a heartbeat's reply with nothing to send is held ([`held_beat::hold_bound`]).
+    pub(crate) hold_bound: Duration,
     /// The machine providers of the pool's Default platform, first to last, as the bindings of
     /// its hosts name them: the order the pass offers the hosts in
     /// ([`crate::sched::rank`]).
@@ -232,6 +244,7 @@ fn placed_in(
     let AgentSetup {
         tokens,
         pool,
+        more,
         mint_provider,
         hello_limit,
         require_host_credential,
@@ -245,13 +258,27 @@ fn placed_in(
     } = *agents;
     let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
     let joins = joins.requiring_credential(require_host_credential);
-    let booked = pool.shape().resources();
-    let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
+    // The usage limits hold the largest host of every pool.
+    let shapes = std::iter::once(&pool).chain(more.iter().map(|more| &more.pool));
+    let largest = shapes
+        .map(|pool| pool.shape().resources())
+        .fold((0, 0), |(cpu, memory), r| {
+            (cpu.max(r.cpu_millis()), memory.max(r.memory_bytes()))
+        });
+    let limits = limits_of(largest.0, largest.1);
     // The scheduler picks the host of a start, and books the share of each host's
-    // memory the pool's percent says; the registry books the whole shape.
+    // memory the pool's percent says (every pool's is the first's: `check_more`); the
+    // registry books the whole shape.
     let (pool, memory) = split(pool);
     let placer = placer(max_lease_wall, cpu_slack, memory, cold, clock);
-    let registry = Registry::new(pool, clock.clone(), placer.clone());
+    let (later, more_tokens): (Vec<_>, Vec<_>) = more
+        .into_iter()
+        .map(|more| (split(more.pool).0, more.tokens))
+        .unzip();
+    let pools = (pool, later);
+    let registry = Registry::with_pools(pools, clock.clone(), OsSessions, placer.clone())
+        .map_err(|err| StartupError::new("--agent-pool-config", err))?;
+    let interval = registry.heartbeat_interval();
     let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
     let (usage, usage_in_job_store) = usage.build(clock, limits, kept.map(ServerStore::store))?;
     // The one job store of the server, when the job service is on. It is opened
@@ -278,6 +305,7 @@ fn placed_in(
     let agents = Agents {
         registry,
         tokens,
+        more_tokens,
         joins,
         mint_provider,
         limiter: HelloLimiter::new(hello_limit, clock.clone()),
@@ -299,6 +327,8 @@ fn placed_in(
         listed_sessions: Mutex::default(),
         meter: OnceLock::new(),
         placing: Mutex::default(),
+        wakes: Wakes::default(),
+        hold_bound: held_beat::hold_bound(interval),
         providers,
     };
     Ok((Arc::new(agents), placer))
@@ -341,11 +371,13 @@ impl Agents {
             interval: std::time::Duration::from_secs(1),
         };
         let providers = static_then(&registry.pool_id());
+        let hold_bound = held_beat::hold_bound(registry.heartbeat_interval());
         Self {
             registry,
             tokens: AgentTokens::open(&tokens, &client).unwrap(),
+            more_tokens: Vec::new(),
             joins,
-            mint_provider: None,
+            mint_provider: BTreeSet::new(),
             limiter: HelloLimiter::new(limit, clock.clone()),
             clock: clock.clone(),
             store: BindingStore::new(dir.join("bindings"), Default::default()),
@@ -365,6 +397,8 @@ impl Agents {
             listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
             placing: Mutex::default(),
+            wakes: Wakes::default(),
+            hold_bound,
             providers,
         }
     }
@@ -729,6 +763,27 @@ impl Agents {
         }
     }
 
+    /// The shared join tokens of every pool, the first pool's first.
+    fn every_tokens(&self) -> impl Iterator<Item = &AgentTokens> {
+        let more = self.more_tokens.iter().map(|more| &more.tokens);
+        std::iter::once(&self.tokens).chain(more)
+    }
+
+    /// The pool a shared join token `given` belongs to, with the credential a host admitted
+    /// with it is bound to: the first pool's name for one of its tokens, a later pool's for
+    /// one of that pool's.
+    pub(crate) fn identify_pooled(&self, given: &str) -> Option<(Credential, String)> {
+        let first = self.tokens.identify(given);
+        let first = first.map(|credential| (credential, self.registry.pool_id().to_string()));
+        let later = || {
+            self.more_tokens.iter().find_map(|more| {
+                let credential = more.tokens.identify(given)?;
+                Some((credential, more.pool.clone()))
+            })
+        };
+        first.or_else(later)
+    }
+
     /// How many times the agent side could not read or write one of its files since the
     /// server started: the join token file that could not be read again, the file of
     /// bindings (or the store) that could not be written, and the credential times the tick
@@ -760,15 +815,22 @@ impl Agents {
     /// queued and started, off this task).
     pub(crate) async fn refresh(self: &Arc<Self>) {
         let this = Arc::clone(self);
-        match blocking(move || this.tokens.reload()).await {
-            Ok(()) => self.limiter.retain(&self.tokens.credentials()),
-            Err(err) => {
-                self.errors.fetch_add(1, Ordering::SeqCst);
-                warn!(error = %err, "cannot read the agent token file again; the tokens in force stay");
-            }
+        let read = blocking(move || this.every_tokens().map(AgentTokens::reload).collect()).await;
+        let read: Vec<Result<(), StartupError>> = read;
+        for err in read.iter().filter_map(|read| read.as_ref().err()) {
+            self.errors.fetch_add(1, Ordering::SeqCst);
+            warn!(error = %err, "cannot read the agent token file again; the tokens in force stay");
         }
+        // A set that could not be read keeps its tokens, and their limits.
+        let credentials = self.every_tokens().flat_map(AgentTokens::credentials);
+        self.limiter.retain(&credentials.collect::<Vec<_>>());
         let this = Arc::clone(self);
-        match blocking(move || this.tokens.reload_clients()).await {
+        let reload = move || {
+            let beside: Vec<&AgentTokens> =
+                this.more_tokens.iter().map(|more| &more.tokens).collect();
+            this.tokens.reload_clients(&beside)
+        };
+        match blocking(reload).await {
             Ok(true) => info!("the client tokens changed: the new tokens are in force"),
             Ok(false) => {}
             Err(error) => {
@@ -821,3 +883,7 @@ mod mint_tests;
 #[cfg(test)]
 #[path = "agents_estimate_tests.rs"]
 mod estimate_tests;
+
+#[cfg(test)]
+#[path = "agents_pools_tests.rs"]
+mod pools_tests;

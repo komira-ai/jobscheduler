@@ -267,8 +267,9 @@ fn hosts_lists_what_the_operator_needs() {
     assert_eq!(listed[1].lease, None);
 }
 
-/// Asserts that timing is validated by the wire's welcome rules, and that the welcome a
-/// host gets carries the pool's interval, grace and name.
+/// Asserts that timing is validated by the wire's welcome rules, that the welcome a host gets
+/// carries the pool's interval, grace and name, and that the registry reads back the same
+/// interval (the bound a server holds a heartbeat's reply to).
 #[test]
 fn timing_is_validated_and_sent_in_the_welcome() {
     assert!(config(1).with_timing(1_000, 2_000).is_err());
@@ -288,6 +289,10 @@ fn timing_is_validated_and_sent_in_the_welcome() {
     );
     assert_eq!(welcome.protocol, 1);
     assert_eq!(welcome.epoch, 1);
+    assert_eq!(
+        registry.heartbeat_interval(),
+        std::time::Duration::from_secs(1)
+    );
 }
 
 /// Asserts that a credential never prints its digest.

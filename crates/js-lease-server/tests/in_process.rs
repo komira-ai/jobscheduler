@@ -330,7 +330,8 @@ async fn the_tick_loop_and_the_seam_leave_equal_job_listings_after_equal_ticks()
 }
 
 /// Asserts that a job survives a restart through the seam: after `shutdown`, a second
-/// server over the same state file with `--boot resume` lists it. Before that, a second
+/// server over the same state file with `--boot resume` lists it, still placed on the host
+/// its submit placed it on (the host had room). Before that, a second
 /// server is refused naming the state file's job tables while the first still holds them, and again
 /// while a clone of the first's router outlives the shut-down handle (the clone holds the
 /// tables, as the module doc says), so the start after the clone is dropped is one the lock
@@ -386,5 +387,6 @@ async fn a_second_in_process_server_starts_over_the_state_file_after_the_first_i
     let listed = routed(&jobs, "GET", "/v1/jobs", Some(TOKEN), None).await;
     assert_eq!(listed.status, 200, "{:?}", listed.body);
     assert_eq!(listed.body["jobs"][0]["id"], "job-kept");
-    assert_eq!(listed.body["jobs"][0]["state"], "JOB_STATE_QUEUED");
+    assert_eq!(listed.body["jobs"][0]["state"], "JOB_STATE_PLACED");
+    assert_eq!(listed.body["jobs"][0]["hostId"], "host-a");
 }

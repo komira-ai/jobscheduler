@@ -575,6 +575,21 @@ impl Rig {
         self.register_with(host, capabilities);
     }
 
+    /// Registers `host`, whose agent reports the `per-job` and `held-beat` capabilities: its
+    /// heartbeat's reply is held while it has nothing to send.
+    pub(crate) fn register_held(&mut self, host: &str) {
+        let capabilities = json!({ "per-job": "true", "held-beat": "true", "arch": "x86_64" });
+        self.register_with(host, capabilities);
+    }
+
+    /// This rig's server holding a heartbeat's reply with nothing to send for `bound` at most.
+    pub(crate) fn holding_for(mut self, bound: std::time::Duration) -> Rig {
+        let mut agents = Arc::try_unwrap(self.agents).ok().unwrap();
+        agents.hold_bound = bound;
+        self.agents = Arc::new(agents);
+        self
+    }
+
     /// Registers `host`, whose agent reports `capabilities`, past the route.
     fn register_with(&mut self, host: &str, capabilities: serde_json::Value) {
         let hello: Hello = serde_json::from_value(json!({
