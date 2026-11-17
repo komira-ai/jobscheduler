@@ -14,7 +14,8 @@
 # the `js-agent` binary of this same package, which `build` reads from the binary on the macOS
 # runner (the linker signs an arm64 binary ad hoc), so the helper needs no flags file.
 #
-# `sign` runs only on main: by hand, or in the release's call (`sign: true`, on a push). It runs
+# `sign` runs only on main: by hand, or in the release's call (`sign: true`, on a push, with
+# `secrets: inherit`, without which a called workflow reads every secret as empty). It runs
 # in the environment `pkg-signing`, which a repository administrator creates with its secrets
 # and a rule that only main may deploy to it. It does not build: it takes the checked unsigned
 # package and the checker from `build`, checks that the package is the one `build` summed,
