@@ -8,9 +8,9 @@
 //!   over once. It runs the calls on a tokio runtime of its own (two threads named
 //!   `js-provide`), as the image pulls of `lifecycle::prefetch` do.
 //! - Each channel connects lazily, on its first call, and again after a connection is lost.
-//!   Before every connect it checks the socket file: a socket that neither group nor others
-//!   can write, in a directory they cannot write either, owned by the agent's user, root or
-//!   that directory's owner (`socket`).
+//!   Before every connect it checks the socket file: a socket others cannot write, in a
+//!   directory of root (or of the agent's user) that its group and others cannot write
+//!   (`socket`).
 //! - Each call has a bound ([`CallBounds`]); a provider that does not answer within it is
 //!   answered `Unavailable`, and the lifecycle asks again when it chooses.
 //! - A reply of `INVALID_ARGUMENT` or `FAILED_PRECONDITION` is a refusal; every other failure
@@ -95,8 +95,8 @@ pub struct ProviderClient {
 
 impl ProviderClient {
     /// A client of the providers `sockets` names (name and socket path), for the agent whose
-    /// host id is `host_id`, which runs as the user `euid`: a socket must belong to `euid`, to
-    /// root or to the owner of its directory. The bounds are [`CallBounds::default`]. No socket is opened until a call is
+    /// host id is `host_id`, which runs as the user `euid`: a socket must lie in a closed
+    /// directory of root or of `euid`. The bounds are [`CallBounds::default`]. No socket is opened until a call is
     /// asked of its provider.
     ///
     /// # Errors

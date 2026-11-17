@@ -413,21 +413,27 @@ fn a_path_that_is_not_a_socket_is_unavailable() {
     assert_unavailable(&settle(&mut client, NAME, &sweep(&[])), ": not a socket");
 }
 
-/// Asserts that a socket a group or others can write is `Unavailable` with that reason, that
-/// the group bit alone is enough, and that the same client reaches the provider when the
-/// socket is owner-only again. It catches a socket that anyone could have put in the
-/// provider's place being trusted with the refs of jobs.
+/// Asserts that a socket others can write is `Unavailable` with that reason, the others bit
+/// alone being enough, that a socket its group can write is reached (the agent's user writes
+/// a provider's socket through its group), and that the same client reaches the provider
+/// when others can no longer write it. It catches a socket that anyone could write trusted
+/// with the refs of jobs, and a provider's group-writable socket refused.
 #[test]
 fn a_socket_others_can_write_is_unavailable_until_it_is_not() {
     let mut rig = rig("pc-mode");
     let call = sweep(&[]);
-    for mode in [0o666, 0o620] {
+    for mode in [0o666, 0o602] {
         fs::set_permissions(rig.fake.socket(), fs::Permissions::from_mode(mode)).unwrap();
         assert_unavailable(
             &settle(&mut rig.client, NAME, &call),
-            "can be written by its group or by others",
+            &format!("can be written by others (mode {mode:o})"),
         );
     }
+    fs::set_permissions(rig.fake.socket(), fs::Permissions::from_mode(0o660)).unwrap();
+    assert_eq!(
+        settle(&mut rig.client, NAME, &call),
+        ProviderAnswer::Done(None)
+    );
     fs::set_permissions(rig.fake.socket(), fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(
         settle(&mut rig.client, NAME, &call),
@@ -435,21 +441,21 @@ fn a_socket_others_can_write_is_unavailable_until_it_is_not() {
     );
 }
 
-/// Asserts that a socket owned by a user that is neither the agent's nor root is taken when
-/// that user also owns the socket's directory, as a provider that runs as a user of its own
-/// (tierstore) binds its socket in its own directory: the agent is told it runs as another
-/// user than the one that owns both. It catches the check that refuses every provider not run
-/// as root or as the agent's user.
+/// Asserts that a socket in a directory that belongs neither to root nor to the agent's user
+/// is `Unavailable` naming the directory's owner, whoever owns the socket: the agent is told it
+/// runs as another user than the one that owns the test's directory. It catches a socket in a
+/// directory another user could have put it in trusted with the refs of jobs.
 #[test]
-fn a_socket_of_its_directorys_owner_is_taken_from_another_user() {
+fn a_socket_in_a_directory_of_another_user_is_unavailable() {
     let (_scratch, fake) = start("pc-owner");
-    let owner = fs::metadata(fake.socket()).unwrap().uid();
+    let owner = fs::metadata(fake.socket().parent().unwrap()).unwrap().uid();
     let mut client =
         ProviderClient::new(HOST, owner + 1, &sockets(fake.socket().to_path_buf())).unwrap();
-    assert_eq!(
-        settle(&mut client, NAME, &sweep(&[])),
-        ProviderAnswer::Done(None)
+    assert_unavailable(
+        &settle(&mut client, NAME, &sweep(&[])),
+        &format!("its directory belongs to user {owner}, neither root nor this agent's user"),
     );
+    assert!(fake.requests().is_empty());
 }
 
 /// Asserts that a socket in a directory its group or others can write is `Unavailable`
