@@ -212,3 +212,82 @@ fn the_beta_stage_runs_after_the_build_and_holds_back_only_the_macos_archives() 
         "            case \"$name\" in\n              *-aarch64-apple-darwin.tar.gz) continue ;;\n            esac\n"
     ));
 }
+
+#[test]
+fn the_package_call_passes_the_release_version_and_asks_for_the_signature() {
+    let w = Workflow::parse("release.yml", &read("release.yml"));
+    let lines = &w
+        .jobs
+        .iter()
+        .find(|(n, _)| n == "beta-macos-pkg")
+        .expect("job")
+        .1;
+    assert_eq!(
+        block(lines, 4, "with").expect("with"),
+        ["version: ${{ needs.plan.outputs.version }}", "sign: true"]
+    );
+    // The called workflow takes the two inputs and starts on no pull request.
+    let called = Workflow::parse("js-agent-macos-pkg.yml", &read("js-agent-macos-pkg.yml"));
+    let on = called.top_block("on").expect("on");
+    assert!(on.iter().any(|l| l == "workflow_call:"));
+    assert!(on.iter().any(|l| l == "sign:"));
+    assert!(!called.on_pull_request());
+}
+
+#[test]
+fn the_package_upload_waits_for_the_beta_stage_and_runs_for_a_push_alone() {
+    let text = read("release.yml");
+    let w = Workflow::parse("release.yml", &text);
+    let upload = &w
+        .jobs
+        .iter()
+        .find(|(n, _)| n == "pkg-upload")
+        .expect("job")
+        .1;
+    // `promote-macos` waits for the three beta jobs and `publish`, so this waits for them all.
+    assert_eq!(
+        block(upload, 4, "needs").expect("needs"),
+        ["[plan, deploy-tool, promote-macos]"]
+    );
+    assert_eq!(
+        block(upload, 4, "runs-on").expect("runs-on"),
+        ["ubuntu-24.04"]
+    );
+    assert!(
+        block(upload, 4, "if")
+            .expect("if")
+            .join(" ")
+            .contains("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+    );
+    // Not a job a pull request starts.
+    let (jobs, problems) = lint(&repository_workflows());
+    assert_eq!(problems, Vec::<String>::new());
+    assert!(!jobs.iter().any(|j| j.contains("pkg-upload")), "{jobs:?}");
+}
+
+#[test]
+fn a_package_upload_without_its_push_condition_is_a_pull_request_job() {
+    // The lint lists the job once its `if:` no longer keeps a pull request's dry run off it.
+    let gate = "  pkg-upload:\n    needs: [plan, deploy-tool, promote-macos]\n    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}\n";
+    let ungated = "  pkg-upload:\n    needs: [plan, deploy-tool, promote-macos]\n";
+    let (jobs, _) = lint(&changed("release.yml", gate, ungated));
+    assert!(
+        jobs.iter().any(|j| j == "release.yml/pkg-upload"),
+        "{jobs:?}"
+    );
+}
+
+#[test]
+fn the_package_workflow_started_by_a_pull_request_is_refused() {
+    let workflows = changed(
+        "js-agent-macos-pkg.yml",
+        "on:\n  workflow_call:\n",
+        "on:\n  pull_request:\n  workflow_call:\n",
+    );
+    let (_, problems) = lint(&workflows);
+    for job in ["build", "sign"] {
+        let want =
+            format!("js-agent-macos-pkg.yml/{job}: runs on macos-15, not Linux x86_64 (ubuntu-*)");
+        assert!(problems.contains(&want), "{problems:?}");
+    }
+}

@@ -170,6 +170,7 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         "beta-macos-pkg",
         "beta-macos-probe",
         "promote-macos",
+        "pkg-upload",
     ]
     .map(str::to_owned)
     .to_vec();

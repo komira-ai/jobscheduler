@@ -12,7 +12,7 @@ use js_update_hook::{
     Clock, CommandRunner, LAUNCHCTL, LaunchUnits, PortError, SETTLE_READS, UnitState, Units,
 };
 
-const LABEL: &str = "com.komira.js-agent";
+const LABEL: &str = "js-agent";
 const GONE: &str = "/bin/launchctl: exit status: 113";
 
 fn print_line(label: &str) -> String {
@@ -152,8 +152,7 @@ const NEVER: &str = "\truns = 0\n\tlast exit code = (never exited)\n";
 /// `show` runs one `print` of the system domain and reads the service's own `state`.
 #[test]
 fn show_prints_the_service_of_the_system_domain_and_reads_its_state() {
-    let tool =
-        Script::default().prints(&["system/com.komira.js-agent = {\n\tstate = running\n}\n"]);
+    let tool = Script::default().prints(&["system/js-agent = {\n\tstate = running\n}\n"]);
     assert_eq!(
         LaunchUnits::new(&tool).show(LABEL),
         Ok(state("active", "running"))

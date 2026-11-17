@@ -8,11 +8,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use js_mac_provision::daemon::{Daemon, RELEASE_LINK};
+use js_mac_provision::daemon::{BIN_DIR, Daemon};
 use js_testkit::dir::TestDir;
 use xtask::macpkg::{
-    Entry, Error, IDENTIFIER, Inspected, Kind, StageArgs, entries, postinstall_script, problems,
-    stage, verdict,
+    Entry, Error, IDENTIFIER, Inspected, Kind, StageArgs, entries, problems, stage, verdict,
 };
 
 const VERSION: &str = "1.2.3";
@@ -36,28 +35,27 @@ fn entry<'a>(all: &'a [Entry], path: &str) -> &'a Entry {
 }
 
 #[test]
-fn the_payload_holds_the_release_the_plists_and_three_directories() {
-    let all = entries(VERSION);
+fn the_payload_holds_the_programs_the_plists_and_two_directories() {
+    let all = entries();
     let files: BTreeSet<&str> = all
         .iter()
         .filter(|e| e.kind == Kind::File)
         .map(|e| e.path.as_str())
         .collect();
     let want: BTreeSet<&str> = [
-        "usr/local/js-agent/releases/1.2.3/js-agent",
-        "usr/local/js-agent/releases/1.2.3/js-mac-session",
-        "usr/local/js-agent/releases/1.2.3/js-mac-provision",
-        "usr/local/js-agent/releases/1.2.3/LICENSE",
-        "usr/local/js-agent/share/com.komira.js-agent.plist",
-        "usr/local/js-agent/share/com.komira.js-mac-session.plist",
+        "Library/Application Support/js-agent/bin/js-agent",
+        "Library/Application Support/js-agent/bin/js-mac-session",
+        "Library/Application Support/js-agent/bin/js-mac-provision",
+        "Library/Application Support/js-agent/LICENSE",
+        "Library/LaunchDaemons/js-agent.plist",
+        "Library/LaunchDaemons/js-agent.session.plist",
     ]
     .into_iter()
     .collect();
     assert_eq!(files, want);
     for dir in [
-        "usr/local/js-agent/link",
-        "Library/Logs/js-agent",
-        "var/db/js-agent-update",
+        "Library/Application Support/js-agent/log",
+        "Library/Application Support/js-agent/update",
     ] {
         assert_eq!(entry(&all, dir).kind, Kind::Dir, "{dir}");
     }
@@ -65,7 +63,7 @@ fn the_payload_holds_the_release_the_plists_and_three_directories() {
 
 #[test]
 fn the_payload_list_and_the_errors_can_be_copied_compared_and_printed() {
-    let all = entries(VERSION);
+    let all = entries();
     assert_eq!(all.clone(), all);
     assert_eq!(format!("{:?}", all[0].kind), "Dir");
     assert!(format!("{:?}", all[0]).starts_with("Entry { path: \"Library\""));
@@ -74,26 +72,41 @@ fn the_payload_list_and_the_errors_can_be_copied_compared_and_printed() {
 
 #[test]
 fn programs_are_0755_data_is_0644_and_the_hooks_state_directory_is_0700() {
-    let all = entries(VERSION);
-    let release = "usr/local/js-agent/releases/1.2.3";
+    let all = entries();
+    let prefix = "Library/Application Support/js-agent";
     for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
-        assert_eq!(entry(&all, &format!("{release}/{program}")).mode, 0o755);
+        assert_eq!(entry(&all, &format!("{prefix}/bin/{program}")).mode, 0o755);
     }
-    assert_eq!(entry(&all, &format!("{release}/LICENSE")).mode, 0o644);
-    assert_eq!(entry(&all, "var/db/js-agent-update").mode, 0o700);
-    assert_eq!(entry(&all, "usr/local/js-agent/link").mode, 0o755);
+    assert_eq!(entry(&all, &format!("{prefix}/LICENSE")).mode, 0o644);
+    for plist in ["js-agent.plist", "js-agent.session.plist"] {
+        assert_eq!(
+            entry(&all, &format!("Library/LaunchDaemons/{plist}")).mode,
+            0o644
+        );
+    }
+    assert_eq!(entry(&all, &format!("{prefix}/update")).mode, 0o700);
+    assert_eq!(entry(&all, &format!("{prefix}/log")).mode, 0o755);
+    for dir in [
+        "Library",
+        "Library/Application Support",
+        "Library/LaunchDaemons",
+        prefix,
+        &format!("{prefix}/bin"),
+    ] {
+        assert_eq!(entry(&all, dir).mode, 0o755, "{dir}");
+    }
 }
 
 #[test]
 fn nothing_in_the_payload_is_writable_by_group_or_others() {
-    for e in entries(VERSION) {
+    for e in entries() {
         assert_eq!(e.mode & 0o022, 0, "{}: {:o}", e.path, e.mode);
     }
 }
 
 #[test]
 fn every_entry_has_its_parent_directories_listed_once() {
-    let all = entries(VERSION);
+    let all = entries();
     let paths: Vec<&str> = all.iter().map(|e| e.path.as_str()).collect();
     let unique: BTreeSet<&str> = paths.iter().copied().collect();
     assert_eq!(paths.len(), unique.len(), "a path is listed twice");
@@ -108,27 +121,39 @@ fn every_entry_has_its_parent_directories_listed_once() {
 }
 
 #[test]
-fn the_release_link_the_daemons_use_has_a_directory_of_its_own() {
-    // The update hook swaps the link by writing next to it, so its parent is a write path of
-    // its own; the package ships that directory empty and never the link.
-    let all = entries(VERSION);
-    let parent = Path::new(RELEASE_LINK).parent().unwrap();
-    let parent = parent.strip_prefix("/").unwrap().to_str().unwrap();
-    assert_eq!(entry(&all, parent).kind, Kind::Dir);
-    assert!(
-        all.iter()
-            .all(|e| !e.path.starts_with(RELEASE_LINK.trim_start_matches('/')))
-    );
+fn the_payload_holds_no_release_tree_and_no_link() {
+    // The package is hostkeeper's: the release is its tree, and no path of the payload is
+    // the old release layout.
+    for e in entries() {
+        assert!(!e.path.starts_with("usr/"), "{}", e.path);
+        assert!(!e.path.contains("releases"), "{}", e.path);
+    }
 }
 
 #[test]
-fn the_postinstall_script_only_runs_the_installed_provision_binary() {
-    let script = postinstall_script(VERSION);
+fn the_plists_programs_are_payload_files() {
+    let all = entries();
+    for daemon in [Daemon::agent(), Daemon::session("x")] {
+        let path = daemon.program.trim_start_matches('/');
+        assert_eq!(entry(&all, path).kind, Kind::File, "{path}");
+        assert_eq!(entry(&all, path).mode, 0o755);
+    }
+    assert!(js_mac_provision::daemon::UPDATE_DIR.ends_with("/js-agent/update"));
     assert_eq!(
-        script,
-        "#!/bin/sh\n\
-         # Written by `cargo xtask pkg stage-macos`. The logic is `js-mac-provision postinstall`.\n\
-         exec \"${3%/}/usr/local/js-agent/releases/1.2.3/js-mac-provision\" postinstall --version 1.2.3 --volume \"$3\"\n"
+        entry(
+            &all,
+            js_mac_provision::daemon::UPDATE_DIR.trim_start_matches('/')
+        )
+        .mode,
+        0o700
+    );
+    assert_eq!(
+        entry(
+            &all,
+            js_mac_provision::daemon::LOG_DIR.trim_start_matches('/')
+        )
+        .kind,
+        Kind::Dir
     );
 }
 
@@ -199,28 +224,25 @@ fn staging_lays_down_exactly_the_payload_with_the_sources_bytes_and_the_listed_m
     let root = s.args.out.join("root");
     let mut found = BTreeSet::new();
     walk(&root, &root, &mut found);
-    let all = entries(VERSION);
+    let all = entries();
     let want: BTreeSet<String> = all.iter().map(|e| e.path.clone()).collect();
     assert_eq!(found, want);
     for e in &all {
         assert_eq!(mode_of(&root.join(&e.path)), e.mode, "{}", e.path);
     }
-    let release = root.join("usr/local/js-agent/releases/1.2.3");
+    let bin = root.join("Library/Application Support/js-agent/bin");
     for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
         assert_eq!(
-            std::fs::read_to_string(release.join(program)).unwrap(),
+            std::fs::read_to_string(bin.join(program)).unwrap(),
             format!("bytes of {program}")
         );
     }
     for (from, to) in [
-        ("LICENSE", "usr/local/js-agent/releases/1.2.3/LICENSE"),
-        (
-            "agent.plist",
-            "usr/local/js-agent/share/com.komira.js-agent.plist",
-        ),
+        ("LICENSE", "Library/Application Support/js-agent/LICENSE"),
+        ("agent.plist", "Library/LaunchDaemons/js-agent.plist"),
         (
             "session.plist",
-            "usr/local/js-agent/share/com.komira.js-mac-session.plist",
+            "Library/LaunchDaemons/js-agent.session.plist",
         ),
     ] {
         assert_eq!(
@@ -232,18 +254,14 @@ fn staging_lays_down_exactly_the_payload_with_the_sources_bytes_and_the_listed_m
 }
 
 #[test]
-fn staging_writes_the_postinstall_script_alone_in_the_scripts_directory() {
+fn staging_writes_no_scripts() {
     let s = sources("macpkg-stage-scripts");
     stage(&s.args).unwrap();
-    let scripts = s.args.out.join("scripts");
     let mut found = BTreeSet::new();
-    walk(&scripts, &scripts, &mut found);
-    assert_eq!(found, BTreeSet::from(["postinstall".to_owned()]));
-    assert_eq!(
-        std::fs::read_to_string(scripts.join("postinstall")).unwrap(),
-        postinstall_script(VERSION)
-    );
-    assert_eq!(mode_of(&scripts.join("postinstall")), 0o755);
+    walk(&s.args.out, &s.args.out, &mut found);
+    assert_eq!(found.iter().filter(|p| p.contains("script")).count(), 0);
+    assert!(!s.args.out.join("scripts").exists());
+    assert!(s.args.out.join("root").is_dir());
 }
 
 #[test]
@@ -285,7 +303,8 @@ fn the_program_stages_the_package_when_asked_to() {
     );
     let said = String::from_utf8(out.stdout).unwrap();
     assert!(said.starts_with("staged js-agent 1.2.3"), "{said}");
-    assert!(a.out.join("scripts/postinstall").is_file());
+    assert!(a.out.join("root").is_dir());
+    assert!(!a.out.join("scripts").exists());
 }
 
 #[test]
@@ -319,11 +338,8 @@ fn bom_of(all: &[Entry]) -> String {
 
 fn good() -> Inspected {
     Inspected {
-        bom: bom_of(&entries(VERSION)),
-        scripts: vec![(
-            "postinstall".to_owned(),
-            postinstall_script(VERSION).into_bytes(),
-        )],
+        bom: bom_of(&entries()),
+        scripts: Vec::new(),
         package_info: format!(
             "<pkg-info format-version=\"2\" identifier=\"{IDENTIFIER}\" version=\"{VERSION}\" install-location=\"/\"/>"
         ),
@@ -352,7 +368,7 @@ fn a_file_missing_from_the_bill_of_materials_is_named() {
         .join("\n");
     assert_eq!(
         refused(&p),
-        ["missing from the package: usr/local/js-agent/releases/1.2.3/js-mac-session"]
+        ["missing from the package: Library/Application Support/js-agent/bin/js-mac-session"]
     );
 }
 
@@ -368,57 +384,63 @@ fn a_wrong_mode_is_named_with_both_modes() {
     let mut p = good();
     p.bom = p
         .bom
-        .replace("js-agent-update\t40700", "js-agent-update\t40755");
+        .replace("js-agent/update\t40700", "js-agent/update\t40755");
     assert_eq!(
         refused(&p),
-        ["var/db/js-agent-update: mode is 0755, not 0700"]
+        ["Library/Application Support/js-agent/update: mode is 0755, not 0700"]
     );
 }
 
 #[test]
 fn an_owner_that_is_not_root_is_named() {
     let mut p = good();
-    p.bom.push_str("");
     p.bom = p.bom.replace(
-        "releases/1.2.3/LICENSE\t100644\t0/0",
-        "releases/1.2.3/LICENSE\t100644\t501/20",
+        "js-agent/LICENSE\t100644\t0/0",
+        "js-agent/LICENSE\t100644\t501/20",
     );
     assert_eq!(
         refused(&p),
-        ["usr/local/js-agent/releases/1.2.3/LICENSE: owned by 501/20, not root:wheel"]
+        ["Library/Application Support/js-agent/LICENSE: owned by 501/20, not root:wheel"]
     );
 }
 
 #[test]
 fn root_with_the_admin_group_is_allowed_and_root_with_a_user_group_is_not() {
     let mut p = good();
-    p.bom = p
-        .bom
-        .replace("./Library/Logs\t40755\t0/0", "./Library/Logs\t40755\t0/80");
+    p.bom = p.bom.replace(
+        "./Library/LaunchDaemons\t40755\t0/0",
+        "./Library/LaunchDaemons\t40755\t0/80",
+    );
     assert_eq!(problems(&p, VERSION), Vec::<String>::new());
-    p.bom = p
-        .bom
-        .replace("./Library/Logs\t40755\t0/80", "./Library/Logs\t40755\t0/20");
-    assert_eq!(refused(&p), ["Library/Logs: owned by 0/20, not root:wheel"]);
+    p.bom = p.bom.replace(
+        "./Library/LaunchDaemons\t40755\t0/80",
+        "./Library/LaunchDaemons\t40755\t0/20",
+    );
+    assert_eq!(
+        refused(&p),
+        ["Library/LaunchDaemons: owned by 0/20, not root:wheel"]
+    );
 }
 
 #[test]
 fn a_link_or_a_file_where_a_directory_belongs_is_refused() {
     let mut p = good();
     p.bom = p.bom.replace(
-        "./usr/local/js-agent/link\t40755",
-        "./usr/local/js-agent/link\t100755",
+        "./Library/Application Support/js-agent/bin\t40755",
+        "./Library/Application Support/js-agent/bin\t100755",
     );
     assert_eq!(
         refused(&p),
-        ["usr/local/js-agent/link: is a file, not a directory"]
+        ["Library/Application Support/js-agent/bin: is a file, not a directory"]
     );
     let mut p = good();
     p.bom
-        .push_str("./usr/local/js-agent/link/current\t120755\t0/0\t30\t1\n");
+        .push_str("./Library/Application Support/js-agent/bin/current\t120755\t0/0\t30\t1\n");
     assert_eq!(
         refused(&p),
-        ["usr/local/js-agent/link/current: is not a file or a directory (mode 120755)"]
+        [
+            "Library/Application Support/js-agent/bin/current: is not a file or a directory (mode 120755)"
+        ]
     );
 }
 
@@ -426,12 +448,12 @@ fn a_link_or_a_file_where_a_directory_belongs_is_refused() {
 fn a_directory_where_a_file_belongs_is_refused() {
     let mut p = good();
     p.bom = p.bom.replace(
-        "releases/1.2.3/LICENSE\t100644\t0/0\t12\t3456",
-        "releases/1.2.3/LICENSE\t40755\t0/0",
+        "js-agent/LICENSE\t100644\t0/0\t12\t3456",
+        "js-agent/LICENSE\t40755\t0/0",
     );
     assert_eq!(
         refused(&p),
-        ["usr/local/js-agent/releases/1.2.3/LICENSE: is a directory, not a file"]
+        ["Library/Application Support/js-agent/LICENSE: is a directory, not a file"]
     );
 }
 
@@ -444,25 +466,28 @@ fn a_line_that_is_not_lsbom_output_and_a_path_listed_twice_are_refused() {
         ["cannot read the bill of materials line \"garbage\""]
     );
     let mut p = good();
-    p.bom.push_str("./var/db/js-agent-update\t40700\t0/0\n");
-    assert_eq!(refused(&p), ["var/db/js-agent-update is listed twice"]);
+    p.bom
+        .push_str("./Library/Application Support/js-agent/update\t40700\t0/0\n");
+    assert_eq!(
+        refused(&p),
+        ["Library/Application Support/js-agent/update is listed twice"]
+    );
 }
 
 #[test]
-fn a_second_script_or_a_changed_postinstall_is_refused() {
-    let mut p = good();
-    p.scripts
-        .push(("preinstall".to_owned(), b"#!/bin/sh\n".to_vec()));
-    assert_eq!(
-        refused(&p),
-        ["the scripts are [\"postinstall\", \"preinstall\"], not [\"postinstall\"]"]
-    );
-    let mut p = good();
-    p.scripts[0].1.extend_from_slice(b"rm -rf /\n");
-    assert_eq!(
-        refused(&p),
-        ["postinstall is not the script of version 1.2.3"]
-    );
+fn any_script_at_all_is_refused() {
+    for names in [vec!["postinstall"], vec!["preinstall", "postinstall"]] {
+        let mut p = good();
+        p.scripts = names.iter().map(ToString::to_string).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            refused(&p),
+            [format!(
+                "the package holds scripts, and must hold none: {sorted:?}"
+            )]
+        );
+    }
 }
 
 #[test]
@@ -495,11 +520,11 @@ fn the_verdict_is_a_line_for_the_package_and_the_problems_for_anything_else() {
         line,
         format!(
             "/x/js-agent.pkg: js-agent 1.2.3 with {} entries",
-            entries(VERSION).len()
+            entries().len()
         )
     );
     let mut p = good();
-    p.scripts.clear();
+    p.scripts.push("preinstall".to_owned());
     let err = verdict(&p, VERSION, pkg).unwrap_err();
     assert_eq!(err, Error::Refused(problems(&p, VERSION)));
     assert!(
@@ -542,8 +567,7 @@ fn program_arguments(plist: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every flag the agent's plists give (with flags of their own, and with a flags file, whose
-/// words are the Mac flags file's) is one the macOS build of the agent has: a flag of every
+/// Every flag the agent's plist gives, and every flag of the Mac flags file it names, is one the macOS build of the agent has: a flag of every
 /// build (this build's parser knows it, and it is no Linux build's flag) or a flag of the macOS
 /// build's runtime (`platform::MACOS_ONLY`), the helper's socket among them. It runs on every
 /// build, so a Linux pull request that renames a flag the plist names fails here, and not only
@@ -552,10 +576,8 @@ fn program_arguments(plist: &str) -> Vec<String> {
 fn the_agents_plist_names_only_flags_of_the_macos_agent() {
     use clap::CommandFactory as _;
     use js_agent::platform::{LINUX_ONLY, MACOS_ONLY};
-    let plist = Daemon::agent("https://leases.example:7300", "mac").render();
-    let from_file = Daemon::agent_from_flags_file("/etc/js-agent/flags").render();
+    let plist = Daemon::agent().render();
     let mut words: Vec<String> = program_arguments(&plist).into_iter().skip(1).collect();
-    words.extend(program_arguments(&from_file).into_iter().skip(1));
     words.extend(js_agent::flags_file::words(MAC_FLAGS).unwrap());
     let command = js_agent::Cli::command();
     let flags: Vec<&str> = words
@@ -579,14 +601,25 @@ fn the_agents_plist_names_only_flags_of_the_macos_agent() {
 #[cfg(target_os = "macos")]
 #[test]
 fn the_agents_plist_names_flags_the_agent_accepts() {
-    let plist = Daemon::agent("https://leases.example:7300", "mac").render();
+    let plist = Daemon::agent().render();
     let words = program_arguments(&plist);
-    assert_eq!(words[0], format!("{RELEASE_LINK}/js-agent"));
+    assert_eq!(words[0], format!("{BIN_DIR}/js-agent"));
+    // The host's own flags, the server and pool among them, are in the flags file the plist names.
     let cli = js_agent::Cli::try_parse_from(
-        std::iter::once("js-agent".to_owned()).chain(words.into_iter().skip(1)),
+        std::iter::once("js-agent".to_owned())
+            .chain(words.into_iter().skip(1))
+            .chain([
+                "--server".to_owned(),
+                "https://leases.example:7300".to_owned(),
+                "--pool".to_owned(),
+                "mac".to_owned(),
+            ]),
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(cli.pool, "mac");
+    assert_eq!(
+        cli.flags_file.as_deref(),
+        Some(Path::new("/etc/js-agent/flags"))
+    );
     assert_eq!(
         cli.os.native_helper_socket.as_deref(),
         Some(Path::new("/var/run/js-mac-session/socket"))
@@ -605,16 +638,16 @@ const MAC_FLAGS: &str = "# the Mac build host group\n\
     --native-pf-endpoint=192.0.2.10:443\n\
     --native-pf-endpoint=192.0.2.11:443\n";
 
-/// The agent's flags-file plist, once the flags file is expanded in place of `--flags-file`,
+/// The agent's plist, once the flags file is expanded in place of `--flags-file`,
 /// is a command line `js_agent::Cli` accepts: the file gives the server, the pool and the
 /// native network, and the plist's own words give the rest. It catches a plist word the agent
 /// would refuse next to the file's, or a file word the plist makes a duplicate of.
 #[cfg(target_os = "macos")]
 #[test]
-fn the_agents_flags_file_plist_names_flags_the_agent_accepts_with_a_flags_file_expanded() {
-    let plist = Daemon::agent_from_flags_file("/etc/js-agent/flags").render();
+fn the_agents_plist_names_flags_the_agent_accepts_with_a_flags_file_expanded() {
+    let plist = Daemon::agent().render();
     let words = program_arguments(&plist);
-    assert_eq!(words[0], format!("{RELEASE_LINK}/js-agent"));
+    assert_eq!(words[0], format!("{BIN_DIR}/js-agent"));
     let mut args = vec!["js-agent".to_owned()];
     let mut rest = words.into_iter().skip(1);
     while let Some(word) = rest.next() {
@@ -639,14 +672,14 @@ fn the_agents_flags_file_plist_names_flags_the_agent_accepts_with_a_flags_file_e
 
 #[test]
 fn the_helpers_plist_names_flags_the_helper_accepts_and_a_socket_the_agent_dials() {
-    let plist = Daemon::session("cdhash H\"abc\"", "_jsagent").render();
+    let plist = Daemon::session("cdhash H\"abc\"").render();
     let words = program_arguments(&plist);
-    assert_eq!(words[0], format!("{RELEASE_LINK}/js-mac-session"));
+    assert_eq!(words[0], format!("{BIN_DIR}/js-mac-session"));
     let args = js_mac_session::start::Args::try_parse_from(
         std::iter::once("js-mac-session".to_owned()).chain(words.into_iter().skip(1)),
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    let agent = program_arguments(&Daemon::agent("https://x:1", "p").render());
+    let agent = program_arguments(&Daemon::agent().render());
     let socket = agent
         .iter()
         .position(|w| w == "--native-helper-socket")

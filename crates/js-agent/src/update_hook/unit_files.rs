@@ -9,7 +9,8 @@
 //!   installer, which keeps the package's files there as they are laid out on the system): the
 //!   unit is `tree/usr/lib/systemd/system/<unit>` for a systemd unit and
 //!   `tree/Library/LaunchDaemons/<unit>.plist` for a launchd job, and the agent is
-//!   `tree/usr/bin/js-agent`;
+//!   `tree/usr/bin/js-agent` (a `.deb`) or
+//!   `tree/Library/Application Support/js-agent/bin/js-agent` (a macOS package);
 //! - without it, it is an archive release of the earlier format: the unit is `units/<unit>` or
 //!   `units/<unit>.plist` ([`Manager::file_name`]) and the agent is `bin/js-agent`.
 //!
@@ -43,8 +44,11 @@ const TREE_DIR: &str = "tree";
 /// The agent's file in an archive release.
 const ARCHIVE_AGENT: &str = "bin/js-agent";
 
-/// The agent's file in a native package release.
+/// The agent's file in a native package release of a systemd host (a `.deb`).
 const NATIVE_AGENT: &str = "tree/usr/bin/js-agent";
+
+/// The agent's file in a native package release of a launchd host (a macOS package).
+const NATIVE_MAC_AGENT: &str = "tree/Library/Application Support/js-agent/bin/js-agent";
 
 /// The directory of a native package release that holds a systemd unit.
 const NATIVE_SYSTEMD_DIR: &str = "tree/usr/lib/systemd/system";
@@ -57,13 +61,14 @@ fn is_native(release: &Path) -> bool {
     release.join(TREE_DIR).is_dir()
 }
 
-/// The agent's file in the release directory `release`, in the layout the directory has.
+/// The agent's file in the release directory `release` of a host under `manager`, in the layout
+/// the directory has.
 #[must_use]
-pub fn agent_in(release: &Path) -> PathBuf {
-    release.join(if is_native(release) {
-        NATIVE_AGENT
-    } else {
-        ARCHIVE_AGENT
+pub fn agent_in(manager: Manager, release: &Path) -> PathBuf {
+    release.join(match (is_native(release), manager) {
+        (false, _) => ARCHIVE_AGENT,
+        (true, Manager::Systemd) => NATIVE_AGENT,
+        (true, Manager::Launchd) => NATIVE_MAC_AGENT,
     })
 }
 

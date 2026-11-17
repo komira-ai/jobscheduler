@@ -13,30 +13,30 @@ use super::manifest::{PARAMS, Param};
 use super::repo::{Listed, listed, sums_digest};
 use super::*;
 
-const AMD64: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-const ARM64: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-const OTHER: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+pub(super) const AMD64: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+pub(super) const ARM64: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+pub(super) const OTHER: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 
 /// Held by each test from its first script to its last run: a script that is being written is
 /// a file open for writing, and a program started meanwhile by another test of this process
 /// would carry that descriptor into its child, which makes the script's own start fail with
 /// "text file busy". Tests that write scripts run one at a time.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Waits for the turn of one test (a failed test does not stop the others).
-fn serial() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A scratch directory of its own for one test.
-fn scratch(name: &str) -> TestDir {
+pub(super) fn scratch(name: &str) -> TestDir {
     TestDir::under(std::env::temp_dir(), name)
 }
 
 /// Writes the executable `name` of `dir`, a shell script with `body`.
-fn script(dir: &TestDir, name: &str, body: &str) -> String {
+pub(super) fn script(dir: &TestDir, name: &str, body: &str) -> String {
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}")).expect("script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
@@ -44,13 +44,13 @@ fn script(dir: &TestDir, name: &str, body: &str) -> String {
 }
 
 /// Shell that prints `text` as it is.
-fn say(text: &str) -> String {
+pub(super) fn say(text: &str) -> String {
     format!("cat <<'EOF'\n{text}\nEOF\n")
 }
 
 /// A stand-in `gh` that logs its command line to `gh.log` and runs the shell of the case whose
 /// arguments are exactly `$*`, and fails (status 9) on any other call.
-fn gh(dir: &TestDir, cases: &[(String, String)]) -> String {
+pub(super) fn gh(dir: &TestDir, cases: &[(String, String)]) -> String {
     let mut body = format!(
         "echo \"$*\" >> '{}'\ncase \"$*\" in\n",
         dir.join("gh.log").display()
@@ -92,7 +92,7 @@ fn curl(dir: &TestDir, amd64: &Index<'_>, arm64: &Index<'_>) -> String {
 }
 
 /// The text of a log (empty when the program was never run).
-fn log(dir: &TestDir, name: &str) -> String {
+pub(super) fn log(dir: &TestDir, name: &str) -> String {
     std::fs::read_to_string(dir.join(name)).unwrap_or_default()
 }
 
@@ -117,7 +117,7 @@ fn release(assets: &[&str]) -> String {
 }
 
 /// The `SHA256SUMS` of a release of 1.2.3 that lists both `.deb`s at `AMD64` and `ARM64`.
-fn sums() -> String {
+pub(super) fn sums() -> String {
     format!(
         "{AMD64}  js-agent_1.2.3_amd64.deb\n{ARM64} *js-agent_1.2.3_arm64.deb\n{OTHER}  js-agent-1.2.3-linux.tar.gz\n"
     )
@@ -125,7 +125,7 @@ fn sums() -> String {
 
 /// The gh cases of a published release 1.2.3 that holds `SHA256SUMS`, which download writes
 /// `sums` for.
-fn release_cases(dir: &TestDir, sums: &str) -> Vec<(String, String)> {
+pub(super) fn release_cases(dir: &TestDir, sums: &str) -> Vec<(String, String)> {
     vec![
         (
             "api repos/o/r/releases/tags/v1.2.3".to_owned(),
@@ -145,7 +145,7 @@ fn release_cases(dir: &TestDir, sums: &str) -> Vec<(String, String)> {
 }
 
 /// The arguments of a run by version in `dir`, with the stand-ins.
-fn args(dir: &TestDir, gh: String, curl: String) -> DesiredArgs {
+pub(super) fn args(dir: &TestDir, gh: String, curl: String) -> DesiredArgs {
     DesiredArgs {
         repo: "o/r".to_owned(),
         version: "1.2.3".to_owned(),
@@ -153,6 +153,7 @@ fn args(dir: &TestDir, gh: String, curl: String) -> DesiredArgs {
         dir: dir.join("d"),
         output: Some(dir.join("out")),
         apt_url: "https://apt.example/apt".to_owned(),
+        pkg_url: None,
         gh,
         curl,
     }
@@ -168,7 +169,7 @@ fn consistent(dir: &TestDir) -> DesiredArgs {
 }
 
 /// The refusal's lines.
-fn refused(result: Result<String, Error>) -> Vec<String> {
+pub(super) fn refused(result: Result<String, Error>) -> Vec<String> {
     match result {
         Err(Error::Refused(lines)) => lines,
         other => panic!("expected a refusal, got {other:?}"),
@@ -178,7 +179,7 @@ fn refused(result: Result<String, Error>) -> Vec<String> {
 /// The `targets` value the verb writes for 1.2.3 with the digests of the two packages: the
 /// whole JSON, written out. Hostkeeper's `Target` in proto3 canonical JSON (lowerCamel names,
 /// 64-bit integers as strings), one `apt` entry of the stable repository per platform.
-fn golden() -> String {
+pub(super) fn golden() -> String {
     let entry = |digest: &str| {
         format!(
             "{{\"entries\":[{{\"digest\":\"{digest}\",\"installer\":\"apt\",\"manifest\":{{\"hook\":{{\"cleanupRetries\":3,\"command\":[\"/usr/bin/js-agent\",\"update-hook\"],\"timeoutSecs\":{{\"cleanup\":\"120\",\"cutover\":\"4320\",\"prepare\":\"3900\",\"rollback\":\"8220\",\"verify\":\"615\"}},\"verifyDeadlineSecs\":\"9000\"}},\"installerBounds\":{{\"activateSecs\":\"300\",\"removeSecs\":\"300\",\"stageSecs\":\"600\"}},\"minHostkeeper\":\"0.1.225\",\"package\":\"js-agent\",\"params\":{{\"cleanup_timeout_secs\":{{\"integer\":\"120\"}},\"cordon_lease_secs\":{{\"integer\":\"300\"}},\"cordon_max_secs\":{{\"integer\":\"17355\"}},\"cutover_timeout_secs\":{{\"integer\":\"4320\"}},\"defer_retry_secs\":{{\"integer\":\"300\"}},\"drain_wait_secs\":{{\"integer\":\"3600\"}},\"flags_file\":{{\"text\":\"/etc/js-agent/flags\"}},\"prepare_timeout_secs\":{{\"integer\":\"3900\"}},\"release_link\":{{\"text\":\"/var/lib/hostkeeper/packages/js-agent/current\"}},\"rollback_timeout_secs\":{{\"integer\":\"8220\"}},\"runtime\":{{\"text\":\"crun\"}},\"state_dir\":{{\"text\":\"/var/lib/js-agent-update\"}},\"state_root\":{{\"text\":\"/var/lib/js-agent/state\"}},\"token_file\":{{\"text\":\"/etc/js-agent/token\"}},\"unit\":{{\"text\":\"js-agent-crun.service\"}},\"verify_deadline_secs\":{{\"integer\":\"9000\"}},\"verify_timeout_secs\":{{\"integer\":\"615\"}}}},\"run\":[\"js-agent-crun.service\"]}},\"packageVersion\":\"1.2.3\",\"repository\":\"komira-stable\"}}]}}"
@@ -414,6 +415,7 @@ fn flags_that_do_not_fit_together_are_usage_errors() {
         repo: ok.repo.clone(),
         dir: ok.dir.clone(),
         output: None,
+        pkg_url: None,
     };
     let url = "https://apt.example/apt";
     let both = "give one of --version and --after-run, not both and not neither";

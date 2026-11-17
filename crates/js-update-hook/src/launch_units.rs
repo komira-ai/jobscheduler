@@ -1,6 +1,6 @@
 //! [`Units`] over `launchctl`, for a Mac: the unit is the label of a LaunchDaemon in the system
-//! domain (js-agent's is `com.komira.js-agent`), and its plist is `<label>.plist` in
-//! `/Library/LaunchDaemons`, where `js-mac-provision` puts the agent's.
+//! domain (js-agent's is `js-agent`), and its plist is `<label>.plist` in
+//! `/Library/LaunchDaemons`, where the macOS package installs the agent's.
 //!
 //! | port call        | `launchctl`                                                         |
 //! |------------------|---------------------------------------------------------------------|

@@ -366,3 +366,46 @@ fn an_apt_read_with_no_aws_program_fails_naming_it_and_writes_nothing() {
     assert!(text(&out.stderr).contains(&aws.display().to_string()));
     assert!(!Path::new(&out_dir).join("etags.txt").exists());
 }
+
+/// `channels pkg upload` through the built program: a directory without the package fails with
+/// status 1 before any `aws` call and names the file it could not read; a version that is not
+/// MAJOR.MINOR.PATCH is a usage error, status 2, that names the version. Neither writes the work
+/// directory. Catches a `pkg` verb the program does not route to the upload, and a usage error
+/// reported as a failure.
+#[test]
+fn pkg_upload_fails_on_a_missing_package_and_refuses_a_bad_version_as_usage() {
+    let dir = scratch("pkg-upload");
+    let release = dir.join("release");
+    let work = dir.join("work");
+    let upload = |version: &str| {
+        Command::new(XTASK)
+            .args(["channels", "pkg", "upload", "--dir"])
+            .arg(&release)
+            .args(["--version", version, "--bucket", "apt-bucket", "--work"])
+            .arg(&work)
+            .arg("--aws")
+            .arg(dir.join("no-aws"))
+            .output()
+            .expect("run xtask")
+    };
+
+    let out = upload("1.2.3");
+    assert_eq!(code(&out), Some(1), "{out:?}");
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "xtask: read {}: No such file or directory (os error 2)\n",
+            release.join("js-agent-1.2.3-macos-arm64.pkg").display()
+        )
+    );
+
+    let out = upload("1.2");
+    assert_eq!(code(&out), Some(2), "{out:?}");
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(
+        text(&out.stderr),
+        "xtask: --version \"1.2\" is not <major>.<minor>.<patch>\n"
+    );
+    assert!(!work.exists());
+}

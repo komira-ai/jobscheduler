@@ -11,6 +11,9 @@
 //!   `release.yml` runs where an action would otherwise do it.
 //! - `channels apt read|index|promote|sign|write ...` ([`apt`]): the Debian packages into the apt
 //!   repository the organisation's products share, in the jobs of `release.yml`.
+//! - `channels pkg upload --dir <dir> --version <X.Y.Z> --bucket <b> --work <dir>` ([`pkg`]): the
+//!   signed macOS installer package and its `SHA256SUMS` into `pkg/jobscheduler/<X.Y.Z>/` of the
+//!   same bucket, each once.
 //! - `channels check-apt --arch <arch> --version <X.Y.Z> ...` ([`check`]): the release installed
 //!   from the `testing` suite in a clean Ubuntu system, as a host does.
 //!
@@ -25,6 +28,7 @@ pub mod assume;
 pub mod aws;
 pub mod check;
 pub mod gate;
+pub mod pkg;
 pub mod sums;
 
 use std::io::Write;
@@ -192,6 +196,12 @@ pub enum Verb {
         #[command(subcommand)]
         verb: apt::Verb,
     },
+    /// The signed macOS installer package: put into the repository's `pkg` directory.
+    Pkg {
+        /// Which step.
+        #[command(subcommand)]
+        verb: pkg::Verb,
+    },
 }
 
 /// Runs a verb: the lines to print.
@@ -248,6 +258,7 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
             },
         ),
         Verb::Apt { verb } => apt::run(verb),
+        Verb::Pkg { verb } => pkg::run(verb),
     }
 }
 

@@ -297,7 +297,7 @@ fn print_of(label: &str, service: &Service) -> String {
     };
     format!(
         "system/{label} = {{\n\tactive count = 1\n\tpath = {path}\n\ttype = LaunchDaemon\n\
-         \tstate = {state}\n\n\tprogram = /usr/local/js-agent/link/current/js-agent\n\
+         \tstate = {state}\n\n\tprogram = /Library/Application Support/js-agent/bin/js-agent\n\
          \truns = {runs}\n\tlast exit code = {exit}\n{signal}\
          \tendpoints = {{\n\t\t\"com.komira.x\" = {{\n\t\t\tport = 0x1\n\t\t\tstate = active\n\
          \t\t}}\n\t}}\n\n\tevent triggers = {{\n\t\tcom.komira.y => {{\n\t\t\tstate = waiting\n\

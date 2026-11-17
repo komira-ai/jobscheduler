@@ -19,7 +19,7 @@ use js_testkit::dir::TestDir;
 use super::unit_conformance::{Exit, Launchctl, Service, Then, plist_of};
 use crate::support::FakeCommands;
 
-const LABEL: &str = "com.komira.js-agent";
+const LABEL: &str = "js-agent";
 
 fn print_line(label: &str) -> String {
     format!("{LAUNCHCTL} print system/{label}")
@@ -35,7 +35,7 @@ fn world() -> Launchctl {
 fn show_prints_the_service_of_the_system_domain_and_reads_its_state() {
     let tool = FakeCommands::default().with(
         &print_line(LABEL),
-        Ok("system/com.komira.js-agent = {\n\tstate = running\n}\n"),
+        Ok("system/js-agent = {\n\tstate = running\n}\n"),
     );
     let state = LaunchUnits::new(&tool).show(LABEL).unwrap();
     assert_eq!(
@@ -600,9 +600,7 @@ fn bootout_is_run_by_the_stop_runner_and_nothing_else_is() {
 
 #[test]
 fn the_stop_runner_waits_longer_than_the_exit_timeout_of_the_agent_daemon() {
-    let exit = Duration::from_secs(u64::from(
-        Daemon::agent("https://x", "pool").exit_timeout_secs,
-    ));
+    let exit = Duration::from_secs(u64::from(Daemon::agent().exit_timeout_secs));
     assert!(BOOTOUT_MARGIN > Duration::ZERO);
     assert!(StopRunner::new(exit).limit() >= exit + BOOTOUT_MARGIN);
 }

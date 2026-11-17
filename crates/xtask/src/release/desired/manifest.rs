@@ -91,15 +91,61 @@ pub const PARAMS: [(&str, Param); 17] = [
     ("verify_deadline_secs", Param::Integer(VERIFY_DEADLINE_SECS)),
 ];
 
+/// The package identifier of the Mac installer package (`crates/xtask/src/macpkg.rs`).
+pub const MAC_PACKAGE: &str = "com.komira.js-agent";
+
+/// The platform of the Mac entry.
+pub const MAC_PLATFORM: &str = "macos-arm64";
+
+/// The installer of the Mac entry.
+pub const MAC_INSTALLER: &str = "macos-pkg";
+
+/// The program of the Mac hook, an absolute path the package installs, and its arguments.
+pub const MAC_HOOK_COMMAND: [&str; 2] = [
+    "/Library/Application Support/js-agent/bin/js-agent",
+    "update-hook",
+];
+
+/// The launchd labels hostkeeper runs on a Mac: the agent and its root helper.
+pub const MAC_RUN: [&str; 2] = ["js-agent", "js-agent.session"];
+
+/// The Mac hook's `params`: the keys of [`PARAMS`] and `helper_unit`, with the Mac's paths and
+/// the `native` runtime; the bounds are the Linux ones.
+pub const MAC_PARAMS: [(&str, Param); 18] = [
+    ("unit", Param::Text("js-agent")),
+    ("helper_unit", Param::Text("js-agent.session")),
+    (
+        "state_dir",
+        Param::Text("/Library/Application Support/js-agent/update"),
+    ),
+    (
+        "release_link",
+        Param::Text("/var/lib/hostkeeper/packages/js-agent/current"),
+    ),
+    ("flags_file", Param::Text("/etc/js-agent/flags")),
+    ("token_file", Param::Text("/etc/js-agent/token")),
+    ("state_root", Param::Text("/var/db/js-agent/state")),
+    ("runtime", Param::Text("native")),
+    ("cordon_lease_secs", Param::Integer(300)),
+    ("cordon_max_secs", Param::Integer(17355)),
+    ("drain_wait_secs", Param::Integer(3600)),
+    ("defer_retry_secs", Param::Integer(300)),
+    ("prepare_timeout_secs", Param::Integer(PREPARE_SECS)),
+    ("cutover_timeout_secs", Param::Integer(CUTOVER_SECS)),
+    ("verify_timeout_secs", Param::Integer(VERIFY_SECS)),
+    ("rollback_timeout_secs", Param::Integer(ROLLBACK_SECS)),
+    ("cleanup_timeout_secs", Param::Integer(CLEANUP_SECS)),
+    ("verify_deadline_secs", Param::Integer(VERIFY_DEADLINE_SECS)),
+];
+
 /// A whole number as proto3 JSON writes a 64-bit one: a string.
 fn int64(n: u64) -> Value {
     Value::String(n.to_string())
 }
 
-/// The `params` table of the manifest.
-#[must_use]
-pub fn params() -> Value {
-    let table: Map<String, Value> = PARAMS
+/// A `params` table from its entries.
+fn table(entries: &[(&str, Param)]) -> Value {
+    let table: Map<String, Value> = entries
         .iter()
         .map(|(key, param)| {
             let value = match param {
@@ -112,13 +158,31 @@ pub fn params() -> Value {
     Value::Object(table)
 }
 
+/// The `params` table of the manifest.
+#[must_use]
+pub fn params() -> Value {
+    table(&PARAMS)
+}
+
+/// The hook manifest of the Mac package.
+#[must_use]
+pub fn mac_manifest() -> Value {
+    manifest_of(MAC_PACKAGE, &MAC_HOOK_COMMAND, &MAC_RUN, table(&MAC_PARAMS))
+}
+
 /// The hook manifest of js-agent.
 #[must_use]
 pub fn manifest() -> Value {
+    manifest_of("js-agent", &HOOK_COMMAND, &[RUN_UNIT], params())
+}
+
+/// A hook manifest of js-agent: its package, the hook's command, the units to run and the
+/// `params`. Everything else is the same on every platform.
+fn manifest_of(package: &str, command: &[&str], run: &[&str], params: Value) -> Value {
     json!({
-        "package": "js-agent",
+        "package": package,
         "hook": {
-            "command": HOOK_COMMAND,
+            "command": command,
             "timeoutSecs": {
                 "prepare": int64(PREPARE_SECS),
                 "cutover": int64(CUTOVER_SECS),
@@ -129,8 +193,8 @@ pub fn manifest() -> Value {
             "verifyDeadlineSecs": int64(VERIFY_DEADLINE_SECS),
             "cleanupRetries": CLEANUP_RETRIES,
         },
-        "run": [RUN_UNIT],
-        "params": params(),
+        "run": run,
+        "params": params,
         "minHostkeeper": MIN_HOSTKEEPER,
         "installerBounds": INSTALLER_BOUNDS
             .iter()
@@ -165,4 +229,26 @@ pub fn targets(version: &str, digests: &[(Platform, String)]) -> Value {
         })
         .collect();
     Value::Object(by_platform)
+}
+
+/// The entry of the installer `macos-pkg` for the signed package of `version` whose SHA-256 is
+/// `digest` and whose size is `bytes` (a 64-bit integer, so a JSON string).
+#[must_use]
+pub fn mac_entry(version: &str, digest: &str, bytes: u64) -> Value {
+    json!({
+        "installer": MAC_INSTALLER,
+        "repository": REPOSITORY,
+        "packageVersion": version,
+        "digest": digest,
+        "bytes": int64(bytes),
+        "manifest": mac_manifest(),
+    })
+}
+
+/// `targets` (an object keyed by platform) with the `macos-arm64` platform added, holding the
+/// one entry `entry`.
+#[must_use]
+pub fn with_mac(mut targets: Value, entry: Value) -> Value {
+    targets[MAC_PLATFORM] = json!({ "entries": [entry] });
+    targets
 }
