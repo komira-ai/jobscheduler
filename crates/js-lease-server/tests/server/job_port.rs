@@ -236,10 +236,11 @@ async fn the_listener_stops_with_the_server() {
 }
 
 /// Asserts that a job holds its host until its agent reports it ended: with one host of
-/// 8 cores registered, a job of 6 cores is queued (201) and, after a tick, the agent's
-/// next heartbeat reply carries its one `job_start`; the agent lists it running and the
-/// job reads `JOB_STATE_RUNNING`; a second job of 6 cores is queued and, while the first
-/// runs, a heartbeat carries no command and the second still reads `JOB_STATE_QUEUED`;
+/// 8 cores registered, a job of 6 cores is answered `JOB_STATE_PLACED` by its own submit
+/// (201, no tick) and the agent's next heartbeat reply carries its one `job_start`; the agent
+/// lists it running and the job reads `JOB_STATE_RUNNING`; a second job of 6 cores has no
+/// room and is queued (201) and, while the first runs, a heartbeat carries no command and
+/// the second still reads `JOB_STATE_QUEUED`;
 /// once the agent reports the first exited the result is accepted, and after a heartbeat
 /// that no longer lists it and a tick the next heartbeat reply carries the second job's start, while the first reads
 /// `JOB_STATE_SUCCEEDED`. A job that wants a GPU is refused 422 `no-capable-host`, and a whole-host job cancelled
@@ -261,8 +262,7 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
 
     let first = submit_body(&h, &wide("held-1").json()).await;
     assert_eq!(first.status, 201, "{}", first.body);
-    assert_eq!(first.json()["job"]["state"], "JOB_STATE_QUEUED");
-    h.ticks.step().await;
+    assert_eq!(first.json()["job"]["state"], "JOB_STATE_PLACED");
     let (started, allocation) = one_start(&beat_with(&h, &agent, &[]).await);
     assert_eq!(started, "held-1");
     let held = beat_with(&h, &agent, &[running("held-1")]).await;

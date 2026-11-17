@@ -328,6 +328,26 @@ os = "linux"
 arch = "x86_64"
 "#;
 
+/// [`POOL_RUNS_TOML`] with the shortest heartbeat interval a pool takes, 250 ms (and a grace of a
+/// minute): a server holds the reply of a quiet heartbeat for up to that long, so the tests that
+/// beat many times against a real server hold each quiet reply for 250 ms and not for 5 s.
+#[cfg(target_os = "linux")]
+pub const POOL_RUNS_QUICK_TOML: &str = r#"
+heartbeat_interval = "250ms"
+grace = "1m"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+"#;
+
 /// Opens the waits of an agent one at a time.
 struct Gate {
     slept: Sender<Duration>,
@@ -744,3 +764,30 @@ impl Transport for Recording {
         self.inner.adopt_credential(secret)
     }
 }
+
+/// The heartbeat interval of the quick pools ([`POOL_RUNS_QUICK_TOML`], [`POOL_QUOTA_TOML`]):
+/// the server holds the reply of a quiet heartbeat for up to the interval, and the default
+/// 5 s would hold each quiet beat of a test that long.
+#[cfg(target_os = "linux")]
+pub const QUICK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The pool of an agent that bounds its runs' disk: it names the quota capability, so a host
+/// joins it only by reporting one, and books 4 GiB for each host.
+#[cfg(target_os = "linux")]
+pub const POOL_QUOTA_TOML: &str = r#"
+heartbeat_interval = "250ms"
+grace = "1m"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+disk_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+scratch-quota = "project"
+"#;

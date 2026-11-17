@@ -3,6 +3,13 @@
 //! waits are opened one at a time by the test, so each test reads as the order of events
 //! it asserts: nothing here waits for a time to pass.
 //!
+//! The rigs use a pool with the shortest heartbeat interval (250 ms, [`POOL_RUNS_QUICK_TOML`]):
+//! the server holds the reply of a heartbeat that has nothing to send for up to that long, to
+//! an agent that reports `held-beat`, and says `beat_now`, after which the agent beats at once
+//! ([`HELD`]); so does a reply with acknowledgements and no command; a reply with a command is
+//! followed by the interval ([`INTERVAL`]). With
+//! the default 5 s each quiet beat would hold the test for 5 s of real time.
+//!
 //! The jobs here are submitted through the v1 job API (`POST /v1/jobs` on `--job-listen`) and
 //! placed by `js-sched` on the agent's host. The drain that lets a running job finish is also
 //! asserted with the server's own binary and the crun runtime, in js-lease-server's
@@ -18,8 +25,16 @@ use serde_json::{Value, json};
 
 use super::fake::FakeMachine;
 use super::{private, user};
-use crate::server::{Agent, Counting, POOL_RUNS_TOML, Recorder, Redirect, Server};
+use crate::server::{Agent, Counting, POOL_RUNS_QUICK_TOML, Recorder, Redirect, Server};
 use crate::support::{Ran, Scratch, code, linux_host};
+
+/// The heartbeat interval of the pool the rigs use ([`POOL_RUNS_QUICK_TOML`]).
+const INTERVAL: Duration = Duration::from_millis(250);
+
+/// The wait after a reply that says `beat_now`: the agent beats again at once. The server says
+/// it for a reply it held (nothing to send) and for one that carries acknowledgements and no
+/// command. A reply with a command (a start, a stop) is followed by [`INTERVAL`].
+const HELD: Duration = Duration::ZERO;
 
 /// The state of a job that is running, as the job service names it.
 const RUNNING: &str = "JOB_STATE_RUNNING";
@@ -37,7 +52,7 @@ struct Rig {
 /// Starts the server and the agent (`extra` flags beside the container ones), waits until
 /// the agent has said hello.
 fn rig(name: &str, extra: &[&str]) -> Rig {
-    let server = Server::start_pool(name, &[], POOL_RUNS_TOML);
+    let server = Server::start_pool(name, &[], POOL_RUNS_QUICK_TOML);
     let address = Arc::new(Mutex::new(server.url()));
     rig_over(server, address, name, extra, Redirect)
 }
@@ -81,7 +96,7 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
         machine.clone(),
     );
     let worker = agent.worker();
-    assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
+    assert_eq!(agent.next_wait(), INTERVAL, "the hello");
     Rig {
         server,
         agent,
@@ -93,10 +108,13 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
 }
 
 impl Rig {
-    /// One heartbeat of the agent, and the worker done with the reply to it.
-    fn beat(&self) {
+    /// One heartbeat of the agent, and the worker done with the reply to it. `wait` is what the
+    /// agent asks for after the reply: [`HELD`] when the server held the reply open for the
+    /// beat, [`INTERVAL`] when the reply carried something.
+    #[track_caller]
+    fn beat(&self, wait: Duration) {
         self.agent.elapse();
-        assert_eq!(self.agent.next_wait(), Duration::from_secs(5));
+        assert_eq!(self.agent.next_wait(), wait);
         assert!(self.worker.settle());
     }
 
@@ -120,11 +138,14 @@ impl Rig {
         (state, reason)
     }
 
-    /// Beats until the server lists `job` as running.
+    /// Beats until the server lists `job` as running: the beat that brings its start (a
+    /// command, so the interval follows), the one that lists it created and the one after,
+    /// both held.
+    #[track_caller]
     fn until_running(&self, job: &str) {
-        self.beat();
-        self.beat();
-        self.beat();
+        self.beat(INTERVAL);
+        self.beat(HELD);
+        self.beat(HELD);
         assert_eq!(self.view(job).0, RUNNING);
     }
 
@@ -143,33 +164,33 @@ impl Rig {
 }
 
 /// Asserts a job from the submitter's side to the agent's and back: the job is submitted
-/// (201) and reads queued; the next heartbeat's reply carries its start and the agent creates
-/// the container; the heartbeat after lists it and the job reads running; with the whole
-/// budget booked a second job stays queued; when the container exits the next heartbeat
-/// carries the result, which the server records (succeeded, reason exit) and acknowledges,
-/// and the agent drops it; the heartbeat after lists nothing, and the queued job is placed on
-/// the budget that came back. It catches a start that never reaches the container runtime, a
-/// result that never reaches the server or is never acknowledged, and a budget that never
-/// returns.
+/// (201) and, with the host idle, reads placed at once (the submit call places it); the next
+/// heartbeat's reply carries its start (so it is not held: the agent waits the interval) and
+/// the agent creates the container; the heartbeat after lists it, is held (the agent beats
+/// again at once) and the job reads running; with the whole budget booked a second job stays
+/// queued; when the container exits the next heartbeat carries the result, which the server
+/// records (succeeded, reason exit) and acknowledges, and the agent drops it; the second job
+/// is then placed on the budget that came back and reads running. It catches a submit that
+/// leaves a job on an idle host queued, a start that never reaches the container runtime, a
+/// result that never reaches the server or is never acknowledged, a budget that never
+/// returns, and a reply with a start that is held, or one with nothing that is not.
 #[test]
 fn a_job_goes_through_the_agent_and_its_result_comes_back() {
     let rig = rig("jobs_e2e_flow", &["--drain-wait", "0"]);
     let job = rig.queued(4000);
-    assert_eq!(rig.view(&job).0, "JOB_STATE_QUEUED");
-
-    rig.beat();
     assert_eq!(rig.view(&job).0, "JOB_STATE_PLACED");
-    rig.beat();
+
+    rig.beat(INTERVAL);
     assert_eq!(rig.machine.world.created(), [job.as_str()]);
-    rig.beat();
+    rig.beat(HELD);
     assert_eq!(rig.view(&job).0, RUNNING);
     let second = rig.queued(1000);
-    rig.beat();
+    rig.beat(HELD);
     assert_eq!(rig.server.job_state(&second), "JOB_STATE_QUEUED");
 
     rig.machine.world.exit(&job, 0);
     assert!(rig.worker.settle());
-    rig.beat();
+    rig.beat(HELD);
     assert_eq!(
         rig.view(&job),
         (
@@ -201,8 +222,8 @@ fn a_cancel_is_delivered_and_the_job_is_stopped() {
     let asked = rig.server.cancel(&job);
     assert_eq!(asked.status, 200, "{}", asked.body);
     assert_eq!(asked.body["job"]["cancelRequested"], true, "{}", asked.body);
-    rig.beat();
-    rig.beat();
+    rig.beat(INTERVAL);
+    rig.beat(HELD);
     assert_eq!(rig.view(&job).0, "JOB_STATE_CANCELLED");
     let log = rig.machine.world.log();
     let order: Vec<&String> = log.iter().filter(|call| call.ends_with(&job)).collect();
@@ -218,7 +239,7 @@ fn a_cancel_is_delivered_and_the_job_is_stopped() {
 /// worker and the session, and a load the real server would refuse.
 #[test]
 fn the_agent_sends_its_load_to_a_real_server() {
-    let server = Server::start_pool("jobs_e2e_load", &[], POOL_RUNS_TOML);
+    let server = Server::start_pool("jobs_e2e_load", &[], POOL_RUNS_QUICK_TOML);
     let address = Arc::new(Mutex::new(server.url()));
     let posts = Recorder::default();
     let posted = posts.0.clone();
@@ -239,7 +260,7 @@ fn the_agent_sends_its_load_to_a_real_server() {
     );
     rig.machine.clock.advance(5_000);
     rig.until_running(&run);
-    rig.beat();
+    rig.beat(HELD);
 
     let loads: Vec<Value> = posted
         .lock()
@@ -284,7 +305,7 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
         "the heartbeat is refused"
     );
     agent.elapse();
-    assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
+    assert_eq!(agent.next_wait(), INTERVAL, "the hello");
     assert!(worker.settle());
     assert_eq!(server.host("h1")["state"], "live");
 
@@ -333,7 +354,7 @@ fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
         "the heartbeat is refused"
     );
     agent.elapse();
-    assert_eq!(agent.next_wait(), Duration::from_secs(5), "the hello");
+    assert_eq!(agent.next_wait(), INTERVAL, "the hello");
     assert!(worker.settle());
 
     agent.elapse();
@@ -371,7 +392,7 @@ fn a_taint_is_reported_acknowledged_and_new_jobs_are_not_placed() {
     rig.machine.world.exit(&run, 0);
     assert!(rig.worker.settle());
     assert!(rig.worker.snapshot().taint.is_some());
-    rig.beat();
+    rig.beat(HELD);
 
     let host = rig.server.host("h1");
     assert_eq!(host["taint"]["reason"], "cleanup-failed");
@@ -398,7 +419,7 @@ fn a_taint_is_reported_acknowledged_and_new_jobs_are_not_placed() {
 /// would give the host up.
 #[test]
 fn the_heartbeats_go_on_while_the_runtime_is_slow() {
-    let server = Server::start_pool("jobs_e2e_slow", &[], POOL_RUNS_TOML);
+    let server = Server::start_pool("jobs_e2e_slow", &[], POOL_RUNS_QUICK_TOML);
     let address = Arc::new(Mutex::new(server.url()));
     let beats = Counting::default();
     let counted = beats.0.clone();
@@ -417,7 +438,7 @@ fn the_heartbeats_go_on_while_the_runtime_is_slow() {
     let before = counted.load(Ordering::SeqCst);
     for _ in 0..20 {
         rig.agent.elapse();
-        assert_eq!(rig.agent.next_wait(), Duration::from_secs(5));
+        assert_eq!(rig.agent.next_wait(), INTERVAL);
     }
     assert_eq!(counted.load(Ordering::SeqCst) - before, 20);
     assert!(
@@ -428,7 +449,7 @@ fn the_heartbeats_go_on_while_the_runtime_is_slow() {
     rig.machine.world.release();
     assert!(rig.worker.settle());
     assert_eq!(rig.machine.world.created(), [run.as_str()]);
-    rig.beat();
+    rig.beat(HELD);
     assert_eq!(rig.view(&run).0, RUNNING);
     let ran = rig.drain_now();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
@@ -449,7 +470,7 @@ fn sigterm_lets_the_job_finish_and_reports_it_before_the_agent_leaves() {
     rig.agent.signal();
     assert_eq!(
         rig.agent.next_wait(),
-        Duration::from_secs(5),
+        INTERVAL,
         "the first draining heartbeat"
     );
     let host = rig.server.host("h1");
@@ -465,11 +486,7 @@ fn sigterm_lets_the_job_finish_and_reports_it_before_the_agent_leaves() {
     rig.machine.world.exit(&run, 0);
     assert!(rig.worker.settle());
     rig.agent.elapse();
-    assert_eq!(
-        rig.agent.next_wait(),
-        Duration::from_secs(5),
-        "the result goes up"
-    );
+    assert_eq!(rig.agent.next_wait(), INTERVAL, "the result goes up");
     assert_eq!(
         rig.view(&run),
         (
@@ -504,14 +521,10 @@ fn sigterm_with_no_wait_stops_the_job_and_reports_it_killed() {
     rig.until_running(&run);
 
     rig.agent.signal();
-    assert_eq!(rig.agent.next_wait(), Duration::from_secs(5));
+    assert_eq!(rig.agent.next_wait(), INTERVAL);
     assert!(rig.worker.settle());
     rig.agent.elapse();
-    assert_eq!(
-        rig.agent.next_wait(),
-        Duration::from_secs(5),
-        "the killed result goes up"
-    );
+    assert_eq!(rig.agent.next_wait(), INTERVAL, "the killed result goes up");
     assert_eq!(rig.view(&run).0, "JOB_STATE_FAILED");
     assert!(rig.worker.settle());
     rig.agent.elapse();
@@ -534,8 +547,8 @@ fn a_cordoned_host_is_placed_no_job_until_it_is_uncordoned() {
     let cordoned = rig.server.job_post("/v1/hosts/h1:cordon", &json!({}));
     assert_eq!(cordoned.status, 200, "{}", cordoned.body);
     let job = rig.queued(1000);
-    rig.beat();
-    rig.beat();
+    rig.beat(HELD);
+    rig.beat(HELD);
     assert_eq!(rig.server.job_state(&job), "JOB_STATE_QUEUED");
     assert!(rig.machine.world.created().is_empty());
 

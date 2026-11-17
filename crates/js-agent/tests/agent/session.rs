@@ -94,6 +94,28 @@ fn the_session_secret_is_sent_in_every_heartbeat_and_nowhere_else() {
     assert!(!notes.join("\n").contains(SECRET));
 }
 
+/// Asserts that after a reply that says `beat_now` (the server held it open) the next
+/// heartbeat goes at once, a wait of zero with nothing noted, and that a reply without it
+/// waits the interval again. It catches an agent that leaves no heartbeat waiting at a server
+/// that holds them, so a start waits the interval again, and one that beats at once after
+/// every reply, which would hammer a server that never holds.
+#[test]
+fn a_held_reply_asks_for_the_next_heartbeat_at_once() {
+    let held = reply(200, json!({ "beat_now": true }));
+    let (mut transport, sent) = script(vec![welcome(7), held, beat_ok()]);
+    let mut session = Session::new(hello("h1"), &mut transport, lowest());
+    let steps = ticks(&mut session, 3);
+    assert_eq!((wait(&steps[1]), note(&steps[1])), (Duration::ZERO, None));
+    assert_eq!(
+        (wait(&steps[2]), note(&steps[2])),
+        (Duration::from_secs(5), None)
+    );
+    assert_eq!(
+        paths(&sent),
+        [HELLO_PATH, HEARTBEAT_PATH, HEARTBEAT_PATH].map(String::from)
+    );
+}
+
 /// Asserts that a hello the wire refuses never leaves the agent: every tick reports it as
 /// an unusable message and nothing is sent. It catches a send path that skips `validate`.
 #[test]

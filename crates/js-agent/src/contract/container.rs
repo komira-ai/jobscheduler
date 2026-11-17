@@ -6,8 +6,8 @@
 use std::path::Path;
 
 use js_agent_wire::{
-    HOST_JOBS_CAPABILITY, Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling, PER_JOB_CAPABILITY,
-    START_FENCE_CAPABILITY,
+    HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY, Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling,
+    PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
 };
 use js_caps::{
     EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, LAYERED_ROOTFS, RUNTIME, SCRATCH_DEFAULT_GIB,
@@ -46,9 +46,9 @@ impl ToolkitHook {
     }
 }
 
-/// Says that the agent takes the job-keyed start and stop, and that it fences them (it
-/// refuses a start whose fence it retired and stops its jobs after a silence): every agent
-/// that runs containers does. A native agent says neither: a job start carries an image,
+/// Says that the agent takes the job-keyed start and stop, that it fences them (it refuses a
+/// start whose fence it retired and stops its jobs after a silence), and that it beats again at
+/// once after a held reply (`held-beat`): every agent that runs containers does. A native agent says neither: a job start carries an image,
 /// which its runtime cannot run.
 fn report_per_job(hello: &mut Hello) {
     hello
@@ -57,6 +57,9 @@ fn report_per_job(hello: &mut Hello) {
     hello
         .capabilities
         .insert(START_FENCE_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    hello
+        .capabilities
+        .insert(HELD_BEAT_CAPABILITY.to_owned(), FLAG_SET.to_owned());
 }
 
 /// Puts `layered-rootfs` into `hello` when the crun runtime gives jobs layers and mounts
@@ -220,12 +223,11 @@ mod tests {
         hello
     }
 
-    /// Asserts that `start-fence` is reported as `true`, beside `per-job`, by the hello of an
-    /// agent that runs containers (its lifecycle judges a job start by its fence and stops its
-    /// jobs after a silence), that the hello still validates, and that a native agent's hello
-    /// carries neither. It catches a server told of a fence an agent does not enforce (a
-    /// native agent, which takes no job start), and one never told that a container agent
-    /// enforces it.
+    /// Asserts that `start-fence` and `held-beat` are reported as `true`, beside `per-job`, by
+    /// the hello of an agent that runs containers (its lifecycle judges a job start by its fence
+    /// and stops its jobs after a silence; its session beats again at once after a held reply),
+    /// and that the hello still validates. It catches a server never told that a container
+    /// agent enforces fences, and one never told it may hold the agent's heartbeat.
     #[test]
     fn the_hello_reports_start_fence_only_when_enforced() {
         let contained = reported(&Config::none());
@@ -236,6 +238,10 @@ mod tests {
         );
         assert_eq!(
             flag(&contained, PER_JOB_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
+        assert_eq!(
+            flag(&contained, HELD_BEAT_CAPABILITY).as_deref(),
             Some(FLAG_SET)
         );
         assert_eq!(contained.validate(), Ok(()));

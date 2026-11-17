@@ -1,6 +1,11 @@
 //! The bearer token in front of every route but health.
 
-use crate::jobs_support::{cancel, job_agent, job_of, job_server, per_job_hello, submit};
+use serde_json::json;
+
+use crate::agents_support::{JOIN, post};
+use crate::jobs_support::{
+    beat_with, cancel, commands, job_agent, job_of, job_server, per_job_hello, submit,
+};
 use crate::support::{Harness, TOKEN, exchange_authorized, request};
 
 /// Asserts that a request with no token, a wrong token, a token of another length, a
@@ -72,20 +77,44 @@ async fn the_scheme_is_case_insensitive() {
 /// Asserts that the server is single-tenant, as its docs say: a job submitted by one
 /// client is read and cancelled by another client that holds the same token (each request
 /// here is its own connection), because the job has no owner the server checks. A
-/// per-tenant token would fail this test, which is the point of pinning it.
+/// per-tenant token would fail this test, which is the point of pinning it. The job is
+/// placed by its submit (the host has room), so the read says `JOB_STATE_PLACED`; the other
+/// client's cancel is the intent a placed job takes (`cancelRequested`), the host is told to
+/// stop it and, once the host says it never held it, the job reads `JOB_STATE_CANCELLED`.
 #[tokio::test]
 async fn one_token_is_one_trust_domain() {
     let h = job_server("single_tenant").await;
-    job_agent(&h, &per_job_hello("host-1")).await;
+    let agent = job_agent(&h, &per_job_hello("host-1")).await;
     let made = submit(&h, "job-1").await;
     assert_eq!(made.status, 201, "{}", made.body);
     assert_eq!(made.json()["job"]["id"], "job-1");
 
     let read = job_of(&h, "job-1").await;
     assert_eq!(read.status, 200, "{}", read.body);
-    assert_eq!(read.json()["job"]["state"], "JOB_STATE_QUEUED");
+    assert_eq!(read.json()["job"]["state"], "JOB_STATE_PLACED");
     let cancelled = cancel(&h, "job-1").await;
     assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+    // The job is placed, so the cancel is an intent the host acts on: its next heartbeat is
+    // told to stop the job, and once the host answers that it never held it, the job reads
+    // cancelled.
+    let intent = job_of(&h, "job-1").await;
+    assert_eq!(intent.json()["job"]["state"], "JOB_STATE_PLACED");
+    assert_eq!(intent.json()["job"]["cancelRequested"], true);
+    let told = beat_with(&h, &agent, &[]).await;
+    assert_eq!(
+        commands(&told),
+        (vec![], vec!["job-1".to_owned()]),
+        "{told}"
+    );
+    let mut retired = agent.beat();
+    retired["retired_jobs"] = json!(["job-1"]);
+    let acked = post(&h, "/v1/agent/heartbeat", Some(JOIN), &retired).await;
+    assert_eq!(
+        acked.json()["retired_acks"],
+        json!(["job-1"]),
+        "{}",
+        acked.body
+    );
     let after = job_of(&h, "job-1").await;
     assert_eq!(after.json()["job"]["state"], "JOB_STATE_CANCELLED");
 }

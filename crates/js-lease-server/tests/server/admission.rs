@@ -241,10 +241,11 @@ fn refused(reply: &Reply) {
     assert_eq!(reply.json(), json!({ "error": "no-capable-host" }));
 }
 
-/// Asserts that `reply` queued a job.
-fn admitted(reply: &Reply) {
+/// Asserts that `reply` admitted a job (201) and answered it in `state`: `JOB_STATE_PLACED`
+/// when a registered host had room for it, `JOB_STATE_QUEUED` when none had.
+fn admitted(reply: &Reply, state: &str) {
     assert_eq!(reply.status, 201, "{}", reply.body);
-    assert_eq!(reply.json()["job"]["state"], "JOB_STATE_QUEUED");
+    assert_eq!(reply.json()["job"]["state"], state);
 }
 
 /// The jobs `GET /v1/jobs` lists on the job port of `h`, by id.
@@ -269,7 +270,10 @@ fn jobs_without_static(scratch: &Scratch) -> Vec<std::ffi::OsString> {
 /// Asserts, through the job service, that a pool whose only machine provider is `static`
 /// (hosts that register themselves) refuses `no-capable-host` with no host registered, and
 /// with a registered host too small for the job, each time recording nothing; and that a
-/// capable host admits the job. Catches a static provider counted as one that may offer.
+/// capable host admits the job: the first job is answered `JOB_STATE_PLACED` (the host has
+/// the room, and the submit places it) and a second, for which the host's one GPU is taken,
+/// `JOB_STATE_QUEUED`. Catches a static provider counted as one that may offer, and a
+/// submit that answers queued over a host with room or placed over one with none.
 #[tokio::test]
 async fn a_static_only_pool_without_a_capable_host_refuses() {
     let scratch = Scratch::new("admission_static_only");
@@ -282,14 +286,17 @@ async fn a_static_only_pool_without_a_capable_host_refuses() {
     refused(&submit_body(&h, &too_big).await);
     assert_eq!(job_of(&h, "two-gpus").await.status, 404);
     assert_eq!(listed(&h).await, Vec::<String>::new());
-    admitted(&submit_body(&h, &one_gpu("fits")).await);
-    admitted(&submit_body(&h, &one_gpu("fits-too")).await);
+    admitted(&submit_body(&h, &one_gpu("fits")).await, "JOB_STATE_PLACED");
+    admitted(
+        &submit_body(&h, &one_gpu("fits-too")).await,
+        "JOB_STATE_QUEUED",
+    );
     assert_eq!(listed(&h).await, ["fits", "fits-too"]);
 }
 
 /// Asserts that a refusal at admission records nothing: after a job nothing could ever
 /// serve is refused, the job reads 404 and the list of jobs is empty, and the next job that
-/// a host can serve is queued.
+/// a host can serve is admitted and answered `JOB_STATE_PLACED` on the host with room.
 #[tokio::test]
 async fn a_refusal_records_nothing() {
     let scratch = Scratch::new("admission_records_nothing");
@@ -300,7 +307,10 @@ async fn a_refusal_records_nothing() {
     refused(&submit_body(&h, &too_big).await);
     assert_eq!(job_of(&h, "sixteen").await.status, 404);
     assert_eq!(listed(&h).await, Vec::<String>::new());
-    admitted(&submit_body(&h, &one_gpu("after")).await);
+    admitted(
+        &submit_body(&h, &one_gpu("after")).await,
+        "JOB_STATE_PLACED",
+    );
     assert_eq!(listed(&h).await, ["after"]);
 }
 
@@ -360,5 +370,8 @@ async fn an_offer_outside_the_pool_limits_does_not_count() {
     let (h, cloud) = over("admission_limits_in", "gpu-host", &[], allowed).await;
     cloud.set(Ok(vec![a100(true)]));
     h.ticks.step().await;
-    admitted(&submit_body(&h, &one_gpu("limits-in")).await);
+    admitted(
+        &submit_body(&h, &one_gpu("limits-in")).await,
+        "JOB_STATE_QUEUED",
+    );
 }
