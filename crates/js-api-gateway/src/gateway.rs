@@ -24,6 +24,8 @@ pub enum Rpc {
     CordonHost,
     /// `UncordonHost`, served at `POST /v1/hosts/{host_id}:uncordon`.
     UncordonHost,
+    /// `ClearHostTaint`, served at `POST /v1/hosts/{host_id}:cleartaint`.
+    ClearHostTaint,
     /// `ListPools`, served at `GET /v1/pools`.
     ListPools,
     /// `ListProviders`, served at `GET /v1/providers`.
@@ -46,6 +48,7 @@ impl Rpc {
             Self::ListHosts => "ListHosts",
             Self::CordonHost => "CordonHost",
             Self::UncordonHost => "UncordonHost",
+            Self::ClearHostTaint => "ClearHostTaint",
             Self::ListPools => "ListPools",
             Self::ListProviders => "ListProviders",
             Self::GetUsage => "GetUsage",
@@ -136,6 +139,15 @@ pub const ROUTES: &[Route] = &[
         status: 200,
         input: "jobscheduler.v1.UncordonHostRequest",
         output: "jobscheduler.v1.UncordonHostResponse",
+    },
+    Route {
+        verb: Verb::Post,
+        template: "/v1/hosts/{host_id}:cleartaint",
+        rpc: Rpc::ClearHostTaint,
+        body: true,
+        status: 200,
+        input: "jobscheduler.v1.ClearHostTaintRequest",
+        output: "jobscheduler.v1.ClearHostTaintResponse",
     },
     Route {
         verb: Verb::Get,
@@ -230,6 +242,12 @@ async fn call<T: ::js_proto::v1::job_service_server::JobService>(
             let request = decode_as::<::js_proto::v1::UncordonHostRequest>(&input)?;
             let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
             let response = service.uncordon_host(request).await;
+            answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
+        }
+        Rpc::ClearHostTaint => {
+            let request = decode_as::<::js_proto::v1::ClearHostTaintRequest>(&input)?;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.clear_host_taint(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::ListPools => {

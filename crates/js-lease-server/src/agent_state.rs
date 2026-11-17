@@ -8,10 +8,10 @@
 //! awaiting host, bound as it was).
 //!
 //! A taint is kept so that a restart does not make a host that reported one clean: the only
-//! thing in the server that clears a taint is the host's own heartbeat reporting the taint
-//! it holds as cleared (`taint_cleared`, see the server's "Taint"), which removes the three
-//! `taint_` fields of its entry; otherwise a tainted host's binding is kept until an operator
-//! stops the server and removes them. A cordon is kept so
+//! things in the server that clear a taint are the host's own heartbeat reporting the taint
+//! it holds as cleared (`taint_cleared`, see the server's "Taint") and the operator's
+//! `ClearHostTaint` call, which each remove the three `taint_` fields of its entry; otherwise a
+//! tainted host's binding is kept. A cordon is kept so
 //! that a restart does not lift it; it is written only while it is in force, so it leaves
 //! the entry at the first save after it lapses or is lifted. An entry from before the field
 //! is read as no cordon.

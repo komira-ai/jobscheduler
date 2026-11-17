@@ -26,6 +26,9 @@ use crate::clock::SharedClock;
 use crate::config::parse_token;
 use crate::join_tokens::JoinTokens;
 
+#[path = "agent_api_store_clear_tests.rs"]
+mod clear;
+
 /// When a rig's clock starts, in milliseconds.
 const START_MS: u64 = 5_000_000;
 

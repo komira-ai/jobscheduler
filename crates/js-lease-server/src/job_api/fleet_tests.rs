@@ -192,6 +192,23 @@ async fn uncordon(api: &JobApi, host: &str) -> Result<UncordonHostResponse, Stat
     answer.map(Response::into_inner)
 }
 
+async fn clear_taint(api: &JobApi, host: &str) -> Result<ClearHostTaintResponse, Status> {
+    let request = ClearHostTaintRequest {
+        host_id: host.to_owned(),
+    };
+    let answer = clear_host_taint(api, Request::new(request)).await;
+    answer.map(Response::into_inner)
+}
+
+/// A taint of reason `residue` that the check `daemonised-child` found after the run `run-1`.
+fn residue() -> Taint {
+    Taint {
+        reason: "residue".to_owned(),
+        run_id: Some("run-1".to_owned()),
+        check: Some("daemonised-child".to_owned()),
+    }
+}
+
 fn refused<T: fmt::Debug>(answer: Result<T, Status>) -> (Code, String) {
     let status = answer.unwrap_err();
     (status.code(), status.message().to_owned())
@@ -422,6 +439,103 @@ async fn cordon_unsaved_is_unavailable_but_holds() {
     assert!(s.bindings_file().unwrap().contains("cordon_until_ms"));
 }
 
+/// Asserts the operator's clear end to end over the server's own state: a tainted host (its
+/// taint in the registry and in the bindings file) takes no queued job and `ListHosts` shows
+/// its reason; the call answers `cleared` with the reason, `ListHosts` and the host in the
+/// answer show no taint, the bindings file holds none, and the next pass places the queued job
+/// on it; a second call answers `cleared` false and, with the file removed first, writes no
+/// file. It catches a clear that forgets the taint in memory only (the file would bring it
+/// back), one that leaves placement refusing the host, and a repeat that writes or claims a
+/// clear.
+#[tokio::test]
+async fn a_cleared_taint_is_gone_from_the_listing_the_file_and_placement() {
+    let s = server("taint-clear");
+    s.register("h1");
+    let id = HostId::new("h1").unwrap();
+    assert!(s.registry.taint_host(&id, residue()));
+    let agents = s.shared.agents();
+    assert!(agents.save_bindings().await);
+    assert_eq!(find(&list(&s.api).await, "h1").taint_reason, "residue");
+    assert!(s.bindings_file().unwrap().contains("taint_reason"));
+    let job = JobId::parse("job-t").unwrap();
+    let new = NewJob {
+        id: Some(job.clone()),
+        spec: spec(),
+        priority: 0,
+        client: None,
+    };
+    s.jobs.insert_queued(new).unwrap();
+    agents.place_jobs();
+    let state = s.jobs.get_job(&job).unwrap().unwrap().state;
+    assert_eq!(state, JobState::Queued);
+
+    let cleared = clear_taint(&s.api, "h1").await.unwrap();
+    assert!(cleared.cleared);
+    assert_eq!(cleared.cleared_reason, "residue");
+    assert_eq!(cleared.host.unwrap().taint_reason, "");
+    assert_eq!(find(&list(&s.api).await, "h1").taint_reason, "");
+    assert!(!s.bindings_file().unwrap().contains("taint_reason"));
+    agents.place_jobs();
+    let state = s.jobs.get_job(&job).unwrap().unwrap().state;
+    assert_eq!(state, JobState::Placed);
+
+    std::fs::remove_file(s.dir.path().join("bindings")).unwrap();
+    let again = clear_taint(&s.api, "h1").await.unwrap();
+    assert!(!again.cleared);
+    assert_eq!(again.cleared_reason, "");
+    assert_eq!(again.host.unwrap().id, "h1");
+    assert_eq!(s.bindings_file(), None);
+}
+
+/// Asserts that a clear of a host the registry does not hold (one that never said hello, or
+/// an id no host can have) is `NOT_FOUND` `unknown-host` and writes nothing, and that a clear
+/// of a host with no taint answers `cleared` false and leaves no taint in the bindings (it
+/// saves bindings that were never saved, which is the retry of an earlier failed save). It
+/// catches an unknown host answered as cleared or written, and a clean host's clear that
+/// writes a taint.
+#[tokio::test]
+async fn clearing_an_unknown_host_is_not_found_and_a_clean_host_writes_nothing() {
+    let unknown = (Code::NotFound, UNKNOWN_HOST.to_owned());
+    let s = server("taint-clear-unknown");
+    s.register("h1");
+    for host in ["h9", "Not A Host!", ""] {
+        assert_eq!(refused(clear_taint(&s.api, host).await), unknown);
+    }
+    assert_eq!(s.bindings_file(), None);
+    let clean = clear_taint(&s.api, "h1").await.unwrap();
+    assert!(!clean.cleared);
+    assert_eq!(clean.cleared_reason, "");
+    let saved = s.bindings_file().unwrap_or_default();
+    assert!(!saved.contains("taint"), "{saved}");
+    assert_eq!(s.shared.agent_errors(), 0);
+}
+
+/// Asserts that a clear whose bindings file cannot be written is `UNAVAILABLE`
+/// `taint-unsaved` (not the cordon's code), counts the failed write, and holds on this
+/// server all the same: the listing shows no taint afterwards. A repeat once the write works
+/// answers `cleared` false and saves the file without the taint. It catches an unsaved clear
+/// acknowledged as saved, one rolled back, and a repeat that never retries the save.
+#[tokio::test]
+async fn an_unsaved_clear_is_unavailable_with_its_own_code_but_holds() {
+    let s = server("taint-unsaved");
+    s.register("h1");
+    assert!(
+        s.registry
+            .taint_host(&HostId::new("h1").unwrap(), residue())
+    );
+    let blocker = s.dir.path().join("bindings.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let unsaved = (Code::Unavailable, TAINT_UNSAVED.to_owned());
+    assert_eq!(refused(clear_taint(&s.api, "h1").await), unsaved);
+    assert_eq!(s.shared.agent_errors(), 1);
+    assert_eq!(find(&list(&s.api).await, "h1").taint_reason, "");
+    std::fs::remove_dir(&blocker).unwrap();
+    let retried = clear_taint(&s.api, "h1").await.unwrap();
+    assert!(!retried.cleared);
+    let saved = s.bindings_file().unwrap();
+    assert!(!saved.contains("taint_reason"), "{saved}");
+}
+
 /// An ended booking of `id`, ending at `end`.
 fn ended(id: &str, end: u64) -> EndedRow {
     EndedRow {
@@ -509,7 +623,8 @@ fn api_over(
 }
 
 /// The hosts of a fake: listed from these registry views, as the server lists them, and
-/// answering every cordon and uncordon with `answer`.
+/// answering every cordon, uncordon and clear of a taint with `answer` (a clear that `answer`
+/// accepts cleared a taint of reason `residue`).
 struct FakeHosts {
     views: Vec<HostView>,
     answer: Result<bool, Refused>,
@@ -536,6 +651,11 @@ impl Hosts for FakeHosts {
 
     async fn uncordon(&self, _: &HostId) -> Result<bool, Refused> {
         self.answer
+    }
+
+    async fn clear_taint(&self, _: &HostId) -> Result<Option<String>, Refused> {
+        let cleared = self.answer?;
+        Ok(cleared.then(|| "residue".to_owned()))
     }
 }
 

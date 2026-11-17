@@ -304,7 +304,7 @@ fn string_field(name: &str, number: i32) -> FieldDescriptorProto {
     }
 }
 
-/// Asserts that the methods of `JobService`, in the order of `service.proto`, are the 12
+/// Asserts that the methods of `JobService`, in the order of `service.proto`, are the 13
 /// of `golden/methods.txt`. Catches a method added, removed, renamed or moved without the
 /// golden changing with it.
 #[test]
@@ -322,7 +322,7 @@ fn method_list_matches_golden() {
         .map(MethodDescriptorProto::name)
         .collect();
     let golden: Vec<&str> = include_str!("golden/methods.txt").lines().collect();
-    assert_eq!(golden.len(), 12);
+    assert_eq!(golden.len(), 13);
     assert_eq!(methods, golden);
 }
 
