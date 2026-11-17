@@ -243,6 +243,7 @@ pub fn spec_of(s: &mut dyn Subject, run_id: &str, program: Program) -> RunSpec {
         ports: Vec::new(),
         host_ports: Vec::new(),
         log_sink: None,
+        outputs: Vec::new(),
     }
 }
 

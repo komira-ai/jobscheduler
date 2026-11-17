@@ -311,6 +311,7 @@ pub mod lifecycle;
 pub mod logs;
 #[cfg(target_os = "macos")]
 pub mod native;
+pub mod outputs;
 pub mod own_host;
 pub mod platform;
 pub mod provider;

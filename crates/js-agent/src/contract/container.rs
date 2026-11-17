@@ -1,7 +1,7 @@
 //! The host contract of an agent that runs containers (the Linux build's runtimes): `runtime`
 //! and `exec` are `container`, with `per-job`, `start-fence`, `gpu-toolkit`, `gpu-passthrough`,
-//! the scratch quota, `host-jobs`, `layered-rootfs` and `mount-provider.<name>` (see
-//! [`super`]).
+//! the scratch quota, `host-jobs`, `layered-rootfs`, `mount-provider.<name>`, and `log-upload`
+//! with `job-outputs` (see [`super`]).
 
 use std::path::Path;
 
@@ -10,8 +10,8 @@ use js_agent_wire::{
     START_FENCE_CAPABILITY,
 };
 use js_caps::{
-    EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, LAYERED_ROOTFS, RUNTIME, SCRATCH_DEFAULT_GIB,
-    SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT, mount_provider_key,
+    EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, JOB_OUTPUTS, LAYERED_ROOTFS, RUNTIME,
+    SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT, mount_provider_key,
 };
 use js_types::ExecMode;
 
@@ -113,8 +113,12 @@ pub(crate) fn report(
     ceiling.insert_into(&mut hello.capabilities);
     report_per_job(hello);
     report_run_files(hello, run_files);
-    let upload = (LOG_UPLOAD_CAPABILITY.to_owned(), FLAG_SET.to_owned());
-    hello.capabilities.extend(log_upload.then_some(upload));
+    // The runtime that uploads live logs puts a job's declared outputs with the same credential.
+    let upload =
+        [LOG_UPLOAD_CAPABILITY, JOB_OUTPUTS].map(|key| (key.to_owned(), FLAG_SET.to_owned()));
+    hello
+        .capabilities
+        .extend(upload.into_iter().filter(|_| log_upload));
     if gpu_passthrough {
         hello
             .capabilities
@@ -242,10 +246,11 @@ mod tests {
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
     }
 
-    /// Asserts that `log-upload` is in the hello of an agent whose runtime uploads live logs
-    /// (the `crun` agent reports with `log_upload` set, and a native agent always) and in no
-    /// other: not an engine agent's. It catches a server that sends a sink to an agent that
-    /// cannot upload, and one never told that a crun or a native agent can.
+    /// Asserts that `log-upload` and `job-outputs` are in the hello of an agent whose runtime
+    /// uploads live logs (the `crun` agent reports with `log_upload` set, and a native agent
+    /// always) and in no other: not an engine agent's. It catches a server that sends a sink or
+    /// outputs to an agent that cannot upload them, and one never told that a crun or a native
+    /// agent can.
     #[test]
     fn the_agent_reports_log_upload_on_the_crun_and_native_runtimes_only() {
         let ceiling = Config::none().ceiling();
@@ -261,16 +266,21 @@ mod tests {
             )
             .is_empty()
         );
-        assert_eq!(
-            crun.capabilities
-                .get(LOG_UPLOAD_CAPABILITY)
-                .map(String::as_str),
-            Some(FLAG_SET)
-        );
+        for key in [LOG_UPLOAD_CAPABILITY, JOB_OUTPUTS] {
+            assert_eq!(
+                crun.capabilities.get(key).map(String::as_str),
+                Some(FLAG_SET),
+                "{key}"
+            );
+        }
         assert_eq!(crun.validate(), Ok(()));
         let engine = reported(&Config::none());
         assert!(!engine.capabilities.contains_key(LOG_UPLOAD_CAPABILITY));
-        assert_eq!(LOG_UPLOAD_CAPABILITY, "log-upload");
+        assert!(!engine.capabilities.contains_key(JOB_OUTPUTS));
+        assert_eq!(
+            (LOG_UPLOAD_CAPABILITY, JOB_OUTPUTS),
+            ("log-upload", "job-outputs")
+        );
     }
 
     /// Catches a container agent that does not say its ceiling, says it under another key,

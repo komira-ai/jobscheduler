@@ -28,24 +28,24 @@ const BIG: u64 = 10 * MIB;
 /// The capture file cap of a run with a sink in these tests.
 const CAP: u64 = 2 * MIB;
 
-fn endpoint() -> Endpoint {
+pub(crate) fn endpoint() -> Endpoint {
     Endpoint::parse("http://127.0.0.1:9000", "test-1", "logs", true).expect("an endpoint")
 }
 
-fn sink(run_id: &str) -> Sink {
+pub(crate) fn sink(run_id: &str) -> Sink {
     Sink::new(endpoint(), JobPrefix::new("js", run_id).expect("a prefix"))
 }
 
 /// A store, the host's credential, and the settings of a runtime that uploads to it, whose
 /// uploaders' wakes are kept in `wakes` in the order they were made.
-struct Live {
-    store: FakeStore,
-    logs: LiveLogs,
+pub(crate) struct Live {
+    pub(crate) store: FakeStore,
+    pub(crate) logs: LiveLogs,
     wakes: Arc<Mutex<Vec<Arc<ManualWake>>>>,
 }
 
 impl Live {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let clock = Arc::new(ManualClock::new(
             UNIX_EPOCH + Duration::from_secs(1_800_000_000),
         ));
@@ -88,17 +88,17 @@ impl Live {
         self
     }
 
-    fn made(&self) -> usize {
+    pub(crate) fn made(&self) -> usize {
         self.wakes.lock().expect("wakes").len()
     }
 
-    fn wake(&self, index: usize) -> Arc<ManualWake> {
+    pub(crate) fn wake(&self, index: usize) -> Arc<ManualWake> {
         self.wakes.lock().expect("wakes")[index].clone()
     }
 }
 
 /// Steps the uploader of `wake` until it has ended.
-fn run_out(wake: &ManualWake) {
+pub(crate) fn run_out(wake: &ManualWake) {
     while wake.step() != Settled::Ended {}
 }
 

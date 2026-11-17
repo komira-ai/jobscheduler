@@ -50,25 +50,38 @@ lists it as failed (`name`), as the agent cannot put it.
 
 ## 3. The agent
 
-When the job's process has ended (and, on macOS, before the run's user and its home are removed),
-the agent opens each declared path below the working directory, following no symbolic link at any
-step (`openat` with `O_NOFOLLOW`, from the working directory down):
+Built in `crates/js-agent/src/outputs` (`gather.rs`, `upload.rs`). When the run is removed, after
+the job's process has ended and before what it wrote is removed, the runtime hands the agent the
+job's working directory on the host: for `crun`, the writable layer of `/work` in the lease
+directory, before the container and the lease directory are removed; for the native runtime,
+the run user's `exec/`, before the user and its home are removed. The agent opens each declared
+path below it, following no symbolic link at any step (each name looked at with
+`AT_SYMLINK_NOFOLLOW`, then opened with `O_NOFOLLOW`, from the working directory down, and what
+was opened held to the kind that was looked at):
 
-- a regular file with one link is an output; a file with more links, a symbolic link, a device, a
-  socket or a pipe is refused (`not-a-file`);
-- a directory is walked, at most 16 levels deep, and each regular file in it is an output;
+- a regular file with one link is an output; a file with more links, a symbolic link (as the
+  output or as a directory on the way to it), a device, a socket or a pipe is refused
+  (`not-a-file`) and never read;
+- a directory is walked in the order of its names, and each regular file in it is an output; a
+  name that is not an output path's segment is refused (`name`, each byte outside
+  `[A-Za-z0-9._-]` shown as `?`); a tree holds at most 16 levels of directories, the declared one
+  the first, and a directory past them is refused (`over-limit`);
 - at most 10,000 files and 1 GiB in all; a file over 64 MiB (one put, the store client's limit)
-  is refused (`too-large`), and files past either total are refused (`over-limit`).
+  is refused (`too-large`), and files past either total are refused (`over-limit`);
+- what cannot be looked at, opened or listed is refused (`read`); a declaration the store's rules
+  refuse (which the server checks at submit) fails every path (`path`).
 
 The files are opened before the job's files are removed and read from the open descriptors after,
 so the removal never waits for the upload and never cuts it short (as the log uploader holds its
 capture files, live-logs 3.5). One thread per job puts the files in the order of the declaration,
-each in one put (the bytes are read and hashed as they are sent), then the manifest. A put the
-store answers `Unavailable` is tried again after 1 s, doubling to 60 s; one answered `Expired`
-waits for the host's next credential; one refused otherwise (`Denied`, `NotFound`, `Invalid`) is
-not tried again and the file is listed failed (`store`). The whole upload has 15 minutes from the
-job's end; past them nothing more is put, and no manifest is written. An agent restarted while it
-uploads does not take the upload up again: the job's outputs then have no manifest.
+each in one put (its bytes read and hashed before it is sent), then the manifest. With no
+credential held, the upload waits; a put the store answers `Unavailable` is tried again after 1 s,
+doubling to 60 s; one answered `Expired` waits for the host's next credential (or the same
+backoff); one refused otherwise (`Denied`, `NotFound`, `Invalid`) is not tried again and the file
+is listed failed (`store`), and a refused manifest ends the upload with none. The whole upload has
+15 minutes from the run's removal; past them nothing more is put, and no manifest is written. An
+agent restarted while it uploads does not take the upload up again: the job's outputs then have no
+manifest.
 
 The manifest (`P/outputs.json`, JSON, at most 1 MiB):
 

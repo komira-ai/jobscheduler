@@ -310,6 +310,8 @@ struct Run {
     entry: Entry,
     /// Its live logs: the sink, then the uploader and the report.
     logs: RunLogs,
+    /// Its declared outputs, put when it is removed ([`crate::outputs`]).
+    outputs: Option<crate::outputs::Plan>,
     /// What its file system cloned, for the check after it ends; none without host paths.
     fs: Option<rootfs::RunFs>,
     /// The steps of its start, until [`Runtime::start_steps`] takes them.
@@ -648,6 +650,7 @@ impl CrunRuntime {
                 },
                 entry,
                 logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
+                outputs: crate::outputs::Plan::of(self.logs.as_ref(), spec),
                 fs: assembled.map(|made| rootfs::RunFs::new(made.sources)),
                 marks,
             },
@@ -846,6 +849,8 @@ impl Runtime for CrunRuntime {
             }
         }
         run.net.release(&id.0);
+        // The job has ended and `/work`'s writable layer is still here: the outputs are opened.
+        let _ = run.outputs.take().map(|plan| plan.start(&run.lease.upper));
         // No progress record is written from here on: a file made in the lease directory while
         // it is removed below would stop the removal.
         run.logs.leave();

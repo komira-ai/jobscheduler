@@ -53,6 +53,7 @@ pub fn spec(run_id: &str, args: &[&str]) -> RunSpec {
         ports: Vec::new(),
         host_ports: Vec::new(),
         log_sink: None,
+        outputs: Vec::new(),
     }
 }
 

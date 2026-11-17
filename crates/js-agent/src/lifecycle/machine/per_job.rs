@@ -110,6 +110,7 @@ impl Lifecycle {
             let given = Given {
                 env: spec.env.clone().into_iter().collect(),
                 log_sink: sink.clone().ok().flatten(),
+                outputs: spec.outputs.clone(),
                 vm: spec.kind == StartKind::Vm,
                 host_ports: spec.host_ports.clone(),
                 fs: JobFs {

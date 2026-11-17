@@ -236,6 +236,8 @@ struct Run {
     _pinned: Option<Pinned>,
     /// Its live logs: the uploader, then the report.
     logs: RunLogs,
+    /// The outputs its job start declared, put when it is removed ([`crate::outputs`]).
+    job_outputs: Option<crate::outputs::Plan>,
 }
 
 impl Run {
@@ -529,6 +531,7 @@ impl NativeRuntime {
             started_ms: record.started_ms,
             _pinned: pinned,
             logs: logs::start(self.logs.as_ref(), spec.log_sink.as_ref(), &spec.scratch),
+            job_outputs: crate::outputs::Plan::of(self.logs.as_ref(), spec),
         })
     }
 
@@ -730,6 +733,8 @@ impl Runtime for NativeRuntime {
         let max_file_bytes = self.config.max_file_bytes;
         if let Some(run) = self.runs.get_mut(&id.0) {
             run.collect(&id.0, max_file_bytes);
+            // Before the user and its home go: the upload reads the outputs from open files.
+            let _ = (run.job_outputs.take()).map(|plan| plan.start(&run.home.join("exec")));
             logs::close(&mut run.logs, &run.scratch);
         }
         let deleted = self.helper.user_delete(&id.0).map(|_| ());

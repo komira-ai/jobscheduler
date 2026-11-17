@@ -420,6 +420,9 @@ impl CrunRuntime {
             // Its uploader, if its lease holds a progress record, comes with the runtime's live
             // logs (`resume_uploads`); the sink came only in its start.
             logs: RunLogs::adopted(None),
+            // Its outputs are not taken up after a restart (`crate::outputs`): the start that
+            // declared them is not kept.
+            outputs: None,
             // What its file system cloned, from its list of mounts, for the check after it ends.
             fs: self.run_fs_of(&entry.name),
             // An adopted run was started by an earlier process: no step of its start is here.

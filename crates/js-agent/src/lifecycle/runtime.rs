@@ -173,6 +173,9 @@ pub struct RunSpec {
     /// ([`Sink::of_start`]), `None` for a run start and a start without one. A runtime that
     /// uploads no live logs ignores it.
     pub log_sink: Option<Sink>,
+    /// The outputs a job start declares, put under `log_sink` when the run is removed by a
+    /// runtime that uploads live logs (`crate::outputs`); empty for a run start.
+    pub outputs: Vec<String>,
 }
 
 /// How a container ended.
@@ -975,6 +978,7 @@ mod tests {
             labels: BTreeMap::new(),
             bundle: None,
             log_sink: None,
+            outputs: Vec::new(),
         }
     }
 }

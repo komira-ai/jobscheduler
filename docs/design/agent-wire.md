@@ -49,6 +49,11 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
   server sends `log_sink` and `log_grant` only to an agent that reported it. Each is decoded as `load` is: a malformed value reads as
   absent, so a log field never refuses a start or a heartbeat.
+- `JobStartSpec.outputs` ([job-outputs.md](job-outputs.md)): the paths, below the job's working directory, that the agent puts under
+  the job's prefix of `log_sink` when the run is removed, with a manifest last; at most 64, left out when empty. The `crun` and native
+  agents announce it with the hello capability `job-outputs`, beside `log-upload`, and a server sends outputs only to an agent that
+  reported it. The agent holds each path to the store's rules when it uploads (`crates/js-agent/src/outputs`), not when it takes the
+  start.
 
 The per-job messages ride in major 1 beside the lease and run messages. An agent announces them with the hello capability
 `per-job` (`PER_JOB_CAPABILITY`), and the wire crate's rule is that a server sends `job_start` and `job_stop` only to an agent that

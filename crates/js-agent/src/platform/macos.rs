@@ -578,8 +578,9 @@ const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartb
 /// jobs: `runtime` and `exec` are `sandbox-exec`, `run-files` when `run_files` (the agent
 /// has a files root), and `egress` is the agent's `--native-network` ceiling as a job level
 /// ([`Ceiling::advertised`]: `off` and `loopback` are `none`, `on` is `allow-list`, `open` is
-/// `open`), with no `egress-ports`, since a Mac forwards no port, and `log-upload`, since the
-/// native runtime uploads live logs (`native/logs.rs`). The hello is sent only after
+/// `open`), with no `egress-ports`, since a Mac forwards no port, and `log-upload` and
+/// `job-outputs`, since the native runtime uploads live logs (`native/logs.rs`) and a job
+/// start's outputs (`crate::outputs`). The hello is sent only after
 /// the job half has started, which asked the helper for its boot reset, so no hello names a
 /// mode the agent cannot serve. Returns the warnings the operator should read: none.
 fn report_native(hello: &mut Hello, run_files: bool, ceiling: Ceiling) -> Vec<String> {
@@ -587,10 +588,13 @@ fn report_native(hello: &mut Hello, run_files: bool, ceiling: Ceiling) -> Vec<St
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
     hello.capabilities.insert(EXEC.to_owned(), mode);
     contract::report_run_files(hello, run_files);
-    // The native runtime uploads the live logs of every run whose start carries a sink.
-    hello
-        .capabilities
-        .insert(LOG_UPLOAD_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    // The native runtime uploads the live logs of every run whose start carries a sink, and a
+    // job start's declared outputs with the same credential.
+    for key in [LOG_UPLOAD_CAPABILITY, js_caps::JOB_OUTPUTS] {
+        hello
+            .capabilities
+            .insert(key.to_owned(), FLAG_SET.to_owned());
+    }
     ceiling.advertised().insert_into(&mut hello.capabilities);
     Vec::new()
 }
@@ -641,6 +645,7 @@ mod tests {
         assert!(report_native(&mut native, true, Ceiling::Off).is_empty());
         let flag = |key: &str| native.capabilities.get(key).cloned();
         assert_eq!(flag(LOG_UPLOAD_CAPABILITY).as_deref(), Some(FLAG_SET));
+        assert_eq!(flag(js_caps::JOB_OUTPUTS).as_deref(), Some(FLAG_SET));
         assert_eq!(flag(js_agent_wire::START_FENCE_CAPABILITY), None);
         assert_eq!(flag(js_agent_wire::PER_JOB_CAPABILITY), None);
         assert_eq!(native.validate(), Ok(()));

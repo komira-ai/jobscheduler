@@ -30,6 +30,7 @@ mod layered;
 mod logs;
 mod node;
 mod open;
+mod outputs;
 mod pins;
 mod resume;
 mod runs;

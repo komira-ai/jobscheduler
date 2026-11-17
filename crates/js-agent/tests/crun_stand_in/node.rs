@@ -409,6 +409,7 @@ impl Node {
             ports: Vec::new(),
             host_ports: Vec::new(),
             log_sink: None,
+            outputs: Vec::new(),
         }
     }
 

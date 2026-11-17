@@ -77,6 +77,8 @@ impl NativeRuntime {
             started_ms: record.started_ms,
             _pinned: pinned,
             logs,
+            // A job start's outputs are not taken up after a restart (`crate::outputs`).
+            job_outputs: None,
         })
     }
 

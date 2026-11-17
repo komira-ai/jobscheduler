@@ -49,6 +49,8 @@ pub(super) struct Given {
     pub(super) env: Vec<(String, String)>,
     /// The checked live-log sink ([`RunSpec::log_sink`]).
     pub(super) log_sink: Option<Sink>,
+    /// The declared outputs ([`RunSpec::outputs`]).
+    pub(super) outputs: Vec<String>,
     /// The start runs in a fresh VM ([`js_agent_wire::StartKind::Vm`]): it is admitted by the
     /// VM rules and its run carries [`label::KIND`].
     pub(super) vm: bool,
@@ -781,5 +783,6 @@ pub(super) fn run_spec(
             .clone()
             .or_else(|| spec.run.as_ref().map(|_| spec.image.clone())),
         log_sink: given.log_sink.clone(),
+        outputs: given.outputs.clone(),
     }
 }

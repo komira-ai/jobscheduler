@@ -189,6 +189,7 @@ mod tests {
             labels: labels.collect(),
             bundle: None,
             log_sink: None,
+            outputs: Vec::new(),
         }
     }
 
