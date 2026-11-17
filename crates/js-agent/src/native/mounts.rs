@@ -483,6 +483,48 @@ mod tests {
         );
     }
 
+    /// Asserts that a link is never made through a parent that is a link or a file: a parent
+    /// that is a link (as an input's link, or another mount's link, would be) fails the start
+    /// naming the mount and the part, and nothing is made where the link leads; a parent
+    /// that is a file fails the same way.
+    ///
+    /// Catches the agent, as root, making a link (and giving it away) inside a host
+    /// directory a link among the parents leads to.
+    #[test]
+    fn a_link_is_never_made_through_a_parent_that_is_not_a_directory() {
+        let dir = TestDir::under(std::env::temp_dir(), "native-mount-parents");
+        let exec = dir.path().join("exec");
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir(&exec).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        symlink(&elsewhere, exec.join("in")).unwrap();
+        let give: HandOver = Arc::new(|_, _, _| Ok(()));
+        let make = |path: &Path| fs::create_dir(path);
+
+        let through_link = [plan("in/m", "/Volumes/data/tree")];
+        let why = link_all(&through_link, &exec, 0, (&give, &make)).unwrap_err();
+        assert_eq!(why.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            why.to_string(),
+            format!(
+                "/work/in/m: {} is there and is not a directory",
+                exec.join("in").display()
+            )
+        );
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+        fs::write(exec.join("file"), "").unwrap();
+        let through_file = [plan("file/m", "/Volumes/data/tree")];
+        let why = link_all(&through_file, &exec, 0, (&give, &make)).unwrap_err();
+        assert_eq!(
+            why.to_string(),
+            format!(
+                "/work/file/m: {} is there and is not a directory",
+                exec.join("file").display()
+            )
+        );
+    }
+
     /// Asserts that the grants carry each plan's path and modes, and that only the
     /// read-only plans have a link to protect.
     ///

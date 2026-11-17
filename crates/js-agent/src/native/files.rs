@@ -89,13 +89,27 @@ pub(super) fn stage_inputs(
 }
 
 /// Makes every directory of `below` (a path relative to `exec`, which exists) that is not
-/// there.
+/// there. A part that is there must be a directory, never a link or a file: the agent makes
+/// what follows as root, so a link among the parents (one an input brought, or the link of
+/// another mount) would have it made wherever the link leads.
+///
+/// # Errors
+///
+/// A part that is there and is not a directory (`AlreadyExists`, naming it), or a directory
+/// that cannot be made.
 pub(super) fn make_parents(exec: &Path, below: &Path, make: MakeDir<'_>) -> io::Result<()> {
     let mut at = exec.to_path_buf();
     for part in below.components() {
         at.push(part);
-        if fs::symlink_metadata(&at).is_err() {
-            make(&at)?;
+        match fs::symlink_metadata(&at) {
+            Ok(there) if there.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{} is there and is not a directory", at.display()),
+                ));
+            }
+            Err(_) => make(&at)?,
         }
     }
     Ok(())

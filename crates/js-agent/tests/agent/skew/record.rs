@@ -65,7 +65,6 @@ arch = "x86_64"
 "#;
 
 /// The heartbeat interval of [`QUICK_POOL`], in milliseconds, as its welcome carries it.
-#[cfg(target_os = "linux")]
 pub const QUICK_INTERVAL_MS: u64 = 250;
 
 /// The pool's join token (a test value: the server reads it from a file of the scratch).

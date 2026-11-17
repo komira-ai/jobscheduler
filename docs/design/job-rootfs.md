@@ -787,9 +787,9 @@ kept off the lifecycle worker, and what the bound means.
 
 ## 5. The agent on macOS
 
-Built for `READ_ONLY` and `READ_WRITE` mounts (`crates/js-agent/src/native/mounts.rs`, the `MountGrant` of `crates/js-mac-pool/src/seatbelt`): the links of 5.2, the profile items of 5.4, the refusals of 5.1, and the hello's `per-job`, `start-fence` and `layered-rootfs`. Not built: copy-on-write mounts, host sockets and the native runtime's `prepare` (the lookups here are metadata calls answered at once). How a Mac gives a job a writable tree over a lazy one is **not chosen here**; a `COPY_ON_WRITE` mount is refused `rootfs-unsupported-here` until it is.
-It waits for measurements of a lazy provider's real macOS mount (13, Q1). This section fixes everything that does not
-depend on that choice: what the Mac agent does with each field of the same `JobStartSpec`, the Seatbelt view, and the
+Built for `READ_ONLY` and `READ_WRITE` mounts (`crates/js-agent/src/native/mounts.rs`, the `MountGrant` of `crates/js-mac-pool/src/seatbelt`): the links of 5.2, the profile items of 5.4, the refusals of 5.1, and the hello's `per-job`, `start-fence`, `held-beat` and `layered-rootfs`. Not built: copy-on-write mounts, host sockets and the native runtime's `prepare` (the lookups here are metadata calls answered at once). How a Mac gives a job a writable tree over a lazy one is **not chosen here**; a `COPY_ON_WRITE` mount is refused `rootfs-unsupported-here` until it is.
+That choice waits for measurements of a lazy provider's real macOS mount (13, Q1). This section fixes everything that does not
+depend on it: what the Mac agent does with each field of the same `JobStartSpec`, the Seatbelt view, and the
 three candidate mechanisms with the tests that will decide between them. The wire and the server of sections 2 and 3 do
 not change whichever wins, because all three realise the same thing: a `COPY_ON_WRITE` mount.
 

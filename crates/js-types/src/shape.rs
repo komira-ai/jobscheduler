@@ -127,7 +127,10 @@ impl Shape {
 /// The major version of an operating-system version text: `26` and `26.1` are 26. `None`
 /// when the text before the first dot is not a whole number.
 fn os_major(text: &str) -> Option<u32> {
-    text.split('.').next()?.parse().ok()
+    text.split_once('.')
+        .map_or(text, |(major, _)| major)
+        .parse()
+        .ok()
 }
 
 /// Whether `offered` has at least the CPU, memory, GPUs and disk of `wanted`, whatever the
