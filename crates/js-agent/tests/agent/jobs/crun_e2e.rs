@@ -203,6 +203,7 @@ pub(super) fn seams() -> Seams {
             kill_wait: LONG,
             pull_limit: LONG,
             call_limit: LONG,
+            proc_read: |_| None,
         },
         host: || self::node().host.clone(),
         ids: IdSources {

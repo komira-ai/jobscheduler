@@ -64,8 +64,10 @@ pub mod code {
     /// unchecked.
     pub const HOST_NOT_VISIBLE: &str = "host-not-visible";
     /// A run the runtime reports as running has no container group (the control group the
-    /// runtime puts every container in) a settle wait after the agent first saw it. The
-    /// host is tainted as unchecked. The post-job checks do not depend on that group, so
+    /// runtime puts every container in) a settle wait after the agent first saw it, and its
+    /// container's first process runs in another group (a container not made yet, or one
+    /// that ended and was removed with its group, is neither). The host is tainted as
+    /// unchecked. The post-job checks do not depend on that group, so
     /// what the run leaves is still found, and a re-check of an idle host clears the taint.
     pub const CGROUP_NOT_FOUND: &str = "cgroup-not-found";
     /// The taint marker could not be written. The host is tainted in memory all the same.

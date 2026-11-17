@@ -210,6 +210,9 @@ mod settings;
 mod spec;
 #[cfg(test)]
 mod tests;
+mod whereabouts;
+#[cfg(test)]
+mod whereabouts_tests;
 mod wire;
 
 pub use dirs::hand_over_no_follow;
@@ -249,7 +252,7 @@ use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, check_run_env, label,
+    Runtime, RuntimeError, Status, Ticket, Whereabouts, check_run_env, label,
 };
 use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger, Supervisor};
@@ -956,5 +959,17 @@ impl Runtime for CrunRuntime {
         matches!(run.state, State::Running { .. })
             .then_some(ctr)
             .filter(|ctr| ctr.is_dir())
+    }
+
+    fn whereabouts(&mut self, id: &RunHandle) -> Whereabouts {
+        let running = self.runs.get(&id.0);
+        match running.filter(|run| matches!(run.state, State::Running { .. })) {
+            Some(run) => whereabouts::whereabouts_of(
+                &ctr_of(run.cgroup.dir()),
+                self.oci.container_pid(&run.spec),
+                self.hooks.proc_read,
+            ),
+            None => Whereabouts::NoProcess,
+        }
     }
 }

@@ -6,7 +6,7 @@ use super::job::{
     Cause, Stage, cause_detail, cgroup_not_found_taint, check_taint, cleanup_taint, input_failure,
     outcome,
 };
-use crate::lifecycle::runtime::{RunHandle, Status};
+use crate::lifecycle::runtime::{RunHandle, Status, Whereabouts};
 use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
 
 /// How often a finished run's usage that stays nonzero is reported again while the agent
@@ -56,11 +56,13 @@ impl Lifecycle {
             Ok(Status::Running) => {
                 // A runtime that puts every container in a group the agent can read, and
                 // cannot name this running container's group (not at the start, not at a
-                // window, not now), left the agent blind to it: its usage is not sampled
-                // and what it leaves is not known to be checkable, when steps find it so over the
-                // settle wait. A run seen only after it ended has no group to look at
-                // (`cgroup` says `None` for it), and one that ended between the poll and the
-                // look is read as ended by the next step: neither is blindness.
+                // window, not now), may leave the agent blind to it. A group that is missing
+                // is not blindness by itself: the run is running from the moment its
+                // supervisor is ready, before the container (and its group) is made, and it
+                // is still read as running for a moment after the container ended and its
+                // group was removed with it. A run seen only after it ended has no group to
+                // look at (`cgroup` says `None` for it), and one that ended between the poll
+                // and the look is read as ended by the next step.
                 //
                 // A run whose end the runtime holds (a failed run whose sources are being
                 // checked) has ended, though `poll` says running: its group is gone, and no
@@ -71,24 +73,31 @@ impl Lifecycle {
                     && !runtime.ends_held(&id)
                 {
                     job.cgroup = runtime.cgroup(&id);
-                    // The first sighting is not enough: a run that ended a moment ago has
-                    // no group left, and is still read as running until its end is read
-                    // (a later step reads it as ended). Steps come at once after one
-                    // another (every order nudges the worker), so the count of steps says
-                    // nothing: only a run that is still running and still has no group a
-                    // settle time (`--settle-ms`) after the first sighting is one the agent
-                    // cannot see.
+                    // Steps come at once after one another (every order nudges the worker),
+                    // so the count of steps says nothing: the runtime is asked where the
+                    // container is only once the run has been without a group for a settle
+                    // time (`--settle-ms`) after the first sighting, and the host is blind
+                    // to it only when its first process runs outside its group. A container
+                    // that is not there (not made yet, or ended) is asked about again a
+                    // settle time later.
                     if job.cgroup.is_none() {
                         let since = *job.blind_since.get_or_insert(now);
                         if now.saturating_sub(since) >= blind_wait_ms {
-                            job.blind_told = true;
-                            job.taint(taint, cgroup_not_found_taint(&job.run_id), events);
-                            let message = format!(
-                                "run {}: its container group was not found within the settle wait \
-                                 of {blind_wait_ms} ms",
-                                job.run_id
-                            );
-                            job.note(code::CGROUP_NOT_FOUND, message, events);
+                            match runtime.whereabouts(&id) {
+                                Whereabouts::Grouped(dir) => job.cgroup = Some(dir),
+                                Whereabouts::NoProcess => job.blind_since = Some(now),
+                                Whereabouts::Elsewhere(group) => {
+                                    job.blind_told = true;
+                                    job.taint(taint, cgroup_not_found_taint(&job.run_id), events);
+                                    let message = format!(
+                                        "run {}: its container group was not found within the \
+                                         settle wait of {blind_wait_ms} ms, and its first process \
+                                         runs in {group}",
+                                        job.run_id
+                                    );
+                                    job.note(code::CGROUP_NOT_FOUND, message, events);
+                                }
+                            }
                         }
                     }
                 }

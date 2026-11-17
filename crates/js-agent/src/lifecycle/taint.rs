@@ -100,7 +100,8 @@
 //!    `process-as-job-user` or `daemonised-child`, or reason [`reason::UNCHECKED`] with a
 //!    check that could not read its input (`*-unreadable`, `watch-over-bound`) or
 //!    `cgroup-not-found` (a crun run whose container group was not found within the settle
-//!    wait; the checks do not depend on that group). Never `cleanup-failed`, `check-owed`,
+//!    wait while its first process ran in another group; the checks do not depend on that
+//!    group). Never `cleanup-failed`, `check-owed`,
 //!    `host-job`, `marker-unreadable`, `host-not-visible`
 //!    (a re-check does not show that the agent now sees the host), nor a mount, user, group,
 //!    module or watched-directory change: state the host really holds. A non-clearable taint

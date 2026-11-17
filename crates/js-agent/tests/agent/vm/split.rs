@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent::lifecycle::{FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, label};
+use js_agent::lifecycle::{
+    FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, Whereabouts, label,
+};
 use js_agent::vm::{VmRuntime, WithVms};
 use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
 use js_vm_lease::fake::FakeDriver;
@@ -26,8 +28,11 @@ fn split(driver: &Arc<FakeDriver>) -> (WithVms, FakeRuntime) {
 
 /// Asserts that a run with the VM kind is made by the VM runtime and one without it by the
 /// other runtime, and that each later call about a run (poll, tail, log report, control
-/// group, stop, removal) goes to the runtime that made it. Catches a VM start run as a
-/// native job on the host, and a container's calls sent to the VM runtime.
+/// group, where its container is, stop, removal) goes to the runtime that made it: a running
+/// VM run of a router whose other runtime places its containers in groups has no container
+/// process to be blind to, and a container's first process outside its group is the other
+/// runtime's answer. Catches a VM start run as a native job on the host, a container's calls
+/// sent to the VM runtime, and a VM run that would taint the host for lacking a group.
 #[test]
 fn each_run_goes_to_the_runtime_of_its_kind() {
     let driver = Arc::new(FakeDriver::new().answering(ExecEnd::Exited(2), "vm out", ""));
@@ -37,6 +42,15 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     plain.labels.remove(label::KIND);
     let on_host = with.create_and_start(&plain).unwrap();
     assert_eq!(in_vm, RunHandle("run-vm".to_owned()));
+    fake.promise_cgroups(true);
+    assert!(with.places_in_cgroup());
+    assert_eq!(with.cgroup(&in_vm), None);
+    assert_eq!(with.whereabouts(&in_vm), Whereabouts::NoProcess);
+    fake.run_elsewhere("run-plain", "/actions/other");
+    assert_eq!(
+        with.whereabouts(&on_host),
+        Whereabouts::Elsewhere("/actions/other".to_owned())
+    );
     assert_eq!(
         fake.created()
             .iter()

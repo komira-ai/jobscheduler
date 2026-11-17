@@ -10,7 +10,7 @@ use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 use super::VmRuntime;
 use crate::lifecycle::{
     Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
-    Status, Ticket, label,
+    Status, Ticket, Whereabouts, label,
 };
 
 /// The agent's runtime and its VM runtime; see the [module](self).
@@ -179,5 +179,9 @@ impl Runtime for WithVms {
 
     fn places_in_cgroup(&self) -> bool {
         self.other.places_in_cgroup()
+    }
+
+    fn whereabouts(&mut self, id: &RunHandle) -> Whereabouts {
+        self.owner(id).whereabouts(id)
     }
 }

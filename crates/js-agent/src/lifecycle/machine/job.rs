@@ -143,8 +143,9 @@ pub(super) fn blind_taint(run_id: &str) -> Taint {
 }
 
 /// The taint of a running run whose container group was not found a settle wait after the
-/// agent first saw it: the agent cannot sample that run, but the checks after the job do not
-/// depend on its group, so a re-check can speak for what it leaves.
+/// agent first saw it, and whose container's first process runs outside that group: the agent
+/// cannot sample that run, but the checks after the job do not depend on its group, so a
+/// re-check can speak for what it leaves.
 pub(super) fn cgroup_not_found_taint(run_id: &str) -> Taint {
     Taint {
         reason: reason::UNCHECKED.to_owned(),
