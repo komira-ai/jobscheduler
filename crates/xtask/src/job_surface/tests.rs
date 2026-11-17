@@ -371,7 +371,7 @@ fn the_blocks_are_rendered_between_their_markers() {
 
 /// Asserts that the served paragraph names exactly the calls of the served list, in the
 /// order of the routes, and every other call as unimplemented: the server's list, which holds
-/// every call, says every call is served; a copy without `GetUsage` names the other twelve and
+/// every call, says every call is served; a copy without `GetUsage` names the other thirteen and
 /// `GetUsage` as unimplemented; a copy without `ListHosts` and `GetUsage` names both, in the
 /// order of the routes; and an empty list says no call is served.
 #[test]
@@ -390,11 +390,11 @@ fn the_served_paragraph_follows_the_served_list() {
     };
     assert_eq!(
         served_paragraph(routes, &without(&[Rpc::GetUsage])),
-        "The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult`, `GetLogs`, `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools` and `ListProviders` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `GetUsage`.\n"
+        "The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult`, `GetLogs`, `GetOutputs`, `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools` and `ListProviders` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `GetUsage`.\n"
     );
     assert_eq!(
         served_paragraph(routes, &without(&[Rpc::GetUsage, Rpc::ListHosts])),
-        "The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult`, `GetLogs`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools` and `ListProviders` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `ListHosts` and `GetUsage`.\n"
+        "The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult`, `GetLogs`, `GetOutputs`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools` and `ListProviders` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `ListHosts` and `GetUsage`.\n"
     );
     assert_eq!(
         served_paragraph(routes, &[]),

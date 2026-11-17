@@ -336,6 +336,7 @@ pub(super) fn spec(labels: &[(&str, &str)]) -> JobSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 

@@ -105,6 +105,9 @@ Options:
           
           [possible values: unspecified, none, allow-list, open]
 
+      --spec.outputs <TEXT>
+          Files the job leaves, which its host's agent puts in the object store when the job ends and GetOutputs reads back (docs/design/job-outputs.md). Each is a path relative to the job's working directory (/work in a Linux container, the run's exec directory on macOS) naming a file or a directory, whose files are all put: at most 64 paths, each 1 to 512 bytes of segments joined by "/", each segment 1 to 255 bytes of [A-Za-z0-9._-] and neither "." nor "..", none twice and none inside another (refused INVALID_ARGUMENT, field spec.outputs[i].path). A path the job did not make is not an error. A job with outputs needs the service's object store (refused FAILED_PRECONDITION no-log-sink on a service without one) and requires the host capability job-outputs, so it is placed only on a host whose agent uploads them. Empty: none. Repeat for more.
+
       --spec.ports-file <PATH>
           The host ports forwarded to the job. Empty: none, and no inbound path to the job. Read from a file holding the field's value in proto3 JSON.
 

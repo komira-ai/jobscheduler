@@ -22,7 +22,7 @@
 //! for route in js_api_gateway::ROUTES {
 //!     println!("{} {} -> {}", route.verb.as_str(), route.template, route.rpc.name());
 //! }
-//! assert_eq!(js_api_gateway::ROUTES.len(), 13);
+//! assert_eq!(js_api_gateway::ROUTES.len(), 14);
 //! ```
 //!
 //! A call that changes state is a POST and a read is a GET. `CancelJob` is
@@ -120,10 +120,12 @@
 //! | `FAILED_PRECONDITION`, message `not-finished` (the result of a job that has not ended) | 409 | `not-finished` |
 //! | `FAILED_PRECONDITION`, message `no-log-sink` (the server keeps no logs: its sink is `none`) | 409 | `no-log-sink` |
 //! | `FAILED_PRECONDITION`, message `no-live-logs` (the job ran without live logs) | 409 | `no-live-logs` |
+//! | `FAILED_PRECONDITION`, message `no-outputs` (outputs of a job that declared none) | 409 | `no-outputs` |
 //! | `INVALID_ARGUMENT` (a message `field: <name>` gives `field`) | 400 | `invalid-argument` |
 //! | `OUT_OF_RANGE`, message `field: fromOffset` (a log offset past the end of the stream) | 400 | `out-of-range`, `field` `fromOffset` |
 //! | `RESOURCE_EXHAUSTED`, message `too-many-follows` | 429 | `too-many-follows` |
 //! | `UNAVAILABLE`, message `log-store-unavailable` | 503 | `log-store-unavailable` |
+//! | `UNAVAILABLE`, message `outputs-unreadable` (a job's outputs manifest the server cannot read) | 503 | `outputs-unreadable` |
 //! | `PERMISSION_DENIED`, message `operator-only` (a fleet call of a client that is no operator) | 403 | `operator-only` |
 //! | `UNIMPLEMENTED` | 501 | `unimplemented` |
 //! | `INTERNAL`, message `state-write-failed` (a store write that failed) | 500 | `state-write-failed` |

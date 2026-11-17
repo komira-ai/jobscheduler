@@ -269,6 +269,7 @@ fn job_spec() -> impl Strategy<Value = JobSpec> {
             host_ports,
             layers,
             mounts,
+            outputs: Vec::new(),
         },
     )
 }

@@ -123,6 +123,7 @@ impl Answer {
                 "not-finished" => Self::coded(StatusCode::CONFLICT, "not-finished"),
                 "no-log-sink" => Self::coded(StatusCode::CONFLICT, "no-log-sink"),
                 "no-live-logs" => Self::coded(StatusCode::CONFLICT, "no-live-logs"),
+                "no-outputs" => Self::coded(StatusCode::CONFLICT, "no-outputs"),
                 _ => Self::internal(),
             },
             Code::Internal => match message {
@@ -157,6 +158,9 @@ impl Answer {
             Code::Unavailable => match message {
                 "log-store-unavailable" => {
                     Self::coded(StatusCode::SERVICE_UNAVAILABLE, "log-store-unavailable")
+                }
+                "outputs-unreadable" => {
+                    Self::coded(StatusCode::SERVICE_UNAVAILABLE, "outputs-unreadable")
                 }
                 _ => Self::internal(),
             },

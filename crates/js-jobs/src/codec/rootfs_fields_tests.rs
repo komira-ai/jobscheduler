@@ -1,6 +1,6 @@
 //! The file-system fields of a job row: the layers, mounts and host ports, the agent's code of
-//! a refused start, the code of an input that failed, and the format byte of a job without an
-//! image; their round trips, what a job without them writes, and every way their values can
+//! a refused start, the code of an input that failed, the declared outputs, and the format byte
+//! of a job without an image; their round trips, what a job without them writes, and every way their values can
 //! fail to parse.
 
 use js_agent_wire::{JobMount, Layer, MountMode, MountSource, Propagation};
@@ -60,7 +60,7 @@ fn every_rootfs_field_reads_back_as_written() {
 
 // Catches a job that names none of the fields writing a tag for them, so that its row would
 // not be the bytes a build before them wrote: the row of a job without them is the full row
-// without tags 54 to 58, and a bare job writes none of them.
+// without tags 54 to 58, and a bare job writes none of them, nor the declared outputs (59).
 #[test]
 fn a_job_without_the_fields_writes_the_row_it_wrote_before() {
     let full = job_row(&full_job());
@@ -75,9 +75,35 @@ fn a_job_without_the_fields_writes_the_row_it_wrote_before() {
     .fold(full, |row, tag| without(&row, *tag));
     assert_eq!(stripped, job_row(&plain_job()));
     let bare = job_row(&bare_job());
-    for tag in 54..=58 {
+    for tag in 54..=59 {
         assert_eq!(field_of(&bare, tag), None, "tag {tag}");
     }
+}
+
+// Catches the declared outputs lost, reordered or written in another form: a job's outputs are
+// tag 59, a list of their paths as text in order; they read back as written; a row without the
+// tag (a build's from before the field) reads as a job with none; and an item that is not
+// UTF-8 is refused as such, naming the tag.
+#[test]
+fn the_declared_outputs_are_a_list_of_texts_read_back_in_order() {
+    let mut job = plain_job();
+    job.spec.outputs = vec!["out".to_owned(), "report.json".to_owned()];
+    let row = job_row(&job);
+    assert_eq!(
+        field_of(&row, t::OUTPUTS),
+        Some(framed(&[b"out", b"report.json"]))
+    );
+    assert_eq!(decode_job(&row), Ok(job.clone()));
+    let before = without(&row, t::OUTPUTS);
+    assert_eq!(
+        decode_job(&before).map(|job| job.spec.outputs),
+        Ok(Vec::new())
+    );
+    let not_text = with(&before, t::OUTPUTS, &framed(&[b"\xff"]));
+    assert_eq!(
+        decode_job(&not_text),
+        Err(DecodeError::NotUtf8 { tag: t::OUTPUTS })
+    );
 }
 
 // Catches a row of a build from before the fields read with any of them: such a row reads with

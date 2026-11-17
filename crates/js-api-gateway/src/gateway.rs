@@ -18,6 +18,8 @@ pub enum Rpc {
     GetResult,
     /// `GetLogs`, served at `GET /v1/jobs/{job_id}/logs`.
     GetLogs,
+    /// `GetOutputs`, served at `GET /v1/jobs/{job_id}/outputs`.
+    GetOutputs,
     /// `ListHosts`, served at `GET /v1/hosts`.
     ListHosts,
     /// `CordonHost`, served at `POST /v1/hosts/{host_id}:cordon`.
@@ -45,6 +47,7 @@ impl Rpc {
             Self::CancelJob => "CancelJob",
             Self::GetResult => "GetResult",
             Self::GetLogs => "GetLogs",
+            Self::GetOutputs => "GetOutputs",
             Self::ListHosts => "ListHosts",
             Self::CordonHost => "CordonHost",
             Self::UncordonHost => "UncordonHost",
@@ -112,6 +115,15 @@ pub const ROUTES: &[Route] = &[
         status: 200,
         input: "jobscheduler.v1.GetLogsRequest",
         output: "jobscheduler.v1.GetLogsResponse",
+    },
+    Route {
+        verb: Verb::Get,
+        template: "/v1/jobs/{job_id}/outputs",
+        rpc: Rpc::GetOutputs,
+        body: false,
+        status: 200,
+        input: "jobscheduler.v1.GetOutputsRequest",
+        output: "jobscheduler.v1.GetOutputsResponse",
     },
     Route {
         verb: Verb::Get,
@@ -224,6 +236,12 @@ async fn call<T: ::js_proto::v1::job_service_server::JobService>(
             let request = decode_as::<::js_proto::v1::GetLogsRequest>(&input)?;
             let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
             let response = service.get_logs(request).await;
+            answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
+        }
+        Rpc::GetOutputs => {
+            let request = decode_as::<::js_proto::v1::GetOutputsRequest>(&input)?;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.get_outputs(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::ListHosts => {

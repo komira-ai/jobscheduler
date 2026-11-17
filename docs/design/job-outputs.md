@@ -29,7 +29,10 @@ ends, and how a client reads them back: `GetOutputs`, the generated `js job outp
 - **A job with outputs needs the object store.** A server without `[logs] sink = "object_store"`
   refuses its submit, `FAILED_PRECONDITION` `no-log-sink`, as `GetLogs` answers such a server.
   The job requires the host capability `job-outputs`, which an agent reports only with
-  `log-upload` (it uploads with that credential); it is placed and started only there.
+  `log-upload` (it uploads with that credential); it is placed and started only there, and a
+  start that would carry no sink is not sent. Admission at submit does not look at the
+  capability: while no host reports it, such a job waits in the queue and fails to start when
+  the pool's queue wait passes.
 
 ## 2. The declaration
 
@@ -85,7 +88,7 @@ a read of the job's own (role `client`: its own jobs; `operator`: any). It answe
 
 - `unknown-job`, `expired` as `GetLogs` does;
 - `FAILED_PRECONDITION` `no-log-sink` on a server without the object store, and `no-outputs` for a
-  job that declared none;
+  job that declared none (or whose id gives no object prefix, so it never had a sink);
 - `UNAVAILABLE` `log-store-unavailable` when the store cannot be read (nothing of the store's
   answer is passed on);
 - otherwise the job's state, `ready` (the manifest was found), and from the manifest the files

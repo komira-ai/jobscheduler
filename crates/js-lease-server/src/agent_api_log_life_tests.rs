@@ -24,6 +24,7 @@ use super::job_rig::{
 use super::log_tests::{LONG_GRACE, capture, sink_of, start_of, tick};
 use crate::api::rig::Lines;
 use crate::clock::SharedClock;
+use crate::job_start::Unsendable;
 use crate::job_store::ServerJobs;
 use crate::metrics::NoMetrics;
 use crate::per_job::{self, BeatContext};
@@ -497,6 +498,56 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
     };
     let start = crate::job_start::start_of(&job, &allocation, &context).unwrap();
     assert_eq!(start.log_sink, Some(sink_of("host-a", "job-a")));
+}
+
+/// Asserts that a job's declared outputs go in its start, in order, beside the sink they are
+/// put under (`docs/design/job-outputs.md`); that a job with outputs is not sent when its start
+/// would have no sink, neither from a beat without sinks nor when the sink is one the agent
+/// would refuse (`OutputsWithoutSink`); and that a job without outputs is still sent then. It
+/// catches outputs dropped from the start, and a job started where its outputs could never be
+/// put.
+#[tokio::test]
+async fn a_jobs_outputs_go_in_its_start_only_beside_a_sink() {
+    let (rig, logs) = logging_rig("logs_outputs", LONG_GRACE);
+    let mut declaring = spec();
+    declaring.outputs = vec!["out".to_owned(), "report.json".to_owned()];
+    let (job, allocation) = placed(&rig.jobs, "job-o", "host-a", declaring, BOOKED);
+    let host = HostId::new("host-a").unwrap();
+    let context = BeatContext {
+        host: &host,
+        ceiling: &NetworkCeiling::default(),
+        host_jobs: false,
+        shape: None,
+        logs: Some(&*logs.grants),
+        metrics: &NoMetrics,
+        layered_rootfs: false,
+        mount_providers: &[],
+    };
+    let start = crate::job_start::start_of(&job, &allocation, &context).unwrap();
+    assert_eq!(start.outputs, ["out", "report.json"]);
+    assert_eq!(start.log_sink, Some(sink_of("host-a", "job-o")));
+    let unsinked = BeatContext {
+        logs: None,
+        ..context
+    };
+    let refused = crate::job_start::start_of(&job, &allocation, &unsinked);
+    assert_eq!(refused, Err(Unsendable::OutputsWithoutSink));
+    assert_eq!(
+        Unsendable::OutputsWithoutSink.to_string(),
+        "the job declares outputs and the host has no log sink to put them under"
+    );
+    let odd = Endpoint::parse("https://odd_host.example", LOG_REGION, LOG_BUCKET, true).unwrap();
+    let minter = Arc::clone(&logs.minter) as Arc<dyn js_logmint::Minter>;
+    let grants = grants_over(odd, minter, &status_clock(&rig));
+    let odd_sink = BeatContext {
+        logs: Some(&*grants),
+        ..context
+    };
+    let refused = crate::job_start::start_of(&job, &allocation, &odd_sink);
+    assert_eq!(refused, Err(Unsendable::OutputsWithoutSink));
+    let (plain, plain_allocation) = placed(&rig.jobs, "job-p", "host-a", spec(), BOOKED);
+    let start = crate::job_start::start_of(&plain, &plain_allocation, &unsinked).unwrap();
+    assert!(start.outputs.is_empty() & start.log_sink.is_none());
 }
 
 /// With every log line captured and the status page rendered, across a mint that succeeds, one

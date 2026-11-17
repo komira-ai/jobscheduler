@@ -20,12 +20,13 @@ use js_proto::v1::{
 use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
     Constraints, CordonHostRequest, CordonHostResponse, ExecMode, GetJobRequest, GetJobResponse,
-    GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest,
-    GetUsageResponse, Job, JobFile, JobResult, JobSpec, JobState, JobTimes, ListHostsRequest,
-    ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse,
-    ListProvidersRequest, ListProvidersResponse, LogGap, LogStream, Needs, NetworkLevel,
-    PortForward, ResourceUsage, ResultReason, StartFailureCode, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    GetLogsRequest, GetLogsResponse, GetOutputsRequest, GetOutputsResponse, GetResultRequest,
+    GetResultResponse, GetUsageRequest, GetUsageResponse, Job, JobFile, JobResult, JobSpec,
+    JobState, JobTimes, ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse,
+    ListPoolsRequest, ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, LogGap,
+    LogStream, Needs, NetworkLevel, OutputFailure, OutputFile, PortForward, ResourceUsage,
+    ResultReason, StartFailureCode, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -186,6 +187,30 @@ impl JobService for Stub {
             }
         };
         self.answer("GetLogs", request, response)
+    }
+
+    async fn get_outputs(
+        &self,
+        request: Request<GetOutputsRequest>,
+    ) -> Result<Response<GetOutputsResponse>, Status> {
+        let response = GetOutputsResponse {
+            state: JobState::Succeeded.into(),
+            ready: true,
+            files: vec![OutputFile {
+                path: "out/report.json".to_owned(),
+                bytes: BIG,
+                sha256: "ab".repeat(32),
+                url: "https://store.example/b/p/outputs/out/report.json?X-Amz-Expires=3600"
+                    .to_owned(),
+            }],
+            missing: vec!["coverage.lcov".to_owned()],
+            failed: vec![OutputFailure {
+                path: "out/core".to_owned(),
+                reason: "too-large".to_owned(),
+            }],
+            urls_expire_at_ms: Some(BIG + 3_600_000),
+        };
+        self.answer("GetOutputs", request, response)
     }
 
     async fn list_hosts(
@@ -442,6 +467,7 @@ pub fn spec() -> JobSpec {
             no_exec: true,
             propagation: js_proto::v1::MountPropagation::Private.into(),
         }],
+        outputs: Vec::new(),
     }
 }
 

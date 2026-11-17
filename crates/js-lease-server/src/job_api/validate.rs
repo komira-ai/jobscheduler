@@ -23,6 +23,7 @@
 //! | `spec.files` | as a start's run files are (`js_agent_wire::validate_files`) | `field: spec.files` |
 //! | `spec.labels` | as a lease's labels are (`Labels::from_caller`) | `field: spec.labels` |
 //! | `spec.layers`, `spec.mounts` | the rules of `rootfs` | `field: spec.layers[i].<name>`, `spec.mounts[i].<name>` |
+//! | `spec.outputs` | at most 64 paths of the store's rules, none twice and none inside another (`js_logstore::outputs::check_declared`, `docs/design/job-outputs.md`) | `field: spec.outputs[i].path` |
 //!
 //! The cross-field rules (an empty image, its command, `exec`, `needs.wholeHost` and
 //! `isolation` beside the layers, mounts and host ports) are checked once those fields are, and
@@ -40,6 +41,11 @@
 //! admission refuses at submit a job no host or catalog could serve, and it is placed and
 //! started only on a host whose agent reports each key.
 //!
+//! A job with outputs records `job-outputs=true` among its capabilities, so it is placed and
+//! started only on a host whose agent uploads them. Admission does not look at the key: such a
+//! job, while no host reports it, waits in the queue and fails to start when the pool's queue
+//! wait passes.
+//!
 //! A field is named by its JSON name, as the gateway names it. A refusal never repeats a
 //! value of the request: not the id, not the image, not a file.
 //!
@@ -53,10 +59,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{Layer, RunFile, validate_files};
-use js_caps::{FLAG_SET, LAYERED_ROOTFS, mount_provider_key};
+use js_caps::{FLAG_SET, JOB_OUTPUTS, LAYERED_ROOTFS, mount_provider_key};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
 };
+use js_logstore::outputs::check_declared;
 use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,
@@ -130,6 +137,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
     let labels = labels(&spec.labels)?;
     let layers = rootfs::layers(&spec.layers)?;
     let mounts = rootfs::mounts(&spec.mounts)?;
+    let outputs = outputs(&spec.outputs)?;
     let accelerator = AcceleratorNeed::requested(&capabilities, resources.shape())
         .map_err(|_| Fault::Field("spec.constraints.accelerator"))?;
     imageless(image.as_ref(), &spec.command, &layers)?;
@@ -145,6 +153,9 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
             return Err(Fault::Field("spec.needs"));
         }
         capabilities.insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
+    }
+    if !outputs.is_empty() {
+        capabilities.insert(JOB_OUTPUTS.to_owned(), FLAG_SET.to_owned());
     }
     let mount_providers = rootfs::providers(&layers, &mounts);
     for name in &mount_providers {
@@ -194,6 +205,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         layers,
         mounts,
         host_ports,
+        outputs,
     };
     Ok(Valid {
         id,
@@ -433,6 +445,13 @@ fn files(files: &[v1::JobFile]) -> Result<JobFiles, Fault> {
             .map(|file| (file.name, file.contents.into_bytes()))
             .collect(),
     ))
+}
+
+/// The declared outputs, held to the store's rules (`js_logstore::outputs::check_declared`):
+/// the first path at fault is named, `spec.outputs[i].path`.
+fn outputs(paths: &[String]) -> Result<Vec<String>, Fault> {
+    check_declared(paths).map_err(|(at, _)| Fault::Entry("outputs", at, "path"))?;
+    Ok(paths.to_vec())
 }
 
 /// The labels, checked as a lease's are.

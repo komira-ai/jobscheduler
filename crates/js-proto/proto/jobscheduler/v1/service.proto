@@ -96,6 +96,16 @@ service JobService {
       get: "/v1/jobs/{job_id}/logs"
     };
   }
+  // Reads the outputs a job declared, once its host has put them in the object store
+  // (docs/design/job-outputs.md): each file with its length, its SHA-256 and a presigned URL
+  // that reads it from the store for an hour, the declared paths the job did not make, and
+  // the paths that could not be put. Until the job has ended and its host has written the
+  // outputs' manifest, the answer is not ready and holds no file. Changes nothing.
+  rpc GetOutputs(GetOutputsRequest) returns (GetOutputsResponse) {
+    option (google.api.http) = {
+      get: "/v1/jobs/{job_id}/outputs"
+    };
+  }
   // Lists the hosts, each with the resources booked on it. Changes nothing.
   rpc ListHosts(ListHostsRequest) returns (ListHostsResponse) {
     option (google.api.http) = {
@@ -303,6 +313,53 @@ message GetLogsResponse {
   // epoch on the host's clock, as the log store recorded it. Absent when data is empty or
   // came from the stream's final file.
   optional uint64 first_byte_at_ms = 10;
+}
+
+// The request of GetOutputs.
+message GetOutputsRequest {
+  // The id of the job whose outputs to read.
+  string job_id = 1;
+}
+
+// One output file of a job, as its host put it in the object store.
+message OutputFile {
+  // The file's path, relative to the job's working directory: a declared path, or one below
+  // a declared directory.
+  string path = 1;
+  // The file's length in bytes.
+  uint64 bytes = 2;
+  // The SHA-256 of the file's bytes, 64 lower-case hex digits.
+  string sha256 = 3;
+  // A presigned GET of the file in the object store: a plain GET of it reads the file, with no
+  // other credential, until urls_expire_at_ms. It reads that one object and nothing else.
+  string url = 4;
+}
+
+// A path of a job's outputs that its host could not put in the object store.
+message OutputFailure {
+  // The path, relative to the job's working directory.
+  string path = 1;
+  // Why, one word: not-a-file, too-large, over-limit, name, read or store.
+  string reason = 2;
+}
+
+// The answer of GetOutputs.
+message GetOutputsResponse {
+  // The job's state when the outputs were read.
+  JobState state = 1;
+  // The job's host has written the outputs' manifest: the lists below are the whole of the
+  // job's outputs. False while the job has not ended, while its host is still putting them,
+  // and when it never will (it went away, or ran out of time); the lists are then empty.
+  bool ready = 2;
+  // The files put, in the order the host put them.
+  repeated OutputFile files = 3;
+  // The declared paths the job did not make.
+  repeated string missing = 4;
+  // The paths the host could not put.
+  repeated OutputFailure failed = 5;
+  // When the URLs of files stop reading, in milliseconds since the Unix epoch on the
+  // service's clock. Absent when no file is listed.
+  optional uint64 urls_expire_at_ms = 6;
 }
 
 // The request of ListHosts.

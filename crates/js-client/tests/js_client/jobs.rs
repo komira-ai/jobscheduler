@@ -9,8 +9,9 @@ use std::time::Duration;
 use js_client::jobs::{Dialer, JobClient, JobError};
 use js_proto::v1::{
     CancelJobRequest, ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetLogsRequest,
-    GetResultRequest, GetUsageRequest, JobSpec, ListHostsRequest, ListJobsRequest,
-    ListPoolsRequest, ListProvidersRequest, Needs, SubmitJobRequest, UncordonHostRequest,
+    GetOutputsRequest, GetResultRequest, GetUsageRequest, JobSpec, ListHostsRequest,
+    ListJobsRequest, ListPoolsRequest, ListProvidersRequest, Needs, SubmitJobRequest,
+    UncordonHostRequest,
 };
 use prost::Message as _;
 use tonic::Code;
@@ -244,6 +245,9 @@ async fn job_client_sends_the_bearer_on_every_call() {
     jobs.cancel_job(CancelJobRequest::default()).await.unwrap();
     jobs.get_result(GetResultRequest::default()).await.unwrap();
     jobs.get_logs(GetLogsRequest::default()).await.unwrap();
+    jobs.get_outputs(GetOutputsRequest::default())
+        .await
+        .unwrap();
     jobs.list_hosts(ListHostsRequest {}).await.unwrap();
     jobs.cordon_host(CordonHostRequest::default())
         .await
@@ -271,6 +275,7 @@ async fn job_client_sends_the_bearer_on_every_call() {
             "CancelJob",
             "GetResult",
             "GetLogs",
+            "GetOutputs",
             "ListHosts",
             "CordonHost",
             "UncordonHost",

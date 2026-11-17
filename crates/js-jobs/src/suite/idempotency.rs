@@ -240,6 +240,9 @@ pub fn same_id_different_job_is_a_conflict<B: Backend>(backend: &B) {
         ("a host port's job port", |spec| {
             spec.host_ports[0].container_port = Some(7172);
         }),
+        ("the declared outputs", |spec| {
+            spec.outputs = vec!["out".to_owned()];
+        }),
     ];
     for &(field, change) in changes {
         let mut spec = full_spec();

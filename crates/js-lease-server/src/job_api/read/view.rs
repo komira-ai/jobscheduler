@@ -278,6 +278,7 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
         host_ports: spec.host_ports.iter().map(host_port).collect(),
         layers: spec.layers.iter().map(layer).collect(),
         mounts: spec.mounts.iter().map(mount).collect(),
+        outputs: spec.outputs.clone(),
     }
 }
 

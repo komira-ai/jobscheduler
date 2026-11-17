@@ -10,10 +10,11 @@ use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
     self, CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
     CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
-    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
-    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, RefusalCode, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    GetLogsResponse, GetOutputsRequest, GetOutputsResponse, GetResultRequest, GetResultResponse,
+    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListJobsRequest,
+    ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
+    ListProvidersResponse, RefusalCode, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
@@ -325,7 +326,7 @@ impl Inner {
 
 /// The job service in memory, answering as the real one does (`JobApi` of
 /// `js-lease-server`) for `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob` and `GetResult`.
-/// The other calls (`GetLogs` and the fleet calls) answer `UNIMPLEMENTED`, as the real
+/// The other calls (`GetLogs`, `GetOutputs` and the fleet calls) answer `UNIMPLEMENTED`, as the real
 /// service does for a call it is not given.
 ///
 /// The model checks only what the scenarios exercise: that a submit has a spec, that the
@@ -554,6 +555,13 @@ impl JobService for ReferenceJobs {
         &self,
         _: Request<GetLogsRequest>,
     ) -> Result<Response<GetLogsResponse>, Status> {
+        unserved()
+    }
+
+    async fn get_outputs(
+        &self,
+        _: Request<GetOutputsRequest>,
+    ) -> Result<Response<GetOutputsResponse>, Status> {
         unserved()
     }
 

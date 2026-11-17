@@ -234,7 +234,7 @@ fn a_template_parses_into_segments_and_a_verb() {
     assert_eq!(Template::parse("/v1/jobs/{}"), Err(Fault::Template));
 }
 
-/// Asserts that the job service's own options pass the checks and give its twelve routes,
+/// Asserts that the job service's own options pass the checks and give its fourteen routes,
 /// with the verbs the crate documents (a change is a POST, a read a GET) and the success
 /// statuses (201 for a submit, 200 for the rest).
 #[test]
@@ -263,6 +263,7 @@ fn the_job_service_routes_pass_the_checks() {
             ("CancelJob", "POST", "/v1/jobs/{job_id}:cancel", true, 200),
             ("GetResult", "GET", "/v1/jobs/{job_id}/result", false, 200),
             ("GetLogs", "GET", "/v1/jobs/{job_id}/logs", false, 200),
+            ("GetOutputs", "GET", "/v1/jobs/{job_id}/outputs", false, 200),
             ("ListHosts", "GET", "/v1/hosts", false, 200),
             (
                 "CordonHost",

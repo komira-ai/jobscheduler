@@ -75,8 +75,8 @@ use std::sync::Arc;
 
 use js_jobs::{ClientName, JobId, JobPage, JobRecord, JobState, MAX_PAGE, keys};
 use js_proto::v1::{
-    self, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
-    GetResultResponse, ListJobsRequest, ListJobsResponse,
+    self, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetOutputsRequest,
+    GetOutputsResponse, GetResultRequest, GetResultResponse, ListJobsRequest, ListJobsResponse,
 };
 use js_state::{ResumeToken, StoreTime};
 use js_types::Clock;
@@ -85,7 +85,7 @@ use tonic::{Request, Response, Status};
 
 use super::fleet::Handle;
 use super::roles::{Caller, hidden};
-use super::{JobApi, logs};
+use super::{JobApi, logs, outputs};
 
 pub(crate) mod view;
 
@@ -296,6 +296,18 @@ pub(super) async fn get_logs(
         Some(stream) => logs::get_logs(api, caller, job, &request, stream).await?,
     };
     Ok(Response::new(answer))
+}
+
+/// `GetOutputs`: the outputs of a job the caller may read, within the retention window
+/// (`outputs.rs`).
+pub(super) async fn get_outputs(
+    api: &JobApi,
+    caller: &Caller,
+    request: Request<GetOutputsRequest>,
+) -> Result<Response<GetOutputsResponse>, Status> {
+    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
+    let job = unexpired(api, job)?;
+    outputs::get_outputs(api, job).await.map(Response::new)
 }
 
 /// The tails `GetLogs` answers for `job`: its result's, or none.

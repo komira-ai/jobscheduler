@@ -66,6 +66,17 @@ impl JobClient {
         answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
+    /// Reads the outputs a job declared, once its host has put them in the object store
+    /// (docs/design/job-outputs.md): each file with its length, its SHA-256 and a presigned URL
+    /// that reads it from the store for an hour, the declared paths the job did not make, and
+    /// the paths that could not be put. Until the job has ended and its host has written the
+    /// outputs' manifest, the answer is not ready and holds no file. Changes nothing.
+    pub async fn get_outputs(&mut self, request: v1::GetOutputsRequest) -> Result<v1::GetOutputsResponse, JobError> {
+        let (attempt, request) = self.begin(request);
+        let answer = tokio::time::timeout(self.limit, self.service.get_outputs(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
+    }
+
     /// Lists the hosts, each with the resources booked on it. Changes nothing.
     pub async fn list_hosts(&mut self, request: v1::ListHostsRequest) -> Result<v1::ListHostsResponse, JobError> {
         let (attempt, request) = self.begin(request);

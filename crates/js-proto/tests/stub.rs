@@ -15,13 +15,14 @@ use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
     Availability, CancelJobRequest, CancelJobResponse, ClearHostTaintRequest,
     ClearHostTaintResponse, CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse,
-    GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest,
-    GetUsageResponse, Host, HostBooking, HostMark, HostSource, HostState, Job, JobResult, JobState,
-    JobTimes, ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse,
-    ListPoolsRequest, ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, Machine,
-    Memory, Pool, Provider, ProviderCatalog, ProviderCheck, Refusal, RefusalCode, ResourceUsage,
-    ResultReason, Shape, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse, UsageRecord, WholeHostOutcome,
+    GetLogsRequest, GetLogsResponse, GetOutputsRequest, GetOutputsResponse, GetResultRequest,
+    GetResultResponse, GetUsageRequest, GetUsageResponse, Host, HostBooking, HostMark, HostSource,
+    HostState, Job, JobResult, JobState, JobTimes, ListHostsRequest, ListHostsResponse,
+    ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
+    ListProvidersResponse, Machine, Memory, OutputFailure, OutputFile, Pool, Provider,
+    ProviderCatalog, ProviderCheck, Refusal, RefusalCode, ResourceUsage, ResultReason, Shape,
+    SubmitJobRequest, SubmitJobResponse, UncordonHostRequest, UncordonHostResponse, UsageRecord,
+    WholeHostOutcome,
 };
 use tokio::io::DuplexStream;
 use tonic::codegen::Service;
@@ -80,6 +81,7 @@ enum Call {
     CancelJob(CancelJobRequest),
     GetResult(GetResultRequest),
     GetLogs(GetLogsRequest),
+    GetOutputs(GetOutputsRequest),
     ListHosts(ListHostsRequest),
     CordonHost(CordonHostRequest),
     UncordonHost(UncordonHostRequest),
@@ -157,6 +159,16 @@ impl JobService for Recording {
         request: Request<GetLogsRequest>,
     ) -> Result<Response<GetLogsResponse>, Status> {
         self.record(Call::GetLogs(request.into_inner()), answers::get_logs())
+    }
+
+    async fn get_outputs(
+        &self,
+        request: Request<GetOutputsRequest>,
+    ) -> Result<Response<GetOutputsResponse>, Status> {
+        self.record(
+            Call::GetOutputs(request.into_inner()),
+            answers::get_outputs(),
+        )
     }
 
     async fn list_hosts(
@@ -266,6 +278,12 @@ mod requests {
         GetLogsRequest {
             job_id: "logs-job".to_owned(),
             ..GetLogsRequest::default()
+        }
+    }
+
+    pub fn get_outputs() -> GetOutputsRequest {
+        GetOutputsRequest {
+            job_id: "outputs-job".to_owned(),
         }
     }
 
@@ -420,6 +438,25 @@ mod answers {
         }
     }
 
+    pub fn get_outputs() -> GetOutputsResponse {
+        GetOutputsResponse {
+            state: JobState::Succeeded.into(),
+            ready: true,
+            files: vec![OutputFile {
+                path: "out/report.json".to_owned(),
+                bytes: 1534,
+                sha256: "ab".repeat(32),
+                url: "https://store.example/logs/out/report.json?X-Amz-Signature=0".to_owned(),
+            }],
+            missing: vec!["coverage.lcov".to_owned()],
+            failed: vec![OutputFailure {
+                path: "out/core".to_owned(),
+                reason: "too-large".to_owned(),
+            }],
+            urls_expire_at_ms: Some(1_800_003_600_000),
+        }
+    }
+
     pub fn list_hosts() -> ListHostsResponse {
         ListHostsResponse {
             hosts: vec![host("listed-host")],
@@ -530,7 +567,7 @@ fn code<T>(reply: Result<Response<T>, Status>) -> Code {
     reply.map(|_| ()).expect_err("the call fails").code()
 }
 
-/// Asserts that each of the 13 methods carries its request to the stub's own handler with
+/// Asserts that each of the 14 methods carries its request to the stub's own handler with
 /// every field intact, and carries that handler's answer back with every field intact.
 /// Catches a field dropped on the way and a method wired to another method's handler.
 #[tokio::test]
@@ -560,6 +597,10 @@ async fn every_method_round_trips_through_a_stub() {
     assert_eq!(
         answer(client.get_logs(requests::get_logs()).await),
         answers::get_logs()
+    );
+    assert_eq!(
+        answer(client.get_outputs(requests::get_outputs()).await),
+        answers::get_outputs()
     );
     assert_eq!(
         answer(client.list_hosts(ListHostsRequest {}).await),
@@ -598,6 +639,7 @@ async fn every_method_round_trips_through_a_stub() {
             Call::CancelJob(requests::cancel_job()),
             Call::GetResult(requests::get_result()),
             Call::GetLogs(requests::get_logs()),
+            Call::GetOutputs(requests::get_outputs()),
             Call::ListHosts(ListHostsRequest {}),
             Call::CordonHost(requests::cordon_host()),
             Call::UncordonHost(requests::uncordon_host()),
@@ -678,7 +720,7 @@ impl JobService for OnlyGetJob {
 }
 
 /// Asserts that a server implementing only `GetJob` answers it and answers each of the
-/// other 12 methods `UNIMPLEMENTED`, so a partial server fails closed.
+/// other 13 methods `UNIMPLEMENTED`, so a partial server fails closed.
 #[tokio::test]
 async fn unimplemented_default_methods_answer_unimplemented() {
     let mut client = connect(OnlyGetJob).await;
@@ -696,6 +738,7 @@ async fn unimplemented_default_methods_answer_unimplemented() {
         code(client.cancel_job(requests::cancel_job()).await),
         code(client.get_result(requests::get_result()).await),
         code(client.get_logs(requests::get_logs()).await),
+        code(client.get_outputs(requests::get_outputs()).await),
         code(client.list_hosts(ListHostsRequest {}).await),
         code(client.cordon_host(requests::cordon_host()).await),
         code(client.uncordon_host(requests::uncordon_host()).await),
@@ -704,5 +747,5 @@ async fn unimplemented_default_methods_answer_unimplemented() {
         code(client.list_providers(ListProvidersRequest {}).await),
         code(client.get_usage(requests::get_usage()).await),
     ];
-    assert_eq!(codes, [Code::Unimplemented; 12]);
+    assert_eq!(codes, [Code::Unimplemented; 13]);
 }

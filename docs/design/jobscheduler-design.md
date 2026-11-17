@@ -26,6 +26,10 @@ The maintainers decided the following. The text below follows these decisions; t
 - **The picture shows the target only.** Section 3's picture has no registry, no separate scaler and no "today" notes (built and planned status is in the table of 3.1; the drift is in 0.1 and 12.1). Section 3.2 says what a job and an allocation are. Section 5.7 walks one job from submit to result and says why each step exists; constants and today-versus-target detail are in an "As built today" box at its end.
 - **Per-job network policy.** A job asks for `network = none | allow-list | open` and declares a list of host ports; each declared port becomes one DNAT host-port forward, and there is no other ingress. The agent's flags are the ceiling a job cannot exceed. The Podman firewall path is retired, so there is one concept (section 5.8).
 - **Live logs.** When the server's `[logs]` table names an object store, a job's whole output, stdout and stderr apart, is read with `GetLogs` while the job runs and for the retention window after it ends, from any byte offset and with `follow`. The agent uploads it in chunks with one upload credential per host that the scheduler mints; the scheduler never stores the bytes. The result's 8 KiB tail is unchanged. The detail is in `live-logs.md`; sections 3.6, 5.3 and 5.7 of this document summarise it.
+- **Job outputs.** A job may declare files it leaves (`JobSpec.outputs`, paths below its working directory). When it ends, the
+  agent of a host that reports `job-outputs` puts them in the live logs' object store under the job's prefix with the same host
+  credential, and writes a manifest last; `GetOutputs` reads the manifest and answers a presigned GET URL for each file. The
+  scheduler never holds the bytes. The detail is in `job-outputs.md`.
 
 ---
 

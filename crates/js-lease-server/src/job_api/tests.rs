@@ -20,10 +20,11 @@ use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
     CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
-    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
-    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    GetLogsResponse, GetOutputsRequest, GetOutputsResponse, GetResultRequest, GetResultResponse,
+    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListJobsRequest,
+    ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
+    ListProvidersResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use js_state::Store;
 use js_state::fake::{Fake, Flaw};
@@ -88,8 +89,16 @@ const REFUSED: [(&str, &str); 6] = [
 pub(super) const SERVICE: &str = "jobscheduler.v1.JobService";
 
 /// The methods a group serves over a service built with every context at its default
-/// (`read.rs` and `cancel.rs`): they answer what the call answers, not `UNIMPLEMENTED`.
-const SERVED: [&str; 5] = ["GetJob", "ListJobs", "CancelJob", "GetResult", "GetLogs"];
+/// (`read.rs`, `outputs.rs` and `cancel.rs`): they answer what the call answers, not
+/// `UNIMPLEMENTED`.
+const SERVED: [&str; 6] = [
+    "GetJob",
+    "ListJobs",
+    "CancelJob",
+    "GetResult",
+    "GetLogs",
+    "GetOutputs",
+];
 
 /// The methods the fleet group (`fleet.rs`) serves once its context is given the server's
 /// handles ([`fleet::Ctx::served`]), as the server's service is.
@@ -326,6 +335,7 @@ recorded! {
     cancel_job: CancelJobRequest => CancelJobResponse;
     get_result: GetResultRequest => GetResultResponse;
     get_logs: GetLogsRequest => GetLogsResponse;
+    get_outputs: GetOutputsRequest => GetOutputsResponse;
     list_hosts: ListHostsRequest => ListHostsResponse;
     cordon_host: CordonHostRequest => CordonHostResponse;
     uncordon_host: UncordonHostRequest => UncordonHostResponse;

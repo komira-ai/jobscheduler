@@ -60,7 +60,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use js_jobs::{JobRecord, JobState};
 use js_logmint::{LogPrefix, host_prefix};
-use js_logstore::{Credential, JobPrefix, Store, StoreError, Stream, Transport, UreqTransport};
+use js_logstore::{
+    Credential, Endpoint, JobPrefix, Store, StoreError, Stream, Transport, UreqTransport,
+};
 use js_proto::v1::{self, GetLogsRequest, GetLogsResponse, LogGap};
 use js_types::Clock as _;
 use tokio::sync::Semaphore;
@@ -114,12 +116,17 @@ impl Waiter for Sleep {
     }
 }
 
-/// Where a server with an object-store sink reads logs: the store, and the log prefix the
-/// hosts' prefixes are built under.
-struct Source {
-    store: page::LogStore,
+/// Where a server with an object-store sink reads logs and outputs: the store, the log prefix
+/// the hosts' prefixes are built under, and the store's endpoint and the read credential, which
+/// presign a client's read of an output (`outputs.rs`).
+pub(super) struct Source {
+    pub(super) store: page::LogStore,
     /// The configured log prefix, with its trailing `/` (empty for none).
-    prefix: LogPrefix,
+    pub(super) prefix: LogPrefix,
+    /// The store's endpoint.
+    pub(super) endpoint: Endpoint,
+    /// The read credential the store signs with.
+    pub(super) credential: Credential,
 }
 
 /// The state of the logs group: the store (none with `sink = "none"`), the waiter of follows
@@ -181,17 +188,24 @@ impl Ctx {
             page::Port(transport),
             StoreClock(clock.clone()),
             sink.endpoint.clone(),
-            credential,
+            credential.clone(),
         );
         let slots = usize::try_from(sink.max_follow).unwrap_or(usize::MAX);
         Ctx {
             source: Some(Arc::new(Source {
                 store,
                 prefix: sink.prefix.clone(),
+                endpoint: sink.endpoint.clone(),
+                credential,
             })),
             follows: Arc::new(Semaphore::new(slots.min(Semaphore::MAX_PERMITS))),
             ..Ctx::default()
         }
+    }
+
+    /// The store the server reads, when it has an object-store sink.
+    pub(super) fn source(&self) -> Option<Arc<Source>> {
+        self.source.clone()
     }
 
     /// The same context, its follows waiting on `waiter`.
@@ -229,7 +243,7 @@ pub(super) async fn get_logs(
     request: &GetLogsRequest,
     stream: Stream,
 ) -> Result<GetLogsResponse, Status> {
-    let Some(source) = api.logs.source.clone() else {
+    let Some(source) = api.logs.source() else {
         return Err(no_log_sink());
     };
     let max = page_bytes(request.max_bytes)?;
@@ -289,7 +303,8 @@ async fn attempt(
             ..page::Page::default()
         });
     };
-    let prefix = job_prefix(&source.prefix, host.as_str(), job.id.as_str())?;
+    let prefix =
+        job_prefix(&source.prefix, host.as_str(), job.id.as_str()).ok_or_else(no_live_logs)?;
     let placed_ms = job.placed_at.map_or(0, view::millis);
     let ask = page::Ask {
         prefix,
@@ -306,12 +321,12 @@ async fn attempt(
 }
 
 /// The prefix `P` of the job `job_id` placed on `host`: the job's id under the host's prefix
-/// under the log prefix `prefix`, as the job's start named it to the agent.
-fn job_prefix(prefix: &LogPrefix, host: &str, job_id: &str) -> Result<JobPrefix, Status> {
+/// under the log prefix `prefix`, as the job's start named it to the agent; `None` when no such
+/// prefix can be built (a job id the layout refuses), so the job had no sink.
+pub(super) fn job_prefix(prefix: &LogPrefix, host: &str, job_id: &str) -> Option<JobPrefix> {
     host_prefix(prefix, host)
         .ok()
         .and_then(|base| JobPrefix::new(base.as_str().trim_end_matches('/'), job_id).ok())
-        .ok_or_else(no_live_logs)
 }
 
 /// How the stream `stream` of the ended job `job` ends: its length and dropped bytes from its
@@ -371,7 +386,7 @@ fn page_bytes(asked: Option<u32>) -> Result<u32, Status> {
 }
 
 /// The answer of a server with no sink: `no-log-sink`.
-fn no_log_sink() -> Status {
+pub(super) fn no_log_sink() -> Status {
     Status::failed_precondition("no-log-sink")
 }
 
@@ -392,7 +407,7 @@ fn too_many_follows() -> Status {
 
 /// The answer of a store request that failed: `log-store-unavailable`, logged by its kind
 /// alone (never a key, a URL or the store's words).
-fn store_failed(error: &StoreError) -> Status {
+pub(super) fn store_failed(error: &StoreError) -> Status {
     let refused = matches!(
         error,
         StoreError::Denied { .. } | StoreError::Expired { .. } | StoreError::NotFound { .. }

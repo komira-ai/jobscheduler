@@ -308,7 +308,9 @@ more than this whatever the role grants.
   `s3:GetObject` on `arn:aws:s3:::BUCKET/L*`. Nothing else.
 - **A lifecycle rule** on the prefix, at least `--job-retention` (D4, section 10).
 - **The log prefix apart from every client's output keys.** A host credential may put and delete anything under its host's prefix, so
-  a client must not let its jobs' outputs (design section 5.7) land under the log prefix.
+  a client must not let its jobs' outputs (design section 5.7) land under the log prefix by keys of its own. The outputs a job declares
+  in `JobSpec.outputs` are the exception: the agent itself puts them under the job's prefix, at `P/outputs/<path>` with the manifest
+  `P/outputs.json`, with the same host credential, and `GetOutputs` reads them with the read key (`job-outputs.md`).
 
 **Lifetime and renewal, per host.** The credential lives for `credential_ttl` (default 1 h). The scheduler mints a host's first one when
 an agent that reported `log-upload` registers, or beats for the first time after a server restart. It mints a new one when the one it
@@ -560,7 +562,8 @@ same host prefix. Checking grants in tierstore, and testing against the real tie
   default, or a capture that frees what was uploaded so the cap bounds the backlog rather than the stream. Design section 13, question 27.
 - **Presigned read URLs.** `GetLogs` returns the bytes through the service. An alternative is to return presigned read URLs of the
   objects, so the bytes go straight from the store to the client; it moves the work off the server and hands a client a URL to the
-  store. Not chosen for v1.
+  store. Not chosen for v1. A job's declared outputs are read that way (`GetOutputs` answers presigned GETs, `job-outputs.md`):
+  an output may be far larger than a page of a stream, and a client downloads it whole.
 - **The CLI's follow loop.** The `js` CLI is generated from the service definition, so the loop that calls `GetLogs` again with
   `next_offset` until `eof`, and backs off on `too-many-follows`, is written by hand: `js job follow` (and `js job run`, which follows
   both streams), over `js_client::jobs::follow_logs`. `js job logs --follow true` stays the one generated call.

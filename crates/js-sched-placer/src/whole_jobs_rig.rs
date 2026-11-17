@@ -135,6 +135,7 @@ pub(crate) fn spec_of(needs: Needs, wall_limit_secs: u64) -> JobSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 

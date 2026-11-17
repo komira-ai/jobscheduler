@@ -42,6 +42,7 @@ writes it between the markers below, and `cargo xtask gen-job-surface --check --
 | `POST /v1/jobs/{job_id}:cancel` | `CancelJob` | 200 |
 | `GET /v1/jobs/{job_id}/result` | `GetResult` | 200 |
 | `GET /v1/jobs/{job_id}/logs` | `GetLogs` | 200 |
+| `GET /v1/jobs/{job_id}/outputs` | `GetOutputs` | 200 |
 | `GET /v1/hosts` | `ListHosts` | 200 |
 | `POST /v1/hosts/{host_id}:cordon` | `CordonHost` | 200 |
 | `POST /v1/hosts/{host_id}:uncordon` | `UncordonHost` | 200 |
@@ -142,13 +143,15 @@ cause.
 | refusal `wall-time-not-positive` | 400 | `wall-time-not-positive`, `field` `spec.wallLimitSeconds` |
 | refusal `wall-time-above-ceiling` | 400 | `wall-time-above-ceiling`, `field` `spec.wallLimitSeconds` |
 | an unknown job | 404 | `unknown-job` |
-| a result or logs past retention | 410 | `expired` |
+| a result, logs or outputs past retention | 410 | `expired` |
 | the result of a job that has not ended | 409 | `not-finished` |
-| logs asked of a server whose log sink is `none` | 409 | `no-log-sink` |
+| logs or outputs asked of, or a job with outputs submitted to, a server whose log sink is `none` | 409 | `no-log-sink` |
 | live logs asked of a job that ran without them | 409 | `no-live-logs` |
+| outputs asked of a job that declared none | 409 | `no-outputs` |
 | a log offset past the end of the stream | 400 | `out-of-range`, `field` `fromOffset` |
 | too many follows open at once | 429 | `too-many-follows` |
 | the log store cannot be read | 503 | `log-store-unavailable` |
+| a job's outputs manifest the server cannot read | 503 | `outputs-unreadable` |
 | a fleet call of a client that is no operator (`PERMISSION_DENIED`, `operator-only`) | 403 | `operator-only` |
 | an argument the service refuses | 400 | `invalid-argument`, with `field` when the service names one |
 | a method the service does not implement | 501 | `unimplemented` |
@@ -159,9 +162,10 @@ cause.
 How the service's answer selects a row: a gRPC status that carries a `Refusal` in its details
 is answered by the refusal's code. Any other status is answered by its gRPC code and its
 message, which the service sets to the code of the table: `NOT_FOUND` with `unknown-job` (404)
-or `expired` (410), `FAILED_PRECONDITION` with `not-finished`, `no-log-sink` or `no-live-logs` (409),
-`OUT_OF_RANGE` with `field: fromOffset` (400 `out-of-range`), `RESOURCE_EXHAUSTED` with
-`too-many-follows` (429), `UNAVAILABLE` with `log-store-unavailable` (503),
+or `expired` (410), `FAILED_PRECONDITION` with `not-finished`, `no-log-sink`, `no-live-logs` or
+`no-outputs` (409), `OUT_OF_RANGE` with `field: fromOffset` (400 `out-of-range`),
+`RESOURCE_EXHAUSTED` with `too-many-follows` (429), `UNAVAILABLE` with `log-store-unavailable` or
+`outputs-unreadable` (503),
 `PERMISSION_DENIED` with `operator-only` (403), `INTERNAL` with
 `state-write-failed` (500 `state-write-failed`), `UNIMPLEMENTED` (501), and `INVALID_ARGUMENT`
 (400, where a message `field: <name>` gives the `field`). Every other status, and a refusal
@@ -189,7 +193,7 @@ request.
 | call | `client` | `operator` |
 |---|---|---|
 | `SubmitJob` | yes | yes |
-| `GetJob`, `GetResult`, `GetLogs`, `CancelJob` | its own jobs only | every job |
+| `GetJob`, `GetResult`, `GetLogs`, `GetOutputs`, `CancelJob` | its own jobs only | every job |
 | `ListJobs` | its own jobs only, whatever the filter | every job |
 | `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403 `operator-only`) | yes |
 
@@ -264,6 +268,7 @@ A request carries at most 64 KiB over either transport: a larger gateway body is
 | calls | file |
 |---|---|
 | `GetJob`, `ListJobs`, `GetResult`, `GetLogs` | `read.rs` |
+| `GetOutputs` | `outputs.rs` (its job read in `read.rs`) |
 | `SubmitJob` | `submit.rs` (its checks in `validate.rs`) |
 | `CancelJob` | `cancel.rs` |
 | `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
@@ -279,7 +284,7 @@ retention end.
 |---|---|---|
 | a `job_id` that is not a job id | `INVALID_ARGUMENT`, `field: jobId` | 400 `invalid-argument`, `field` `jobId` |
 | no job with the id: never submitted, or swept after its retention window | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
-| `GetResult` or `GetLogs` of a job past its retention end and not yet swept | `NOT_FOUND`, `expired` | 410 `expired` |
+| `GetResult`, `GetLogs` or `GetOutputs` of a job past its retention end and not yet swept | `NOT_FOUND`, `expired` | 410 `expired` |
 | `GetResult` of a job that has not ended | `FAILED_PRECONDITION`, `not-finished` | 409 `not-finished` |
 | a `page_token` no listing gave | `INVALID_ARGUMENT`, `field: pageToken` | 400 `invalid-argument`, `field` `pageToken` |
 | a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
@@ -373,6 +378,30 @@ answers, while the job runs and has printed `hello\n`:
 ```
 
 (`offset` is 0, a default, so the answer leaves it out.)
+
+### Reading outputs
+
+`GetOutputs` (`outputs.rs`, [design/job-outputs.md](design/job-outputs.md)) answers the files a
+job declared in `spec.outputs`, once its host has put them in the object store and written their
+manifest, `P/outputs.json`, last. It reads the manifest with the read key and answers each file
+it lists with its path, length, SHA-256 and a presigned GET (`url`), signed with the same key,
+that reads that one object from the store for an hour (`urlsExpireAtMs`); the file's bytes never
+pass through the server. Until the job has ended and the manifest is there, the answer is
+`ready: false` with the job's state and no list: a client asks again. A job with outputs is taken
+only by a server with an object store (`SubmitJob` answers 409 `no-log-sink` otherwise).
+
+| case | gRPC | gateway |
+|---|---|---|
+| the server's `[logs]` table has `sink = "none"` | `FAILED_PRECONDITION`, `no-log-sink` | 409 `no-log-sink` |
+| a job that declared no outputs, or whose id has no log prefix | `FAILED_PRECONDITION`, `no-outputs` | 409 `no-outputs` |
+| a manifest that is not the job's: over 1 MiB, not JSON, another version, a file outside the job's outputs | `UNAVAILABLE`, `outputs-unreadable` | 503 `outputs-unreadable` |
+| the store unreachable, slow, failing, or refusing the read key | `UNAVAILABLE`, `log-store-unavailable` | 503 `log-store-unavailable` |
+
+For example, `GET /v1/jobs/build-42/outputs` answers, once the job's host has put its report:
+
+```json
+{"state": "JOB_STATE_SUCCEEDED", "ready": true, "files": [{"path": "out/report.json", "bytes": "1534", "sha256": "<64 hex digits>", "url": "https://<store>/<bucket>/<prefix>/outputs/out/report.json?X-Amz-..."}], "urlsExpireAtMs": "1800003600000"}
+```
 
 **`ListJobs`** keeps the jobs in any of the `states` (a state this server does not know
 matches none), carrying every one of the `labels` with the same value, submitted by the

@@ -14,10 +14,11 @@ use js_jobs::{ClientName, NewJob, Retention};
 use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
     CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
-    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
-    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    GetLogsResponse, GetOutputsRequest, GetOutputsResponse, GetResultRequest, GetResultResponse,
+    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListJobsRequest,
+    ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
+    ListProvidersResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use js_registry::{HostState, HostView};
 use js_state::ManualClock;
@@ -165,6 +166,7 @@ enum Call {
     Get(&'static str),
     Result(&'static str),
     Logs(&'static str),
+    Outputs(&'static str),
     List,
     Cancel(&'static str),
     ListHosts,
@@ -210,6 +212,13 @@ async fn answer(rig: &Writes, token: &str, call: Call) -> (Code, String) {
             };
             status(
                 rig.grpc_as::<_, GetLogsResponse>(token, "GetLogs", request)
+                    .await,
+            )
+        }
+        Call::Outputs(id) => {
+            let request = GetOutputsRequest { job_id: job(id) };
+            status(
+                rig.grpc_as::<_, GetOutputsResponse>(token, "GetOutputs", request)
                     .await,
             )
         }
@@ -313,7 +322,8 @@ fn cancel_asked(rig: &Writes, id: &str) -> bool {
 
 /// Asserts the exact answer of every call to the client `ci` and to the operator `ops`: both
 /// submit; each reads, lists and cancels its own jobs; `ci` is answered `unknown-job` for the
-/// job of `kbf` and the job with no client (`GetJob`, `GetResult`, `GetLogs`, `CancelJob`),
+/// job of `kbf` and the job with no client (`GetJob`, `GetResult`, `GetLogs`, `GetOutputs`,
+/// `CancelJob`),
 /// lists only its own jobs (also when it asks for `kbf`'s), and is refused every fleet call
 /// `PERMISSION_DENIED` `operator-only`; `ops` reads, lists and cancels every job and makes
 /// every fleet call. A refused cancel asks for nothing. Catches a client that cancels or reads
@@ -329,6 +339,8 @@ async fn each_role_is_answered_as_the_role_table_says() {
     let unknown = (Code::NotFound, "unknown-job".to_owned());
     let not_finished = (Code::FailedPrecondition, "not-finished".to_owned());
     let operator_only = (Code::PermissionDenied, "operator-only".to_owned());
+    // The rig has no object store: a job the caller may read answers `no-log-sink`.
+    let no_sink = (Code::FailedPrecondition, "no-log-sink".to_owned());
     let fleet = [
         Call::ListHosts,
         Call::Cordon,
@@ -347,6 +359,8 @@ async fn each_role_is_answered_as_the_role_table_says() {
         (Call::Get("kbf-job"), unknown.clone()),
         (Call::Result("kbf-job"), unknown.clone()),
         (Call::Logs("kbf-job"), unknown.clone()),
+        (Call::Outputs("ci-job"), no_sink.clone()),
+        (Call::Outputs("kbf-job"), unknown.clone()),
         (Call::Get("none-job"), unknown.clone()),
         (Call::Cancel("kbf-job"), unknown.clone()),
         (Call::Cancel("none-job"), unknown.clone()),
@@ -380,6 +394,7 @@ async fn each_role_is_answered_as_the_role_table_says() {
         (Call::Get("none-job"), ok.clone()),
         (Call::Result("kbf-job"), not_finished.clone()),
         (Call::Logs("kbf-job"), ok.clone()),
+        (Call::Outputs("kbf-job"), no_sink.clone()),
         (Call::List, ok.clone()),
         (Call::Cancel("ops-job"), ok.clone()),
         (Call::Cancel("kbf-job"), ok.clone()),

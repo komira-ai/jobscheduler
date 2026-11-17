@@ -58,6 +58,11 @@ pub(crate) enum Unsendable {
     /// sources would not read the source, so it is never sent such a job. It names the key.
     #[error("the job requires {0} and the host does not report it")]
     MountProviderNotReported(String),
+    /// The job declares outputs and the start has no log sink to put them under: the server
+    /// has no object store, or the host does not upload live logs (`docs/design/job-outputs.md`).
+    /// The job's outputs could never be read back, so it is not started there.
+    #[error("the job declares outputs and the host has no log sink to put them under")]
+    OutputsWithoutSink,
     /// The wall limit in milliseconds overflows.
     #[error("the wall limit overflows")]
     WallLimit,
@@ -100,7 +105,10 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 /// `host-jobs` ([`BeatContext::host_jobs`]), and one with layers, mounts or host ports only to
 /// a host whose agent reported `layered-rootfs` ([`BeatContext::layered_rootfs`]); a job that
 /// requires a `mount-provider.<name>` capability is sent only to a host whose agent reported
-/// each such key ([`BeatContext::mount_providers`]).
+/// each such key ([`BeatContext::mount_providers`]). The job's declared outputs go as its
+/// record holds them; a job with outputs whose start has no sink (the agent would have nowhere
+/// to put them) is not sent ([`Unsendable::OutputsWithoutSink`]). Placement sends such a job
+/// only to a host that reports `job-outputs`, which an agent reports only with `log-upload`.
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -204,10 +212,13 @@ pub(crate) fn start_of(
         layers: spec.layers.clone(),
         mounts: spec.mounts.clone(),
         host_ports: spec.host_ports.clone(),
-        outputs: Vec::new(),
+        outputs: spec.outputs.clone(),
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);
+    if !start.outputs.is_empty() & start.log_sink.is_none() {
+        return Err(Unsendable::OutputsWithoutSink);
+    }
     start
         .validate()
         .and_then(|()| start.require_pinned())

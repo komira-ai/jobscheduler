@@ -76,10 +76,11 @@ use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
     CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
-    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
-    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
-    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    GetLogsResponse, GetOutputsRequest, GetOutputsResponse, GetResultRequest, GetResultResponse,
+    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListJobsRequest,
+    ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
+    ListProvidersResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
+    UncordonHostResponse,
 };
 use tonic::{Code, Request, Response, Status};
 use tower::Layer;
@@ -93,6 +94,7 @@ mod auth;
 pub(crate) mod cancel;
 pub(crate) mod fleet;
 pub(crate) mod logs;
+pub(crate) mod outputs;
 pub(crate) mod read;
 pub(crate) mod roles;
 mod rootfs;
@@ -116,6 +118,8 @@ mod logs_follow_tests;
 mod logs_rig;
 #[cfg(test)]
 mod logs_tests;
+#[cfg(test)]
+mod outputs_tests;
 #[cfg(test)]
 mod read_list_tests;
 #[cfg(test)]
@@ -325,6 +329,20 @@ impl JobService for JobApi {
             Err(status) => Err(status),
         };
         logged("GetLogs", caller.as_ref(), Target::Job(&job), &answer);
+        answer
+    }
+
+    async fn get_outputs(
+        &self,
+        request: Request<GetOutputsRequest>,
+    ) -> Result<Response<GetOutputsResponse>, Status> {
+        let caller = caller_of(&request);
+        let job = request.get_ref().job_id.clone();
+        let answer = match admitted(caller.as_ref()) {
+            Ok(caller) => read::get_outputs(self, caller, request).await,
+            Err(status) => Err(status),
+        };
+        logged("GetOutputs", caller.as_ref(), Target::Job(&job), &answer);
         answer
     }
 

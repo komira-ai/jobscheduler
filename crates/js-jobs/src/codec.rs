@@ -363,7 +363,7 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
         .collect();
     row.put(t::PORTS, ports);
     file_fields::put_files(row, &spec.files);
-    rootfs_fields::put_spec(row, &spec.layers, &spec.mounts, &spec.host_ports);
+    rootfs_fields::put_spec(row, spec);
     row.put(
         t::LABELS,
         map(spec
@@ -878,23 +878,11 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let ports = fields.opt(t::PORTS, ports_of)?.unwrap_or_default();
     let files = file_fields::take_files(fields)?;
     let labels = fields.opt(t::LABELS, labels_of)?.unwrap_or_default();
-    let (layers, mounts, host_ports) = rootfs_fields::take_spec(fields)?;
-    Ok(JobSpec {
-        image,
-        command,
-        args,
-        env,
-        needs,
-        constraints,
-        wall_limit_secs,
-        network,
-        ports,
-        files,
-        labels,
-        layers,
-        mounts,
-        host_ports,
-    })
+    let (layers, mounts, host_ports, outputs) = rootfs_fields::take_spec(fields)?;
+    #[rustfmt::skip]
+    let spec = JobSpec { image, command, args, env, needs, constraints, wall_limit_secs, network,
+        ports, files, labels, layers, mounts, host_ports, outputs };
+    Ok(spec)
 }
 
 /// The job a row holds.

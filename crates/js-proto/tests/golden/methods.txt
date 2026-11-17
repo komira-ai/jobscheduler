@@ -4,6 +4,7 @@ ListJobs
 CancelJob
 GetResult
 GetLogs
+GetOutputs
 ListHosts
 CordonHost
 UncordonHost

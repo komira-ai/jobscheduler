@@ -369,7 +369,7 @@ fn refusal_to_status_table_matches_golden() {
 }
 
 /// The messages each gRPC code is tried with in the status table.
-const MESSAGES: [&str; 12] = [
+const MESSAGES: [&str; 14] = [
     "unknown-job",
     "expired",
     "not-finished",
@@ -382,6 +382,8 @@ const MESSAGES: [&str; 12] = [
     "too-many-follows",
     "log-store-unavailable",
     "field: fromOffset",
+    "no-outputs",
+    "outputs-unreadable",
 ];
 
 /// Asserts that every gRPC code with each message of [`MESSAGES`] maps to the line of
@@ -869,6 +871,15 @@ async fn fleet_usage_and_log_answers_survive_the_mapping() {
         js_proto::v1::GetLogsResponse,
         "GetLogsResponse",
         "/v1/jobs/x-1/logs"
+    );
+    same!(
+        get_outputs,
+        js_proto::v1::GetOutputsRequest {
+            job_id: "x-1".to_owned(),
+        },
+        js_proto::v1::GetOutputsResponse,
+        "GetOutputsResponse",
+        "/v1/jobs/x-1/outputs"
     );
     let listed = same!(
         list_jobs,

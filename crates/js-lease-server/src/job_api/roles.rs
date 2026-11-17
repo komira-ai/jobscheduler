@@ -4,7 +4,7 @@
 //! | call | `client` | `operator` |
 //! |---|---|---|
 //! | `SubmitJob` | yes; a retry of a job id another client holds is `job-id-conflict` | yes |
-//! | `GetJob`, `GetResult`, `GetLogs`, `CancelJob` | its own jobs; any other job is `unknown-job`, as one with no row | every job |
+//! | `GetJob`, `GetResult`, `GetLogs`, `GetOutputs`, `CancelJob` | its own jobs; any other job is `unknown-job`, as one with no row | every job |
 //! | `ListJobs` | its own jobs only, whatever the filter | every job |
 //! | `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403) | yes |
 //!

@@ -218,6 +218,10 @@ pub struct JobSpec {
     /// (`container_port` is never `None` in a job the job service recorded) and its protocol.
     /// Not [`Self::ports`], which go the other way, and not booked on the host.
     pub host_ports: Vec<HostPort>,
+    /// The files the job leaves, which its host puts in the object store when it ends: paths
+    /// below its working directory (`docs/design/job-outputs.md`), as the job service checked
+    /// them. Kept after the job ends (they are not secret).
+    pub outputs: Vec<String>,
 }
 
 impl JobSpec {
@@ -251,6 +255,7 @@ impl JobSpec {
             layers,
             mounts,
             host_ports,
+            outputs,
         } = self;
         (*image == submitted.image)
             & (*command == submitted.command)
@@ -266,6 +271,7 @@ impl JobSpec {
             & (*layers == submitted.layers)
             & (*mounts == submitted.mounts)
             & (*host_ports == submitted.host_ports)
+            & (*outputs == submitted.outputs)
     }
 
     /// This spec with its files' contents replaced by their digests: what an ended job keeps.

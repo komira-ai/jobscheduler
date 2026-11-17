@@ -55,6 +55,7 @@
 //! js job get --job-id ID          js job cancel --job-id ID
 //! js job list [--states S ...] [--labels K=V ...] [--page-size N] [--page-token T]
 //! js job result --job-id ID       js job logs --job-id ID
+//! js job outputs --job-id ID
 //! js host list                    js host cordon --host-id ID [--cordon-secs <dur>]
 //! js host uncordon --host-id ID   js host host-taint --host-id ID
 //! js pool list                    js provider list

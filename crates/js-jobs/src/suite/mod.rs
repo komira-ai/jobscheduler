@@ -562,6 +562,7 @@ pub(crate) fn full_spec() -> JobSpec {
                 protocol: PortProtocol::Tcp,
             },
         ],
+        outputs: Vec::new(),
     }
 }
 

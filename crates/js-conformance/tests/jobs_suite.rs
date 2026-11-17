@@ -271,6 +271,7 @@ macro_rules! hollow {
 
 hollow!(
     get_logs: GetLogsRequest -> GetLogsResponse,
+    get_outputs: GetOutputsRequest -> GetOutputsResponse,
     list_hosts: ListHostsRequest -> ListHostsResponse,
     cordon_host: CordonHostRequest -> CordonHostResponse,
     uncordon_host: UncordonHostRequest -> UncordonHostResponse,
@@ -463,6 +464,11 @@ async fn the_calls_the_model_does_not_serve_answer_unimplemented() {
             .err()
             .map(|s| s.code()),
         client
+            .get_outputs(v1::GetOutputsRequest::default())
+            .await
+            .err()
+            .map(|s| s.code()),
+        client
             .list_hosts(v1::ListHostsRequest::default())
             .await
             .err()
@@ -498,7 +504,7 @@ async fn the_calls_the_model_does_not_serve_answer_unimplemented() {
             .err()
             .map(|s| s.code()),
     ];
-    assert_eq!(codes, [Some(Code::Unimplemented); 8]);
+    assert_eq!(codes, [Some(Code::Unimplemented); 9]);
     let status = client.get_usage(v1::GetUsageRequest::default()).await.err();
     assert_eq!(
         status.map(|s| s.message().to_string()),

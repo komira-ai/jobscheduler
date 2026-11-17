@@ -1,11 +1,13 @@
 //! A job's file system beyond its image (`docs/design/job-rootfs.md`): the job row's layers
 //! (tag 54), mounts (55) and host ports (56), the agent's code of a refused start (57), the
-//! code of an input that failed while the job ran (58, a result field), and the job row's
-//! format when the job has no image.
+//! code of an input that failed while the job ran (58, a result field), the job's declared
+//! outputs (59, `docs/design/job-outputs.md`), and the job row's format when the job has no
+//! image.
 //!
-//! Each of tags 54 to 56 is a list, and is written only when it holds an item, so the row of a
-//! job that names none is the bytes a build before these fields wrote. Tags 57 and 58 are text,
-//! written only when there is a code; 58 is read only beside a result (`result_fields`).
+//! Each of tags 54 to 56 and 59 is a list, and is written only when it holds an item, so the
+//! row of a job that names none is the bytes a build before these fields wrote. An output is
+//! its path as text. Tags 57 and 58 are text, written only when there is a code; 58 is read
+//! only beside a result (`result_fields`).
 //!
 //! - A layer is its kind (one byte: 0 a host path, 1 an image, 2 a provider) and its text. The
 //!   text of a provider is its name, a NUL byte and its ref (a name has no NUL, so the first one
@@ -34,6 +36,8 @@
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_types::ImageDigestRef;
 
+use crate::record::JobSpec;
+
 use super::{
     DecodeError, FORMAT, Fields, Writer, byte_of, image_of, items_of, job_tag, list, text, text_of,
 };
@@ -54,6 +58,8 @@ pub(crate) mod job_rootfs_tag {
     pub const START_FAILURE_DETAIL: u16 = 57;
     /// With a result whose reason is an input failure, the agent's code of the input (text).
     pub const RESULT_INPUT_FAILURE: u16 = 58;
+    /// The declared outputs (a list of texts).
+    pub const OUTPUTS: u16 = 59;
 }
 
 use job_rootfs_tag as t;
@@ -95,20 +101,18 @@ pub(super) fn take_image(fields: &mut Fields) -> Result<Option<ImageDigestRef>, 
     }
 }
 
-/// Puts the layers, mounts and host ports in `row`, each only when it holds an item.
-pub(super) fn put_spec(
-    row: &mut Writer,
-    layers: &[Layer],
-    mounts: &[JobMount],
-    host_ports: &[HostPort],
-) {
-    let layers: Vec<Vec<u8>> = layers.iter().map(layer).collect();
-    let mounts: Vec<Vec<u8>> = mounts.iter().map(mount).collect();
-    let ports: Vec<Vec<u8>> = host_ports.iter().map(host_port).collect();
+/// Puts the layers, mounts, host ports and declared outputs of `spec` in `row`, each only when
+/// it holds an item.
+pub(super) fn put_spec(row: &mut Writer, spec: &JobSpec) {
+    let layers: Vec<Vec<u8>> = spec.layers.iter().map(layer).collect();
+    let mounts: Vec<Vec<u8>> = spec.mounts.iter().map(mount).collect();
+    let ports: Vec<Vec<u8>> = spec.host_ports.iter().map(host_port).collect();
+    let outputs: Vec<Vec<u8>> = spec.outputs.iter().map(|path| text(path)).collect();
     for (tag, items) in [
         (t::LAYERS, layers),
         (t::MOUNTS, mounts),
         (t::HOST_PORTS, ports),
+        (t::OUTPUTS, outputs),
     ] {
         row.put_opt(
             tag,
@@ -117,19 +121,27 @@ pub(super) fn put_spec(
     }
 }
 
-/// A job's layers, mounts and host ports.
-type Parts = (Vec<Layer>, Vec<JobMount>, Vec<HostPort>);
+/// A job's layers, mounts, host ports and declared outputs.
+type Parts = (Vec<Layer>, Vec<JobMount>, Vec<HostPort>, Vec<String>);
 
-/// The layers, mounts and host ports of a row, each empty when the row lacks it.
+/// The layers, mounts, host ports and declared outputs of a row, each empty when the row lacks
+/// it (a row from a build before the field).
 pub(super) fn take_spec(fields: &mut Fields) -> Result<Parts, DecodeError> {
     let layers = fields.opt(t::LAYERS, |tag, value| each(tag, &value, layer_of))?;
     let mounts = fields.opt(t::MOUNTS, |tag, value| each(tag, &value, mount_of))?;
     let ports = fields.opt(t::HOST_PORTS, |tag, value| each(tag, &value, host_port_of))?;
+    let outputs = fields.opt(t::OUTPUTS, |tag, value| each(tag, &value, output_of))?;
     Ok((
         layers.unwrap_or_default(),
         mounts.unwrap_or_default(),
         ports.unwrap_or_default(),
+        outputs.unwrap_or_default(),
     ))
+}
+
+/// A declared output: its path, as text.
+fn output_of(tag: u16, item: &[u8]) -> Result<String, DecodeError> {
+    text_of(tag, item.to_vec())
 }
 
 /// Puts the agent's code of a refused start, when there is one, in `row`.

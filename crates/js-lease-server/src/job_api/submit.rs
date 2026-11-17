@@ -201,6 +201,10 @@ pub(super) async fn submit_job(
     let client = Some(caller.name.clone());
     let request = request.into_inner();
     let valid = validate::job(request.spec.as_ref(), served.ceiling).map_err(refused)?;
+    // Outputs are put in the object store: a server without one could never read them back.
+    if !valid.spec.outputs.is_empty() & api.logs.source().is_none() {
+        return Err(super::logs::no_log_sink());
+    }
     let held = match &valid.id {
         Some(id) => api.jobs.get_job(id).map_err(not_written())?.is_some(),
         None => false,
