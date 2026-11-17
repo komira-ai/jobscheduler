@@ -21,7 +21,9 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    already recorded, is only committed; the next pass places it, as before.
 2. **Hold the heartbeat.** An agent that reports the hello capability `held-beat` is one whose session
    sends its next heartbeat at once after a reply that says `beat_now`. The server watches such a host's
-   heartbeat from before it reads the store for the reply (`held_beat::Wakes::watch`). When the reply has
+   heartbeat from before it reads the store for the reply (`held_beat::Wakes::watch`), when the heartbeat's
+   phase is `serving`: a draining, preparing or tainted host takes no new start, and a draining agent
+   counts its drain in the waits it asks for, which a held reply would stretch. When the reply has
    nothing to send (no command, acknowledgement, taint acknowledgement or log credential), the route holds
    it open for the pool's heartbeat interval, at most 5 s, and answers it with `beat_now`. Everything the
    beat reported was committed and counted before the hold.

@@ -87,7 +87,7 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, HostCredential, ProtocolRange, Welcome, refusal,
+    Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, ProtocolRange, Welcome, refusal,
 };
 use js_registry::{Credential, Refusal};
 use js_types::Clock;
@@ -530,7 +530,11 @@ async fn serve_jobs(
     };
     let first = agents.first_listing(&host, session);
     let capabilities = claim.capabilities();
-    let watch = reports_held_beat(capabilities).then(|| agents.wakes.watch(&host));
+    // Only a serving host takes a new start: a draining, preparing or tainted one is never
+    // held (a draining agent counts its drain in the waits it asks for, which a held reply
+    // would stretch).
+    let holds = reports_held_beat(capabilities) && heartbeat.phase == Phase::Serving;
+    let watch = holds.then(|| agents.wakes.watch(&host));
     let inputs = Arc::new(held::Inputs {
         jobs: Arc::clone(jobs),
         ceiling: js_agent_wire::NetworkCeiling::from_capabilities(capabilities).unwrap_or_default(),

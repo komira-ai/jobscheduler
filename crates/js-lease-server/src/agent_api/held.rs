@@ -1,5 +1,5 @@
 //! The hold of a heartbeat's reply ([`crate::held_beat`]): a reply with nothing to send to a
-//! host that reported `held-beat` is held open until a placement on the host wakes it, or for
+//! serving host that reported `held-beat` is held open until a placement on the host wakes it, or for
 //! [`Agents::hold_bound`] at most, and says `beat_now`, so the agent sends its next heartbeat
 //! at once.
 //!

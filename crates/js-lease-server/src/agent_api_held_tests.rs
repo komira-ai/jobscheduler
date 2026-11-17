@@ -77,17 +77,23 @@ async fn a_quiet_reply_ends_at_the_bound_and_says_beat_now() {
     assert_eq!(waits(&rig), 1);
 }
 
-/// Asserts that a reply that has a start to send is answered at once, without `beat_now`, and
-/// that the heartbeat of a host that did not report `held-beat` is never held. It catches a
-/// hold that delays a start the store already holds, and one that stretches the interval of an
-/// agent that waits the interval after every reply.
+/// Asserts that a reply that has a start to send is answered at once, without `beat_now`, that
+/// the heartbeat of a host that did not report `held-beat` is never held, and that neither is
+/// the heartbeat of a draining host that did. It catches a hold that delays a start the store
+/// already holds, one that stretches the interval of an agent that waits the interval after
+/// every reply, and one that stretches a drain, which the agent counts in the waits it asks
+/// for.
 #[tokio::test]
-async fn a_reply_with_a_start_and_a_host_without_held_beat_are_not_held() {
-    let (mut rig, agent) = held_rig("held_not", LONG);
+async fn a_reply_with_a_start_a_host_without_held_beat_and_a_draining_host_are_not_held() {
+    let (mut rig, mut agent) = held_rig("held_not", LONG);
     rig.place("job-1", "host-a");
     let reply = rig.beat(&agent).await.unwrap();
     assert_eq!(starts(&reply).len(), 1);
     assert!(!reply.beat_now);
+    agent.take(&reply);
+    agent.phase = js_agent_wire::Phase::Draining;
+    let draining = rig.beat(&agent).await.unwrap();
+    assert!(!draining.beat_now);
     rig.register("host-b", true);
     let other = rig.beat(&FakeAgent::new("host-b")).await.unwrap();
     assert_eq!(other, HeartbeatReply::default());
