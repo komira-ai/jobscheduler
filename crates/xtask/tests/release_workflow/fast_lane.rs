@@ -511,7 +511,7 @@ fn desired_problems(text: &str) -> Vec<String> {
 /// version on that check's word alone, and the turn's go, the variable and a stable write
 /// without conflict in its condition.
 #[test]
-fn desired_starts_hostkeeper_desired_with_actions_write_alone() {
+fn desired_starts_hostkeeper_desired_only_for_the_newest_release() {
     let text = workflow();
     for (from, to) in [
         (
