@@ -296,6 +296,39 @@ fn a_reply_the_busy_worker_cannot_take_is_noted_and_the_tick_returns() {
     assert!(worker.handle().settle());
 }
 
+/// Asserts that a held reply with nothing else in it (`beat_now` alone) is not handed to the
+/// worker and asks for the next heartbeat at once: with the worker's queue full, it is not
+/// noted `Busy` and the step waits zero, while an ordinary empty reply waits the interval. It
+/// catches a `beat_now` that makes every quiet held reply a delivery the worker must make room
+/// for, and one the session does not act on.
+#[test]
+fn a_held_reply_alone_is_not_delivered_and_beats_again_at_once() {
+    let dir = Scratch::new("jobs-session-held");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    machine.world.hold_creates();
+    let mut replies = vec![welcome(1)];
+    replies.extend((0..=QUEUE).map(|_| reply(200, start_answer(&["r1"]))));
+    replies.push(reply(200, json!({ "beat_now": true })));
+    replies.push(beat_ok());
+    let (mut script, _) = Script::new(replies);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    let step = |session: &mut Session<'_>| match session.tick() {
+        Step::Wait { after, note } => (after, note),
+        other => panic!("{other:?}"),
+    };
+    step(&mut session);
+    step(&mut session);
+    machine.world.wait_entered(1);
+    for n in 0..QUEUE {
+        assert_eq!(step(&mut session).1, None, "reply {n} has room");
+    }
+    assert_eq!(step(&mut session), (Duration::ZERO, None));
+    assert_eq!(step(&mut session), (Duration::from_secs(5), None));
+    machine.world.release();
+    assert!(worker.handle().settle());
+}
+
 /// Asserts that a session whose worker has ended ends with `Failed`, and that a worker that
 /// is alive does not. It catches an agent that heartbeats on with jobs nobody supervises.
 #[test]

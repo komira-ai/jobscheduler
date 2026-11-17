@@ -61,6 +61,14 @@ pub const START_FENCE_CAPABILITY: &str = "start-fence";
 /// changes.
 pub const HOST_JOBS_CAPABILITY: &str = "host-jobs";
 
+/// The hello capability of an agent that sends its next heartbeat at once when a reply says
+/// [`crate::HeartbeatReply::beat_now`]. Its value is `true`. A server holds the reply to such
+/// an agent's heartbeat open while it has nothing to send, for at most the heartbeat interval,
+/// and answers it as soon as a job is placed on the host, so a start reaches the host without
+/// waiting for its next heartbeat. An agent without it waits the interval after every reply,
+/// so a server never holds its heartbeat: a held reply would stretch its interval.
+pub const HELD_BEAT_CAPABILITY: &str = "held-beat";
+
 /// What the job's allocation booked on the host, which the agent enforces as the job's
 /// limits. The ranges are those of [`crate::Limits`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

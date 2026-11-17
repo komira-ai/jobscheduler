@@ -354,7 +354,8 @@
 //! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
 //! [`SERVED_CALLS`] are served: `SubmitJob` (validated, idempotent on the job id, admitted
-//! over the registered hosts and the pool's catalog, committed before it answers; its wall
+//! over the registered hosts and the pool's catalog, committed before it answers, and placed in
+//! the call when no queued job of its priority or above is ahead; its wall
 //! limit held to `--max-job-wall`), `CancelJob` and the reads, and the fleet calls (`ListHosts`,
 //! `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
 //! hosts, the status of its pools, and its usage and job stores. `docs/http-gateway.md` has the answers
@@ -488,7 +489,7 @@
 //! | request | answers |
 //! |---|---|
 //! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted` (with `"reason"`: `below-floor`, the host's shape, labels or capabilities do not meet the pool's; `quota-default-unfit`, the pool names `scratch-quota` and the host's scratch default is absent, zero or above the pool's `disk_bytes`; or `quota-without-pool-disk`, the host enforces a scratch quota and the pool books no disk and does not name `scratch-quota`; a server logs the refusal with the host id, the code and the reason), `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable`, or `state-write-failed` when, with a store setting, the host's binding could not be committed |
-//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack, taint_cleared_ack?}` (see "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
+//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack, taint_cleared_ack?, beat_now?}` (see "Taint"; to an agent that reported `held-beat`, a reply with nothing to send is held open until a job is placed on the host, for the heartbeat interval at most 5 s, and says `beat_now`: `docs/design/held-beat.md`); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
 //! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; body optional, `{"lease_secs": n}` (default 300, cut to 3600); 400 `invalid-cordon`; 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
 //! | `POST /v1/hosts/{id}:uncordon` | as the cordon, with no body: 200 the host, plus `lifted`; 200 also when it was not cordoned |
 //! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, mark?, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}`; `mark` is `reserved`, `held`, `draining` or `releasing` as in the `mark` of `GET /v1/hosts`, and absent for a host that is not set aside (a host is idle when `lease` is absent, `leases` is 0, `releasing` is false and `mark` is absent) |
@@ -703,6 +704,7 @@ mod error;
 mod file;
 mod file_checks;
 mod flags;
+mod held_beat;
 mod host_keys;
 mod hosts;
 #[cfg(feature = "in-process")]

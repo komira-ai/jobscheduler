@@ -267,6 +267,12 @@ impl Registry {
         self.shared.config.whole_node()
     }
 
+    /// The interval the pool asks its hosts to heartbeat at (the welcome's
+    /// `heartbeat_interval_ms`): the longest a server holds a heartbeat's reply open.
+    pub fn heartbeat_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.shared.config.heartbeat_interval_ms())
+    }
+
     fn grace_ms(&self) -> u64 {
         self.shared.config.grace_ms()
     }

@@ -359,6 +359,13 @@ pub struct HeartbeatReply {
         deserialize_with = "log_sink::lenient"
     )]
     pub log_grant: Option<LogGrant>,
+    /// Whether the server held this reply open until it had something to send or its hold
+    /// ran out ([`crate::HELD_BEAT_CAPABILITY`]): the agent then sends its next heartbeat at
+    /// once instead of after the interval, so that one is always waiting at the server. Sent
+    /// only to an agent that reported the capability; absent means false, and an agent from
+    /// before the field ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub beat_now: bool,
 }
 
 impl HeldRun {
