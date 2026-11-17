@@ -8,11 +8,16 @@
 //! in the order it was asked, and the caller gives up on its answer at a deadline of its
 //! own clock ([`Pending::poll`]) whether or not a thread ever took it. A thread stuck in the
 //! kernel stays stuck until the file system answers or is unmounted.
+//!
+//! A task that answered rings the pool's [`Wake`] ([`Pool::set_wake`]), so the lifecycle's
+//! worker asks for the answer at once instead of at its next step.
 
 use std::io;
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
+
+use crate::lifecycle::Wake;
 
 /// The threads of the pool of a node.
 pub(crate) const THREADS: usize = 4;
@@ -24,6 +29,8 @@ type Task = Box<dyn FnOnce() + Send>;
 #[derive(Debug)]
 pub(crate) struct Pool {
     work: Sender<Task>,
+    /// Rung once a task has answered.
+    wake: Wake,
 }
 
 impl Pool {
@@ -39,7 +46,15 @@ impl Pool {
             let thread = std::thread::Builder::new().name("js-paths".to_owned());
             thread.spawn(move || serve(&queue)).map(drop)
         });
-        spawned.map(|()| Self { work })
+        spawned.map(|()| Self {
+            work,
+            wake: Wake::default(),
+        })
+    }
+
+    /// Rings `wake` whenever a task asked from now on has answered.
+    pub(crate) fn set_wake(&mut self, wake: Wake) {
+        self.wake = wake;
     }
 
     /// Asks a thread of the pool to run `task`, whose answer the caller waits for until
@@ -50,10 +65,12 @@ impl Pool {
         task: impl FnOnce() -> T + Send + 'static,
     ) -> Pending<T> {
         let (answer, answered) = mpsc::channel();
+        let wake = self.wake.clone();
         // A queue no thread takes from any more drops the task, and its answer with it:
         // the caller hears that it is lost.
         let _ = self.work.send(Box::new(move || {
             let _ = answer.send(task());
+            wake.wake();
         }));
         Pending {
             answered,

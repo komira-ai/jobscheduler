@@ -21,9 +21,10 @@ mod rootfs;
 mod silence;
 mod slots;
 mod tails;
+mod timeline;
 mod vm;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -31,6 +32,7 @@ use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, NativeSpec, Outcome, ResultAck,
     RunResult, Taint, limits, refusal,
 };
+use js_types::JobNetwork;
 
 pub use self::exclusive::{Quiet, Restored};
 use self::held::Records;
@@ -40,7 +42,9 @@ pub use self::slots::Slots;
 use super::quota::QuotaHealth;
 use super::runtime::{ResolvedMount, RunHandle, Runtime, RuntimeError};
 use super::taint::TaintState;
-use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
+use super::{
+    Capacity, CheckHook, Clock, Config, Event, Finding, Skip, StartTimeline, Wake, code, detail,
+};
 use crate::quota::QuotaError;
 
 /// How many fences of finished or stopped work the agent remembers (a run id, or a job id
@@ -134,6 +138,11 @@ pub struct Lifecycle {
     /// The mount providers the agent was given and the sources the runs hold of them (see
     /// `provided`, `providing`).
     providers: provided::Attached,
+    /// What the runtime and the providers ring when work they do off the worker is done
+    /// ([`Lifecycle::with_wake`]).
+    wake: Wake,
+    /// The timelines of the starts admitted and not yet started or ended (`timeline`).
+    starting: BTreeMap<String, StartTimeline>,
 }
 
 impl Lifecycle {
@@ -524,11 +533,15 @@ impl Lifecycle {
         // And layers and mounts it does not give, or paths beneath no root of the agent's.
         self.admit_fs(spec, given)?;
         // Last, so that a job refused for another reason costs no call. Before every
-        // contained create: the firewall can change between two jobs. A native job has its
-        // own check (a Mac pool is limited by a packet filter, not a container network).
+        // contained create of a job the firewall carries (`allow-list`, `open`): the firewall
+        // can change between two jobs. A `none` job's namespace has loopback alone and is
+        // never wired, so no rule of the host's is its to check, and it is not asked for. A
+        // native job has its own check (a Mac pool is limited by a packet filter, not a
+        // container network).
+        let wired = spec.network != JobNetwork::None;
         let egress = match &body {
             Some(native) => self.runtime.check_native_egress(native),
-            None if spec.isolation == Isolation::Contained && !given.vm => {
+            None if spec.isolation == Isolation::Contained && !given.vm && wired => {
                 self.runtime.check_egress()
             }
             None => Ok(()),
@@ -814,6 +827,7 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
+        let taken = self.clock.now_ms();
         // A job that may change the host taints it before it exists: whatever it does, and
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
@@ -851,6 +865,7 @@ impl Lifecycle {
         // made: a run whose images are still being fetched, or whose file system is being
         // prepared, waits as `starting`, holding its booking, and costs the worker nothing
         // until it is ready (see `Runtime::prepare` and `prepare`).
+        self.begin_timeline(run_id, received, taken);
         let made = (mounts, slot, booked);
         self.prepare_or_begin((spec, keyed), given, made, received, events);
     }
@@ -870,6 +885,8 @@ impl Lifecycle {
         let run_id = &spec.run_id;
         let mut job = match started {
             Ok(id) => {
+                self.mark(run_id, "created");
+                let timeline = self.take_timeline(run_id, &id);
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
                 let cgroup = self.runtime.cgroup(&id);
@@ -878,10 +895,12 @@ impl Lifecycle {
                 job.cgroup = cgroup;
                 events.push(Event::Started {
                     run_id: run_id.clone(),
+                    timeline,
                 });
                 job
             }
             Err((why, finding, message, blind)) => {
+                self.drop_timeline(run_id);
                 let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot), booked);
                 // A host the agent cannot see is not known to be checkable: tainted as
                 // unchecked, before the finding that follows from it.

@@ -4,8 +4,9 @@
 //! and the offer of a run's host ports ([`Forwarder`]) at every level, its own or an adopted
 //! run's, with the label that records them.
 //!
-//! The order is the one [`crate::egress`] fixes: [`EgressPort::check`] before every create
-//! (`Runtime::check_egress`, which the lifecycle calls and answers `egress-unchecked`), the
+//! The order is the one [`crate::egress`] fixes: [`EgressPort::check`] before every create of a
+//! wired job (`Runtime::check_egress`, which the lifecycle calls, for no `none` job, and answers
+//! `egress-unchecked`), the
 //! create, `Oci::start_supervised`, `Oci::container_pid`, [`EgressPort::attach`] with the job's
 //! level and declared ports, the offer of the run's host ports, and [`Wired::release`] and the
 //! offer's close once the run has ended or is removed. An agent in mode none has no port, and
@@ -37,7 +38,8 @@ const PID_PAUSE: Duration = Duration::from_millis(10);
 
 /// What the crun runtime asks of the host's egress. [`Egress`] is the one an agent runs.
 pub trait EgressPort: std::fmt::Debug + Send + Sync {
-    /// Whether the host's firewall is as it was set up. Asked before every create.
+    /// Whether the host's firewall is as it was set up. Asked before every create of a wired
+    /// job (`allow-list` or `open`).
     ///
     /// # Errors
     ///

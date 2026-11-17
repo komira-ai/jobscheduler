@@ -8,10 +8,14 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, Exit, Finished, Found, FsPrepared, JobFs, NativeRefusal,
-    Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Whereabouts, label,
+    Clock, Exit, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
+
+#[path = "fake_checks.rs"]
+mod checks;
+pub use checks::ScriptedChecks;
 
 /// A clock that moves only when a test says so. Clones share one reading.
 #[derive(Clone, Default)]
@@ -107,6 +111,12 @@ struct State {
     ceiling: NetworkCeiling,
     /// How many times `network_ceiling` was asked.
     ceiling_asks: u32,
+    /// How many times `check_egress` was asked.
+    egress_asks: u32,
+    /// What `start_steps` answers, once, by run id.
+    steps: BTreeMap<String, Vec<(&'static str, u64)>>,
+    /// What the runtime was given to ring (`set_wake`).
+    wake: Wake,
     /// What `host_ports` answers; none by default, as the trait's default.
     host_ports: Vec<PortRange>,
     /// Why each run named here lost its host ports (`host_port_lost`), by run id.
@@ -356,6 +366,23 @@ impl FakeRuntime {
     /// How many times the network ceiling was asked for.
     pub fn ceiling_asks(&self) -> u32 {
         self.state.borrow().ceiling_asks
+    }
+
+    /// Rings the wake the runtime was given, as work it did off the worker would.
+    pub fn ring_wake(&self) {
+        let wake = self.state.borrow().wake.clone();
+        wake.wake();
+    }
+
+    /// `start_steps` answers `steps` for `run_id`, once.
+    pub fn steps_of(&self, run_id: &str, steps: &[(&'static str, u64)]) {
+        let mut state = self.state.borrow_mut();
+        state.steps.insert(run_id.to_owned(), steps.to_vec());
+    }
+
+    /// How many times the egress check was asked for.
+    pub fn egress_asks(&self) -> u32 {
+        self.state.borrow().egress_asks
     }
 
     /// Whether the runtime says it puts every container in a control group the agent can
@@ -677,6 +704,7 @@ impl Runtime for FakeRuntime {
     }
 
     fn check_egress(&self) -> Result<(), RuntimeError> {
+        self.state.borrow_mut().egress_asks += 1;
         match self.fails("egress") {
             true => Err(err("egress")),
             false => Ok(()),
@@ -701,6 +729,17 @@ impl Runtime for FakeRuntime {
         };
         state.asks.entry(image.to_owned()).or_default().push(waited);
         answer
+    }
+
+    fn set_wake(&mut self, wake: Wake) {
+        self.state.borrow_mut().wake = wake;
+    }
+
+    fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
+        let mut state = self.state.borrow_mut();
+        let run_id = state.containers.get(&id.0).map(|c| c.run_id.clone());
+        let steps = run_id.and_then(|run_id| state.steps.remove(&run_id));
+        steps.unwrap_or_default()
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
@@ -928,71 +967,5 @@ impl Runtime for FakeRuntime {
                 never_started: !c.started,
             })
             .collect())
-    }
-}
-
-/// Post-job checks that pass until a test makes one find something, and record when
-/// they ran and what the host looked like then.
-pub struct ScriptedChecks {
-    log: Log,
-    runtime: FakeRuntime,
-    scratch_root: PathBuf,
-    findings: BTreeMap<String, CheckFinding>,
-}
-
-impl ScriptedChecks {
-    pub fn new(log: &Log, runtime: &FakeRuntime, scratch_root: &Path) -> Self {
-        Self {
-            log: Rc::clone(log),
-            runtime: runtime.clone(),
-            scratch_root: scratch_root.to_path_buf(),
-            findings: BTreeMap::new(),
-        }
-    }
-
-    pub fn find(mut self, run_id: &str, finding: CheckFinding) -> Self {
-        self.findings.insert(run_id.to_owned(), finding);
-        self
-    }
-}
-
-impl CheckHook for ScriptedChecks {
-    fn idle(&mut self) {
-        self.runtime.state.borrow_mut().idles += 1;
-    }
-
-    fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
-        let run_id = job.run_id;
-        let container = match self.runtime.gone(run_id) {
-            true => "container gone",
-            false => "container present",
-        };
-        let scratch = match self.scratch_root.join(run_id).exists() {
-            true => "scratch present",
-            false => "scratch gone",
-        };
-        self.log.borrow_mut().push(format!(
-            "check {run_id} ({container}, {scratch}){}",
-            self.runtime.marker_note()
-        ));
-        if !job.live.is_empty() {
-            let live: Vec<&str> = job.live.iter().map(|id| id.0.as_str()).collect();
-            self.log
-                .borrow_mut()
-                .push(format!("live beside {run_id}: {}", live.join(",")));
-        }
-        if !job.held_mounts.is_empty() {
-            let held: Vec<String> = job
-                .held_mounts
-                .iter()
-                .map(|dir| dir.display().to_string())
-                .collect();
-            self.log
-                .borrow_mut()
-                .push(format!("mounts held beside {run_id}: {}", held.join(",")));
-        }
-        self.findings
-            .get(run_id)
-            .map_or(Ok(()), |finding| Err(finding.clone()))
     }
 }

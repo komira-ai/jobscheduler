@@ -29,7 +29,7 @@ const IMAGE: &str = "registry.example/job:1@sha256:0123456789abcdef0123456789abc
 
 /// A harness whose agent has the roots `data` (read-write) and `ro` (read-only), and whose
 /// runtime gives layers, keeping its lease directories beside the runs'.
-fn harness(name: &str) -> Harness {
+pub(super) fn harness(name: &str) -> Harness {
     let dir = Scratch::new(&format!("life-{name}"));
     let mut config: Config = config_in(&dir, false);
     fs::create_dir_all(dir.path("ro")).unwrap();
@@ -76,7 +76,7 @@ fn mount(path: &str, target: &str, mode: MountMode) -> JobMount {
 
 /// A job start of `job_id` with a host path layer of the root `data` and a mount of it, of a
 /// tenth of a core, so that many fit the harness's four.
-fn layered(h: &Harness, job_id: &str) -> JobStartSpec {
+pub(super) fn layered(h: &Harness, job_id: &str) -> JobStartSpec {
     let data = h.dir.path("data").display().to_string();
     let mut small = start(job_id);
     small.booked.cpu_millis = 100;
