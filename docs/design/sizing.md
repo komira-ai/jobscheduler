@@ -78,10 +78,17 @@ of its class gives (`crates/js-sched-placer/src/sizes.rs`). A dimension the job 
 - **partition**: the client that submitted the job; **platform**: the job's `os` and `arch` as it names them; **basis**: cgroup.
 
 The estimator is `js-sizing` unchanged: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the 90th
-percentile of CPU used per second of wall time rounded up to a quarter core. A class with too few runs books the cold size: a quarter
-of the most cores and of the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows, and
-at least the class's kill floor. Before five runs the memory may only rise from there. A class whose estimate reaches the largest
-host's bookable memory books all of it and waits for an empty host.
+percentile of CPU used per second of wall time rounded up to a quarter core. A class with too few runs books the cold size:
+`server.cold_cpu_millis` and `server.cold_memory_bytes` when the server's file sets them, each one left out a quarter of the most
+cores or of the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows; never more
+than those most, and at least the class's kill floor. Before five runs the memory may only rise from the cold memory. A class whose
+estimate reaches the largest host's bookable memory books all of it and waits for an empty host.
+
+On a farm whose hosts have 88 cores and 251 GiB, a quarter is 22 cores and 62.75 GiB, so a host holds four cold jobs; a client
+that books every build target by its history (CPU and memory 0, the target's name as `size-class`) would run four jobs a host until
+each target had five runs. Such a farm sets the cold size to what an unlearned build step uses (two cores and 8 GiB: 31 a host by
+memory), and a target that needs more is raised by its runs: a memory kill at the cold size books twice it next, and runs that
+come near it raise the next booking after two runs.
 
 The size is decided by the placement pass, not at submit, and is not written on the job: its needs stay as submitted, so a retried
 submit with the same id is still the same job. What it was booked is its allocation's `booked`. A contained job's booking is its

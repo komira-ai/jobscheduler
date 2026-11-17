@@ -42,13 +42,14 @@ pub fn config(max_machines: usize) -> PoolConfig {
 }
 
 /// The placer the server gives a registry, with its defaults: backfill up to any wall time
-/// (no `server.max_lease_wall`), the default CPU slack and `percent` of each host's memory,
-/// on `clock`.
+/// (no `server.max_lease_wall`), the default CPU slack and cold size, and `percent` of each
+/// host's memory, on `clock`.
 pub fn sched_placer(percent: u32, clock: &ManualClock) -> Arc<SchedPlacer> {
     let settings = Settings {
         backfill: Backfill::enforced(Duration::MAX),
         load: LoadConfig::default(),
         memory: MemoryPercent::clamped(percent),
+        ..Settings::default()
     };
     Arc::new(SchedPlacer::new(settings, clock.clone()))
 }

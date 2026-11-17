@@ -185,6 +185,8 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--agent-hello-interval", "5s"),
         key("--placement", "js-sched"),
         key("--cpu-slack", "1.1"),
+        key("--cold-cpu-millis", "2000"),
+        key("--cold-memory-bytes", "8589934592"),
         key("--tick", "3s"),
         key("--tls-cert", "/cert"),
         key("--tls-key", "/key"),

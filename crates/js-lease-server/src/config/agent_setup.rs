@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
+use js_sched_placer::sizes::ColdSize;
 use js_types::ProviderId;
 
 use super::{Config, CpuSlack};
@@ -25,6 +26,10 @@ pub(crate) struct AgentSetup {
     pub(crate) require_host_credential: bool,
     /// `--cpu-slack`, or the engine's default.
     pub(crate) cpu_slack: CpuSlack,
+    /// `--cold-cpu-millis` and `--cold-memory-bytes`, or `server.cold_cpu_millis` and
+    /// `server.cold_memory_bytes`: what a job that books nothing books while its class has no
+    /// estimate (each absent one a quarter of the largest host).
+    pub(crate) cold: ColdSize,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
     pub(crate) max_lease_wall: Option<Duration>,

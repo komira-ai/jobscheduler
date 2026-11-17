@@ -236,6 +236,7 @@ fn placed_in(
         hello_limit,
         require_host_credential,
         cpu_slack,
+        cold,
         max_lease_wall,
         job_limits,
         jobs,
@@ -249,7 +250,7 @@ fn placed_in(
     // The scheduler picks the host of a start, and books the share of each host's
     // memory the pool's percent says; the registry books the whole shape.
     let (pool, memory) = split(pool);
-    let placer = placer(max_lease_wall, cpu_slack, memory, clock);
+    let placer = placer(max_lease_wall, cpu_slack, memory, cold, clock);
     let registry = Registry::new(pool, clock.clone(), placer.clone());
     let providers = providers.unwrap_or_else(|| static_then(&registry.pool_id()));
     let (usage, usage_in_job_store) = usage.build(clock, limits, kept.map(ServerStore::store))?;
