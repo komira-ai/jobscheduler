@@ -218,7 +218,8 @@ fn refused(args: Vec<OsString>) -> String {
 /// Asserts each refusal of a second pool file, each naming the file: its name is the first
 /// pool's; its `memory_schedulable_percent` differs from the first pool's; it has whole-node
 /// settings (its class is `whole-node`); its shape names no `arch`, so the scheduler cannot
-/// take its hosts as nodes; its `join_token_file` cannot be read. It catches a
+/// take its hosts as nodes; its `join_token_file` cannot be read. A third file whose name is the
+/// second's is refused naming the third. It catches a
 /// second pool that would be served with settings the server reads only from the first.
 #[test]
 fn a_second_pool_file_is_refused_naming_it() {
@@ -261,11 +262,29 @@ fn a_second_pool_file_is_refused_naming_it() {
     let head = format!("{at}: join_token_file: ");
     assert!(said.starts_with(&head), "{said}");
     assert!(said.contains("no-such-tokens"), "{said}");
+    // A second file that cannot be read is refused naming it.
+    let mut args = agent_args(&scratch);
+    let gone = scratch.path("no-such-pool.toml");
+    args.extend(["--agent-pool-config".into(), gone.clone().into_os_string()]);
+    let said = refused(args);
+    let head = format!("--agent-pool-config: {}: ", gone.display());
+    assert!(said.starts_with(&head), "{said}");
+    // A third file is held to the second's name too, not only to the first's.
+    let mut args = two_pool_args(&scratch, &mac_pool(None));
+    let third = scratch.write("third-pool.toml", &mac_pool(None), 0o644);
+    args.extend(["--agent-pool-config".into(), third.clone().into_os_string()]);
+    let said = refused(args);
+    let at = format!("--agent-pool-config {}", third.display());
+    assert_eq!(
+        said,
+        format!("{at}: name: also the name of an earlier pool")
+    );
 }
 
 /// Asserts that the first pool's shared tokens may be its file's `join_token_file` in place of
-/// `--agent-token-file`, and that naming both is refused naming the file: two settings for
-/// one set of tokens. It catches a first pool file whose `join_token_file` is ignored.
+/// `--agent-token-file`, that naming both is refused naming the file (two settings for one
+/// set of tokens), and that a first pool's `join_token_file` that cannot be read is refused
+/// naming the file and the key. It catches a first pool file whose `join_token_file` is ignored.
 #[tokio::test]
 async fn the_first_pools_tokens_are_its_join_token_file_or_the_flag_but_not_both() {
     let scratch = Scratch::new("first_pool_tokens");
@@ -281,6 +300,20 @@ async fn the_first_pools_tokens_are_its_join_token_file_or_the_flag_but_not_both
         said,
         format!("--agent-pool-config {}: {reason}", path.display())
     );
+    let missing = scratch.path("no-such-burst-tokens");
+    let text = format!("join_token_file = {missing:?}\n{POOL}");
+    let unread = scratch.write("unread-pool.toml", &text, 0o644);
+    let args = base_args(&scratch);
+    let said = refused(replace(
+        args,
+        "--agent-pool-config",
+        unread.clone().into_os_string(),
+    ));
+    let head = format!(
+        "--agent-pool-config {}: join_token_file: ",
+        unread.display()
+    );
+    assert!(said.starts_with(&head), "{said}");
     let args = base_args(&scratch);
     let args = replace(args, "--agent-pool-config", path.into_os_string());
     let h = Harness::with(scratch, args).await;

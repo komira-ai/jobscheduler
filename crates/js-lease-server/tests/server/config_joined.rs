@@ -166,6 +166,8 @@ fn joined_pools_load_together_and_an_elastic_pool_beside_one_is_refused() {
     let server = server_with_agents(&scratch);
     let second = PoolText::joined("second").set("class", &quote("mac-host"));
     assert!(load(&scratch, &file(&server, &[&joined(), &second])).is_ok());
+    let third = PoolText::joined("third").set("class", &quote("mac-host"));
+    assert!(load(&scratch, &file(&server, &[&joined(), &second, &third])).is_ok());
     let whole = PoolText::joined("second");
     assert_eq!(
         refusal(&scratch, &file(&server, &[&joined(), &whole])),
