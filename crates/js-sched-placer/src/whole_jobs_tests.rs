@@ -529,3 +529,89 @@ fn a_failed_prepare_adds_to_the_count_and_keeps_the_stronger_bar() {
         assert_eq!(failed.prepare_bars, expected, "{earlier:?}");
     }
 }
+
+/// A quiet host named `name` of 8 cores and 16 GiB that reports `os` and `arch`.
+fn platform_host(name: &str, (os, arch): (&str, &str)) -> js_types::Candidate {
+    let caps = [("os", os), ("arch", arch)]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    let resources = js_types::Resources::new(8000, 16 << 30, 0, None).unwrap();
+    js_types::Candidate {
+        host: host(name),
+        shape: js_types::Shape::new(resources, caps),
+        leases: Vec::new(),
+    }
+}
+
+/// The whole-host job `id`, queued, that names `os` and `arch`.
+fn whole_on(tables: &Tables, id: &str, (os, arch): (&str, &str)) -> JobRecord {
+    let mut job = tables.whole(id);
+    job.spec.constraints.os = Some(os.to_owned());
+    job.spec.constraints.arch = Some(arch.to_owned());
+    job
+}
+
+/// Catches: a whole-host job granted a host of another platform, as it was when every
+/// whole-machine request asked nothing of its host. With a quiet Linux host `a` and a quiet
+/// Mac `b`, a job that names Linux on x86_64 is committed on `a` alone and one that names
+/// macOS on arm64 on `b` alone, whichever is queued first.
+#[test]
+fn a_whole_host_job_is_granted_only_a_host_of_the_platform_it_names() {
+    let tables = Tables::new();
+    let linux = whole_on(&tables, "linux", ("linux", "x86_64"));
+    let mac = whole_on(&tables, "mac", ("macos", "arm64"));
+    for queue in [[mac.clone(), linux.clone()], [linux.clone(), mac.clone()]] {
+        let hosts = [
+            platform_host("a", ("linux", "x86_64")),
+            platform_host("b", ("macos", "arm64")),
+        ];
+        let mut e = crate::engine::rig::engine_over(&hosts);
+        let mut steps = run(&mut e, (&queue, &[]), 1_000);
+        steps.sort_by_key(|step| format!("{step:?}"));
+        let commit = |job: &JobRecord, on: &str| WholeJobStep::Commit {
+            job: job.id.clone(),
+            host: host(on),
+        };
+        assert_eq!(steps, [commit(&linux, "a"), commit(&mac, "b")]);
+    }
+}
+
+/// Catches: a whole-host job that names a platform no host has granted a host anyway. A job
+/// that names Linux on arm64 beside two hosts of other platforms is queued and granted none.
+#[test]
+fn a_whole_host_job_of_a_platform_no_host_has_is_granted_none() {
+    let tables = Tables::new();
+    let arm = whole_on(&tables, "arm", ("linux", "arm64"));
+    let hosts = [
+        platform_host("a", ("linux", "x86_64")),
+        platform_host("b", ("macos", "arm64")),
+    ];
+    let mut e = crate::engine::rig::engine_over(&hosts);
+    let queue = [arm];
+    assert!(run(&mut e, (&queue, &[]), 1_000).is_empty());
+    assert!(run(&mut e, (&queue, &[]), 2_000).is_empty());
+    for name in ["a", "b"] {
+        assert!(e.pending_on(&map::worker(&host(name))).is_empty(), "{name}");
+    }
+}
+
+/// Catches: a whole-host job whose constraints are no platform requirements queued with no
+/// needs, so that any host could be granted to it. Such a job is not queued: no host is
+/// granted to it, and a well-formed whole-host job beside it still is.
+#[test]
+fn a_whole_host_job_whose_constraints_are_no_platform_requirements_is_not_queued() {
+    let tables = Tables::new();
+    let mut odd = tables.whole("odd");
+    let unknown = [("no-such-key".to_owned(), "1".to_owned())];
+    odd.spec.constraints.capabilities = unknown.into_iter().collect();
+    let plain = tables.whole("plain");
+    let mut e = engine(&[("a", &[]), ("b", &[])]);
+    let queue = [odd, plain.clone()];
+    let steps = run(&mut e, (&queue, &[]), 1_000);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let WholeJobStep::Commit { job, .. } = &steps[0] else {
+        panic!("not a commit: {steps:?}");
+    };
+    assert_eq!(job, &plain.id);
+}

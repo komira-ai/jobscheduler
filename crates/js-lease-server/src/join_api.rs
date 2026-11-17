@@ -43,6 +43,7 @@
 //! `host-bound`), so a fresh launch uses a fresh instance and host id. A file that cannot be written is a 503 `state-write-failed`
 //! and the tokens stay as they were. The body is validated like the mint's (400).
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -135,21 +136,24 @@ fn instance_of(provider: String, instance_id: String) -> Result<InstanceIdentity
     Ok(instance)
 }
 
-/// A 400 naming `provider` when the pool admits one provider and `asked` is another: a
-/// token for a host the pool would name differently never admits it.
-fn check_provider(only: Option<&str>, asked: &str) -> Result<(), ApiError> {
-    match only {
-        Some(pool) if pool != asked => Err(ApiError::bad_request(format!(
-            "provider must be the pool's name, {pool:?}"
-        ))),
-        _ => Ok(()),
+/// A 400 naming the providers when the pools admit only some (their names) and `asked` is
+/// none of them: a token for a host the pools would name differently never admits it.
+fn check_provider(only: &BTreeSet<String>, asked: &str) -> Result<(), ApiError> {
+    if only.is_empty() || only.contains(asked) {
+        return Ok(());
     }
+    let names: Vec<&String> = only.iter().collect();
+    let reason = match names.as_slice() {
+        [pool] => format!("provider must be the pool's name, {pool:?}"),
+        _ => format!("provider must be one of the pools' names, {names:?}"),
+    };
+    Err(ApiError::bad_request(reason))
 }
 
 async fn mint(State(agents): State<Arc<Agents>>, body: Bytes) -> Result<Response, ApiError> {
     let body: MintBody = parse(&body)?;
     let ttl = lifetime(body.ttl_seconds)?;
-    check_provider(agents.mint_provider.as_deref(), &body.provider)?;
+    check_provider(&agents.mint_provider, &body.provider)?;
     let instance = instance_of(body.provider, body.instance_id)?;
     let named = (instance.provider.clone(), instance.instance_id.clone());
     let made = blocking(move || agents.joins.mint(instance, ttl)).await;
@@ -189,15 +193,31 @@ async fn revoke(State(agents): State<Arc<Agents>>, body: Bytes) -> Result<Respon
 mod tests {
     use super::*;
 
-    /// A pool that names its provider accepts that name only, and a 400 says `provider`;
-    /// a server with no such pool accepts any. It catches a mint for another pool's name.
+    /// The names `names`, as the mint route holds them.
+    fn named(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// A pool that names its provider accepts that name only, and a 400 names it; pools
+    /// that name theirs accept each of their names and a 400 lists them; a server with no
+    /// such pool accepts any. It catches a mint for another pool's name, and a server of two
+    /// joined pools that mints for the first alone.
     #[test]
     fn the_provider_must_be_the_pools_name_when_it_has_one() {
-        assert!(check_provider(Some("burst"), "burst").is_ok());
-        assert!(check_provider(None, "lambdalabs").is_ok());
-        let err = check_provider(Some("burst"), "lambdalabs").unwrap_err();
+        assert!(check_provider(&named(&["burst"]), "burst").is_ok());
+        assert!(check_provider(&named(&[]), "lambdalabs").is_ok());
+        let err = check_provider(&named(&["burst"]), "lambdalabs").unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert!(format!("{err:?}").contains("provider must be"));
+        let reason = |err: &ApiError| format!("{err:?}").replace("\\\"", "\"");
+        let one = "reason: Some(\"provider must be the pool's name, \"burst\"\")";
+        assert!(reason(&err).contains(one), "{err:?}");
+        let two = named(&["farm", "mac-build"]);
+        assert!(check_provider(&two, "farm").is_ok());
+        assert!(check_provider(&two, "mac-build").is_ok());
+        let err = check_provider(&two, "burst").unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        let listed = "provider must be one of the pools' names, [\"farm\", \"mac-build\"]";
+        assert!(reason(&err).contains(listed), "{err:?}");
     }
 
     /// The lifetime is the default when none is asked, what is asked inside the bounds,

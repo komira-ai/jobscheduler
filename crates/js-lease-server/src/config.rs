@@ -8,24 +8,20 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use js_alert::AlertSink;
 use js_jobs::Retention;
-use js_sched_placer::sizes::ColdSize;
 use js_system_clock::{SystemClock, SystemMonotonic};
 use js_types::Monotonic;
 
 use js_registry::{OsSessions, SessionSource};
 
-use crate::agent_pool;
-use crate::agent_tokens::AgentTokens;
+use crate::agent_tokens::PoolTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, Registering, UsageKeys};
 use crate::flags;
-use crate::job_expiry::JobLimits;
 use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
-use crate::rate::HelloLimit;
 use crate::sched::rank;
 use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
 use crate::usage::UsageSink;
@@ -44,6 +40,7 @@ mod retention;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
+use agent_setup::{MorePool, agents, check_more};
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use feed_retention::FeedRetention;
 pub(crate) use feed_retention::{
@@ -142,8 +139,11 @@ pub struct Cli {
     pub agent_token_file: Option<PathBuf>,
     /// Turns agent registration on: the TOML file describing the pool that registering
     /// hosts join (its name, class, machine limit, shape, capabilities and timing).
+    /// Repeatable: each further file is one more pool, such as the Macs beside the Linux
+    /// nodes, which a hello joins by naming it. `--agent-token-file` is the first pool's
+    /// shared tokens; a later pool's are its file's `join_token_file`, or none.
     #[arg(long)]
-    pub agent_pool_config: Option<PathBuf>,
+    pub agent_pool_config: Vec<PathBuf>,
     /// The hellos one join token may say in a burst before it is held to one per
     /// `--agent-hello-interval`. Needs `--agent-pool-config`. The scaler's wait to hear from
     /// the hosts after a restart assumes the default burst and interval; a smaller burst or
@@ -606,6 +606,7 @@ impl Config {
             client_token,
             clients,
             registering,
+            more: later,
             mut warnings,
             unrunnable,
             logs,
@@ -619,9 +620,23 @@ impl Config {
             plan,
             pool,
             tokens,
-            mint_provider,
+            mut mint_provider,
             job_limits,
         } = *registering;
+        let mut more = Vec::new();
+        for (head, registering) in later {
+            check_more(&pool, &more, (&registering.pool, &head))?;
+            mint_provider.extend(registering.mint_provider);
+            let name = registering.pool.name().to_string();
+            let tokens = PoolTokens {
+                pool: name,
+                tokens: registering.tokens,
+            };
+            more.push(MorePool {
+                pool: registering.pool,
+                tokens,
+            });
+        }
         let placed = Placement::given(server.agents.placement(), "server.placement")?;
         warnings.extend(placed);
         warnings.extend(estimate_feed::deprecated(
@@ -637,6 +652,7 @@ impl Config {
         let agents = Box::new(AgentSetup {
             tokens,
             pool,
+            more,
             mint_provider,
             hello_limit: server.agents.hello_limit(),
             require_host_credential: server.agents.require_host_credential(),
@@ -885,50 +901,6 @@ impl Config {
 /// `--config` is given, so a missing one means a `Cli` built by hand.
 fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> {
     value.ok_or_else(|| StartupError::new(flag, "required unless --config is given"))
-}
-
-/// The registering side the flags name: `--agent-pool-config` is required (a server serves
-/// the hosts that run `js-agent` and register), and the shared join token file needs it.
-fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>, StartupError> {
-    match (&cli.agent_token_file, &cli.agent_pool_config) {
-        (None, None) => Err(StartupError::new(
-            "--agent-pool-config",
-            "required: a server serves the hosts that run js-agent and register",
-        )),
-        (tokens, Some(pool)) => {
-            let tokens = match tokens {
-                Some(path) => AgentTokens::open(path, clients)?,
-                None => AgentTokens::none(clients),
-            };
-            let pool = agent_pool::read(pool)?;
-            check_pool(&pool, "--agent-pool-config")?;
-            let cpu_slack = cli.cpu_slack.unwrap_or_default();
-            Ok(Box::new(AgentSetup {
-                tokens,
-                pool,
-                mint_provider: None,
-                hello_limit: HelloLimit {
-                    burst: cli.agent_hello_burst,
-                    interval: cli.agent_hello_interval,
-                },
-                require_host_credential: cli.require_host_credential,
-                cpu_slack,
-                cold: ColdSize {
-                    cpu_millis: cli.cold_cpu_millis,
-                    memory_bytes: cli.cold_memory_bytes,
-                },
-                max_lease_wall: None,
-                job_limits: JobLimits::default(),
-                jobs: listen::job_store(cli),
-                job_sources: JobSources::default(),
-                providers: None,
-            }))
-        }
-        (Some(_), None) => Err(StartupError::new(
-            "--agent-pool-config",
-            "required with --agent-token-file",
-        )),
-    }
 }
 
 /// The fewest bytes a bearer token may have after its trailing whitespace is dropped.

@@ -106,8 +106,8 @@ pub(crate) fn need_agent_pool(cli: &Cli) -> Result<(), StartupError> {
         .iter()
         .flatten()
         .find(|flag| NEED_AGENT_POOL.contains(&flag.as_str()));
-    match (stray, &cli.agent_pool_config) {
-        (Some(flag), None) => Err(StartupError::at(flag, "requires --agent-pool-config")),
+    match (stray, cli.agent_pool_config.is_empty()) {
+        (Some(flag), true) => Err(StartupError::at(flag, "requires --agent-pool-config")),
         _ => Ok(()),
     }
 }

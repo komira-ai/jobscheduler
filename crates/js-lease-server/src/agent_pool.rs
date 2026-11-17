@@ -8,7 +8,7 @@
 //! `whole-node`; `gpu-host` books a whole host (`BookAll`) and refuses them.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
@@ -58,6 +58,9 @@ struct RawPool {
     regain_grace: Option<String>,
     // A class that books part of a host, served beside `class`.
     share_class: Option<String>,
+    // The pool's shared join tokens, as `--agent-token-file` holds them; absent, none (or
+    // the first pool's `--agent-token-file`).
+    join_token_file: Option<PathBuf>,
 }
 
 impl RawPool {
@@ -101,17 +104,25 @@ struct RawShape {
     disk_bytes: u64,
 }
 
+/// A pool file as read: the pool, and the file of its shared join tokens when it names one.
+#[derive(Debug)]
+pub(crate) struct PoolFile {
+    pub(crate) pool: PoolConfig,
+    /// The file's `join_token_file`.
+    pub(crate) join_token_file: Option<PathBuf>,
+}
+
 /// Reads the pool file at `path`.
-pub(crate) fn read(path: &Path) -> Result<PoolConfig, StartupError> {
+pub(crate) fn read(path: &Path) -> Result<PoolFile, StartupError> {
     let flag = "--agent-pool-config";
     let text = std::fs::read_to_string(path)
         .map_err(|err| StartupError::new(flag, format!("{}: {err}", path.display())))?;
-    let pool = parse(&text)
+    let file = parse_file(&text, class)
         .map_err(|reason| StartupError::new(flag, format!("{}: {reason}", path.display())))?;
-    if let Some(note) = surplus_warning(&pool) {
+    if let Some(note) = surplus_warning(&file.pool) {
         warn!("{}: {note}", path.display());
     }
-    Ok(pool)
+    Ok(file)
 }
 
 /// What to tell the operator when a dedicated pool allows fewer whole hosts than
@@ -124,17 +135,40 @@ fn surplus_warning(pool: &PoolConfig) -> Option<String> {
 }
 
 /// The pool a file's text describes, or what is wrong with it.
+#[cfg(test)]
 pub(crate) fn parse(text: &str) -> Result<PoolConfig, String> {
     parse_with(text, class)
 }
 
 /// [`parse`] with the class names read by `classes`, so a test can offer a class no
 /// file can name today.
+#[cfg(test)]
 fn parse_with(
     text: &str,
     classes: fn(&str) -> Result<ResourceClass, String>,
 ) -> Result<PoolConfig, String> {
+    parse_file(text, classes).map(|file| file.pool)
+}
+
+/// The pool and the token file a file's text describes, the class names read by `classes`.
+fn parse_file(
+    text: &str,
+    classes: fn(&str) -> Result<ResourceClass, String>,
+) -> Result<PoolFile, String> {
     let raw: RawPool = toml::from_str(text).map_err(|err| err.to_string())?;
+    let join_token_file = raw.join_token_file.clone();
+    let pool = pool_of(raw, classes)?;
+    Ok(PoolFile {
+        pool,
+        join_token_file,
+    })
+}
+
+/// The pool `raw` describes, its class read by `classes`.
+fn pool_of(
+    raw: RawPool,
+    classes: fn(&str) -> Result<ResourceClass, String>,
+) -> Result<PoolConfig, String> {
     let name = ProviderId::new(&raw.name).map_err(|err| format!("name: {err}"))?;
     let class = classes(&raw.class)?;
     let admission = class.admission().clone();
@@ -740,7 +774,7 @@ mod tests {
             ("full", whole("")),
         ] {
             let file = TempFile::new(key, &text);
-            assert_eq!(read(&file.0).unwrap(), parse(&text).unwrap());
+            assert_eq!(read(&file.0).unwrap().pool, parse(&text).unwrap());
         }
         drop(scope);
     }
