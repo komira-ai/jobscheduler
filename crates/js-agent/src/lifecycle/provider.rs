@@ -94,8 +94,10 @@ pub trait Providers {
     /// this agent was not given answers [`ProviderAnswer::Unavailable`].
     fn ask(&mut self, provider: &str, call: &ProviderCall) -> ProviderAnswer;
 
-    /// Gives the providers the [`Wake`](super::Wake) to ring when a call's answer comes, so
-    /// the start that waits on it is asked again at once. The default keeps none: answers are
-    /// then asked for at the next step.
+    /// Gives the providers the [`Wake`](super::Wake) to ring when a call succeeds, so the
+    /// start that waits on it goes on at once. A call refused or failed rings nothing: it is
+    /// asked again at a later step (a release and a start's `Prepare` and `Mount` at every
+    /// step), and a ring for it would ask a provider that fails at once in a loop with no
+    /// pause. The default keeps none: answers are then asked for at the next step.
     fn set_wake(&mut self, _wake: super::Wake) {}
 }

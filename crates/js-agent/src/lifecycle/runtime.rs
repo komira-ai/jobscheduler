@@ -620,7 +620,8 @@ pub trait Runtime {
     }
 
     /// Whether the network a contained job gets is limited as the agent was told. Called
-    /// before every contained start; a start whose check fails is refused
+    /// before every contained start of a job that asked for a network (`allow-list` or
+    /// `open`), never for a `none` job; a start whose check fails is refused
     /// (`egress-unchecked`) and creates nothing. A runtime with nothing to check passes.
     ///
     /// # Errors

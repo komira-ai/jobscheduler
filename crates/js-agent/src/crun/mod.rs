@@ -132,8 +132,8 @@
 //! # Network
 //!
 //! A `none` job has loopback only. Under `--egress allow-list` or `open` the runtime checks the
-//! firewall ([`EgressPort`]) before every create and wires a job that asked for a network after
-//! `Oci::start_supervised` (its init holds it until the route), with a forward from the host
+//! firewall ([`EgressPort`]) before every wired create and wires a job that asked for a network
+//! after `Oci::start_supervised` (its init holds it until the route), with a forward from the host
 //! for each port it declared, releasing it when the run ends or goes. A runtime with such an
 //! egress adopts no run that may still run: the egress removes the wiring of a previous process
 //! when it starts, so such a lease an earlier agent left is removed. A run that ended while no

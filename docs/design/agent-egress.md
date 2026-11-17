@@ -208,7 +208,7 @@ writes, read by the program's blocking read of a FIFO it holds open. `create_and
 `CrunRuntime::stage` then `start_staged`, so this is the second half of the runtime's start entry:
 `crun run` and, for `wired`, the container's pid, `Egress::attach` (the veth, the /30, the
 firewall's set member) and the init's wait for the default route, with the resolver file the
-backend writes. Outside the interval: the lifecycle's per-start firewall check
+backend writes. Outside the interval: the lifecycle's per-start firewall check of a wired job
 (`check_egress`), the stage (the lease's directories, cgroup and bundle), image pull and unpack
 (the image is in the store before the first sample), and the teardown between samples.
 

@@ -347,22 +347,39 @@ fn a_worker_that_panics_is_seen_to_have_ended() {
 
 /// Asserts that a start waiting for its image goes on as soon as the pull ends, though the
 /// worker has no step interval to fall back on: the pull's end rings the worker, which steps
-/// and creates the container. It catches a start held to the step interval (up to a second
-/// on a node) for each wait of its preparation.
+/// and creates the container; and that the worker is rung again for a later pull once it has
+/// taken the first nudge. It catches a start held to the step interval (up to a second on a
+/// node) for each wait of its preparation, and a worker rung once and never again.
 #[test]
 fn a_start_waiting_for_its_image_goes_on_when_the_pull_ends() {
     let dir = Scratch::new("jobs-worker-wake");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    let image = job("r1").image;
-    machine.world.begin_pull(&image);
-    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    let first = job("r1").image;
+    let second = first.replace("job:1", "job:2");
+    machine.world.begin_pull(&first);
+    machine.world.begin_pull(&second);
+    let mut reply = starts(&["r1", "r2"]);
+    if let Command::Start(spec) = &mut reply.commands[1] {
+        spec.image = second.clone();
+    }
+    assert_eq!(worker.try_deliver(reply), Delivery::Delivered);
     assert!(worker.handle().settle());
-    assert_eq!(worker.snapshot().held[0].state, HeldState::Starting);
+    let states: Vec<HeldState> = worker.snapshot().held.iter().map(|h| h.state).collect();
+    assert_eq!(states, [HeldState::Starting, HeldState::Starting]);
     assert!(machine.world.created().is_empty());
 
-    machine.world.end_pull(&image);
-    let running = |s: &js_agent::Snapshot| s.held.iter().any(|h| h.state == HeldState::Running);
-    assert!(worker.handle().wait_until(&running, HANG_GUARD));
-    assert_eq!(machine.world.created(), ["r1"]);
+    for (image, created) in [(&first, &["r1"][..]), (&second, &["r1", "r2"][..])] {
+        machine.world.end_pull(image, true);
+        let running = created.len();
+        let up = move |s: &js_agent::Snapshot| {
+            s.held
+                .iter()
+                .filter(|h| h.state == HeldState::Running)
+                .count()
+                == running
+        };
+        assert!(worker.handle().wait_until(&up, HANG_GUARD));
+        assert_eq!(machine.world.created(), created);
+    }
 }

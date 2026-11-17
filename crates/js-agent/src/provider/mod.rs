@@ -89,7 +89,7 @@ pub struct ProviderClient {
     /// One lazily connected channel for each provider, by name.
     clients: BTreeMap<String, Channel>,
     flights: Arc<Flights>,
-    /// Rung when a call's answer is in ([`Providers::set_wake`]).
+    /// Rung when a call succeeded ([`Providers::set_wake`]).
     wake: Wake,
     /// Kept to be shut down on drop; calls are spawned through `handle`.
     runtime: Option<Runtime>,
@@ -191,8 +191,14 @@ impl Providers for ProviderClient {
         let (flights, wake) = (Arc::clone(&self.flights), self.wake.clone());
         self.handle.spawn(async move {
             let answer = task.await;
+            // Only an answer the lifecycle goes on from rings: a refused or failed call is
+            // asked again at a later step, and ringing for it would ask a provider that fails
+            // at once again and again without a pause.
+            let goes_on = matches!(answer, ProviderAnswer::Done(_));
             flights.finish(key, answer);
-            wake.wake();
+            if goes_on {
+                wake.wake();
+            }
         });
         ProviderAnswer::Pending
     }

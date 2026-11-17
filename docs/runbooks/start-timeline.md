@@ -18,7 +18,10 @@ journal: `journalctl -u <the agent's unit> | grep 'job: Started'`.
 ## The lifecycle's steps (`steps`)
 
 Each is the milliseconds after `received_ms`, the moment the heartbeat reply that carried the start
-arrived, on the agent's own monotonic clock (milliseconds since the agent started). In order:
+arrived, on the agent's own monotonic clock (milliseconds since the agent started). A start with
+neither layers nor mounts logs `taken`, `admitted`, `ready`, `dirs`, `created`; a start with layers
+or mounts makes its directories before its assembly, and logs `taken`, `admitted`, `resolved`,
+`dirs`, `ready`, `created`.
 
 | Step | Done when |
 |---|---|
@@ -26,7 +29,7 @@ arrived, on the agent's own monotonic clock (milliseconds since the agent starte
 | `admitted` | its admission passed (its body, network ceiling, host ports and mounts, and the firewall for a wired job) and its slot is booked |
 | `resolved` | a start with layers or mounts only: its images are on the node and its host paths were found |
 | `dirs` | its scratch directory, and the runtime's directory of the lease beside it, are made and under the run's quota |
-| `ready` | everything it waited for is here: its images, its providers' answers, its assembled file system |
+| `ready` | everything it waited for is here (its images, its providers' answers, its assembled file system), and the agent goes on to make what is left and create the container |
 | `created` | the runtime's create returned |
 
 A start whose image is still being pulled, or whose providers or file system are being prepared,

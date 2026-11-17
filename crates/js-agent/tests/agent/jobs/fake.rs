@@ -19,10 +19,10 @@ use js_agent::cli_runtime::Mapping;
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 #[cfg(target_os = "linux")]
 use js_agent::lifecycle::Exit;
-use js_agent::lifecycle::{Clock, ProviderAnswer, ProviderCall, Providers, Runtime};
+use js_agent::lifecycle::{Clock, ProviderAnswer, ProviderCall, Providers, Runtime, Wake};
 #[cfg(target_os = "linux")]
 use js_agent::lifecycle::{
-    Found, Prepared, RunHandle, RunSpec, RuntimeError, Status, Ticket, Wake, label,
+    Found, Prepared, RunHandle, RunSpec, RuntimeError, Status, Ticket, label,
 };
 #[cfg(target_os = "macos")]
 use js_agent::native::NativeRuntime;
@@ -273,16 +273,18 @@ impl World {
         self.lock().pulling.insert(image.to_owned());
     }
 
-    /// The pull of `image` is over: the image is here, and the runtime rings its wake, as a
-    /// runtime whose pull ends off the worker does.
+    /// The pull of `image` is over: the image is here, and the runtime rings its wake when
+    /// `rings`, as a runtime whose pull ends off the worker does.
     #[cfg(target_os = "linux")]
-    pub fn end_pull(&self, image: &str) {
+    pub fn end_pull(&self, image: &str, rings: bool) {
         let wake = {
             let mut state = self.lock();
             state.pulling.remove(image);
             state.wake.clone()
         };
-        wake.wake();
+        if rings {
+            wake.wake();
+        }
     }
 
     /// The runtime of the agent `host_id` on this world: it labels what it makes with the
@@ -508,6 +510,8 @@ pub struct FakeMachine {
     /// What `providers` makes for an agent given mount providers: stand-ins that write what
     /// they are asked in the shared list, or why the machine cannot make them.
     pub providers: Result<Arc<Mutex<Vec<String>>>, String>,
+    /// What the providers were given to ring (`Providers::set_wake`).
+    provider_wake: Arc<Mutex<Wake>>,
 }
 
 /// The mount providers of a worker test: they have the names they were made for, write each
@@ -516,6 +520,7 @@ struct AskedProviders {
     host_id: String,
     names: Vec<String>,
     calls: Arc<Mutex<Vec<String>>>,
+    wake: Arc<Mutex<Wake>>,
 }
 
 impl Providers for AskedProviders {
@@ -531,6 +536,10 @@ impl Providers for AskedProviders {
         let mut calls = self.calls.lock().unwrap_or_else(PoisonError::into_inner);
         calls.push(format!("{} {provider} {call:?}", self.host_id));
         ProviderAnswer::Done(None)
+    }
+
+    fn set_wake(&mut self, wake: Wake) {
+        *self.wake.lock().unwrap_or_else(PoisonError::into_inner) = wake;
     }
 }
 
@@ -602,7 +611,17 @@ impl FakeMachine {
             bundles_seen: Arc::default(),
             vms: None,
             providers: Ok(Arc::default()),
+            provider_wake: Arc::default(),
         }
+    }
+
+    /// Rings the wake the machine's providers were given, as a provider's answer does.
+    pub fn ring_providers(&self) {
+        let wake = self
+            .provider_wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        wake.clone().wake();
     }
 
     /// The same machine, which cannot make the client of the mount providers: `why`.
@@ -726,6 +745,7 @@ impl Machine for FakeMachine {
             host_id: host_id.to_owned(),
             names,
             calls,
+            wake: Arc::clone(&self.provider_wake),
         }))
     }
 

@@ -14,17 +14,6 @@ fn read(path: &std::path::Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// Proves the whole of a run the runtime makes and reads. A run becomes: the lease's
-/// directories, given to the job user or to the job's id (first id of the subordinate range
-/// plus 1000) in the order the layout says, then the run's scratch directory to the job's
-/// id, then the lease's cgroup and its four files to the job user; a cgroup limited by the
-/// booking (`memory.max` the booking, no swap, `cpu.max` the booked cores,
-/// `memory.oom.group`); a bundle that runs the image's entrypoint with the run's arguments
-/// in the image's environment with the scratch directory bound. It lists with the run's
-/// label, the agent's and the time it was made. The program's exit 3 polls as 3, again as
-/// the same, and removing it leaves no directory, no cgroup and no listing, repeated without
-/// error. Catches a limit that is not the booking, files the job cannot write or `crun`
-/// cannot use, and a removal that leaves a lease behind.
 /// Proves the steps of a start the runtime gives for its timeline: each step of the making
 /// and of the start, in the order they are done, at the runtime's clock (5000 here), given
 /// once; a container it does not hold has none. Catches a step left out or out of order, and
@@ -55,6 +44,17 @@ fn a_start_gives_its_steps_once_in_the_order_they_were_done() {
     runtime.remove(&id).expect("removed");
 }
 
+/// Proves the whole of a run the runtime makes and reads. A run becomes: the lease's
+/// directories, given to the job user or to the job's id (first id of the subordinate range
+/// plus 1000) in the order the layout says, then the run's scratch directory to the job's
+/// id, then the lease's cgroup and its four files to the job user; a cgroup limited by the
+/// booking (`memory.max` the booking, no swap, `cpu.max` the booked cores,
+/// `memory.oom.group`); a bundle that runs the image's entrypoint with the run's arguments
+/// in the image's environment with the scratch directory bound. It lists with the run's
+/// label, the agent's and the time it was made. The program's exit 3 polls as 3, again as
+/// the same, and removing it leaves no directory, no cgroup and no listing, repeated without
+/// error. Catches a limit that is not the booking, files the job cannot write or `crun`
+/// cannot use, and a removal that leaves a lease behind.
 #[test]
 fn a_run_is_made_started_read_and_removed() {
     let node = Node::new("run-life");

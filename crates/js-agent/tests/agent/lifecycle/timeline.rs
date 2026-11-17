@@ -103,9 +103,9 @@ fn a_start_with_layers_shows_its_lookups_and_its_assembly() {
     assert_eq!(h.life.step(), started("j1", timeline));
 }
 
-/// Asserts that a start whose create failed is not logged as started, and that the next
-/// start's timeline is its own: it carries none of the failed start's steps. Catches a
-/// timeline kept after its start failed and handed to another.
+/// Asserts that a start whose create failed is logged with no `Started` line (so with no
+/// timeline), and that the start after it is logged from its own arrival with its own steps.
+/// Catches a failed create logged as a start.
 #[test]
 fn a_failed_start_leaves_no_timeline_behind() {
     let mut h = Harness::new("timeline-failed");
