@@ -549,6 +549,25 @@ fn walker(job: &JobRecord) -> Option<Walker> {
 /// # Errors
 /// As [`map::needs_of`].
 pub fn job_request(job: &JobRecord, resources: &Resources) -> Result<Request, MapError> {
+    let capabilities = job_capabilities(job);
+    Ok(Request {
+        key: WorkKey::new("job", job.id.as_str()),
+        qos: Qos::Batch,
+        kind: LeaseKind::Action,
+        resources: map::booking(resources),
+        needs: map::needs_of(&capabilities, resources)?,
+        hermetic: false,
+        do_not_cache: true,
+        whole_worker: false,
+        pin: None,
+    })
+}
+
+/// What `job` requires of a host's capabilities: its constraints' capabilities, with its
+/// `os`, `arch` and `exec` when it names them. The request of a queued job ([`job_request`])
+/// and of a whole-host job (`crate::engine::whole_jobs`) are made of it, so both are placed
+/// only on a host of the platform they name.
+pub(crate) fn job_capabilities(job: &JobRecord) -> js_types::Capabilities {
     let constraints = &job.spec.constraints;
     let mut capabilities = constraints.capabilities.clone();
     let exec = constraints.exec.map(|mode| mode.name().to_owned());
@@ -561,17 +580,7 @@ pub fn job_request(job: &JobRecord, resources: &Resources) -> Result<Request, Ma
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)));
     capabilities.extend(named);
-    Ok(Request {
-        key: WorkKey::new("job", job.id.as_str()),
-        qos: Qos::Batch,
-        kind: LeaseKind::Action,
-        resources: map::booking(resources),
-        needs: map::needs_of(&capabilities, resources)?,
-        hermetic: false,
-        do_not_cache: true,
-        whole_worker: false,
-        pin: None,
-    })
+    capabilities
 }
 
 /// The scheduler's booking of `booked`, and whether it is the whole host.

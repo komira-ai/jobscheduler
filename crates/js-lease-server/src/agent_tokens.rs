@@ -125,6 +125,14 @@ impl AgentTokens {
     }
 }
 
+/// The shared join tokens of a pool after the first, with the pool's name: a hello with one
+/// of them must name that pool.
+pub(crate) struct PoolTokens {
+    /// The pool's name.
+    pub(crate) pool: String,
+    pub(crate) tokens: AgentTokens,
+}
+
 /// The tokens a file's bytes hold, one per line.
 fn parse(bytes: &[u8]) -> Result<Vec<Token>, String> {
     let mut tokens: Vec<Token> = Vec::new();

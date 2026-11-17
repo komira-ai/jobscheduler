@@ -37,7 +37,7 @@ The feed reads the raw P90, not the life admission charges a lease (`lives.rs` h
 - A lease put back from the lease file keeps its recorded start and bound only with the flag on. With the flag off it has no bound and counts as ending now (tests `a_restored_lease_keeps_its_recorded_bound_only_with_the_flag`, `without_a_source_of_lives_a_restored_lease_counts_as_ending_now`; design section 8, row 10).
 - There is nothing to measure: every stop the counters count is `ended_unestimated` (a restored lease's stop counts nothing), and no ended row has an `estimated_end` (section 2).
 
-**The switch.** The switch is the flag `--estimate-feed` or the file key `server.estimate_feed`, `false` by default (`crates/js-lease-server/src/lib.rs`, tests `the_flag_is_off_by_default_and_needs_an_agent_pool_and_usage` and `the_key_is_read_from_the_file_and_refused_beside_usage_off`). It needs `--agent-pool-config` and is refused with `--usage-off`. Today a server starts with at most one pool that registers agents (`lib.rs`, the `[[pool]]` rules), so the server-wide flag is in effect a per-pool setting.
+**The switch.** The switch is the flag `--estimate-feed` or the file key `server.estimate_feed`, `false` by default (`crates/js-lease-server/src/lib.rs`, tests `the_flag_is_off_by_default_and_needs_an_agent_pool_and_usage` and `the_key_is_read_from_the_file_and_refused_beside_usage_off`). It needs `--agent-pool-config` and is refused with `--usage-off`. Today a server starts with one elastic pool, or with several joined pools that share its registry (`lib.rs`, the `[[pool]]` rules), so the server-wide flag is in effect a per-pool setting for an elastic pool.
 
 ## 2. What is recorded
 
@@ -205,7 +205,7 @@ Once the counters are stored (step 3), rules 3 to 5 read straight off them: p is
 
 **The mechanism it implies.** It implies a pool key, `estimate_feed` (`true` or `false`), in the pool's table: the `[[pool]]` table of the configuration file, or the `--agent-pool-config` file. The key overrides the server default (`server.estimate_feed` or `--estimate-feed`). A pool that leaves the key out takes the server default. A pool with too little evidence (rule 1 or rule 2 unmet) leaves it out, so it stays off while the default is off.
 
-Today a server starts with at most one pool that registers agents, so the existing flag already is that per-pool switch. A second key would be a second way to say the same thing. The recommendation is therefore to add the pool key with design step 8, when a server first serves several pools, and until then to use `server.estimate_feed` as the pool's switch.
+Today a server starts with one elastic pool, or with several joined pools that launch nothing, so the existing flag already is that per-pool switch. A second key would be a second way to say the same thing. The recommendation is therefore to add the pool key with design step 8, when a server first serves several pools, and until then to use `server.estimate_feed` as the pool's switch.
 
 **Approval.** Any of these settings is a configuration change, and the owner approves it. This note adds none of them.
 

@@ -110,6 +110,11 @@ fn the_workflow_is_called_by_the_release_and_started_by_hand_but_never_by_a_pull
             "required: false",
             "type: boolean",
             "default: false",
+            "secrets:",
+            "MACOS_INSTALLER_P12:",
+            "required: false",
+            "MACOS_INSTALLER_P12_PASSWORD:",
+            "required: false",
             "workflow_dispatch:",
             "inputs:",
             "version:",
@@ -717,4 +722,92 @@ fn the_sign_condition_refuses_a_pull_request_and_a_push_that_does_not_ask() {
     assert!(release.contains(
         "    uses: ./.github/workflows/js-agent-macos-pkg.yml\n    with:\n      version: ${{ needs.plan.outputs.version }}\n      sign: true\n"
     ));
+}
+
+/// The lines of the job `name` of the workflow `text` (indented past the job's name), or none.
+fn job_of<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+    let head = format!("  {name}:");
+    let lines = text.lines().skip_while(|l| *l != head).skip(1);
+    lines
+        .take_while(|l| l.is_empty() || l.starts_with("   ") || l.starts_with("  #"))
+        .collect()
+}
+
+/// What is wrong with the secrets the release's jobs pass the workflows they call: the call
+/// of the macOS package must pass the two secrets of the installer identity, by name and from
+/// the secrets of the same names, and nothing else; no other job of the release passes any;
+/// and none passes `secrets: inherit`, which would hand the called workflow every secret.
+fn passed_secrets_problems(release: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    if code(release).iter().any(|l| l.trim() == "secrets: inherit") {
+        problems.push("a job passes secrets: inherit".to_owned());
+    }
+    let pkg = job_of(release, "beta-macos-pkg");
+    let at = pkg.iter().position(|l| *l == "    secrets:");
+    let passed: Vec<&str> = at.map_or(Vec::new(), |at| {
+        let after = pkg.iter().skip(at + 1);
+        after.take_while(|l| indent(l) >= 6).copied().collect()
+    });
+    let want = [
+        "      MACOS_INSTALLER_P12: ${{ secrets.MACOS_INSTALLER_P12 }}",
+        "      MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}",
+    ];
+    if passed != want {
+        problems.push(format!("beta-macos-pkg passes {passed:?}"));
+    }
+    for other in ["beta-macos", "beta-macos-probe", "artifacts"] {
+        if job_of(release, other).iter().any(|l| l.contains("secrets")) {
+            problems.push(format!("{other} passes a secret"));
+        }
+    }
+    problems
+}
+
+/// The release passes the call of the macOS package the two secrets of the installer
+/// identity by name, and no other job of the release passes one. It catches a call that
+/// passes none, after which `sign` never sees the organisation's secrets and every release
+/// ships no signed package (so no Mac is ordered js-agent); and a call that passes every
+/// secret or another one. Each way of breaking the rule is named.
+#[test]
+fn the_release_passes_the_call_the_two_signing_secrets_by_name_and_no_other() {
+    let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let release = std::fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
+    assert_eq!(passed_secrets_problems(&release), Vec::<String>::new());
+    let pair = "    secrets:\n      MACOS_INSTALLER_P12: ${{ secrets.MACOS_INSTALLER_P12 }}\n      MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}\n";
+    assert!(release.contains(pair));
+    let none = release.replace(pair, "");
+    let inherit = release.replace(pair, "    secrets: inherit\n");
+    let more = release.replace(
+        pair,
+        &format!("{pair}      APT_GPG_PASSPHRASE: ${{{{ secrets.APT_GPG_PASSPHRASE }}}}\n"),
+    );
+    let probe = release.replace(
+        "    uses: ./.github/workflows/macos-probe.yml\n",
+        "    uses: ./.github/workflows/macos-probe.yml\n    secrets:\n      X: ${{ secrets.X }}\n",
+    );
+    let cases = [
+        (none, vec!["beta-macos-pkg passes []".to_owned()]),
+        (
+            inherit,
+            vec![
+                "a job passes secrets: inherit".to_owned(),
+                "beta-macos-pkg passes []".to_owned(),
+            ],
+        ),
+        (
+            more,
+            vec![format!(
+                "beta-macos-pkg passes {:?}",
+                [
+                    "      MACOS_INSTALLER_P12: ${{ secrets.MACOS_INSTALLER_P12 }}",
+                    "      MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}",
+                    "      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}",
+                ]
+            )],
+        ),
+        (probe, vec!["beta-macos-probe passes a secret".to_owned()]),
+    ];
+    for (text, want) in cases {
+        assert_eq!(passed_secrets_problems(&text), want);
+    }
 }

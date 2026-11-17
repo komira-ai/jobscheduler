@@ -97,10 +97,15 @@ environment or its secrets are not set up it prints a notice and skips every ste
 first, and the run succeeds.
 
 `pkg-signing` is created by a repository administrator, with a rule that only main may
-deploy to it and with these secrets as environment secrets (none is in the tree):
+deploy to it. The secrets are the organisation's, selected for this repository, or environment
+secrets of `pkg-signing`, which take their place when set (none is in the tree):
 
 - `MACOS_INSTALLER_P12`: the "Developer ID Installer" certificate and key, a PKCS#12 file, base64.
 - `MACOS_INSTALLER_P12_PASSWORD`: its password.
+
+A called workflow sees no organisation or repository secret its caller does not pass, so
+`release.yml`'s `beta-macos-pkg` passes these two by name to the call (and no other: not
+`secrets: inherit`); the workflow declares them as optional secrets of its `workflow_call`.
 
 No certificate name and no team id is written in the tree: the identity is found in the
 temporary keychain by its hash. Each secret is named only in the environment of the step

@@ -1,6 +1,7 @@
 //! What the configuration decided for the agents that register hosts: [`AgentSetup`], the
 //! clock and id source its job store is opened on ([`Config::with_job_sources`]).
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +10,8 @@ use js_sched_placer::sizes::ColdSize;
 use js_types::ProviderId;
 
 use super::{Config, CpuSlack};
-use crate::agent_tokens::AgentTokens;
+use crate::agent_tokens::{AgentTokens, PoolTokens};
+use crate::error::StartupError;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{JobSources, JobStoreSetup, ServerIds};
 use crate::rate::HelloLimit;
@@ -17,10 +19,16 @@ use crate::rate::HelloLimit;
 /// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
 /// decided.
 pub(crate) struct AgentSetup {
+    /// The first pool's shared join tokens.
     pub(crate) tokens: AgentTokens,
+    /// The first pool: the one the registry is named for, whose whole-node settings and
+    /// timing of restored hosts are the server's.
     pub(crate) pool: PoolConfig,
-    /// The one provider the mint route accepts, when the configuration names it.
-    pub(crate) mint_provider: Option<String>,
+    /// The pools after the first, each with its shared join tokens, in the order given:
+    /// a later `--agent-pool-config`, or a later joined `[[pool]]`.
+    pub(crate) more: Vec<MorePool>,
+    /// The providers the mint route accepts, when the configuration names them; empty, any.
+    pub(crate) mint_provider: BTreeSet<String>,
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
@@ -46,6 +54,43 @@ pub(crate) struct AgentSetup {
     /// names no platform for the pool, and the order is `static`, then the pool's launched
     /// hosts ([`crate::sched::rank::static_then`]).
     pub(crate) providers: Option<Vec<ProviderId>>,
+}
+
+/// A pool after the first: what registers into it and its shared join tokens.
+pub(crate) struct MorePool {
+    pub(crate) pool: PoolConfig,
+    pub(crate) tokens: PoolTokens,
+}
+
+/// Refuses `pool`, which `place` names, as a pool after `first` and `before`: its name is
+/// one of theirs (a hello could not say which it joins); its `memory_schedulable_percent` is
+/// not the first pool's (the placement engine books one share of every host's memory); or it
+/// has whole-node settings (the server's are the first pool's, so a later pool's would be
+/// read by nothing: its class must not be `whole-node`).
+pub(crate) fn check_more(
+    first: &PoolConfig,
+    before: &[MorePool],
+    (pool, place): (&PoolConfig, &str),
+) -> Result<(), StartupError> {
+    let mut earlier = std::iter::once(first).chain(before.iter().map(|more| &more.pool));
+    if earlier.any(|earlier| earlier.name() == pool.name()) {
+        return Err(StartupError::at(
+            place,
+            "name: also the name of an earlier pool",
+        ));
+    }
+    let percent = first.memory_percent().get();
+    if pool.memory_percent().get() != percent {
+        let reason = format!(
+            "memory_schedulable_percent must be the first pool's ({percent}): the placement engine books one share of every host's memory"
+        );
+        return Err(StartupError::at(place, reason));
+    }
+    if pool.whole_node().is_some() {
+        let reason = "whole-node settings are the first pool's alone: give this pool a class that is not whole-node, and no whole-node keys";
+        return Err(StartupError::at(place, reason));
+    }
+    Ok(())
 }
 
 impl Config {

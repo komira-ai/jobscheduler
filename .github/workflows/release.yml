@@ -425,9 +425,11 @@ jobs:
   # The beta stage: the platforms other than Linux x86_64, on the hosted macOS runners, after
   # `artifacts` and in parallel with `publish` and everything after it (none of those needs
   # these jobs). A push to main only; a pull request runs none of them. Each job calls a
-  # workflow that holds `contents: read` alone. None of them is given a secret: the package's
-  # `sign` job, which this call asks for (`sign: true`, on a push to main), takes the secrets
-  # of its own environment `pkg-signing`, and skips itself with a notice when they are not set.
+  # workflow that holds `contents: read` alone. Only `beta-macos-pkg` is given secrets, the two
+  # of the installer identity, and only its `sign` job reads them (`sign: true`, on a push to
+  # main), in its environment `pkg-signing`, skipping itself with a notice when they are not
+  # set. They are passed by name: a called workflow sees no secret of the organisation or the
+  # repository that its caller does not pass, and `secrets: inherit` would pass every one.
   beta-macos:
     needs: [plan, artifacts]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
@@ -444,6 +446,9 @@ jobs:
     with:
       version: ${{ needs.plan.outputs.version }}
       sign: true
+    secrets:
+      MACOS_INSTALLER_P12: ${{ secrets.MACOS_INSTALLER_P12 }}
+      MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}
 
   beta-macos-probe:
     needs: [plan, artifacts]

@@ -133,6 +133,11 @@ pub(crate) fn router(agents: Arc<Agents>) -> Router {
 #[derive(Clone)]
 struct OneTime(Credential);
 
+/// Marks a request that was authenticated with one of a pool's shared join tokens: the name
+/// of that pool, which a hello must name ([`serve_hello_in`]).
+#[derive(Clone)]
+struct TokenPool(String);
+
 /// Refuses a request that does not carry one of the join tokens, a one-time token or a host
 /// credential, with a 401 that says nothing else, and passes the credential the registry
 /// knows the host by on (and the mark [`OneTime`] when it is a one-time token or a host
@@ -148,11 +153,12 @@ async fn authenticate(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(bearer);
-    let pooled = given.and_then(|given| agents.tokens.identify(given));
+    let pooled = given.and_then(|given| agents.identify_pooled(given));
     let single = || given.and_then(|given| agents.joins.identify(given));
     match (pooled, single()) {
-        (Some(credential), _) => {
+        (Some((credential, pool)), _) => {
             request.extensions_mut().insert(credential);
+            request.extensions_mut().insert(TokenPool(pool));
             next.run(request).await
         }
         (None, Some(presented)) => {
@@ -203,11 +209,13 @@ fn retry_after(wait: Duration) -> u64 {
 async fn hello(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
-    one_time: Option<Extension<OneTime>>,
+    (one_time, pool): (Option<Extension<OneTime>>, Option<Extension<TokenPool>>),
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, Refused> {
     let presented = one_time.map(|Extension(OneTime(presented))| presented);
-    let welcome = serve_hello(&agents, who, presented, body, &|| ()).await?;
+    let pool = pool.map(|Extension(TokenPool(pool))| pool);
+    let given = (who, presented, pool.as_deref());
+    let welcome = serve_hello_in(&agents, given, body, &|| ()).await?;
     // The Welcome can carry the host credential, so no cache may keep it (as for a token
     // response in RFC 6749, section 5.1).
     let headers = [
@@ -224,6 +232,7 @@ async fn hello(
 /// waits on timing. `who` is the credential the registry knows the host by; `one_time` is
 /// the digest of the one-time token or host credential the request carried, when it
 /// carried one.
+#[cfg(test)]
 async fn serve_hello(
     agents: &Arc<Agents>,
     who: Credential,
@@ -231,10 +240,34 @@ async fn serve_hello(
     body: Result<Bytes, BytesRejection>,
     between: &(dyn Fn() + Sync),
 ) -> Result<Json<Welcome>, Refused> {
+    serve_hello_in(agents, (who, one_time, None), body, between).await
+}
+
+/// [`serve_hello`], for a request authenticated with a pool's shared join token when `pool`
+/// is that pool's name: the hello must name it. On a server of several pools a hello with a
+/// one-time token or a host credential must name the pool its instance's provider names.
+/// Either refusal is `unknown-pool`, before anything is taken or written: a token of one
+/// pool never registers a host into another.
+async fn serve_hello_in(
+    agents: &Arc<Agents>,
+    (who, one_time, pool): (Credential, Option<Credential>, Option<&str>),
+    body: Result<Bytes, BytesRejection>,
+    between: &(dyn Fn() + Sync),
+) -> Result<Json<Welcome>, Refused> {
     let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
     hello
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    let several = !agents.more_tokens.is_empty();
+    let launched = hello
+        .instance
+        .as_ref()
+        .map(|instance| instance.provider.as_str());
+    let named = pool.or(launched.filter(|_| several && one_time.is_some()));
+    if named.is_some_and(|named| named != hello.pool) {
+        warn!(host = %hello.host_id, pool = %hello.pool, "agent hello refused: its token is another pool's");
+        return Err(Refused::of(&Refusal::UnknownPool));
+    }
     // Hellos are taken one at a time, from the use of the token to the registry's answer
     // and the release of a refused one, so no other hello of the host comes in between.
     let gate = agents.host_writes.lock().await;

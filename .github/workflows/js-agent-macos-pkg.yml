@@ -46,6 +46,14 @@ on:
         required: false
         type: boolean
         default: false
+    # A called workflow sees no secret of the organisation or the repository unless its
+    # caller passes it: release.yml passes these two, and `sign` alone reads them. A secret of
+    # the environment `pkg-signing` of the same name is used in their place when it is set.
+    secrets:
+      MACOS_INSTALLER_P12:
+        required: false
+      MACOS_INSTALLER_P12_PASSWORD:
+        required: false
   workflow_dispatch:
     inputs:
       version:

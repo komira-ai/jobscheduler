@@ -156,10 +156,10 @@ type; 4.3 shows where those live.
 ### 3.2 Pools (requirement 2)
 
 A pool is one `[[pool]]` table: a name, a class, a cap, a provider, a network, an idle
-time, an execution mode. Today the server has exactly one registering pool: `Registry::new`
-takes one `PoolConfig` (`crates/js-registry/src/registry.rs`, built in
-`crates/js-lease-server/src/agents.rs`). The first slice keeps that: at most one pool whose
-provider is elastic or `agent`, plus any number of `static` pools.
+time, an execution mode. One registry serves the registering pools: `Registry::with_pools`
+takes a first `PoolConfig` and the others (`crates/js-registry/src/registry.rs`, built in
+`crates/js-lease-server/src/agents.rs`), and each host is in the pool its hello names. The
+first slice serves several joined pools together, or one elastic pool alone.
 
 This replaces the provider hierarchy of `docs/design/providers.md` (`providers = [...]` per
 pool, `provider_max_machines`) for the first slice. A pool has one provider. Choosing among
@@ -422,7 +422,7 @@ message naming pool and field:
 | `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
 | `launch = "live"` on a pool whose provider cannot be built | `pool "gpu": launch: ...` |
 | two pools with one name; a class that books part of a host (first slice) | `pool "b": name: also the name of an earlier pool` |
-| more than one registering pool: the file is valid, and the server does not start on it | `pool "b": several elastic pools are parsed; this version runs one, as the server keeps one registry of agents` |
+| two elastic pools, or an elastic pool beside a joined one: the file is valid, and the server does not start on it | `pool "b": several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`; `pool "b": an elastic pool is served alone; this version runs several pools only when every one is joined` |
 | `exec` not `container` or `sandbox-exec`; `sandbox-exec` with an elastic kind that cannot launch macOS | `pool "mac": exec: ...` |
 | an elastic pool and no `server.agent_listen`; `agent_listen` equal to `listen` | `server.agent_listen: required with an elastic pool; must differ from server.listen` |
 | `advertise_url` that is `http://` and not loopback, whenever any elastic pool exists (the agent refuses it, `crates/js-agent/src/cli.rs`; a pool that passed start and then failed every boot would bill 15 minutes per launch with only "booting, no hello" to show) | `server.advertise_url: http:// is refused by agents; use https (or loopback)` |

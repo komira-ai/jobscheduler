@@ -87,9 +87,12 @@ changing its role, takes a restart (a restart ends no job); `default`'s token is
 A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
 `max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents;
 `server.agent_listen` is required as for an elastic pool. A file may declare any number of joined and elastic pools, each with its own
-`join_token_file`, but the server starts only on a file with at most one pool that registers agents: with more it refuses naming the
-second (`several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`, or `several pools register agents; ...`
-when they are not all elastic).
+`join_token_file`. The server starts on several joined pools, whose hosts share its one registry (each host in the pool its hello names,
+with that pool's shared tokens only), and on an elastic pool alone: beside another registering pool an elastic one is refused naming the
+second (`several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`, or `an elastic pool is
+served alone; this version runs several pools only when every one is joined`). A joined pool after the first must not have the first's
+name, must have its `memory_schedulable_percent` and must not be of class `whole-node`; the flags say the same with a repeated
+`--agent-pool-config` (`crates/js-lease-server/src/lib.rs`).
 
 ```toml
 [[pool]]

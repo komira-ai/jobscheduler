@@ -35,6 +35,9 @@ pub enum ConfigError {
     /// A setting that is a maximum, a count or a time is zero where zero is meaningless.
     #[error("{0} must be at least 1")]
     WholeZero(&'static str),
+    /// Two pools of one registry have one name ([`crate::Registry::with_pools`]).
+    #[error("two pools are named {0:?}: a hello could not say which it joins")]
+    PoolNamedTwice(String),
     /// A dedicated pool has no ordinary work to keep hosts for.
     #[error("keep_for_ordinary is for mixed pools; a dedicated pool keeps none")]
     DedicatedKeep,
@@ -336,7 +339,9 @@ impl PoolConfig {
         whole.map_or(0, |w| self.max_machines.saturating_sub(w.max_whole_node))
     }
 
-    pub(crate) fn name(&self) -> &ProviderId {
+    /// The pool's name: what a hello names to join it, and the provider the bindings of the
+    /// machines launched for it name.
+    pub fn name(&self) -> &ProviderId {
         &self.name
     }
 
