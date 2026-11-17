@@ -31,9 +31,13 @@ pub const SCRATCH_TARGET: &str = "/scratch";
 /// after `create` checks it like them: one that reads back writable is refused.
 pub const FILES_TARGET: &str = "/run/js-files";
 
-/// The most processes a job may hold when its limits name no bound: a fork bomb is
-/// stopped well before it takes the host, and a build with many threads still fits.
-pub const DEFAULT_PIDS: u64 = 4096;
+/// The most processes (tasks, threads included) a job may hold when its limits name no
+/// bound. Build tools size their parallelism to the node rather than to the booking (busybox
+/// `nproc` and Zig count the CPUs the job may run on, all of the node's), so on an 88-CPU node
+/// `make -j$(nproc)` starts 88 compilers, each with its own processes and threads; 32768
+/// leaves such a build room on the largest nodes while a fork bomb is still stopped far below
+/// the kernel's `pid_max`.
+pub const DEFAULT_PIDS: u64 = 32_768;
 
 /// A value that cannot be given to the runtime safely, or a limit it cannot honour.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

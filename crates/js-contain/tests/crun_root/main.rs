@@ -5,7 +5,8 @@
 //! says it should see.
 //!
 //! - `inside`: the ids the job runs as, its capabilities, the seccomp filter, the root's
-//!   read-only mount, `/tmp`, the network namespace, the cgroup's OOM group and the
+//!   read-only mount, `/tmp`, the network namespace, the cgroup's OOM group, the booking in
+//!   its own cgroup's `cpu.max` and `memory.max`, and the
 //!   exec-root overlay's options.
 //! - `limits`: an out-of-memory kill is the lease's own, a kill leaves no process or
 //!   cgroup, and one job that has used up its process limit does not stop another from
