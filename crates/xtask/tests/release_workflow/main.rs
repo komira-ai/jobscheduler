@@ -17,6 +17,7 @@ mod calls;
 mod debs;
 mod fast_lane;
 mod images;
+mod secrets;
 
 use calls::{CALLERS, calls};
 
