@@ -240,6 +240,7 @@ fn job_start(job: &str, cpu_millis: u64) -> Command {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        outputs: Vec::new(),
     }))
 }
 

@@ -84,8 +84,10 @@ fn a_request_without_a_readable_signature_is_refused() {
 /// Asserts that a signed request whose URL has no scheme, no path or an undecodable query is
 /// `InvalidURI`; that one for another host or another bucket, or naming a key that is not
 /// valid percent-encoded UTF-8, is `NoSuchBucket`; that a method the fake does not serve on
-/// the object or the bucket is `MethodNotAllowed`; and that a read without a valid range and a
-/// listing that is not ListObjectsV2 with a `max-keys` of 1 to 1000 are `InvalidRequest`.
+/// the object or the bucket is `MethodNotAllowed`; that a read with a range that is not valid
+/// and a listing that is not ListObjectsV2 with a `max-keys` of 1 to 1000 are `InvalidRequest`.
+/// (A read with no range is of the whole object, as a presigned GET reads it:
+/// `outputs::a_presigned_get_reads_one_object_until_it_expires`.)
 #[test]
 fn a_call_the_fake_does_not_serve_is_refused() {
     let (rig, credential) = rig();
@@ -144,10 +146,7 @@ fn a_call_the_fake_does_not_serve_is_refused() {
     }
 
     let invalid = (400, "InvalidRequest".to_owned());
-    assert_eq!(
-        refusal(fake, signed(Raw::new(Method::Get, "/logs/k"))),
-        invalid
-    );
+
     for range in [
         "bytes=5-2",
         "bytes=a-9",

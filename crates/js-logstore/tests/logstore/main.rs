@@ -14,6 +14,7 @@ mod fake_presigned;
 mod fake_requests;
 mod fake_sts;
 mod layout;
+mod outputs;
 mod presigned;
 #[path = "../s3_compat/mod.rs"]
 mod s3_compat;

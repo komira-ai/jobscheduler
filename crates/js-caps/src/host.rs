@@ -88,6 +88,14 @@ pub const GPU_PASSTHROUGH: &str = "gpu-passthrough";
 /// exactly.
 pub const LAYERED_ROOTFS: &str = "layered-rootfs";
 
+/// The capability key of an agent that uploads a job's declared outputs
+/// (`js_agent_wire::JobStartSpec::outputs`) to the object store when the job ends
+/// (`docs/design/job-outputs.md`). Its value is [`FLAG_SET`]. An agent reports it only with
+/// `log-upload`, whose credential the upload uses. An agent without it ignores the field, so a
+/// job that declares outputs is placed only on a host that reports this key, and its start is
+/// sent only there. A request compares it exactly.
+pub const JOB_OUTPUTS: &str = "job-outputs";
+
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
@@ -113,7 +121,7 @@ pub fn is_mount_provider_key(key: &str) -> bool {
 }
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 11] = [
+pub const DETECTED_KEYS: [&str; 12] = [
     RUNTIME,
     GPU_TOOLKIT,
     GPU_PASSTHROUGH,
@@ -125,6 +133,7 @@ pub const DETECTED_KEYS: [&str; 11] = [
     BUNDLE,
     BUNDLE_ROOT,
     LAYERED_ROOTFS,
+    JOB_OUTPUTS,
 ];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.

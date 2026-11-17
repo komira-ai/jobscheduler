@@ -101,7 +101,7 @@ impl fmt::Display for Consumable {
 }
 
 /// Keys compared as exact strings.
-const EXACT_KEYS: [&str; 7] = [
+const EXACT_KEYS: [&str; 8] = [
     "os",
     "os_image",
     "cpu.model",
@@ -109,6 +109,7 @@ const EXACT_KEYS: [&str; 7] = [
     "gpu.kind",
     crate::host::EXEC,
     crate::host::LAYERED_ROOTFS,
+    crate::host::JOB_OUTPUTS,
 ];
 
 /// Keys a node reports as a set and a request names one member of.

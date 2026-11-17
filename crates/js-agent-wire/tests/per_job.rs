@@ -45,6 +45,7 @@ fn start() -> JobStartSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 

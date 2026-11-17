@@ -40,6 +40,7 @@ pub(super) fn start(job_id: &str) -> JobStartSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 

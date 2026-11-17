@@ -58,6 +58,7 @@ fn start() -> JobStartSpec {
             provider_mount("scratch-2", "cache", "/data/cache", MountMode::ReadWrite),
         ],
         host_ports: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 

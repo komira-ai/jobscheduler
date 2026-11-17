@@ -46,6 +46,7 @@ async fn a_start_is_resent_until_listed() {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        outputs: Vec::new(),
     };
     let mut last = None;
     for _ in 0..3 {

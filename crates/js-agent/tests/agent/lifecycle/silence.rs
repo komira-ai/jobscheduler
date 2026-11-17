@@ -66,6 +66,7 @@ pub fn job_start(job_id: &str, allocation: &str) -> Command {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        outputs: Vec::new(),
     }))
 }
 

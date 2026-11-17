@@ -204,6 +204,7 @@ pub(crate) fn start_of(
         layers: spec.layers.clone(),
         mounts: spec.mounts.clone(),
         host_ports: spec.host_ports.clone(),
+        outputs: Vec::new(),
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);

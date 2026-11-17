@@ -23,6 +23,7 @@
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` and [`MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN`] for `egress-ports` |
 //! | a job start's `layers` | [`MAX_LAYERS`] entries; a host path [`MAX_PATH_LEN`] bytes, absolute, in normal form; an image as `image`; a provider's name [`MAX_PROVIDER_NAME_LEN`] bytes of `[a-z0-9-]`, leading letter, and its ref [`MAX_PROVIDER_REF_LEN`] bytes, no control or format character |
+//! | a job start's `outputs` | [`MAX_JOB_OUTPUTS`] entries; each path is checked by the agent when it uploads, not as part of the start |
 //! | a job start's `mounts` | [`MAX_MOUNTS`] entries; a host-path `source` as a layer's host path, a provider `source` as a layer's provider; a `sub_path` as a target after its `/`, or empty; `target` [`MAX_PATH_LEN`] bytes with its leading `/`, ASCII, outside the runtime's places, no two equal in any case |
 //! | a job start's `host_ports` | [`MAX_PORTS`] entries; `host_port` and a given `container_port` from 1 to 65535; no two of one protocol at one job port, none at a declared port's `container` |
 //! | declared ports (`JobSpec::ports`) | [`MAX_PORTS`] entries, each port from 1 to 65535; the capability `egress-ports` [`MAX_PORTS`] items |
@@ -65,6 +66,9 @@ pub const MAX_ENV_TOTAL_BYTES: usize = 128 * 1024;
 pub const MAX_INPUTS: usize = 256;
 /// Most declared outputs on a run or a native job.
 pub const MAX_OUTPUTS: usize = 256;
+/// Most declared outputs on a job start (`docs/design/job-outputs.md`); the server and the
+/// agent hold each path to the store's rules (`js_logstore::outputs`).
+pub const MAX_JOB_OUTPUTS: usize = 64;
 /// Most mounts on one job: a run start's `mounts`, and a job start's path `mounts`.
 pub const MAX_MOUNTS: usize = 64;
 /// Longest mount root name, in bytes.

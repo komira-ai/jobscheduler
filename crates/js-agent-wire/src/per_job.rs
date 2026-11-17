@@ -117,8 +117,9 @@ impl BookedResources {
 /// The `run`, `os` and `arch` of the one job definition are here as on a run start
 /// ([`crate::JobSpec::run`]); a native body and a bundle are not carried. Fields a later
 /// change adds, as optional fields: the network policy and the declared ports (the job
-/// network change), the kind of start, the isolation, and the layers, mounts and host
-/// ports of a job's file system (`docs/design/job-rootfs.md`).
+/// network change), the kind of start, the isolation, the layers, mounts and host
+/// ports of a job's file system (`docs/design/job-rootfs.md`), and the job's declared outputs
+/// (`docs/design/job-outputs.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobStartSpec {
     /// The job's id; the key of every idempotent step. The grammar of every id here
@@ -230,6 +231,15 @@ pub struct JobStartSpec {
     /// none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_ports: Vec<HostPort>,
+    /// The job's declared outputs (`docs/design/job-outputs.md`): paths below the job's working
+    /// directory that the agent uploads when the job ends, under the job's prefix of
+    /// `log_sink`. At most [`limits::MAX_JOB_OUTPUTS`] (refused `invalid-job` naming `outputs`
+    /// otherwise); left out when there are none. Each path is held to the store's rules by the
+    /// agent when it uploads, and one that breaks them is reported failed there, not refused
+    /// here. Sent only to a host that reports the capability `job-outputs`
+    /// (`js_caps::JOB_OUTPUTS`): an agent that predates the field ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
 }
 
 impl JobStartSpec {
@@ -270,6 +280,11 @@ impl JobStartSpec {
         rootfs::check_layers(&self.layers)?;
         rootfs::check_mounts(&self.mounts)?;
         rootfs::check_host_ports(&self.host_ports, &self.ports)?;
+        check::count(
+            at.field("outputs"),
+            self.outputs.len(),
+            limits::MAX_JOB_OUTPUTS,
+        )?;
         let rootfs = [
             self.layers.is_empty(),
             self.mounts.is_empty(),

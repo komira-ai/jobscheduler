@@ -219,8 +219,8 @@ enum Call {
     },
     Get {
         key: String,
-        first: u64,
-        last: u64,
+        /// The first and last byte asked for; none for the whole object.
+        range: Option<(u64, u64)>,
     },
     List {
         prefix: String,
@@ -503,11 +503,12 @@ impl FakeStore {
             }),
             (Method::Delete, Some(key)) => Ok(Call::Delete { key }),
             (Method::Get, Some(key)) => {
-                let (first, last) = request
+                // No range is the whole object, as a presigned GET reads it.
+                let range = request
                     .header("range")
-                    .and_then(parse_range)
-                    .ok_or_else(invalid)?;
-                Ok(Call::Get { key, first, last })
+                    .map(|value| parse_range(value).ok_or_else(invalid))
+                    .transpose()?;
+                Ok(Call::Get { key, range })
             }
             (Method::Get, None) => {
                 let max_keys = param(query, "max-keys")
@@ -547,11 +548,12 @@ impl FakeStore {
                 state.objects.remove(&key);
                 answer(204, Vec::new(), Vec::new())
             }
-            Call::Get { key, first, last } => {
+            Call::Get { key, range } => {
                 state.operations.push(Op::Get { key: key.clone() });
-                match state.objects.get(&key) {
-                    None => error(404, "NoSuchKey"),
-                    Some(stored) => ranged(stored, first, last),
+                match (state.objects.get(&key), range) {
+                    (None, _) => error(404, "NoSuchKey"),
+                    (Some(stored), Some((first, last))) => ranged(stored, first, last),
+                    (Some(stored), None) => answer(200, Vec::new(), stored.bytes.clone()),
                 }
             }
             Call::List {

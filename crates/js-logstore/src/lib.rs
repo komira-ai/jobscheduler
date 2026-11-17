@@ -13,6 +13,9 @@
 //!   path-style or virtual-host-style, over a [`Transport`]. [`UreqTransport`] is the production
 //!   transport; the `fake` feature's [`fake::FakeStore`] is an in-memory bucket that checks
 //!   signatures, session policies and prefix grants.
+//! - [`outputs`] names and reads a job's outputs (`docs/design/job-outputs.md`): its files at
+//!   `P/outputs/<path>`, the manifest `P/outputs.json` written last, the rules of an output
+//!   path and of a declaration, and a presigned GET of one object.
 //! - [`presigned`] is the upload credential of a store with no STS: a [`PrefixGrant`] scopes a
 //!   derived key to one prefix until an absolute expiry, and [`PrefixSigner`] presigns puts and
 //!   deletes with it, refusing a key outside the prefix or a time past the expiry before any
@@ -44,6 +47,7 @@ pub mod fake;
 pub mod http;
 pub mod layout;
 pub mod list;
+pub mod outputs;
 pub mod presigned;
 pub mod sigv4;
 pub mod ureq_transport;

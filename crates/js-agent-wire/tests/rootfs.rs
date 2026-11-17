@@ -62,6 +62,7 @@ fn start() -> JobStartSpec {
             mount("/srv/out/job-1", "/out", MountMode::ReadWrite),
         ],
         host_ports: vec![port(9000, None), port(9443, Some(19443))],
+        outputs: Vec::new(),
     }
 }
 

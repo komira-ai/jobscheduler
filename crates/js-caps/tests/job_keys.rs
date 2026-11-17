@@ -1,8 +1,8 @@
 //! The capability keys a job request can require of a host: `disk-gib` and `exec`.
 
 use js_caps::{
-    Consumable, DETECTED_KEYS, DISK_GIB, EXEC, LAYERED_ROOTFS, NodeCaps, ReportError, Request,
-    RequestError, Unmet,
+    Consumable, DETECTED_KEYS, DISK_GIB, EXEC, JOB_OUTPUTS, LAYERED_ROOTFS, NodeCaps, ReportError,
+    Request, RequestError, Unmet,
 };
 
 fn req(props: &[(&str, &str)]) -> Result<Request, RequestError> {
@@ -112,14 +112,14 @@ fn a_report_with_a_bad_disk_is_refused() {
     assert!(node(&[("disk-gib", "lots")]).is_err());
 }
 
-/// Asserts that the detected keys are exactly these eleven, and that a request may name only
-/// `disk-gib`, `exec` and `layered-rootfs` of them (the last because the server asks for it
-/// of a job with layers, mounts or host ports): each of the other eight is refused as an
-/// unknown key, naming it. It catches a detected key added without the agent detecting it, and a host
+/// Asserts that the detected keys are exactly these twelve, and that a request may name only
+/// `disk-gib`, `exec`, `layered-rootfs` and `job-outputs` of them (the last two because the
+/// server asks for them of a job with layers, mounts or host ports, and of a job with
+/// outputs): each of the other eight is refused as an unknown key, naming it. It catches a detected key added without the agent detecting it, and a host
 /// property a request could ask for though no agent reports it, so that a job naming it
 /// could be placed nowhere.
 #[test]
-fn a_request_names_no_detected_key_but_disk_exec_and_layered_rootfs() {
+fn a_request_names_no_detected_key_but_disk_exec_layered_rootfs_and_job_outputs() {
     let detected = [
         "runtime",
         "gpu-toolkit",
@@ -132,11 +132,12 @@ fn a_request_names_no_detected_key_but_disk_exec_and_layered_rootfs() {
         "bundle",
         "bundle-root",
         "layered-rootfs",
+        "job-outputs",
     ];
     assert_eq!(DETECTED_KEYS.as_slice(), detected.as_slice());
     for key in DETECTED_KEYS
         .iter()
-        .filter(|key| ![DISK_GIB, EXEC, LAYERED_ROOTFS].contains(key))
+        .filter(|key| ![DISK_GIB, EXEC, LAYERED_ROOTFS, JOB_OUTPUTS].contains(key))
     {
         let refused = req(&[(key, "true")]);
         assert_eq!(refused, Err(RequestError::UnknownKey((*key).to_owned())));
@@ -145,6 +146,7 @@ fn a_request_names_no_detected_key_but_disk_exec_and_layered_rootfs() {
         (DISK_GIB, "1"),
         (EXEC, "container"),
         (LAYERED_ROOTFS, "true"),
+        (JOB_OUTPUTS, "true"),
     ];
     assert!(req(&named).is_ok());
 }
