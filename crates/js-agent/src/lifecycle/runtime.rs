@@ -667,6 +667,17 @@ pub trait Runtime {
         false
     }
 
+    /// Refuses a job start's `fs` and `host_ports` this runtime cannot realise, with a code of
+    /// its own (not a VM start), asked before the host ports are admitted. The default
+    /// refuses nothing.
+    ///
+    /// # Errors
+    ///
+    /// The code and why.
+    fn check_job_fs(&self, _fs: &JobFs, _host_ports: &[HostPort]) -> Result<(), NativeRefusal> {
+        Ok(())
+    }
+
     /// Whether this runtime may pull the image of an image layer (`image`, pinned by
     /// digest), asked at admission: one on none of its registry entries is refused
     /// [`refusal::IMAGE_NOT_ALLOWED`]. The default allows every image: only a runtime that

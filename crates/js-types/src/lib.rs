@@ -65,8 +65,8 @@ pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};
 pub use isa::{Arch, ArmVersion, IsaLevel, UnknownArch, UnknownIsaLevel, X86Level, normalise_arch};
 pub use job::{
-    ContainerSpec, DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, Os,
-    PlatformConflict, Requirements, RequirementsError, UnknownExecMode, UnknownOs,
+    ContainerSpec, DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, OS_VERSION_KEY,
+    Os, PlatformConflict, Requirements, RequirementsError, UnknownExecMode, UnknownOs,
 };
 pub use labels::{LabelError, Labels, RESERVED_PREFIX, ReservedKey};
 pub use memory::{MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, MemoryPercentError};

@@ -49,6 +49,7 @@ fn demand(need: Option<AcceleratorNeed>) -> Demand {
         os: None,
         arch: None,
         isa_level: None,
+        os_version: None,
         exec: None,
         accelerator: need,
         network: Default::default(),

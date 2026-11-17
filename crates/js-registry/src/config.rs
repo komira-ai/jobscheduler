@@ -7,8 +7,8 @@ use js_agent_wire::{
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
 use js_provider::HostBook;
 use js_types::{
-    ACCEL_KEYS, Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId,
-    ResourceClass, Shape,
+    ACCEL_KEYS, Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, OS_VERSION_KEY,
+    ProviderId, ResourceClass, Shape,
 };
 
 use crate::WholeNodeConfig;
@@ -395,17 +395,22 @@ impl PoolConfig {
 /// validated claim, so its real family, variant facts and measured memory are matched while
 /// the pool's numbers stay the booking limits. With `by_hello`
 /// ([`PoolConfig::placing_by_hello`]) the claim's other capabilities are added where
-/// `booked` does not name them; where both name one, the pool's value stays. A host without
-/// a claim keeps the pool's.
+/// `booked` does not name them; where both name one, the pool's value stays. The claim's
+/// `os_version` ([`OS_VERSION_KEY`]) replaces the pool's in every pool, as the accelerator
+/// facts do: the pool's value is a least version the claim met when the host joined
+/// (`os_version` is matched as at least), so a host is placed by the version it runs. A host
+/// without a claim keeps the pool's.
 pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>, by_hello: bool) -> Shape {
-    let is_accel = |key: &String| ACCEL_KEYS.contains(&key.as_str());
+    let replaced = |key: &String| ACCEL_KEYS.contains(&key.as_str()) || key == OS_VERSION_KEY;
     let mut capabilities = booked.capabilities().clone();
-    capabilities.retain(|key, _| !is_accel(key));
+    let claimed_version =
+        claim.is_some_and(|claim| claim.capabilities().contains_key(OS_VERSION_KEY));
+    capabilities.retain(|key, _| !replaced(key) || (key == OS_VERSION_KEY && !claimed_version));
     // Read against the pool's capabilities before any of the claim's is added.
     let added: Vec<(String, String)> = claim
         .into_iter()
         .flat_map(|claim| claim.capabilities())
-        .filter(|(key, _)| is_accel(key) || (by_hello && !capabilities.contains_key(*key)))
+        .filter(|(key, _)| replaced(key) || (by_hello && !capabilities.contains_key(*key)))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     capabilities.extend(added);

@@ -5,17 +5,14 @@
 
 use std::path::Path;
 
-use js_agent_wire::{
-    HOST_JOBS_CAPABILITY, Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling, PER_JOB_CAPABILITY,
-    START_FENCE_CAPABILITY,
-};
+use js_agent_wire::{HOST_JOBS_CAPABILITY, Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling};
 use js_caps::{
-    EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, LAYERED_ROOTFS, RUNTIME, SCRATCH_DEFAULT_GIB,
-    SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT, mount_provider_key,
+    EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUNTIME, SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA,
+    SCRATCH_QUOTA_PROJECT, mount_provider_key,
 };
 use js_types::ExecMode;
 
-use super::report_run_files;
+use super::{report_per_job, report_run_files};
 use crate::facts::CommandRunner;
 use crate::lifecycle::MountProviders;
 
@@ -43,29 +40,6 @@ impl ToolkitHook {
             ));
         }
         Ok(Some(Self(path.to_owned())))
-    }
-}
-
-/// Says that the agent takes the job-keyed start and stop, and that it fences them (it
-/// refuses a start whose fence it retired and stops its jobs after a silence): every agent
-/// that runs containers does. A native agent says neither: a job start carries an image,
-/// which its runtime cannot run.
-fn report_per_job(hello: &mut Hello) {
-    hello
-        .capabilities
-        .insert(PER_JOB_CAPABILITY.to_owned(), FLAG_SET.to_owned());
-    hello
-        .capabilities
-        .insert(START_FENCE_CAPABILITY.to_owned(), FLAG_SET.to_owned());
-}
-
-/// Puts `layered-rootfs` into `hello` when the crun runtime gives jobs layers and mounts
-/// (`layered`: the kernel has the calls).
-pub(crate) fn report_layered(hello: &mut Hello, layered: bool) {
-    if layered {
-        hello
-            .capabilities
-            .insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
     }
 }
 
@@ -148,7 +122,9 @@ pub(crate) fn report(
 mod tests {
     use std::collections::BTreeMap;
 
-    use js_agent_wire::{HeldRun, Phase, ProtocolRange, WireShape};
+    use js_agent_wire::{
+        HeldRun, PER_JOB_CAPABILITY, Phase, ProtocolRange, START_FENCE_CAPABILITY, WireShape,
+    };
 
     use super::*;
     use crate::egress::Config;
@@ -222,10 +198,8 @@ mod tests {
 
     /// Asserts that `start-fence` is reported as `true`, beside `per-job`, by the hello of an
     /// agent that runs containers (its lifecycle judges a job start by its fence and stops its
-    /// jobs after a silence), that the hello still validates, and that a native agent's hello
-    /// carries neither. It catches a server told of a fence an agent does not enforce (a
-    /// native agent, which takes no job start), and one never told that a container agent
-    /// enforces it.
+    /// jobs after a silence), and that the hello still validates. It catches a server never
+    /// told that a container agent enforces the fence.
     #[test]
     fn the_hello_reports_start_fence_only_when_enforced() {
         let contained = reported(&Config::none());
@@ -240,6 +214,28 @@ mod tests {
         );
         assert_eq!(contained.validate(), Ok(()));
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
+    }
+
+    /// Asserts that the job half of a native agent's hello (`report_native_jobs`, which the
+    /// macOS build calls) is `per-job`, `start-fence` and `layered-rootfs`, each `true`, and
+    /// that the hello still validates. It catches a native agent that hides that it takes
+    /// job starts and gives mounts, so no server sends it the kbf action jobs.
+    #[test]
+    fn a_native_agents_job_half_reports_per_job_start_fence_and_layered_rootfs() {
+        let mut native = hello();
+        crate::contract::report_native_jobs(&mut native);
+        for key in [
+            PER_JOB_CAPABILITY,
+            START_FENCE_CAPABILITY,
+            js_caps::LAYERED_ROOTFS,
+        ] {
+            assert_eq!(
+                native.capabilities.get(key).map(String::as_str),
+                Some(FLAG_SET),
+                "{key}"
+            );
+        }
+        assert_eq!(native.validate(), Ok(()));
     }
 
     /// Asserts that `log-upload` is in the hello of an agent whose runtime uploads live logs

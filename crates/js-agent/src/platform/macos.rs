@@ -328,6 +328,9 @@ pub(crate) type Opened = Start;
 pub(crate) struct Jobs {
     /// The native settings, once [`Jobs::finish`] has made them.
     native: Option<NativeSettings>,
+    /// The mount roots (`--mount-root`, `--mount-root-ro`): read denies of every run, and
+    /// what a job's mounts must lie beneath.
+    mounts: Vec<crate::native::MountRoot>,
     /// The run files root's layout: the run's user reaches its own directory.
     pub(crate) layout: crate::lifecycle::DirLayout,
     /// Egress none: the native ceiling is `--native-network`'s.
@@ -341,8 +344,9 @@ pub(crate) struct Jobs {
 }
 
 /// The job flags of a macOS agent: nothing is checked until the roots are known
-/// ([`Jobs::finish`]). A macOS agent has no crun settings (`start`), no mount roots to bind and
-/// no egress, settle or taint re-check flags.
+/// ([`Jobs::finish`]). A macOS agent has no crun settings (`start`) and
+/// no egress, settle or taint re-check flags; it keeps the mount roots, which become read
+/// denies of every run and the roots a job's mounts lie beneath.
 ///
 /// # Errors
 ///
@@ -350,10 +354,11 @@ pub(crate) struct Jobs {
 pub(crate) fn jobs(
     _cli: &Cli,
     _start: Option<Settings>,
-    _mounts: &crate::lifecycle::MountRoots,
+    mounts: &crate::lifecycle::MountRoots,
 ) -> Result<Jobs, String> {
     Ok(Jobs {
         native: None,
+        mounts: crate::native::roots_of(mounts),
         layout: crate::lifecycle::DirLayout::Private,
         egress: crate::egress::Config::default(),
         settle: crate::lifecycle::DEFAULT_SETTLE,
@@ -383,7 +388,9 @@ impl Jobs {
         euid: u32,
     ) -> Result<(), String> {
         let journal = state.map_or_else(PathBuf::new, |state| state.path().join(NATIVE_JOURNAL));
-        let native = NativeSettings::from_flags(&cli.os.native(), denied, &journal)?;
+        let native = NativeSettings::from_flags(&cli.os.native(), denied, &journal)?
+            .map(|native| native.with_mount_roots(self.mounts.clone()))
+            .transpose()?;
         if native.is_some() && euid != 0 {
             return Err(
                 "--native-helper-socket: the agent must run as root: it gives each run's \
@@ -579,7 +586,8 @@ const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartb
 /// has a files root), and `egress` is the agent's `--native-network` ceiling as a job level
 /// ([`Ceiling::advertised`]: `off` and `loopback` are `none`, `on` is `allow-list`, `open` is
 /// `open`), with no `egress-ports`, since a Mac forwards no port, and `log-upload`, since the
-/// native runtime uploads live logs (`native/logs.rs`). The hello is sent only after
+/// native runtime uploads live logs (`native/logs.rs`), and the job half (`per-job`,
+/// `start-fence`, `layered-rootfs`: [`contract::report_native_jobs`]). The hello is sent only after
 /// the job half has started, which asked the helper for its boot reset, so no hello names a
 /// mode the agent cannot serve. Returns the warnings the operator should read: none.
 fn report_native(hello: &mut Hello, run_files: bool, ceiling: Ceiling) -> Vec<String> {
@@ -591,6 +599,7 @@ fn report_native(hello: &mut Hello, run_files: bool, ceiling: Ceiling) -> Vec<St
     hello
         .capabilities
         .insert(LOG_UPLOAD_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    contract::report_native_jobs(hello);
     ceiling.advertised().insert_into(&mut hello.capabilities);
     Vec::new()
 }
@@ -631,18 +640,25 @@ mod tests {
         }
     }
 
-    /// Asserts that a native agent's hello says it uploads live logs and carries neither
-    /// `per-job` nor `start-fence` (it takes no job-keyed start), and still validates. Catches
-    /// a server never told that a native agent uploads, and one told of a fence the agent does
-    /// not enforce.
+    /// Asserts that a native agent's hello says it uploads live logs, takes the job-keyed
+    /// start (`per-job`, `start-fence`) and gives mounts (`layered-rootfs`), and still
+    /// validates. Catches a server never told that a native agent uploads or takes job starts
+    /// and mounts.
     #[test]
-    fn a_native_agent_reports_log_upload_and_no_fence() {
+    fn a_native_agent_reports_log_upload_and_the_job_keys() {
         let mut native = hello();
         assert!(report_native(&mut native, true, Ceiling::Off).is_empty());
         let flag = |key: &str| native.capabilities.get(key).cloned();
         assert_eq!(flag(LOG_UPLOAD_CAPABILITY).as_deref(), Some(FLAG_SET));
-        assert_eq!(flag(js_agent_wire::START_FENCE_CAPABILITY), None);
-        assert_eq!(flag(js_agent_wire::PER_JOB_CAPABILITY), None);
+        assert_eq!(
+            flag(js_agent_wire::START_FENCE_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
+        assert_eq!(
+            flag(js_agent_wire::PER_JOB_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
+        assert_eq!(flag(js_caps::LAYERED_ROOTFS).as_deref(), Some(FLAG_SET));
         assert_eq!(native.validate(), Ok(()));
     }
 

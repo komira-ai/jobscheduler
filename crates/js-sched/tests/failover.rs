@@ -24,6 +24,7 @@ fn demand() -> Demand {
         os: None,
         arch: None,
         isa_level: None,
+        os_version: None,
         exec: None,
         accelerator: None,
         network: Default::default(),

@@ -526,6 +526,10 @@ impl Lifecycle {
         // A job above the runtime's ceiling is refused, never run with less; it costs no call.
         crate::egress::admit(&self.runtime.network_ceiling(), spec)
             .map_err(|refused| (refused.code, refused.detail))?;
+        if !given.vm {
+            let checked = self.runtime.check_job_fs(&given.fs, &given.host_ports);
+            checked.map_err(|why| (why.code, why.why))?;
+        }
         // So is a host port the runtime does not offer; a VM's runtime offers none.
         let offered = (!given.vm).then(|| self.runtime.host_ports());
         crate::host_ports::admit(&offered.unwrap_or_default(), &given.host_ports)

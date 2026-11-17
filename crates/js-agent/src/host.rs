@@ -10,7 +10,7 @@ use js_agent_wire::{
 };
 
 use js_agent_wire::{HOST_JOBS_CAPABILITY, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
-use js_caps::{DETECTED_KEYS, DISK_GIB, REPORT_ONLY_KEYS, is_mount_provider_key};
+use js_caps::{DETECTED_KEYS, DISK_GIB, OS_VERSION, REPORT_ONLY_KEYS, is_mount_provider_key};
 use js_types::normalise_arch;
 
 use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
@@ -20,6 +20,7 @@ use crate::facts::{
     self, CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
 };
 use crate::identity;
+use crate::os_version;
 
 /// The hello, and what the operator should be told about how it was made.
 #[derive(Debug)]
@@ -205,7 +206,8 @@ pub struct StoreView<'a> {
     pub long_values: bool,
 }
 
-/// Detects the host and applies the flags. A host that has a bundle store (`store`) also
+/// Detects the host and applies the flags. A Mac also reports its operating system's major
+/// version as `os_version` (read by the `os_version` module). A host that has a bundle store (`store`) also
 /// reports `bundle-root` and `bundle` (see [`crate::bundle`]), and the disk it offers (the
 /// shape's `disk_bytes` and `disk-gib`) leaves out the unused part of the store's budget:
 /// `floor((free - max(0, budget - used) - low_water) / GiB)`.
@@ -229,6 +231,8 @@ pub fn offer(
     let memory_bytes = capped("--memory-bytes", cli.memory_bytes, detected.memory_bytes)?;
     let gpu_class = class(cli.gpu_class.clone(), gpus, detected.gpus.class)?;
     let mut capabilities = capabilities(platform, &cli.capabilities)?;
+    let (os_version, os_version_warning) = os_version::report(platform, runner);
+    capabilities.extend(os_version.map(|major| (OS_VERSION.to_owned(), major)));
     if cli.scratch_low_water_gib.is_some() && cli.scratch_root.is_none() {
         return Err("--scratch-low-water-gib: needs --scratch-root".to_owned());
     }
@@ -292,6 +296,7 @@ pub fn offer(
         warnings: detected
             .warnings
             .into_iter()
+            .chain(os_version_warning)
             .chain(disk_warning)
             .chain(reserve_warning.flatten())
             .chain(image_warning.flatten())

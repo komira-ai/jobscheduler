@@ -45,6 +45,18 @@ pub enum PolicyError {
     TwoXcodes,
 }
 
+/// One host directory a run may use, granted by its canonical path (Seatbelt matches the
+/// resolved path, so a link in the run directory is covered by the grant of its target).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MountGrant {
+    /// The canonical host path.
+    pub path: AbsPath,
+    /// Whether the run may also write below `path`.
+    pub write: bool,
+    /// Whether the run may not execute or map as executable anything below `path`.
+    pub no_exec: bool,
+}
+
 /// The places the slot layout produced for one run. Nothing else is ever writable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotLayout {
@@ -58,6 +70,9 @@ pub struct SlotLayout {
     pub inputs: Vec<AbsPath>,
     /// Paths a run may not read (the agent's state, the store, credentials).
     pub read_denies: Vec<AbsPath>,
+    /// Host directories granted to this run, after the read denies (so a mount under a
+    /// denied mount root is readable again) and before the network rules.
+    pub mounts: Vec<MountGrant>,
 }
 
 /// What the agent allows at most, from its flags.
@@ -77,6 +92,7 @@ pub struct Policy {
     uid_entry: Option<AbsPath>,
     inputs: BTreeSet<AbsPath>,
     read_denies: BTreeSet<AbsPath>,
+    mounts: BTreeSet<MountGrant>,
     net: Net,
     read_model: ReadModel,
     allow: Option<AllowGrants>,
@@ -149,6 +165,7 @@ impl Policy {
             uid_entry: layout.uid_entry,
             inputs: layout.inputs.into_iter().collect(),
             read_denies: layout.read_denies.into_iter().collect(),
+            mounts: layout.mounts.into_iter().collect(),
             net: caps.net,
             read_model: caps.read_model,
             allow: None,
@@ -222,7 +239,8 @@ impl Policy {
 
     fn check(&self) -> Result<(), PolicyError> {
         bounded(self.inputs.len(), "inputs")?;
-        bounded(self.read_denies.len(), "read denies")
+        bounded(self.read_denies.len(), "read denies")?;
+        bounded(self.mounts.len(), "mounts")
     }
 
     pub(super) fn allow(&self) -> Option<&AllowGrants> {
@@ -243,6 +261,10 @@ impl Policy {
 
     pub(super) fn read_denies(&self) -> &BTreeSet<AbsPath> {
         &self.read_denies
+    }
+
+    pub(super) fn mounts(&self) -> &BTreeSet<MountGrant> {
+        &self.mounts
     }
 }
 

@@ -92,6 +92,7 @@ pub const NVIDIA_CMD: &str = "/usr/bin/nvidia-smi --query-gpu=index,uuid,name,me
 pub const PROFILER_CMD: &str = "/usr/sbin/system_profiler SPDisplaysDataType -json";
 pub const CPU_CMD: &str = "/usr/bin/getconf _NPROCESSORS_ONLN";
 pub const MEMSIZE_CMD: &str = "/usr/sbin/sysctl -n hw.memsize";
+pub const OS_VERSION_CMD: &str = "/usr/sbin/sysctl -n kern.osproductversion";
 pub const IOREG_CMD: &str = "/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice";
 
 /// `nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv,noheader,nounits` on
@@ -375,6 +376,7 @@ pub fn mac_host() -> Host {
         commands: FakeCommands::default()
             .with(CPU_CMD, Ok("10\n"))
             .with(MEMSIZE_CMD, Ok("17179869184\n"))
+            .with(OS_VERSION_CMD, Ok("26.1\n"))
             .with(PROFILER_CMD, Ok(APPLE_M2))
             .with(IOREG_CMD, Ok(&ioreg())),
         files: FakeFiles::default(),

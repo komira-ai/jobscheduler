@@ -131,6 +131,7 @@ impl Mac {
             uid_entry: Some(abs(&self.uid_entry)),
             inputs: Vec::new(),
             read_denies: vec![abs(&self.run.join("state"))],
+            mounts: vec![],
         }
     }
 

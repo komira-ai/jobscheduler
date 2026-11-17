@@ -313,6 +313,7 @@ fn request(gpus: u64) -> Demand {
         os: None,
         arch: Some("x86_64".to_owned()),
         isa_level: None,
+        os_version: None,
         exec: None,
         accelerator: booked(H100, gpus),
         network: Default::default(),

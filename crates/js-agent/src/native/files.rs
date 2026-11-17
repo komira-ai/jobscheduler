@@ -90,7 +90,7 @@ pub(super) fn stage_inputs(
 
 /// Makes every directory of `below` (a path relative to `exec`, which exists) that is not
 /// there.
-fn make_parents(exec: &Path, below: &Path, make: MakeDir<'_>) -> io::Result<()> {
+pub(super) fn make_parents(exec: &Path, below: &Path, make: MakeDir<'_>) -> io::Result<()> {
     let mut at = exec.to_path_buf();
     for part in below.components() {
         at.push(part);

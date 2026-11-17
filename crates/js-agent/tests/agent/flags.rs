@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 #[cfg(target_os = "linux")]
 use crate::jobs::{private, user};
 use crate::support::{
-    CountingSleeper, Highest, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
-    linux_host, mac_host, run, run_scripted, welcome,
+    CountingSleeper, Highest, Lowest, OS_VERSION_CMD, Ran, Scratch, Script, ScriptConnector, code,
+    flags, linux_host, mac_host, run, run_scripted, welcome,
 };
 
 /// Runs the program to its first wait with a welcome and returns the hello it sent.
@@ -53,10 +53,41 @@ fn the_hello_offers_what_was_detected() {
     assert_eq!(hello["shape"]["gpu_class"], "apple-m");
     assert_eq!(
         hello["capabilities"],
-        json!({ "os": "macos", "arch": "arm64", "toolchain": "xcode16" })
+        json!({ "os": "macos", "arch": "arm64", "os_version": "26", "toolchain": "xcode16" })
     );
     assert_eq!(hello["labels"], json!({ "rack": "r1" }));
     assert_eq!(hello["gpu_devices"], json!([]));
+}
+
+/// Asserts that a Mac reports the major version `sysctl -n kern.osproductversion` prints as
+/// `os_version` (`26.1` is `26`), that a Mac whose probe fails still says hello, without the
+/// key and with a warning, and that a Linux host reports no `os_version` and is not asked for
+/// one. Catches a hello that carries the whole version text, one that is not sent for want of
+/// a version, and a Linux host that claims a macOS version.
+#[test]
+fn a_mac_reports_its_os_major_version_and_a_linux_host_none() {
+    let hello = hello_of(&[], &mac_host());
+    assert_eq!(hello["capabilities"]["os_version"], "26");
+
+    let mut silent = mac_host();
+    silent.commands = silent
+        .commands
+        .with(OS_VERSION_CMD, Err("sysctl: not found"));
+    let (ran, sent, _) = run_scripted(&[], &silent, vec![welcome(1)], 1);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(
+        sent.borrow()[0].1["capabilities"],
+        json!({ "os": "macos", "arch": "arm64" })
+    );
+    assert!(
+        ran.err
+            .contains("OS version probe failed (sysctl: not found)"),
+        "{}",
+        ran.err
+    );
+
+    let hello = hello_of(&[], &linux_host());
+    assert_eq!(hello["capabilities"].get("os_version"), None);
 }
 
 /// Asserts that every flag lowers what was detected and none raises it: lowered values
@@ -166,6 +197,11 @@ fn detected_capabilities_and_bad_labels_are_refused() {
     );
     let said = refused(&["--capability", "arch=arm"], &mac_host());
     assert!(said.contains("--capability: arch is detected"), "{said}");
+    let said = refused(&["--capability", "os_version=26"], &mac_host());
+    assert!(
+        said.contains("--capability: os_version is detected"),
+        "{said}"
+    );
     let said = refused(&["--label", "jobscheduler.dev/pool=other"], &mac_host());
     assert!(said.contains("the hello is not acceptable"), "{said}");
 }

@@ -8,7 +8,7 @@
 //!   list's first item, and the rest of the list goes before the arguments, so a command of
 //!   one item (what a submit records) reads back as it was given.
 //! - A file's contents are secret: every file is named, with empty contents.
-//! - The record keeps the ISA level and the accelerator a submit was given among its
+//! - The record keeps the ISA level, the least operating-system version and the accelerator a submit was given among its
 //!   capabilities, under the keys a lease request uses (`validate.rs`): they are shown in
 //!   their fields. Any other capability has no field and is not shown.
 //! - The host silence of a job (`host_silent_since_ms`) is not in the record: it is left
@@ -43,7 +43,8 @@ use js_proto::v1;
 use js_state::StoreTime;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
-    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ExecMode, JobEventKind, QueueCode,
+    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ExecMode, JobEventKind,
+    OS_VERSION_KEY, QueueCode,
 };
 
 use crate::job_api::validate::ISA_LEVEL_KEY;
@@ -247,6 +248,7 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             arch: spec.constraints.arch.clone().unwrap_or_default(),
             exec: exec(spec.constraints.exec).into(),
             isa_level: capability(spec, ISA_LEVEL_KEY).unwrap_or_default(),
+            os_version: capability(spec, OS_VERSION_KEY).unwrap_or_default(),
             accelerator: accelerator(spec),
             isolation: isolation(spec.constraints.isolation).into(),
         }),

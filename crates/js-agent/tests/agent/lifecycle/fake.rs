@@ -11,7 +11,7 @@ use js_agent::lifecycle::{
     Clock, Exit, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
     RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
-use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
+use js_agent_wire::{HostPort, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 
 #[path = "fake_checks.rs"]
 mod checks;
@@ -154,6 +154,10 @@ struct FsScript {
     assembled: BTreeMap<String, FsPrepared>,
     /// The images of a layer `check_layer_image` refuses.
     refused_images: Vec<String>,
+    /// What `check_job_fs` refuses with; none: it accepts.
+    job_fs_refusal: Option<(&'static str, String)>,
+    /// What `check_job_fs` was asked: the layers, mounts and host ports of each call.
+    job_fs_checks: Vec<(usize, usize, usize)>,
     /// The runs whose sources did not answer after they ended (`input_failure`).
     unreadable: Vec<String>,
     /// The directory the runs' mounts are under (`mounts_of`).
@@ -260,6 +264,26 @@ impl FakeRuntime {
     /// `assemble_fs` answers `answer` for `run_id` from now on.
     pub fn assembly_answers(&self, run_id: &str, answer: FsPrepared) {
         self.script().assembled.insert(run_id.to_owned(), answer);
+    }
+
+    /// The layers, mounts and host ports of each `check_job_fs` call.
+    pub fn job_fs_checks(&self) -> Vec<(usize, usize, usize)> {
+        let state = self.state.borrow();
+        state
+            .fs
+            .as_ref()
+            .map(|fs| fs.job_fs_checks.clone())
+            .unwrap_or_default()
+    }
+
+    /// `check_job_fs` refuses with `code` and `why` from now on.
+    pub fn refuse_job_fs(&self, code: &'static str, why: &str) {
+        self.script().job_fs_refusal = Some((code, why.to_owned()));
+    }
+
+    /// `check_job_fs` accepts again.
+    pub fn accept_job_fs(&self) {
+        self.script().job_fs_refusal = None;
     }
 
     /// `check_layer_image` refuses `image`.
@@ -638,6 +662,18 @@ impl Runtime for FakeRuntime {
             true => Err(format!("{image} is on no registry entry")),
             false => Ok(()),
         }
+    }
+
+    fn check_job_fs(&self, fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRefusal> {
+        let mut state = self.state.borrow_mut();
+        let Some(script) = state.fs.as_mut() else {
+            return Ok(());
+        };
+        script
+            .job_fs_checks
+            .push((fs.layers.len(), fs.mounts.len(), host_ports.len()));
+        let refused = script.job_fs_refusal.clone();
+        refused.map_or(Ok(()), |(code, why)| Err(NativeRefusal { code, why }))
     }
 
     fn binds_named_mounts(&self) -> bool {

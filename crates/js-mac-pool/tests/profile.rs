@@ -3,8 +3,8 @@
 use std::ffi::OsString;
 
 use js_mac_pool::seatbelt::{
-    AbsPath, Caps, MAX_LISTED, Narrowing, Net, Policy, PolicyError, Ports, Profile, ReadModel,
-    SANDBOX_EXEC, SlotLayout,
+    AbsPath, Caps, MAX_LISTED, MountGrant, Narrowing, Net, Policy, PolicyError, Ports, Profile,
+    ReadModel, SANDBOX_EXEC, SlotLayout,
 };
 
 fn path(text: &str) -> AbsPath {
@@ -20,6 +20,7 @@ fn layout() -> SlotLayout {
             path("/Volumes/work/state"),
             path("/Library/Keychains/System.keychain"),
         ],
+        mounts: vec![],
     }
 }
 
@@ -330,5 +331,136 @@ fn a_layout_over_the_bound_is_refused() {
     assert_eq!(
         Policy::base(big, caps(Net::Off)),
         Err(PolicyError::TooMany("inputs"))
+    );
+}
+
+fn mount(text: &str, write: bool, no_exec: bool) -> MountGrant {
+    MountGrant {
+        path: path(text),
+        write,
+        no_exec,
+    }
+}
+
+fn mounted() -> SlotLayout {
+    SlotLayout {
+        mounts: vec![
+            mount("/Volumes/data/out", true, false),
+            mount("/Volumes/data/in", false, true),
+        ],
+        ..layout()
+    }
+}
+
+/// Asserts the whole text of a profile with a read-only no-exec mount and a read-write
+/// mount, and the parameters in the order they are passed (mounts sorted by path).
+///
+/// Catches a grant that is missing, in the wrong place, or that gives a read-only mount
+/// a write grant.
+#[test]
+fn a_profile_with_two_mounts_matches_its_golden() {
+    let policy = Policy::base(mounted(), caps(Net::Off)).unwrap();
+    let profile = Profile::for_policy(&policy).unwrap();
+    assert_eq!(profile.text(), include_str!("goldens/open_off_mounts.sb"));
+    let granted: Vec<_> = profile
+        .params()
+        .iter()
+        .filter(|(name, _)| name.starts_with("GR_"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        granted,
+        vec![
+            ("GR_0".to_owned(), "/Volumes/data/in".to_owned()),
+            ("GR_1".to_owned(), "/Volumes/data/out".to_owned()),
+        ]
+    );
+}
+
+/// A layout with no mounts renders the same text as before mounts existed.
+///
+/// Catches a mount rule or parameter that appears without a mount.
+#[test]
+fn a_layout_without_mounts_renders_no_mount_rule() {
+    let policy = Policy::base(layout(), caps(Net::Off)).unwrap();
+    let profile = Profile::for_policy(&policy).unwrap();
+    assert!(!profile.text().contains("GR_"));
+    assert!(
+        profile
+            .params()
+            .iter()
+            .all(|(name, _)| !name.starts_with("GR_"))
+    );
+}
+
+/// The mount grants come after the read denies and the input write denies (a later rule
+/// wins, so the grant reopens a path under a denied mount root), the exec denies come
+/// after every grant, and the network rules and the floor follow.
+///
+/// Catches a grant placed before the deny it must beat, and an exec deny that a later
+/// grant would reopen.
+#[test]
+fn mount_grants_follow_the_denies_the_exec_denies_follow_the_grants_and_the_floor_is_last() {
+    let policy = Policy::base(mounted(), caps(Net::Off)).unwrap();
+    let text = text_of(&policy);
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+    let last_at = |needle: &str| text.rfind(needle).unwrap_or_else(|| panic!("no {needle}"));
+    let denies = at("(deny file-write* (subpath (param \"RD_1\")))")
+        .max(at("(deny file-write* (subpath (param \"IN_0\")))"));
+    let first_grant = at("(allow file-read* (subpath (param \"GR_0\")))");
+    let last_grant = last_at("(allow file-write* (subpath (param \"GR_1\")))");
+    let first_exec = at("(deny process-exec* (subpath (param \"GR_0\")))");
+    let last_exec = last_at("(deny file-map-executable (subpath (param \"GR_0\")))");
+    let network = at("(deny network*)");
+    assert!(denies < first_grant);
+    assert!(last_grant < first_exec);
+    assert!(last_exec < network);
+    assert!(text.ends_with(FLOOR_TEXT));
+}
+
+/// A read-write mount that is not `no_exec` gets no exec deny, and a read-only one gets no
+/// write grant.
+///
+/// Catches exec denies on every mount and write grants on read-only mounts.
+#[test]
+fn only_the_write_mount_is_writable_and_only_the_no_exec_mount_is_exec_denied() {
+    let policy = Policy::base(mounted(), caps(Net::Off)).unwrap();
+    let text = text_of(&policy);
+    assert_eq!(
+        text.matches("(allow file-write* (subpath (param \"GR_")
+            .count(),
+        1
+    );
+    assert!(!text.contains("(allow file-write* (subpath (param \"GR_0\")))"));
+    assert_eq!(
+        text.matches("(deny process-exec* (subpath (param \"GR_")
+            .count(),
+        1
+    );
+    assert!(!text.contains("(deny process-exec* (subpath (param \"GR_1\")))"));
+}
+
+/// More mounts than [`MAX_LISTED`] are refused, and exactly that many are not.
+///
+/// Catches a mount list that is unbounded.
+#[test]
+fn a_layout_with_more_mounts_than_the_bound_is_refused() {
+    let many = |n: usize| -> Vec<MountGrant> {
+        (0..n)
+            .map(|i| mount(&format!("/Volumes/m/{i}"), false, true))
+            .collect()
+    };
+    let at_bound = SlotLayout {
+        mounts: many(MAX_LISTED),
+        ..layout()
+    };
+    assert!(Policy::base(at_bound, caps(Net::Off)).is_ok());
+    let over = SlotLayout {
+        mounts: many(MAX_LISTED + 1),
+        ..layout()
+    };
+    assert_eq!(
+        Policy::base(over, caps(Net::Off)),
+        Err(PolicyError::TooMany("mounts"))
     );
 }

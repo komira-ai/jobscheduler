@@ -3,8 +3,8 @@
 //! A job never names a cloud, an image of a machine or an instance type; those live in
 //! the pool that serves it. [`ContainerSpec`] is the container, [`Requirements`] is the
 //! host it needs. A lease request still carries resources and capabilities only, so
-//! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `disk-gib`, `exec` and
-//! the `accelerator.*` keys from the capabilities the request requires. A job's image is
+//! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `os_version`, `disk-gib`, `exec`
+//! and the `accelerator.*` keys from the capabilities the request requires. A job's image is
 //! built for one platform ([`Os`] and [`Arch`]): [`Requirements::with_image_platform`] adds
 //! it to what the request asked for.
 
@@ -25,6 +25,9 @@ const OS_KEY: &str = "os";
 pub(crate) const ARCH_KEY: &str = "arch";
 /// The capability key a request names its least ISA level by (`x86-64-v3`, `armv8.2-a`).
 pub(crate) const ISA_LEVEL_KEY: &str = "isa_level";
+/// The capability key a request names the least major version of the host's operating
+/// system by (`26`: macOS 26 or newer). A host reports its own major version under it.
+pub const OS_VERSION_KEY: &str = "os_version";
 /// The capability key a request names its least free disk by, in whole GiB. A host
 /// reports the free space of its work volume under it.
 pub const DISK_GIB_KEY: &str = "disk-gib";
@@ -217,6 +220,9 @@ pub struct Requirements {
     /// The least ISA level, met by a level of the same family at least as high. `None`: not
     /// asked for.
     pub isa_level: Option<IsaLevel>,
+    /// The least major version of the host's operating system (`26`: macOS 26 or newer).
+    /// `None`: any.
+    pub os_version: Option<u32>,
     /// The mode the host runs jobs in. `None`: either.
     pub exec: Option<ExecMode>,
     /// The accelerators the job needs: its booked GPU count and class (`model` the class as
@@ -237,7 +243,7 @@ pub struct Requirements {
     pub mount_providers: Vec<String>,
 }
 
-/// Why a request's `disk-gib`, `exec`, `isa_level` or `accelerator.*` capabilities are not a
+/// Why a request's `disk-gib`, `exec`, `isa_level`, `os_version` or `accelerator.*` capabilities are not a
 /// requirement.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RequirementsError {
@@ -250,6 +256,9 @@ pub enum RequirementsError {
     /// `isa_level` names no ISA level.
     #[error("isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a, not {0:?}")]
     BadIsaLevel(String),
+    /// `os_version` is not a whole major version number.
+    #[error("os_version must be a whole major version number such as 26, not {0:?}")]
+    BadOsVersion(String),
     /// An `accelerator.*` key holds a value that is not valid.
     #[error("accelerator: {0}")]
     BadAccelerator(#[from] AccelError),
@@ -281,10 +290,10 @@ pub struct PlatformConflict {
 
 impl Requirements {
     /// The requirements of a lease request: its resources, and `os`, `arch` (through
-    /// [`normalise_arch`]), `isa_level`, `disk-gib`, `exec` and the accelerator from the
+    /// [`normalise_arch`]), `isa_level`, `os_version`, `disk-gib`, `exec` and the accelerator from the
     /// capabilities it requires. A capability the request does not name is `None`: any. A
-    /// `disk-gib`, `exec`, `isa_level` or `accelerator.*` key that is not valid makes all
-    /// four read as not asked here, the accelerator then as the booked GPU count and class;
+    /// `disk-gib`, `exec`, `isa_level`, `os_version` or `accelerator.*` key that is not valid
+    /// makes all five read as not asked here, the accelerator then as the booked GPU count and class;
     /// [`Request::validate`] refuses such a request, so none that was admitted has one
     /// ([`Self::try_from_request`] says why).
     pub fn from_request(request: &Request) -> Self {
@@ -294,6 +303,7 @@ impl Requirements {
             os: request.capabilities.get(OS_KEY).cloned(),
             arch: arch_of(request),
             isa_level: None,
+            os_version: None,
             exec: None,
             accelerator: AcceleratorNeed::booked(&request.resources),
             network: JobNetwork::None,
@@ -303,7 +313,7 @@ impl Requirements {
         })
     }
 
-    /// [`Self::from_request`], refusing a `disk-gib`, `exec`, `isa_level` or
+    /// [`Self::from_request`], refusing a `disk-gib`, `exec`, `isa_level`, `os_version` or
     /// `accelerator.*` key that is not valid.
     ///
     /// # Errors
@@ -311,7 +321,8 @@ impl Requirements {
     /// [`RequirementsError::BadDisk`] when `disk-gib` is not a whole number of GiB whose
     /// size in bytes fits 64 bits; [`RequirementsError::BadExec`] when `exec` is not a
     /// mode name; [`RequirementsError::BadIsaLevel`] when `isa_level` is not a level
-    /// name; [`RequirementsError::BadAccelerator`] when an `accelerator.*` key is not
+    /// name; [`RequirementsError::BadOsVersion`] when `os_version` is not a whole number;
+    /// [`RequirementsError::BadAccelerator`] when an `accelerator.*` key is not
     /// valid; [`RequirementsError::CountWithoutModel`] when `accelerator.count` is above
     /// zero and neither `accelerator.model` nor a booked GPU class names a model;
     /// [`RequirementsError::CountNotBooked`] when it is above the GPUs the request books. `disk-gib=0` is valid and asks for nothing.
@@ -339,12 +350,20 @@ impl Requirements {
                     .map_err(|_| RequirementsError::BadIsaLevel(text.clone()))
             })
             .transpose()?;
+        let os_version = caps
+            .get(OS_VERSION_KEY)
+            .map(|text| {
+                text.parse::<u32>()
+                    .map_err(|_| RequirementsError::BadOsVersion(text.clone()))
+            })
+            .transpose()?;
         Ok(Self {
             resources: request.resources.clone(),
             disk_bytes,
             os: caps.get(OS_KEY).cloned(),
             arch: arch_of(request),
             isa_level,
+            os_version,
             exec,
             accelerator: need_of(request)?,
             network: JobNetwork::None,
@@ -530,6 +549,7 @@ mod tests {
             os: None,
             arch: None,
             isa_level: None,
+            os_version: None,
             exec: None,
             accelerator: a10(),
             network: JobNetwork::None,
@@ -602,6 +622,7 @@ mod tests {
                 os: Some("linux".to_owned()),
                 arch: Some("arm64".to_owned()),
                 isa_level: None,
+                os_version: None,
                 exec: None,
                 accelerator: a10(),
                 network: JobNetwork::None,
@@ -611,6 +632,28 @@ mod tests {
             };
             assert_eq!(lenient, want, "{refusal}");
         }
+    }
+
+    /// Asserts that `os_version` is read as a whole major version, that a request without
+    /// it asks for none, and that text that is not a whole number is refused naming the
+    /// text, and read as not asked by `from_request`. Catches a requirement that drops the
+    /// version, or that admits a version no host can state.
+    #[test]
+    fn the_os_version_comes_from_the_request() {
+        let asked = Requirements::try_from_request(&request(&[(OS_VERSION_KEY, "26")]));
+        assert_eq!(asked.map(|r| r.os_version), Ok(Some(26)));
+        let none = Requirements::try_from_request(&request(&[("os", "macos")])).unwrap();
+        assert_eq!(none.os_version, None);
+        for bad in ["", "26.1", "x", "-1"] {
+            let err = Requirements::try_from_request(&request(&[(OS_VERSION_KEY, bad)]));
+            assert_eq!(err, Err(RequirementsError::BadOsVersion(bad.to_owned())));
+            let lenient = Requirements::from_request(&request(&[(OS_VERSION_KEY, bad)]));
+            assert_eq!(lenient.os_version, None, "{bad:?}");
+        }
+        assert_eq!(
+            RequirementsError::BadOsVersion("26.1".into()).to_string(),
+            "os_version must be a whole major version number such as 26, not \"26.1\""
+        );
     }
 
     /// Asserts that `isa_level` is read as a level of either family, that a request

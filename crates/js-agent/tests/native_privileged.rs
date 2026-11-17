@@ -180,6 +180,7 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
             denied(&fixture.root.join("scratch")),
             denied(&fixture.root.join("secret")),
         ],
+        mount_roots: Vec::new(),
         read_model: ReadModel::Open,
         journal: fixture.root.join("native-leases"),
         max_file_bytes: 1 << 30,

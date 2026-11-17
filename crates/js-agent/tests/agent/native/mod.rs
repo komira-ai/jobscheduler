@@ -25,6 +25,7 @@ mod mac;
 mod mac_agent;
 #[cfg(target_os = "macos")]
 mod mac_pf;
+mod mounts;
 mod network;
 mod outputs;
 mod pf_gate;
@@ -68,6 +69,7 @@ pub fn config(fake: &FakeHelper) -> NativeConfig {
         network: Ceiling::Loopback,
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
+        mount_roots: Vec::new(),
         read_model: ReadModel::Open,
         journal: fake
             .homes()

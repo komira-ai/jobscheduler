@@ -433,6 +433,7 @@ mod tests {
             os: None,
             arch: None,
             isa_level: None,
+            os_version: None,
             exec: None,
             network: js_types::JobNetwork::None,
             host_ports: Vec::new(),

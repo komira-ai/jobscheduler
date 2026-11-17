@@ -193,6 +193,7 @@ fn new_spec() -> JobSpec {
             arch: "x86_64".to_owned(),
             exec: ExecMode::Container as i32,
             isa_level: "x86-64-v3".to_owned(),
+            os_version: String::new(),
             accelerator: Some(Accelerator {
                 vendor: Some("nvidia".to_owned()),
                 model: Some("nvidia-a100".to_owned()),
