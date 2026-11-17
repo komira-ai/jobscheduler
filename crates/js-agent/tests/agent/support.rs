@@ -244,6 +244,7 @@ impl FakeFiles {
     }
 
     /// The link at `path` cannot be read.
+    #[cfg(target_os = "linux")]
     pub fn without_link(mut self, path: &str) -> Self {
         self.links.remove(path);
         self

@@ -34,8 +34,9 @@
 //! With `--pkg-url <base>` the Mac is looked at too ([`mac`]): when `<base>/<X.Y.Z>/SHA256SUMS`
 //! exists, the package it lists is downloaded and held to that digest, `targets` gains the
 //! `macos-arm64` entry of the installer `macos-pkg` and the output `set-mac=true` is written;
-//! when it does not exist (`404`), `targets` has the Linux platforms alone and `set-mac=false`
-//! is written. Any other failure, or a package that is not the one the sums list, is an error.
+//! when it does not exist (`404`, or the `403` a CDN over a store it may not list answers for a
+//! missing object), `targets` has the Linux platforms alone and `set-mac=false` is written. Any
+//! other failure, or a package that is not the one the sums list, is an error.
 //! Without `--pkg-url` there is no `macos-arm64` entry and no `set-mac`.
 
 use std::io::Write;

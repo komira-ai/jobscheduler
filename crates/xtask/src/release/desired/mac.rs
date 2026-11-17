@@ -2,8 +2,10 @@
 //! it: `<base>/<X.Y.Z>/SHA256SUMS` and the package `<base>/<X.Y.Z>/js-agent-<X.Y.Z>-macos-arm64.pkg`,
 //! the files `channels pkg upload` put there, read from the public host over HTTPS.
 //!
-//! A directory with no `SHA256SUMS` (a `404`) means the release has no Mac package yet: the
-//! release is then set for the Linux platforms alone. Any other failure to read it is an error,
+//! A directory with no `SHA256SUMS` means the release has no Mac package yet: the release is then
+//! set for the Linux platforms alone. The host answers a file that is not there with a `404`, or
+//! with a `403` when it is a CDN over an object store it may not list (`packages.komira.ai` is
+//! CloudFront over S3, which answers every missing object so), and both mean no sums. Any other failure to read it is an error,
 //! and so is a package whose SHA-256 is not the one the sums list, so a half-published or
 //! replaced package is never pinned.
 
@@ -14,8 +16,9 @@ use super::{Error, SUMS, capture, strings};
 use crate::fetch::Sha256;
 use crate::release::{Version, io_error};
 
-/// What curl says of an HTTP `404` under `--fail`.
-const NOT_FOUND: &str = "returned error: 404";
+/// What curl says under `--fail` of the answers that mean the sums are not there: `404`, and the
+/// `403` a store that may not be listed answers for a missing object.
+const ABSENT: [&str; 2] = ["returned error: 404", "returned error: 403"];
 
 /// The Mac package of a release.
 #[derive(Debug, PartialEq, Eq)]
@@ -33,8 +36,8 @@ pub fn file_name(version: Version) -> String {
 }
 
 /// The arguments of the `curl` that reads `url` into `file`: HTTPS only, TLS 1.2 or later, a
-/// failure on an HTTP error status and five retries of what is transient (a `404` is not: it is
-/// an answer), with a time for a package of some tens of megabytes.
+/// failure on an HTTP error status and five retries of what is transient (a `404` or a `403` is
+/// not: it is an answer), with a time for a package of some tens of megabytes.
 fn curl_args(file: &Path, url: &str) -> Vec<String> {
     let mut args = strings(&[
         "--proto",
@@ -56,12 +59,13 @@ fn curl_args(file: &Path, url: &str) -> Vec<String> {
     args
 }
 
-/// The package of `version` at `base`, or `None` when its directory has no `SHA256SUMS`.
+/// The package of `version` at `base`, or `None` when its directory has no `SHA256SUMS` (a `404`
+/// or a `403` for it).
 ///
 /// # Errors
 /// [`Error::Refused`] for sums that list no package or a package whose digest is not the one
-/// they list; [`Error::Release`] for a `curl` that fails other than with a `404`, or a file that
-/// cannot be made or read.
+/// they list; [`Error::Release`] for a `curl` that fails other than with a `404` or a `403` for
+/// the sums (any failure for the package they list), or a file that cannot be made or read.
 pub fn fetch(
     curl: &str,
     dir: &Path,
@@ -75,7 +79,9 @@ pub fn fetch(
     let sums_url = format!("{base}/{version}/{SUMS}");
     match capture(curl, &curl_args(&sums_file, &sums_url)) {
         Ok(_) => {}
-        Err(crate::release::Error::Failed { stderr, .. }) if stderr.contains(NOT_FOUND) => {
+        Err(crate::release::Error::Failed { stderr, .. })
+            if ABSENT.iter().any(|absent| stderr.contains(absent)) =>
+        {
             return Ok(None);
         }
         Err(e) => return Err(e.into()),

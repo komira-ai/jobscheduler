@@ -185,6 +185,25 @@ impl FakeHelper {
         &self.shared.homes
     }
 
+    /// The native backend over this helper, with its lease journal in `dir`: what an agent
+    /// given this helper's socket and homes (`--native-helper-socket`, `--native-homes`) runs
+    /// its jobs with.
+    pub fn backend(&self, dir: &Scratch) -> js_agent::Backend {
+        let flags = js_agent::native::NativeFlags {
+            socket: Some(self.socket()),
+            homes: Some(self.homes()),
+            network: None,
+            tool_roots: &[],
+            deny_read: &[],
+            max_file_mib: None,
+            max_processes: None,
+            pf: js_agent::native::PfFlags::default(),
+        };
+        let journal = dir.path("native-leases");
+        let settings = js_agent::native::NativeSettings::from_flags(&flags, &[], &journal);
+        js_agent::Backend::Native(settings.unwrap().unwrap())
+    }
+
     /// The home of the user of `lease`.
     pub fn home_of(&self, lease: &str) -> PathBuf {
         let id = parse_lease(lease).unwrap();
