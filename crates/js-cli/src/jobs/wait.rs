@@ -150,19 +150,9 @@ pub(crate) fn ended(
     render: Render,
     to: &mut dyn Write,
 ) -> Result<u8, Failure> {
-    let outcome = waited.map_err(|why| undetermined(job, &why))?;
-    Ok(report(job, outcome, render, to))
-}
-
-/// The failure of a wait for job `job` that could not tell how it ended.
-pub(crate) fn undetermined(job: &str, why: &WaitError) -> Failure {
-    Failure::Undetermined(format!("cannot tell how job {job} ended: {why}"))
-}
-
-/// Prints `job <id> <end>` on `to` and gives the exit status of `outcome`. The status is the
-/// answer, so a line that cannot be printed does not change it.
-pub(crate) fn report(job: &str, outcome: Outcome, render: Render, to: &mut dyn Write) -> u8 {
+    let outcome = waited
+        .map_err(|why| Failure::Undetermined(format!("cannot tell how job {job} ended: {why}")))?;
     let (code, name) = status(outcome);
     let _ = show(to, &render.ended(job, name));
-    code
+    Ok(code)
 }

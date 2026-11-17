@@ -26,9 +26,7 @@ follows both streams, waits, and cancels on a signal). Their loops are js-client
 trait and an injected `Waiter`); js-cli's `jobs/wait.rs`, `jobs/follow.rs` and `jobs/run.rs`
 read their flags, print, and map the job's end to the exit status. `job run` takes the
 flags of `job submit` from the table, so a field added to `SubmitJobRequest` is a flag of
-both. Their help is held to goldens beside the generated commands'. `js ci run`
-(`crates/js-cli/src/ci/`, `docs/ci-runner.md`) is written by hand too: it builds its own
-`SubmitJobRequest` for a CI step and drives it with `job run`'s loop (`jobs/run.rs`, `Run`).
+both. Their help is held to goldens beside the generated commands'.
 
 ## Adding a call
 

@@ -17,9 +17,6 @@ const JOIN_TOKEN: [&[&str]; 3] = [
     &["join-token", "revoke"],
 ];
 
-/// The CI commands, whose help is held to `goldens/ci_help/`.
-const CI: [&[&str]; 2] = [&["ci"], &["ci", "run"]];
-
 /// The program and the job commands, whose help is held to `goldens/job_help/`: the
 /// generated ones, and the hand-written `job wait`, `job follow` and `job run`.
 const JOB: [&[&str]; 21] = [
@@ -89,15 +86,6 @@ fn join_token_help_text_matches_goldens() {
     assert!(differ.is_empty(), "{}", differ.join("\n"));
 }
 
-/// Asserts that the help of `ci` and `ci run` equals the goldens: each flag with what it
-/// takes, its default and its meaning, and the table of exit statuses. It catches a flag of
-/// the GitHub Action's call that is renamed or changes its meaning.
-#[test]
-fn ci_help_text_matches_goldens() {
-    let differ = differing("ci_help", &CI);
-    assert!(differ.is_empty(), "{}", differ.join("\n"));
-}
-
 /// Asserts that `js --help` and the help of every job group and command equal their
 /// goldens: the commands' words, each flag with its field's comment, the required flags,
 /// and `--id` in place of `--spec.job-id`. A change to the definition or to the generator's
@@ -119,14 +107,14 @@ fn golden_files_are_named_by_the_command() {
 }
 
 /// Asserts that `js_cli::command()`, the tree a documentation check walks, is the one the
-/// program parses with: it is named `js`, holds every join-token, job and CI command this file holds
+/// program parses with: it is named `js`, holds every join-token and job command this file holds
 /// to goldens and nothing beside them at the top, and carries the four global flags. It
 /// catches a public tree that leaves out the generated job commands or the join-token group.
 #[test]
 fn the_public_command_tree_is_the_parsed_one() {
     let tree = js_cli::command();
     assert_eq!(tree.get_name(), "js");
-    for words in JOIN_TOKEN.iter().chain(JOB.iter()).chain(CI.iter()) {
+    for words in JOIN_TOKEN.iter().chain(JOB.iter()) {
         let found = words
             .iter()
             .try_fold(&tree, |at, word| at.find_subcommand(word));
@@ -138,15 +126,7 @@ fn the_public_command_tree_is_the_parsed_one() {
         .collect();
     assert_eq!(
         top,
-        [
-            "join-token",
-            "job",
-            "host",
-            "pool",
-            "provider",
-            "usage",
-            "ci"
-        ]
+        ["join-token", "job", "host", "pool", "provider", "usage"]
     );
     let globals: Vec<&str> = tree
         .get_arguments()
@@ -159,8 +139,8 @@ fn the_public_command_tree_is_the_parsed_one() {
 /// Asserts that every spelling of the removed `lease` command group is a usage error: exit
 /// 2, nothing on stdout, a message that names the unrecognized subcommand `lease`, and no
 /// request sent to the server it was pointed at (the server is one that records what it
-/// reads). It also asserts that `js --help` lists the join-token command, the generated
-/// job, host, pool, provider and usage commands and the ci command, and no `lease` command. It catches a
+/// reads). It also asserts that `js --help` lists the join-token command and the generated
+/// job, host, pool, provider and usage commands, and no `lease` command. It catches a
 /// lease command that parses again or that reaches the server before it is refused.
 #[test]
 fn the_lease_commands_are_gone_from_the_cli() {
@@ -205,7 +185,6 @@ fn the_lease_commands_are_gone_from_the_cli() {
             "pool",
             "provider",
             "usage",
-            "ci",
             "help"
         ]
     );

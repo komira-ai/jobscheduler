@@ -1,9 +1,8 @@
 //! `js`: the command-line client of `js-lease-server`. It makes the calls
 //! of the job service (`jobscheduler.v1.JobService`), one command per call, with three
 //! commands written by hand that loop over several calls: `job wait`, `job follow` and
-//! `job run` (see "Job commands" below); it runs a CI step as a job (`ci run`, see "CI steps"
-//! below); and it mints and revokes the join tokens that admit a launched machine's agent
-//! (`join-token`).
+//! `job run` (see "Job commands" below); and it mints and revokes the join tokens that
+//! admit a launched machine's agent (`join-token`).
 //!
 //! The library is the program: [`run_with`] takes the arguments, the streams to print
 //! to and the [`Services`] (the signal source, and the job commands' waiter and dialer),
@@ -142,30 +141,6 @@
 //! Text the server sends in an error or a reason is printed without its control
 //! characters.
 //!
-//! # CI steps
-//!
-//! ```text
-//! js ci run --os macos|linux --image REF --step NAME --run SCRIPT --source-url URL
-//!           --source-commit SHA [--source-token-file PATH] [--outputs PATHS --outputs-dir DIR]
-//!           [--size-fallback NAME] [--wall-limit <dur>] [--network none|allow-list|open]
-//!           [--env K=V ...] [--id ID] [--github-output FILE]
-//! ```
-//!
-//! `ci run` runs one CI step as a job, for a CI runner that is not the machine the step needs;
-//! the GitHub Action `actions/run` calls it (`docs/ci-runner.md`). The job is `/bin/sh` with a
-//! script that fetches the one commit of `--source-url` (with the token of
-//! `--source-token-file`, sent as a job file, through a git credential helper), runs `--run`
-//! with `bash -e -o pipefail` in the checkout, and then writes the paths of `--outputs` that
-//! exist to its stdout as a framed tar archive. The job asks for macOS on arm64 under
-//! sandbox-exec, or Linux in a container; it names no CPU or memory, and carries the labels
-//! `size-class` (`--step` written as a class) and `size-fallback` (`--size-fallback`, by
-//! default `ci-macos` or `ci-linux`), so the scheduler sizes it from history. `js` submits
-//! it, follows and waits as `job run` does (the same retried submit, signals and statuses),
-//! takes the archive out of the job's stdout and unpacks it into `--outputs-dir`, and exits
-//! with the step's own exit code when the job failed with one (1 to 255; the outcome tells it
-//! from `js`'s statuses). A job that succeeded but whose outputs could not be read back is
-//! 16. `--github-output` appends `job-id=`, `outcome=` and `exit-code=` lines.
-//!
 //! # Exit status
 //!
 //! | status | meaning |
@@ -182,14 +157,11 @@
 //! | 13 | `job wait`, `job run`: the job was lost |
 //! | 14 | `job wait`, `job run`: the job failed to start |
 //! | 15 | `job wait`, `job run`: how the job ended could not be told: a call failed, or the job is in a state this `js` does not know (`undetermined`) |
-//! | 16 | `ci run`: the job succeeded, but its declared outputs could not be read back |
-//! | 1 to 255 | `ci run`: also the step's own exit code, when its job failed with one |
 //! | 129, 130, 143 | `job run`: a second SIGHUP, SIGINT or SIGTERM ended `js` before the job ended (`interrupted`) |
 //!
 //! The reason is on stderr (`js: refused: join-tokens-unsupported`), and never holds the token.
 
 mod api;
-mod ci;
 mod cli;
 mod events;
 mod failure;
@@ -265,10 +237,9 @@ fn execute(
     services: Services,
 ) -> u8 {
     let render = Render::new(matches.get_flag("json"));
-    let done = match (ci::chosen(matches), jobs::chosen(matches)) {
-        (Some(own), _) => ci::run(matches, own, render, out, err, services),
-        (None, Some(chosen)) => jobs::execute(chosen, matches, render, out, err, services),
-        (None, None) => join_token_command(matches, render, out),
+    let done = match jobs::chosen(matches) {
+        Some(chosen) => jobs::execute(chosen, matches, render, out, err, services),
+        None => join_token_command(matches, render, out),
     };
     match done {
         Ok(code) => code,

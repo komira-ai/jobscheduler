@@ -15,15 +15,11 @@ path = "src/main.rs"
 js-client = { path = "../js-client", features = ["jobs"] }
 # The job service's descriptor set, which the job commands build requests and print answers by.
 js-proto = { path = "../js-proto" }
-# `ci run`: the size-class labels and how a step's name is written as a class.
-js-types = { path = "../js-types" }
 clap.workspace = true
 getrandom.workspace = true
 prost.workspace = true
 prost-reflect = { workspace = true, features = ["serde", "text-format"] }
 serde_json.workspace = true
-# `ci run`: the archive of a step's outputs.
-tar.workspace = true
 thiserror.workspace = true
 # `macros` and `sync`: `job run` waits and follows at once, and reads the signals as it waits.
 tokio = { workspace = true, features = ["macros", "rt", "signal", "sync"] }
@@ -35,6 +31,7 @@ hyper.workspace = true
 js-conformance = { path = "../js-conformance" }
 js-lease-server = { path = "../js-lease-server" }
 js-testkit = { path = "../js-testkit" }
+js-types = { path = "../js-types" }
 rcgen.workspace = true
 # `signals`: the test sends the process the signal its handlers are installed for.
 rustix = { workspace = true, features = ["process"] }
