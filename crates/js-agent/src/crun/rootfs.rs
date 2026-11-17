@@ -16,11 +16,21 @@ use tokio::runtime::Runtime as TokioRuntime;
 use super::CrunRuntime;
 use super::fs::pool::{Pending, Poll};
 use super::fs::{Assembled, Fs, Owners};
-use super::ledger::{Failed, Reason, Removed, SweepReport};
+use super::ledger::{Entry, Failed, Reason, Removed, SweepReport};
 use super::pull::Images;
 use super::spec::pinned;
 use crate::cli_runtime::container_name;
 use crate::lifecycle::{Exit, FsPrepared, JobFs, RuntimeError, Status};
+
+/// The lease name a run's file system was assembled under when its container is another
+/// lease's (a container made ahead of it, [`Entry::lease_id`]): the run's own.
+pub(super) fn assembled_name(entry: &Entry) -> Option<String> {
+    let own = entry
+        .lease_id
+        .as_ref()
+        .map(|_| container_name(&entry.agent, &entry.run_id));
+    own.and_then(Result::ok)
+}
 
 /// The name of the pin of the image of a lease's layer `k`.
 pub(super) fn layer_pin(name: &str, k: usize) -> String {
@@ -215,9 +225,15 @@ impl CrunRuntime {
     pub(super) fn sweep_mounts(&self, report: &mut SweepReport) {
         let prefix = self.lease_prefix();
         let leases = self.fs.as_ref().map(Fs::leases).unwrap_or_default();
-        let left = leases
-            .into_iter()
-            .filter(|name| name.starts_with(&prefix) && !self.runs.contains_key(name));
+        // A run started in a container made ahead of it holds its mounts under its own name.
+        let held: Vec<String> = self
+            .runs
+            .values()
+            .filter_map(|run| assembled_name(&run.entry))
+            .collect();
+        let left = leases.into_iter().filter(|name| {
+            name.starts_with(&prefix) && !self.runs.contains_key(name) && !held.contains(name)
+        });
         for name in left {
             let run_id = name[prefix.len()..].to_owned();
             let removed = self.release_fs(&name).and_then(|()| self.unpin_all(&name));
@@ -233,13 +249,17 @@ impl CrunRuntime {
         }
     }
 
-    /// What an adopted lease `name` cloned, for the check after it ends: none for a lease
-    /// with no directory of mounts.
-    pub(super) fn run_fs_of(&self, name: &str) -> Option<RunFs> {
+    /// What the adopted lease of `entry` cloned, for the check after it ends: none for a lease
+    /// with no directory of mounts. A run started in a container made ahead of it has its
+    /// mounts under its own lease name, not the container's.
+    pub(super) fn run_fs_of(&self, entry: &Entry) -> Option<RunFs> {
         let fs = self.fs.as_ref()?;
-        fs.dir_of(name)
-            .is_dir()
-            .then(|| RunFs::new(fs.sources_of(name)))
+        let own = assembled_name(entry);
+        let name = own.clone().unwrap_or_else(|| entry.name.clone());
+        fs.dir_of(&name).is_dir().then(|| RunFs {
+            assembled_as: own,
+            ..RunFs::new(fs.sources_of(&name))
+        })
     }
 
     /// What the assembly of a run made, given to its container: the root it mounted

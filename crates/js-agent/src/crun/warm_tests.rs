@@ -11,7 +11,7 @@ use js_types::JobNetwork;
 use js_types::PortMap;
 
 use super::spec::container_spec;
-use super::warm::{KEEP_MS, Pool, RECENT_MS, binds_of, fits, init_of};
+use super::warm::{KEEP_MS, MOST_IDLE, Pool, RECENT_MS, binds_of, fits, init_of};
 use crate::lifecycle::{Body, RunSpec};
 
 /// A pool of at most `per_image` sandboxes an image.
@@ -79,7 +79,8 @@ fn an_image_gets_as_many_sandboxes_as_it_started_recently_within_the_bound() {
 }
 
 /// Proves which runs a held container can carry: a contained run of an image with no
-/// network, GPU, port or host port; and not a host run, a native body, a run with no image,
+/// network, GPU, port or host port, booking CPU and memory; and not a host run, one that
+/// books no CPU or no memory (a sandbox's own small limits would stay), a native body, a run with no image,
 /// or one asking for any of those. Catches a sandbox given a run whose container would differ
 /// from it in what a bind cannot change.
 #[test]
@@ -108,6 +109,12 @@ fn only_a_plain_contained_run_of_an_image_fits_a_sandbox() {
     host_port.host_ports =
         vec![serde_json::from_str::<HostPort>(r#"{"host_port":5000}"#).expect("a host port")];
     cases.push(host_port);
+    let mut unbooked_cpu = run();
+    unbooked_cpu.cpu_millis = 0;
+    cases.push(unbooked_cpu);
+    let mut unbooked_memory = run();
+    unbooked_memory.memory_bytes = 0;
+    cases.push(unbooked_memory);
     let mut bare = run();
     bare.body = Body::Container {
         image: String::new(),
@@ -186,4 +193,27 @@ fn a_sandbox_is_up_when_its_init_is_alone_in_its_group() {
         std::fs::write(dir.join("ctr/cgroup.procs"), text).expect("procs");
         assert_eq!(init_of(&dir), want, "{text:?}");
     }
+}
+
+/// Proves the images that lack sandboxes together get at most [`MOST_IDLE`], the first ones
+/// first, and a resting image none. Catches a pool that grows with the number of images a
+/// node ran, holding memory no booking counts.
+#[test]
+fn the_sandboxes_of_all_images_together_are_bounded() {
+    let mut pool = pool(4);
+    let images: Vec<String> = (0..6).map(|n| format!("image-{n}")).collect();
+    for image in &images {
+        for at in 0..4 {
+            pool.note_start(image, 1_000 + at);
+        }
+    }
+    let lacking = pool.lacking(1_010);
+    let total: usize = lacking.iter().map(|(_, lack)| lack).sum();
+    assert_eq!(total, MOST_IDLE);
+    assert_eq!(lacking.len(), MOST_IDLE / 4);
+    assert_eq!(lacking[0], (images[0].clone(), 4));
+    pool.rest(&images[0], 1_010);
+    let rested = pool.lacking(1_011);
+    assert!(rested.iter().all(|(image, _)| *image != images[0]));
+    assert_eq!(pool.lacking(1_010 + super::warm::RETRY_MS)[0].0, images[0]);
 }

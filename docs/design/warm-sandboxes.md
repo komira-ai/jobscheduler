@@ -34,7 +34,9 @@ carries a run that is:
 - without a network (`none`: loopback only);
 - without a GPU;
 - without a port or a host port;
-- without a layered root.
+- without a layered root;
+- booking both CPU and memory (a run that books none of a kind has no limit of it, which the sandbox's own small
+  booking would otherwise impose).
 
 Mounts (host paths, provider mounts, copy-on-write mounts), run files, a process limit, live logs and any booking
 are carried. Every other run is made cold. The pool runs only where the job file system runs (the kernel's new
@@ -46,10 +48,12 @@ mount API: `open_tree`, `move_mount`, `mount_setattr`) and where leases are made
 - **Sizing.** An image gets no sandbox until a contained start of it is counted. The sizing counts every start
   the pool could carry by its shape (§1), whether or not it found a sandbox. An image keeps sandboxes for ten
   minutes after its last start (`KEEP_MS`). For that time it has as many as it started in the last minute
-  (`RECENT_MS`), at least one and at most `--warm-sandboxes`. `--warm-sandboxes 0` turns the pool off.
+  (`RECENT_MS`), at least one and at most `--warm-sandboxes`. All images together have at most 16 idle sandboxes
+  (`MOST_IDLE`), filled image by image in name order. `--warm-sandboxes 0` turns the pool off.
 - **Tending.** The lifecycle calls `Runtime::tend` once a step, after the step's starts. Tending removes the
-  sandboxes that ended and those an image no longer needs (oldest first), then makes those an image lacks. An
-  image whose sandbox cannot be made is not tried again for 30 s (`RETRY_MS`).
+  sandboxes that ended and those an image no longer needs (in the order of their names), then makes those an
+  image lacks. An image whose sandbox cannot be made, or cannot be removed, is not tried again for 30 s
+  (`RETRY_MS`).
 - **Making a sandbox.** It is made as a run's container is (`make`, held). Its own id is `w<epoch>-<n>`. Its
   bundle is the loopback bundle, with the init's arguments `--wait-job /dev/js-job --` and the lease's named
   pipe `job` (mode `0600`, given to the job's id) bound read-only at `/dev/js-job`. Its `/scratch` is its own
@@ -57,10 +61,12 @@ mount API: `open_tree`, `move_mount`, `mount_setattr`) and where leases are made
 - **Its booking.** Its lease cgroup books 1 CPU and 64 MiB until a run takes it: the init and `crun`'s setup
   need less.
 - **Its logs.** Its capture is capped as a live-logs run's would be, since a sandbox does not know whether its
-  run will upload.
+  run will upload. The capture files stay in the sandbox's lease, outside the run's quota: a warm run's
+  stdout and stderr on disk are bounded by that cap, not by the run's disk booking.
 - **Its sidecar.** The sidecar stays in the state *starting*, with the label `jobscheduler.dev/warm` naming the
   image.
-- **Not a run.** Sandboxes are not in the runtime's runs. They are never listed as containers and never adopted.
+- **Not a run.** An idle sandbox is not one of the runtime's runs (only its removal goes through the runs' path).
+  It is never listed as a container and never adopted.
   `Runtime::idle_handles` names them, and the post-job and taint checks count their processes as live (the
   runtime's own), never as a job's leftovers.
 
@@ -109,7 +115,8 @@ The handle of the run is the sandbox's name. `Runtime::started_warm` says it was
   that cannot be taken. The runtime removes the sandbox and empties the run's lease directory of what step 2
   made, and the run is made cold.
 - **A failure of step 5.** Nothing ran: the init exits when it reads no well-formed job. The runtime removes the
-  sandbox, and the run is made cold.
+  sandbox, and the run is made cold. This includes an init that is alone in its group but has not yet opened
+  its pipe (`NotWaiting`): the binds are already made, so the sandbox is removed rather than put back.
 - **A failure of step 6.** The run has started, and the start fails as a cold start whose sidecar cannot be
   written does. The run is removed.
 - **A crash before step 6.** The sidecar still says *starting*, so the next start of the agent removes the lease
@@ -123,8 +130,9 @@ The handle of the run is the sandbox's name. `Runtime::started_warm` says it was
 
 ## 5. Security
 
-- The pipe is the job's id's and `0600`, in a lease directory no container sees. Only the agent and that id
-  reach it, and no job's process of another container sees the path.
+- The pipe is the job's id's and `0600`, in a lease directory of the host. It is bound read-only into its own
+  container only (at `/dev/js-job`); no other container sees it, and on the host only the agent and that id can
+  open it.
 - The init reads it once, before any job code runs in the container. Nothing reads it afterwards.
 - The binds are made by root in the container's namespace before the job runs, with the same flags `crun` gives
   (`nosuid`, `nodev`, read-only as asked).
@@ -147,7 +155,7 @@ there is write its profile and copy its inputs, and both depend on the job. No w
   - runs the pool cannot carry;
   - a failed bind and a failed hand-over, each made cold;
   - the pool's steps: what ended, what is unused, and an image that rests;
-  - a restart: an idle sandbox removed, a warm run adopted.
+  - a restart: an idle sandbox removed, a warm run adopted, and a warm run's mounts kept.
 - **The pool's rules.** `crates/js-agent/src/crun/warm_tests.rs` covers sizing, eligibility, the binds and when
   a sandbox is up.
 - **The init.** The init's `--wait-job` tests in `crates/js-contain/src/oci/init.rs` cover the job run in its

@@ -421,7 +421,7 @@ impl CrunRuntime {
             // logs (`resume_uploads`); the sink came only in its start.
             logs: RunLogs::adopted(None),
             // What its file system cloned, from its list of mounts, for the check after it ends.
-            fs: self.run_fs_of(&entry.name),
+            fs: self.run_fs_of(entry),
         }
     }
 
@@ -487,8 +487,7 @@ impl CrunRuntime {
         let taken: BTreeSet<String> = self
             .runs
             .values()
-            .filter(|run| run.entry.lease_id.is_some())
-            .filter_map(|run| container_name(&self.host_id, &run.entry.run_id).ok())
+            .filter_map(|run| super::rootfs::assembled_name(&run.entry))
             .collect();
         for run_id in runs {
             let name = format!("{prefix}{run_id}");

@@ -7,7 +7,8 @@
 //! a job file system ([`CrunSettings::fs`](super::CrunSettings), the new mount API) and its
 //! leases beside the runs, keeps up to that many idle sandboxes for each image a contained job
 //! started recently: none for an image no job started in the last [`KEEP_MS`], and otherwise
-//! as many as started in the last [`RECENT_MS`], at least one. [`CrunRuntime::tend_warm`]
+//! as many as started in the last [`RECENT_MS`], at least one; all images together at most
+//! [`MOST_IDLE`]. [`CrunRuntime::tend_warm`]
 //! (the lifecycle's [`Runtime::tend`](crate::lifecycle::Runtime::tend), once a step, after the
 //! step's starts) makes those an image lacks and removes those it no longer needs, and those
 //! that ended. A sandbox is made as a run's container is (`make`, `held`), under a name of its
@@ -78,6 +79,10 @@ pub(super) const WARM_MEMORY_BYTES: u64 = 64 << 20;
 
 /// How long an image whose sandbox could not be made is not tried again: 30 seconds.
 pub(super) const RETRY_MS: u64 = 30 * 1000;
+
+/// The most idle sandboxes of all images together: each holds a cgroup, an init and a
+/// supervisor that no booking counts.
+pub(super) const MOST_IDLE: usize = 16;
 
 /// Where the container sees the run's home directory (`js_contain`'s writable home).
 const HOME: &str = "/root";
@@ -184,19 +189,25 @@ impl Pool {
         gone
     }
 
-    /// What each image that started recently lacks at `now`, leaving out those that rest.
-    fn lacking(&self, now: u64) -> Vec<(String, usize)> {
+    /// What each image that started recently lacks at `now`, leaving out those that rest, all
+    /// of them together at most [`MOST_IDLE`] with the idle ones.
+    pub(super) fn lacking(&self, now: u64) -> Vec<(String, usize)> {
         let awake = |image: &&String| self.resting.get(*image).is_none_or(|until| now >= *until);
         let lack = |image: &String| self.target(image, now).saturating_sub(self.count(image));
         let images = self.starts.keys().filter(awake);
-        images
-            .map(|image| (image.clone(), lack(image)))
-            .filter(|(_, lack)| *lack > 0)
-            .collect()
+        let mut room = MOST_IDLE.saturating_sub(self.idle.len());
+        let mut lacking = Vec::new();
+        for image in images {
+            let wanted = lack(image).min(room);
+            room -= wanted;
+            lacking.push((image.clone(), wanted));
+        }
+        lacking.retain(|(_, lack)| *lack > 0);
+        lacking
     }
 
     /// `image` is not tried again until [`RETRY_MS`] after `now`.
-    fn rest(&mut self, image: &str, now: u64) {
+    pub(super) fn rest(&mut self, image: &str, now: u64) {
         self.resting
             .insert(image.to_owned(), now.saturating_add(RETRY_MS));
     }
@@ -238,8 +249,9 @@ impl Pool {
 }
 
 /// Whether the run `spec` can be started in a held container, as far as the run says: a
-/// contained run of an image, with no network, no GPU, no port and no host port. Gives its
-/// image and arguments.
+/// contained run of an image, with no network, no GPU, no port and no host port, that books
+/// CPU and memory (a run that books none of a kind has no limit of it, which a sandbox's
+/// small booking would be). Gives its image and arguments.
 pub(super) fn fits(spec: &RunSpec) -> Option<(&str, &[String])> {
     let Body::Container { image, args } = &spec.body else {
         return None;
@@ -249,6 +261,8 @@ pub(super) fn fits(spec: &RunSpec) -> Option<(&str, &[String])> {
         && spec.gpu_indices.is_empty()
         && spec.ports.is_empty()
         && spec.host_ports.is_empty()
+        && spec.cpu_millis > 0
+        && spec.memory_bytes > 0
         && !image.is_empty();
     plain.then_some((image.as_str(), args.as_slice()))
 }
@@ -303,7 +317,12 @@ impl CrunRuntime {
         let gone = pool.take_unneeded(now);
         let lacking = pool.lacking(now);
         for (name, sandbox) in gone {
-            self.discard_sandbox(name, sandbox.run, sandbox.running);
+            let image = sandbox.image.clone();
+            // One that cannot be removed is left to the next start of the agent; its image
+            // rests, so that a removal that keeps failing does not leave one at every step.
+            if !self.discard_sandbox(name, sandbox.run, sandbox.running) {
+                pool.rest(&image, now);
+            }
         }
         for (image, lack) in lacking {
             for _ in 0..lack {
@@ -374,25 +393,28 @@ impl CrunRuntime {
         Ok(())
     }
 
-    /// Removes the container `name` (supervised by `running`) and everything its lease made.
-    fn discard_sandbox(&mut self, name: String, mut run: Run, running: Supervised) {
+    /// Removes the container `name` (supervised by `running`) and everything its lease made;
+    /// whether it was.
+    fn discard_sandbox(&mut self, name: String, mut run: Run, running: Supervised) -> bool {
         run.state = State::Running {
             run: running,
             since_ms: 0,
         };
-        self.discard_unstarted(name, run);
+        self.discard_unstarted(name, run)
     }
 
     /// Removes the container `run` named `name` and everything its lease made, as a removal
-    /// does. One that cannot be removed is left to the next start of the agent, whose sweep
-    /// removes it: it is never a run of this process.
-    fn discard_unstarted(&mut self, name: String, run: Run) {
+    /// does, and says whether it was. One that cannot be removed is left to the next start of
+    /// the agent, whose sweep removes it: it is never a run of this process.
+    fn discard_unstarted(&mut self, name: String, run: Run) -> bool {
         let handle = RunHandle(name.clone());
         self.runs.insert(name, run);
-        if let Err(why) = crate::lifecycle::Runtime::remove(self, &handle) {
+        let removed = crate::lifecycle::Runtime::remove(self, &handle);
+        removed.as_ref().err().into_iter().for_each(|why| {
             tracing::warn!(lease = %handle.0, "remove a container made ahead of its job: {why}");
             self.runs.remove(&handle.0);
-        }
+        });
+        removed.is_ok()
     }
 
     /// Starts the run `spec` in an idle sandbox of its image, when it can be ([`fits`], no

@@ -735,3 +735,63 @@ fn settled_status(runtime: &mut CrunRuntime, id: &RunHandle) -> Status {
     }
     panic!("the run's sources did not answer");
 }
+
+/// Proves a restart that adopts a run started in a sandbox keeps the mounts its assembly made
+/// under the run's own lease name (nothing of them is detached), and the adopted run's sources
+/// are found there. Catches a restart that unmounts a running warm job's inputs because no
+/// container bears their name.
+#[test]
+fn a_restart_keeps_the_mounts_of_a_run_started_in_a_sandbox() {
+    use js_agent::lifecycle::{FsPrepared, JobFs};
+    use js_agent_wire::{JobMount, MountMode, MountSource, Propagation};
+    let node = Node::new("warm-restart-mount");
+    let enter = Enter::new(Box::new(|_| Ok(())));
+    let mut runtime = open(settings(&node, &enter, 1));
+    one_sandbox(&node, &mut runtime, 1);
+    let spec = job(&node, "r2", "--hold");
+    let fs = JobFs {
+        layers: Vec::new(),
+        mounts: vec![JobMount {
+            source: MountSource::HostPath {
+                path: node.dir.join("data/sdk").display().to_string(),
+            },
+            target: "/opt/sdk".to_owned(),
+            mode: MountMode::ReadOnly,
+            sub_path: None,
+            no_exec: false,
+            propagation: Propagation::Private,
+        }],
+    };
+    let image = node.image();
+    assert_eq!(
+        runtime.resolve_fs("r2", &image, &fs, 5000),
+        FsPrepared::Pending
+    );
+    assert_eq!(
+        settled(|| runtime.resolve_fs("r2", &image, &fs, 5000)),
+        FsPrepared::Ready
+    );
+    lifecycle_lease(&runtime, &spec);
+    assert_eq!(
+        settled(|| runtime.assemble_fs("r2", 5000)),
+        FsPrepared::Ready
+    );
+    let id = runtime.create_and_start(&spec).expect("started");
+    assert_eq!(id.0, warm_name(1));
+    node.place(&id.0, crate::node::PID);
+    let mounts = runtime.mounts_of("r2").expect("the run's mounts");
+    drop(runtime);
+
+    let before = enter.lines().len();
+    let mut again = open(settings(&node, &enter, 1));
+    assert!(again.swept().adopted.contains(&"r2".to_owned()));
+    let detached: Vec<String> = enter.lines()[before..]
+        .iter()
+        .filter(|line| line.starts_with("detach") && line.contains(&cold_name("r2")))
+        .cloned()
+        .collect();
+    assert!(detached.is_empty(), "{detached:?}");
+    assert!(mounts.is_dir(), "the run's mounts stay");
+    again.remove(&id).expect("removed");
+    again.discard_fs("r2").expect("discarded");
+}
