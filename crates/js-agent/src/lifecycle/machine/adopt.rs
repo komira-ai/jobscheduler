@@ -2,6 +2,7 @@
 //! stand for, and trying again to remove the ones that could not be removed.
 
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 
 use js_agent_wire::Taint;
 
@@ -16,7 +17,8 @@ use crate::lifecycle::quota::QuotaHealth;
 use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{
-    CheckHook, Clock, Config, DEFAULT_SETTLE, DEFAULT_TAINT_RECHECK, Event, Finding, code, label,
+    CheckHook, Clock, Config, DEFAULT_SETTLE, DEFAULT_TAINT_RECHECK, Event, Finding, Wake, code,
+    label,
 };
 
 /// The taint of a record of owed checks: the run it names, or the check code when the
@@ -104,6 +106,8 @@ impl Lifecycle {
             blind_wait: DEFAULT_SETTLE,
             taint_recheck: DEFAULT_TAINT_RECHECK,
             providers: Attached::none(),
+            wake: Wake::default(),
+            starting: BTreeMap::new(),
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);

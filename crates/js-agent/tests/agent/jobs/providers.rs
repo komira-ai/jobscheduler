@@ -8,8 +8,12 @@ use std::path::Path;
 use js_agent::Worker;
 use js_agent::lifecycle::MountProviders;
 
-use super::fake::FakeMachine;
-use super::{STEP_NEVER, plan, start};
+use js_agent::Delivery;
+use js_agent_wire::HeldState;
+
+use super::fake::{FakeMachine, HANG_GUARD};
+use super::{STEP_NEVER, plan, start, starts};
+use crate::lifecycle::job;
 use crate::support::Scratch;
 
 /// Asserts that a worker given a provider asks it for its sweep as it starts, naming the
@@ -54,4 +58,34 @@ fn a_machine_that_cannot_make_the_providers_ends_the_start_of_the_worker() {
         Err(why) => assert_eq!(why, "--mount-provider: no client is made"),
     }
     assert!(machine.provider_calls().is_empty());
+}
+
+/// Asserts that the providers a worker is given ring that worker: a start waits for its image,
+/// whose pull ends without the runtime ringing, and the providers' ring alone makes the worker
+/// step and start it, though it has no step interval to fall back on. Catches providers given
+/// no wake (or a wake given only after they were attached), so a start waiting on a provider's
+/// answer goes on only at the next step interval.
+#[test]
+fn the_providers_of_a_worker_ring_it() {
+    let dir = Scratch::new("jobs-providers-wake");
+    let machine = FakeMachine::new();
+    let mut given = plan(&dir, &machine, STEP_NEVER);
+    let sockets = [("tier".to_owned(), dir.path("tier.sock"))];
+    given.providers =
+        MountProviders::from_flags(&sockets, &[], Some(30), Path::new("/nonexistent")).unwrap();
+    let worker = match Worker::start(given) {
+        Ok(worker) => worker,
+        Err(why) => panic!("the worker did not start: {why}"),
+    };
+    let image = job("r1").image;
+    machine.world.begin_pull(&image);
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    assert_eq!(worker.snapshot().held[0].state, HeldState::Starting);
+
+    machine.world.end_pull(&image, false);
+    machine.ring_providers();
+    let running = |s: &js_agent::Snapshot| s.held.iter().any(|h| h.state == HeldState::Running);
+    assert!(worker.handle().wait_until(&running, HANG_GUARD));
+    assert_eq!(machine.world.created(), ["r1"]);
 }

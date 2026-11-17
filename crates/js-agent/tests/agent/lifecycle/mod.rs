@@ -48,6 +48,7 @@ mod taint;
 mod taint_clear;
 mod taint_idle;
 mod taint_pin;
+mod timeline;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -306,7 +307,7 @@ pub fn names(events: &[Event]) -> Vec<String> {
         .iter()
         .map(|event| match event {
             Event::Adopted { run_id } => format!("adopted {run_id}"),
-            Event::Started { run_id } => format!("started {run_id}"),
+            Event::Started { run_id, .. } => format!("started {run_id}"),
             Event::Refused { run_id, code, .. } => format!("refused {run_id} {code}"),
             Event::Skipped { run_id, why } => format!("skipped {run_id} {why:?}"),
             Event::Invalid { index, code } => format!("invalid #{index} {code}"),

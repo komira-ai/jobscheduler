@@ -237,7 +237,12 @@ impl Lifecycle {
     ///
     /// Without this a start that names a provider is refused (`input-not-allowed`): the
     /// agent was not given one.
-    pub fn attach_providers(&mut self, providers: Box<dyn Providers>, wait_ms: u64) -> Vec<Event> {
+    pub fn attach_providers(
+        &mut self,
+        mut providers: Box<dyn Providers>,
+        wait_ms: u64,
+    ) -> Vec<Event> {
+        providers.set_wake(self.wake.clone());
         let mut events = Vec::new();
         let now = self.clock.now_ms();
         let stuck = self.stuck.iter().filter_map(|held| held.run_id.clone());
