@@ -184,6 +184,14 @@
 //! sources has answered a check ([`Runtime::input_failure`]). A run start's mount of a named
 //! root is refused: no path is bound by its text.
 //!
+//! # Warm sandboxes
+//!
+//! A runtime opened with [`CrunSettings::warm_sandboxes`] above 0, a job file system and its
+//! leases beside the runs keeps containers made and started ahead of their jobs for the images
+//! that started recently (the module `warm`, `docs/design/warm-sandboxes.md`): a run such a
+//! container can carry is started by binding its directories into one and handing its init the
+//! program, and its handle is that container's name; every other run is made as above.
+//!
 //! # Not here
 //!
 //! No read-back of the container's mounts: none is bound by a path a job could change.
@@ -210,6 +218,9 @@ mod settings;
 mod spec;
 #[cfg(test)]
 mod tests;
+mod warm;
+#[cfg(test)]
+mod warm_tests;
 mod whereabouts;
 #[cfg(test)]
 mod whereabouts_tests;
@@ -245,22 +256,21 @@ use std::time::Duration;
 use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
 use js_contain::cgroup::{LeaseCgroup, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
-use js_contain::oci::image::{ImageSource, PinnedImage};
+use js_contain::oci::image::ImageSource;
 use js_contain::oci::{GcReport, LeaseDirs, Oci, Supervised, stderr_path, stdout_path};
-use js_types::JobNetwork;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
 use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
 use crate::lifecycle::{
-    Body, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Whereabouts, check_run_env, label,
+    Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, Whereabouts, check_run_env,
 };
 use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger, Supervisor};
 pub use ledger::{Failed, LedgerError, Left, Reason, Removed, SweepReport};
 use pull::Images;
-use spec::{concluded, ctr_of, log_tail_of, pinned};
+use spec::{concluded, ctr_of, log_tail_of};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -347,6 +357,9 @@ pub struct CrunRuntime {
     logs: Option<LiveLogs>,
     /// What jobs' layers and mounts are made with; none for a runtime that gives none.
     fs: Option<fs::Fs>,
+    /// The containers made ahead of their jobs (the module `warm`); none for a runtime that
+    /// makes none.
+    warm: Option<warm::Pool>,
 }
 
 impl std::fmt::Debug for CrunRuntime {
@@ -449,6 +462,16 @@ impl CrunRuntime {
             ledger,
             swept: SweepReport::default(),
             logs: None,
+            // Only with the new mount API, which binds a run's directories into a container
+            // that runs, and with leases beside the runs, under whose quota a run's writes are.
+            warm: settings
+                .fs
+                .as_ref()
+                .filter(|_| settings.warm_sandboxes > 0 && leases_beside)
+                .map(|fs| {
+                    let epoch = (hooks.now_ms)();
+                    warm::Pool::new(settings.warm_sandboxes, Arc::clone(&fs.inject), epoch)
+                }),
             fs: settings.fs.map(fs::Fs::open).transpose()?,
         };
         // No container of this process exists yet: the runs of an earlier process of this
@@ -520,14 +543,21 @@ impl CrunRuntime {
 
     /// Waits until the container `id` has exited (one that is gone, never started or ended
     /// already returns at once). The lifecycle polls instead; this is for a caller with
-    /// nothing else to do.
+    /// nothing else to do. An idle container made ahead of its job is waited for too.
     pub fn wait_ended(&mut self, id: &RunHandle) {
         let rt = &self.rt;
-        if let Some(Run {
-            state: State::Running { run, .. },
-            ..
-        }) = self.runs.get_mut(&id.0)
-        {
+        let idle = self
+            .warm
+            .as_mut()
+            .and_then(|pool| pool.idle_supervisor(&id.0));
+        let held = self
+            .runs
+            .get_mut(&id.0)
+            .and_then(|run| match &mut run.state {
+                State::Running { run, .. } => Some(run),
+                _ => None,
+            });
+        if let Some(run) = idle.or(held) {
             rt.block_on(run.wait());
         }
     }
@@ -541,115 +571,10 @@ impl CrunRuntime {
     /// As [`Runtime::create_and_start`], and an environment [`check_run_env`] refuses.
     pub fn stage(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         check_run_env(&spec.env)?;
-        self.make(spec)
+        let assembled = self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id));
+        self.make(spec, assembled, false)
             .map(RunHandle)
             .map_err(|fault| RuntimeError::new(fault.to_string()))
-    }
-
-    /// Makes the container of `spec`, everything but its start. A failure removes what it
-    /// made.
-    ///
-    /// An image in the store with no kept config is removed and fetched again. That deletes
-    /// the root such an image gives as the lower layer of a container's mounts, so it relies
-    /// on every container of an earlier daemon that still runs on it pinning it (an adopted
-    /// run's pin stays until its removal, and a pinned image is not removed), and on the
-    /// start-up pass that removes the rest of what an earlier agent left (P12b) having run
-    /// before the first run is made. The removal and a fetch of the same image never overlap
-    /// (the image store holds one gate for each digest).
-    ///
-    /// A host job is refused unless the runtime launches them ([`CrunSettings::host_jobs`]),
-    /// and when it names a mount, run files or a GPU; it is not wired, since it has the
-    /// host's network.
-    fn make(&mut self, spec: &RunSpec) -> Result<String, Fault> {
-        let host = spec.isolation == js_agent_wire::Isolation::Host;
-        if host {
-            if !self.host_jobs {
-                return Err(Fault::NotContained);
-            }
-            if !spec.mounts.is_empty() || spec.files.is_some() {
-                return Err(Fault::HostMounts);
-            }
-            if !spec.gpu_indices.is_empty() {
-                return Err(Fault::HostGpus);
-            }
-        } else {
-            net::port_for(self.egress.as_deref(), spec.network).map_err(Fault::Network)?;
-        }
-        // Before anything is made: a run's nodes are read now, and one that is gone refuses it.
-        let gpu = gpu::wiring(self.gpus.as_ref(), &spec.gpu_indices).map_err(Fault::Gpu)?;
-        let Body::Container { image: given, args } = &spec.body else {
-            return Err(Fault::Native);
-        };
-        // What the run's assembly made of its layers and mounts: the run's removal unmounts
-        // it, or, for a run that is not made, the lifecycle's discard (`Runtime::discard_fs`).
-        let assembled = self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id));
-        // A root of layers alone has no image.
-        let image = match given.is_empty() {
-            true => PinnedImage {
-                reference: String::new(),
-                digest: String::new(),
-            },
-            false => pinned(given).map_err(Fault::Image)?,
-        };
-        let name = container_name(&self.host_id, &spec.run_id)
-            .map_err(|_| Fault::Name(spec.run_id.clone()))?;
-        if self.runs.contains_key(&name) {
-            return Err(Fault::InUse(spec.run_id.clone()));
-        }
-        let now = (self.hooks.now_ms)();
-        let mut labels = spec.labels.clone();
-        labels.insert(label::AGENT.to_owned(), self.host_id.clone());
-        labels.insert(label::CREATED_MS.to_owned(), now.to_string());
-        // A restart offers the run its host ports again from this.
-        if let Some(host_ports) = net::host_ports_label(&spec.host_ports) {
-            labels.insert(label::HOST_PORTS.to_owned(), host_ports);
-        }
-        // Before the first thing the sidecar names is made (see the module `ledger`), the
-        // image's pin among them: the next start removes a pin a dead process left, once it
-        // has removed the lease's container.
-        let entry = self.entry_for(spec, &name, (&labels, &image.digest));
-        self.ledger
-            .record(&entry)
-            .map_err(|why| Fault::step("record the lease's labels", &why))?;
-        let (container, lease, cgroup) = match self.make_recorded(
-            spec,
-            (given, &image),
-            (args, assembled.as_ref()),
-            &name,
-            gpu,
-        ) {
-            Ok(made) => made,
-            Err(fault) => {
-                // What the failed step left; none of it is a container. The sidecar goes with
-                // it (the pin last), or stays for the next start when some of it cannot be
-                // removed.
-                let _ = self.ledger.discard(&entry, |entry| self.tear_down(entry));
-                return Err(fault);
-            }
-        };
-        self.runs.insert(
-            name.clone(),
-            Run {
-                spec: container,
-                labels,
-                lease,
-                cgroup,
-                cap: js_contain::hard_memory_max(spec.memory_bytes),
-                backstop: None,
-                state: State::Created,
-                net: match host {
-                    // The host's own network: nothing to wire, nothing to forward.
-                    true => net::Net::asked(JobNetwork::None, Vec::new(), Vec::new()),
-                    false => {
-                        net::Net::asked(spec.network, spec.ports.clone(), spec.host_ports.clone())
-                    }
-                },
-                entry,
-                logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
-                fs: assembled.map(|made| rootfs::RunFs::new(made.sources)),
-            },
-        );
-        Ok(name)
     }
 
     /// Starts the container `id` that [`CrunRuntime::stage`] made and wires its network. A
@@ -702,6 +627,23 @@ impl CrunRuntime {
         recorded.map_err(|why| RuntimeError::new(format!("record the running lease: {why}")))
     }
 
+    /// `why` a run started in a container made ahead of it failed after it started: the run
+    /// that started is removed, as a failed cold start's is.
+    fn removed_after(&mut self, spec: &RunSpec, why: RuntimeError) -> RuntimeError {
+        let held = self
+            .runs
+            .iter()
+            .filter(|(_, run)| run.entry.run_id == spec.run_id);
+        let names: Vec<String> = held.map(|(name, _)| name.clone()).collect();
+        for name in names {
+            let removed = self.remove(&RunHandle(name.clone()));
+            removed.err().into_iter().for_each(|left| {
+                tracing::warn!(lease = %name, "remove the failed start: {left}");
+            });
+        }
+        why
+    }
+
     /// Reads how the container `name` stands, ending it in the books once its supervisor wrote
     /// the end, and holding a run that ended as running until its sources were checked
     /// ([`CrunRuntime::checked`]).
@@ -742,7 +684,18 @@ impl Runtime for CrunRuntime {
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        let id = self.stage(spec)?;
+        check_run_env(&spec.env)?;
+        let assembled = self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id));
+        let now = (self.hooks.now_ms)();
+        let assembled = match self.start_warm(spec, assembled, now) {
+            Ok(Ok(id)) => return Ok(id),
+            Ok(Err(why)) => return Err(self.removed_after(spec, why)),
+            Err(assembled) => assembled,
+        };
+        let id = self
+            .make(spec, assembled, false)
+            .map(RunHandle)
+            .map_err(|fault| RuntimeError::new(fault.to_string()))?;
         if let Err(why) = self.start_staged(&id) {
             // The failed start leaves no container: the lease is taken apart as a removal
             // does. What cannot be is kept, listed, and removed by the next removal or sweep.
@@ -752,6 +705,22 @@ impl Runtime for CrunRuntime {
             return Err(why);
         }
         Ok(id)
+    }
+
+    fn tend(&mut self, now_ms: u64) {
+        self.tend_warm(now_ms);
+    }
+
+    fn idle_handles(&self) -> Vec<RunHandle> {
+        self.warm
+            .as_ref()
+            .map_or_else(Vec::new, warm::Pool::idle_handles)
+    }
+
+    fn started_warm(&self, id: &RunHandle) -> bool {
+        self.warm
+            .as_ref()
+            .is_some_and(|pool| pool.started_warm(&id.0))
     }
 
     fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
@@ -852,6 +821,9 @@ impl Runtime for CrunRuntime {
             .forget(&id.0)
             .map_err(|why| failed("remove the lease's sidecar", &why))?;
         self.runs.remove(&id.0);
+        if let Some(pool) = self.warm.as_mut() {
+            pool.forget(&id.0);
+        }
         Ok(())
     }
 

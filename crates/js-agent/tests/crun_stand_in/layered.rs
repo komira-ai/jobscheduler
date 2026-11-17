@@ -125,6 +125,7 @@ fn settings(node: &Node, calls: &Arc<Calls>, paths: Paths) -> CrunSettings {
         roots: MountRoots::new(&[("data".to_owned(), data)]).expect("roots"),
         calls: calls.clone(),
         paths: Arc::new(paths),
+        inject: Arc::new(js_contain::job_fs::Kernel),
         image_allow: vec![js_oci::Allow::parse("registry.example/job").expect("an entry")],
     });
     settings

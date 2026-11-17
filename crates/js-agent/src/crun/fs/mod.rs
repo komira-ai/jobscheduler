@@ -65,6 +65,9 @@ pub struct FsSettings {
     pub calls: Arc<dyn MountCalls + Send + Sync>,
     /// The calls that read a host path.
     pub paths: Arc<dyn PathCalls>,
+    /// The calls that bind a run's directories into a container made ahead of it (a warm
+    /// sandbox, `super::warm`).
+    pub inject: Arc<dyn js_contain::job_fs::Inject + Send + Sync>,
     /// The registries an image layer may be pulled from, as the job's image
     /// (`--image-allow`, `--image-allow-loopback`).
     pub image_allow: Vec<js_oci::Allow>,

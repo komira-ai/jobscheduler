@@ -36,3 +36,4 @@ mod runs;
 mod s3_compat;
 mod stop;
 mod sweep;
+mod warm;

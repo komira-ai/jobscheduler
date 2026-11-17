@@ -152,6 +152,8 @@ pub struct MountSeam {
     pub calls: Arc<dyn MountCalls + Send + Sync>,
     /// The calls that read a host path.
     pub paths: Arc<dyn PathCalls>,
+    /// The calls that bind a run's directories into a container made ahead of it.
+    pub inject: Arc<dyn js_contain::job_fs::Inject + Send + Sync>,
 }
 
 impl Default for MountSeam {
@@ -160,6 +162,7 @@ impl Default for MountSeam {
             dir: PathBuf::from(MOUNTS_DIR),
             calls: Arc::new(js_contain::job_fs::Kernel),
             paths: Arc::new(super::fs::Kernel),
+            inject: Arc::new(js_contain::job_fs::Kernel),
         }
     }
 }
@@ -271,6 +274,7 @@ pub fn open(
             roots: plan.mount_roots.clone(),
             calls: Arc::clone(&seams.mounts.calls),
             paths: Arc::clone(&seams.mounts.paths),
+            inject: Arc::clone(&seams.mounts.inject),
             image_allow: plan.image_allow.clone(),
         }),
     };

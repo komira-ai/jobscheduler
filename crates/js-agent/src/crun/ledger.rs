@@ -170,6 +170,11 @@ pub struct Entry {
     /// The supervisor process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<Supervisor>,
+    /// The id the lease's name was made from, when that is not `run_id`: a container made
+    /// ahead of its job (a warm sandbox) is named for an id of its own, and keeps that name
+    /// once a run is started in it. None for every other lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
 }
 
 impl Entry {
@@ -200,6 +205,7 @@ impl Entry {
             exit_record: None,
             image_digest: None,
             supervisor: None,
+            lease_id: None,
         }
     }
 
@@ -210,6 +216,11 @@ impl Entry {
             supervisor: Some(supervisor),
             ..self.clone()
         }
+    }
+
+    /// The id the lease's name is made from: [`Entry::lease_id`], or the run's own.
+    pub(super) fn named_for(&self) -> &str {
+        self.lease_id.as_deref().unwrap_or(&self.run_id)
     }
 
     /// This sidecar once the container started at `started_wall_ms` under `supervisor`.
@@ -539,7 +550,7 @@ impl Ledger {
         if !(OLDEST..=VERSION).contains(&entry.version) {
             return Err(format!("its form is version {}", entry.version));
         }
-        let named = container_name(&entry.agent, &entry.run_id).ok();
+        let named = container_name(&entry.agent, entry.named_for()).ok();
         if entry.name != stem || named.as_deref() != Some(stem) {
             return Err(format!(
                 "it names the lease {:?}, which is not its own name's",

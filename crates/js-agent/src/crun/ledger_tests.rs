@@ -581,3 +581,35 @@ fn a_sweep_keeps_the_leases_the_judge_takes_over_and_removes_the_rest_with_the_r
     assert!(leases.root.join(&keep.name).is_dir());
     assert_eq!(files(&ledger), [format!("{}.json", keep.name)]);
 }
+
+/// Proves a sidecar of a run started in a container made ahead of it (named for the
+/// container's own id, `lease_id`, not the run's) is read back as this agent's with that id,
+/// one whose `lease_id` does not make its name is malformed, and a sidecar with none writes no
+/// `lease_id` at all (an older agent reads it unchanged). Catches a bound sidecar that a
+/// restart leaves alone as malformed, and its lease with it.
+#[test]
+fn a_sidecar_named_for_another_id_than_its_runs_is_read_by_that_id() {
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-lease-id");
+    let ledger = ledger(&dir, "agent-a");
+    let name = container_name("agent-a", "w9-1").expect("a lease name");
+    let mut bound = entry("agent-a", "r1");
+    bound.name = name.clone();
+    bound.lease_id = Some("w9-1".to_owned());
+    assert_eq!(bound.named_for(), "w9-1");
+    ledger.record(&bound).expect("record");
+    assert_eq!(ledger.read(&name), Some(Read::Mine(bound.clone())));
+
+    let mut wrong = bound.clone();
+    wrong.lease_id = Some("w9-2".to_owned());
+    fs::write(
+        file_of(&ledger, &bound),
+        serde_json::to_string(&wrong).expect("json"),
+    )
+    .expect("write");
+    assert!(matches!(ledger.read(&name), Some(Read::Malformed(_))));
+
+    let plain = entry("agent-a", "r2");
+    assert_eq!(plain.named_for(), "r2");
+    let text = serde_json::to_string(&plain).expect("json");
+    assert!(!text.contains("lease_id"), "{text}");
+}

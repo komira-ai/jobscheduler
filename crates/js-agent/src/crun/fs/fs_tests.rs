@@ -29,6 +29,7 @@ fn open(dir: &TestDir, paths: Paths) -> (Fs, Arc<Mounts>) {
         roots,
         calls: calls.clone(),
         paths: Arc::new(paths),
+        inject: Arc::new(js_contain::job_fs::Kernel),
         image_allow: Vec::new(),
     };
     (Fs::open(settings).expect("opened"), calls)
@@ -50,6 +51,7 @@ fn a_parent_only_root_could_search_is_opened_to_search() {
         roots: MountRoots::default(),
         calls: Arc::new(Mounts::under(dir.path())),
         paths: Arc::new(Paths::default()),
+        inject: Arc::new(js_contain::job_fs::Kernel),
         image_allow: Vec::new(),
     };
     drop(Fs::open(settings).expect("opened"));
@@ -91,6 +93,7 @@ fn the_directory_of_mounts_is_made_private_and_the_roots_opened() {
         roots,
         calls: Arc::new(calls),
         paths: Arc::new(Paths::default()),
+        inject: Arc::new(js_contain::job_fs::Kernel),
         image_allow: Vec::new(),
     };
     // Found a mount already, it is only made private.

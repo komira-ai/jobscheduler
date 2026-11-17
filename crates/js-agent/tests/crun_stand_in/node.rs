@@ -58,6 +58,9 @@ fn note(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
     if text.contains("no-bundle") && path.ends_with("work") {
         std::fs::File::create(path.parent().expect("a lease").join("bundle"))?;
     }
+    if text.contains("pipe-denied") && path.ends_with("job") {
+        return Err(io::Error::other("refused"));
+    }
     if text.contains("start-fails") && path.ends_with("work") {
         let report = path.parent().expect("a lease").join("init-report");
         std::fs::create_dir(report)?;
@@ -195,6 +198,18 @@ case "$cmd" in
       *-wired|*-late|*-deaf|*-badpid|*-hugepid) trap '' TERM; exec sleep 600;;
       *-nopid) echo '{"level":"error","msg":"no container made"}' >> "$log"; exit 1;;
       *-stuckcg) mkdir -p "$cg/left"; : > "$cg/left/held"; trap '' TERM; exec sleep 600;;
+      *-w5000-*)
+        # A container made ahead of its job: up as its init (alone in its group), then the job
+        # read from the lease's pipe, whose second argument picks the part.
+        mkdir -p "$cg/ctr"; echo $$ > "$cg/ctr/cgroup.procs"
+        if [ -p "$DIR/ready-$name" ]; then echo up > "$DIR/ready-$name"; fi
+        tr '\000' '\n' < "$bundle/../job" > "$DIR/job-$name"
+        [ -s "$DIR/job-$name" ] || exit 126
+        case "$(sed -n 5p "$DIR/job-$name")" in
+          --exit3) exit 3;;
+          --hold) sleep 600 & c=$!; trap 'kill $c; exit 143' TERM; wait $c;;
+          *) exit 0;;
+        esac;;
       *) exit 0;;
     esac;;
   kill)
@@ -203,7 +218,7 @@ case "$cmd" in
   delete)
     if [ -e "$DIR/delete-fails" ]; then echo boom >&2; exit 1; fi
     find "$cg" -maxdepth 1 ! -type d -delete 2>/dev/null
-    rm -f "$cg/ctr/cgroup.procs"
+    rm -f "$cg/ctr/cgroup.procs" "$cg/ctr/pids.max"
     rmdir "$root/$name" 2>/dev/null
     exit 0;;
   state)

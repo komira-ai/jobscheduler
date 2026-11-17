@@ -33,6 +33,9 @@ pub(super) struct RunFs {
     /// How many host paths the run cloned.
     sources: usize,
     check: Check,
+    /// The lease the run's file system was assembled for, when the run's container is
+    /// another's (a container made ahead of its job): its mounts are found by that name.
+    assembled_as: Option<String>,
 }
 
 /// The check of a run's sources after it ended.
@@ -52,6 +55,16 @@ impl RunFs {
         Self {
             sources,
             check: Check::Unasked,
+            assembled_as: None,
+        }
+    }
+
+    /// The sources of a run that cloned `sources` host paths for the lease `name`, whose
+    /// container is another lease's.
+    pub(super) fn assembled_as(sources: usize, name: String) -> Self {
+        Self {
+            assembled_as: Some(name),
+            ..Self::new(sources)
         }
     }
 }
@@ -256,7 +269,8 @@ impl CrunRuntime {
         match (&sources.check, succeeded) {
             (_, true) | (Check::Done(_), _) => ended,
             (Check::Unasked, false) => {
-                sources.check = Check::Asked(fs.check(name, sources.sources, now));
+                let lease = sources.assembled_as.as_deref().unwrap_or(name);
+                sources.check = Check::Asked(fs.check(lease, sources.sources, now));
                 Status::Running
             }
             (Check::Asked(pending), false) => match pending.poll(now) {

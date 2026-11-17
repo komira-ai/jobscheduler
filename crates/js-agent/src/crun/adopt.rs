@@ -482,9 +482,17 @@ impl CrunRuntime {
             &cgroup_dir(&self.cgroups.mount, &self.cgroups.actions),
             &prefix,
         ));
+        // A run adopted in a container made ahead of it has its own lease directory under the
+        // run's name beside the container's, which no sidecar is named for.
+        let taken: BTreeSet<String> = self
+            .runs
+            .values()
+            .filter(|run| run.entry.lease_id.is_some())
+            .filter_map(|run| container_name(&self.host_id, &run.entry.run_id).ok())
+            .collect();
         for run_id in runs {
             let name = format!("{prefix}{run_id}");
-            if self.ledger.read(&name).is_some() {
+            if self.ledger.read(&name).is_some() || taken.contains(&name) {
                 continue;
             }
             match self.tear_down_named(&name) {
@@ -511,7 +519,8 @@ impl CrunRuntime {
     pub fn remove_orphan(&mut self, run_id: &str) -> Result<bool, RuntimeError> {
         let name = container_name(&self.host_id, run_id)
             .map_err(|_| RuntimeError::new(Fault::Name(run_id.to_owned()).to_string()))?;
-        if self.runs.contains_key(&name) {
+        let held = self.runs.values().any(|run| run.entry.run_id == run_id);
+        if self.runs.contains_key(&name) || held {
             return Err(RuntimeError::new(format!("run {run_id} is not an orphan")));
         }
         self.remove_leftover(&name)

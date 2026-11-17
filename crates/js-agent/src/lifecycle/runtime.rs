@@ -73,6 +73,10 @@ pub mod label {
     pub const KIND: &str = "jobscheduler.dev/kind";
     /// The value of [`KIND`] on the run of a VM start.
     pub const VM_KIND: &str = "vm";
+    /// The image a container made ahead of its job (a warm sandbox of the `crun` runtime) was
+    /// made for, on its sidecar while it waits for a run; a run started in it carries the run's
+    /// labels instead.
+    pub const WARM: &str = "jobscheduler.dev/warm";
 }
 
 /// A container's id as the runtime names it. Opaque to the agent.
