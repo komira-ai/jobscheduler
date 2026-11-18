@@ -82,6 +82,7 @@ mod scaler_store;
 mod scaler_support;
 mod scaler_unremoved;
 mod service_certs;
+mod service_certs_agent;
 mod service_certs_hosts;
 mod service_certs_start;
 mod service_certs_support;
