@@ -242,13 +242,21 @@ impl JobApi {
         &self,
         call: impl FnOnce(&ServerJobs) -> Result<T, JobStoreError> + Send + 'static,
     ) -> Result<T, JobStoreError> {
-        let slots = Arc::clone(&self.gate.slots);
-        let Ok(Ok(place)) = tokio::time::timeout(self.gate.wait, slots.acquire_owned()).await
-        else {
-            return Err(JobStoreError::Store(StoreError::Unavailable(format!(
-                "all {} calls on the job tables stayed busy for {:?}",
-                self.gate.size, self.gate.wait
-            ))));
+        let place = match Arc::clone(&self.gate.slots).try_acquire_owned() {
+            Ok(place) => place,
+            // Only a call that finds every place taken waits on the runtime's timer (a runtime
+            // without one, as the simulation's, never meets it while there is room).
+            Err(_) => {
+                let slots = Arc::clone(&self.gate.slots);
+                let waited = tokio::time::timeout(self.gate.wait, slots.acquire_owned()).await;
+                let Ok(Ok(place)) = waited else {
+                    return Err(JobStoreError::Store(StoreError::Unavailable(format!(
+                        "all {} calls on the job tables stayed busy for {:?}",
+                        self.gate.size, self.gate.wait
+                    ))));
+                };
+                place
+            }
         };
         let jobs = Arc::clone(&self.jobs);
         crate::util::blocking(move || {

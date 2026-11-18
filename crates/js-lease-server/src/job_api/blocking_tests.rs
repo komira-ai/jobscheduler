@@ -382,3 +382,29 @@ async fn a_waiting_call_whose_client_is_gone_never_runs() {
         "the dropped call reached the store"
     );
 }
+
+/// Asserts that a call that finds every place taken waits, and runs as soon as a place comes
+/// back: polled with the place held it is still waiting and has not reached the store; once
+/// the place is given back it is served. Catches a wait that gives up before its time, and a
+/// place given back that does not wake the call waiting for it.
+#[tokio::test]
+async fn a_waiting_call_runs_when_a_place_comes_back() {
+    let (probe, jobs) = probed();
+    let api = gated(jobs, 1, Duration::from_secs(3600)).await;
+    probe.take();
+    let held = Arc::clone(&api.gate.slots).try_acquire_owned().unwrap();
+    let caller = operator();
+    let waiting = read::get_job(&api, &caller, get_g());
+    let mut waiting = std::pin::pin!(waiting);
+    let polled = waiting
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    assert!(matches!(polled, Poll::Pending), "the call did not wait");
+    assert!(
+        probe.take().is_empty(),
+        "the waiting call reached the store"
+    );
+    drop(held);
+    let job = waiting.await.unwrap().into_inner();
+    assert_eq!(job.job.unwrap().id, "job-g");
+}
