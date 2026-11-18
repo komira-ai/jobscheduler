@@ -236,10 +236,7 @@ impl RunQuota {
     /// [`ProjectIds::claim`]): a run that takes the slot is bounded by them.
     pub(super) fn claim(&self, slot: u32) -> Result<ProjectId, QuotaError> {
         for project in self.projects(slot)? {
-            let usage = self.quota.usage(project)?;
-            if !usage.is_zero() {
-                return Err(QuotaError::InUse { project, usage });
-            }
+            crate::quota::clean(&*self.quota, project)?;
         }
         self.ids.of_slot(slot)
     }

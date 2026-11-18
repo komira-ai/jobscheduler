@@ -93,6 +93,16 @@ pub(super) fn tmp_dir_beside(lease_dir: &Path, name: &str) -> PathBuf {
     parent.join(format!("{TMP_PREFIX}{name}"))
 }
 
+/// Removes the job's temporary directory of the lease `name` whose directory is `lease_dir`,
+/// with everything in it; one that is not there is not an error. It holds no mount once the
+/// container is deleted: its binds are in the container's mount namespace.
+pub(super) fn remove_tmp_beside(lease_dir: &Path, name: &str) -> io::Result<()> {
+    match js_contain::remove::remove_tree(&tmp_dir_beside(lease_dir, name)) {
+        Err(why) if why.kind() != io::ErrorKind::NotFound => Err(why),
+        _ => Ok(()),
+    }
+}
+
 /// The names of what the assembly of a run's file system puts in its lease directory before
 /// the container is made: the writable layer and the work directory of a layered root, and
 /// those of its copy-on-write mounts.

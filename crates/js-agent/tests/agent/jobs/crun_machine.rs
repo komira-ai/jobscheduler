@@ -37,6 +37,9 @@ pub(super) struct CrunMachine {
     pub(super) host_ports: Arc<Mutex<Vec<HostPortsSeen>>>,
 }
 
+/// The pool a rig's agent joins and the machine it runs on (`Rig::on_flags`).
+pub(super) type On = (&'static str, Arc<CrunMachine>);
+
 /// The host ports a crun runtime was opened with, and the ones it then allowed.
 pub(super) type HostPortsSeen = (Vec<PortRange>, Vec<PortRange>);
 

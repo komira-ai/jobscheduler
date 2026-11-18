@@ -89,7 +89,7 @@ fn a_crun_agent_whose_scratch_root_cannot_hold_a_quota_runs_no_job() {
     let reason = "xfs mounted without prjquota";
     let machine = CrunMachine::with_quota(FakeQuota::unsupported(reason));
     let flags = crun_flags("h1", &[]);
-    let rig = Rig::on_flags("jobs_crun_tmp_none", flags, POOL_RUNS_QUICK_TOML, machine);
+    let rig = Rig::on_flags("jobs_crun_tmp_none", flags, (POOL_RUNS_QUICK_TOML, machine));
     let run = rig.queued();
     for _ in 0..10 {
         rig.beat();

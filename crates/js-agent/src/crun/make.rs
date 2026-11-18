@@ -34,6 +34,15 @@ impl CrunRuntime {
         super::dirs::tmp_dir_beside(&self.oci.lease_dirs(name).dir, name)
     }
 
+    /// The job's temporary directory of the run `run_id` that the lifecycle makes and bounds
+    /// ([`Runtime::tmp_dir`](crate::lifecycle::Runtime::tmp_dir)): one beside the run's
+    /// directory, when the leases are beside the runs; `None` otherwise, or for an id that
+    /// names no lease.
+    pub(super) fn tmp_dir_of_run(&self, run_id: &str) -> Option<std::path::PathBuf> {
+        let name = super::container_name(&self.host_id, run_id).ok()?;
+        self.leases_beside.then(|| self.tmp_dir_of(&name))
+    }
+
     /// Marks `step` done now, on the runtime's clock.
     pub(super) fn mark(&self, marks: &mut Marks, step: &'static str) {
         marks.push((step, (self.hooks.now_ms)()));
@@ -63,7 +72,7 @@ impl CrunRuntime {
         let tmp = self.tmp_dir_of(name);
         let mut container = match spec.isolation {
             js_agent_wire::Isolation::Contained => {
-                container_spec(name, spec, image, (&lease, &tmp), cgroup.name())
+                container_spec(name, spec, image, (&lease, Some(&tmp)), cgroup.name())
             }
             js_agent_wire::Isolation::Host => host_spec(name, spec, image, &lease, cgroup.name()),
         };

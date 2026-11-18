@@ -376,19 +376,23 @@ not at a remount, so the filesystem is unmounted and mounted again. One node at 
    credential flags as `docs/runbooks/cordon-a-node.md` says, and wait until it runs no job (the
    lease server lists none on the host). Do not stop the agent with `systemctl stop` while it runs
    a job; the cordon drains it.
-2. Once the node is idle, add `prjquota` to the unit's `Options=` and remount. The setup script's
-   step 4 makes this edit and the remount, with its checks: `packaging/js-agent/crun_host_setup.sh`
-   (see `docs/runbooks/crun-host-setup.md`, "scratch quota"). By hand:
+2. Once the node is idle, add `prjquota` to the unit's `Options=` (an editor, as root), then
+   reload systemd and restart the mount unit:
 
    ```text
    systemctl daemon-reload
    systemctl restart 'var-lib-js\x2dagent-scratch.mount'
    ```
 
-   The agent's unit requires the mount (`RequiresMountsFor=`), so the restart takes the idle agent
-   down with the mount and starts it again after it.
+   The agent's unit (`js-agent-crun.service`) requires the mount (`RequiresMountsFor=`), and
+   systemd restarts a unit whose required unit is restarted, so the restart takes the idle agent
+   down with the mount and starts it again after it. (The setup script's step 4,
+   `crun_host_setup.sh`, makes the same edit with more checks, but it refuses while the agent's
+   unit is active and needs it stopped first: use it only on a node being set up, not on a
+   running farm node.)
 3. Check: `findmnt -no OPTIONS /var/lib/js-agent/scratch` lists `prjquota` (XFS shows it as
-   `prjquota` or `pquota`), and the agent's start prints `js-agent: scratch quota: project (...)`.
+   `prjquota` or `pquota`), `systemctl is-active js-agent-crun` says `active`, and the agent's
+   start printed `js-agent: scratch quota: project (...)` (`journalctl -u js-agent-crun`).
 4. Let the cordon end (stop the `js-agent cordon` process, or let `--for` pass), then go on to the
    next node.
 

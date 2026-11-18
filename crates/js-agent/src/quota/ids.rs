@@ -107,11 +107,19 @@ impl ProjectIds {
     /// The slot has no id, the usage cannot be read, or the id still holds usage
     /// ([`QuotaError::InUse`]).
     pub fn claim(&self, quota: &dyn ScratchQuota, slot: u32) -> Result<ProjectId, QuotaError> {
-        let project = self.of_slot(slot)?;
-        let usage = quota.usage(project)?;
-        match usage.is_zero() {
-            true => Ok(project),
-            false => Err(QuotaError::InUse { project, usage }),
-        }
+        clean(quota, self.of_slot(slot)?)
+    }
+}
+
+/// `project`, if it holds no usage (see [`ProjectIds::claim`]).
+///
+/// # Errors
+///
+/// The usage cannot be read, or the id still holds usage ([`QuotaError::InUse`]).
+pub fn clean(quota: &dyn ScratchQuota, project: ProjectId) -> Result<ProjectId, QuotaError> {
+    let usage = quota.usage(project)?;
+    match usage.is_zero() {
+        true => Ok(project),
+        false => Err(QuotaError::InUse { project, usage }),
     }
 }

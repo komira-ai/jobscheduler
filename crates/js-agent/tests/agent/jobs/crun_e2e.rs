@@ -35,7 +35,7 @@ use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 use serde_json::json;
 
-use super::crun_machine::CrunMachine;
+use super::crun_machine::{CrunMachine, On};
 use crate::crun_host::Fixture;
 use crate::server::{
     Agent, POOL_QUOTA_TOML, POOL_RUNS_QUICK_TOML, POOL_RUNS_TOML, QUICK_INTERVAL, Redirect, Server,
@@ -453,16 +453,11 @@ impl Rig {
 
     /// [`Rig::new`] over the pool `pool` describes.
     fn on_pool(name: &str, extra: &[&str], pool: &'static str) -> Self {
-        Self::on_flags(name, crun_flags("h1", extra), pool, CrunMachine::new())
+        Self::on_flags(name, crun_flags("h1", extra), (pool, CrunMachine::new()))
     }
 
     /// [`Rig::on_pool`] with the agent's flags given whole.
-    pub(super) fn on_flags(
-        name: &str,
-        flags: Vec<String>,
-        pool: &'static str,
-        machine: Arc<CrunMachine>,
-    ) -> Self {
+    pub(super) fn on_flags(name: &str, flags: Vec<String>, (pool, machine): On) -> Self {
         let node = node();
         end_leftovers(&node.scratch);
         for signal in ["ready", "go", "calls"] {

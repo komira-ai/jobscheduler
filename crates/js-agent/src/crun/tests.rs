@@ -126,7 +126,7 @@ fn a_job_env_goes_over_the_image_env_once_applied() {
         "js-x-r1",
         &run(None, None),
         &image,
-        (&lease(), Path::new(TMP)),
+        (&lease(), Some(Path::new(TMP))),
         "/js",
     );
     config.apply(&[], &mut spec).expect("applied");
@@ -166,7 +166,7 @@ fn a_run_becomes_the_container_it_asked_for() {
         "js-x-r1",
         &run(Some(77), Some(PathBuf::from("/run/files/r1"))),
         &image,
-        (&lease(), Path::new(TMP)),
+        (&lease(), Some(Path::new(TMP))),
         "/js/actions/js-x-r1",
     );
     assert_eq!(spec.name, "js-x-r1");
@@ -218,7 +218,7 @@ fn a_run_becomes_the_container_it_asked_for() {
         "js-x-r1",
         &run(None, None),
         &image,
-        (&lease(), Path::new(TMP)),
+        (&lease(), Some(Path::new(TMP))),
         "/c",
     );
     assert_eq!(plain.limits.pids, DEFAULT_PIDS);
@@ -245,7 +245,13 @@ fn a_run_becomes_the_container_it_asked_for() {
             protocol: PortProtocol::Tcp,
         },
     ];
-    let ported = container_spec("js-x-r1", &ported, &image, (&lease(), Path::new(TMP)), "/c");
+    let ported = container_spec(
+        "js-x-r1",
+        &ported,
+        &image,
+        (&lease(), Some(Path::new(TMP))),
+        "/c",
+    );
     assert_eq!(
         ported.listen_ports,
         [5432, 80],
@@ -719,7 +725,7 @@ fn a_run_that_names_no_process_limit_gets_room_for_a_build_sized_to_the_node() {
         "js-x-r1",
         &run(None, None),
         &image,
-        (&lease(), Path::new(TMP)),
+        (&lease(), Some(Path::new(TMP))),
         "/c",
     );
     assert_eq!(plain.limits.pids, 32_768);
@@ -729,7 +735,7 @@ fn a_run_that_names_no_process_limit_gets_room_for_a_build_sized_to_the_node() {
         "js-x-r1",
         &run(Some(512), None),
         &image,
-        (&lease(), Path::new(TMP)),
+        (&lease(), Some(Path::new(TMP))),
         "/c",
     );
     assert_eq!(named.limits.pids, 512);
@@ -790,7 +796,7 @@ fn a_contained_jobs_tmpdir_is_its_tmp_over_the_images() {
         "js-x-r1",
         &run(None, None),
         &image,
-        (&lease(), Path::new(TMP)),
+        (&lease(), Some(Path::new(TMP))),
         "/c",
     );
     spec.env = vec![pair("PATH", "/bin"), pair("TMPDIR", "/image/tmp")];

@@ -240,3 +240,49 @@ fn a_runtime_with_leases_beside_the_runs_names_a_lease_directory_for_a_run() {
     drop(beside);
     assert_eq!(open(node.settings("/root")).lease_dir("r1"), None);
 }
+
+/// Proves a runtime with leases beside the runs takes the job's temporary directory only as
+/// the lifecycle leaves it, there and empty: a start whose directory is missing, or holds a
+/// file made before its bound was set, fails naming the job's temporary directory, runs
+/// nothing and removes the directory with the lease; the same start with an empty directory runs, with the directory's `tmp` and
+/// `var-tmp` made in it. Catches a container started with its `/tmp` outside the bound the
+/// lifecycle set.
+#[test]
+fn a_start_takes_the_jobs_tmp_directory_only_when_it_is_there_and_empty() {
+    let node = Node::new("open-tmp-dir");
+    let runs = node.dir.join("runs");
+    std::fs::create_dir_all(&runs).expect("the runs directory");
+    let mut settings = node.settings("/root");
+    settings.oci.leases_in = Some(runs.clone());
+    let mut runtime = CrunRuntime::open_with(settings, Arc::new(NoImages), Node::hooks(LONG, LONG))
+        .expect("opens");
+    let spec = node.spec("r7-exit");
+    let lease = runtime.lease_dir("r7-exit").expect("a lease directory");
+    let tmp = runtime.tmp_dir("r7-exit").expect("a temporary directory");
+    assert_eq!(tmp.parent(), Some(runs.as_path()));
+    std::fs::create_dir(&lease).expect("the lease directory");
+    let refused = |runtime: &mut CrunRuntime| {
+        let why = runtime.create_and_start(&spec).expect_err("refused");
+        assert!(
+            why.to_string()
+                .contains("make the job's temporary directory"),
+            "{why}"
+        );
+        assert!(runtime.list_labelled().expect("lists").is_empty());
+        std::fs::create_dir_all(&lease).expect("the lease directory again");
+    };
+    refused(&mut runtime);
+    std::fs::create_dir(&tmp).expect("the temporary directory");
+    std::fs::write(tmp.join("early"), b"x").expect("a file made too soon");
+    refused(&mut runtime);
+    assert!(
+        !tmp.exists(),
+        "the refused start's directory is removed with its lease"
+    );
+    std::fs::create_dir(&tmp).expect("the temporary directory, empty");
+    let id = runtime.create_and_start(&spec).expect("started");
+    assert!(tmp.join("tmp").is_dir() && tmp.join("var-tmp").is_dir());
+    runtime.wait_ended(&id);
+    runtime.remove(&id).expect("removed");
+    assert!(!tmp.exists());
+}
