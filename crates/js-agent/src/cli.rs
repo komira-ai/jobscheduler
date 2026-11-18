@@ -1,10 +1,12 @@
 //! The command line: flags only, never environment variables.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
 
+use crate::flags_file::{self, FileFacts};
 use crate::identity::IdentityFlags;
 #[cfg(target_os = "macos")]
 use crate::platform::LINUX_ONLY as OTHER_PLATFORM;
@@ -457,6 +459,33 @@ pub fn removed_flag(args: &[OsString]) -> Option<String> {
         }
     }
     None
+}
+
+/// The agent's flags as the command line `args` (the program name first) gives them, a
+/// `--flags-file` among them read as the agent reads it: by the user `euid`, with the facts of
+/// a file from `read`. The update hook and the cordon verb read the host's own agent flags
+/// through it, so they find the server, the host and the credential the agent finds.
+///
+/// # Errors
+///
+/// The flags file cannot be used (see [`flags_file::expand_with`]), or the words are not flags
+/// the agent takes (the server and the pool are required, a flag is given once): the file's
+/// error, or clap's reason without its usage lines.
+pub(crate) fn parse_agent_flags(
+    args: Vec<OsString>,
+    euid: u32,
+    read: &dyn Fn(&Path) -> io::Result<FileFacts>,
+) -> Result<Cli, String> {
+    let words = flags_file::expand_with(args, euid, read).map_err(|why| why.to_string())?;
+    Cli::try_parse_from(words).map_err(|why| {
+        let text = why.to_string();
+        let reason: Vec<&str> = text
+            .lines()
+            .take_while(|line| !line.starts_with("Usage:"))
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        reason.join(" ")
+    })
 }
 
 /// `name=path` split at the first `=`.

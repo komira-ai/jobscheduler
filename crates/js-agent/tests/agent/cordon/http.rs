@@ -97,7 +97,7 @@ pub(crate) fn enrol(name: &str) -> Enrolled {
 }
 
 /// The connector of the program: a real client for the host.
-fn real(at: &js_agent::cordon::Connection<'_>) -> Result<Box<dyn Lease>, ClientError> {
+pub(super) fn real(at: &js_agent::cordon::Connection<'_>) -> Result<Box<dyn Lease>, ClientError> {
     HttpLease::connect(
         at.server,
         at.login,
@@ -163,7 +163,8 @@ fn the_client_cordons_reads_and_uncordons_a_real_host_with_its_credential() {
 /// Asserts the refusals of a credential that is not the host's, as the client reports them:
 /// the shared pool token is refused 403 `host-credential-required` on all three routes, and a
 /// token the server does not know is a 401 with no body, which the client names `http-401`;
-/// the verb ends with status 1 and calls both a credential error, and neither the token nor
+/// the verb ends with status 1, calls both a credential error and names the token file it
+/// sent and the host it asked for, and neither the token nor
 /// anything of it is on standard output or error. It catches a client that reports a refused
 /// credential as an unreachable server, and a verb that prints the secret it was given.
 #[test]
@@ -211,7 +212,9 @@ fn the_pool_token_and_an_unknown_token_are_refused_as_credential_errors() {
         assert_eq!(ran.status, code(1), "{}", ran.err);
         let expected = format!(
             "js-agent cordon: credential error: cannot cordon the host: the server refused the \
-             credential ({why})\n"
+             credential ({why})\njs-agent cordon: it sent the token file {file} for host mac-1; \
+             to cordon with what the agent on this host presents, give the agent's flags file \
+             with --flags-file (such as /etc/js-agent/flags)\n"
         );
         assert_eq!(ran.err, expected);
         assert!(ran.out.is_empty());
