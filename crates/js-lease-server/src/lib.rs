@@ -375,8 +375,8 @@
 //! per-job heartbeat both read it. A commit of the open (its index backfill, the boot's raise of
 //! deadlines) that another server's write beat, as the old instance of a start-first update
 //! does, is not a refusal: the open reads again and commits again, after a pause that doubles
-//! from 10 ms up to one second, for as long as it loses; any other error refuses the start. Without `--job-listen` no store is opened and no file is
-//! made.
+//! from 10 ms up to one second, for as long as it loses; any other error refuses the start.
+//! Without `--job-listen` no store is opened and no file is made.
 //!
 //! # The store
 //!
