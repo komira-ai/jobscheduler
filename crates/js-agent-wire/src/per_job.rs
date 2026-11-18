@@ -238,6 +238,13 @@ pub struct JobStartSpec {
     /// none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_ports: Vec<HostPort>,
+    /// The server's Unix time in milliseconds at which it placed the job (the job record's
+    /// `placed_at`). It is carried for the agent's start timeline only, which reads the time
+    /// from placement to arrival; the agent decides nothing by it, and
+    /// [`JobStartSpec::validate`] does not look at it. Absent when the server sends none; an
+    /// agent that predates the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed_at_ms: Option<u64>,
 }
 
 impl JobStartSpec {

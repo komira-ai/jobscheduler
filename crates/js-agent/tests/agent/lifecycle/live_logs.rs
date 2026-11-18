@@ -44,6 +44,7 @@ fn start(job_id: &str, bucket: &str, prefix: &str) -> JobStartSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        placed_at_ms: None,
     }
 }
 

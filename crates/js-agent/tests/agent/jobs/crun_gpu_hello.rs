@@ -395,6 +395,7 @@ fn host_start() -> crate::support::Reply {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        placed_at_ms: None,
     };
     let beat = HeartbeatReply {
         commands: vec![Command::JobStart(Box::new(start))],

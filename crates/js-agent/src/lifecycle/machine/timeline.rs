@@ -6,9 +6,24 @@
 //! And the wake the lifecycle hands on to its runtime and its providers
 //! ([`Lifecycle::with_wake`]).
 
+use std::collections::BTreeMap;
+
 use super::Lifecycle;
 use crate::lifecycle::runtime::RunHandle;
 use crate::lifecycle::{StartTimeline, Wake};
+
+/// Marks `step` of the start `run_id` in `starting` as done at `now`, for a caller that
+/// holds other parts of the lifecycle borrowed.
+pub(super) fn mark_at(
+    starting: &mut BTreeMap<String, StartTimeline>,
+    run_id: &str,
+    step: &'static str,
+    now: u64,
+) {
+    let timeline = starting.entry(run_id.to_owned()).or_default();
+    let after = now.saturating_sub(timeline.received_ms);
+    timeline.steps.push((step, after));
+}
 
 impl Lifecycle {
     /// Gives the runtime, and the providers attached from now on
@@ -23,10 +38,23 @@ impl Lifecycle {
     }
 
     /// Begins the timeline of the start `run_id`, which arrived at `received` and was
-    /// taken at `taken` and is admitted now.
-    pub(super) fn begin_timeline(&mut self, run_id: &str, received: u64, taken: u64) {
+    /// taken at `taken` (both on the lifecycle's clock) and is admitted now, and which the
+    /// server placed at `placed_at_ms` (Unix time) when it says. Its arrival in Unix time is
+    /// the Unix time now less the time since `received`, when the clock has a Unix time.
+    pub(super) fn begin_timeline(
+        &mut self,
+        run_id: &str,
+        (received, taken): (u64, u64),
+        placed_at_ms: Option<u64>,
+    ) {
+        let since_received = self.clock.now_ms().saturating_sub(received);
         let timeline = StartTimeline {
             received_ms: received,
+            placed_at_ms,
+            received_at_ms: self
+                .clock
+                .unix_ms()
+                .map(|now| now.saturating_sub(since_received)),
             steps: vec![("taken", taken.saturating_sub(received))],
             runtime: Vec::new(),
         };
@@ -38,9 +66,7 @@ impl Lifecycle {
     /// and its timeline was begun then.
     pub(super) fn mark(&mut self, run_id: &str, step: &'static str) {
         let now = self.clock.now_ms();
-        let timeline = self.starting.entry(run_id.to_owned()).or_default();
-        let after = now.saturating_sub(timeline.received_ms);
-        timeline.steps.push((step, after));
+        mark_at(&mut self.starting, run_id, step, now);
     }
 
     /// The timeline of the start `run_id`, whose container `id` the runtime created, with

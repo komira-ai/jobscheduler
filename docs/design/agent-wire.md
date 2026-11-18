@@ -72,6 +72,11 @@ under a new allocation, and stops every job it holds once it has not heard the s
 300 s by default, reported `killed` with the detail `silence-stop`). A server that does not see the capability can expect neither.
 A run start is fenced by its run id alone, as before.
 
+A job start carries the optional `placed_at_ms` (`JobStartSpec.placed_at_ms`): the server's Unix time in milliseconds at which it placed the
+job. It is for the agent's start timeline alone (`docs/runbooks/start-timeline.md`), which reads from it the time from placement to the
+start's arrival; the agent decides nothing by it and the start's checks do not look at it. It is left out when the server sends none, and a
+reader that predates it ignores it (`crates/js-agent-wire/tests/previous_release_v0_1_208.rs`).
+
 **Cadence.** The welcome sets the heartbeat interval and the grace; the defaults are `DEFAULT_HEARTBEAT_INTERVAL_MS` 5,000 and
 `DEFAULT_GRACE_MS` 15,000, and a grace must exceed two intervals (`grace_covers_heartbeats`). `Welcome::validate` holds the interval
 between `MIN_HEARTBEAT_INTERVAL_MS` 250 and `MAX_HEARTBEAT_INTERVAL_MS` 3,600,000 and the grace to at most `MAX_GRACE_MS`

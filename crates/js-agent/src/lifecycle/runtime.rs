@@ -19,12 +19,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{
-    HostPort, Isolation, JobMount, Layer, LogReport, LogTail, MountSource, NativeSpec,
-    NetworkCeiling, NetworkLevel, PortRange, refusal,
+    HostPort, Isolation, LogReport, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, PortRange,
+    refusal,
 };
 use js_types::{JobNetwork, PortMap};
 
 use super::Wake;
+pub use super::job_fs::{HostSource, JobFs};
 use crate::logs::Sink;
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
@@ -329,78 +330,6 @@ pub enum Prepared {
     Failed(RuntimeError),
 }
 
-/// What a job start asks of its file system beyond its image (`docs/design/job-rootfs.md`):
-/// the read-only layers of its root and the trees at paths of its own, as the start carries
-/// them ([`js_agent_wire::JobStartSpec::layers`], [`js_agent_wire::JobStartSpec::mounts`]).
-/// Empty for a start that asks for neither, and for a run start.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct JobFs {
-    /// The layers of the root, base first.
-    pub layers: Vec<Layer>,
-    /// The trees at paths of the job's file system.
-    pub mounts: Vec<JobMount>,
-}
-
-impl JobFs {
-    /// Whether the start asks for no layer and no mount.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.layers.is_empty() && self.mounts.is_empty()
-    }
-
-    /// The host paths the start names, each with the `sub_path` of its mount and whether
-    /// the job may write through it (a read-write mount's), in the order a runtime counts
-    /// its sources: the layers' first, in their order, then the mounts'. A source a
-    /// provider makes has no path until the provider answers one, and is not here: the
-    /// lifecycle replaces it by the path before the runtime is asked to look anything up.
-    #[must_use]
-    pub fn host_paths(&self) -> Vec<HostSource<'_>> {
-        let layers = self.layers.iter().filter_map(|layer| match layer {
-            Layer::HostPath { path } => Some(HostSource {
-                path,
-                sub_path: None,
-                writes: false,
-            }),
-            Layer::Image { .. } | Layer::Provider { .. } => None,
-        });
-        let mounts = self.mounts.iter().filter_map(|mount| match &mount.source {
-            MountSource::HostPath { path } => Some(HostSource {
-                path,
-                sub_path: mount.sub_path.as_deref(),
-                writes: mount.mode == js_agent_wire::MountMode::ReadWrite,
-            }),
-            MountSource::Provider { .. } => None,
-        });
-        layers.chain(mounts).collect()
-    }
-
-    /// The images of the start's image layers, base first.
-    #[must_use]
-    pub fn images(&self) -> Vec<&str> {
-        self.layers.iter().filter_map(layer_image).collect()
-    }
-}
-
-/// The image of an image layer.
-fn layer_image(layer: &Layer) -> Option<&str> {
-    match layer {
-        Layer::Image { image } => Some(image),
-        Layer::HostPath { .. } | Layer::Provider { .. } => None,
-    }
-}
-
-/// One host path of a [`JobFs`] ([`JobFs::host_paths`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostSource<'a> {
-    /// The absolute path on the host.
-    pub path: &'a str,
-    /// The directory below it that the job sees instead (a mount's `sub_path`).
-    pub sub_path: Option<&'a str>,
-    /// The job writes through it: a read-write mount, which only a root the job may mount
-    /// read-write allows.
-    pub writes: bool,
-}
-
 /// How a runtime's preparation of a start's file system stands ([`Runtime::resolve_fs`],
 /// [`Runtime::assemble_fs`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,8 +632,14 @@ pub trait Runtime {
     /// `fs` (over the image `image`, empty for a root of layers alone), off the lifecycle's
     /// worker: the lifecycle asks at every step until the answer is not
     /// [`FsPrepared::Pending`], `now_ms` on its own clock, by which a lookup's bound is
-    /// counted. The first ask starts it. Asked only of a runtime that gives layers. The
-    /// default has nothing to look up.
+    /// counted. The first ask starts it. Asked only of a runtime that gives layers.
+    ///
+    /// The first ask may be of the start's `fs` without its provider sources
+    /// ([`JobFs::without_providers`]); once the providers have answered, the asks are of the
+    /// `fs` whose provider sources are host paths. The runtime keeps the lookups it began,
+    /// begins those of the paths it has not looked up, and prepares the assembly
+    /// ([`Runtime::assemble_fs`]) from the last `fs` it was given. The default has nothing
+    /// to look up.
     fn resolve_fs(&mut self, _run_id: &str, _image: &str, _fs: &JobFs, _now_ms: u64) -> FsPrepared {
         FsPrepared::Ready
     }
@@ -826,6 +761,7 @@ pub trait Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use js_agent_wire::{JobMount, Layer, MountSource};
 
     /// A runtime that keeps every default of the trait.
     struct Bare;

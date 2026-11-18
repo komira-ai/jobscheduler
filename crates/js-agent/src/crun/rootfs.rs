@@ -67,7 +67,7 @@ fn pin_tree((oci, dir, images, rt): Store<'_>, image: &str, pin: &str) -> Result
     let pinned = pinned(image)?;
     oci.pin_image(&pinned, pin).map_err(|why| why.to_string())?;
     images.lease(pin, &pinned.digest);
-    rt.block_on(images.ensure(&pinned))?;
+    rt.block_on(images.use_held(&pinned))?;
     Ok(published_root(dir, &pinned.digest))
 }
 

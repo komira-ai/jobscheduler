@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use js_agent_wire::{Ack, BookedResources, HeldState, JobStartSpec, Layer, Outcome};
 use js_jobs::{AllocationStep, EndReason, JobEnd, JobId, JobState, NewJob};
 
+use crate::job_api::read::view::millis;
+
 use super::job_rig::{BOOKED, FakeAgent, image, placing_rig, rig, spec, starts, stops};
 use super::*;
 
@@ -46,6 +48,7 @@ async fn a_start_is_resent_until_listed() {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        placed_at_ms: Some(millis(rig.job(&id).placed_at.unwrap())),
     };
     let mut last = None;
     for _ in 0..3 {

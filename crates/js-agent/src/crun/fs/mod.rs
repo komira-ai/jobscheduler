@@ -6,6 +6,8 @@
 //!
 //! 1. each host path is opened beneath its root, and a mount's `sub_path` beneath it, on the
 //!    pool ([`Fs::resolve`]), each lookup bounded by [`LOOKUP_MS`] on the lifecycle's clock;
+//!    a start with none is ready at the first call, and a later call that adds host paths
+//!    keeps the lookups already begun and asks only the new ones;
 //! 2. once they are open and the images are in the store, the assembly ([`assemble`]) runs
 //!    on the pool ([`Fs::assemble`]): clones, overlays, targets, each mount listed in
 //!    `<mounts>/<lease>/mounts` ([`list`]) before it is made;
@@ -42,7 +44,7 @@ pub(crate) use assemble::{Assembled, Lower, Owners, Plan, Unassembled};
 pub use kernel::{Kernel, PathCalls};
 use pool::{Pending, Poll, Pool};
 
-use crate::lifecycle::{FsPrepared, JobFs, MountRoots, NativeRefusal, RuntimeError};
+use crate::lifecycle::{FsPrepared, HostSource, JobFs, MountRoots, NativeRefusal, RuntimeError};
 
 /// Where the agent mounts what its runs' file systems are made of: outside the scratch
 /// root, which every release sweeps at its start, on a `tmpfs` a reboot clears.
@@ -105,11 +107,28 @@ pub enum FsError {
 
 /// One host path being looked up, or open.
 #[derive(Debug)]
-enum Lookup {
-    /// Asked of the pool: the path, and the answer to come.
-    Asked(String, Pending<Result<OwnedFd, NativeRefusal>>),
+struct Lookup {
+    /// The host path as the start named it.
+    path: String,
+    /// The directory below it that is opened as well (a mount's `sub_path`).
+    sub_path: Option<String>,
+    state: Opened,
+}
+
+/// How a [`Lookup`] stands.
+#[derive(Debug)]
+enum Opened {
+    /// Asked of the pool: the answer to come.
+    Asked(Pending<Result<OwnedFd, NativeRefusal>>),
     /// Open.
     Open(OwnedFd),
+}
+
+impl Lookup {
+    /// Whether this is the lookup of `source`.
+    fn is_of(&self, source: &HostSource<'_>) -> bool {
+        self.path == source.path && self.sub_path.as_deref() == source.sub_path
+    }
 }
 
 /// How the assembly of a run stands.
@@ -148,6 +167,34 @@ pub(crate) struct Fs {
     pool: Pool,
     /// By run id.
     preps: BTreeMap<String, Prep>,
+}
+
+impl Prep {
+    /// Polls every lookup: one that failed is the answer at once, whatever another that is
+    /// held still waits for.
+    fn poll(&mut self, now_ms: u64) -> FsPrepared {
+        let mut waiting = false;
+        for lookup in &mut self.lookups {
+            let Opened::Asked(pending) = &lookup.state else {
+                continue;
+            };
+            match pending.poll(now_ms) {
+                Poll::Waiting => waiting = true,
+                Poll::Answered(Ok(opened)) => lookup.state = Opened::Open(opened),
+                Poll::Answered(Err(refused)) => return FsPrepared::Refused(refused),
+                Poll::Unanswered(why) => {
+                    return FsPrepared::Refused(NativeRefusal {
+                        code: refusal::INPUT_UNAVAILABLE,
+                        why: format!("the lookup of {} {why} (bound {LOOKUP_MS} ms)", lookup.path),
+                    });
+                }
+            }
+        }
+        match waiting {
+            true => FsPrepared::Pending,
+            false => FsPrepared::Ready,
+        }
+    }
 }
 
 impl std::fmt::Debug for Fs {
@@ -219,10 +266,20 @@ impl Fs {
     }
 
     /// Begins, or follows, the lookups of the host paths of the run `run_id` (lease `name`):
-    /// each is asked of the pool at the first call, bounded by [`LOOKUP_MS`] from `now_ms`.
-    /// [`FsPrepared::Ready`] once every one is open; refused `input-not-allowed` for a path
-    /// beneath no root or one that leads out of it by a link, `input-unavailable` for one
-    /// that is missing, is not a directory, cannot be searched or did not answer in time.
+    /// each is asked of the pool at the first call, bounded by [`LOOKUP_MS`] from `now_ms`,
+    /// and the first call polls them as a later one does, so a start with no host path is
+    /// [`FsPrepared::Ready`] at once. [`FsPrepared::Ready`] once every one is open; refused
+    /// `input-not-allowed` for a path beneath no root or one that leads out of it by a link,
+    /// `input-unavailable` for one that is missing, is not a directory, cannot be searched or
+    /// did not answer in time.
+    ///
+    /// A later call may bring a `fs` that adds host paths (the lifecycle asks first without
+    /// the layers and mounts a provider makes, then with the paths the providers answered).
+    /// Each lookup already begun whose path and `sub_path` a host path of the new `fs` names
+    /// is kept (one lookup for one host path), a host path that matches none is asked, a
+    /// lookup that matches none is dropped, and the lookups follow the order of
+    /// [`JobFs::host_paths`]. The new `fs` and `image` are the ones the assembly is made
+    /// from. A call with the `fs` of the run's preparation only polls.
     pub(crate) fn resolve(
         &mut self,
         (run_id, name): (&str, &str),
@@ -230,55 +287,50 @@ impl Fs {
         fs: &JobFs,
         now_ms: u64,
     ) -> FsPrepared {
-        let Some(prep) = self.preps.get_mut(run_id) else {
-            let lookups = fs
-                .host_paths()
-                .into_iter()
-                .map(|source| self.look_up(source.path, source.sub_path, now_ms))
-                .collect();
-            let prep = Prep {
-                name: name.to_owned(),
-                image: image.to_owned(),
-                fs: fs.clone(),
-                lookups,
-                assembly: Assembly::Unasked,
-            };
-            self.preps.insert(run_id.to_owned(), prep);
-            return FsPrepared::Pending;
-        };
-        // Every lookup is polled: one that failed is the answer at once, whatever another
-        // that is held still waits for.
-        let mut waiting = false;
-        for lookup in &mut prep.lookups {
-            let Lookup::Asked(path, pending) = lookup else {
-                continue;
-            };
-            match pending.poll(now_ms) {
-                Poll::Waiting => waiting = true,
-                Poll::Answered(Ok(opened)) => *lookup = Lookup::Open(opened),
-                Poll::Answered(Err(refused)) => return FsPrepared::Refused(refused),
-                Poll::Unanswered(why) => {
-                    return FsPrepared::Refused(NativeRefusal {
-                        code: refusal::INPUT_UNAVAILABLE,
-                        why: format!("the lookup of {path} {why} (bound {LOOKUP_MS} ms)"),
-                    });
-                }
-            }
+        let mut prep = self.preps.remove(run_id).unwrap_or_else(|| Prep {
+            name: name.to_owned(),
+            image: String::new(),
+            fs: JobFs::default(),
+            lookups: Vec::new(),
+            assembly: Assembly::Unasked,
+        });
+        // The image of the last call is the assembly's, whether or not its fs changed.
+        image.clone_into(&mut prep.image);
+        if prep.fs != *fs {
+            prep.lookups = self.reconcile(std::mem::take(&mut prep.lookups), fs, now_ms);
+            prep.fs = fs.clone();
         }
-        match waiting {
-            true => FsPrepared::Pending,
-            false => FsPrepared::Ready,
+        let answer = prep.poll(now_ms);
+        self.preps.insert(run_id.to_owned(), prep);
+        answer
+    }
+
+    /// The lookups for the host paths of `fs`, in their order: those of `held` that are
+    /// still wanted (each matches at most one host path), and a new one for each other.
+    fn reconcile(&self, held: Vec<Lookup>, fs: &JobFs, now_ms: u64) -> Vec<Lookup> {
+        let mut held: Vec<Option<Lookup>> = held.into_iter().map(Some).collect();
+        let wanted = fs.host_paths();
+        let mut lookups = Vec::with_capacity(wanted.len());
+        for source in wanted {
+            let kept = held
+                .iter_mut()
+                .find(|slot| slot.as_ref().is_some_and(|lookup| lookup.is_of(&source)))
+                .and_then(Option::take);
+            lookups.push(kept.unwrap_or_else(|| self.look_up(source, now_ms)));
         }
+        lookups
     }
 
     /// Asks the pool to open `path` beneath its root, and `sub_path` beneath it.
-    fn look_up(&self, path: &str, sub_path: Option<&str>, now_ms: u64) -> Lookup {
+    fn look_up(&self, source: HostSource<'_>, now_ms: u64) -> Lookup {
+        let (path, sub_path) = (source.path, source.sub_path);
         // Every root is held from the start: the one a path lies beneath is open.
         let root = self.roots.beneath(path).and_then(|beneath| {
             let held = self.held.get(beneath.name);
             held.map(|held| (Arc::clone(held), beneath.rest))
         });
         let paths = Arc::clone(&self.paths);
+        let sub_path_text = sub_path.map(str::to_owned);
         let (given, sub_path) = (path.to_owned(), sub_path.map(PathBuf::from));
         let deadline = now_ms.saturating_add(LOOKUP_MS);
         let pending = self.pool.run(deadline, move || {
@@ -296,7 +348,11 @@ impl Fs {
                     .map_err(refusal_of),
             }
         });
-        Lookup::Asked(path.to_owned(), pending)
+        Lookup {
+            path: path.to_owned(),
+            sub_path: sub_path_text,
+            state: Opened::Asked(pending),
+        }
     }
 
     /// The image and the layers of the run `run_id` being prepared, for the runtime to pin
@@ -327,9 +383,9 @@ impl Fs {
             .ok_or_else(|| format!("run {run_id} has no file system being prepared"))?;
         let mut sources = Vec::new();
         for lookup in std::mem::take(&mut prep.lookups) {
-            match lookup {
-                Lookup::Open(opened) => sources.push(opened),
-                Lookup::Asked(path, _) => return Err(format!("{path} is not open yet")),
+            match lookup.state {
+                Opened::Open(opened) => sources.push(opened),
+                Opened::Asked(_) => return Err(format!("{} is not open yet", lookup.path)),
             }
         }
         let mut trees = trees.into_iter();

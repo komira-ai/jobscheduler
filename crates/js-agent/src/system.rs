@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use js_vm_lease::VmDriver;
 
@@ -27,6 +27,10 @@ pub type SharedClock = Arc<dyn Clock + Send + Sync>;
 impl Clock for SharedClock {
     fn now_ms(&self) -> u64 {
         (**self).now_ms()
+    }
+
+    fn unix_ms(&self) -> Option<u64> {
+        (**self).unix_ms()
     }
 }
 
@@ -172,6 +176,13 @@ struct Monotonic(Instant);
 impl Clock for Monotonic {
     fn now_ms(&self) -> u64 {
         u64::try_from(self.0.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The wall clock now in milliseconds since the Unix epoch; `None` when the wall clock
+    /// reads a time before the epoch.
+    fn unix_ms(&self) -> Option<u64> {
+        let since = SystemTime::now().duration_since(UNIX_EPOCH).ok();
+        since.map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
     }
 }
 

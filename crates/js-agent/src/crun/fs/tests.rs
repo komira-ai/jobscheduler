@@ -11,8 +11,9 @@ use std::io;
 use std::os::fd::{AsRawFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 
 use js_agent_wire::{JobMount, Layer, MountMode, MountSource, Propagation};
 use js_contain::job_fs::{Attributes, MountCalls, ResolveError};
@@ -154,6 +155,8 @@ pub(super) struct Paths {
     /// Gives only record: each name and the ids it was to be given, in the order asked, and
     /// nothing is changed on the disk; the kernel's gives when this is `None`.
     pub(super) given: Option<Mutex<Gives>>,
+    /// How many opens beneath a directory were made, shared with the test that counts them.
+    pub(super) opens: Arc<AtomicUsize>,
 }
 
 impl Paths {
@@ -178,6 +181,7 @@ impl Paths {
 
 impl PathCalls for Paths {
     fn open_beneath(&self, dir: BorrowedFd<'_>, rest: &Path) -> Result<OwnedFd, ResolveError> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
         self.wait();
         Kernel.open_beneath(dir, rest)
     }
