@@ -61,10 +61,32 @@
 //! drain. An HTTP/1.1 connection there is held to everything above. An HTTP/2 connection
 //! is held to the same handshake, read and write limits; its head is at most [`MAX_BUF`];
 //! `max_requests` and the `Connection: close` it adds do not apply to it (HTTP/2 has no
-//! such header, and its streams are bounded by the protocol's concurrency limit instead).
+//! such header, and its streams are bounded by the protocol's concurrency limit instead,
+//! [`MAX_STREAMS`]).
+//!
+//! An HTTP/2 client may cancel (reset) a request the server has not taken up yet; a server
+//! that is slow to take requests up (a worker held by a slow call, say) then holds many such
+//! requests at once. Up to [`MAX_STREAMS`] of them are held, then taken up and dropped as
+//! usual; one more, and the client is told to calm down (`GOAWAY` `ENHANCE_YOUR_CALM`), which
+//! ends the connection and fails every call on it. The bound is chosen equal to the number of
+//! requests a client may have open: a client that cancels everything it has open while the
+//! server is held stays within it, though one that goes on opening and cancelling while the
+//! server stays held can still pass it, as a "rapid reset" flood does. The protocol library's
+//! default bound (20) is not used: under it, a client that cancels more than 20 calls a held
+//! server has not taken up loses every call of its connection, which a gRPC client reads as
+//! `RESOURCE_EXHAUSTED`, a refusal for being busy.
+//!
+//! What the larger bound gives a client that floods: per connection, up to [`MAX_STREAMS`]
+//! cancelled requests (each at most [`MAX_HEAD_LIST`] bytes of headers) held until the
+//! server takes them up, instead of 20, and as many handler runs for requests no one waits
+//! on; connections stay capped at [`Limits::max_connections`] and each request still passes
+//! the bearer layer before any route runs.
+//!
 //! HTTP/2 runs each request on a task of its own: those tasks hold the connection's slot
-//! and are cut with it, so a drain that cuts a connection cuts its requests too, and
-//! nothing a connection started outlives [`serve_both`].
+//! and are cut with it, so a drain that cuts a connection cuts its requests too, and no
+//! task a connection started outlives [`serve_both`]. Work a request handed to the pool for
+//! blocking calls (a store call of the job service) is not a task the cut can end: it runs
+//! to its end after its request is cut, and only its result is dropped.
 
 use std::future::Future;
 use std::io;
@@ -379,7 +401,9 @@ async fn talk_both(
     builder
         .http2()
         .timer(TokioTimer::new())
-        .max_header_list_size(MAX_HEAD_LIST);
+        .max_header_list_size(MAX_HEAD_LIST)
+        .max_concurrent_streams(u32::from(MAX_STREAMS))
+        .max_pending_accept_reset_streams(usize::from(MAX_STREAMS));
     let served = builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(app));
     let mut served = pin!(served);
     tokio::select! {
@@ -390,6 +414,11 @@ async fn talk_both(
         }
     }
 }
+
+/// The most requests an HTTP/2 connection may have open at once, and the most it may have
+/// cancelled before the server took them up (see the module's notes). 200 is hyper's own
+/// default for the first; it is set here so that the two stay one number.
+pub(crate) const MAX_STREAMS: u16 = 200;
 
 /// The most bytes of headers an HTTP/2 request may carry: [`MAX_BUF`], the limit an
 /// HTTP/1.1 head is held to.
@@ -709,3 +738,7 @@ mod tests {
 #[cfg(test)]
 #[path = "listener_answer_tests.rs"]
 mod answer_tests;
+
+#[cfg(test)]
+#[path = "listener_h2_tests.rs"]
+mod h2_tests;

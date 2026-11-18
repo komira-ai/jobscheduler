@@ -59,6 +59,9 @@
 //!    job of a service that does not place, are only committed: the tick's pass, or a
 //!    heartbeat's, finds the queued row. A failed read of the queue counts as a job ahead.
 //!
+//! Every read and write of the job tables runs on the pool for blocking calls
+//! ([`JobApi::on_tables`]), so a slow store holds up this call and not the server's workers.
+//!
 //! The call calls no provider.
 
 use std::sync::Arc;
@@ -231,16 +234,20 @@ pub(super) async fn submit_job(
     let client = Some(caller.name.clone());
     let request = request.into_inner();
     let valid = validate::job(request.spec.as_ref(), served.ceiling).map_err(refused)?;
-    let held = match &valid.id {
-        Some(id) => api.jobs.get_job(id).map_err(not_written())?.is_some(),
+    let held = match valid.id.clone() {
+        Some(id) => api
+            .on_tables(move |jobs| jobs.get_job(&id))
+            .await
+            .map_err(not_written())?
+            .is_some(),
         None => false,
     };
     // Read before the commit, so two jobs submitted together into an empty queue are both
     // placed in their calls (the passes take turns), not both left to the tick.
-    let placing = served
-        .placing
-        .as_ref()
-        .filter(|_| !held && nothing_ahead(api, valid.priority));
+    let placing = match &served.placing {
+        Some(agents) if !held && nothing_ahead(api, valid.priority).await => Some(agents),
+        _ => None,
+    };
     let isolation = valid.spec.constraints.isolation;
     if !held
         && !served
@@ -257,7 +264,10 @@ pub(super) async fn submit_job(
         priority: valid.priority,
         client,
     };
-    let inserted = api.jobs.insert_queued(new).map_err(not_written())?;
+    let inserted = api
+        .on_tables(move |jobs| jobs.insert_queued(new))
+        .await
+        .map_err(not_written())?;
     if !caller.owns(&inserted.record) {
         return Err(id_conflict());
     }
@@ -272,8 +282,8 @@ pub(super) async fn submit_job(
 
 /// Whether no queued job has a priority equal to or above `priority`; `false` when the queue
 /// cannot be read.
-fn nothing_ahead(api: &JobApi, priority: i32) -> bool {
-    let queued = api.jobs.queued();
+async fn nothing_ahead(api: &JobApi, priority: i32) -> bool {
+    let queued = api.on_tables(|jobs| jobs.queued()).await;
     queued.is_ok_and(|queued| queued.iter().all(|job| job.priority < priority))
 }
 
@@ -284,7 +294,9 @@ async fn place_now(api: &JobApi, agents: &Arc<Agents>, record: JobRecord) -> Job
     let placing = Arc::clone(agents);
     let tainted = blocking(move || placing.place_jobs()).await;
     agents.keep_taints(tainted).await;
-    let now = api.jobs.get_job(&record.id).ok().flatten();
+    let id = record.id.clone();
+    let now = api.on_tables(move |jobs| jobs.get_job(&id)).await;
+    let now = now.ok().flatten();
     now.unwrap_or(record)
 }
 

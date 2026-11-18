@@ -65,6 +65,17 @@
 //! whose call takes the registry's lock alone, calls no provider, and returns before the
 //! group writes the job tables.
 //!
+//! # The job tables are read and written off the runtime's workers
+//!
+//! The store's calls block: a call waits on the database for as long as the database takes
+//! (up to its statement timeout). Every call of a group on the job tables therefore goes
+//! through [`JobApi::on_tables`], which runs it on the runtime's pool for blocking calls, so
+//! a slow database holds up the calls that wait on it and nothing else: the workers go on
+//! serving the connections, and a client's HTTP/2 connection is read while its calls wait.
+//! A call whose client gives up (cancels the stream) is dropped at its next wait; a store
+//! call it started runs to its end, and what it wrote stands, as a call whose answer was
+//! lost (a resubmit under the same id is answered with that job).
+//!
 //! A request carries at most [`js_api_gateway::BODY_LIMIT`] (64 KiB) over either transport:
 //! the gateway answers a larger body 413 `request-too-large`, and the gRPC service decodes
 //! no larger message (`OUT_OF_RANGE`).
@@ -106,6 +117,8 @@ pub(crate) use wiring::{from_server, port};
 
 #[cfg(test)]
 mod access_tests;
+#[cfg(test)]
+mod blocking_tests;
 #[cfg(test)]
 mod clients_tests;
 #[cfg(test)]
@@ -166,6 +179,19 @@ impl JobApi {
             fleet: fleet::Ctx::default(),
             logs: logs::Ctx::default(),
         }
+    }
+}
+
+impl JobApi {
+    /// Runs `call` over the job tables on the runtime's pool for blocking calls and waits for
+    /// it without holding up a worker (see the module's notes). A panic in `call` is raised
+    /// again in the caller.
+    async fn on_tables<T: Send + 'static>(
+        &self,
+        call: impl FnOnce(&ServerJobs) -> T + Send + 'static,
+    ) -> T {
+        let jobs = Arc::clone(&self.jobs);
+        crate::util::blocking(move || call(&jobs)).await
     }
 }
 

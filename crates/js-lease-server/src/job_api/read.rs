@@ -2,7 +2,8 @@
 //! tables. The group's own state is [`Ctx`], set through [`JobApi::with_read`].
 //!
 //! Every call reads the tables through [`Reads`], which offers the two reads they need (one
-//! job, one page of jobs) and no write, so no read call changes any state. None takes a lock:
+//! job, one page of jobs) and no write, so no read call changes any state. Each read runs on
+//! the pool for blocking calls ([`JobApi::on_tables`]). None takes a lock:
 //! the service holds no handle on the registry. Time is read from the
 //! service's clock, and only to tell an ended job whose retention end has passed.
 //!
@@ -209,13 +210,10 @@ impl Reads<'_> {
     /// The job `text` names, as `caller` may read it: refused when `text` is not a job id,
     /// `unknown-job` when there is no row for it, and the same answer, marked hidden, when
     /// the job is not the caller's to read.
-    pub(super) fn job(&self, text: &str, caller: &Caller) -> Result<JobRecord, Status> {
+    pub(super) async fn job(&self, text: &str, caller: &Caller) -> Result<JobRecord, Status> {
         let id = JobId::parse(text).map_err(|_| invalid(JOB_ID_FIELD))?;
-        let found = self
-            .0
-            .jobs
-            .get_job(&id)
-            .map_err(|error| read_failed(&error))?;
+        let found = self.0.on_tables(move |jobs| jobs.get_job(&id)).await;
+        let found = found.map_err(|error| read_failed(&error))?;
         let job = found.ok_or_else(unknown_job)?;
         match caller.owns(&job) {
             true => Ok(job),
@@ -225,16 +223,17 @@ impl Reads<'_> {
 
     /// One window of the table: at most `window` rows after `resume`, keeping the jobs in
     /// `state` when one is given.
-    fn window(
+    async fn window(
         &self,
         state: Option<JobState>,
-        resume: Option<&ResumeToken>,
+        resume: Option<ResumeToken>,
         window: NonZeroUsize,
     ) -> Result<JobPage, Status> {
-        self.0
-            .jobs
-            .list_jobs(state, resume, window)
-            .map_err(|error| read_failed(&error))
+        let page = self
+            .0
+            .on_tables(move |jobs| jobs.list_jobs(state, resume.as_ref(), window))
+            .await;
+        page.map_err(|error| read_failed(&error))
     }
 }
 
@@ -258,7 +257,7 @@ pub(super) async fn get_job(
     caller: &Caller,
     request: Request<GetJobRequest>,
 ) -> Result<Response<GetJobResponse>, Status> {
-    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
+    let job = Reads(api).job(&request.into_inner().job_id, caller).await?;
     Ok(Response::new(GetJobResponse {
         job: Some(shown(&api.read, &job)),
     }))
@@ -270,7 +269,7 @@ pub(super) async fn get_result(
     caller: &Caller,
     request: Request<GetResultRequest>,
 ) -> Result<Response<GetResultResponse>, Status> {
-    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
+    let job = Reads(api).job(&request.into_inner().job_id, caller).await?;
     let job = unexpired(api, job)?;
     match job.state.is_ended() {
         true => Ok(Response::new(GetResultResponse {
@@ -289,7 +288,7 @@ pub(super) async fn get_logs(
     request: Request<GetLogsRequest>,
 ) -> Result<Response<GetLogsResponse>, Status> {
     let request = request.into_inner();
-    let job = Reads(api).job(&request.job_id, caller)?;
+    let job = Reads(api).job(&request.job_id, caller).await?;
     let job = unexpired(api, job)?;
     let answer = match logs::stream_of(&request) {
         None => tails(&job),
@@ -422,7 +421,7 @@ pub(super) async fn list_jobs(
         client: request.client,
         owner: caller.only_jobs_of().cloned(),
     };
-    let (jobs, next) = list(&api.read, Reads(api), &filter, resume, size)?;
+    let (jobs, next) = list(&api.read, Reads(api), &filter, resume, size).await?;
     Ok(Response::new(ListJobsResponse {
         jobs: jobs.iter().map(|job| shown(&api.read, job)).collect(),
         next_page_token: next.map(|token| token.key().to_owned()).unwrap_or_default(),
@@ -432,7 +431,7 @@ pub(super) async fn list_jobs(
 /// Up to `size` jobs that `filter` keeps, from `resume` on, reading windows of the table
 /// until the page is full, the table ends, or the context's bound of rows is read; with the
 /// token of the next page, or none when the table has ended.
-fn list(
+async fn list(
     ctx: &Ctx,
     reads: Reads<'_>,
     filter: &Filter,
@@ -448,7 +447,7 @@ fn list(
             Some(rest) => ctx.scan_window.min(rest),
             None => ctx.scan_window,
         };
-        let page = reads.window(scan_state, resume.as_ref(), window)?;
+        let page = reads.window(scan_state, resume.clone(), window).await?;
         for job in page.jobs.into_iter().filter(|job| filter.keeps(job)) {
             if jobs.len() == size {
                 let next = token_after(jobs.last());

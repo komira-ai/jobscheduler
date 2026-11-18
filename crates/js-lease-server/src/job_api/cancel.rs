@@ -67,14 +67,19 @@ pub(super) async fn cancel_job(
 ) -> Result<Response<CancelJobResponse>, Status> {
     let id = JobId::parse(&request.into_inner().job_id)
         .map_err(|_| Status::invalid_argument("field: jobId"))?;
-    let read = api.jobs.get_job(&id).map_err(not_written())?;
+    let lookup = id.clone();
+    let read = api.on_tables(move |jobs| jobs.get_job(&lookup)).await;
+    let read = read.map_err(not_written())?;
     let read = read.ok_or_else(unknown_job)?;
     if !caller.owns(&read) {
         return Err(hidden());
     }
     let job = match read.state.is_ended() {
         true => read,
-        false => api.jobs.request_cancel(&id).map_err(not_written())?,
+        false => api
+            .on_tables(move |jobs| jobs.request_cancel(&id))
+            .await
+            .map_err(not_written())?,
     };
     Ok(Response::new(CancelJobResponse {
         job: Some(view::job(&job)),
