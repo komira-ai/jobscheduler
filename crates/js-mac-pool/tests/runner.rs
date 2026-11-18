@@ -65,6 +65,7 @@ impl Scene {
                 .iter()
                 .map(|path| AbsPath::new(path).expect("read-denied path"))
                 .collect(),
+            mounts: vec![],
         };
         Policy::base(
             layout,
@@ -541,6 +542,7 @@ fn a_floor_deny_beats_an_earlier_grant() {
         uid_entry: Some(AbsPath::new(&scene.uid_entry).expect("entry path")),
         inputs: vec![],
         read_denies: vec![],
+        mounts: vec![],
     };
     let caps = Caps {
         net: Net::Off,

@@ -30,6 +30,7 @@ Constraints.exec = 3 : ExecMode
 Constraints.isa_level = 4 : string
 Constraints.accelerator = 5 : Accelerator
 Constraints.isolation = 6 : Isolation
+Constraints.os_version = 7 : string
 Accelerator.vendor = 1 : optional string
 Accelerator.model = 2 : optional string
 Accelerator.count = 3 : optional uint32

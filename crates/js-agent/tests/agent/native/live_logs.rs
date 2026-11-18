@@ -414,8 +414,7 @@ fn a_native_run_without_a_sink_uploads_nothing() {
 /// Proves that a Mac agent says it uploads live logs and holds the host's credential cell: its
 /// hello reports `log-upload`, and its first heartbeat reports the credential state (`stale`,
 /// none held yet), so the server mints it one. (A sink rides only in a job start, which the
-/// server sends a host that reports `per-job`; a native agent does not yet, so its runs carry
-/// none until it does.) Catches a native agent that hides that it can upload, and one that
+/// server sends a host that reports `per-job`, which a native agent does.) Catches a native agent that hides that it can upload, and one that
 /// reports the capability without a cell for the credential.
 #[test]
 fn a_mac_agent_reports_log_upload_and_asks_for_the_credential() {

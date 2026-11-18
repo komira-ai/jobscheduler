@@ -41,14 +41,21 @@
 //!   example, a container that runs `nvidia-smi`); the agent knows only its exit status.
 //!   With no hook, with no GPU offered, or with a hook that fails, the capability is
 //!   absent, and a pool that needs it refuses the host `host-contract`.
-//! - `per-job` is `true` for an agent that runs containers: it takes the job-keyed start
-//!   and stop and lists those jobs in `jobs` ([`js_agent_wire::PER_JOB_CAPABILITY`]), so a
-//!   server sends them only to a host that reports it. A native agent does not report it (a
-//!   job start carries an image, which it cannot run). An operator cannot set it either.
+//! - `per-job` is `true` for every agent, a container one and a native one: it takes the
+//!   job-keyed start and stop and lists those jobs in `jobs`
+//!   ([`js_agent_wire::PER_JOB_CAPABILITY`]), so a server sends them only to a host that
+//!   reports it. A native agent runs a job start whose image is a bundle and which carries
+//!   a `run`; it refuses any other. An operator cannot set it either.
+//! - `layered-rootfs` is `true` for a crun agent on a kernel with the calls it needs, and
+//!   for a native agent: the native runtime gives a job mounts of host paths below `/work`
+//!   (links in its `exec/`, with Seatbelt grants) and refuses layers, a mount target
+//!   outside `/work` and a remapped host port at admission.
 //! - `start-fence` is `true` wherever `per-job` is: the agent judges a job start by its
 //!   fence (the job id with the allocation id), keeps the fences it retired in its state root,
 //!   and stops every job after a silence of the server
 //!   ([`js_agent_wire::START_FENCE_CAPABILITY`]). An operator cannot set it.
+//! - `held-beat` is `true` wherever `per-job` is: the session sends its next heartbeat at
+//!   once after a reply the server held open ([`js_agent_wire::HELD_BEAT_CAPABILITY`]).
 //! - `host-jobs` is `true` for an agent started with `--allow-host-jobs`, which only
 //!   the crun runtime takes: its runtime launches a job with `isolation = host`
 //!   ([`js_agent_wire::HOST_JOBS_CAPABILITY`]). The server taints a host when it places such
@@ -58,15 +65,50 @@
 //!   is a layer or a mount of the job). A server sends a job that names a provider only to a
 //!   host that reports it. An operator cannot set it (`js_caps::is_mount_provider_key`).
 
-use js_agent_wire::Hello;
-use js_caps::{FLAG_SET, RUN_FILES};
+use js_agent_wire::{HELD_BEAT_CAPABILITY, Hello, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS, RUN_FILES};
 
 #[cfg(target_os = "linux")]
 mod container;
 #[cfg(target_os = "linux")]
-pub(crate) use container::{
-    ToolkitHook, report, report_host_jobs, report_layered, report_mount_providers,
-};
+pub(crate) use container::{ToolkitHook, report, report_host_jobs, report_mount_providers};
+
+/// Says that the agent takes the job-keyed start and stop, that it fences them (it refuses a
+/// start whose fence it retired and stops its jobs after a silence), and that it beats again
+/// at once after a held reply (`held-beat`, the session's): every agent does, the container
+/// runtime and the native one.
+pub(crate) fn report_per_job(hello: &mut Hello) {
+    hello
+        .capabilities
+        .insert(PER_JOB_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    hello
+        .capabilities
+        .insert(START_FENCE_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    hello
+        .capabilities
+        .insert(HELD_BEAT_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+}
+
+/// Puts `layered-rootfs` into `hello` when the runtime gives jobs mounts of host paths
+/// (`layered`: the crun runtime when the kernel has the calls; the native runtime always,
+/// and it refuses layers itself).
+pub(crate) fn report_layered(hello: &mut Hello, layered: bool) {
+    if layered {
+        hello
+            .capabilities
+            .insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
+    }
+}
+
+/// The job half of a native agent's hello: `per-job`, `start-fence`, `held-beat` and
+/// `layered-rootfs`.
+/// The native runtime takes the job-keyed start (a bundle image with a `run`) and gives a
+/// job mounts of host paths below `/work`; layers are refused at admission.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn report_native_jobs(hello: &mut Hello) {
+    report_per_job(hello);
+    report_layered(hello, true);
+}
 
 /// Says that the agent writes a start's run files, when it has a files root (`run_files`);
 /// an older agent would ignore them, and one without a root refuses them.

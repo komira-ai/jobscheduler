@@ -93,6 +93,10 @@ message Constraints {
   Accelerator accelerator = 5;
   // How the job is confined. Unspecified: contained.
   Isolation isolation = 6;
+  // The least version of the host's operating system, as a major version such as 26 (macOS
+  // 26): a host is capable when it reports that major version or a later one. Empty: any
+  // version.
+  string os_version = 7;
 }
 
 // One host port forwarded to a port of the job (design section 5.8). New traffic toward a

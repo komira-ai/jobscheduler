@@ -760,6 +760,7 @@ impl Elastic<'_> {
             os: None,
             arch: None,
             isa_level: None,
+            os_version: None,
             exec,
             accelerator: floor.need(),
             network: Default::default(),

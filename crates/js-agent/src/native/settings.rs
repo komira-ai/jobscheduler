@@ -8,6 +8,7 @@ use js_mac_pool::seatbelt::{AbsPath, ReadModel, SANDBOX_EXEC};
 use js_mac_session::proto::Limits;
 
 use super::NativeConfig;
+use super::mounts::MountRoot;
 use super::network::Ceiling;
 use super::pf::{Enforcer, PfFlags, PfPolicy};
 use crate::bundle::Placer;
@@ -171,6 +172,7 @@ impl NativeSettings {
                 network,
                 tool_roots,
                 read_denies,
+                mount_roots: Vec::new(),
                 read_model: ReadModel::Open,
                 journal: journal.to_path_buf(),
                 max_file_bytes,
@@ -208,6 +210,25 @@ impl NativeSettings {
             bundles: Some(placer),
             ..self
         })
+    }
+
+    /// The same settings with `roots` (`--mount-root`, `--mount-root-ro`) as the roots a
+    /// job's mounts lie beneath, and each of them a read deny of every run: a run reads
+    /// only the mounts it was given, which its profile grants back.
+    ///
+    /// # Errors
+    ///
+    /// A root the profile cannot name.
+    pub fn with_mount_roots(mut self, roots: Vec<MountRoot>) -> Result<Self, String> {
+        for root in &roots {
+            let denied = AbsPath::new(&root.path)
+                .map_err(|why| format!("--mount-root: {}: {why}", root.path.display()))?;
+            if !self.config.read_denies.contains(&denied) {
+                self.config.read_denies.push(denied);
+            }
+        }
+        self.config.mount_roots = roots;
+        Ok(self)
     }
 
     /// The same settings with `file_cap` (`--log-file-cap`) as the most bytes of each log file

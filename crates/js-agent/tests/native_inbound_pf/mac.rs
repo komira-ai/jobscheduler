@@ -155,6 +155,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
             denied(&fixture.state),
             denied(&fixture.root.join("scratch")),
         ],
+        mount_roots: Vec::new(),
         read_model: ReadModel::Open,
         journal: fixture.root.join("native-leases"),
         max_file_bytes: 1 << 30,

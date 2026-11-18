@@ -467,8 +467,8 @@
 //! capable host exists, else when a launching machine provider of the pool may offer a
 //! machine for it, and otherwise refused at once with `no-capable-host`, before anything is
 //! recorded. A host is capable when what the pool books of it holds the request and it
-//! reports the `os`, `arch`, `disk-gib`, `isa_level` and `exec` the request requires, as
-//! placement compares them, and it is neither tainted nor being released (leaving the
+//! reports the `os`, `arch`, `disk-gib`, `isa_level`, `os_version` (at least, by major
+//! version) and `exec` the request requires, as placement compares them, and it is neither tainted nor being released (leaving the
 //! pool): a busy, silent, cordoned or drain-marked host is capable, and so is one whose
 //! agent announced it is stopping, so a job that only has to wait is never refused for it.
 //! A provider may offer when the request is inside its capabilities and its catalog has an

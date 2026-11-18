@@ -547,6 +547,7 @@ pub fn request_demand() -> Requirements {
         os: None,
         arch: None,
         isa_level: None,
+        os_version: None,
         exec: None,
         accelerator: Some(AcceleratorNeed {
             model: Some(Model::parse("nvidia-a10").unwrap()),

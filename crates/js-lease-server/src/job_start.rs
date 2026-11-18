@@ -12,10 +12,12 @@
 //! it records one (a job backfilled on a marked host is cut to the time left in the tail),
 //! else the job's.
 
-use js_agent_wire::{BookedResources, Isolation, JobStartSpec, RunFile};
+use js_agent_wire::{
+    BUNDLE_PROGRAM_PREFIX, BookedResources, Isolation, JobStartSpec, NetworkLevel, RunFile, RunSpec,
+};
 use js_caps::is_mount_provider_key;
-use js_jobs::{AllocationRecord, Booked, JobRecord};
-use js_types::{PortMap, Resources};
+use js_jobs::{AllocationRecord, Booked, JobRecord, JobSpec, NetworkPolicy};
+use js_types::{Arch, ExecMode, Os, PortMap, Resources};
 
 use crate::per_job::BeatContext;
 
@@ -104,6 +106,16 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
+///
+/// # Native jobs
+/// A job whose `exec` constraint is `sandbox-exec` and that has an image runs a bundle, not a
+/// container: its start has `command` empty (the wire requires it beside a `run`) and a
+/// `run` with no files, no environment of its own (the job's environment stays in `env`, which
+/// the agent lays over the bundle's), no inputs and no outputs, the network level mapped from
+/// the job's ([`run_network`]) and the program of [`bundle_program`]. The start's `os` and
+/// `arch` are the job's constraints when they name a known system and architecture. Every
+/// other job (`exec` unspecified or `container`, or no image) is built as a container job, with
+/// the command then its arguments in `command` and `run`, `os` and `arch` left out.
 pub(crate) fn start_of(
     job: &JobRecord,
     allocation: &AllocationRecord,
@@ -180,6 +192,28 @@ pub(crate) fn start_of(
     let log_sink = context
         .logs
         .and_then(|logs| logs.sink_for(context.host.as_str(), job.id.as_str()));
+    let native = spec.constraints.exec == Some(ExecMode::SandboxExec) && spec.image.is_some();
+    let (command, run, os, arch) = if native {
+        (
+            Vec::new(),
+            spec.image.as_ref().map(|image| run_of(spec, image.name())),
+            spec.constraints
+                .os
+                .as_deref()
+                .and_then(|os| os.parse::<Os>().ok()),
+            spec.constraints
+                .arch
+                .as_deref()
+                .and_then(|arch| arch.parse::<Arch>().ok()),
+        )
+    } else {
+        (
+            spec.command.iter().chain(&spec.args).cloned().collect(),
+            None,
+            None,
+            None,
+        )
+    };
     let mut start = JobStartSpec {
         job_id: job.id.to_string(),
         allocation_id: allocation.allocation_id.to_string(),
@@ -188,10 +222,10 @@ pub(crate) fn start_of(
             .as_ref()
             .map(|image| format!("{}@{}", image.name(), image.digest()))
             .unwrap_or_default(),
-        command: spec.command.iter().chain(&spec.args).cloned().collect(),
-        run: None,
-        os: None,
-        arch: None,
+        command,
+        run,
+        os,
+        arch,
         env: spec.env.clone(),
         files,
         booked,
@@ -215,6 +249,60 @@ pub(crate) fn start_of(
             field: error.field(),
         })?;
     Ok(start)
+}
+
+/// The network level of a native job's [`RunSpec`]: none is off, an allow-list is on (limited
+/// to the pool's packet filter), open is open.
+fn run_network(policy: NetworkPolicy) -> NetworkLevel {
+    match policy {
+        NetworkPolicy::None => NetworkLevel::Off,
+        NetworkPolicy::AllowList => NetworkLevel::On,
+        NetworkPolicy::Open => NetworkLevel::Open,
+    }
+}
+
+/// The run of a native job of the image named `image_name`: the program of [`bundle_program`], then the rest of the job's
+/// command, then its arguments; nothing else (the job's environment stays in the start's `env`).
+fn run_of(spec: &JobSpec, image_name: &str) -> RunSpec {
+    let (program, rest) = bundle_program(spec, image_name);
+    RunSpec {
+        program,
+        args: rest.iter().chain(&spec.args).cloned().collect(),
+        env: Default::default(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: run_network(spec.network),
+    }
+}
+
+/// The program a native job runs, and the arguments of its command after the program.
+///
+/// With a command, its first entry is the program: kept as it is when it starts with `@bundle/`
+/// or is an absolute path, else taken as the name of an entrypoint of the bundle (`@bundle/`
+/// then the entry). With no command, the program is the bundle's default entrypoint, the one
+/// named as the bundle (the last `/`-separated part of the image's name, without its tag), as
+/// an OCI image's entrypoint runs when no command is given. A program the wire's grammar
+/// refuses is left for [`JobStartSpec::validate`] to refuse.
+fn bundle_program<'a>(spec: &'a JobSpec, image_name: &str) -> (String, &'a [String]) {
+    match spec.command.split_first() {
+        Some((first, rest)) => {
+            let kept = first.starts_with(BUNDLE_PROGRAM_PREFIX) || first.starts_with('/');
+            let program = if kept {
+                first.clone()
+            } else {
+                format!("{BUNDLE_PROGRAM_PREFIX}{first}")
+            };
+            (program, rest)
+        }
+        None => {
+            let base = image_name
+                .rsplit_once('/')
+                .map_or(image_name, |(_, last)| last);
+            let bundle = base.split_once(':').map_or(base, |(bundle, _)| bundle);
+            (format!("{BUNDLE_PROGRAM_PREFIX}{bundle}"), &[])
+        }
+    }
 }
 
 /// What an allocation of the whole host books: the CPU, memory and disk of `shape`, the
