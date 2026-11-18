@@ -1,5 +1,6 @@
-# Continuous release: every push to main that passed `ci` and changed code that ships is
-# released as the next version, with no step by hand (docs/release.md). GitHub-hosted
+# Continuous release: every push to main that changed code that ships is released as the next
+# version and deployed, with no step by hand, once it built and its unit tests passed
+# (docs/release.md). GitHub-hosted
 # runners only, actions pinned to commit SHAs.
 #
 # What starts it. A push to main (`on: push`), and nothing else releases: the wait and
@@ -14,30 +15,46 @@
 # attestation records `github.sha` and `github.ref` (the certificate's source digest and
 # ref), so the run has to be at the commit it releases; that is why the release is not
 # started by the completion of `ci` (`workflow_run`), whose runs are at main's tip, not at
-# the commit that passed. The first job, `ci-passed`, waits for the jobs of the `ci` run of
-# that commit (a push run; it polls every 120 s, up to four hours) and fails the release, with
-# the run's URL and the jobs that did not succeed, if any job failed, was cancelled or timed out.
-# Every other job needs it. It holds `actions: read` only and checks out nothing; ten reads of the runs in a row that fail
-# (about twenty minutes) fail it too. A re-run keeps the commit and `github.sha`
-# of the run it repeats; a re-run of only the failed jobs keeps the `plan` that succeeded,
-# so `publish` and artifacts.yml's `verify` check the tag and the attestations.
+# the commit that passed.
+#
+# The deploy path, and what is not on it. A merge reaches the farm through `plan`, `artifacts`
+# (build, sums, attest, verify) and `unit-tests` (the workspace's tests, the ones `ci`'s `test`
+# job runs but its `--ignored` live steps, in four shards beside the build), then `turn`,
+# `publish`, the apt repository (with `check-apt`, its install check), the control-plane deploy
+# and `desired`, which starts hostkeeper-desired.yml for the release. Nothing else gates it:
+# `ci` (lint, deny, coverage, the privileged and live jobs) and the beta stage (the macOS tests
+# and probe) run beside it or after it. `ci-passed` still waits for the jobs of the `ci` run of the commit
+# (polling every 120 s, up to four hours) but no job needs it to pass: when `ci` fails, the
+# release has shipped already and `release-red` reports it, and the fix is the next merge. It
+# holds `actions: read` only and checks out nothing; ten reads of the runs in a row that fail
+# (about twenty minutes) fail it too.
+#
+# A failure of any job of the run on main (the deploy path, `ci-passed` or the beta stage) runs
+# `release-red`, which opens an issue titled `RELEASE-RED: jobscheduler ...` with the label
+# `main-red`, the label the project's red-main alert watches, or comments on the one that is
+# open; a run in which every job passed or was skipped runs `release-green`, which closes it. A
+# re-run of only the failed jobs keeps the `plan` that succeeded, so `publish` and artifacts.yml's
+# `verify` check the tag and the attestations.
 #
 # Two tag views differ on purpose. `plan` counts only the `v*` tags merged into the commit;
 # `publish` compares against the highest `vX.Y.Z` tag of the whole repository and refuses
 # unless it is a proper ancestor of the commit, so it fails closed: a `v` tag that is not on
 # main blocks releases until it is removed (docs/release.md, Recovery).
 #
-# Main may move on while a run waits or builds. The run still releases its own commit,
-# since the commit passed `ci`; `plan` refuses it only when a `v*` tag is at a descendant
-# (a later release covers it, which keeps the version monotonic), and `publish` checks
-# again right before the publishing call that the latest `v*` tag is a proper ancestor of
-# the commit, so two runs that finish out of order never put a tag on an older commit. The
-# one gap: a run replaced while it waits for the group (below) is made up by the newer
-# push's release, and if that push then fails `ci` the next push that passes releases it.
+# Several merges at once. There is no concurrency group: every push starts its run at once and
+# none is cancelled or replaced. The runs build and test side by side (each its own version, see
+# `plan`) and take turns at publishing and deploying: `turn` (`cargo xtask release turn`) waits
+# while an older run holds the turn, from its `turn` until its job `deployed`, the last of its
+# publish and deploy jobs, has ended; and when a newer run has reached its turn, or a newer
+# release is published, it says so and `publish` and everything after it are skipped, so of
+# several runs waiting only the newest deploys, and the superseded ones end green. An older run
+# never waits for a newer one. `publish` checks again right before the publishing call that the
+# latest `v*` tag is a proper ancestor of the commit, so no tag is ever put on an older commit.
 #
 # The decision and the version are `cargo xtask release plan` (crates/xtask): a release
-# only when a file that ships changed since the latest `v*` tag, as the next patch
-# version, or the workspace version when that is above the tag. `cargo xtask release
+# only when a file that ships changed since the latest `v*` tag, as that tag with its patch
+# raised by the number of first-parent commits from it to the commit (so runs that build at
+# once never take the same version), or the workspace version when that is above the tag. `cargo xtask release
 # stamp` puts the version into the build's checkout, so `--version` prints it; nothing is
 # committed.
 #
@@ -49,17 +66,21 @@
 # but the bundles. This file attests nothing: every attestation is signed by artifacts.yml, the
 # one signer farm hosts trust (see the top of that file).
 #
-# Order: ci-passed, plan, artifacts (build, sums, attest, verify), publish, then the apt
-# repository, gamma and the control-plane deploy. The beta stage, the platforms other than Linux
+# Order: plan, then artifacts (build, sums, attest, verify) beside unit-tests, then turn and
+# publish, then the apt repository, gamma, the control-plane deploy, pkg-upload and desired, and
+# last `deployed`, which marks the end of the run's publish and deploy jobs for `turn`. The beta stage, the platforms other than Linux
 # x86_64, runs beside publish and the jobs after it, not before them: after `artifacts`, the
 # jobs `beta-macos` (beta.yml: the workspace's tests on Apple silicon), `beta-macos-pkg`
 # (js-agent-macos-pkg.yml: the installer package of js-agent, built and signed) and
 # `beta-macos-probe` (macos-probe.yml) run on the hosted macOS runners, and `promote-macos` adds
 # the macOS archives (`*-aarch64-apple-darwin.tar.gz`) to the published release when all three
-# and `publish` succeeded. `pkg-upload` then puts the signed package in the package repository
-# (`pkg/jobscheduler/<version>/`), where hostkeeper-desired.yml finds it. `publish` leaves the
-# archives out, and nothing else waits for the beta stage: not the Linux assets, the .debs, the
-# apt repository, gamma or the control-plane deploy.
+# and `publish` succeeded. `pkg-upload` puts the signed package in the package repository
+# (`pkg/jobscheduler/<version>/`), where hostkeeper-desired.yml finds it, as soon as
+# `beta-macos-pkg` has ended and `publish` succeeded: a package that failed to build or sign is
+# left out (hosts on macOS then keep their version) and the deploy goes on without it, so
+# `desired` waits for the package job's end but never for its success, and for no test of the
+# beta stage. `publish` leaves the archives out, and nothing else waits for the beta stage: not
+# the Linux assets, the .debs, the apt repository, gamma, the control-plane deploy or hostkeeper.
 # A pull request runs none of it. The tag is made first of those: `publish`
 # makes a draft release, uploads the files built, attested and verified, and publishes it in one
 # call, which creates the tag. A failed run leaves no tag. A re-run of a failed run continues the
@@ -72,8 +93,8 @@
 # `check-apt` installs the release from `testing` in a clean Ubuntu container on amd64 and on
 # arm64, and only when it succeeded the same bytes are promoted into the suite `stable` (the jobs
 # `stable-apt-*`, which write the index alone, `--no-pool`). Hosts install from `stable`:
-# hostkeeper's apt installer is told to by hostkeeper-desired.yml, which runs after this
-# workflow. No job holds both the signing key and the cloud role: the `*-apt-read` and
+# hostkeeper's apt installer is told to by hostkeeper-desired.yml, which `desired` starts once
+# `stable` lists the release. No job holds both the signing key and the cloud role: the `*-apt-read` and
 # `*-apt-write` jobs (environment `apt-publish`) assume the publish role through OIDC and hold no
 # key; the `*-apt-index` jobs (environment `apt-signing`) hold the key and `contents: read`
 # alone. None of them checks out the repository or compiles anything: each downloads the `xtask`
@@ -105,9 +126,11 @@
 # `gh`; `gamma`, `cp-deploy-digest`, `pkg-upload` and the apt read, index and write jobs run the `xtask` binary
 # that the permissionless `deploy-tool` job built (so no build script ever sees a token, the token
 # service's address or the key), after the pinned actions. The apt read and write jobs hold no
-# key, and the index jobs no token. A test
-# (crates/xtask/tests/release_workflow) pins these rules for both files, and another
-# (crates/xtask/tests/apt_workflow) the apt jobs and hostkeeper-desired.yml.
+# key, and the index jobs no token. `turn` holds `actions: read` and `contents: read` and runs
+# that same binary; `desired` holds `actions: write` alone, to start hostkeeper-desired.yml, and
+# runs `gh` only; `release-red` and `release-green` hold `issues: write` and `actions: read` and
+# run `gh` only. A test (crates/xtask/tests/release_workflow) pins these rules for both files,
+# and another (crates/xtask/tests/apt_workflow) the apt jobs and hostkeeper-desired.yml.
 name: release
 
 on:
@@ -118,15 +141,9 @@ on:
 
 permissions: {}
 
-# One release at a time, none cancelled: a second waits for the first (GitHub keeps one
-# waiting run per group, and the newer replaces the older; the replaced push is released
-# by the newer one). Only a run that will release shares the group (the same test as the
-# jobs': a push to main); a pull request takes a group of its own so it cannot replace the
-# waiting one. The wait for `ci` is inside the group, so the run that is releasing is never
-# replaced.
-concurrency:
-  group: release-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}
-  cancel-in-progress: false
+# No concurrency group, on purpose: GitHub keeps one waiting run per group and cancels the
+# older waiting one, so a group would drop releases. The runs order their publishing and
+# deploying themselves (`turn`, above).
 
 env:
   CARGO_TERM_COLOR: always
@@ -136,8 +153,10 @@ env:
 
 jobs:
   # Waits for the jobs of the `ci` run of this commit, and passes only
-  # when they all succeeded or were skipped. It holds `actions: read` and nothing else,
-  # checks out nothing and runs no repository code. On a pull request it is skipped.
+  # when they all succeeded or were skipped. No job needs it to pass: the release does not wait
+  # for `ci` (the top of this file), and when `ci` fails this job fails and `release-red`
+  # reports it. It holds `actions: read` and nothing else, checks out nothing and runs no
+  # repository code. On a pull request it is skipped.
   ci-passed:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
@@ -167,7 +186,7 @@ jobs:
             else
               failed=$((failed + 1))
               if [ "$failed" -ge 10 ]; then
-                echo "::error::reading the ci runs of $COMMIT failed $failed times in a row; nothing is released"
+                echo "::error::reading the ci runs of $COMMIT failed $failed times in a row; release-red reports it"
                 exit 1
               fi
               echo "::warning::reading the ci runs failed ($failed in a row); trying again"
@@ -181,7 +200,7 @@ jobs:
               # A job that failed, was cancelled or timed out fails the release at once, even
               # while the others still run.
               if [ -n "$bad" ]; then
-                echo "::error::ci did not pass for $COMMIT: $bad, $url; nothing is released"
+                echo "::error::ci did not pass for $COMMIT: $bad, $url; release-red reports it"
                 exit 1
               fi
               if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
@@ -189,7 +208,7 @@ jobs:
                 exit 0
               fi
               if [ "$status" = completed ]; then
-                echo "::error::ci did not pass for $COMMIT: no job in the run, $url; nothing is released"
+                echo "::error::ci did not pass for $COMMIT: no job in the run, $url; release-red reports it"
                 exit 1
               fi
               echo "ci is $status: $url ($pending of $total jobs still to finish)"
@@ -199,10 +218,8 @@ jobs:
 
   # Whether to release, and as which version (crates/xtask, `release plan`).
   plan:
-    # The wait passed, for a push to main; or a pull request (a dry run, which skips the
-    # wait).
-    needs: [ci-passed]
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (needs.ci-passed.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    # A push to main, at once (it does not wait for `ci`); or a pull request (a dry run).
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -239,8 +256,7 @@ jobs:
   # artifacts.yml then holds only its own (only `attest` holds the two writes).
   artifacts:
     needs: [plan]
-    # `!cancelled()`: a skipped job upstream would otherwise skip this one. A push only: a
-    # pull request builds nothing here (its dry run is `plan`), since the build legs include
+    # A push only: a pull request builds nothing here (its dry run is `plan`), since the build legs include
     # arm64 and macOS runners, which no pull request starts.
     if: ${{ !cancelled() && github.event_name == 'push' && needs.plan.outputs.release == 'true' }}
     permissions:
@@ -251,8 +267,108 @@ jobs:
     with:
       version: ${{ needs.plan.outputs.version }}
 
+  # The unit tests of the deploy path: the workspace's tests, those `ci`'s `test` job runs with
+  # `cargo test --workspace` (not its `--ignored` live steps, and not the privileged, live and
+  # coverage jobs of `ci`, which do not gate the release), under cargo-nextest in four shards on
+  # four runners, beside the build. It starts at the push, without waiting for `plan`, so it is
+  # not after anything on the clock; `turn`, and so `publish`, needs every shard to pass. Like
+  # `test` it has a Postgres service (js-state's tests fail without it) and restores the Cargo
+  # cache that `test` saves on main, read-only: this job saves none. nextest runs no doctests;
+  # `ci` does. It holds `contents: read` alone and writes nothing that ships.
+  unit-tests:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      # Every shard runs to the end, so one failing test does not hide the others'.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      postgres:
+        image: postgres@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545
+        env:
+          POSTGRES_PASSWORD: js-ci-throwaway
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      KBF_TEST_POSTGRES_URL: postgres://postgres:js-ci-throwaway@127.0.0.1:5432/postgres
+      NEXTEST_VERSION: 0.9.146
+      NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-test-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-test-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: nextest-cache
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
+          key: pinned-cargo-nextest-${{ env.NEXTEST_VERSION }}-${{ env.NEXTEST_SHA256 }}
+      - name: Install cargo-nextest (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$NEXTEST_SHA256" --cache "$RUNNER_TEMP/pinned/cargo-nextest.tar.gz" --out "$HOME/.cargo/bin/cargo-nextest" --extract tar.gz --member cargo-nextest
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.nextest-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
+          key: ${{ steps.nextest-cache.outputs.cache-primary-key }}
+      # Every package Cargo.lock names, for every platform, before any test runs: tests such as
+      # xtask's spawn_sites run `cargo tree --target all --offline`, which reads them from the
+      # registry, and with the tests split over shards no earlier test in the same job fetches
+      # the rest (as in `ci`'s coverage shards).
+      - run: cargo fetch --locked
+      - name: Run this shard's unit tests
+        run: cargo nextest run --workspace --locked --no-fail-fast --partition "slice:${{ matrix.shard }}/${{ strategy.job-total }}"
+
+  # Takes this run's turn at publishing and deploying (`cargo xtask release turn`,
+  # crates/xtask/src/release/turn.rs): it waits while an older run of this workflow holds the
+  # turn (from its `turn` until its `deployed` has ended), and answers `go=false` when a newer
+  # run has reached its turn or a newer release is published, so `publish` and everything after
+  # it are skipped and only the newest of several waiting runs deploys. It runs after the build
+  # and the unit tests passed, so a run that fails them never holds the turn. It runs the `xtask`
+  # of `deploy-tool` with `actions: read` (the runs and their jobs) and `contents: read` (the
+  # releases), and no repository code it compiled.
+  turn:
+    needs: [plan, artifacts, unit-tests, deploy-tool]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      go: ${{ steps.turn.outputs.go }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deploy-tool
+          path: tool
+      - run: chmod +x tool/xtask
+      - name: Wait for this run's turn, or learn that a newer run takes it
+        id: turn
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: tool/xtask release turn --repo "$REPO" --workflow release.yml --run-number "$GITHUB_RUN_NUMBER" --version "$VERSION" --output "$GITHUB_OUTPUT"
+
   # Creates the release with the files artifacts.yml built, attested and verified, then
-  # publishes it, which creates the tag.
+  # publishes it, which creates the tag. Only when the unit tests passed and `turn` said
+  # `go=true`; when it said `go=false` (superseded) this job and every job that needs it are
+  # skipped, and the run ends green.
   # Nothing is rebuilt. The release starts as a draft for this version (tag_name and
   # target_commitish the commit), every file is uploaded to it, and one last call
   # publishes it: a failed upload leaves a draft and no tag, and a re-run continues the
@@ -269,8 +385,8 @@ jobs:
   # repository code (see the top of this file), so its decisions stay in the few lines
   # below. Nothing here is covered by a test; the dry run checks the file parses.
   publish:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
-    needs: [plan, artifacts]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.turn.outputs.go == 'true' }}
+    needs: [plan, artifacts, unit-tests, turn]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -424,10 +540,15 @@ jobs:
 
   # The beta stage: the platforms other than Linux x86_64, on the hosted macOS runners, after
   # `artifacts` and in parallel with `publish` and everything after it (none of those needs
-  # these jobs). A push to main only; a pull request runs none of them. Each job calls a
-  # workflow that holds `contents: read` alone. None of them is given a secret: the package's
-  # `sign` job, which this call asks for (`sign: true`, on a push to main), takes the secrets
-  # of its own environment `pkg-signing`, and skips itself with a notice when they are not set.
+  # these jobs, but `pkg-upload` and so `desired` wait for `beta-macos-pkg` to end, pass or
+  # fail, since the package goes into the deploy's targets). A push to main only; a pull
+  # request runs none of them. Each job calls a workflow that holds `contents: read` alone.
+  # Only `beta-macos-pkg` is given secrets (`secrets: inherit`), since a called workflow sees
+  # none of the caller's repository or organization secrets otherwise: in
+  # js-agent-macos-pkg.yml only the `sign` job, which this call asks for (`sign: true`, on a
+  # push to main), names them, in the environment `pkg-signing`, and it skips itself with a
+  # notice when they are not set. crates/xtask/tests/release_workflow/secrets.rs checks each
+  # call against this rule.
   beta-macos:
     needs: [plan, artifacts]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
@@ -444,6 +565,7 @@ jobs:
     with:
       version: ${{ needs.plan.outputs.version }}
       sign: true
+    secrets: inherit
 
   beta-macos-probe:
     needs: [plan, artifacts]
@@ -498,16 +620,19 @@ jobs:
           done
 
   # Puts the signed js-agent package of macOS in the package repository, under
-  # `pkg/jobscheduler/<version>/` (the one prefix the publish role may write there), after the
-  # three beta jobs and `publish` passed (`promote-macos` needs all of them). hostkeeper-desired.yml
-  # then adds the package to the release's targets when its SHA256SUMS is there. Like the apt jobs
-  # it runs the `xtask` of `deploy-tool` with the role of the environment `apt-publish`, compiles
-  # nothing, ends green and writes nothing without the settings of that environment (`channels
-  # gate`), and runs for a push to main only. A release whose package was not signed (the
-  # `pkg-signing` environment is not set up) uploads nothing.
+  # `pkg/jobscheduler/<version>/` (the one prefix the publish role may write there), once
+  # `publish` passed and `beta-macos-pkg` has ended, whatever its result: it is part of the
+  # deploy, which waits for no test of the beta stage. hostkeeper-desired.yml then adds the
+  # package to the release's targets when its SHA256SUMS is there; the targets of a version are
+  # fixed by its first set, so the package has to be there before `desired`, or hosts on macOS
+  # never get the version. Like the apt jobs it runs the `xtask` of `deploy-tool` with the role of
+  # the environment `apt-publish`, compiles nothing, ends green and writes nothing without the
+  # settings of that environment (`channels gate`), and runs for a push to main only. A release
+  # whose package was not built or not signed (the `pkg-signing` environment is not set up)
+  # uploads nothing, and the release is deployed to the Linux hosts alone.
   pkg-upload:
-    needs: [plan, deploy-tool, promote-macos]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    needs: [plan, deploy-tool, publish, beta-macos-pkg]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -1915,3 +2040,127 @@ jobs:
           APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
           APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
         run: tool/xtask channels apt write --suite stable --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/apt-next" --no-pool --last --output "$GITHUB_OUTPUT"
+
+  # Starts hostkeeper-desired.yml for this release, which sets it as hostkeeper's desired version
+  # of js-agent (its `workflow_dispatch` with `version`: the coordinator's allow-list admits that
+  # event; a call from this run would carry the event `push`, which it does not). Only once the
+  # suite `stable` lists the release (one of the stable writes reported no conflict, which also
+  # means the apt jobs are on), after `pkg-upload` has ended (its package is in the targets the
+  # first set fixes), when `turn` gave this run the turn, and while JS_AGENT_SETS_DESIRED is
+  # `true` (hostkeeper-desired.yml is off otherwise). It does not wait for that workflow, which
+  # takes about two minutes; a newer run starts its own after this one, in turn. It first checks
+  # that the release is still the newest published one: a re-run of the failed jobs of an older
+  # run keeps that run's `turn` (and its `go=true`), and must not move the farm back to an older
+  # version, so when a newer release exists it starts nothing and says so. It holds
+  # `actions: write`, to start the workflow, and `contents: read`, to list the releases, and runs
+  # `gh` only.
+  desired:
+    needs: [plan, turn, pkg-upload, stable-apt-write, stable-apt-write-2, stable-apt-write-3]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.turn.outputs.go == 'true' && vars.JS_AGENT_SETS_DESIRED == 'true' && (needs.stable-apt-write.outputs.conflict == 'false' || needs.stable-apt-write-2.outputs.conflict == 'false' || needs.stable-apt-write-3.outputs.conflict == 'false') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - name: Check that this release is the newest published one
+        id: newest
+        run: |
+          set -euo pipefail
+          newest="$(gh api --paginate "repos/$REPO/releases" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))' | sort -V | tail -n 1)"
+          if [ "$newest" = "v$VERSION" ]; then
+            echo "newest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$newest is published, newer than v$VERSION: hostkeeper-desired.yml is not started for v$VERSION"
+            echo "newest=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Start hostkeeper-desired.yml for this release
+        if: ${{ steps.newest.outputs.newest == 'true' }}
+        run: gh workflow run hostkeeper-desired.yml --repo "$REPO" --ref main -f version="$VERSION"
+
+  # The end of this run's publish and deploy jobs, whatever their results: `turn` of a newer run
+  # waits for this job of every older run that holds the turn. `always()`, so it ends when they
+  # failed, were skipped or the run was cancelled. It holds nothing and does nothing else.
+  deployed:
+    needs: [turn, publish, gamma, cp-deploy, pkg-upload, desired, stable-apt-write, stable-apt-write-2, stable-apt-write-3]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - run: echo "the publish and deploy jobs of this run have ended"
+
+  # A job of this run on main failed: the deploy path, `ci-passed` (the `ci` run of the commit)
+  # or the beta stage (`failure()` looks at every job these need, and every job those need).
+  # Opens an issue titled `RELEASE-RED: jobscheduler <first failing job> failed on main at <commit>`
+  # with the label `main-red`, whose body has a `Run:`, a `Head:` and up to five `Failing:` lines,
+  # or comments the same lines on the RELEASE-RED issue that is open. It holds `issues: write`
+  # and `actions: read` and runs `gh` only.
+  release-red:
+    needs: [ci-passed, unit-tests, deployed, beta-macos, beta-macos-probe, promote-macos]
+    if: ${{ failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open a RELEASE-RED issue, or comment on the one that is open
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          failing="$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name')"
+          first="$(head -n 1 <<< "$failing")"
+          {
+            echo "Run: $RUN_URL"
+            echo "Head: $COMMIT"
+            head -n 5 <<< "$failing" | sed 's/^/Failing: /'
+          } > "$RUNNER_TEMP/body.md"
+          gh label create main-red --repo "$REPO" --color b60205 --description "A run on main is red" --force
+          open="$(gh issue list --repo "$REPO" --label main-red --state open --json number,title --jq '[.[] | select(.title | startswith("RELEASE-RED: jobscheduler"))] | first | .number // empty')"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$REPO" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --repo "$REPO" --label main-red --title "RELEASE-RED: jobscheduler ${first:-a job} failed on main at ${COMMIT:0:12}" --body-file "$RUNNER_TEMP/body.md"
+          fi
+
+  # A run that released (plan said so) in which no job failed or was cancelled: every suite that
+  # ran on this commit passed. When the commit is still the tip of main, the RELEASE-RED issues
+  # that are open are closed, each with a comment naming the commit and the run; when main has
+  # moved on, a newer run may have opened them, so nothing is closed (the newer run's own green
+  # closes them). Same permissions as `release-red`, `gh` only.
+  release-green:
+    needs: [plan, ci-passed, unit-tests, deployed, beta-macos, beta-macos-probe, promote-macos]
+    if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Close the RELEASE-RED issues that are open
+        run: |
+          set -euo pipefail
+          tip="$(gh api "repos/$REPO/commits/main" --jq .sha)"
+          if [ "$tip" != "$COMMIT" ]; then
+            echo "::notice::main is at $tip, past $COMMIT: the RELEASE-RED issues are left to the run of the newer commit"
+            exit 0
+          fi
+          open="$(gh issue list --repo "$REPO" --label main-red --state open --json number,title --jq '.[] | select(.title | startswith("RELEASE-RED: jobscheduler")) | .number')"
+          for number in $open; do
+            gh issue close "$number" --repo "$REPO" --comment "Fixed: every job of the release run at $COMMIT passed or was skipped ($RUN_URL)."
+          done

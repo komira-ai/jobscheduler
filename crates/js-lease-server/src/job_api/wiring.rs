@@ -5,8 +5,9 @@
 //! the context it needs, one builder call per group. A group task whose calls the server
 //! serves adds its `with_<group>` line here when the server handles that group's context
 //! needs exist. Today the read group's is (it reads host silence from the registry), the
-//! submit group's (the ceiling on a job's wall limit, and admission over the registry's hosts
-//! and the pool's launching providers), the fleet group's (the server's hosts and their
+//! submit group's (the ceiling on a job's wall limit, admission over the registry's hosts
+//! and the pool's launching providers, and the agent side whose pass places a job with nothing
+//! ahead of it in the call), the fleet group's (the server's hosts and their
 //! cordons, the status of its pools, the usage sink's ended bookings, none with
 //! `--usage-off`, and the job store's records of jobs' allocations), and the logs group's (the log store of the `[logs]` table, built before
 //! the configuration is consumed). The cancel group needs nothing but the tables.
@@ -47,7 +48,7 @@ use crate::status::Status;
 /// (`cargo xtask gen-job-surface` writes that text), and a test of this file sends every call
 /// to the service `from_server` builds and fails when one answers otherwise than this list
 /// says.
-pub const SERVED_CALLS: [Rpc; 12] = [
+pub const SERVED_CALLS: [Rpc; 13] = [
     Rpc::SubmitJob,
     Rpc::GetJob,
     Rpc::ListJobs,
@@ -57,6 +58,7 @@ pub const SERVED_CALLS: [Rpc; 12] = [
     Rpc::ListHosts,
     Rpc::CordonHost,
     Rpc::UncordonHost,
+    Rpc::ClearHostTaint,
     Rpc::ListPools,
     Rpc::ListProviders,
     Rpc::GetUsage,
@@ -76,6 +78,7 @@ pub(crate) fn from_server(
     let read = read::Ctx::default().with_silence(silence);
     let admission = JobAdmission::new(state.admit().clone(), agents.registry.clone());
     let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
+    let submit = submit.placing(Arc::clone(agents));
     let shared: Arc<Shared> = Arc::clone(state);
     let hosts: Arc<dyn Hosts> = shared;
     let pools: Arc<dyn Pools> = match state.pools() {

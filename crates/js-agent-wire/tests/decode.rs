@@ -188,6 +188,7 @@ fn unknown_fields_ignored_everywhere() {
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
         log_grant: None,
+        beat_now: false,
     };
     let mut body = with_unknown(&reply, &[]);
     body["commands"][0]["field_from_the_future"] = json!(true);

@@ -48,11 +48,13 @@ fn spec() -> SubmitSpec {
         os: None,
         arch: None,
         isa_level: None,
+        os_version: None,
         exec: None,
         accelerator: None,
         network: JobNetwork::None,
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     };
     SubmitSpec::new(
         "submit-1",

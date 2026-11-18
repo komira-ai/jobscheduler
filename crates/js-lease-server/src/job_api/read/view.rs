@@ -8,7 +8,7 @@
 //!   list's first item, and the rest of the list goes before the arguments, so a command of
 //!   one item (what a submit records) reads back as it was given.
 //! - A file's contents are secret: every file is named, with empty contents.
-//! - The record keeps the ISA level and the accelerator a submit was given among its
+//! - The record keeps the ISA level, the least operating-system version and the accelerator a submit was given among its
 //!   capabilities, under the keys a lease request uses (`validate.rs`): they are shown in
 //!   their fields. Any other capability has no field and is not shown.
 //! - The host silence of a job (`host_silent_since_ms`) is not in the record: it is left
@@ -21,6 +21,9 @@
 //!   the job is queued, and on a job past the queue only when it is `placed`: a job that ended
 //!   without being placed shows none, since its last wait no longer holds ([`queue_status`]).
 //!   Its attempts and events are shown in every state.
+//! - A layer or a mount from a provider shows its provider's name and its ref as recorded; the
+//!   `mount-provider.<name>` capabilities a submit records beside them have no field and are not
+//!   shown.
 //! - A job without an image (a root of layers alone) shows an empty image.
 //! - The record keeps every mode, propagation and protocol of a job's mounts and host ports
 //!   in its explicit form, and every host port's job port, as a submit recorded them: they are
@@ -40,7 +43,8 @@ use js_proto::v1;
 use js_state::StoreTime;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
-    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ExecMode, JobEventKind, QueueCode,
+    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ExecMode, JobEventKind,
+    OS_VERSION_KEY, QueueCode,
 };
 
 use crate::job_api::validate::ISA_LEVEL_KEY;
@@ -169,16 +173,34 @@ fn layer(layer: &Layer) -> v1::Layer {
     let source = match layer {
         Layer::HostPath { path } => v1::layer::Source::HostPath(path.clone()),
         Layer::Image { image } => v1::layer::Source::Image(image.clone()),
+        Layer::Provider {
+            provider,
+            reference,
+        } => v1::layer::Source::Provider(provider_source(provider, reference)),
     };
     v1::Layer {
         source: Some(source),
     }
 }
 
+/// A provider source as the job service shows it: the name and the ref as recorded.
+fn provider_source(provider: &str, reference: &str) -> v1::ProviderSource {
+    v1::ProviderSource {
+        provider: provider.to_owned(),
+        r#ref: reference.to_owned(),
+    }
+}
+
 /// A mount as the job service shows it: its mode and propagation explicit, an absent
 /// `sub_path` empty.
 fn mount(mount: &JobMount) -> v1::Mount {
-    let MountSource::HostPath { path } = &mount.source;
+    let source = match &mount.source {
+        MountSource::HostPath { path } => v1::mount::Source::HostPath(path.clone()),
+        MountSource::Provider {
+            provider,
+            reference,
+        } => v1::mount::Source::Provider(provider_source(provider, reference)),
+    };
     let mode = match mount.mode {
         MountMode::ReadOnly => v1::MountMode::ReadOnly,
         MountMode::ReadWrite => v1::MountMode::ReadWrite,
@@ -186,7 +208,7 @@ fn mount(mount: &JobMount) -> v1::Mount {
     };
     let Propagation::Private = mount.propagation;
     v1::Mount {
-        source: Some(v1::mount::Source::HostPath(path.clone())),
+        source: Some(source),
         target: mount.target.clone(),
         mode: mode.into(),
         sub_path: mount.sub_path.clone().unwrap_or_default(),
@@ -226,6 +248,7 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             arch: spec.constraints.arch.clone().unwrap_or_default(),
             exec: exec(spec.constraints.exec).into(),
             isa_level: capability(spec, ISA_LEVEL_KEY).unwrap_or_default(),
+            os_version: capability(spec, OS_VERSION_KEY).unwrap_or_default(),
             accelerator: accelerator(spec),
             isolation: isolation(spec.constraints.isolation).into(),
         }),

@@ -15,7 +15,8 @@ use axum::http::{Request, StatusCode};
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
     Accelerator, CancelJobRequest, Constraints, GetJobRequest, HostPort, JobFile, JobSpec, Layer,
-    ListJobsRequest, Mount, Needs, PortForward, SubmitJobRequest, SubmitJobResponse, layer, mount,
+    ListJobsRequest, Mount, Needs, PortForward, ProviderSource, SubmitJobRequest,
+    SubmitJobResponse, layer, mount,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use proptest::collection::{btree_map, vec};
@@ -149,13 +150,15 @@ fn constraints() -> impl Strategy<Value = Constraints> {
         text(),
         proptest::option::of(accelerator()),
         variant(3),
+        text(),
     )
         .prop_map(
-            |(os, arch, exec, isa_level, accelerator, isolation)| Constraints {
+            |(os, arch, exec, isa_level, accelerator, isolation, os_version)| Constraints {
                 os,
                 arch,
                 exec,
                 isa_level,
+                os_version,
                 accelerator,
                 isolation,
             },
@@ -172,17 +175,29 @@ fn host_port() -> impl Strategy<Value = HostPort> {
     )
 }
 
+fn provider_source() -> impl Strategy<Value = ProviderSource> {
+    (text(), text()).prop_map(|(provider, r#ref)| ProviderSource { provider, r#ref })
+}
+
 fn layer() -> impl Strategy<Value = Layer> {
     let source = prop_oneof![
         text().prop_map(layer::Source::HostPath),
         text().prop_map(layer::Source::Image),
+        provider_source().prop_map(layer::Source::Provider),
     ];
     proptest::option::of(source).prop_map(|source| Layer { source })
 }
 
+fn mount_source() -> impl Strategy<Value = mount::Source> {
+    prop_oneof![
+        text().prop_map(mount::Source::HostPath),
+        provider_source().prop_map(mount::Source::Provider),
+    ]
+}
+
 fn mount() -> impl Strategy<Value = Mount> {
     (
-        proptest::option::of(text().prop_map(mount::Source::HostPath)),
+        proptest::option::of(mount_source()),
         text(),
         variant(4),
         text(),

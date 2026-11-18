@@ -204,8 +204,8 @@ pub fn file_name(version: Version, platform: Platform) -> String {
 }
 
 /// The text of a js-agent binary that its `--version` is made of: the version, a newline and the
-/// start of the runtimes line (`js_agent::cli::LONG_VERSION`, whose runtimes line starts with
-/// `docker` on every platform). The binary holds no `js-agent <version>` as one piece of text:
+/// start of the runtimes line (`js_agent::platform::LONG_VERSION` of the Linux build, whose
+/// runtimes line starts with `docker`; the package is Linux's). The binary holds no `js-agent <version>` as one piece of text:
 /// clap puts the name before the version when it prints. The newline after the version keeps
 /// `1.2.30` from passing for `1.2.3`.
 #[must_use]

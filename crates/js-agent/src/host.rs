@@ -10,16 +10,17 @@ use js_agent_wire::{
 };
 
 use js_agent_wire::{HOST_JOBS_CAPABILITY, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
-use js_caps::{DETECTED_KEYS, DISK_GIB, REPORT_ONLY_KEYS};
+use js_caps::{DETECTED_KEYS, DISK_GIB, OS_VERSION, REPORT_ONLY_KEYS, is_mount_provider_key};
 use js_types::normalise_arch;
 
 use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
-use crate::cli::Cli;
+use crate::cli::{Cli, resolve_host_id};
 use crate::disk::{ImageReserve, image_budget_bytes, image_reserve_bytes};
 use crate::facts::{
     self, CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
 };
 use crate::identity;
+use crate::os_version;
 
 /// The hello, and what the operator should be told about how it was made.
 #[derive(Debug)]
@@ -58,7 +59,8 @@ fn class(
 /// The capabilities to report: the operator's, and `os` and `arch` as detected, the
 /// architecture in the one spelling (`arm64`, never `aarch64`). The keys of the host
 /// contract and the network ceiling (`egress`, `egress-ports`) are detected too and cannot be
-/// given.
+/// given, nor can `mount-provider.<name>`: a host reports the providers its `--mount-provider`
+/// flags name.
 fn capabilities(
     platform: &Platform,
     given: &[(String, String)],
@@ -73,6 +75,7 @@ fn capabilities(
                 | EGRESS_CAPABILITY
                 | EGRESS_PORTS_CAPABILITY
         ) || DETECTED_KEYS.contains(key)
+            || is_mount_provider_key(key)
             || REPORT_ONLY_KEYS.contains(key)
     });
     match clash {
@@ -116,7 +119,7 @@ pub fn offered_disk_bytes(free: u64, low_water_gib: Option<u64>) -> u64 {
 /// value of 0 leaves nothing out here; the runtime's flags refuse it) or without
 /// `--scratch-root`.
 fn image_reserve(cli: &Cli) -> Option<(u64, Option<String>)> {
-    let budget = image_budget_bytes(cli.image_budget_gib).ok().flatten();
+    let budget = image_budget_bytes(cli.os.image_budget_gib()).ok().flatten();
     let root = cli.scratch_root.as_deref()?;
     ImageReserve::of(budget, root)
         .as_ref()
@@ -162,8 +165,9 @@ fn id(
     runner: &dyn CommandRunner,
     files: &dyn FileReader,
 ) -> Result<String, String> {
-    match &cli.host_id {
-        Some(id) => Ok(id.clone()),
+    let euid = rustix::process::geteuid().as_raw();
+    match resolve_host_id(cli, euid, &|path| files.facts(path)).map_err(|why| why.to_string())? {
+        Some(id) => Ok(id),
         None => machine_id(platform, runner, files)
             .map(|machine| host_id(&machine))
             .map_err(|why| format!("cannot read the machine id ({why}); pass --host-id")),
@@ -202,7 +206,8 @@ pub struct StoreView<'a> {
     pub long_values: bool,
 }
 
-/// Detects the host and applies the flags. A host that has a bundle store (`store`) also
+/// Detects the host and applies the flags. A Mac also reports its operating system's major
+/// version as `os_version` (read by the `os_version` module). A host that has a bundle store (`store`) also
 /// reports `bundle-root` and `bundle` (see [`crate::bundle`]), and the disk it offers (the
 /// shape's `disk_bytes` and `disk-gib`) leaves out the unused part of the store's budget:
 /// `floor((free - max(0, budget - used) - low_water) / GiB)`.
@@ -226,6 +231,8 @@ pub fn offer(
     let memory_bytes = capped("--memory-bytes", cli.memory_bytes, detected.memory_bytes)?;
     let gpu_class = class(cli.gpu_class.clone(), gpus, detected.gpus.class)?;
     let mut capabilities = capabilities(platform, &cli.capabilities)?;
+    let (os_version, os_version_warning) = os_version::report(platform, runner);
+    capabilities.extend(os_version.map(|major| (OS_VERSION.to_owned(), major)));
     if cli.scratch_low_water_gib.is_some() && cli.scratch_root.is_none() {
         return Err("--scratch-low-water-gib: needs --scratch-root".to_owned());
     }
@@ -289,6 +296,7 @@ pub fn offer(
         warnings: detected
             .warnings
             .into_iter()
+            .chain(os_version_warning)
             .chain(disk_warning)
             .chain(reserve_warning.flatten())
             .chain(image_warning.flatten())

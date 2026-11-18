@@ -97,6 +97,14 @@
 //! the native body. A start named by its image without a `run`, or on a runtime with no
 //! store, is refused `image-unsupported-here`.
 //!
+//! A job start's mounts of host paths (`docs/design/job-rootfs.md` 5.1, 5.2, 5.4; `native/mounts.rs`)
+//! are links `exec/<rest>` for a target `/work/<rest>`, made before the run's first process,
+//! with a read grant (and a write grant when read-write) of the canonical host path in its profile,
+//! an exec deny for a `no_exec` mount, and every mount root a read deny of every run. Layers,
+//! copy-on-write mounts, targets outside or at `/work` and a remapped host port are refused at
+//! admission; a host port at its own number is refused by the lifecycle (this runtime offers none).
+//! A `cwd` at or below a mount's link leaves `exec/` and fails the start (`native/cwd.rs`).
+//!
 //! # Stops and deadlines
 //!
 //! [`Runtime::stop`] is the helper's `stop`: `SIGTERM` to the run's process group, and
@@ -136,6 +144,7 @@ mod env;
 mod files;
 mod journal;
 mod logs;
+mod mounts;
 mod network;
 mod outputs;
 mod pf;
@@ -156,7 +165,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use js_agent_wire::{
-    BUNDLE_PROGRAM_PREFIX, InputRef, LogReport, LogTail, NativeSpec, OutputSpec, refusal,
+    BUNDLE_PROGRAM_PREFIX, HostPort, InputRef, LogReport, LogTail, NativeSpec, OutputSpec, refusal,
 };
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
@@ -168,13 +177,14 @@ use js_types::LeaseId;
 use crate::bundle::{Pinned, Placer};
 use crate::egress::NetworkRefusal;
 use crate::lifecycle::{
-    Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, check_run_env,
+    Body, CheckFinding, CheckHook, Exit, Finished, Found, FsPrepared, JobFs, NativeRefusal,
+    RunHandle, RunSpec, Runtime, RuntimeError, Status, check_run_env,
 };
 use crate::logs::{LiveLogs, RunLogs};
 
 pub use files::HandOver;
 pub use journal::{Journal, RunRecord};
+pub use mounts::{MountRoot, roots_of};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
 pub use profile::{profile_argv, self_test};
@@ -194,8 +204,12 @@ pub struct NativeConfig {
     pub network: Ceiling,
     /// The directories a start's program must lie under.
     pub tool_roots: Vec<PathBuf>,
-    /// Paths no run may read, such as the agent's state and scratch roots.
+    /// Paths no run may read, such as the agent's state and scratch roots, and every mount
+    /// root: a run reads only the mounts it was given.
     pub read_denies: Vec<AbsPath>,
+    /// The roots a job's mounts must lie beneath once their links are followed
+    /// (`--mount-root`, `--mount-root-ro`), canonical; also in `read_denies`.
+    pub mount_roots: Vec<MountRoot>,
     /// Which reads the profile permits. The runtime builds no grants, so only
     /// [`ReadModel::Open`] gives a profile; with the other every start fails.
     pub read_model: ReadModel,
@@ -271,6 +285,9 @@ pub struct NativeRuntime {
     term: u64,
     next: u64,
     runs: BTreeMap<String, Run>,
+    /// The mounts of the job starts whose file system was resolved, by run id, until their
+    /// start takes them (`native/mounts.rs`).
+    plans: mounts::Plans,
     /// The bundle store, on an agent that has one.
     bundles: Option<Arc<Placer>>,
     journal: Journal,
@@ -349,6 +366,7 @@ impl NativeRuntime {
             term,
             next: 0,
             runs: BTreeMap::new(),
+            plans: BTreeMap::new(),
             bundles: None,
             journal,
             reset_needed: false,
@@ -442,7 +460,7 @@ impl NativeRuntime {
         spec: &RunSpec,
         native: &NativeSpec,
         (id, lease, uid): (LeaseId, &str, u32),
-        pinned: Option<Pinned>,
+        (pinned, plans): (Option<Pinned>, &[mounts::MountPlan]),
     ) -> Result<Run, RuntimeError> {
         let home = self.config.homes.join(user_name(id));
         let (exec, tmp) = (home.join("exec"), home.join("tmp"));
@@ -456,6 +474,8 @@ impl NativeRuntime {
         let make = |path: &Path| make_dir(path, uid).map(drop);
         files::stage_inputs(&exec, &spec.mounts, uid, (&self.hand_over, &make))
             .map_err(|why| fail(&"an input", &why))?;
+        mounts::link_all(plans, &exec, uid, (&self.hand_over, &make))
+            .map_err(|why| fail(&"a mount", &why))?;
         let cwd = cwd::open(&exec, &native.cwd, &make)
             .map_err(|why| RuntimeError::new(why.to_string()))?;
         let (native, mut env) = match &pinned {
@@ -485,10 +505,12 @@ impl NativeRuntime {
                     .iter()
                     .map(|input| ("an input", files::input_dest(&exec, input))),
             )
+            .chain(mounts::read_only_links(plans, &exec))
             .collect();
         // The job start's environment last, over the agent's: its values win.
         let env = env::with_job(env, &spec.env);
-        let argv = profile::argv_of(&self.config, &native, &home, &read_only)?;
+        let grants = mounts::grants(plans);
+        let argv = profile::argv_of(&self.config, &native, &home, (&read_only, &grants))?;
         let logs = logs::open(&spec.scratch).map_err(RuntimeError::new)?;
         let fds = [
             logs[0].as_fd(),
@@ -682,7 +704,8 @@ impl Runtime for NativeRuntime {
                 return Err(with_problems(fail(&"user-create", &why), &problems));
             }
         };
-        match self.launch(spec, native, (id, &lease, uid), pinned) {
+        let plans = self.plans.remove(&spec.run_id).unwrap_or_default();
+        match self.launch(spec, native, (id, &lease, uid), (pinned, &plans)) {
             Ok(run) => {
                 self.runs.insert(lease.clone(), run);
                 Ok(RunHandle(lease))
@@ -839,6 +862,24 @@ impl Runtime for NativeRuntime {
             code: refusal::IMAGE_UNSUPPORTED_HERE,
             why: "this agent runs an image only as a bundle, with a run".to_owned(),
         })
+    }
+
+    /// Mounts of host paths, as links in `exec/` (`native/mounts.rs`); layers are refused.
+    fn layered_rootfs(&self) -> bool {
+        true
+    }
+
+    fn check_job_fs(&self, fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRefusal> {
+        mounts::check(fs, host_ports)
+    }
+
+    fn resolve_fs(&mut self, run_id: &str, _image: &str, fs: &JobFs, _now_ms: u64) -> FsPrepared {
+        mounts::resolve(&self.config.mount_roots, &mut self.plans, run_id, fs)
+    }
+
+    fn discard_fs(&mut self, run_id: &str) -> Result<(), RuntimeError> {
+        self.plans.remove(run_id);
+        Ok(())
     }
 
     /// With a bundle store, the image of a start with a `run` is the bundle it runs from.

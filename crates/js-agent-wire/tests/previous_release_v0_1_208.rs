@@ -377,3 +377,32 @@ fn the_v0_1_208_structs_read_the_v0_1_208_reply() {
     assert_eq!(old.result_acks[1].ack, previous::Ack::UnknownLease);
     assert_eq!(old.job_acks[0].ack, previous::Ack::Accepted);
 }
+
+/// Asserts that a held reply of this version, which carries a job start and `beat_now`,
+/// decodes with the copy of that release's structs with the start intact and the field
+/// skipped, and that the release's own reply, which has no `beat_now`, reads as `false` here.
+/// It catches a `beat_now` an old agent would refuse the reply over (a server only sets it for
+/// an agent that reported `held-beat`, but a reply must stay readable either way), and a
+/// default that would make a new agent beat at once against a server that never holds.
+#[test]
+fn a_held_reply_reads_in_the_v0_1_208_structs_and_an_old_reply_is_not_held() {
+    let sent: HeartbeatReply = serde_json::from_value(fixture(REPLY)).unwrap();
+    assert!(!sent.beat_now);
+    let start = sent
+        .commands
+        .into_iter()
+        .filter(|command| matches!(command, Command::JobStart(_)))
+        .collect();
+    let held = HeartbeatReply {
+        commands: start,
+        beat_now: true,
+        ..HeartbeatReply::default()
+    };
+    let wire = serde_json::to_value(&held).unwrap();
+    assert_eq!(wire["beat_now"], Value::Bool(true));
+    let old: previous::HeartbeatReply = serde_json::from_value(wire).unwrap();
+    assert_eq!(old.commands.len(), 1);
+    assert!(
+        matches!(&old.commands[0], previous::Command::JobStart(spec) if spec.job_id == "job-3")
+    );
+}

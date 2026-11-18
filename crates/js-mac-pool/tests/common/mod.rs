@@ -117,6 +117,7 @@ pub fn layout() -> SlotLayout {
             path("/Volumes/work/state"),
             path("/Library/Keychains/System.keychain"),
         ],
+        mounts: vec![],
     }
 }
 

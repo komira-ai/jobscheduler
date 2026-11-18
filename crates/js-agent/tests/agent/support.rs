@@ -92,6 +92,7 @@ pub const NVIDIA_CMD: &str = "/usr/bin/nvidia-smi --query-gpu=index,uuid,name,me
 pub const PROFILER_CMD: &str = "/usr/sbin/system_profiler SPDisplaysDataType -json";
 pub const CPU_CMD: &str = "/usr/bin/getconf _NPROCESSORS_ONLN";
 pub const MEMSIZE_CMD: &str = "/usr/sbin/sysctl -n hw.memsize";
+pub const OS_VERSION_CMD: &str = "/usr/sbin/sysctl -n kern.osproductversion";
 pub const IOREG_CMD: &str = "/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice";
 
 /// `nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv,noheader,nounits` on
@@ -209,6 +210,8 @@ impl CommandRunner for FakeCommands {
 pub struct FakeFiles {
     files: BTreeMap<String, String>,
     links: BTreeMap<String, String>,
+    /// What the files read for their owner and mode (`--host-id-from-facts`) are.
+    facts: BTreeMap<String, js_agent::flags_file::FileFacts>,
     /// Paths under a prefix share a device.
     devices: Vec<(PathBuf, u64)>,
     /// Paths under a prefix cannot be looked at.
@@ -219,6 +222,13 @@ pub struct FakeFiles {
 impl FakeFiles {
     pub fn with(mut self, path: &str, text: &str) -> Self {
         self.files.insert(path.to_owned(), text.to_owned());
+        self
+    }
+
+    /// The file at `path` is what `facts` says (as a facts file is read, with its owner and
+    /// mode).
+    pub fn with_facts(mut self, path: &str, facts: js_agent::flags_file::FileFacts) -> Self {
+        self.facts.insert(path.to_owned(), facts);
         self
     }
 
@@ -235,6 +245,7 @@ impl FakeFiles {
     }
 
     /// The link at `path` cannot be read.
+    #[cfg(target_os = "linux")]
     pub fn without_link(mut self, path: &str) -> Self {
         self.links.remove(path);
         self
@@ -261,6 +272,13 @@ impl FakeFiles {
 }
 
 impl FileReader for FakeFiles {
+    fn facts(&self, path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
+        self.facts
+            .get(path.to_string_lossy().as_ref())
+            .cloned()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+
     fn read(&self, path: &str) -> Result<String, String> {
         self.files
             .get(path)
@@ -358,6 +376,7 @@ pub fn mac_host() -> Host {
         commands: FakeCommands::default()
             .with(CPU_CMD, Ok("10\n"))
             .with(MEMSIZE_CMD, Ok("17179869184\n"))
+            .with(OS_VERSION_CMD, Ok("26.1\n"))
             .with(PROFILER_CMD, Ok(APPLE_M2))
             .with(IOREG_CMD, Ok(&ioreg())),
         files: FakeFiles::default(),
@@ -665,23 +684,27 @@ pub fn run_on(
     )
 }
 
-/// `--runtime none` for the arguments of an agent start that names no runtime: no `--runtime`,
-/// no `--container-bin` and no `--native-*` flag (a verb, which comes first, gets nothing). A
-/// Linux agent given no `--runtime` runs `crun`, its default; the tests written for the agent
-/// that runs no job name that agent with `--runtime none`, and the tests of the default start
-/// through `run_defaulted` (built on Linux only) or [`run_on_defaulted`], which add nothing.
+/// `--no-jobs` for the arguments of an agent start that names no runtime of this build: no
+/// `--no-jobs`, no `--allow-container-engine` or `--container-bin` (Linux), no `--native-*`
+/// flag (macOS), and no removed `--runtime` (a verb, which comes first, gets nothing). A Linux
+/// agent given none of them runs `crun`, its build's runtime, and a macOS one needs the native
+/// socket; the tests written for the agent that runs no job name that agent with `--no-jobs`,
+/// and the tests of the build's runtime go through `run_defaulted` (built on Linux only) or
+/// [`run_on_defaulted`], which add nothing.
 pub fn no_job_runtime(args: &[&str]) -> &'static [&'static str] {
     let start = args.first().is_some_and(|first| first.starts_with("--"));
     let names = args.iter().any(|arg| {
-        ["--runtime", "--container-bin", "--native-"]
-            .iter()
-            .any(|flag| arg.starts_with(flag))
+        [
+            "--no-jobs",
+            "--allow-container-engine",
+            "--container-bin",
+            "--native-",
+            "--runtime",
+        ]
+        .iter()
+        .any(|flag| arg.starts_with(flag))
     });
-    if start && !names {
-        &["--runtime", "none"]
-    } else {
-        &[]
-    }
+    if start && !names { &["--no-jobs"] } else { &[] }
 }
 
 /// [`run_on`] with the bundle store's host given.

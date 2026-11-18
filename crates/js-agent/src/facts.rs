@@ -60,6 +60,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::container;
+use crate::flags_file::{self, FileFacts};
 
 /// The GPU class an Apple GPU is reported under: the alias table's Apple family.
 pub const APPLE_GPU_CLASS: &str = js_caps::APPLE_M;
@@ -94,6 +95,10 @@ pub trait FileReader {
     /// Whether `path` is on a `tmpfs` (Linux; anywhere else, no), or the system's reason it
     /// cannot be looked at.
     fn is_tmpfs(&self, path: &Path) -> Result<bool, String>;
+
+    /// What is known of the file at `path` for a check of who may have written it (a link is
+    /// followed): the facts file of `--host-id-from-facts` is read through this.
+    fn facts(&self, path: &Path) -> io::Result<FileFacts>;
 }
 
 impl FileReader for Box<dyn FileReader> {
@@ -111,6 +116,10 @@ impl FileReader for Box<dyn FileReader> {
 
     fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
         (**self).is_tmpfs(path)
+    }
+
+    fn facts(&self, path: &Path) -> io::Result<FileFacts> {
+        (**self).facts(path)
     }
 }
 
@@ -464,6 +473,10 @@ impl FileReader for SystemFiles {
         std::fs::metadata(path)
             .map(|meta| meta.dev())
             .map_err(|err| format!("{}: {err}", path.display()))
+    }
+
+    fn facts(&self, path: &Path) -> io::Result<FileFacts> {
+        flags_file::read_system(path)
     }
 
     #[cfg(target_os = "linux")]

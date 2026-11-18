@@ -216,7 +216,8 @@ fn an_agent_that_does_not_run_or_a_release_without_one_is_refused_and_nothing_ch
 
 #[test]
 fn a_taint_is_checked_before_the_version_and_after_the_record() {
-    // Halting comes first: no version can repair a taint, so the agent is not even run.
+    // Halting comes first: no version can repair a taint the agent cannot clear (this one has no
+    // check), so the agent is not even run.
     let rig = Rig::new("hook-prepare-taint-first");
     rig.taint();
     let spy = Spy::new(&rig);
@@ -356,8 +357,8 @@ fn a_retry_of_zero_defers_with_retry_after_zero() {
     assert_eq!(line(&done)["retry_after_secs"], 0);
 }
 
-/// What a Mac build's `--version` prints (the second line is `cli::LONG_VERSION`'s).
-const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: docker native\n";
+/// What a Mac build's `--version` prints (the second line is `platform::LONG_VERSION`'s).
+const MAC_VERSION: &str = "js-agent 1.4.0\nruntimes: native\n";
 
 #[test]
 fn a_staged_mac_agent_passes_prepare_under_params_that_name_the_native_runtime() {

@@ -48,7 +48,7 @@ install changes nothing a running agent reads until hostkeeper restarts the unit
 
 ## What the host provides
 
-The agent's start check of `--runtime crun` (`js-agent-crun.service` exits 2 and
+The agent's start check of the crun runtime (`js-agent-crun.service` exits 2 and
 `journalctl -u js-agent-crun` lists each missing piece) needs more than the package carries. The
 package makes the job user and its subordinate ranges; the rest is the host's, and is placed before hostkeeper starts the
 unit, by `crun_host_setup.sh` (`docs/runbooks/crun-host-setup.md`), by the machine image, or by
@@ -103,6 +103,15 @@ skipped:
 that is not a regular file owned by root (or the user running the agent), is writable by group or
 others, or holds a line that is not a flag.
 
+A host that belongs to a host group does not name its id here: a host-group config package puts
+`--host-id-from-facts=/var/lib/hostkeeper/facts.json` in the flags file in place of `--host-id`
+(the two together are refused). The agent registers under the `host_id` of that file, which
+hostkeeper's daemon writes; the update hook reads the same file, so it finds the host under the
+same id. The facts file must be a regular file owned by root (or the user running the agent),
+not writable by group or others, at most 64 KiB, JSON with `"schema":1` and a `host_id` the hello
+accepts; a file that is missing or refused stops the agent (it never falls back to the machine
+id).
+
 The first install of a host defers (the hook reports `join_token_missing` and hostkeeper retries)
 until `/etc/js-agent/token` is a regular file, owned by root, mode 0600 or 0400. Place the
 files first, then let hostkeeper install `js-agent`.
@@ -151,6 +160,67 @@ files below `tree/` in that directory (`tree/usr/bin/js-agent`,
 `tree/usr/lib/systemd/system/js-agent-crun.service`), and the hook reads that layout; a directory
 without `tree/` is an archive release of the earlier format (`bin/js-agent`, `units/<unit>`),
 which the first update of a host that ran one still compares the units with.
+
+## Config packages: `js-agent config-hook`
+
+A host group's flags file and certificate come in a config package, `js-agent-config-<group>`,
+which installs `/etc/js-agent/flags` and the `ca.pem` the flags name and runs no service of its
+own. The agent reads its flags once, at its start, so the package's hook hands the new files
+over by restarting the agent. Its manifest names
+
+```
+"hook": {
+  "command": ["/usr/bin/js-agent", "config-hook"],
+  "timeoutSecs": {"prepare": "60", "cutover": "420", "verify": "300", "rollback": "420", "cleanup": "60", "uninstall": "60"}
+}
+```
+
+and hostkeeper runs `/usr/bin/js-agent config-hook <step> [<dir>] --params <file>`, with the same
+exit statuses, last line and lock as the update hook above. The installer has put the new files in
+place before `cutover`, and the previous version's back before `rollback`.
+
+- `prepare` reads and checks the params, and deletes the record an earlier update left when its
+  `cleanup` did not run, so the update it begins restarts the agent again.
+- `cutover` checks that the flags file now in place parses as the agent's flags and names a host
+  id (a facts file read included). If it does not, the step ends `bad_config` (reversible) with
+  nothing restarted, and hostkeeper rolls the files back. Otherwise it notes the session the lease
+  server shows for the host (none when the server does not know the host or shows it in no
+  session); a server that cannot be reached or refuses the question defers the step
+  (`lease_unreachable`, retried after 60 s) before anything is restarted. Then it stops the unit, waits for it to be down, starts it and waits
+  for it to be active. The restart is not preceded by a cordon or a drain: running jobs are
+  stopped as they are on any stop of the agent. A run after the restart was recorded does not
+  restart again.
+- `verify` waits until the unit is active and the lease server shows the host `live` in a session
+  other than the noted one: `no_hello` when none comes in `verify_timeout_secs` less 15 s,
+  `lease_unreachable` (class environment) when the server could not be asked, `start_failed` when
+  the unit is down.
+- `rollback` restarts the unit onto the previous files. With `/etc/js-agent/token` in place it also
+  waits up to 60 s for the agent's hello, and tells in its detail when none came: a missing hello
+  never fails a rollback. A `cutover` that restarted nothing leaves the unit alone.
+- `cleanup` deletes the hook's record once `verify` succeeded (`not_verified`, reversible,
+  before).
+- `uninstall` does nothing to the service: the files go with the package, and the agent keeps
+  running on what it read.
+
+`params` is a flat table of exactly these keys (the updater's `updater.*` keys are ignored, any
+other key is refused; paths are absolute and plain):
+
+```
+unit = "js-agent-crun.service"
+flags_file = "/etc/js-agent/flags"
+token_file = "/etc/js-agent/token"
+state_root = "/var/lib/js-agent/state"
+state_dir = "/var/lib/js-agent-config"
+cutover_timeout_secs = 420
+verify_timeout_secs = 300
+rollback_timeout_secs = 420
+```
+
+`state_dir` is the hook's lock and record, root's, mode 0700 (the hook makes it). The bounds must
+exceed what the steps wait for: `cutover` 180 s (the wait for the start and a margin) plus the
+wait for the agent to stop, which is what is left of it, so 420 s allows 240 s; `verify` 15 s;
+`rollback` 240 s plus its wait for the stop, so 420 s allows 180 s. The hook refuses shorter
+values (`bad_params`). The agent's own stop takes up to 120 s to stop its jobs.
 
 ## Moving a host from the setup script's unit
 

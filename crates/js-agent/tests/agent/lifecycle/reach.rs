@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use crate::support::{Host, Scratch, code, linux_host, run_scripted, welcome};
 
 /// The user containers run as, for an agent of any user.
+#[cfg(target_os = "linux")]
 fn container_user() -> String {
     let uid = rustix::process::geteuid().as_raw();
     match uid {
@@ -34,14 +35,13 @@ fn private(dir: &Scratch, name: &str) -> PathBuf {
 }
 
 /// The flags that enable containers, with the state root `state`.
+#[cfg(target_os = "linux")]
 fn containers(dir: &Scratch, state: &std::path::Path) -> Vec<String> {
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
     let scratch = private(dir, "run-scratch");
     vec![
         "--scratch-root".to_owned(),
         scratch.display().to_string(),
-        "--runtime".to_owned(),
-        "docker".to_owned(),
         "--allow-container-engine".to_owned(),
         "--container-bin".to_owned(),
         exec.display().to_string(),
@@ -54,6 +54,7 @@ fn containers(dir: &Scratch, state: &std::path::Path) -> Vec<String> {
     ]
 }
 
+#[cfg(target_os = "linux")]
 fn args(owned: &[String]) -> Vec<&str> {
     owned.iter().map(String::as_str).collect()
 }
@@ -65,6 +66,7 @@ fn args(owned: &[String]) -> Vec<&str> {
 /// when the namespaces are the same. It catches an agent that cannot see its jobs'
 /// processes or mounts and checks them anyway, which would call every host clean.
 #[test]
+#[cfg(target_os = "linux")]
 fn an_agent_that_cannot_see_the_host_does_not_start_with_containers() {
     let dir = Scratch::new("reach-namespaces");
     let state = private(&dir, "state");
@@ -113,6 +115,7 @@ fn an_agent_that_cannot_see_the_host_does_not_start_with_containers() {
 /// `/proc` of its own, that runs its jobs on the host through a socket and checks the
 /// wrong machine.
 #[test]
+#[cfg(target_os = "linux")]
 fn an_agent_with_a_container_proc_does_not_start_with_containers() {
     let dir = Scratch::new("reach-container-proc");
     let state = private(&dir, "state");
@@ -253,6 +256,7 @@ fn a_second_mount_root_on_the_state_roots_device_is_refused() {
 /// containers, say nothing of the kind. It catches an agent that checks two files and lets
 /// the operator believe the host is watched.
 #[test]
+#[cfg(target_os = "linux")]
 fn an_agent_that_watches_no_directory_says_so() {
     let dir = Scratch::new("reach-watch-warning");
     let state = private(&dir, "state");

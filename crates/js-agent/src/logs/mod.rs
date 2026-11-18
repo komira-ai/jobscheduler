@@ -373,6 +373,7 @@ impl RunLogs {
     /// [`RunLogs::resume`] for a run whose files the job wrote itself (the native runtime's),
     /// its record in the directory `dir`: as [`RunLogs::start_capped`], the uploader reads at
     /// most [`LiveLogs::file_cap`] bytes of each file.
+    #[cfg(target_os = "macos")]
     pub(crate) fn resume_capped(
         &mut self,
         logs: &LiveLogs,
@@ -441,6 +442,7 @@ impl RunLogs {
     /// uploader reads at most [`LiveLogs::file_cap`] bytes of each file and the end counts the
     /// rest as dropped, so the upload is what it would be from a capture that stops at that
     /// cap: chunks up to it, then a gap marker and no final.
+    #[cfg(target_os = "macos")]
     pub fn start_capped(
         &mut self,
         logs: Option<&LiveLogs>,

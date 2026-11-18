@@ -79,20 +79,22 @@ fn name(behaviour: &str, kind: Kind, via: Option<Via>) -> String {
     format!("{behaviour}-{}{via}", kind.name())
 }
 
-/// Asserts the path of one job that exits 0, through `via`: submitted, it is queued, placed on
-/// the agent's host, started through `crun run` of the stand-in, and ends succeeded with exit
-/// code 0, reason exit, and the line it printed in both tails of `GetResult` and in the tails
-/// of `GetLogs`. The stand-in started it exactly once, and it is not started again in the
-/// heartbeats after it ended. It catches a server that never hands a queued job to the agent,
-/// an agent that never reaches `crun`, a result lost on the way back, output dropped, and a job
-/// handed out twice.
+/// Asserts the path of one job that exits 0, through `via`: submitted, it is answered placed on
+/// the agent's host (the submit places it, with no tick), started through `crun run` of the
+/// stand-in, and ends succeeded with exit code 0, reason exit, and the line it printed in both
+/// tails of `GetResult` and in the tails of `GetLogs`. The stand-in started it exactly once,
+/// and it is not started again in the heartbeats after it ended. It catches a submit that
+/// leaves a job queued over a host with room, a server that never hands a placed job to the
+/// agent, an agent that never reaches `crun`, a result lost on the way back, output dropped,
+/// and a job handed out twice.
 fn a_job_runs_once_and_succeeds_with_its_output(kind: Kind, via: Via) {
     let rig = Rig::new(&name("runs", kind, Some(via)), kind, &[]);
     let jobs = rig.client(via);
     let spec = Spec::new("j1");
     let made = rig.submit(via, &spec);
     assert_eq!(made["id"], "j1");
-    assert_eq!(made["state"], "JOB_STATE_QUEUED");
+    assert_eq!(made["state"], "JOB_STATE_PLACED");
+    assert_eq!(made["hostId"], "h1", "{made}");
     rig.until_state("j1", "JOB_STATE_SUCCEEDED");
     let job = jobs.job("j1");
     assert_eq!(job["hostId"], "h1", "{job}");
@@ -296,9 +298,10 @@ fn usage_of(http: &crate::http::Gateway, js: &crate::cli::Js, id: &str) -> Value
     got.body
 }
 
-/// Asserts the default runtime (ported from the lease path of the agent's crun tests): an
-/// agent given no `--runtime` registers, runs a job through the stand-in and reports it
-/// succeeded. It catches a default that is not crun, or a crun agent that runs no job.
+/// Asserts the Linux build's runtime (ported from the lease path of the agent's crun tests): an
+/// agent given no runtime flag registers, runs a job through crun's stand-in and reports it
+/// succeeded. It catches a Linux agent whose runtime is not crun, or a crun agent that runs no
+/// job.
 fn an_agent_with_no_runtime_flag_runs_a_job_through_crun(kind: Kind) {
     let rig = Rig::with_agent(&name("default", kind, None), kind, |node, server, token| {
         Agent::start_defaulted(node, server, token, "h1")

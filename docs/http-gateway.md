@@ -45,6 +45,7 @@ writes it between the markers below, and `cargo xtask gen-job-surface --check --
 | `GET /v1/hosts` | `ListHosts` | 200 |
 | `POST /v1/hosts/{host_id}:cordon` | `CordonHost` | 200 |
 | `POST /v1/hosts/{host_id}:uncordon` | `UncordonHost` | 200 |
+| `POST /v1/hosts/{host_id}:cleartaint` | `ClearHostTaint` | 200 |
 | `GET /v1/pools` | `ListPools` | 200 |
 | `GET /v1/providers` | `ListProviders` | 200 |
 | `GET /v1/usage` | `GetUsage` | 200 |
@@ -152,6 +153,8 @@ cause.
 | an argument the service refuses | 400 | `invalid-argument`, with `field` when the service names one |
 | a method the service does not implement | 501 | `unimplemented` |
 | a store write that failed | 500 | `state-write-failed` |
+| a store write the store was too busy to take (`UNAVAILABLE`, `state-write-failed`): nothing was written, and a retry may pass | 503 | `state-write-failed` |
+| a store read the store was too busy to take, or a fleet call that could not read the store (`UNAVAILABLE`, `store-unavailable`) | 503 | `store-unavailable` |
 | any other failure, a response that cannot be written | 500 | `internal` |
 | unauthenticated (the mounting server's bearer layer) | 401 | empty body |
 
@@ -160,9 +163,10 @@ is answered by the refusal's code. Any other status is answered by its gRPC code
 message, which the service sets to the code of the table: `NOT_FOUND` with `unknown-job` (404)
 or `expired` (410), `FAILED_PRECONDITION` with `not-finished`, `no-log-sink` or `no-live-logs` (409),
 `OUT_OF_RANGE` with `field: fromOffset` (400 `out-of-range`), `RESOURCE_EXHAUSTED` with
-`too-many-follows` (429), `UNAVAILABLE` with `log-store-unavailable` (503),
-`PERMISSION_DENIED` with `operator-only` (403), `INTERNAL` with
-`state-write-failed` (500 `state-write-failed`), `UNIMPLEMENTED` (501), and `INVALID_ARGUMENT`
+`too-many-follows` (429), `UNAVAILABLE` with `log-store-unavailable`, `store-unavailable` or
+`state-write-failed` (503, the same code), `PERMISSION_DENIED` with `operator-only` (403),
+`INTERNAL` with `state-write-failed` (500 `state-write-failed`), `UNIMPLEMENTED` (501), and
+`INVALID_ARGUMENT`
 (400, where a message `field: <name>` gives the `field`). Every other status, and a refusal
 code this version does not know, is a 500 `internal`. The crate's goldens
 (`crates/js-api-gateway/tests/golden/`) hold the whole mapping.
@@ -190,7 +194,7 @@ request.
 | `SubmitJob` | yes | yes |
 | `GetJob`, `GetResult`, `GetLogs`, `CancelJob` | its own jobs only | every job |
 | `ListJobs` | its own jobs only, whatever the filter | every job |
-| `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403 `operator-only`) | yes |
+| `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403 `operator-only`) | yes |
 
 A client's own jobs are the ones recorded with its name. A job recorded with no client
 (submitted before clients were named) belongs to no client, so only an operator can read or
@@ -237,15 +241,15 @@ along with them.
 
 - `call`: the method.
 - `client` and `role`: the caller, from its token.
-- `target`: the job id, or the host for `CordonHost` and `UncordonHost`; empty for a listing.
+- `target`: the job id, or the host for `CordonHost`, `UncordonHost` and `ClearHostTaint`; empty for a listing.
 - `job`: the job alone, as before.
 - `outcome`: `ok`, `denied` (a client's fleet call, or another client's job, logged as
   `denied` although the answer is `unknown-job`), `not-found`, `refused` (an argument, a
   conflict or a precondition), or `failed` (the server could not answer).
 - `code`: the gRPC code.
 
-This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost` and
-`UncordonHost`. No line holds a token or its digest. A request whose token is no client's
+This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost`,
+`UncordonHost` and `ClearHostTaint`. No line holds a token or its digest. A request whose token is no client's
 reaches no call and writes no call line. The job record does not take a `cancelled_by` field:
 the line is the record of who cancelled.
 
@@ -265,7 +269,7 @@ A request carries at most 64 KiB over either transport: a larger gateway body is
 | `GetJob`, `ListJobs`, `GetResult`, `GetLogs` | `read.rs` |
 | `SubmitJob` | `submit.rs` (its checks in `validate.rs`) |
 | `CancelJob` | `cancel.rs` |
-| `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
+| `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
 
 ### Serving the read calls
 
@@ -282,6 +286,7 @@ retention end.
 | `GetResult` of a job that has not ended | `FAILED_PRECONDITION`, `not-finished` | 409 `not-finished` |
 | a `page_token` no listing gave | `INVALID_ARGUMENT`, `field: pageToken` | 400 `invalid-argument`, `field` `pageToken` |
 | a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
+| a read the store was too busy to take (no connection came free, or the statement waited past its limit) | `UNAVAILABLE`, `store-unavailable` | 503 `store-unavailable` |
 
 **`GetJob`** answers the job: its spec as submitted (a file's contents left empty), its state
 and start failure, its host once placed, whether a cancel was asked for, its times
@@ -401,6 +406,7 @@ answer from what the commit returned; neither holds anything of its own outside 
 | `CancelJob` of an id with no job, or of another client's job by a `client` | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
 | `SubmitJob` by a `client` of an id another client's job holds | `ALREADY_EXISTS` with the refusal | 409 `job-id-conflict` |
 | a store that failed (the commit, or the read before it) | `INTERNAL`, `state-write-failed` | 500 `state-write-failed` |
+| a store too busy to take the commit or the read before it (no connection came free, or a statement waited past its limit): nothing was written, and a retry may pass | `UNAVAILABLE`, `state-write-failed` | 503 `state-write-failed` |
 
 **`SubmitJob`**, in order:
 
@@ -423,15 +429,18 @@ answer from what the commit returned; neither holds anything of its own outside 
    mounts and host ports (`docs/design/job-rootfs.md`, section 2.5) are at most 16, 64 and
    16; each layer and mount has one source this server knows (else refused naming
    `spec.layers[<i>]` or `spec.mounts[<i>]`, "no source this server knows"); a host path is
-   absolute and in normal form, a mount's target absolute, in normal form, outside the
-   runtime's own places and unique in lower case, a `subPath` relative, a mode, propagation
-   and protocol known; a host port and a job port are 1 to 65535, and no job port is given
+   absolute and in normal form, a provider source (`docs/design/mount-providers.md`) has a
+   name of 1 to 32 bytes of lower-case letters, digits and `-` that starts with a letter and
+   a ref of 1 to 1024 bytes with no control character, a mount's target absolute, in normal
+   form, outside the runtime's own places and unique in lower case, a `subPath` relative, a
+   mode, propagation and protocol known; a host port and a job port are 1 to 65535, and no job port is given
    twice or is the container port of one of `ports` (each refused naming the entry's field,
    such as `spec.mounts[<i>].target` or `spec.hostPorts[<i>].containerPort`). A job with any
    of them is refused with host isolation (naming `spec.constraints.isolation`) and with the
    whole host (naming `spec.needs`), and records
-   `layered-rootfs=true` among its capabilities, which admission and placement ask a host
-   for; one with layers, or a host port at a job port of its own, records the execution mode
+   `layered-rootfs=true` among its capabilities, and each provider it names
+   `mount-provider.<name>=true`, which admission and placement ask a host for; one with
+   layers, or a host port at a job port of its own, records the execution mode
    `container` when it gave none, and is refused with `sandbox-exec` (naming
    `spec.constraints.exec`). Each default is recorded in its explicit form (read-only,
    private, TCP, the job port of a host port), so a resubmit that spells a default either way
@@ -454,8 +463,14 @@ answer from what the commit returned; neither holds anything of its own outside 
    failed) may offer, so the job is admitted.
 4. **Commit, then answer.** The job is inserted as queued in one transaction; the answer is
    the job as recorded (201 over the gateway). A failed commit is `state-write-failed` and
-   nothing was recorded. The call does not wait for placement: placement finds the queued job
-   on its own pass.
+   nothing was recorded.
+5. **Place now, when nothing is ahead.** When no queued job had the new job's priority or a
+   higher one, the call runs the placement pass itself before it answers, and the answer is
+   the job as it then stands: `placed` with its host when a host had room, `queued` when none
+   had. The placement wakes the host's held heartbeat, whose reply carries the start
+   ([`design/held-beat.md`](design/held-beat.md)). A job with a queued job of its priority or
+   above ahead of it, and a retry of a job already recorded, is answered as recorded and
+   placed by the next pass.
 
 **`CancelJob`** commits one transaction and answers the job as it then stands. A queued job is
 cancelled at once (it has no allocation), with a result of reason cancelled and its retention
@@ -488,6 +503,18 @@ generated paragraph above.
   only once the bindings are written: when they cannot be, the answer is `UNAVAILABLE`
   `cordon-unsaved` and the change holds on this server all the same. A host the registry does
   not hold (a static host, or one that never said hello) is `NOT_FOUND` `unknown-host`.
+- `ClearHostTaint` clears the taint the server stores for a host, so the host is offered jobs
+  again: the registry's taint and the host's stored binding, by the compare-and-set a
+  heartbeat's `taint_cleared` uses, under the same lock. `cleared` says a taint was there and
+  is gone, and `cleared_reason` is its reason code; a host with no taint answers `cleared`
+  false and nothing is written. A store that holds another taint than the server (another
+  server's newer report) refuses the clear, `UNAVAILABLE` `taint-unsaved`, and nothing
+  changes; in file mode, when the bindings file cannot be written, the clear holds on this
+  server all the same. A host the registry does not hold is `NOT_FOUND` `unknown-host`. The
+  call does not reach the agent: an agent whose marker still holds the taint refuses the next
+  start `host-tainted`, which the server takes as the host's taint again, so the operator
+  moves the agent's `taint.json`, `taint.pinned` and its `owed-*` records aside first, or lets the agent clear
+  the taint itself ([design/taint-self-clearing.md](design/taint-self-clearing.md)).
 - `ListPools` and `ListProviders` read the status `GET /v1/pools` writes: per elastic pool its
   name, kind, state, reasons, memory, machine count and last tick; per pool's provider its
   credentials check and its own checks, and the machines it launched. Nothing else of the
@@ -513,7 +540,7 @@ generated paragraph above.
 
 Over the gateway, a fleet call's `INVALID_ARGUMENT` is 400 `invalid-argument` as for any call,
 but the gateway's error table does not name the fleet calls' other refusals yet: `unknown-host`
-(`NOT_FOUND`), and `cordon-unsaved`, `store-unavailable` and `usage-unavailable`
+(`NOT_FOUND`), and `cordon-unsaved`, `taint-unsaved`, `store-unavailable` and `usage-unavailable`
 (`UNAVAILABLE`), each answer 500 `internal`.
 
 None of the reads takes a write lock, writes a row or counts anything. The hand-written

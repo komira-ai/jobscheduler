@@ -5,11 +5,20 @@
 //! The previous agent's posts after the first answer only carry back what it was told, so
 //! the values this server draws afresh (session, job and allocation ids) are put in their
 //! place ([`Minted`]).
+//!
+//! One answer differs by design: this server places a job in the submit call, so the first
+//! heartbeat after it already carries the job's start, where the previous server's carried
+//! none and its next one the start. The previous agent starts a job from any reply, so the
+//! replay accepts that start ([`take_early_start`]) when it is the only command, the previous
+//! server sent none, and the transcript has the start at a later step; it is compared there
+//! field by field with the start the transcript has, and this server sends it again at that
+//! step, because the previous agent's heartbeat there does not list the job yet, where it
+//! is compared as any answer. Any other extra command is a problem.
 
 use js_agent::{Connector, Dialer};
 use serde_json::Value;
 
-use super::compare::{Minted, uncovered};
+use super::compare::{Minted, start_after, take_early_start, uncovered};
 use super::record::Cell;
 
 /// Every place where this server's answers said less than the previous server's, as
@@ -21,7 +30,9 @@ pub fn replay(name: &str, transcript: &Value) -> Vec<String> {
         .unwrap();
     let mut minted = Minted::default();
     let mut problems = Vec::new();
-    let flow = transcript["flow"].as_array().unwrap();
+    // The cell runs on the default pool, which asks 5000.
+    let mut flow = transcript["flow"].as_array().unwrap().clone();
+    super::welcome_interval_as(&mut flow, 5000);
     for (index, step) in flow.iter().chain([&transcript["refusal"]]).enumerate() {
         if let Some(job) = step.get("submitted") {
             minted.learn(job.clone(), Value::String(cell.submit()));
@@ -47,8 +58,30 @@ pub fn replay(name: &str, transcript: &Value) -> Vec<String> {
             problems.push(format!("{at}: status was {was}, now {}", answer.status));
         }
         let expected = minted.apply(&wanted["body"]);
-        let missing = uncovered(&expected, &answer.body, Some(&mut minted));
-        problems.extend(missing.into_iter().map(|what| format!("{at} {what}")));
+        let mut body = answer.body.clone();
+        if let Some(early) = take_early_start(&expected, &mut body) {
+            if let Some((later, start)) = start_after(&flow, index) {
+                let start = minted.apply(&start);
+                let named = flow[later]["agent"]["path"].as_str().unwrap();
+                for what in uncovered(&start, &early, Some(&mut minted)) {
+                    let rest = what.strip_prefix('$').unwrap_or(&what);
+                    let problem = format!("{later} {named} $.commands[0]{rest}");
+                    if !problems.contains(&problem) {
+                        problems.push(problem);
+                    }
+                }
+            } else {
+                problems.push(format!("{at}: a job start the previous server never sent"));
+                body = answer.body.clone();
+            }
+        }
+        let missing = uncovered(&expected, &body, Some(&mut minted));
+        for what in missing {
+            let problem = format!("{at} {what}");
+            if !problems.contains(&problem) {
+                problems.push(problem);
+            }
+        }
     }
     problems
 }
@@ -129,4 +162,34 @@ fn a_refusal_field_this_server_no_longer_sends_is_named() {
     let problems = replay("skew-server-refusal", &transcript);
     let wanted = format!("{index} /v1/agent/hello $.majors: missing");
     assert_eq!(problems, [wanted]);
+}
+
+/// Asserts that the replay does not accept a job start in an earlier reply when the
+/// transcript has no start at all (the transcript's start removed, as if the previous server
+/// had never sent this job to the host): the start is named in the heartbeat after the
+/// submit and again where this server sends it again, each as a command the previous server
+/// did not send, and the commands themselves as extra. It catches an acceptance of an early start that does not look for the start it
+/// is compared with, which would pass a server that starts jobs the previous one did not.
+#[test]
+fn a_start_the_previous_server_never_sent_is_named() {
+    let mut transcript = super::previous();
+    let flow = transcript["flow"].as_array_mut().unwrap();
+    let index = flow
+        .iter()
+        .position(|step| step["server"]["body"]["commands"][0]["type"] == "job_start")
+        .unwrap();
+    flow[index]["server"]["body"]["commands"] = serde_json::json!([]);
+    let problems = replay("skew-server-unsent", &transcript);
+    let path = "/v1/agent/heartbeat";
+    let (early, shown) = (index - 1, "$.commands: 0 items, now 1");
+    let never = "a job start the previous server never sent";
+    let wanted = [
+        format!("{early} {path}: {never}"),
+        format!("{early} {path} {shown}"),
+        format!("{index} {path}: {never}"),
+        format!("{index} {path} {shown}"),
+    ];
+    // The replay goes on after the first differences (the job is then started and ends on
+    // the server's side as the transcript did not say), so only the first four are asserted.
+    assert_eq!(problems[..4], wanted, "{problems:?}");
 }

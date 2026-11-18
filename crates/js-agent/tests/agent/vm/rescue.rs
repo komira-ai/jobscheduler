@@ -1,31 +1,58 @@
 //! The rescue of an agent whose worker is stuck, with the VM backend on: it destroys the VMs
-//! it finds as it stops the containers.
+//! it finds as it stops the jobs of the build's runtime.
 
 use std::sync::Arc;
 
-use clap::Parser as _;
+use js_agent::Worker;
 use js_agent::vm::VmSettings;
-use js_agent::{Cli, Platform, Worker};
 use js_vm_lease::fake::{Call, FakeDriver};
 use js_vm_lease::{Step, VmDriver};
 
-use super::agent::vm_flags;
 use super::vm;
 use crate::jobs::fake::FakeMachine;
 use crate::jobs::{STEP_NEVER, plan};
-use crate::support::{Scratch, flags};
+#[cfg(target_os = "macos")]
+use crate::native::fake_helper::FakeHelper;
+use crate::support::Scratch;
 
-/// The VM settings of flags over a driver and a store in `dir`.
+/// The VM settings over a driver binary and a store with a base image, both in `dir`.
 fn settings(dir: &Scratch) -> VmSettings {
-    let mut args = vec!["js-agent".to_owned()];
-    args.extend(flags(&[]).iter().map(|flag| (*flag).to_owned()));
-    args.extend(vm_flags(dir));
-    let cli = Cli::try_parse_from(&args).unwrap();
-    let mac = Platform {
-        os: "macos".to_owned(),
-        arch: "arm64".to_owned(),
-    };
-    VmSettings::from_cli(&cli, &mac, true).unwrap().unwrap()
+    let driver = dir.write("js-vmm", "#!/bin/sh\n", 0o755);
+    let store = dir.path("vm-store");
+    std::fs::create_dir_all(store.join("base")).unwrap();
+    VmSettings::new(Some(&driver), Some(&store))
+        .unwrap()
+        .unwrap()
+}
+
+/// A worker and what its jobs backend needs while it runs.
+struct Running {
+    worker: Worker,
+    /// The fake helper the native backend talks to, kept until the test ends.
+    #[cfg(target_os = "macos")]
+    _helper: FakeHelper,
+}
+
+/// A worker over `machine` under `dir`, with `vm` as its VM backend. Its jobs backend is the
+/// build's: the container runtime of `plan` on Linux, the native runtime on macOS, over a fake
+/// helper, since a worker asks the helper for its boot reset when it starts.
+fn start(dir: &Scratch, machine: &FakeMachine, vm: Option<VmSettings>) -> Running {
+    #[cfg(target_os = "macos")]
+    let helper = FakeHelper::start(dir);
+    let mut plan = plan(dir, machine, STEP_NEVER);
+    plan.vm = vm;
+    #[cfg(target_os = "macos")]
+    {
+        plan.backend = helper.backend(dir);
+    }
+    match Worker::start(plan) {
+        Ok(worker) => Running {
+            worker,
+            #[cfg(target_os = "macos")]
+            _helper: helper,
+        },
+        Err(why) => panic!("the worker did not start: {why}"),
+    }
 }
 
 /// Asserts that a worker with the VM backend reclaims the VMs an earlier process left when it
@@ -38,17 +65,12 @@ fn the_rescue_stops_and_destroys_the_vms_it_finds() {
     let dir = Scratch::new("vm-rescue");
     let driver = Arc::new(FakeDriver::new().leaving(&[vm("before")]));
     let machine = FakeMachine::new().with_vms(&driver);
-    let mut with_vms = plan(&dir, &machine, STEP_NEVER);
-    with_vms.vm = Some(settings(&dir));
-    let worker = match Worker::start(with_vms) {
-        Ok(worker) => worker,
-        Err(why) => panic!("the worker did not start: {why}"),
-    };
+    let running = start(&dir, &machine, Some(settings(&dir)));
     assert_eq!(driver.steps_of(&vm("before")), [Step::Stop, Step::Destroy]);
 
     // A VM made while the worker ran, and left when it got stuck.
     driver.clone_base(&vm("stuck")).unwrap();
-    let lines = worker.rescue();
+    let lines = running.worker.rescue();
     assert!(
         lines.contains(&"rescue: vm: destroyed the VM stuck an earlier process left".to_owned()),
         "{lines:?}"
@@ -62,10 +84,7 @@ fn the_rescue_stops_and_destroys_the_vms_it_finds() {
     let plain = Scratch::new("vm-rescue-off");
     let untouched = Arc::new(FakeDriver::new().leaving(&[vm("other")]));
     let machine = FakeMachine::new().with_vms(&untouched);
-    let worker = match Worker::start(plan(&plain, &machine, STEP_NEVER)) {
-        Ok(worker) => worker,
-        Err(why) => panic!("the worker did not start: {why}"),
-    };
-    let _ = worker.rescue();
+    let running = start(&plain, &machine, None);
+    let _ = running.worker.rescue();
     assert_eq!(untouched.calls(), Vec::<Call>::new());
 }

@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use clap::Parser;
-use js_agent::{Cli, RuntimeKind};
+use js_agent::Cli;
 
 const DEB: &str = "packaging/js-agent/deb";
 const UNIT: &str = "packaging/js-agent/deb/js-agent-crun.service";
@@ -168,16 +168,17 @@ fn the_unit_expands_with_a_flags_file_to_a_command_line_the_agent_parses() {
         cli.scratch_root.as_deref(),
         Some(Path::new("/var/lib/js-agent/scratch/runs"))
     );
-    assert_eq!(cli.runtime, Some(RuntimeKind::Crun));
-    assert_eq!(cli.crun_bin.as_deref(), Some(Path::new("/usr/bin/crun")));
-    assert_eq!(cli.job_user.as_deref(), Some("jsjob"));
+    // crun is the runtime of the Linux build: no opt-in to the engine, no `--no-jobs`.
+    assert!(!cli.no_jobs && !cli.os.allow_container_engine);
+    assert_eq!(cli.os.crun_bin.as_deref(), Some(Path::new("/usr/bin/crun")));
+    assert_eq!(cli.os.job_user.as_deref(), Some("jsjob"));
     assert_eq!(cli.drain_wait, Some(3600));
     assert_eq!(cli.stop_grace, Some(120));
     assert_eq!(
         cli.instance_file.as_deref(),
         Some(Path::new("/etc/js-agent/instance"))
     );
-    assert_eq!(cli.host_id.as_deref(), Some("node-5"));
+    assert_eq!(cli.host.host_id.as_deref(), Some("node-5"));
     assert!(js_agent::crun_host::flags(&cli).is_ok());
 }
 

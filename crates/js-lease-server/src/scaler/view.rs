@@ -166,11 +166,13 @@ mod tests {
             os: None,
             arch: None,
             isa_level: None,
+            os_version: None,
             exec: None,
             accelerator: None,
             network: Default::default(),
             host_ports: Vec::new(),
             layered_rootfs: false,
+            mount_providers: Vec::new(),
         };
         let none = offer_of(&shape(0, &[]), &shape(0, &[]), ExecMode::Container);
         let some = offer_of(&shape(0, &[]), &shape(10 << 30, &[]), ExecMode::Container);

@@ -20,10 +20,12 @@ fn wanted() -> Requirements {
         os: Some("linux".to_owned()),
         arch: Some("x86_64".to_owned()),
         isa_level: None,
+        os_version: None,
         exec: None,
         network: JobNetwork::None,
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     }
 }
 
@@ -523,4 +525,79 @@ fn a_layered_job_is_capable_only_on_a_host_that_reports_layered_rootfs() {
         HOST
     );
     assert_eq!(can_ever_serve(&wanted(), &[silent], &[]), HOST);
+}
+
+/// Asserts that a job naming mount providers is capable only on a host that reports
+/// `mount-provider.<name>=true` for every name: a host with one of two, or with the key set
+/// to another value, is not capable, and a pool with a host that reports both admits through
+/// it. Catches admission that queues a job whose provider no host of the pool has, or that
+/// treats one provider of two as enough.
+#[test]
+fn a_job_naming_providers_is_capable_only_on_a_host_that_reports_each() {
+    let wants = Requirements {
+        layered_rootfs: true,
+        mount_providers: vec!["cache".to_owned(), "tierstore".to_owned()],
+        ..wanted()
+    };
+    let layered = [("layered-rootfs", "true")];
+    let silent = advertising("h1", &layered);
+    let one = advertising("h2", &[layered[0], ("mount-provider.tierstore", "true")]);
+    let other = advertising(
+        "h3",
+        &[
+            layered[0],
+            ("mount-provider.cache", "false"),
+            ("mount-provider.tierstore", "true"),
+        ],
+    );
+    assert_eq!(
+        can_ever_serve(&wants, &[silent.clone(), one.clone(), other.clone()], &[]),
+        Admission::Refuse
+    );
+    let both = advertising(
+        "h4",
+        &[
+            layered[0],
+            ("mount-provider.cache", "true"),
+            ("mount-provider.tierstore", "true"),
+        ],
+    );
+    assert_eq!(
+        can_ever_serve(&wants, &[silent, one, other, both], &[]),
+        HOST
+    );
+}
+
+/// Asserts that a job asking for a least `os_version` can ever run on a host that reports
+/// that major version or a later one, in the host's full version text too, and not on a
+/// host that reports an earlier one or none. Catches a requirement that drops the version
+/// from what the host must report, which would place a macOS 26 job on a macOS 15 host.
+#[test]
+fn a_host_is_capable_only_at_the_least_os_version() {
+    let with_version = |version: Option<&str>| {
+        let mut host = host("h1");
+        if let Some(version) = version {
+            host.facts
+                .insert("os_version".to_owned(), version.to_owned());
+        }
+        host
+    };
+    let asks_26 = Requirements {
+        os_version: Some(26),
+        ..wanted()
+    };
+    for serves in ["26", "26.1", "27"] {
+        let hosts = [with_version(Some(serves))];
+        assert_eq!(can_ever_serve(&asks_26, &hosts, &[]), HOST, "{serves}");
+    }
+    for refuses in [Some("15"), Some("15.7.2"), Some("beta"), None] {
+        let hosts = [with_version(refuses)];
+        assert_eq!(
+            can_ever_serve(&asks_26, &hosts, &[]),
+            Admission::Refuse,
+            "{refuses:?}"
+        );
+    }
+    let asks_none = wanted();
+    assert_eq!(can_ever_serve(&asks_none, &[with_version(None)], &[]), HOST);
 }

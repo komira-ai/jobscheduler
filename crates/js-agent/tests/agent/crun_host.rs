@@ -1,5 +1,6 @@
-//! The start check of `--runtime crun`: each piece of the host a crun job needs is named when it
-//! is missing, all of them in one refusal, and a host that has every piece passes. The host is a
+//! The start check of the crun runtime, the runtime of the Linux build: each piece of the host a
+//! crun job needs is named when it is missing, all of them in one refusal, and a host that has
+//! every piece passes. The host is a
 //! directory of stand-in files (`CrunHost` names the paths the check reads) and a scripted
 //! `crun --version`; every case starts from a host that passes and breaks one piece, so a case
 //! that fails names the check that no longer catches its defect. (Linux only: only Linux runs
@@ -12,13 +13,16 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use js_agent::Cli;
 use js_agent::crun_host::{CrunHost, Piece, Report, Request, check, flags, ready, start};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 
-use crate::support::{FakeCommands, code, linux_host, mac_host, run_scripted, welcome};
+use crate::support::{
+    CountingSleeper, FakeCommands, Lowest, Ran, Script, ScriptConnector, Sent, code,
+    flags as agent_flags, linux_host, run_defaulted, welcome,
+};
 
 const USER: &str = "jsjob";
 
@@ -527,7 +531,7 @@ fn a_host_with_nothing_set_up_is_refused_naming_every_piece() {
         assert!(text.contains(name), "{name} in {text}");
     }
     assert!(
-        text.starts_with("--runtime crun: this host is not ready (8 missing):"),
+        text.starts_with("the crun runtime: this host is not ready (8 missing):"),
         "{text}"
     );
     assert!(text.contains("(fix: "));
@@ -545,8 +549,6 @@ pub(crate) fn cli(extra: &[&str]) -> Cli {
 #[test]
 fn the_crun_flags_are_checked_against_each_other() {
     let ok = [
-        "--runtime",
-        "crun",
         "--job-user",
         USER,
         "--state-root",
@@ -608,8 +610,6 @@ fn the_crun_flags_are_checked_against_each_other() {
 fn start_refuses_an_incomplete_host_and_returns_the_warnings_of_a_complete_one() {
     let fx = Fixture::new("crun-host-start");
     let args = [
-        "--runtime",
-        "crun",
         "--job-user",
         USER,
         "--crun-bin",
@@ -661,37 +661,67 @@ fn ready_refuses_job_ids_that_are_missing_or_root() {
     }
 }
 
-/// Runs the agent to its first wait with `extra`; returns (status, stderr).
+/// Runs the agent to its first wait with `extra` exactly as given, so a start naming neither
+/// `--no-jobs` nor `--allow-container-engine` is a crun start; returns what it printed and what
+/// it sent.
+fn run_crun(extra: &[&str]) -> (Ran, Sent) {
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let ran = run_defaulted(
+        &agent_flags(extra),
+        &linux_host(),
+        &ScriptConnector::of(script),
+        &mut sleeper,
+        &mut Lowest,
+    );
+    (ran, sent)
+}
+
+/// Runs the agent as [`run_crun`] does; returns (status, stderr).
 fn run_agent(extra: &[&str]) -> (String, String) {
-    let (ran, _, _) = run_scripted(extra, &linux_host(), vec![welcome(1)], 1);
+    let (ran, _) = run_crun(extra);
     (ran.status(), ran.err)
 }
 
 /// The program refuses a runtime flag that cannot work, with status 2 and the flag named, before
-/// it registers: `--runtime docker` without an engine program, and the crun flags without
-/// `--runtime crun` (which would otherwise be ignored and run the engine runtime).
+/// it registers: `--allow-container-engine` without an engine program, a crun flag with the
+/// engine, an engine flag without `--allow-container-engine` (which would otherwise be ignored
+/// by an agent that runs crun), and a runtime flag of an agent that runs no job.
 #[test]
 fn the_agent_refuses_runtime_flags_that_cannot_work() {
     let cases = [
         (
-            vec!["--runtime", "docker"],
-            "--runtime docker: needs --container-bin",
+            vec!["--allow-container-engine"],
+            "--allow-container-engine: needs --container-bin",
         ),
-        (
-            vec!["--crun-bin", "/usr/bin/crun"],
-            "--crun-bin: needs --runtime crun",
-        ),
-        (vec!["--job-user", USER], "--job-user: needs --runtime crun"),
         (
             vec![
-                "--runtime",
-                "docker",
-                "--job-user",
-                USER,
+                "--allow-container-engine",
                 "--container-bin",
                 "/usr/bin/docker",
+                "--crun-bin",
+                "/usr/bin/crun",
             ],
-            "--job-user: needs --runtime crun",
+            "--crun-bin: not with --allow-container-engine (a flag of the crun runtime)",
+        ),
+        (
+            vec![
+                "--allow-container-engine",
+                "--container-bin",
+                "/usr/bin/docker",
+                "--job-user",
+                USER,
+            ],
+            "--job-user: not with --allow-container-engine (a flag of the crun runtime)",
+        ),
+        (
+            vec!["--container-bin", "/usr/bin/docker"],
+            "--container-bin: needs --allow-container-engine (a flag of the container engine; \
+             without it this agent runs crun)",
+        ),
+        (
+            vec!["--no-jobs", "--job-user", USER],
+            "--job-user: not with --no-jobs (an agent that runs no job)",
         ),
     ];
     for (args, why) in cases {
@@ -701,128 +731,62 @@ fn the_agent_refuses_runtime_flags_that_cannot_work() {
     }
 }
 
-/// A value that parses for the `--native-*` flag `name`: the numbers and the level are
-/// given their own, every other flag takes a path. A new flag of another type fails the parse
-/// here, so whoever adds it says what it takes.
-fn native_value(name: &str) -> &'static str {
-    match name {
-        "native-network" => "off",
-        "native-max-file-mib" | "native-max-processes" => "1",
-        "native-pf-uid-start" | "native-pf-uid-count" => "600",
-        _ => "/native",
-    }
-}
-
-/// The `--native-*` flags clap knows, read from the definition of `Cli`.
-fn native_flag_names() -> Vec<String> {
-    let names: Vec<String> = Cli::command()
-        .get_arguments()
-        .filter_map(|arg| arg.get_long())
-        .filter(|long| long.starts_with("native-"))
-        .map(str::to_owned)
-        .collect();
-    assert!(names.len() >= 7, "{names:?}");
-    names
-}
-
-/// `--runtime crun` refuses every `--native-*` flag, each by name, on the command line of an
-/// otherwise complete crun agent. The flags are walked from the definition of `Cli`, so a new
-/// native flag that `flags` does not refuse fails here. It catches a refusal list that misses
-/// a native flag, which would start a crun agent that ignores it.
+/// Every flag of the macOS build is refused by name by the whole program, in a crun agent, in
+/// an agent of the container engine and in one that runs no job, with status 2 and before
+/// anything is sent. The flags are walked from `MACOS_ONLY`, so a new native flag that the Linux
+/// build parses and ignores fails here. It catches a Linux build that takes a native flag.
 #[test]
-fn the_crun_runtime_refuses_every_native_flag_by_name() {
-    for name in native_flag_names() {
-        let flag = format!("--{name}");
-        let cli = cli(&[
-            "--runtime",
-            "crun",
-            "--job-user",
-            USER,
-            "--state-root",
-            "/s",
-            "--scratch-root",
-            "/r",
-            &flag,
-            native_value(&name),
-        ]);
-        let why = flags(&cli).map(|_| ()).unwrap_err();
-        assert!(
-            why.starts_with(&format!("{flag}: not accepted with --runtime crun")),
-            "{flag}: {why}"
-        );
-    }
-}
-
-/// The whole program, given `--runtime crun` with the native socket, ends with status 2 and the
-/// socket named, before it registers and before any host file is read.
-#[test]
-fn the_agent_refuses_the_crun_runtime_with_the_native_socket() {
-    let (status, err) = run_agent(&[
-        "--runtime",
-        "crun",
+fn every_native_flag_is_refused_by_name_whatever_the_runtime() {
+    let crun = [
         "--job-user",
         USER,
         "--state-root",
         "/s",
         "--scratch-root",
         "/r",
-        "--native-helper-socket",
-        "/native/helper.sock",
-    ]);
-    assert_eq!(status, code(2), "{err}");
-    assert!(
-        err.contains("--native-helper-socket: not accepted with --runtime crun"),
-        "{err}"
-    );
+    ];
+    let engine = [
+        "--allow-container-engine",
+        "--container-bin",
+        "/usr/bin/docker",
+    ];
+    for name in js_agent::platform::MACOS_ONLY {
+        let flag = format!("--{name}");
+        for base in [&crun[..], &engine[..], &["--no-jobs"][..]] {
+            let args = [base, &[flag.as_str(), "/native/value"][..]].concat();
+            let (ran, sent) = run_crun(&args);
+            assert_eq!(ran.status(), code(2), "{args:?}: {}", ran.err);
+            assert!(sent.borrow().is_empty(), "{args:?}");
+            assert!(
+                ran.err.contains(&format!(
+                    "--{name}: macOS only (a flag of the native runtime): this Linux build runs \
+                     its jobs with crun, or with the container engine of --allow-container-engine"
+                )),
+                "{args:?}: {}",
+                ran.err
+            );
+        }
+    }
 }
 
-/// The whole program, given `--runtime docker` with an engine program and the native socket,
-/// ends with status 2 and the socket named, before it registers: containers run on Linux only
-/// and native jobs on a Mac only, so no host takes both, and a Linux host says whose flag it
-/// is.
-#[test]
-fn the_agent_refuses_the_docker_runtime_with_the_native_socket() {
-    let engine = ["--runtime", "docker", "--allow-container-engine"];
-    let socket = ["--native-helper-socket", "/native/helper.sock"];
-    let roots = ["--state-root", "/s", "--scratch-root", "/r"];
-    let bin = ["--container-bin", "/usr/bin/docker"];
-    let args = [&engine[..], &bin[..], &socket[..], &roots[..]].concat();
-    let (ran, sent, _) = run_scripted(&args, &linux_host(), vec![welcome(1)], 1);
-    assert_eq!(ran.status(), code(2), "{}", ran.err);
-    assert!(sent.borrow().is_empty());
-    assert!(
-        ran.err
-            .contains("--native-helper-socket: native jobs run on macOS only"),
-        "{}",
-        ran.err
-    );
-}
-
-/// `--runtime crun` ends the agent with status 2 and the check's refusal when `crun` is not
+/// A crun start ends the agent with status 2 and the check's refusal when `crun` is not
 /// where `--crun-bin` says, naming it with the other pieces this host lacks. Nothing is sent to
 /// the server.
 #[test]
 fn the_agent_exits_2_naming_the_missing_crun() {
-    let (ran, sent, _) = run_scripted(
-        &[
-            "--runtime",
-            "crun",
-            "--job-user",
-            "js-no-such-user-for-this-test",
-            "--crun-bin",
-            "/nonexistent/crun",
-            "--state-root",
-            "/nonexistent/state",
-            "--scratch-root",
-            "/nonexistent/scratch",
-        ],
-        &linux_host(),
-        vec![welcome(1)],
-        1,
-    );
+    let (ran, sent) = run_crun(&[
+        "--job-user",
+        "js-no-such-user-for-this-test",
+        "--crun-bin",
+        "/nonexistent/crun",
+        "--state-root",
+        "/nonexistent/state",
+        "--scratch-root",
+        "/nonexistent/scratch",
+    ]);
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(
-        ran.err.contains("--runtime crun: this host is not ready"),
+        ran.err.contains("the crun runtime: this host is not ready"),
         "{}",
         ran.err
     );
@@ -834,6 +798,11 @@ fn the_agent_exits_2_naming_the_missing_crun() {
     ] {
         assert!(ran.err.contains(piece), "{piece} in {}", ran.err);
     }
+    assert!(
+        ran.err.contains(js_agent::platform::NOT_READY),
+        "{}",
+        ran.err
+    );
     assert_eq!(sent.borrow().len(), 0);
 }
 
@@ -894,31 +863,22 @@ fn every_piece_has_its_own_name() {
     assert_eq!(names.len(), all.len());
 }
 
-/// `flags` is for `--runtime crun` only: without it the answer is an error, not a request.
+/// `flags` is for the crun runtime only: for an agent that runs no job or the container
+/// engine the answer is an error, not a request.
 #[test]
 fn flags_without_the_crun_runtime_is_an_error() {
-    let cli = cli(&["--runtime", "docker", "--container-bin", "/usr/bin/docker"]);
-    assert_eq!(
-        flags(&cli).map(|_| ()).unwrap_err(),
-        "--runtime crun: not given"
-    );
-}
-
-/// A Mac is told `--runtime crun` is Linux only, before any host file is read.
-#[test]
-fn a_mac_refuses_the_crun_runtime() {
-    let (ran, _, _) = run_scripted(
-        &["--runtime", "crun", "--job-user", USER],
-        &mac_host(),
-        vec![welcome(1)],
-        1,
-    );
-    assert_eq!(ran.status(), code(2), "{}", ran.err);
-    assert!(
-        ran.err.contains("--runtime crun: Linux only"),
-        "{}",
-        ran.err
-    );
+    let engine = cli(&[
+        "--allow-container-engine",
+        "--container-bin",
+        "/usr/bin/docker",
+    ]);
+    let no_jobs = cli(&["--no-jobs"]);
+    for cli in [engine, no_jobs] {
+        assert_eq!(
+            flags(&cli).map(|_| ()).unwrap_err(),
+            "the crun runtime: not this agent's (--no-jobs or --allow-container-engine)"
+        );
+    }
 }
 
 /// The agent runs `crun` as the job user, so a `crun` only root can execute is refused (mode

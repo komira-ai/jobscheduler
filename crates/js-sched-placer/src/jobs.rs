@@ -117,6 +117,7 @@ use super::whole_jobs::{WholeJobStep, WholeJobs};
 use super::{Engine, Placed, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
+use crate::sizes::{bounds_of, day_of};
 
 /// The network level a job's policy asks for.
 pub fn job_network(policy: NetworkPolicy) -> JobNetwork {
@@ -386,7 +387,10 @@ impl Engine {
         if hold {
             self.sched.hold_matches();
         }
-        let walkers: Vec<Walker> = queued.iter().filter_map(walker).collect();
+        self.sizes.set_bounds(bounds_of(self.capacities()));
+        let day = day_of(now);
+        let sized = queued.iter().map(|job| self.sizes.sized(job, day));
+        let walkers: Vec<Walker> = sized.filter_map(|job| walker(&job)).collect();
         let usable: Vec<BTreeSet<&HostId>> = walkers
             .iter()
             .map(|walker| {
@@ -490,6 +494,7 @@ impl Engine {
             Some((lease, host)) => {
                 let placed = Placed { lease, operation };
                 self.hold_job(&walker.job, &host, walker.host_ports.clone(), placed);
+                self.sizes.placed(&walker.job, walker.booked);
                 Some(host)
             }
             None => {
@@ -544,6 +549,25 @@ fn walker(job: &JobRecord) -> Option<Walker> {
 /// # Errors
 /// As [`map::needs_of`].
 pub fn job_request(job: &JobRecord, resources: &Resources) -> Result<Request, MapError> {
+    let capabilities = job_capabilities(job);
+    Ok(Request {
+        key: WorkKey::new("job", job.id.as_str()),
+        qos: Qos::Batch,
+        kind: LeaseKind::Action,
+        resources: map::booking(resources),
+        needs: map::needs_of(&capabilities, resources)?,
+        hermetic: false,
+        do_not_cache: true,
+        whole_worker: false,
+        pin: None,
+    })
+}
+
+/// What `job` requires of a host's capabilities: its constraints' capabilities, with its
+/// `os`, `arch` and `exec` when it names them. The request of a queued job ([`job_request`])
+/// and of a whole-host job (`crate::engine::whole_jobs`) are made of it, so both are placed
+/// only on a host of the platform they name.
+pub(crate) fn job_capabilities(job: &JobRecord) -> js_types::Capabilities {
     let constraints = &job.spec.constraints;
     let mut capabilities = constraints.capabilities.clone();
     let exec = constraints.exec.map(|mode| mode.name().to_owned());
@@ -556,17 +580,7 @@ pub fn job_request(job: &JobRecord, resources: &Resources) -> Result<Request, Ma
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)));
     capabilities.extend(named);
-    Ok(Request {
-        key: WorkKey::new("job", job.id.as_str()),
-        qos: Qos::Batch,
-        kind: LeaseKind::Action,
-        resources: map::booking(resources),
-        needs: map::needs_of(&capabilities, resources)?,
-        hermetic: false,
-        do_not_cache: true,
-        whole_worker: false,
-        pin: None,
-    })
+    capabilities
 }
 
 /// The scheduler's booking of `booked`, and whether it is the whole host.
@@ -685,6 +699,7 @@ impl SchedPlacer {
     ) -> Result<Vec<JobId>, JobStoreError> {
         let tables = self.tables(jobs)?;
         let (live, queued, marks) = (&tables.live, &tables.queued, &tables.marks);
+        self.learn_freed(jobs, live);
         let now = self.now();
         let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
         let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
@@ -753,6 +768,7 @@ impl SchedPlacer {
             let capacity = capacity_of(hosts, &host);
             match jobs.place_claimed(&job, &host, booked, &placement, capacity) {
                 Ok((record, _)) => {
+                    self.log_sized(&record, &host, now);
                     told(&record, &host, (starts, metrics));
                     placed.push(job);
                 }

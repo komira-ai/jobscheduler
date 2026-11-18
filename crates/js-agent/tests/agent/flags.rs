@@ -3,9 +3,11 @@
 use js_agent::Dialer;
 use serde_json::{Value, json};
 
+#[cfg(target_os = "linux")]
+use crate::jobs::{private, user};
 use crate::support::{
-    CountingSleeper, Highest, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
-    linux_host, mac_host, run, run_scripted, welcome,
+    CountingSleeper, Highest, Lowest, OS_VERSION_CMD, Ran, Scratch, Script, ScriptConnector, code,
+    flags, linux_host, mac_host, run, run_scripted, welcome,
 };
 
 /// Runs the program to its first wait with a welcome and returns the hello it sent.
@@ -51,10 +53,41 @@ fn the_hello_offers_what_was_detected() {
     assert_eq!(hello["shape"]["gpu_class"], "apple-m");
     assert_eq!(
         hello["capabilities"],
-        json!({ "os": "macos", "arch": "arm64", "toolchain": "xcode16" })
+        json!({ "os": "macos", "arch": "arm64", "os_version": "26", "toolchain": "xcode16" })
     );
     assert_eq!(hello["labels"], json!({ "rack": "r1" }));
     assert_eq!(hello["gpu_devices"], json!([]));
+}
+
+/// Asserts that a Mac reports the major version `sysctl -n kern.osproductversion` prints as
+/// `os_version` (`26.1` is `26`), that a Mac whose probe fails still says hello, without the
+/// key and with a warning, and that a Linux host reports no `os_version` and is not asked for
+/// one. Catches a hello that carries the whole version text, one that is not sent for want of
+/// a version, and a Linux host that claims a macOS version.
+#[test]
+fn a_mac_reports_its_os_major_version_and_a_linux_host_none() {
+    let hello = hello_of(&[], &mac_host());
+    assert_eq!(hello["capabilities"]["os_version"], "26");
+
+    let mut silent = mac_host();
+    silent.commands = silent
+        .commands
+        .with(OS_VERSION_CMD, Err("sysctl: not found"));
+    let (ran, sent, _) = run_scripted(&[], &silent, vec![welcome(1)], 1);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(
+        sent.borrow()[0].1["capabilities"],
+        json!({ "os": "macos", "arch": "arm64" })
+    );
+    assert!(
+        ran.err
+            .contains("OS version probe failed (sysctl: not found)"),
+        "{}",
+        ran.err
+    );
+
+    let hello = hello_of(&[], &linux_host());
+    assert_eq!(hello["capabilities"].get("os_version"), None);
 }
 
 /// Asserts that every flag lowers what was detected and none raises it: lowered values
@@ -164,6 +197,11 @@ fn detected_capabilities_and_bad_labels_are_refused() {
     );
     let said = refused(&["--capability", "arch=arm"], &mac_host());
     assert!(said.contains("--capability: arch is detected"), "{said}");
+    let said = refused(&["--capability", "os_version=26"], &mac_host());
+    assert!(
+        said.contains("--capability: os_version is detected"),
+        "{said}"
+    );
     let said = refused(&["--label", "jobscheduler.dev/pool=other"], &mac_host());
     assert!(said.contains("the hello is not acceptable"), "{said}");
 }
@@ -213,10 +251,10 @@ fn usage_errors_and_help() {
     let version = go(&["--version"]);
     assert_eq!(version.status(), code(0));
     assert!(version.out.starts_with("js-agent "), "{}", version.out);
-    // The line the node-setup script reads to know `--runtime crun` is wired.
+    // The line the node-setup script reads to know the crun runtime is wired.
     let runtimes = match cfg!(target_os = "linux") {
         true => "runtimes: docker crun",
-        false => "runtimes: docker native",
+        false => "runtimes: native",
     };
     let lines: Vec<&str> = version.out.lines().collect();
     assert_eq!(lines.len(), 2, "{}", version.out);
@@ -438,22 +476,35 @@ fn a_low_water_mark_without_a_scratch_root_is_refused() {
 }
 
 /// Asserts the egress flags of an agent whose runtime is not `crun`. The default is no
-/// network and is accepted with and without `--egress none`; every flag of a job network
-/// names the modes it needs (`--egress-forward-port` among them); a mode that is not one of
-/// the three is refused; `allow-list` and `open` are refused at start, naming `--runtime
-/// crun` (the only runtime that enforces them) and saying that a container-engine job has
-/// network none, with no runtime given and with `--runtime docker`, so an operator who asks
-/// for a network never gets a different one; and an operator cannot claim a ceiling with
-/// `--capability`. It catches a ceiling accepted and silently ignored by a runtime that gives
-/// jobs no such network, and a hello that says `egress=open` on an operator's word.
+/// network and is accepted with and without `--egress none` on the container engine; every
+/// flag of a job network names the modes it needs (`--egress-forward-port` among them); a mode
+/// that is not one of the three is refused; `allow-list` and `open` are refused at start on
+/// the container engine, naming the crun runtime (the only runtime that enforces them) and
+/// saying that a container-engine job has network none, so an operator who asks for a network
+/// never gets a different one; an agent that runs no job refuses every egress flag naming
+/// `--no-jobs`; and an operator cannot claim a ceiling with `--capability`. It catches a
+/// ceiling accepted and silently ignored by a runtime that gives jobs no such network, and a
+/// hello that says `egress=open` on an operator's word.
 #[test]
+#[cfg(target_os = "linux")]
 fn egress_allow_list_is_refused_without_the_crun_runtime() {
     let host = linux_host();
-    let hello = hello_of(&["--egress", "none"], &host);
+    let dir = Scratch::new("flags-egress");
+    let engine = container_flags(&dir);
+    let engine: Vec<&str> = engine.iter().map(String::as_str).collect();
+    let with = |extra: &[&'static str]| [&engine[..], extra].concat();
+    let hello = hello_of(&with(&["--egress", "none"]), &host);
     assert_eq!(hello["phase"], "serving");
-    let said = refused(&["--egress", "wide"], &host);
+    let hello = hello_of(&engine, &host);
+    assert_eq!(hello["phase"], "serving");
+    let said = refused(&with(&["--egress", "wide"]), &host);
     assert!(
         said.contains("--egress: expected none, allow-list or open"),
+        "{said}"
+    );
+    let said = refused(&["--egress", "none"], &host);
+    assert!(
+        said.contains("--egress: not with --no-jobs (an agent that runs no job)"),
         "{said}"
     );
     for (flags, name) in [
@@ -467,9 +518,16 @@ fn egress_allow_list_is_refused_without_the_crun_runtime() {
         (&["--egress-nft", "/bin/sh"][..], "--egress-nft"),
         (&["--egress-nsenter", "/bin/sh"][..], "--egress-nsenter"),
     ] {
-        let said = refused(flags, &host);
+        let said = refused(&with(flags), &host);
         assert!(
             said.contains(&format!("{name}: needs --egress allow-list or open")),
+            "{said}"
+        );
+        let said = refused(flags, &host);
+        assert!(
+            said.contains(&format!(
+                "{name}: not with --no-jobs (an agent that runs no job)"
+            )),
             "{said}"
         );
     }
@@ -479,131 +537,148 @@ fn egress_allow_list_is_refused_without_the_crun_runtime() {
         let want = format!("--capability: {key} is detected and cannot be set");
         assert!(said.contains(&want), "{said}");
     }
-    #[cfg(target_os = "linux")]
-    {
-        let allow = [
-            "--egress",
-            "allow-list",
-            "--egress-allow",
-            "192.0.2.10:443",
-            "--egress-ip",
-            "/bin/sh",
-            "--egress-nft",
-            "/bin/sh",
-        ];
-        let mut docker = allow.to_vec();
-        docker.extend(["--runtime", "docker", "--allow-container-engine"]);
-        docker.extend(["--container-bin", "/bin/sh"]);
-        for given in [&allow[..], &docker[..]] {
-            let said = refused(given, &host);
-            assert!(
-                said.contains(
-                    "--egress allow-list: needs --runtime crun, the only runtime that enforces \
-                     it; a job run through --container-bin has network none"
-                ),
-                "{given:?}: {said}"
-            );
-        }
-        let said = refused(&["--egress", "allow-list"], &host);
-        assert!(said.contains("needs at least one --egress-allow"), "{said}");
-        let programs = ["--egress-ip", "/bin/sh", "--egress-nft", "/bin/sh"];
-        let mut open = vec!["--egress", "open", "--egress-nsenter", "/bin/sh"];
-        open.extend(programs);
-        let said = refused(&open, &host);
-        assert!(
-            said.contains("--egress open: needs --runtime crun"),
-            "{said}"
-        );
-        open.extend(["--egress-forward-port", "70000"]);
-        let said = refused(&open, &host);
-        assert!(said.contains("--egress-forward-port: not <PORT>"), "{said}");
-    }
+    let allow = [
+        "--egress",
+        "allow-list",
+        "--egress-allow",
+        "192.0.2.10:443",
+        "--egress-ip",
+        "/bin/sh",
+        "--egress-nft",
+        "/bin/sh",
+    ];
+    let said = refused(&with(&allow), &host);
+    assert!(
+        said.contains(
+            "--egress allow-list: needs the crun runtime, the only runtime that enforces \
+             it; a job run through the container engine has network none"
+        ),
+        "{said}"
+    );
+    let said = refused(&with(&["--egress", "allow-list"]), &host);
+    assert!(said.contains("needs at least one --egress-allow"), "{said}");
+    let programs = ["--egress-ip", "/bin/sh", "--egress-nft", "/bin/sh"];
+    let mut open = vec!["--egress", "open", "--egress-nsenter", "/bin/sh"];
+    open.extend(programs);
+    let said = refused(&with(&open), &host);
+    assert!(
+        said.contains("--egress open: needs the crun runtime"),
+        "{said}"
+    );
+    open.extend(["--egress-forward-port", "70000"]);
+    let said = refused(&with(&open), &host);
+    assert!(said.contains("--egress-forward-port: not <PORT>"), "{said}");
 }
 
-/// Proves `--host-port` is refused at start, naming `--runtime crun`, on an agent whose
-/// runtime is the default, the container engine or none, so no job that names a host port is
-/// run without it; and that with `--runtime crun` an entry that is not a port or a range
-/// (0, 65536, a reversed range) and a seventeenth entry are refused naming the flag before
-/// the host is checked. Catches a host-port list accepted by a runtime that offers no host
-/// port, and a wrong entry found only when a job names it.
+/// The flags of an agent that runs the container engine over `dir`: a program that is never
+/// run, the agent's own user, and the roots.
+#[cfg(target_os = "linux")]
+fn container_flags(dir: &Scratch) -> Vec<String> {
+    let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
+    let (user, _, _) = user();
+    vec![
+        "--allow-container-engine".to_owned(),
+        "--container-bin".to_owned(),
+        exec.display().to_string(),
+        "--container-user".to_owned(),
+        user,
+        "--container-subuid".to_owned(),
+        "jobmap".to_owned(),
+        "--state-root".to_owned(),
+        private(dir, "state").display().to_string(),
+        "--scratch-root".to_owned(),
+        private(dir, "run-scratch").display().to_string(),
+    ]
+}
+
+/// Runs a crun start (no `--no-jobs`, no `--allow-container-engine`) with `extra` to its first
+/// wait on `host` and returns what it printed, which must be a refusal sent nothing.
+#[cfg(target_os = "linux")]
+fn refused_crun(extra: &[&str], host: &crate::support::Host) -> String {
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let ran = crate::support::run_defaulted(
+        &flags(extra),
+        host,
+        &ScriptConnector::of(script),
+        &mut sleeper,
+        &mut Lowest,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(sent.borrow().is_empty(), "something was sent");
+    ran.err
+}
+
+/// Proves `--host-port` is refused at start, naming the runtime that does not take it, on an
+/// agent that runs the container engine or no job, so no job that names a host port is run
+/// without it; and that on the crun runtime an entry that is not a port or a range (0, 65536,
+/// a reversed range) and a seventeenth entry are refused naming the flag before the host is
+/// checked. Catches a host-port list accepted by a runtime that offers no host port, and a
+/// wrong entry found only when a job names it.
+#[cfg(target_os = "linux")]
 #[test]
 fn host_ports_are_a_flag_of_the_crun_runtime() {
     let host = linux_host();
-    let docker = [
-        "--runtime",
-        "docker",
-        "--allow-container-engine",
-        "--container-bin",
-        "/bin/sh",
-    ];
-    for runtime in [&[][..], &docker[..], &["--runtime", "none"][..]] {
-        let mut given = vec!["--host-port", "5432"];
-        given.extend(runtime);
-        let said = refused(&given, &host);
-        assert!(
-            said.contains("--host-port: needs --runtime crun"),
-            "{runtime:?}: {said}"
+    let engine = ["--allow-container-engine", "--container-bin", "/bin/sh"];
+    let mut given = vec!["--host-port", "5432"];
+    given.extend(engine);
+    let said = refused(&given, &host);
+    assert!(
+        said.contains(
+            "--host-port: not with --allow-container-engine (a flag of the crun runtime)"
+        ),
+        "{said}"
+    );
+    let said = refused(&["--host-port", "5432"], &host);
+    assert!(
+        said.contains("--host-port: not with --no-jobs (an agent that runs no job)"),
+        "{said}"
+    );
+    for wrong in ["0", "65536", "90-80"] {
+        let said = refused_crun(&["--host-port", "80", "--host-port", wrong], &host);
+        let want = format!(
+            "--host-port: not <PORT> or <LO-HI>, each from 1 to 65535, LO not above HI: \"{wrong}\""
         );
+        assert!(said.contains(&want), "{wrong}: {said}");
     }
-    #[cfg(target_os = "linux")]
-    {
-        for wrong in ["0", "65536", "90-80"] {
-            let said = refused(
-                &[
-                    "--runtime",
-                    "crun",
-                    "--host-port",
-                    "80",
-                    "--host-port",
-                    wrong,
-                ],
-                &host,
-            );
-            let want = format!(
-                "--host-port: not <PORT> or <LO-HI>, each from 1 to 65535, LO not above HI: \"{wrong}\""
-            );
-            assert!(said.contains(&want), "{wrong}: {said}");
-        }
-        let mut many = vec!["--runtime".to_owned(), "crun".to_owned()];
-        for port in 1..=17 {
-            many.extend(["--host-port".to_owned(), port.to_string()]);
-        }
-        let many: Vec<&str> = many.iter().map(String::as_str).collect();
-        let said = refused(&many, &host);
-        assert!(said.contains("--host-port: at most 16 entries"), "{said}");
+    let mut many = Vec::new();
+    for port in 1..=17 {
+        many.extend(["--host-port".to_owned(), port.to_string()]);
     }
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let said = refused_crun(&many, &host);
+    assert!(said.contains("--host-port: at most 16 entries"), "{said}");
 }
 
-/// Proves `--image-allow-loopback` is refused at start, naming `--runtime crun`, on an agent
-/// whose runtime is the container engine or none; and that an entry whose registry is not a
-/// loopback address with a port is refused naming the flag, whatever the runtime. Catches a
-/// plain-http registry accepted by a runtime that does not pull with js-oci, and a
+/// Proves `--image-allow-loopback` is refused at start, naming the runtime that does not take
+/// it, on an agent that runs the container engine or no job; and that an entry whose registry
+/// is not a loopback address with a port is refused naming the flag, whatever the runtime.
+/// Catches a plain-http registry accepted by a runtime that does not pull with js-oci, and a
 /// non-loopback host given plain http.
+#[cfg(target_os = "linux")]
 #[test]
 fn image_allow_loopback_is_a_flag_of_the_crun_runtime() {
     let host = linux_host();
-    let docker = [
-        "--runtime",
-        "docker",
-        "--allow-container-engine",
-        "--container-bin",
-        "/bin/sh",
-    ];
-    for runtime in [&docker[..], &["--runtime", "none"][..]] {
-        let mut given = vec!["--image-allow-loopback", "127.0.0.1:5000/cache"];
-        given.extend(runtime);
-        let said = refused(&given, &host);
-        assert!(
-            said.contains("--image-allow-loopback: needs --runtime crun"),
-            "{runtime:?}: {said}"
-        );
-    }
+    let entry = ["--image-allow-loopback", "127.0.0.1:5000/cache"];
+    let engine = ["--allow-container-engine", "--container-bin", "/bin/sh"];
+    let said = refused(&[&entry[..], &engine[..]].concat(), &host);
+    assert!(
+        said.contains(
+            "--image-allow-loopback: not with --allow-container-engine (a flag of the crun runtime)"
+        ),
+        "{said}"
+    );
+    let said = refused(&entry, &host);
+    assert!(
+        said.contains("--image-allow-loopback: not with --no-jobs (an agent that runs no job)"),
+        "{said}"
+    );
     for wrong in [
         "10.0.0.1:5000/cache",
         "127.0.0.1/cache",
         "localhost:5000/cache",
     ] {
-        let said = refused(&["--image-allow-loopback", wrong], &host);
+        let said = refused_crun(&["--image-allow-loopback", wrong], &host);
         let want = format!(
             "--image-allow-loopback: {wrong}: not 127.0.0.1:PORT/PREFIX or [::1]:PORT/PREFIX"
         );
@@ -613,12 +688,17 @@ fn image_allow_loopback_is_a_flag_of_the_crun_runtime() {
 
 /// What the agent prints for `--container-network`, which was removed.
 const NO_NETWORK: &str = "--container-network: removed. A job run through the container \
-    engine now always has network none. For networking give --runtime crun with --egress, and \
-    ask for a network per job in the job's network field";
+    engine now always has network none. For networking run crun (the Linux build's runtime) with \
+    --egress, and ask for a network per job in the job's network field";
 
 /// What the agent prints for `--container-egress-allow`, which was removed.
 const NO_EGRESS_ALLOW: &str = "--container-egress-allow: removed. Use --egress allow-list with \
     --egress-allow on the crun runtime, or the job's network field";
+
+/// What the agent prints for `--runtime`, which was removed.
+const NO_RUNTIME: &str = "--runtime: removed. The runtime is the build's: a Linux build runs \
+    crun (or, with --allow-container-engine and --container-bin, the container engine), a macOS \
+    build the native runtime of --native-helper-socket; --no-jobs starts an agent that runs no job";
 
 /// What the agent prints for `--container-nft`, which was removed.
 const NO_NFT: &str = "--container-nft: removed together with --container-network. The crun \
@@ -643,7 +723,8 @@ fn run_counting(extra: &[&str]) -> (Ran, bool, usize) {
     (ran, connected, sent)
 }
 
-/// Asserts that each removed flag, in both spellings and beside an otherwise valid command
+/// Asserts that each removed flag (`--runtime`, whatever its value, among them), in both
+/// spellings and beside an otherwise valid command
 /// line, ends the program with status 2 and exactly one line that names the flag and what
 /// replaces it, before the agent connects or sends anything; that the refusal comes before
 /// clap's own (an unknown flag ahead of it does not turn it into clap's usage error); that a
@@ -655,7 +736,7 @@ fn run_counting(extra: &[&str]) -> (Ran, bool, usize) {
 /// of the replacement, and a refusal that comes after the agent registered.
 #[test]
 fn the_removed_flags_are_refused_with_a_message() {
-    let cases: [(&[&str], &str); 14] = [
+    let cases: [(&[&str], &str); 18] = [
         (&["--container-network", "jobs"], NO_NETWORK),
         (&["--container-network=jobs"], NO_NETWORK),
         (
@@ -666,6 +747,10 @@ fn the_removed_flags_are_refused_with_a_message() {
         (&["--container-nft", "/usr/sbin/nft"], NO_NFT),
         (&["--container-nft=/usr/sbin/nft"], NO_NFT),
         (&["--container-network"], NO_NETWORK),
+        (&["--runtime", "crun"], NO_RUNTIME),
+        (&["--runtime=docker"], NO_RUNTIME),
+        (&["--runtime", "none", "--no-jobs"], NO_RUNTIME),
+        (&["--runtime"], NO_RUNTIME),
         (&["--container-egress-allow="], NO_EGRESS_ALLOW),
         (&["--container-nft="], NO_NFT),
         (

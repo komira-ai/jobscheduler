@@ -43,12 +43,13 @@
 //! | `--store-unreachable-after <duration>` | `60s`: how long the store paths of the tick (the job pass over the job tables) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both. Zero or an unparsable value is refused at start naming the flag |
 //! | `--boot initialise\|resume` | required: `initialise` is the first start (a live elastic pool may have no records yet), `resume` a later one (its records must exist); the server reads no lease file at either, so `resume` without one starts |
 //! | `--pool-config <path>` | removed, and hidden from `--help`: the agentless hosts-file pool is not served. A start that gives it is refused naming it, with the migration (run `js-agent` on each listed host and use `--agent-pool-config`, or a `[[pool]]` of `kind = "joined"`; see "Migrating an agentless pool" in `docs/design/configuration.md`). `--agent-pool-config` is required |
-//! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
-//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk the pool books for every host and the floor a hello must meet; zero or absent books none; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that books disk and does not name `scratch-quota` refuses every agent that does not report disk, which no current agent does; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project` (reason `below-floor`), or whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than `disk_bytes` (reason `quota-default-unfit`), with `shape-not-accepted`; a pool that books no disk and does not name `scratch-quota` refuses with `shape-not-accepted` (reason `quota-without-pool-disk`) a host that runs with `--scratch-quota`), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on; `share_class?`: a class that books part of a host, served beside `class` so that its work shares a host with room (it may not name `class`); a joined pool of the file takes the same key |
+//! | `--agent-token-file <path>` | the pool's shared join tokens (the first pool's, on a server of several), one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies, unless its file names `join_token_file`. Naming both is refused, naming the file. Needs `--agent-pool-config` |
+//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk the pool books for every host and the floor a hello must meet; zero or absent books none; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that books disk and does not name `scratch-quota` refuses every agent that does not report disk, which no current agent does; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project` (reason `below-floor`), or whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than `disk_bytes` (reason `quota-default-unfit`), with `shape-not-accepted`; a pool that books no disk and does not name `scratch-quota` refuses with `shape-not-accepted` (reason `quota-without-pool-disk`) a host that runs with `--scratch-quota`), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on; `share_class?`: a class that books part of a host, served beside `class` so that its work shares a host with room (it may not name `class`); a joined pool of the file takes the same key; `join_token_file?`: the pool's shared join tokens, read as `--agent-token-file` is. Repeatable: each further file is one more pool beside the first, which a hello joins by naming it (Linux nodes and Macs, say). One registry holds the hosts of every pool, each held to its own pool's shape, `exec`, `max_machines` and timing, and a host id is in one pool at a time (a hello for it in another is refused `host-listed`). A shared token of one pool is refused `unknown-pool` on a hello that names another, and on a server of several pools a one-time token's hello must name the pool of its instance's provider. A later file is refused, naming it, when its name is an earlier pool's, its `memory_schedulable_percent` is not the first pool's (the scheduler books one share of every host), or it has whole-node settings (its class is `whole-node`: the server's whole-node settings, and the timing of a host put back after a restart before its hello, are the first pool's) |
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
 //! | `--placement js-sched` | deprecated, and does nothing: `js-sched` is the only placement. The flag is accepted with the warning `--placement is deprecated and does nothing: js-sched is the only placement (drop the flag)`; `--placement registry`, the removed first-free placement, is refused at start, `the registry placement mode was removed; js-sched is the only placement (drop the flag)`. The server keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets; it places the jobs on the hosts that registered themselves, and the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings, and the start is counted. The pool's `memory_schedulable_percent` is the scheduler's rule: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; `GET /v1/hosts` shows the cut memory as `shape.memory_bytes`, beside the percent. A host a whole-node request has set aside takes work of the pool's `share_class` only as backfill, by the end of the host's tail as the mark took it; a wall time above `server.max_lease_wall` never does. An agent pool (`--agent-pool-config`, or a joined pool of the file) whose capabilities name no `arch` is refused at start, naming the pool; an elastic pool is not: each of its machines is placed by the floor's numbers and the capabilities its agent reported at hello, `arch` among them. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. Needs `--agent-pool-config` |
+//! | `--cold-cpu-millis <n>`, `--cold-memory-bytes <n>` | what a queued job that names no CPU or no memory books, for that dimension, while the history of its class gives no estimate (`docs/design/sizing.md`, section 7.7): millicores from `250`, bytes from `1073741824` (1 GiB); the memory is also the least its class books before five runs. Each left out is a quarter of the most cores or bookable memory a registered host has; a value above the most a registered host has books that most. Needs `--agent-pool-config` |
 //! | `--estimate-feed` | deprecated, and does nothing: no lease is costed by an estimate any more. The flag is accepted with the warning `--estimate-feed is deprecated and does nothing: no lease is costed by an estimate any more (drop the flag)`, and is still refused beside `--usage-off` and without `--agent-pool-config` |
 //! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of `GET /v1/hosts` and the join, brake and usage routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--tick` | how often the job pass runs and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
@@ -70,7 +71,8 @@
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
 //! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed`,
-//! `--cpu-slack` and `--job-listen` need `--agent-pool-config`, and are refused without it.
+//! `--cpu-slack`, `--cold-cpu-millis`, `--cold-memory-bytes` and `--job-listen` need
+//! `--agent-pool-config`, and are refused without it.
 //!
 //! # The configuration file
 //!
@@ -110,6 +112,10 @@
 //! # placement: deprecated, as the flag; "js-sched" warns, "registry" is refused; refused unless a pool registers agents
 //! # cpu_slack (1.1, a number): the flag's name, default and range; refused unless a pool
 //! # registers agents
+//! # cold_cpu_millis (250 or more), cold_memory_bytes (1073741824 or more): what a queued job
+//! # that names no CPU or memory books while its class has no estimate, and the least memory
+//! # its class books before five runs; each left out is a quarter of the largest host; held
+//! # at the largest host; the flags' names (--cold-cpu-millis, --cold-memory-bytes) and rules
 //! # estimate_feed (false): deprecated, as the flag; true warns and does nothing; refused unless a
 //! # pool registers agents, and refused as true beside usage_off = true
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456),
@@ -225,10 +231,14 @@
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
 //! what a pool without it gets, or `{ kind = "tailscale", oauth_client_file = ..., tag
 //! = ... }`. Any number of elastic and joined pools may be declared, each with its own
-//! `join_token_file`, but this version starts only on a file with at most one pool that
-//! registers agents (an elastic or a joined pool): with more it refuses to start, naming the
-//! second, `several elastic pools are parsed; this version runs one, as the server keeps one
-//! registry of agents` ([`Config::resolve_file`] still reads such a file). A file with no
+//! `join_token_file`. The server starts on several joined pools, which share its one registry
+//! of agents (each host in the pool its hello names, with that pool's shared tokens only, see
+//! `--agent-pool-config`), and on one elastic pool alone: beside another pool that registers
+//! agents an elastic pool is refused at start, naming the second, `several elastic pools are
+//! parsed; this version runs one, as the server keeps one registry of agents` or `an elastic
+//! pool is served alone; this version runs several pools only when every one is joined`
+//! ([`Config::resolve_file`] still reads such a file). A joined pool after the first is held
+//! to the first's rules as a later `--agent-pool-config` is. A file with no
 //! pool that registers agents is refused naming `pool`. The removed agentless hosts-file
 //! pool, a `[[pool]]` whose `provider` is of kind `static` (with or without a
 //! `hosts_file`), is refused at start naming the pool and those keys, with the migration;
@@ -348,9 +358,10 @@
 //! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
 //! [`SERVED_CALLS`] are served: `SubmitJob` (validated, idempotent on the job id, admitted
-//! over the registered hosts and the pool's catalog, committed before it answers; its wall
+//! over the registered hosts and the pool's catalog, committed before it answers, and placed in
+//! the call when no queued job of its priority or above is ahead; its wall
 //! limit held to `--max-job-wall`), `CancelJob` and the reads, and the fleet calls (`ListHosts`,
-//! `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
+//! `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
 //! hosts, the status of its pools, and its usage and job stores. `docs/http-gateway.md` has the answers
 //! of each call. The port has the connection cap and the timeouts of the other listeners, and
 //! stops with them. The job routes are not served on `--listen`: the gateway's `/v1/hosts`
@@ -456,8 +467,8 @@
 //! capable host exists, else when a launching machine provider of the pool may offer a
 //! machine for it, and otherwise refused at once with `no-capable-host`, before anything is
 //! recorded. A host is capable when what the pool books of it holds the request and it
-//! reports the `os`, `arch`, `disk-gib`, `isa_level` and `exec` the request requires, as
-//! placement compares them, and it is neither tainted nor being released (leaving the
+//! reports the `os`, `arch`, `disk-gib`, `isa_level`, `os_version` (at least, by major
+//! version) and `exec` the request requires, as placement compares them, and it is neither tainted nor being released (leaving the
 //! pool): a busy, silent, cordoned or drain-marked host is capable, and so is one whose
 //! agent announced it is stopping, so a job that only has to wait is never refused for it.
 //! A provider may offer when the request is inside its capabilities and its catalog has an
@@ -482,7 +493,7 @@
 //! | request | answers |
 //! |---|---|
 //! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted` (with `"reason"`: `below-floor`, the host's shape, labels or capabilities do not meet the pool's; `quota-default-unfit`, the pool names `scratch-quota` and the host's scratch default is absent, zero or above the pool's `disk_bytes`; or `quota-without-pool-disk`, the host enforces a scratch quota and the pool books no disk and does not name `scratch-quota`; a server logs the refusal with the host id, the code and the reason), `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable`, or `state-write-failed` when, with a store setting, the host's binding could not be committed |
-//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack, taint_cleared_ack?}` (see "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
+//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack, taint_cleared_ack?, beat_now?}` (see "Taint"; to an agent that reported `held-beat`, a reply with nothing to send is held open until a job is placed on the host, for the heartbeat interval at most 5 s, and says `beat_now`: `docs/design/held-beat.md`); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
 //! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; body optional, `{"lease_secs": n}` (default 300, cut to 3600); 400 `invalid-cordon`; 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
 //! | `POST /v1/hosts/{id}:uncordon` | as the cordon, with no body: 200 the host, plus `lifted`; 200 also when it was not cordoned |
 //! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, mark?, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}`; `mark` is `reserved`, `held`, `draining` or `releasing` as in the `mark` of `GET /v1/hosts`, and absent for a host that is not set aside (a host is idle when `lease` is absent, `leases` is 0, `releasing` is false and `mark` is absent) |
@@ -548,15 +559,21 @@
 //! toward `max_machines`, is never forgotten for being silent, and keeps its taint across its own
 //! hello and a server restart (the `.agents` file or the store holds it, see "Restart"). The runs
 //! it already holds finish: their stops are sent, their results are acknowledged, and the budget
-//! returns when the host stops listing them. A taint ends in one way: the agent's own heartbeat
-//! reports it cleared (`taint_cleared`: the agent re-checked an idle host twice, see its
-//! `--taint-recheck-ms`). The server clears the host's taint when `taint_cleared` equals the
+//! returns when the host stops listing them. A taint ends in one of two ways. The first is the
+//! agent's own heartbeat, which reports it cleared (`taint_cleared`: the agent re-checked an idle host twice, see its
+//! `--taint-recheck-ms`): the server clears the host's taint when `taint_cleared` equals the
 //! taint it holds, field for field, commits the binding without it first (as for a report), and
 //! answers `taint_cleared_ack: true` (not `taint_ack`, which answers a taint report, so that a late acknowledgement of the report cannot end the agent's taint before the server has heard of the clear), so the agent stops sending it; a cleared report of any other
 //! taint (a host job's, say) changes nothing and is acknowledged all the same. A start refused
 //! `host-tainted` in the beat that reports the clear taints nothing: those results predate it.
-//! Otherwise an operator stops the server and removes the `taint_` keys of the host's entry in the
-//! `.agents` file (or of its value in the store). A job with host isolation taints its host when
+//! The second is the operator's `ClearHostTaint` call of the job service (`js host host-taint`),
+//! for a taint the agent will not report cleared (an agent too old to report a clear, a marker
+//! moved aside by hand, a reimaged host): the server commits the binding without the taint by
+//! the same compare-and-set as a heartbeat's clear, under the same lock, then forgets it in the
+//! registry; a host that has none changes nothing and writes nothing. The call does not reach
+//! the agent, so an agent whose marker still holds the taint refuses the next start
+//! `host-tainted`, which the server takes as the host's taint again: the operator moves the
+//! agent's `taint.json` and its `owed-*` records aside first. A job with host isolation taints its host when
 //! its placement commits (reason `host-job`, `run_id` the job's id; `docs/runbooks/host-jobs.md`),
 //! and its own start is still sent. An agent that cleared a taint stays tainted for the server
 //! until it is acknowledged, so a server that does not know the field (an older release) leaves
@@ -691,6 +708,7 @@ mod error;
 mod file;
 mod file_checks;
 mod flags;
+mod held_beat;
 mod host_keys;
 mod hosts;
 #[cfg(feature = "in-process")]
@@ -708,6 +726,7 @@ mod job_api;
 mod job_expiry;
 mod job_loss;
 mod job_pass;
+mod job_sizes;
 mod job_start;
 mod job_store;
 mod job_whole;

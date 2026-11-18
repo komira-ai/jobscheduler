@@ -57,10 +57,14 @@ pub struct Args {
     /// Without it the public roots bundled in the program are.
     #[arg(long, value_name = "PATH")]
     pub ca_cert: Option<PathBuf>,
-    /// The host to cordon. By default the id the agent registers under: `h-` and 32 hex
-    /// digits of a salted hash of the machine id.
-    #[arg(long, value_name = "ID")]
+    /// The host to cordon. By default the id the agent registers under without `--host-id`:
+    /// `h-` and 32 hex digits of a salted hash of the machine id.
+    #[arg(long, value_name = "ID", conflicts_with = "host_id_from_facts")]
     pub host_id: Option<String>,
+    /// The host to cordon is the `host_id` of this facts file of hostkeeper's daemon
+    /// (`/var/lib/hostkeeper/facts.json`), for an agent that registers with the same flag.
+    #[arg(long, value_name = "PATH")]
+    pub host_id_from_facts: Option<PathBuf>,
     /// How long to keep the host cordoned, such as `90m`, `2h` or `1h30m` (units `s`, `m`,
     /// `h`, `d`).
     #[arg(long = "for", value_name = "DURATION", value_parser = parse_window)]

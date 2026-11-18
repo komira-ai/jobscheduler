@@ -12,8 +12,10 @@ mod cleanup;
 mod disk;
 mod exclusive;
 pub mod fake;
+mod fake_providers;
 mod fence;
 mod files;
+#[cfg(target_os = "linux")]
 mod flags;
 mod held;
 mod host_ports;
@@ -22,10 +24,16 @@ mod lease_dir;
 mod live_logs;
 mod logs;
 mod mounts;
+mod native_bodies;
 mod network;
 mod owed;
 mod per_job;
 mod prepare;
+#[cfg(target_os = "linux")]
+mod provider_flags;
+mod providers;
+mod providers_end;
+mod providers_restart;
 pub mod quota;
 mod quota_health;
 mod reach;
@@ -39,6 +47,8 @@ mod slots;
 mod taint;
 mod taint_clear;
 mod taint_idle;
+mod taint_pin;
+mod timeline;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -139,10 +149,16 @@ impl Harness {
     /// lists. Its post-job checks are the scripted ones, which pass.
     pub fn restart(&mut self) -> Result<Vec<Event>, RuntimeError> {
         let scratch = self.dir.path("scratch");
+        let checks = hook(&self.log, &self.fake, &scratch, &[]);
+        self.restart_with(checks)
+    }
+
+    /// As [`Harness::restart`], with `checks` as the post-job checks of the new process.
+    pub fn restart_with(&mut self, checks: Box<dyn CheckHook>) -> Result<Vec<Event>, RuntimeError> {
         let (life, events) = Lifecycle::adopt(
             self.config.clone(),
             Box::new(self.fake.clone()),
-            hook(&self.log, &self.fake, &scratch, &[]),
+            checks,
             Box::new(self.clock.clone()),
         )?;
         self.life = life;
@@ -291,7 +307,7 @@ pub fn names(events: &[Event]) -> Vec<String> {
         .iter()
         .map(|event| match event {
             Event::Adopted { run_id } => format!("adopted {run_id}"),
-            Event::Started { run_id } => format!("started {run_id}"),
+            Event::Started { run_id, .. } => format!("started {run_id}"),
             Event::Refused { run_id, code, .. } => format!("refused {run_id} {code}"),
             Event::Skipped { run_id, why } => format!("skipped {run_id} {why:?}"),
             Event::Invalid { index, code } => format!("invalid #{index} {code}"),

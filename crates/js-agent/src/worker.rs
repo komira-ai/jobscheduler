@@ -19,7 +19,10 @@
 //!   swap it, never across a runtime call.
 //! - **The worker steps by itself.** It calls [`Lifecycle::step`] after each order and
 //!   whenever it has had none for the step interval of its [`Plan`], so a container that
-//!   exited is found whether or not the server said anything.
+//!   exited is found whether or not the server said anything; and at once when work its
+//!   lifecycle handed off the worker (an image's pull, a lookup or an assembly of a job's
+//!   file system, a provider's call) is done, so a start that waits on it is not held to
+//!   the interval (the lifecycle's [`Wake`], module `nudge`).
 //! - **The session says when it heard the server.** [`Worker::heard`] stamps a [`Contact`]
 //!   on the lifecycle's clock without waiting, at every welcome and every accepted reply,
 //!   whether or not the queue had room for it; the lifecycle reads it at every step and
@@ -102,13 +105,15 @@ use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunRes
 
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
-use crate::integrity::Integrity;
-use crate::lifecycle::{CheckHook, Config, Contact, Event, Lifecycle, Status, fits_grace};
+
+use crate::lifecycle::{
+    Config, Contact, Event, Lifecycle, MountProviders, Status, Wake, fits_grace,
+};
 use crate::readiness::{HookWindow, WorkerHook};
 
+mod nudge;
 mod quiesce;
 
-use crate::native::NativeChecks;
 use crate::system::{Backend, Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
 use crate::vm::VmSettings;
@@ -155,6 +160,9 @@ pub struct Plan {
     pub backend: Backend,
     /// The id the agent registered under.
     pub host_id: String,
+    /// The mount providers the agent was given (`--mount-provider`); none for an agent
+    /// given none.
+    pub providers: MountProviders,
     /// The platform the agent runs on.
     pub platform: Platform,
     /// The directories the post-job checks watch.
@@ -433,6 +441,9 @@ struct Shared {
     prepare_queued: AtomicBool,
     /// The same for a restore order.
     restore_queued: AtomicBool,
+    /// A nudge the lifecycle's [`Wake`](crate::lifecycle::Wake) sent waits in the queue: set
+    /// by the ring that sends it, cleared when the worker takes any order (`nudge`).
+    nudge_queued: AtomicBool,
     /// The lease the latest prepare question was about. The order carries none, so the one
     /// that waits in the queue is always about the lease asked most recently.
     asked_prepare: Mutex<Option<String>>,
@@ -496,7 +507,7 @@ pub enum Delivery {
 /// A way to talk to the worker that can be copied: for a test to wait for it.
 #[derive(Clone)]
 pub struct Handle {
-    orders: SyncSender<Order>,
+    orders: Arc<SyncSender<Order>>,
     shared: Arc<Shared>,
 }
 
@@ -555,8 +566,10 @@ impl Worker {
     /// died while it built them. The text says why.
     pub fn start(mut plan: Plan) -> Result<Self, String> {
         let (orders, inbox) = sync_channel(QUEUE);
+        let orders = Arc::new(orders);
         let (ready, built) = sync_channel(1);
         let shared = Arc::new(Shared::default());
+        let wake = nudge::wake(&orders, &shared);
         let clock = plan.machine.clock();
         let hook = plan.readiness.take();
         let (own, step_every, thread_clock) = (shared.clone(), plan.step_every, clock.clone());
@@ -580,7 +593,7 @@ impl Worker {
         // container that is still there is adopted by the next process.
         thread::spawn(move || {
             let _ending = Ending(&own);
-            match build(plan, thread_clock.clone()) {
+            match build(plan, thread_clock.clone(), wake) {
                 Err(why) => {
                     let _ = ready.send(Err(why));
                 }
@@ -631,6 +644,7 @@ impl Worker {
     #[doc(hidden)]
     pub fn orphaned(clock: SharedClock, snapshot: Snapshot, rescue: Rescue) -> Self {
         let (orders, _) = sync_channel(QUEUE);
+        let orders = Arc::new(orders);
         let published = Published {
             snapshot,
             ..Published::default()
@@ -769,11 +783,12 @@ type Built = (Lifecycle, Option<Collector>, Vec<String>);
 
 /// The lifecycle, built and with the previous process's containers adopted, the collector of
 /// the usage, and the lines to print about them.
-fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
+fn build(plan: Plan, clock: SharedClock, wake: Wake) -> Result<Built, String> {
     let Plan {
         config,
         backend,
         host_id,
+        providers,
         platform,
         watch,
         settle,
@@ -797,27 +812,17 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
     // alone, so a firewall that has gone never keeps it from stopping the containers.
     runtime.check_egress().map_err(|why| why.to_string())?;
-    let (checks, actions): (Box<dyn CheckHook>, Result<String, &str>) = match &backend {
-        Backend::Container(settings) => {
-            let integrity =
-                Integrity::start(machine.view(), settings.uid(), watch)?.with_settle(settle);
-            // The engines give each slot a user of its own; every crun job runs as the one id
-            // of the job user's range, so there are no slots to tell apart.
-            let integrity = match settings.crun() {
-                Some(_) => integrity,
-                None => integrity.with_slots(settings.slot_ids(0).0),
-            };
-            let actions = settings.actions_cgroup().map(str::to_owned);
-            (Box::new(integrity), actions.ok_or(NO_ACTIONS_CGROUP))
-        }
-        Backend::Native(_) => (Box::new(NativeChecks), Err(NO_NATIVE_USAGE)),
-    };
+    let (checks, actions) = crate::platform::checks(&backend, &*machine, watch, settle)?;
     let (life, events) = Lifecycle::adopt(config, runtime, checks, Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
-    let life = life
+    let mut life = life
         .with_blind_wait(settle)
-        .with_taint_recheck(taint_recheck);
+        .with_taint_recheck(taint_recheck)
+        .with_wake(wake);
     lines.extend(describe(&events));
+    // The mount providers, once the earlier process's runs are adopted: what it left of
+    // theirs is released.
+    lines.extend(describe(&providers.attach(&mut life, &*machine, &host_id)?));
     let collector = usage.and_then(|outbox| match actions {
         Ok(dir) => Some(Collector::new(
             machine.cgroup_files(),
@@ -832,13 +837,6 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     });
     Ok((life, collector, lines))
 }
-
-/// Why the heartbeat of a native agent carries no load.
-const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartbeat carries none";
-
-/// Why the heartbeat carries no load.
-const NO_ACTIONS_CGROUP: &str =
-    "usage: --actions-cgroup is not given: the heartbeat carries no load";
 
 /// The worker's loop: an order or a step interval, then a step, then a publication.
 fn work(
@@ -865,6 +863,8 @@ fn work(
         let mut lines = Vec::new();
         let mut settle = None;
         let order = inbox.recv_timeout(step_every);
+        // The step below sees all that was done before it: a ring from now on nudges again.
+        shared.nudge_queued.store(false, Ordering::SeqCst);
         let asked = order.as_ref().map_or(0, |order| match order {
             Order::Reply { reply, .. } => reply.commands.len().saturating_mul(CALLS_PER_START),
             _ => 0,

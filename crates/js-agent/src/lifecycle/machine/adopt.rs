@@ -2,6 +2,7 @@
 //! stand for, and trying again to remove the ones that could not be removed.
 
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 
 use js_agent_wire::Taint;
 
@@ -10,12 +11,14 @@ use super::job::{
     Booking, Job, Retired, Stuck, cleanup_taint, host_taint, host_taint_of, label_id,
     may_change_host, slot_label,
 };
+use super::provided::Attached;
 use super::{Lifecycle, MAX_JOBS, SLOTS, Slots};
 use crate::lifecycle::quota::QuotaHealth;
 use crate::lifecycle::runtime::{Found, Runtime, RuntimeError, Status};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{
-    CheckHook, Clock, Config, DEFAULT_SETTLE, DEFAULT_TAINT_RECHECK, Event, Finding, code, label,
+    CheckHook, Clock, Config, DEFAULT_SETTLE, DEFAULT_TAINT_RECHECK, Event, Finding, Wake, code,
+    label,
 };
 
 /// The taint of a record of owed checks: the run it names, or the check code when the
@@ -102,6 +105,9 @@ impl Lifecycle {
             silence: None,
             blind_wait: DEFAULT_SETTLE,
             taint_recheck: DEFAULT_TAINT_RECHECK,
+            providers: Attached::none(),
+            wake: Wake::default(),
+            starting: BTreeMap::new(),
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);
@@ -350,8 +356,11 @@ impl Lifecycle {
             stuck,
             runtime,
             config,
+            providers,
+            clock,
             ..
         } = self;
+        let now = clock.now_ms();
         stuck.retain(|held| {
             let _ = runtime.stop(&held.id, config.stop_grace);
             let gone = runtime.remove(&held.id).is_ok();
@@ -361,6 +370,8 @@ impl Lifecycle {
                     code: code::UNADOPTABLE,
                     message: format!("container {}: removed on a later attempt", held.id.0),
                 }));
+                // The run it stood for holds nothing now: its sources are released.
+                held.run_id.iter().for_each(|run| providers.leave(run, now));
             }
             !gone
         });

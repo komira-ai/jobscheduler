@@ -17,9 +17,13 @@
 //! | [`BUNDLE`] | the held bundle manifest digests, `sha256:<hex>`, comma-separated | the agent has a bundle store and holds at least one bundle |
 //! | [`BUNDLE_ROOT`] | the absolute path of the bundle store | the agent has a bundle store |
 //! | [`LAYERED_ROOTFS`] | [`FLAG_SET`] | the agent reads a job start's layers, mounts and host ports, and its runtime and kernel can make them (or refuse by name what they cannot) |
+//! | [`OS_VERSION`] | the major version of the host's operating system, a decimal number such as `26` | the agent runs on macOS and could read the version |
+//! | `mount-provider.<name>` ([`mount_provider_key`]) | [`FLAG_SET`] | the agent reports layered rootfs and was given the node-local provider `<name>` (`--mount-provider`) |
 //!
 //! A job request may require [`EXEC`] (the same mode), [`DISK_GIB`] (at least that
-//! much free disk) and [`LAYERED_ROOTFS`] (the same value); see [`crate::Request`].
+//! much free disk), [`LAYERED_ROOTFS`] and a `mount-provider.<name>` key (the same
+//! value); see [`crate::Request`]. The provider keys are a family, not names, so they are
+//! not among [`DETECTED_KEYS`]: [`is_mount_provider_key`] says whether a key is one.
 //!
 //! A pool that declares an execution mode makes a [`HostContract`] of it: `runtime` must
 //! equal the mode, and a pool with GPUs also needs `gpu-toolkit`. The check is
@@ -39,6 +43,11 @@ pub const GPU_TOOLKIT: &str = "gpu-toolkit";
 
 /// The capability key of the mode the agent runs jobs in.
 pub const EXEC: &str = js_types::EXEC_KEY;
+
+/// The capability key of the major version of the host's operating system (`26`: macOS 26).
+/// A job names the least version it needs under it, and a host is capable when it reports
+/// that major version or a later one.
+pub const OS_VERSION: &str = js_types::OS_VERSION_KEY;
 
 /// The capability key of the free disk, in whole GiB, of the volume jobs work on.
 pub const DISK_GIB: &str = js_types::DISK_GIB_KEY;
@@ -88,8 +97,29 @@ pub const LAYERED_ROOTFS: &str = "layered-rootfs";
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
+/// The prefix of the capability key of a node-local mount provider an agent was given:
+/// `mount-provider.<name>` ([`mount_provider_key`]). Its value is [`FLAG_SET`]. A job
+/// that names the provider `<name>` for a layer or a mount requires the key, so it is
+/// placed only on a host that reports it, and its start is sent only there. An operator
+/// cannot set such a key with a flag; a request compares it exactly.
+pub const MOUNT_PROVIDER_PREFIX: &str = "mount-provider.";
+
+/// The capability key of the mount provider `name`: [`MOUNT_PROVIDER_PREFIX`] and the name.
+#[must_use]
+pub fn mount_provider_key(name: &str) -> String {
+    format!("{MOUNT_PROVIDER_PREFIX}{name}")
+}
+
+/// Whether `key` is a mount provider's key: [`MOUNT_PROVIDER_PREFIX`] and a name of at
+/// least one byte.
+#[must_use]
+pub fn is_mount_provider_key(key: &str) -> bool {
+    key.strip_prefix(MOUNT_PROVIDER_PREFIX)
+        .is_some_and(|name| !name.is_empty())
+}
+
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 11] = [
+pub const DETECTED_KEYS: [&str; 12] = [
     RUNTIME,
     GPU_TOOLKIT,
     GPU_PASSTHROUGH,
@@ -101,6 +131,7 @@ pub const DETECTED_KEYS: [&str; 11] = [
     BUNDLE,
     BUNDLE_ROOT,
     LAYERED_ROOTFS,
+    OS_VERSION,
 ];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.

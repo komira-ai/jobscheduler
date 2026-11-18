@@ -571,7 +571,7 @@ All flags, in the agent's flags file (B14, S2):
 
 | Flag | Meaning |
 |---|---|
-| `--mount-root NAME=PATH`, `--mount-root-ro NAME=PATH` | **existing**, now accepted with `--runtime crun`. Each root is a prefix: a job may name any directory beneath it (after links are followed), read-only beneath either kind, read-write only beneath a `--mount-root`. The names stay for the legacy `Mount` form and for the log; a host path never names a root. |
+| `--mount-root NAME=PATH`, `--mount-root-ro NAME=PATH` | **existing**, now accepted with the crun runtime. Each root is a prefix: a job may name any directory beneath it (after links are followed), read-only beneath either kind, read-write only beneath a `--mount-root`. The names stay for the legacy `Mount` form and for the log; a host path never names a root. |
 | `--image-allow HOST[:PORT]/PREFIX` | **existing**; an image layer is allowed as the job's image is. |
 | `--image-allow-loopback 127.0.0.1:PORT/PREFIX` (or `[::1]:PORT/PREFIX`) | **new**: a registry on the host's own loopback, over plain HTTP, with its port given. It builds `Allow::plain_http_loopback()`; `--registry-credentials` may name it as any other entry. |
 | `--host-port PORT` or `LO-HI` | **new**, repeatable, at most 16: the host loopback ports a job may reach (a `HostPort.host_port`; the job's own port is not bounded, since it is in the job's network alone). |
@@ -787,9 +787,9 @@ kept off the lifecycle worker, and what the bound means.
 
 ## 5. The agent on macOS
 
-Not built now: the Macs are deferred, and how a Mac gives a job a writable tree over a lazy one is **not chosen here**.
-It waits for measurements of a lazy provider's real macOS mount (13, Q1). This section fixes everything that does not
-depend on that choice: what the Mac agent does with each field of the same `JobStartSpec`, the Seatbelt view, and the
+Built for `READ_ONLY` and `READ_WRITE` mounts (`crates/js-agent/src/native/mounts.rs`, the `MountGrant` of `crates/js-mac-pool/src/seatbelt`): the links of 5.2, the profile items of 5.4, the refusals of 5.1, and the hello's `per-job`, `start-fence`, `held-beat` and `layered-rootfs`. Not built: copy-on-write mounts, host sockets and the native runtime's `prepare` (the lookups here are metadata calls answered at once). How a Mac gives a job a writable tree over a lazy one is **not chosen here**; a `COPY_ON_WRITE` mount is refused `rootfs-unsupported-here` until it is.
+That choice waits for measurements of a lazy provider's real macOS mount (13, Q1). This section fixes everything that does not
+depend on it: what the Mac agent does with each field of the same `JobStartSpec`, the Seatbelt view, and the
 three candidate mechanisms with the tests that will decide between them. The wire and the server of sections 2 and 3 do
 not change whichever wins, because all three realise the same thing: a `COPY_ON_WRITE` mount.
 
@@ -798,14 +798,14 @@ not change whichever wins, because all three realise the same thing: a `COPY_ON_
 | Field | macOS |
 |---|---|
 | `layers` | refused `rootfs-unsupported-here`; placement never sends them (2.6: they require `exec=container`). A native job runs in its own directory of the host's file system; there is no root for layers to replace, under any of the mechanisms of 5.3. |
-| `mounts`, `COPY_ON_WRITE`, target `/work` or below it | realised in the run's `exec/` by the mechanism chosen from 5.3 |
-| `mounts`, `READ_ONLY` or `READ_WRITE`, target below `/work` | a link in `exec/` (5.2) |
+| `mounts`, `COPY_ON_WRITE`, target `/work` or below it | realised in the run's `exec/` by the mechanism chosen from 5.3; until one is, refused `rootfs-unsupported-here` |
+| `mounts`, `READ_ONLY` or `READ_WRITE`, target below `/work` | a link in `exec/` (5.2); built. A target below another mount's target is refused `mount-target-unsupported-here` (its link would be made inside the host directory the first points at) |
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target exactly `/work` | refused `mount-target-unsupported-here`: the run's working directory is a directory of the run's home, which a link cannot replace |
 | `mounts`, any target outside `/work` | refused `mount-target-unsupported-here` |
 | `mounts[i].sub_path` | resolved beneath the host path as on Linux; the link of 5.2 points at the result |
 | `mounts[i].no_exec` | a Seatbelt deny of `process-exec*` and `file-map-executable` for the mount's path (5.4) |
 | `mounts[i].propagation` | private is what a link gives: nothing mounted on the host later appears through it unless it is mounted below the linked path itself, which the provider controls |
-| `host_ports`, job port equal to the host port | allowed in the Seatbelt profile (5.4) |
+| `host_ports`, job port equal to the host port | allowed in the Seatbelt profile (5.4); not built: the native runtime offers no host port, so the lifecycle's host-port admission refuses it `input-not-allowed` |
 | `host_ports`, job port different from the host port | refused `host-port-remap-unsupported-here`: a native job shares the host's loopback, so it reaches a host port only at its own number; placement never sends one (2.6) |
 | `host_sockets` (designed) | a link at the target in `exec/`, which must be below `/work` as a mount's is, and a Seatbelt grant to connect to the socket (5.4) |
 
@@ -831,6 +831,7 @@ Independent of 5.3:
   the run's home, where the profile's head denies them. A working directory at or below the link is refused
   `cwd-in-tree` (an existing code), since the working-directory check (`crates/js-agent/src/native/cwd.rs`) refuses a
   link out of `exec/`.
+- **Built** in `native/mounts.rs`. The lookup (`resolve_fs`) canonicalises each host path with its `sub_path`, requires a directory (`input-unavailable` when it is missing or is not one) beneath a canonical root of the agent that its mode allows (`input-not-allowed`; the lifecycle's own check reads the path's text only, so a link inside a root that leads out is caught here), and keeps the plan by run id; the start makes the links, with the missing directories above them as the run's user's, and a name that is there already fails the start. `discard_fs` drops an unused plan.
 - **`READ_WRITE`**: the same link, with the host path in a write grant of the profile (5.4); the Unix permissions of the
   host path must also let the run's user write it, which the profile cannot grant.
 
@@ -868,14 +869,14 @@ and because it is the cheapest if the measurements show that the jobs only repla
 
 The profile of a run with mounts (reads stay open, `ReadModel::Open`), whichever candidate is chosen:
 
-- Each `--mount-root`/`--mount-root-ro` is a **read deny** of every run (`NativeConfig.read_denies`), so a run cannot
+- Built. Each `--mount-root`/`--mount-root-ro` is a **read deny** of every run (`NativeConfig.read_denies`), so a run cannot
   read what another run was given below the same root. An operator who keeps a tool under a mount root, which jobs read
   without mounting, moves it out; the agent already refuses a files root that overlaps a mount root at start.
 - Each read-only or read-write mount of the run, and each host path a candidate reads through, is **granted** by a new
   policy item emitted after the read denies and before the floor: `(allow file-read* (subpath (param "GR_i")))`, and
-  `(allow file-read-metadata (literal ...))` for each ancestor between the root and the path, so that `realpath` and
-  `getcwd` work. Later rules win in Seatbelt, so the grant beats the root's deny and loses to the floor. A read-write
-  mount also gets `(allow file-write* (subpath (param "GW_i")))` in the same place. (tree-inputs.md 4.2 designed the
+  `(allow file-read-metadata (path-ancestors (param "GR_i")))`, so that `realpath` and
+  `getcwd` work through a denied root (the filter the allow model's grants use, instead of a literal per ancestor). Later rules win in Seatbelt, so the grant beats the root's deny and loses to the floor. A read-write
+  mount also gets `(allow file-write* (subpath (param "GR_i")))` in the same place (the same parameter: one path, one name). (tree-inputs.md 4.2 designed the
   same item for its trees.)
 - **`no_exec`.** For a mount with it, `(deny process-exec* (subpath (param "GR_i")))` and
   `(deny file-map-executable (subpath (param "GR_i")))` after the grants, so nothing in it is run or mapped executable.
@@ -945,7 +946,7 @@ the heartbeat that carries it, not from the moment the agent reached it.
 | Phase | `JobState` | Observable from | What the host has done with the job's inputs | Set on the job |
 |---|---|---|---|---|
 | queued | `QUEUED` | the submit's answer | nothing: no host is chosen | `times.queued_at_ms` |
-| creating | `PLACED` | the commit of the placement | nothing yet: the start leaves on the host's next heartbeat reply (a whole-host job's, once its host is quiet and ready) | `host_id`; `times.placed_at_ms`; an event `PLACED` naming the host |
+| creating | `PLACED` | the commit of the placement | nothing yet: the start leaves on the host's next heartbeat reply, or on the one the server holds for it ([held-beat.md](held-beat.md)) (a whole-host job's, once its host is quiet and ready) | `host_id`; `times.placed_at_ms`; an event `PLACED` naming the host |
 | creating | `STARTING` | the first heartbeat on which the host lists the run as starting | preparing (4.7): pulling the image and image layers, resolving each host path (4.2), making the clones, overlays and targets; a host path's root is opened here, and the overlay's mount looks up each lower's root | as `PLACED` |
 | running | `RUNNING` | the first heartbeat on which the host lists the run as running | the job's program runs; every read of a lower or a mount from here on is the job's own, made when the job makes it | `times.started_at_ms`; the wall limit counts from here |
 | ended | `SUCCEEDED`, `FAILED`, `CANCELLED`, `LOST`, `FAILED_TO_START` | the heartbeat that carries the result, or the server's own end (a cancel before a start, the start timeout, the queue's limit, a lost host) | for `SUCCEEDED` and `FAILED`: the job's processes have exited; the host removes its mounts as it removes the run (4.6) | `times.ended_at_ms`; the result; for `FAILED_TO_START`, `start_failure` and `start_failure_detail` |
@@ -1138,7 +1139,7 @@ port 0.
   and each outcome; the start failure detail round-trips through the stored row and `GetJob`;
 - the tree wire's tests of section 6 pass unchanged; the removed key of section 6 is an unknown key to a request.
 - flags: `--host-port` with 16 entries accepted and 17 refused, a range `LO-HI` accepted, a reversed range, a port 0
-  and a port 65536 refused at start; `--mount-root` and `--mount-root-ro` accepted with `--runtime crun`;
+  and a port 65536 refused at start; `--mount-root` and `--mount-root-ro` accepted with the crun runtime;
 
 **Agent, Linux** (`js-agent`, with fakes):
 
@@ -1256,8 +1257,8 @@ One subject per pull request, in this order; each names its tests from section 1
 6. **Host ports on `crun`** (`js-agent`, `js-contain` for the init's `--wait-listen`): `--host-port`, the forwarder,
    adoption. The listener binds the job port and the forwarder connects to the host port, which differ only in the
    number each uses.
-7. **macOS** (`js-agent`, `js-mac-pool`), when the Macs are built and after the candidate of 5.3 is chosen: the native
-   runtime's `prepare`, the links, the chosen candidate, the profile items of 5.4, the refusals.
+7. **macOS** (`js-agent`, `js-mac-pool`): the links, the profile items of 5.4 and the refusals are built for `READ_ONLY`
+   and `READ_WRITE` mounts; the native runtime's `prepare` and the chosen candidate of 5.3 wait until it is chosen.
 8. **An end-to-end run on one Linux node** with a FUSE file system as a layer's and a mount's source, a registry on
    `127.0.0.1`, and a service on a host port: the job reads lazily, writes copy up, the upload reaches the service, the
    run directory is removed, the integrity check passes, and a restart of the FUSE file system's service while no job

@@ -7,10 +7,15 @@
 //! .deb, uploads the .deb and publishes, signs and attests nothing.
 //! Nothing here starts the unit: these are static checks of the files.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
 use clap::Parser;
+#[cfg(target_os = "linux")]
 use js_agent::Cli;
+#[cfg(target_os = "linux")]
 use js_agent::lifecycle::DEFAULT_STOP_GRACE;
 
 const UNIT: &str = "packaging/js-agent/js-agent.service";
@@ -74,6 +79,7 @@ fn unit_value(key: &str) -> String {
     found[0].clone()
 }
 
+#[cfg(target_os = "linux")]
 /// The words of the unit's `ExecStart`.
 fn exec_words() -> Vec<String> {
     unit_value("ExecStart")
@@ -83,16 +89,20 @@ fn exec_words() -> Vec<String> {
 }
 
 /// The unit's `ExecStart` as the agent's own command line parser reads it: a flag the agent
-/// does not have, or a value it refuses, is a failure here and a restart loop on a host.
+/// does not have, or a value it refuses, is a failure here and a restart loop on a host. The unit
+/// is a Linux one: it names flags only the Linux build of the agent has.
+#[cfg(target_os = "linux")]
 fn agent_cli() -> Cli {
     Cli::try_parse_from(exec_words())
         .unwrap_or_else(|e| panic!("ExecStart is not a command line of js-agent: {e}"))
 }
 
+#[cfg(target_os = "linux")]
 fn seconds(text: &str) -> u64 {
     text.parse().unwrap_or_else(|e| panic!("{text}: {e}"))
 }
 
+#[cfg(target_os = "linux")]
 /// The lines of the tmpfiles file, each split into its fields: type, path, mode, owner,
 /// group, age.
 fn tmpfiles() -> Vec<Vec<String>> {
@@ -127,6 +137,7 @@ fn the_unit_restarts_the_agent_after_every_exit_and_not_in_a_tight_loop() {
 /// own command line parser accepts: the agent reads no environment variable and no file of
 /// settings, and the join token is never on the command line (argv is world-readable; the agent
 /// has no flag for it), only the path of its file.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_unit_runs_the_installed_binary_with_flags_the_agent_accepts() {
     let words = exec_words();
@@ -145,6 +156,7 @@ fn the_unit_runs_the_installed_binary_with_flags_the_agent_accepts() {
 /// An operator who enables the unit without editing it gets a failure that names the flag, and
 /// not an agent that sits running and retries a server that is not there: the shipped `--server`
 /// is not an address the agent's client accepts.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_shipped_server_is_a_placeholder_the_agent_refuses_at_start() {
     let cli = agent_cli();
@@ -159,6 +171,7 @@ fn the_shipped_server_is_a_placeholder_the_agent_refuses_at_start() {
 /// `--stop-grace` to stop them, `DRAIN_SETTLE` for the server to acknowledge the results, and
 /// 30 seconds for the engine's calls. A flag a host raises raises the timeout with it, or the
 /// agent is killed with results unacknowledged.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_stop_timeout_covers_the_drain_the_flags_ask_for() {
     let cli = agent_cli();
@@ -199,19 +212,19 @@ fn the_unit_is_ordered_after_the_engine_and_does_not_pull_it_in() {
 /// state root and the scratch root, and the unit waits for the scratch disk by the same path.
 /// (The token is not among them: the payload keeps a one-time token and an instance file in
 /// `/etc/jobscheduler`, a host of the package an operator's pool token in `/etc/js-agent`.)
+#[cfg(target_os = "linux")]
 #[test]
 fn the_unit_uses_the_paths_of_the_elastic_agent() {
     let cli = agent_cli();
     let path = |p: &Option<PathBuf>| p.as_deref().map(Path::to_path_buf);
     assert_eq!(
-        path(&cli.container_bin),
+        path(&cli.os.container_bin),
         Some(js_elastic::CONTAINER_BIN.into())
     );
-    // The Docker units name their runtime and its opt-in: crun is the default Linux runtime,
-    // and the Linux farm's unit (js_agent_farm_unit) names it.
-    assert_eq!(cli.runtime, Some(js_agent::RuntimeKind::Docker));
-    assert!(cli.allow_container_engine);
-    assert_eq!(js_elastic::RUNTIME, "docker");
+    // The Docker units name the opt-in to the engine: crun is the runtime of the Linux build,
+    // which the Linux farm's unit (js_agent_farm_unit) runs.
+    assert!(cli.os.allow_container_engine);
+    assert_eq!(js_elastic::ENGINE_OPT_IN, "--allow-container-engine");
     assert_eq!(path(&cli.state_root), Some(js_elastic::STATE_ROOT.into()));
     assert_eq!(
         path(&cli.scratch_root),
@@ -223,6 +236,7 @@ fn the_unit_uses_the_paths_of_the_elastic_agent() {
 /// A host without a disk of its own at the scratch root (the agent refuses a state root on the
 /// scratch root's disk) does not start the agent and loop: the unit's condition names the mount
 /// point and `systemctl status` says so.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_unit_starts_only_with_a_mount_at_the_scratch_root() {
     assert_eq!(
@@ -313,6 +327,7 @@ fn the_unit_sets_only_the_settings_listed_here() {
 /// each root's with mode 0700 and no cleaning age: a credential in a directory a user other
 /// than root can enter or list is exposed, and an age on a `d` line would let
 /// `systemd-tmpfiles --clean` delete the credential. No other directory is made.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_directories_are_roots_mode_0700_and_never_cleaned() {
     let cli = agent_cli();

@@ -58,6 +58,12 @@ use crate::metrics::MetricsSink;
 use crate::sched::place::SchedPlacer;
 use crate::store_health::{FailureKind, Pass};
 
+/// The periodic duty of the job pass ([`run`]), as the servers claim it ([`js_jobs::JobStore::claim_duty`]).
+const JOB_PASS: &str = "job-pass";
+
+/// The periodic duty of the feed's trim, as the servers claim it.
+const FEED_TRIM: &str = "feed-trim";
+
 /// What one pass changed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Passed {
@@ -163,6 +169,24 @@ impl Agents {
         let now = store_time(began.millis());
         let meter = self.meter();
         let sink = meter.sink();
+        // One server runs the pass in each period: the one whose advance of the duty's row
+        // commits. The others leave it, having learnt that the store answers. A server whose
+        // registry removed a host holds what only its own pass settles (the host is read absent
+        // here, and unknown to every other server), so it runs the pass whether or not another
+        // server claimed the period: the pass's writes are conditional on the rows it read, so
+        // two passes in one period do no wrong, and one that is never run would leave the
+        // removed host's jobs unended.
+        if gone.is_empty() {
+            match jobs.claim_duty(JOB_PASS, now, self.duty_period()) {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(error) => {
+                    sink.store_write_failed();
+                    warn!(%error, "the job pass could not be claimed; the next tick tries again");
+                    return FailureKind::of(&error).map(Pass::Failed);
+                }
+            }
+        }
         let rules = self.whole_rules();
         let limits = (self.job_limits, &rules);
         let (passed, took) = meter.timed(|| run(jobs, limits, (&observer, sink), now));
@@ -189,16 +213,25 @@ impl Agents {
                 FailureKind::of(&error).map(Pass::Failed)
             }
         };
-        self.trim_feed();
+        self.trim_feed(now);
         seen
     }
 
     /// Trims the job store's change feed to the newest `--job-feed-retention` changes, and
-    /// logs how many rows went. A store that fails is logged; the next tick trims again.
-    fn trim_feed(&self) {
-        let Some(feed) = &self.job_feed else {
+    /// logs how many rows went, when this server claims the duty for the period that begins at
+    /// `now`. A store that fails is logged; the next tick trims again.
+    fn trim_feed(&self, now: StoreTime) {
+        let (Some(feed), Some(jobs)) = (&self.job_feed, &self.jobs) else {
             return;
         };
+        match jobs.claim_duty(FEED_TRIM, now, self.duty_period()) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                warn!(%error, "the job store's change feed trim could not be claimed");
+                return;
+            }
+        }
         match feed.pass() {
             Ok(0) => {}
             Ok(trimmed) => info!(trimmed, "the job store's change feed was trimmed"),

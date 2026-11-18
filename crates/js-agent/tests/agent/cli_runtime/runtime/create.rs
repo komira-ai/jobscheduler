@@ -163,12 +163,12 @@ fn create_builds_the_documented_argv() {
 }
 
 /// Asserts that the opt-in to the engine leaves its GPU jobs as they were: the command line
-/// `--runtime docker --allow-container-engine --container-bin <engine>` parses to the engine
-/// runtime with the opt-in set, and a runtime over that `--container-bin` gives a job that
+/// `--allow-container-engine --container-bin <engine>` parses with the opt-in set, and a runtime over that `--container-bin` gives a job that
 /// booked GPUs 0 and 1 exactly those (`--gpus "device=0,1"`) with network none. The opt-in
 /// gates the start only (see the flag tests); the runtime it lets the agent open is the one
 /// whose GPU argv the tests above pin. It catches the fallback losing its GPU devices ahead
 /// of GPU passthrough on crun, which is what keeps GPU jobs on the engine.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_gpu_job_still_runs_on_the_fallback() {
     use clap::Parser as _;
@@ -178,16 +178,13 @@ fn a_gpu_job_still_runs_on_the_fallback() {
         "http://127.0.0.1:1",
         "--pool",
         "gpu",
-        "--runtime",
-        "docker",
         "--allow-container-engine",
         "--container-bin",
         super::super::BIN,
     ])
     .unwrap();
-    assert_eq!(cli.runtime, Some(js_agent::RuntimeKind::Docker));
-    assert!(cli.allow_container_engine);
-    let bin = cli.container_bin.as_deref().unwrap();
+    assert!(cli.os.allow_container_engine);
+    let bin = cli.os.container_bin.as_deref().unwrap();
     let set = js_agent::cli_runtime::Settings::new(bin, None).unwrap();
     let world = docker();
     let mut rt = open_with(&world, "linux", set);

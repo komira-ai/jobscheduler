@@ -89,7 +89,7 @@ condition is on the lease: it must be a whole-node lease (5.17, D51), so that no
 
 The default is contained only. A pool that allows host jobs should be a pool of throwaway machines, since every host job costs its machine.
 
-**How a host job runs.** Only the `crun` runtime launches one, and the agent takes `--allow-host-jobs` with `--runtime crun` only (it
+**How a host job runs.** Only the `crun` runtime launches one, and the agent takes `--allow-host-jobs` with the crun runtime only (it
 then reports `host-jobs`; on any other runtime the flag is refused at start). A host job is an OCI container run by `crun` as root that
 shares the host's namespaces (pid, network, mount, IPC, UTS and cgroup; no user namespace and no id mapping), with the host's `/` as
 its root, every capability, no seccomp filter and no mount of its own; it starts in the run's scratch directory, and the image's config
@@ -114,7 +114,7 @@ last known clean (at agent start, and after each job that passed). This list is 
 and none is removed without a decision:
 
 - *stray processes*: any process started during the job that is outside the job's cgroup or still alive after the container is gone
-  (including a daemonised child), and any process running as the job's user after the job ends;
+  (including a daemonised child, when it is in a group a job can be in: see taint-self-clearing.md, A process outside the groups a job can be in), and any process running as the job's user after the job ends;
 - *host changes*: a file created or changed outside the allowed roots (the agent's scratch, cache and output roots), compared by a bounded
   listing and digest of a configured watch list of directories; the set of mounts (`/proc/self/mountinfo`) against the baseline; the user
   and group database against the baseline; the loaded kernel modules (`/proc/modules`) against the baseline;
@@ -137,11 +137,12 @@ taint changes nothing; only the provider path below, or an operator, ends it.
 | Kind | Tainted host |
 |---|---|
 | `aws` and later elastic kinds (a registered elastic host is ordinary, but it has an instance id) | Once its leases are gone, `release` it (terminate, read back Absent), then acquire a replacement under the usual caps. A tainted machine counts toward `max_machines` until it reads back Absent, so at the cap the terminate comes first. The instance id is never reused. |
-| `static` (tests only), listed | Cordoned. It stays listed and takes no work until an operator reimages it and runs `js-cli host clear-taint`, which is an audited operator action. |
+| `static` (tests only), listed | Cordoned. It stays listed and takes no work until an operator reimages it and runs `ClearHostTaint` (`js host host-taint --host-id ID`), which is an audited operator action. |
 | `default` (registered) | The host id enters the tainted set and any hello from it is refused with a constant code, even with a valid join credential, until an operator reimages the machine and clears the id. Clearing also drops the binding of the id to its first credential (5.8). |
 
 A tainted host id cannot rejoin: it is checked at admission before the credential. The tainted set survives a scheduler restart (it is in
-the binding file), and an operator's clear is the only way out.
+the binding file), and a taint ends by the agent's own acknowledged clear
+([taint-self-clearing.md](taint-self-clearing.md)) or by the operator's clear (`ClearHostTaint`, after moving the agent's marker aside).
 
 **Replacement is bounded.** A replacement is an acquire like any other: it follows `max_step`, `cooldown` and `max_machines`, and a pool
 whose hosts keep tainting (a bad job class) raises an alert after `max_taints_in_a_row` replacements without a clean job between them,

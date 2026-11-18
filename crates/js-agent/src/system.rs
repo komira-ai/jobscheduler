@@ -8,53 +8,18 @@
 //! thing both threads read: the session thread stamps a reply with it when the reply
 //! arrives, and the lifecycle counts the reply's `valid_for_ms` from that stamp.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use js_mac_session::client::Client;
 use js_vm_lease::VmDriver;
 
-use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
 use crate::facts::{FileReader, Platform, SystemFiles};
 use crate::integrity::{HostView, ProcHost};
-use crate::lifecycle::{Clock, Runtime};
-use crate::native::{self, NativeRuntime, NativeSettings};
+use crate::lifecycle::{Clock, Providers, Runtime};
 use crate::quota::{self, ScratchQuota};
 use crate::usage::UsageClock;
 use crate::vm::VmSettings;
-
-/// The bits of a native runtime's term that are random. A lease user is named
-/// `kbf-lease-<term>-<sequence>` and a user name is at most 31 bytes, so the term has at
-/// most 13 digits (40 bits is below 10^13) and leaves room for a sequence of seven.
-const TERM_BITS: u32 = 40;
-
-/// The native runtime over the helper `native` names, whose runs the helper also bounds by
-/// their wall limit and `stop_grace`. Its term is random, so a second process of the agent
-/// never asks the helper for a lease user the first one had.
-fn native_runtime(
-    native: &NativeSettings,
-    stop_grace: Duration,
-) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
-    let mut bytes = [0u8; 8];
-    // A source of randomness that fails leaves a term of zero, which the helper's ledger
-    // refuses the second time: the start fails, loudly, and never runs as a used user.
-    let _ = getrandom::getrandom(&mut bytes);
-    let term = u64::from_le_bytes(bytes) >> (u64::BITS - TERM_BITS);
-    native::self_test(native.config(), native.sandbox_exec())
-        .map_err(|why| format!("--native-helper-socket: the sandbox self-test failed: {why}"))?;
-    let helper = Client::new(native.socket());
-    let opened = NativeRuntime::open(helper, native.config().clone(), term);
-    let runtime = opened
-        .map_err(|why| format!("--native-helper-socket: {why}"))?
-        .with_stop_grace(stop_grace);
-    let runtime = match native.bundles() {
-        Some(store) => runtime.with_bundles(Arc::clone(store)),
-        None => runtime,
-    };
-    let runtime = runtime.with_live_logs(native.logs().live());
-    Ok((Box::new(runtime), Vec::new()))
-}
 
 /// A monotonic clock both threads of the agent may read.
 pub type SharedClock = Arc<dyn Clock + Send + Sync>;
@@ -65,14 +30,7 @@ impl Clock for SharedClock {
     }
 }
 
-/// What the agent runs jobs with.
-#[derive(Debug, Clone)]
-pub enum Backend {
-    /// Containers, through Docker or Podman (Linux).
-    Container(Settings),
-    /// Programs run as users of the root helper, under a Seatbelt profile (macOS).
-    Native(NativeSettings),
-}
+pub use crate::platform::Backend;
 
 /// What a runtime is made from.
 #[derive(Debug, Clone, Copy)]
@@ -110,7 +68,7 @@ pub trait Machine: Send + Sync {
         Box::new(Milliseconds(self.clock()))
     }
 
-    /// The files and programs the start check of `--runtime crun` reads. Called on the
+    /// The files and programs the start check of the crun runtime reads. Called on the
     /// thread that starts the agent. By default the machine's own.
     #[cfg(target_os = "linux")]
     fn crun_host(&self) -> crate::crun_host::CrunHost {
@@ -138,6 +96,25 @@ pub trait Machine: Send + Sync {
     /// The machine cannot run VMs; the text says why.
     fn vm_driver(&self, settings: &VmSettings) -> Result<Arc<dyn VmDriver>, String> {
         crate::vm::system_driver(settings)
+    }
+
+    /// The client of the node-local mount providers `sockets` (`--mount-provider`: each
+    /// provider's name, the socket it serves on and the uid it runs as), for the agent that registered as
+    /// `host_id`, which names itself to them. Called on the worker thread, once, when the
+    /// agent was given providers. By default the agent's own client of the providers'
+    /// protocol ([`crate::provider::ProviderClient`]), which connects to a socket only when
+    /// a call is made.
+    ///
+    /// # Errors
+    ///
+    /// The client cannot be made (its runtime cannot start).
+    fn providers(
+        &self,
+        host_id: &str,
+        sockets: &[(String, PathBuf, u32)],
+    ) -> std::io::Result<Box<dyn Providers>> {
+        let client = crate::provider::ProviderClient::new(host_id, sockets)?;
+        Ok(Box::new(client))
     }
 }
 
@@ -176,18 +153,10 @@ impl System {
         Self { crun, ..self }
     }
 
-    /// The crun runtime of `plan`, and the warnings the operator should read.
+    /// The cgroup set-up and hooks of the crun runtime.
     #[cfg(target_os = "linux")]
-    fn crun_runtime(
-        &self,
-        plan: &crate::cli_runtime::CrunPlan,
-        settings: &crate::cli_runtime::Settings,
-        build: &RuntimeBuild<'_>,
-    ) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
-        let opened = crate::crun::open_for_plan(plan, build.host_id, &self.crun);
-        let (runtime, mapping, warnings) = opened.map_err(|why| why.to_string())?;
-        settings.resolve(mapping);
-        Ok((Box::new(runtime), warnings))
+    pub(crate) fn crun_seams(&self) -> &crate::crun::Seams {
+        &self.crun
     }
 }
 
@@ -218,25 +187,7 @@ impl Machine for System {
     }
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
-        let settings = match build.backend {
-            Backend::Container(settings) => settings,
-            Backend::Native(native) => return native_runtime(native, build.stop_grace),
-        };
-        #[cfg(target_os = "linux")]
-        if let Some(plan) = settings.crun() {
-            return self.crun_runtime(plan, settings, build);
-        }
-        let runner = Box::new(system_runner(build.stop_grace));
-        let opened = CliRuntime::open(
-            settings.clone(),
-            build.host_id,
-            build.platform,
-            unix_ms,
-            runner,
-        );
-        let runtime = opened.map_err(|why| format!("{}: {why}", settings.bin()))?;
-        let warnings = runtime.warnings().to_vec();
-        Ok((Box::new(runtime), warnings))
+        crate::platform::runtime(self, build)
     }
 
     fn view(&self) -> Box<dyn HostView> {

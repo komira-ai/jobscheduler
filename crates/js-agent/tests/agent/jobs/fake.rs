@@ -14,15 +14,22 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::ThreadId;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use js_agent::cli_runtime::Mapping;
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
+#[cfg(target_os = "linux")]
+use js_agent::lifecycle::Exit;
+use js_agent::lifecycle::{Clock, ProviderAnswer, ProviderCall, Providers, Runtime, Wake};
+#[cfg(target_os = "linux")]
 use js_agent::lifecycle::{
-    Clock, Exit, Found, RunHandle, RunSpec, Runtime, RuntimeError, Status, label,
+    Found, Prepared, RunHandle, RunSpec, RuntimeError, Status, Ticket, label,
 };
+#[cfg(target_os = "macos")]
 use js_agent::native::NativeRuntime;
 use js_agent::quota::{FakeQuota, ScratchQuota};
 use js_agent::vm::VmSettings;
 use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock};
+#[cfg(target_os = "macos")]
 use js_mac_session::client::Client;
 use js_vm_lease::VmDriver;
 use js_vm_lease::fake::FakeDriver;
@@ -46,21 +53,28 @@ impl Clock for TestClock {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct Container {
     run_id: String,
+    #[cfg(target_os = "linux")]
     labels: BTreeMap<String, String>,
     exit: Option<Exit>,
 }
 
 #[derive(Default)]
 struct State {
+    #[cfg(target_os = "linux")]
     containers: BTreeMap<String, Container>,
+    #[cfg(target_os = "linux")]
     next: u32,
     /// Calls to fail: the name of the call and how many more times it fails.
+    #[cfg(target_os = "linux")]
     failing: BTreeMap<&'static str, u32>,
     /// `create_and_start` waits while this is set.
+    #[cfg(target_os = "linux")]
     hold_creates: bool,
     /// `list_labelled` waits while this is set.
+    #[cfg(target_os = "linux")]
     hold_lists: bool,
     /// The host view's process listing (the first thing a post-job check reads) waits while
     /// this is set.
@@ -68,17 +82,27 @@ struct State {
     /// How many process listings have begun, counted again from zero by [`World::hold_checks`].
     checking: u32,
     /// How many `create_and_start` calls have begun.
+    #[cfg(target_os = "linux")]
     entered: u32,
     /// The calls, in order: `create r1`, `stop r1`, `remove r1`, `list`.
+    #[cfg(target_os = "linux")]
     log: Vec<String>,
     /// The run id and isolation of each create, in order. Kept on Linux only: its one
     /// reader, `crun_gpu_hello`, is a Linux-only module.
     #[cfg(target_os = "linux")]
     isolations: Vec<(String, js_agent_wire::Isolation)>,
     /// The call that panics, once.
+    #[cfg(target_os = "linux")]
     panic_at: Option<&'static str>,
     /// The directory every container is in, as `<dir>/docker-<run>.scope`.
+    #[cfg(target_os = "linux")]
     cgroup_base: Option<PathBuf>,
+    /// The images being pulled: `prepare` answers `Pending` for them.
+    #[cfg(target_os = "linux")]
+    pulling: BTreeSet<String>,
+    /// What the runtime was given to ring when a pull ends (`Runtime::set_wake`).
+    #[cfg(target_os = "linux")]
+    wake: Wake,
 }
 
 struct Inner {
@@ -103,6 +127,7 @@ impl World {
     }
 
     /// The container of `run_id` exits with `code`.
+    #[cfg(target_os = "linux")]
     pub fn exit(&self, run_id: &str, code: i32) {
         let mut state = self.lock();
         let found = state.containers.values_mut().find(|c| c.run_id == run_id);
@@ -113,16 +138,19 @@ impl World {
     }
 
     /// Every container is in `<dir>/docker-<run>.scope`.
+    #[cfg(target_os = "linux")]
     pub fn set_cgroup_base(&self, dir: &str) {
         self.lock().cgroup_base = Some(dir.into());
     }
 
     /// The calls so far, in order.
+    #[cfg(target_os = "linux")]
     pub fn log(&self) -> Vec<String> {
         self.lock().log.clone()
     }
 
     /// How many containers exist.
+    #[cfg(target_os = "linux")]
     pub fn alive(&self) -> usize {
         self.lock().containers.len()
     }
@@ -135,6 +163,7 @@ impl World {
     }
 
     /// The run ids of the containers that were created, in order.
+    #[cfg(target_os = "linux")]
     pub fn created(&self) -> Vec<String> {
         let log = self.log();
         let runs = log.iter().filter_map(|call| call.strip_prefix("create "));
@@ -143,27 +172,32 @@ impl World {
 
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove` or
     /// `list`) fail.
+    #[cfg(target_os = "linux")]
     pub fn fail(&self, call: &'static str, times: u32) {
         self.lock().failing.insert(call, times);
     }
 
     /// Makes the next call named `call` panic.
+    #[cfg(target_os = "linux")]
     pub fn panic_at(&self, call: &'static str) {
         self.lock().panic_at = Some(call);
     }
 
     /// From now on `create_and_start` waits for [`World::release`].
+    #[cfg(target_os = "linux")]
     pub fn hold_creates(&self) {
         self.lock().hold_creates = true;
     }
 
     /// From now on `list_labelled` waits for [`World::release`].
+    #[cfg(target_os = "linux")]
     pub fn hold_lists(&self) {
         self.lock().hold_lists = true;
     }
 
     /// From now on a post-job check waits, before it reads anything, for
     /// [`World::release`]; [`World::wait_checking`] counts the checks that began from here.
+    #[cfg(target_os = "linux")]
     pub fn hold_checks(&self) {
         let mut state = self.lock();
         state.hold_checks = true;
@@ -171,6 +205,7 @@ impl World {
     }
 
     /// Lets the held `create_and_start`, `list_labelled` and check calls go on.
+    #[cfg(target_os = "linux")]
     pub fn release(&self) {
         let mut state = self.lock();
         state.hold_creates = false;
@@ -181,6 +216,7 @@ impl World {
     }
 
     /// Waits until `n` `create_and_start` calls have begun.
+    #[cfg(target_os = "linux")]
     pub fn wait_entered(&self, n: u32) {
         let state = self.lock();
         let waited = self
@@ -195,6 +231,7 @@ impl World {
     }
 
     /// Waits until `n` post-job checks have begun since [`World::hold_checks`].
+    #[cfg(target_os = "linux")]
     pub fn wait_checking(&self, n: u32) {
         let state = self.lock();
         let waited = self
@@ -207,6 +244,7 @@ impl World {
 
     /// How many post-job checks have begun in this world (the agent's start takes a baseline
     /// of the host, which counts as one), or since [`World::hold_checks`].
+    #[cfg(target_os = "linux")]
     pub fn checked(&self) -> u32 {
         self.lock().checking
     }
@@ -229,14 +267,36 @@ impl World {
         }
     }
 
+    /// `image` is being pulled: a start that names it waits until [`World::end_pull`].
+    #[cfg(target_os = "linux")]
+    pub fn begin_pull(&self, image: &str) {
+        self.lock().pulling.insert(image.to_owned());
+    }
+
+    /// The pull of `image` is over: the image is here, and the runtime rings its wake when
+    /// `rings`, as a runtime whose pull ends off the worker does.
+    #[cfg(target_os = "linux")]
+    pub fn end_pull(&self, image: &str, rings: bool) {
+        let wake = {
+            let mut state = self.lock();
+            state.pulling.remove(image);
+            state.wake.clone()
+        };
+        if rings {
+            wake.wake();
+        }
+    }
+
     /// The runtime of the agent `host_id` on this world: it labels what it makes with the
     /// host id and lists only what carries the run label and its own host id.
+    #[cfg(target_os = "linux")]
     pub fn runtime(&self, host_id: &str) -> WorldRuntime {
         WorldRuntime(self.clone(), host_id.to_owned())
     }
 
     /// A running container of the run `run_id` that the agent `host_id` made, which no
     /// runtime of another agent may list or stop.
+    #[cfg(target_os = "linux")]
     pub fn leak(&self, run_id: &str, host_id: &str) {
         let mut state = self.lock();
         state.next += 1;
@@ -254,6 +314,7 @@ impl World {
 
 impl State {
     /// Whether the call `call` fails now (and counts it), and panics if it is to.
+    #[cfg(target_os = "linux")]
     fn fails(&mut self, call: &'static str) -> bool {
         if self.panic_at.take_if(|at| *at == call).is_some() {
             panic!("the {call} of the fake runtime panics");
@@ -268,14 +329,28 @@ impl State {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn failed(call: &str) -> RuntimeError {
     RuntimeError::new(format!("{call} failed"))
 }
 
 /// The container runtime the worker thread makes.
+#[cfg(target_os = "linux")]
 pub struct WorldRuntime(World, String);
 
+#[cfg(target_os = "linux")]
 impl Runtime for WorldRuntime {
+    fn set_wake(&mut self, wake: Wake) {
+        self.0.lock().wake = wake;
+    }
+
+    fn prepare(&mut self, image: &str, _waited: Option<Ticket>) -> Prepared {
+        match self.0.lock().pulling.contains(image) {
+            true => Prepared::Pending(Ticket(1)),
+            false => Prepared::Ready,
+        }
+    }
+
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
         let world = &self.0;
         let mut state = world.lock();
@@ -407,8 +482,10 @@ pub enum Build {
     /// It builds.
     Fine,
     /// The runtime cannot be made.
+    #[cfg(target_os = "linux")]
     RuntimeFails,
     /// The runtime panics while it is made.
+    #[cfg(target_os = "linux")]
     Panics,
     /// The agent cannot see the host the checks read.
     HostNotSeen,
@@ -425,10 +502,45 @@ pub struct FakeMachine {
     /// The scratch quota of the machine: one that works, unless a test replaces it.
     pub quota: Arc<FakeQuota>,
     /// For each native runtime made: whether its settings carried a bundle store.
+    #[cfg(target_os = "macos")]
     pub bundles_seen: Arc<Mutex<Vec<bool>>>,
     /// The VM driver of the VM backend; none for a machine that runs no VMs (the default
     /// driver, which runs none off macOS).
     pub vms: Option<Arc<FakeDriver>>,
+    /// What `providers` makes for an agent given mount providers: stand-ins that write what
+    /// they are asked in the shared list, or why the machine cannot make them.
+    pub providers: Result<Arc<Mutex<Vec<String>>>, String>,
+    /// What the providers were given to ring (`Providers::set_wake`).
+    provider_wake: Arc<Mutex<Wake>>,
+}
+
+/// The mount providers of a worker test: they have the names they were made for, write each
+/// call they are sent as one line, and answer every call that it is done.
+struct AskedProviders {
+    host_id: String,
+    names: Vec<String>,
+    calls: Arc<Mutex<Vec<String>>>,
+    wake: Arc<Mutex<Wake>>,
+}
+
+impl Providers for AskedProviders {
+    fn has(&self, name: &str) -> bool {
+        self.names.iter().any(|have| have == name)
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.names.clone()
+    }
+
+    fn ask(&mut self, provider: &str, call: &ProviderCall) -> ProviderAnswer {
+        let mut calls = self.calls.lock().unwrap_or_else(PoisonError::into_inner);
+        calls.push(format!("{} {provider} {call:?}", self.host_id));
+        ProviderAnswer::Done(None)
+    }
+
+    fn set_wake(&mut self, wake: Wake) {
+        *self.wake.lock().unwrap_or_else(PoisonError::into_inner) = wake;
+    }
 }
 
 /// Cgroup files the test writes and the worker thread reads, and the threads that read.
@@ -443,12 +555,14 @@ struct Files {
 
 impl SharedFiles {
     /// The file at `path` holds `text` from now on.
+    #[cfg(target_os = "linux")]
     pub fn set(&self, path: &str, text: &str) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.text.insert(path.to_owned(), text.to_owned());
     }
 
     /// The threads that read a file, one entry for each read.
+    #[cfg(target_os = "linux")]
     pub fn readers(&self) -> Vec<ThreadId> {
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.readers.clone()
@@ -474,6 +588,10 @@ impl FileReader for SharedFiles {
     fn is_tmpfs(&self, _path: &Path) -> Result<bool, String> {
         Err("no file systems here".to_owned())
     }
+
+    fn facts(&self, _path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
+        Err(std::io::Error::other("no facts here"))
+    }
 }
 
 impl FakeMachine {
@@ -489,8 +607,40 @@ impl FakeMachine {
             build: Build::Fine,
             files: SharedFiles::default(),
             quota: Arc::new(FakeQuota::new()),
+            #[cfg(target_os = "macos")]
             bundles_seen: Arc::default(),
             vms: None,
+            providers: Ok(Arc::default()),
+            provider_wake: Arc::default(),
+        }
+    }
+
+    /// Rings the wake the machine's providers were given, as a provider's answer does. Only
+    /// the Linux build's provider tests ring it.
+    #[cfg(target_os = "linux")]
+    pub fn ring_providers(&self) {
+        let wake = self
+            .provider_wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        wake.clone().wake();
+    }
+
+    /// The same machine, which cannot make the client of the mount providers: `why`.
+    #[cfg(target_os = "linux")]
+    pub fn without_providers(self, why: &str) -> Self {
+        Self {
+            providers: Err(why.to_owned()),
+            ..self
+        }
+    }
+
+    /// The calls the mount providers were sent so far, each as `<host id> <provider> <call>`.
+    #[cfg(target_os = "linux")]
+    pub fn provider_calls(&self) -> Vec<String> {
+        match &self.providers {
+            Ok(calls) => calls.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -503,11 +653,13 @@ impl FakeMachine {
     }
 
     /// For each native runtime made: whether its settings carried a bundle store.
+    #[cfg(target_os = "macos")]
     pub fn bundles_seen(&self) -> Vec<bool> {
         self.bundles_seen.lock().unwrap().clone()
     }
 
     /// The same machine with `quota` as its scratch quota.
+    #[cfg(target_os = "linux")]
     pub fn with_quota(self, quota: FakeQuota) -> Self {
         Self {
             quota: Arc::new(quota),
@@ -515,6 +667,7 @@ impl FakeMachine {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn failing(build: Build) -> Self {
         Self {
             build,
@@ -530,35 +683,40 @@ impl Machine for FakeMachine {
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         match self.build {
+            #[cfg(target_os = "linux")]
             Build::RuntimeFails => Err("the engine does not answer".to_owned()),
+            #[cfg(target_os = "linux")]
             Build::Panics => panic!("the runtime panics while it is made"),
             Build::Fine | Build::HostNotSeen => {
                 // What opening the real runtime does for jobs mapped onto a range: the
                 // checks take the range from the settings (the fake engine maps nothing).
-                let settings = match build.backend {
-                    Backend::Container(settings) => settings,
-                    // A native agent's runtime is the real one, over whatever helper the
-                    // flags name (the tests serve a fake one on that socket).
-                    Backend::Native(native) => {
-                        let helper = Client::new(native.socket());
-                        let opened = NativeRuntime::open(helper, native.config().clone(), 1);
-                        let runtime = opened.map_err(|why| why.to_string())?;
-                        self.bundles_seen
-                            .lock()
-                            .unwrap()
-                            .push(native.bundles().is_some());
-                        let runtime = match native.bundles() {
-                            Some(store) => runtime.with_bundles(Arc::clone(store)),
-                            None => runtime,
-                        };
-                        return Ok((Box::new(runtime), Vec::new()));
-                    }
-                };
-                settings.resolve(Mapping::new(231_072, 462_144));
-                Ok((
-                    Box::new(self.world.runtime(build.host_id)),
-                    vec!["the fake engine is ready".to_owned()],
-                ))
+                // A native agent's runtime (a macOS build's) is the real one, over whatever
+                // helper the flags name (the tests serve a fake one on that socket).
+                #[cfg(target_os = "macos")]
+                {
+                    let Backend::Native(native) = build.backend;
+                    let helper = Client::new(native.socket());
+                    let opened = NativeRuntime::open(helper, native.config().clone(), 1);
+                    let runtime = opened.map_err(|why| why.to_string())?;
+                    self.bundles_seen
+                        .lock()
+                        .unwrap()
+                        .push(native.bundles().is_some());
+                    let runtime = match native.bundles() {
+                        Some(store) => runtime.with_bundles(Arc::clone(store)),
+                        None => runtime,
+                    };
+                    Ok((Box::new(runtime), Vec::new()))
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let Backend::Container(settings) = build.backend;
+                    settings.resolve(Mapping::new(231_072, 462_144));
+                    Ok((
+                        Box::new(self.world.runtime(build.host_id)),
+                        vec!["the fake engine is ready".to_owned()],
+                    ))
+                }
             }
         }
     }
@@ -576,6 +734,21 @@ impl Machine for FakeMachine {
             Some(driver) => Ok(driver.clone()),
             None => js_agent::vm::system_driver(settings),
         }
+    }
+
+    fn providers(
+        &self,
+        host_id: &str,
+        sockets: &[(String, PathBuf, u32)],
+    ) -> std::io::Result<Box<dyn Providers>> {
+        let calls = self.providers.clone().map_err(std::io::Error::other)?;
+        let names = sockets.iter().map(|(name, _, _)| name.clone()).collect();
+        Ok(Box::new(AskedProviders {
+            host_id: host_id.to_owned(),
+            names,
+            calls,
+            wake: Arc::clone(&self.provider_wake),
+        }))
     }
 
     fn view(&self) -> Box<dyn HostView> {

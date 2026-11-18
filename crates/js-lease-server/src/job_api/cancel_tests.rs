@@ -13,6 +13,14 @@ use tonic::Code;
 use crate::agent_api::job_rig::{BOOKED, FakeAgent, clocked_rig, starts, stops};
 use crate::job_api::writes_rig::{Fixed, NEVER, Via, id, over_fake, served, wire};
 
+/// What a write the store was too busy to take answers over JSON (the gateway's 503).
+fn busy() -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({ "error": "state-write-failed" }),
+    )
+}
+
 /// Asserts that once a cancel intent is committed for a placed job, no heartbeat reply
 /// carries its start. Cancelled before the agent heard of it: the intent is in the job's row,
 /// the next reply carries the stop and no start, the agent retires the id it never held, and
@@ -236,4 +244,37 @@ async fn a_failed_cancel_answers_500_and_changes_nothing() {
         again.cancel_requested,
         "an asked cancel is answered without a commit"
     );
+}
+
+/// Asserts that a submit or a cancel whose commit the store was too busy to take (no connection
+/// came free, or a statement waited past its limit) answers `UNAVAILABLE` with
+/// `state-write-failed` over gRPC and 503 `state-write-failed` over JSON, and changes nothing:
+/// no job is made and a cancelled job keeps its state; the same call once the store has room is
+/// committed. Catches a busy store answered `INTERNAL` (500), which a client cannot tell from a
+/// fault and so does not retry.
+#[tokio::test]
+async fn a_write_the_store_is_too_busy_for_answers_503_and_changes_nothing() {
+    let (store, writes) = over_fake(Fixed::new(true)).await;
+    store.fail_with(js_state::StoreError::Unavailable(
+        "no connection".to_owned(),
+    ));
+    store.fail_next();
+    let status = writes.submit_grpc(&wire("job-u")).await.unwrap_err();
+    assert_eq!(
+        (status.code(), status.message()),
+        (Code::Unavailable, "state-write-failed")
+    );
+    store.fail_next();
+    let answer = writes.submit(Via::Json, &wire("job-u")).await.unwrap_err();
+    assert_eq!(answer, busy());
+    assert_eq!(writes.jobs.get_job(&id("job-u")).unwrap(), None);
+    writes.submit(Via::Grpc, &wire("job-u")).await.unwrap();
+
+    store.fail_next();
+    let answer = writes.cancel(Via::Json, "job-u").await.unwrap_err();
+    assert_eq!(answer, busy());
+    let job = writes.jobs.get_job(&id("job-u")).unwrap().unwrap();
+    assert_eq!(job.state, JobState::Queued);
+    let cancelled = writes.cancel(Via::Grpc, "job-u").await.unwrap();
+    assert_eq!(cancelled.state(), v1::JobState::Cancelled);
 }

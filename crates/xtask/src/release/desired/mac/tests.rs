@@ -26,6 +26,9 @@ enum Serve<'a> {
     Text(&'a str),
     /// Fails as `curl --fail` does for a 404.
     Missing,
+    /// Fails as `curl --fail` does for a 403, which CloudFront over S3 answers for a missing
+    /// object.
+    Forbidden,
     /// Fails as `curl --fail` does for a 500.
     Broken,
     /// Succeeds and writes nothing.
@@ -38,6 +41,9 @@ fn serve(url: &str, what: &Serve<'_>) -> String {
         Serve::Text(text) => format!("{url}) cat > \"$out\" <<'EOF'\n{text}\nEOF\n;;\n"),
         Serve::Missing => format!(
             "{url}) echo 'curl: (22) The requested URL returned error: 404' >&2; exit 22;;\n"
+        ),
+        Serve::Forbidden => format!(
+            "{url}) echo 'curl: (22) The requested URL returned error: 403' >&2; exit 22;;\n"
         ),
         Serve::Broken => format!(
             "{url}) echo 'curl: (22) The requested URL returned error: 500' >&2; exit 22;;\n"
@@ -169,10 +175,55 @@ fn an_unpublished_mac_package_leaves_the_linux_targets_as_they_are() {
     assert!(!log(&dir, "curl.log").contains(PKG_NAME));
 }
 
-/// Asserts that a failure other than a `404` of the sums is an error and nothing is written: a
-/// host group of Macs is not left unset for a host that merely could not be reached.
+/// Asserts a release whose Mac directory the host answers with a `403` for its `SHA256SUMS`, as
+/// CloudFront over an S3 bucket it may not list answers every missing object: the same outputs as
+/// a `404`, written out (the Linux targets, `set-mac=false`), the package never asked for, and the
+/// sums asked for once (a `403` is an answer, not retried by hand).
 #[test]
-fn a_failure_reading_the_mac_sums_other_than_a_404_is_an_error() {
+fn a_403_for_the_mac_sums_is_an_unpublished_mac_package() {
+    let _serial = serial();
+    let dir = scratch("desired-mac-forbidden");
+    let args = with_mac(&dir, &Serve::Forbidden, &Serve::Forbidden);
+    let printed = run(&args).expect("the run passes");
+    let lines = format!(
+        "set=true\npackage-version=1.2.3\ntargets={}\nset-mac=false\n",
+        golden()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out")).expect("output"),
+        lines
+    );
+    assert_eq!(
+        printed,
+        format!(
+            "release v1.2.3: the stable suite lists js-agent 1.2.3 for each of 2 architectures, each with the digest SHA256SUMS lists\n{}",
+            lines.trim_end()
+        )
+    );
+    let calls = log(&dir, "curl.log");
+    assert!(!calls.contains(PKG_NAME), "{calls}");
+    assert_eq!(calls.matches("/1.2.3/SHA256SUMS").count(), 1, "{calls}");
+}
+
+/// Asserts that a `403` for the package, once its sums were read, is an error and nothing is
+/// written: the sums say it is published, so the answer is not taken for an absent package.
+#[test]
+fn a_403_for_a_mac_package_its_sums_list_is_an_error() {
+    let _serial = serial();
+    let dir = scratch("desired-mac-pkg-forbidden");
+    let sums_text = pkg_sums(&pkg_digest());
+    let args = with_mac(&dir, &Serve::Text(&sums_text), &Serve::Forbidden);
+    let Err(Error::Release(crate::release::Error::Failed { stderr, .. })) = run(&args) else {
+        panic!("not a failed program");
+    };
+    assert!(stderr.contains("error: 403"), "{stderr}");
+    assert!(!dir.join("out").exists());
+}
+
+/// Asserts that a failure other than a `404` or a `403` of the sums is an error and nothing is
+/// written: a host group of Macs is not left unset for a host that merely could not be reached.
+#[test]
+fn a_failure_reading_the_mac_sums_other_than_a_404_or_403_is_an_error() {
     let _serial = serial();
     let dir = scratch("desired-mac-broken");
     let args = with_mac(&dir, &Serve::Broken, &Serve::Missing);

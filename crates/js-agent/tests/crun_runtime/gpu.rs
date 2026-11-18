@@ -95,7 +95,7 @@ fn a_crun_job_sees_only_its_booked_gpu() {
         "GPU_TEST=booked",
     ])
     .expect("the flags parse");
-    let passthrough = GpuPassthrough::from_cli(&cli, &[0, 1], read_node)
+    let passthrough = GpuPassthrough::from_cli(&cli.os, &[0, 1], read_node)
         .expect("the host has the nodes")
         .expect("a device list");
     s.prepared();

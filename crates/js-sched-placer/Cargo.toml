@@ -19,9 +19,11 @@ js-caps = { path = "../js-caps" }
 js-jobs = { path = "../js-jobs" }
 js-registry = { path = "../js-registry" }
 js-sched = { path = "../js-sched" }
+js-sizing = { path = "../js-sizing" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
 js-whole = { path = "../js-whole" }
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -34,6 +36,8 @@ js-jobs = { path = "../js-jobs", features = ["test-support"] }
 # The walk tests count the platform matches the scheduler makes.
 js-sched = { path = "../js-sched", features = ["test-support"] }
 js-state = { path = "../js-state", features = ["test-support"] }
+# The sizing tests read the line each placement logs.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

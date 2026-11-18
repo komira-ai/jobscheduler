@@ -4,10 +4,13 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{
     BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, HostPort, Isolation, JobMount,
-    Layer, MountMode, MountSource, NetworkCeiling, PortProtocol, Propagation, RunFile,
+    Layer, MountMode, MountSource, NetworkCeiling, NetworkLevel, PortProtocol, Propagation,
+    RunFile,
 };
 use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobFiles, JobId, JobRecord, NetworkPolicy};
-use js_types::{HostId, JobNetwork as Level, PortMap, Resources};
+use js_types::{
+    Arch, ExecMode, HostId, ImageDigestRef, JobNetwork as Level, Os, PortMap, Resources,
+};
 
 use super::{Unsendable, start_of};
 use crate::agent_api::job_rig::{BOOKED, image, placed, spec, tables};
@@ -71,6 +74,7 @@ fn build_for(
             logs: None,
             metrics: &NoMetrics,
             layered_rootfs: false,
+            mount_providers: &[],
         },
     )
 }
@@ -292,6 +296,7 @@ fn build_layered(
             logs: None,
             metrics: &NoMetrics,
             layered_rootfs,
+            mount_providers: &[],
         },
     )
 }
@@ -452,6 +457,276 @@ fn a_layer_the_wire_refuses_is_unsendable_naming_the_code_and_field() {
         Err(Unsendable::Invalid {
             code: "invalid-job",
             field: "layers.path",
+        })
+    );
+}
+
+/// The start of `job` for `allocation` to `host-a`, whose agent reports `layered-rootfs` and,
+/// as `mount-provider.<name>` capabilities, the keys `reported`.
+fn build_providers(
+    job: &JobRecord,
+    allocation: &AllocationRecord,
+    reported: &[String],
+) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
+    let host = HostId::new("host-a").unwrap();
+    start_of(
+        job,
+        allocation,
+        &BeatContext {
+            host: &host,
+            ceiling: &allow_list(),
+            host_jobs: false,
+            shape: None,
+            logs: None,
+            metrics: &NoMetrics,
+            layered_rootfs: true,
+            mount_providers: reported,
+        },
+    )
+}
+
+/// A job that requires the capabilities of the providers `names`, as a submit records them,
+/// with a provider layer of each.
+fn provided(job: &JobRecord, names: &[&str]) -> JobRecord {
+    let mut job = job.clone();
+    for name in names {
+        job.spec
+            .constraints
+            .capabilities
+            .insert(js_caps::mount_provider_key(name), "true".to_owned());
+        job.spec.layers.push(Layer::Provider {
+            provider: (*name).to_owned(),
+            reference: "trees/0123".to_owned(),
+        });
+    }
+    job
+}
+
+/// A job whose layers or mounts name providers is not sent to a host whose agent did not report
+/// each `mount-provider.<name>` the job requires, with the text the log and the start timeout
+/// show, whatever else the host reports (a different provider, `layered-rootfs`); sent to one
+/// that reports them all, with the provider layers as the record holds them. A job that requires
+/// no provider is sent to a host that reports none. It catches a start that an agent without
+/// the provider would fail, or that one from before provider sources would not read, and a
+/// host that reports one provider of two taken as enough.
+#[test]
+fn a_job_requiring_a_provider_is_not_sent_to_a_host_that_does_not_report_it() {
+    let (plain, allocation) = records();
+    let both = provided(&plain, &["cache", "tierstore"]);
+    let key = js_caps::mount_provider_key;
+    assert_eq!(
+        build_providers(&both, &allocation, &[]),
+        Err(Unsendable::MountProviderNotReported(key("cache")))
+    );
+    assert_eq!(
+        build_providers(&both, &allocation, &[key("other"), key("tierstore")]),
+        Err(Unsendable::MountProviderNotReported(key("cache")))
+    );
+    assert_eq!(
+        build_providers(&both, &allocation, &[key("cache")]),
+        Err(Unsendable::MountProviderNotReported(key("tierstore")))
+    );
+    let start = build_providers(&both, &allocation, &[key("cache"), key("tierstore")]).unwrap();
+    assert_eq!(
+        start.layers,
+        [
+            Layer::Provider {
+                provider: "cache".to_owned(),
+                reference: "trees/0123".to_owned(),
+            },
+            Layer::Provider {
+                provider: "tierstore".to_owned(),
+                reference: "trees/0123".to_owned(),
+            },
+        ]
+    );
+    assert!(build_providers(&plain, &allocation, &[]).is_ok());
+    assert!(build_providers(&plain, &allocation, &[key("tierstore")]).is_ok());
+    assert_eq!(
+        Unsendable::MountProviderNotReported(key("cache")).to_string(),
+        "the job requires mount-provider.cache and the host does not report it"
+    );
+}
+
+/// The digest of the bundle images of the native tests.
+fn bundle_digest() -> String {
+    "b".repeat(64)
+}
+
+/// A job as kbf submits a macOS task: a bundle image named `image_name`, no command, the task
+/// flags as arguments, no network, `os=macos arch=arm64 exec=sandbox-exec`, and a read-only
+/// and a read-write host-path mount, both `no_exec`.
+fn native_records(image_name: &str) -> (JobRecord, AllocationRecord) {
+    let (mut job, allocation) = records();
+    job.spec.image =
+        ImageDigestRef::parse(&format!("{image_name}@sha256:{}", bundle_digest())).ok();
+    job.spec.command = Vec::new();
+    job.spec.args = vec!["--task".to_owned(), "build".to_owned()];
+    job.spec.network = NetworkPolicy::None;
+    job.spec.ports = Vec::new();
+    job.spec.constraints.os = Some("macos".to_owned());
+    job.spec.constraints.arch = Some("arm64".to_owned());
+    job.spec.constraints.exec = Some(ExecMode::SandboxExec);
+    job.spec.mounts = vec![
+        JobMount {
+            no_exec: true,
+            ..mount_of("/Users/ci/tree", "/work/.kbf-tree")
+        },
+        JobMount {
+            no_exec: true,
+            mode: MountMode::ReadWrite,
+            ..mount_of("/Users/ci/out", "/work/.kbf-out")
+        },
+    ];
+    (job, allocation)
+}
+
+/// The start of a native job, to a host that reports `layered-rootfs`.
+fn native_start(job: &JobRecord, allocation: &AllocationRecord) -> js_agent_wire::JobStartSpec {
+    build_layered(job, allocation, &allow_list(), true).unwrap()
+}
+
+/// A job that asks for `sandbox-exec` with an image and no command starts in the agent's
+/// one-job form: the program is the bundle's default entrypoint (named as the bundle, the
+/// last part of the image name), the run's arguments are the job's, the command is empty, the
+/// system and architecture are parsed, the network is off, the environment stays in `env`, the
+/// image keeps its digest and the mounts are carried. It catches a native job sent as a
+/// container command, or one that loses its mounts, its system or its environment.
+#[test]
+fn a_native_job_without_a_command_runs_the_bundle_named_entrypoint_with_its_args() {
+    let (job, allocation) = native_records("registry.example/team/kbf-task");
+    let start = native_start(&job, &allocation);
+    let run = start.run.as_ref().unwrap();
+    assert_eq!(run.program, "@bundle/kbf-task");
+    assert_eq!(run.args, ["--task", "build"]);
+    assert!(run.env.is_empty() && run.inputs.is_empty() && run.outputs.is_empty());
+    assert_eq!(run.cwd, "");
+    assert_eq!(run.network, NetworkLevel::Off);
+    assert!(start.command.is_empty());
+    assert_eq!(start.os, Some(Os::Macos));
+    assert_eq!(start.arch, Some(Arch::Arm64));
+    assert_eq!(start.network, Level::None);
+    assert_eq!(start.env, job.spec.env);
+    assert_eq!(
+        start.image,
+        format!("registry.example/team/kbf-task@sha256:{}", bundle_digest())
+    );
+    assert_eq!(start.mounts, job.spec.mounts);
+}
+
+/// The default entrypoint is the bundle's name without a tag, and a name with no `/` is the
+/// bundle's name whole. It catches a tag or a registry path leaking into the program.
+#[test]
+fn the_default_entrypoint_drops_the_registry_path_and_the_tag() {
+    for (name, program) in [
+        ("kbf-task", "@bundle/kbf-task"),
+        ("kbf-task:v1", "@bundle/kbf-task"),
+        ("host:5000/team/kbf-task:v1", "@bundle/kbf-task"),
+        ("host:5000/kbf-task", "@bundle/kbf-task"),
+    ] {
+        let (job, allocation) = native_records(name);
+        let start = native_start(&job, &allocation);
+        assert_eq!(start.run.unwrap().program, program, "{name}");
+    }
+}
+
+/// A command whose first entry is a bare name names an entrypoint of the bundle, one that
+/// starts with `@bundle/` or `/` is kept as written, and the rest of the command comes before
+/// the job's arguments. It catches a prefix added twice, an absolute path turned into an
+/// entrypoint, or the command's tail dropped or put after the arguments.
+#[test]
+fn a_native_command_names_an_entrypoint_a_bundle_path_or_an_absolute_program() {
+    for (first, program) in [
+        ("tool", "@bundle/tool"),
+        ("@bundle/other", "@bundle/other"),
+        ("/usr/bin/env", "/usr/bin/env"),
+    ] {
+        let (mut job, allocation) = native_records("reg/kbf-task");
+        job.spec.command = vec![first.to_owned(), "sub".to_owned()];
+        let start = native_start(&job, &allocation);
+        let run = start.run.unwrap();
+        assert_eq!(run.program, program, "{first}");
+        assert_eq!(run.args, ["sub", "--task", "build"], "{first}");
+        assert!(start.command.is_empty(), "{first}");
+    }
+}
+
+/// The run's network follows the job's: none is off, an allow-list is on, open is open, and
+/// the start's own network keeps the job's level. It catches a mapping that widens or narrows
+/// a level.
+#[test]
+fn a_native_runs_network_follows_the_jobs_network() {
+    let ceiling = NetworkCeiling::from_capabilities(&BTreeMap::from([(
+        EGRESS_CAPABILITY.to_owned(),
+        "open".to_owned(),
+    )]))
+    .unwrap();
+    for (policy, run, start_level) in [
+        (NetworkPolicy::None, NetworkLevel::Off, Level::None),
+        (NetworkPolicy::AllowList, NetworkLevel::On, Level::AllowList),
+        (NetworkPolicy::Open, NetworkLevel::Open, Level::Open),
+    ] {
+        let (mut job, allocation) = native_records("reg/kbf-task");
+        job.spec.network = policy;
+        let start = build_layered(&job, &allocation, &ceiling, true).unwrap();
+        assert_eq!(start.run.unwrap().network, run);
+        assert_eq!(start.network, start_level);
+    }
+}
+
+/// A constraint that names no known system or architecture leaves the start's field out, and
+/// `aarch64` reads as `arm64`. It catches a start refused, or a guessed value sent, for an
+/// unknown spelling.
+#[test]
+fn a_native_start_leaves_out_a_system_or_architecture_it_cannot_parse() {
+    let (mut job, allocation) = native_records("reg/kbf-task");
+    job.spec.constraints.os = Some("plan9".to_owned());
+    job.spec.constraints.arch = Some("aarch64".to_owned());
+    let start = native_start(&job, &allocation);
+    assert_eq!((start.os, start.arch), (None, Some(Arch::Arm64)));
+    job.spec.constraints.os = None;
+    job.spec.constraints.arch = Some("mips".to_owned());
+    let start = native_start(&job, &allocation);
+    assert_eq!((start.os, start.arch), (None, None));
+}
+
+/// A job that is not native is built as before: with `exec` unspecified or `container` it has
+/// no run, no system and no architecture, and its command then its arguments are the start's
+/// command, though its constraints name a system. A `sandbox-exec` job with no image (layers
+/// alone) is not a bundle and is built the same way. It catches the native form applied to a
+/// container job.
+#[test]
+fn a_job_that_is_not_native_has_no_run_and_its_command_then_args() {
+    for exec in [None, Some(ExecMode::Container)] {
+        let (mut job, allocation) = native_records("reg/kbf-task");
+        job.spec.command = vec!["tool".to_owned()];
+        job.spec.constraints.exec = exec;
+        let start = native_start(&job, &allocation);
+        assert_eq!(start.run, None, "{exec:?}");
+        assert_eq!(start.command, ["tool", "--task", "build"], "{exec:?}");
+        assert_eq!((start.os, start.arch), (None, None), "{exec:?}");
+    }
+    let (mut job, allocation) = native_records("reg/kbf-task");
+    job.spec.image = None;
+    job.spec.layers = vec![host_layer("/opt/rootfs")];
+    job.spec.command = vec!["/bin/run".to_owned()];
+    let start = native_start(&job, &allocation);
+    assert_eq!(start.run, None);
+    assert_eq!(start.command, ["/bin/run", "--task", "build"]);
+}
+
+/// A native job whose program the wire's entrypoint grammar refuses (a space in the name) is
+/// unsendable naming the wire's code and field. It catches a program passed to an agent
+/// unchecked.
+#[test]
+fn a_native_program_the_wire_refuses_is_unsendable() {
+    let (mut job, allocation) = native_records("reg/kbf-task");
+    job.spec.command = vec!["bad name".to_owned()];
+    assert_eq!(
+        build_layered(&job, &allocation, &allow_list(), true),
+        Err(Unsendable::Invalid {
+            code: "invalid-program",
+            field: "run.program",
         })
     );
 }

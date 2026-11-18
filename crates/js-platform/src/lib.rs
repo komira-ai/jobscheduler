@@ -385,11 +385,13 @@ mod tests {
             os: os.map(str::to_owned),
             arch: arch.map(str::to_owned),
             isa_level: None,
+            os_version: None,
             exec: None,
             accelerator: None,
             network: JobNetwork::None,
             host_ports: Vec::new(),
             layered_rootfs: false,
+            mount_providers: Vec::new(),
         }
     }
 

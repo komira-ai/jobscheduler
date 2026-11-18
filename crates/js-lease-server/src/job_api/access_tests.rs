@@ -12,12 +12,12 @@ use axum::http::StatusCode;
 use js_agent_wire::Phase as AgentPhase;
 use js_jobs::{ClientName, NewJob, Retention};
 use js_proto::v1::{
-    CancelJobRequest, CancelJobResponse, CordonHostRequest, CordonHostResponse, GetJobRequest,
-    GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse,
-    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListJobsRequest,
-    ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse,
+    CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
+    CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
+    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
+    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
+    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use js_registry::{HostState, HostView};
 use js_state::ManualClock;
@@ -99,7 +99,7 @@ fn h1() -> HostView {
     }
 }
 
-/// Hosts that list `h1` and acknowledge every cordon and uncordon.
+/// Hosts that list `h1` and acknowledge every cordon, uncordon and clear of a taint.
 struct AnyHost;
 
 #[tonic::async_trait]
@@ -114,6 +114,10 @@ impl Hosts for AnyHost {
 
     async fn uncordon(&self, _: &HostId) -> Result<bool, Refused> {
         Ok(true)
+    }
+
+    async fn clear_taint(&self, _: &HostId) -> Result<Option<String>, Refused> {
+        Ok(Some("residue".to_owned()))
     }
 }
 
@@ -166,6 +170,7 @@ enum Call {
     ListHosts,
     Cordon,
     Uncordon,
+    ClearTaint,
     ListPools,
     ListProviders,
     GetUsage,
@@ -245,6 +250,15 @@ async fn answer(rig: &Writes, token: &str, call: Call) -> (Code, String) {
                     .await,
             )
         }
+        Call::ClearTaint => {
+            let request = ClearHostTaintRequest {
+                host_id: "h1".to_owned(),
+            };
+            status(
+                rig.grpc_as::<_, ClearHostTaintResponse>(token, "ClearHostTaint", request)
+                    .await,
+            )
+        }
         Call::ListPools => status(
             rig.grpc_as::<_, ListPoolsResponse>(token, "ListPools", ListPoolsRequest {})
                 .await,
@@ -319,6 +333,7 @@ async fn each_role_is_answered_as_the_role_table_says() {
         Call::ListHosts,
         Call::Cordon,
         Call::Uncordon,
+        Call::ClearTaint,
         Call::ListPools,
         Call::ListProviders,
         Call::GetUsage,
@@ -525,7 +540,7 @@ fn line(
     code: &str,
 ) -> BTreeMap<String, String> {
     let job = match call {
-        "CordonHost" | "UncordonHost" => "",
+        "CordonHost" | "UncordonHost" | "ClearHostTaint" => "",
         _ => target,
     };
     [
@@ -544,9 +559,10 @@ fn line(
 }
 
 /// Asserts, with a subscriber that collects every event, that each state-changing call
-/// (`SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost`) writes exactly one info event of
-/// this crate, whose fields are exactly the method, the client, its role, the target (the
-/// job, or the host), the outcome and the code; that a client's cordon and its cancel of
+/// (`SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost`, `ClearHostTaint`) writes exactly
+/// one info event of this crate, whose fields are exactly the method, the client, its role,
+/// the target (the job, or the host), the outcome and the code; that a client's cordon, its
+/// clear of a taint and its cancel of
 /// another client's job each log `denied` (the cancel although its answer is `unknown-job`),
 /// and a cancel of a job with no row `not-found`; and that no field of any event holds a
 /// token, at any level. Catches a call with no line or two, a line that misses who called or what it
@@ -608,6 +624,23 @@ async fn each_state_change_logs_one_line_with_who_what_and_how_it_ended() {
                 "denied",
                 "PermissionDenied",
             ),
+        ),
+        (
+            CI,
+            Call::ClearTaint,
+            line(
+                "ClearHostTaint",
+                "ci",
+                "client",
+                "h1",
+                "denied",
+                "PermissionDenied",
+            ),
+        ),
+        (
+            OPS,
+            Call::ClearTaint,
+            line("ClearHostTaint", "ops", "operator", "h1", "ok", "Ok"),
         ),
         (
             OPS,
@@ -780,6 +813,12 @@ async fn a_call_with_no_caller_is_unauthenticated() {
         ),
         status(
             api.uncordon_host(Request::new(UncordonHostRequest {
+                host_id: "h1".to_owned(),
+            }))
+            .await,
+        ),
+        status(
+            api.clear_host_taint(Request::new(ClearHostTaintRequest {
                 host_id: "h1".to_owned(),
             }))
             .await,

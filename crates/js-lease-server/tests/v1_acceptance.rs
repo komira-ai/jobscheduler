@@ -11,7 +11,7 @@
 //! `GetUsage` lists beside the usage store's) are read from that job store in both.
 //!
 //! The agent is `js_agent::run_with` on a thread of this binary: the real binary needs root
-//! and the machine's own `/etc` and `/sys/fs/cgroup` for `--runtime crun`, which a test may not
+//! and the machine's own `/etc` and `/sys/fs/cgroup` for the crun runtime, which a test may not
 //! have. Its transport, its job worker and its crun runtime are the binary's; the probes'
 //! programs and files, the post-job checks' view of the host and the quota are replaced
 //! (`v1_acceptance/agent.rs`). Its waits are a gate the case opens, so every wait for progress

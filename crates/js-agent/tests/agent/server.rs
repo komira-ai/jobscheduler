@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use js_agent::{
-    Answer, Connector, Dialer, HEARTBEAT_PATH, Handle, Machine, Sleeper, Transport, Wake,
-};
+#[cfg(target_os = "linux")]
+use js_agent::HEARTBEAT_PATH;
+use js_agent::{Answer, Connector, Dialer, Handle, Machine, Sleeper, Transport, Wake};
 use js_agent_wire::ProtocolRange;
 use js_client::{Client, ClientError, Reply};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
@@ -176,6 +176,7 @@ impl Server {
 
     /// [`Server::restart`] with the job store's files removed while the server is down: the
     /// restarted server holds no job.
+    #[cfg(target_os = "linux")]
     pub fn restart_forgetting_jobs(self) -> Self {
         self.restart_over(true)
     }
@@ -223,11 +224,13 @@ impl Server {
     }
 
     /// The job service's address as `--server` takes it.
+    #[cfg(target_os = "linux")]
     pub fn job_url(&self) -> String {
         let addr = self.running.job_addr().expect("the job service is on");
         format!("http://{addr}")
     }
 
+    #[cfg(target_os = "linux")]
     fn job_client(&self) -> Client {
         let file = self.scratch.path("client-token");
         Client::connect(&self.job_url(), &file, None, Duration::from_secs(10)).unwrap()
@@ -235,6 +238,7 @@ impl Server {
 
     /// `POST /v1/jobs` of a job that runs `busybox` and needs `cpu` thousandths of a core,
     /// pinned by digest and bounded to an hour.
+    #[cfg(target_os = "linux")]
     pub fn submit(&self, cpu: u64) -> Reply {
         let body = json!({
             "spec": {
@@ -248,16 +252,19 @@ impl Server {
     }
 
     /// `GET path` on the job port.
+    #[cfg(target_os = "linux")]
     pub fn job_get(&self, path: &str) -> Reply {
         self.job_client().get(path).unwrap()
     }
 
     /// `POST path` on the job port with `body`.
+    #[cfg(target_os = "linux")]
     pub fn job_post(&self, path: &str, body: &Value) -> Reply {
         self.job_client().post(path, body).unwrap()
     }
 
     /// The job `id` as `GET /v1/jobs/{id}` answers it.
+    #[cfg(target_os = "linux")]
     pub fn job(&self, id: &str) -> Value {
         let reply = self.job_get(&format!("/v1/jobs/{id}"));
         assert_eq!(reply.status, 200, "{}", reply.body);
@@ -265,16 +272,19 @@ impl Server {
     }
 
     /// The state of the job `id`, as `JOB_STATE_*`.
+    #[cfg(target_os = "linux")]
     pub fn job_state(&self, id: &str) -> String {
         self.job(id)["state"].as_str().unwrap().to_owned()
     }
 
     /// The result of the job `id` as `GET /v1/jobs/{id}/result` answers it.
+    #[cfg(target_os = "linux")]
     pub fn job_result(&self, id: &str) -> Reply {
         self.job_get(&format!("/v1/jobs/{id}/result"))
     }
 
     /// `POST /v1/jobs/{id}:cancel`.
+    #[cfg(target_os = "linux")]
     pub fn cancel(&self, id: &str) -> Reply {
         self.job_post(&format!("/v1/jobs/{id}:cancel"), &json!({}))
     }
@@ -303,7 +313,28 @@ impl Server {
 /// A pool that books a host as 4 CPUs and 4 GiB and asks only that it runs Linux on
 /// `x86_64` (the hosts of these tests): a machine that offers more joins it, and the jobs
 /// placed on it book up to that shape.
+#[cfg(target_os = "linux")]
 pub const POOL_RUNS_TOML: &str = r#"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+"#;
+
+/// [`POOL_RUNS_TOML`] with the shortest heartbeat interval a pool takes, 250 ms (and a grace of a
+/// minute): a server holds the reply of a quiet heartbeat for up to that long, so the tests that
+/// beat many times against a real server hold each quiet reply for 250 ms and not for 5 s.
+#[cfg(target_os = "linux")]
+pub const POOL_RUNS_QUICK_TOML: &str = r#"
+heartbeat_interval = "250ms"
+grace = "1m"
 name = "macs"
 class = "mac"
 max_machines = 4
@@ -347,6 +378,13 @@ pub struct Agent {
     slept: Receiver<Duration>,
     go: Sender<Wake>,
     handle: JoinHandle<Ran>,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "read by `worker`, which only the Linux container tests call"
+        )
+    )]
     worker: Receiver<Handle>,
 }
 
@@ -377,21 +415,9 @@ impl Agent {
         Self::launch(url, Some(token), extra, host, connector, machine, false)
     }
 
-    /// [`Agent::spawn_on`] over any machine.
-    #[cfg(target_os = "linux")]
-    pub fn spawn_machine(
-        url: String,
-        token: PathBuf,
-        extra: &[&str],
-        host: fn() -> Host,
-        connector: impl Connector + Send + 'static,
-        machine: Arc<dyn Machine>,
-    ) -> Self {
-        Self::launch(url, Some(token), extra, host, connector, machine, false)
-    }
-
-    /// [`Agent::spawn_machine`] with `extra` exactly as given: a start with no `--runtime` is
-    /// the default runtime's (`crun` on Linux), not the agent that runs no job.
+    /// [`Agent::spawn_on`] over any machine, with `extra` exactly as given: a start that names
+    /// no runtime flag is a crun start (the Linux build's runtime), not the agent that runs no
+    /// job.
     #[cfg(target_os = "linux")]
     pub fn spawn_machine_defaulted(
         url: String,
@@ -494,6 +520,7 @@ impl Agent {
 
     /// The handle to the agent's job worker, once it has started: an agent started with
     /// `--container-bin` has one before its first hello.
+    #[cfg(target_os = "linux")]
     pub fn worker(&self) -> Handle {
         self.worker
             .recv_timeout(HANG_GUARD)
@@ -507,6 +534,7 @@ impl Agent {
     }
 
     /// Delivers a stop request, as a signal would, without waiting for the agent to end.
+    #[cfg(target_os = "linux")]
     pub fn signal(&self) {
         self.go.send(Wake::Stop).unwrap();
     }
@@ -619,13 +647,16 @@ impl Transport for Rewriting {
 
 /// Counts the heartbeats the agent posts.
 #[derive(Clone, Default)]
+#[cfg(target_os = "linux")]
 pub struct Counting(pub Arc<std::sync::atomic::AtomicUsize>);
 
+#[cfg(target_os = "linux")]
 struct Counted {
     inner: Box<dyn Transport>,
     beats: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+#[cfg(target_os = "linux")]
 impl Connector for Counting {
     fn connect(
         &self,
@@ -641,6 +672,7 @@ impl Connector for Counting {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Transport for Counted {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
         let beat = usize::from(path == HEARTBEAT_PATH);
@@ -694,13 +726,16 @@ impl Transport for Spying {
 
 /// Records the body of every heartbeat the agent posts.
 #[derive(Clone, Default)]
+#[cfg(target_os = "linux")]
 pub struct Recorder(pub Arc<Mutex<Vec<Value>>>);
 
+#[cfg(target_os = "linux")]
 struct Recording {
     inner: Box<dyn Transport>,
     posted: Arc<Mutex<Vec<Value>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl Connector for Recorder {
     fn connect(
         &self,
@@ -716,6 +751,7 @@ impl Connector for Recorder {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Transport for Recording {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
         if path == HEARTBEAT_PATH {
@@ -728,3 +764,30 @@ impl Transport for Recording {
         self.inner.adopt_credential(secret)
     }
 }
+
+/// The heartbeat interval of the quick pools ([`POOL_RUNS_QUICK_TOML`], [`POOL_QUOTA_TOML`]):
+/// the server holds the reply of a quiet heartbeat for up to the interval, and the default
+/// 5 s would hold each quiet beat of a test that long.
+#[cfg(target_os = "linux")]
+pub const QUICK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The pool of an agent that bounds its runs' disk: it names the quota capability, so a host
+/// joins it only by reporting one, and books 4 GiB for each host.
+#[cfg(target_os = "linux")]
+pub const POOL_QUOTA_TOML: &str = r#"
+heartbeat_interval = "250ms"
+grace = "1m"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+disk_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+scratch-quota = "project"
+"#;

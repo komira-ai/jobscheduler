@@ -11,6 +11,12 @@ for an operator's script, on Linux and on macOS.
 js-agent cordon --server <url> --state-root <dir> --for 2h
 ```
 
+The verb cordons the host under the id the agent registers with. Without a flag that is the
+default derived from the machine id; a host whose agent is started with `--host-id <id>` is
+cordoned with the same `--host-id <id>`, and one whose agent takes its id from hostkeeper's facts
+file (`--host-id-from-facts`) is cordoned with
+`--host-id-from-facts /var/lib/hostkeeper/facts.json`.
+
 1. It cordons the host with the host's own credential (the one the agent keeps in its state root,
    or `--token-file` for a host that has not swapped its one-time token yet). The pool's shared join
    token is refused by the server on these routes.

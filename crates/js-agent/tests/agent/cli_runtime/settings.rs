@@ -12,7 +12,9 @@ use js_agent::cli_runtime::{
 use js_agent::lifecycle::SLOTS;
 
 use super::BIN;
-use crate::support::{Scratch, code, linux_host, run_scripted, welcome};
+use crate::support::Scratch;
+#[cfg(target_os = "linux")]
+use crate::support::{code, linux_host, run_scripted, welcome};
 
 fn bin() -> &'static Path {
     Path::new(BIN)
@@ -21,6 +23,7 @@ fn bin() -> &'static Path {
 /// The ids of the agent a test pretends to be, not root.
 const AGENT: (u32, u32) = (1000, 1000);
 
+#[cfg(target_os = "linux")]
 fn own_ids() -> (u32, u32) {
     (
         rustix::process::geteuid().as_raw(),
@@ -414,11 +417,12 @@ fn errors_name_their_flag() {
 }
 
 /// Runs the agent with `extra` and returns (status, stderr, messages sent). A start with
-/// `--container-bin` names the engine runtime and its opt-in, which a Linux agent needs to run
-/// the engine (with no `--runtime` it is a crun start).
+/// `--container-bin` names the engine's opt-in, which a Linux agent needs to run the engine
+/// (without it it is a crun start that refuses the flag).
+#[cfg(target_os = "linux")]
 fn start(extra: &[&str]) -> (String, String, usize) {
     let engine: &[&str] = if extra.contains(&"--container-bin") {
-        &["--runtime", "docker", "--allow-container-engine"]
+        &["--allow-container-engine"]
     } else {
         &[]
     };
@@ -433,6 +437,7 @@ fn start(extra: &[&str]) -> (String, String, usize) {
 /// user other than the agent's own when the agent is not root. It catches a container flag
 /// that is only found wrong when the first job arrives.
 #[test]
+#[cfg(target_os = "linux")]
 fn container_flags_are_checked_when_the_agent_starts() {
     let dir = Scratch::new("cli-settings-flags");
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
@@ -536,7 +541,7 @@ fn container_flags_are_checked_when_the_agent_starts() {
         ),
         (
             &["--actions-cgroup", "/sys/fs/cgroup/jobs.slice"],
-            "need --container-bin",
+            "--actions-cgroup: not with --no-jobs (an agent that runs no job)",
         ),
         (
             &["--container-bin", exec],
@@ -546,7 +551,10 @@ fn container_flags_are_checked_when_the_agent_starts() {
             &["--container-bin", exec, "--container-subuid", "a:b"],
             "--container-subuid: not a user name",
         ),
-        (&["--container-subuid", "jobmap"], "need --container-bin"),
+        (
+            &["--container-subuid", "jobmap"],
+            "--container-subuid: not with --no-jobs (an agent that runs no job)",
+        ),
     ];
     for (extra, text) in cases {
         let (status, err, sent) = start(extra);

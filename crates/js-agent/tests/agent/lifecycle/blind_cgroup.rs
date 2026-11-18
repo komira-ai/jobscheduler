@@ -1,11 +1,13 @@
 //! A runtime that puts every container in a control group the agent can read, and a run
-//! whose group the agent never learned: the agent cannot see that container, so the host is
-//! tainted as unchecked while the run runs, and a runtime that makes no such promise (the
-//! engines) is not tainted for lacking one. The runtime is the in-memory fake; the end of a
-//! run is a call the test makes, not a wait.
+//! whose group the agent never learned: when the container's first process runs outside its
+//! group the agent cannot see that container, so the host is tainted as unchecked while the
+//! run runs; a container that is not there (not made yet, or ended with its group) taints
+//! nothing; and a runtime that makes no such promise (the engines) is not tainted for lacking
+//! one. The runtime is the in-memory fake; the end of a run is a call the test makes, not a
+//! wait.
 
-use js_agent::lifecycle::code;
 use js_agent::lifecycle::taint::reason;
+use js_agent::lifecycle::{Event, code};
 use js_agent_wire::Taint;
 
 use super::{Harness, job, names};
@@ -18,18 +20,20 @@ fn blind(run_id: &str) -> Taint {
     Taint {
         reason: reason::UNCHECKED.to_owned(),
         run_id: Some(run_id.to_owned()),
-        check: Some(code::HOST_NOT_VISIBLE.to_owned()),
+        check: Some(code::CGROUP_NOT_FOUND.to_owned()),
     }
 }
 
 /// Asserts that a run of a runtime that places its containers in readable groups, whose
-/// group was never named, taints the host as unchecked while it runs (the same taint a start
-/// the agent cannot see gets), and that the next start is then refused. It catches a lease that is never sampled and never checked
+/// group was never named and whose first process runs in another group, taints the host as
+/// unchecked while it runs (the same taint a start the agent cannot see gets), and that the
+/// next start is then refused. It catches a lease that is never sampled and never checked
 /// for its group and passes silently.
 #[test]
 fn a_run_whose_group_was_never_seen_taints_the_host() {
     let mut h = Harness::new("blind-cgroup");
     h.fake.promise_cgroups(true);
+    h.fake.run_elsewhere("r1", "/actions/other");
     h.start(job("r1"));
     assert!(!h.life.is_tainted(), "the start alone says nothing");
     let first = names(&h.life.step());
@@ -54,6 +58,37 @@ fn a_run_whose_group_was_never_seen_taints_the_host() {
     h.fake.exit("r1", 0);
     h.life.step();
     assert_eq!(h.life.pending_taint(), Some(blind("r1")), "told once");
+}
+
+/// Asserts that the finding of a run whose group was not found names the run, says its
+/// container group was not found within the settle wait, with the wait given, and names the
+/// group its first process runs in, under the code `cgroup-not-found`. Catches a finding that
+/// says only that the host is blind, leaving the operator without the run, or the group, to
+/// look at.
+#[test]
+fn the_finding_names_the_run_the_wait_and_the_group() {
+    let mut h = Harness::new("blind-finding");
+    h.fake.promise_cgroups(true);
+    h.fake.run_elsewhere("r1", "/actions/other");
+    h.start(job("r1"));
+    h.life.step();
+    h.clock.advance(SETTLE_MS);
+    let events = h.life.step();
+    let found: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Finding(finding) => Some(finding),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{events:?}");
+    assert_eq!(found[0].code, code::CGROUP_NOT_FOUND);
+    assert_eq!(found[0].run_id.as_deref(), Some("r1"));
+    assert_eq!(
+        found[0].message,
+        "run r1: its container group was not found within the settle wait of 1000 ms, \
+         and its first process runs in /actions/other"
+    );
 }
 
 /// Asserts that a run whose group is known when it ends taints nothing, whether the runtime
@@ -181,6 +216,7 @@ fn a_runtime_with_no_groups_of_its_own_is_never_blind_for_lack_of_one() {
 fn steps_with_no_time_between_them_are_not_blindness() {
     let mut h = Harness::new("blind-steps-at-once");
     h.fake.promise_cgroups(true);
+    h.fake.run_elsewhere("r1", "/actions/other");
     h.start(job("r1"));
     for _ in 0..10 {
         let events = names(&h.life.step());
@@ -209,6 +245,7 @@ fn the_blindness_wait_is_the_one_given() {
     let mut h = Harness::new("blind-wait-given");
     h.life = h.life.with_blind_wait(std::time::Duration::from_secs(5));
     h.fake.promise_cgroups(true);
+    h.fake.run_elsewhere("r1", "/actions/other");
     h.start(job("r1"));
     h.life.step();
     h.clock.advance(4_999);
@@ -237,4 +274,78 @@ fn a_run_that_ends_within_the_wait_is_not_blind_however_often_it_was_seen() {
     h.life.step();
     assert!(!h.life.is_tainted());
     assert_eq!(h.life.pending_taint(), None);
+}
+
+/// Asserts that a run read as running with no group for the settle wait and longer, whose
+/// container has no process (not made yet, or ended and removed with its group), taints
+/// nothing: the runtime is asked where the container is once the wait is over, and again
+/// only a wait after each answer, never at the steps in between. Once its first process runs
+/// in another group, the next ask a wait later taints the host. Catches the farm's taint of
+/// a host whose job ran clean: a run blamed for a group that `crun` had not made yet, or had
+/// removed with the ended container.
+#[test]
+fn a_run_with_no_group_and_no_process_is_not_blind() {
+    let mut h = Harness::new("no-group-no-process");
+    h.fake.promise_cgroups(true);
+    h.start(job("r1"));
+    h.life.step();
+    assert_eq!(h.fake.where_asks("r1"), 0, "not asked before the wait");
+    h.clock.advance(SETTLE_MS);
+    let events = names(&h.life.step());
+    assert!(
+        !events.iter().any(|event| event.starts_with("tainted")),
+        "{events:?}"
+    );
+    assert_eq!(h.fake.where_asks("r1"), 1);
+    h.clock.advance(SETTLE_MS - 1);
+    h.life.step();
+    h.life.step();
+    assert_eq!(h.fake.where_asks("r1"), 1, "asked again only a wait later");
+    h.clock.advance(1);
+    h.life.step();
+    assert_eq!(h.fake.where_asks("r1"), 2);
+    assert!(!h.life.is_tainted());
+    assert_eq!(h.life.pending_taint(), None);
+
+    h.fake.run_elsewhere("r1", "/actions/other");
+    h.clock.advance(SETTLE_MS);
+    let events = names(&h.life.step());
+    assert!(
+        events.contains(&"tainted r1 unchecked".to_owned()),
+        "{events:?}"
+    );
+    assert_eq!(h.life.pending_taint(), Some(blind("r1")));
+}
+
+/// Asserts that a run whose group the runtime names only when asked where its container is
+/// (the group was made between the lifecycle's look and that ask) is not blind: the group is
+/// taken as the run's, so it is sampled from then on, and the runtime is asked nothing more.
+/// Catches a group found at the last moment thrown away, leaving the lease unsampled.
+#[test]
+fn a_group_named_when_asked_where_the_container_is_is_the_runs() {
+    let mut h = Harness::new("grouped-when-asked");
+    h.fake.promise_cgroups(true);
+    h.fake
+        .group_when_asked("r1", "/sys/fs/cgroup/actions/lease-r1/ctr");
+    h.start(job("r1"));
+    h.life.step();
+    h.clock.advance(SETTLE_MS);
+    h.life.step();
+    assert_eq!(h.fake.where_asks("r1"), 1);
+    assert!(!h.life.is_tainted());
+    let running = h.life.running();
+    assert_eq!(
+        running[0].cgroup.as_deref(),
+        Some(std::path::Path::new("/sys/fs/cgroup/actions/lease-r1/ctr"))
+    );
+    h.clock.advance(SETTLE_MS);
+    h.life.step();
+    assert_eq!(
+        h.fake.where_asks("r1"),
+        1,
+        "a run with a group is not asked about"
+    );
+    h.fake.exit("r1", 0);
+    h.life.step();
+    assert!(!h.life.is_tainted());
 }

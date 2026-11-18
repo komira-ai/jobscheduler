@@ -24,6 +24,7 @@ use js_agent_wire::{
 };
 use js_types::{JobNetwork, PortMap};
 
+use super::Wake;
 use crate::logs::Sink;
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
@@ -199,6 +200,22 @@ pub enum Status {
     Gone,
 }
 
+/// Where a running run's container is, asked of a runtime that places its containers in
+/// control groups ([`Runtime::places_in_cgroup`]) once [`Runtime::cgroup`] has named no group
+/// for the run for a settle wait ([`Runtime::whereabouts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Whereabouts {
+    /// The container's control group, made since the runtime last named none.
+    Grouped(PathBuf),
+    /// No process of the container runs: it is not made yet, or it has ended and its group
+    /// went with it. The agent is not blind to a container that is not there.
+    NoProcess,
+    /// The container's first process runs, and not in the group the runtime made for it: the
+    /// agent is blind to that container. The text is that process's control group, as its
+    /// `/proc/<pid>/cgroup` names it.
+    Elsewhere(String),
+}
+
 /// A labelled container found on the host, for re-adoption after a restart. Whether it
 /// still runs is found by polling it, like any other.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,7 +246,8 @@ enum Kind {
     /// The agent cannot see the host ([`RuntimeError::blind`]).
     Blind,
     /// A removal that ended everything of the run and could not copy a declared output
-    /// ([`RuntimeError::outputs`]).
+    /// ([`RuntimeError::outputs`]): the native runtime's (a macOS build's).
+    #[cfg(target_os = "macos")]
     Outputs,
 }
 
@@ -254,12 +272,15 @@ impl RuntimeError {
 
     /// A removal that did everything a removal does (the run's processes and its user are
     /// gone) but could not copy one or more of the run's declared outputs. Nothing of the
-    /// run is left on the host, so the lifecycle reports it and does not taint the host.
+    /// run is left on the host, so the lifecycle reports it and does not taint the host. Only
+    /// the native runtime copies outputs.
+    #[cfg(target_os = "macos")]
     pub(crate) fn outputs(text: impl Into<String>) -> Self {
         Self(text.into(), Kind::Outputs)
     }
 
     /// Whether the failure is only that outputs were not copied ([`RuntimeError::outputs`]).
+    #[cfg(target_os = "macos")]
     pub(crate) fn is_outputs(&self) -> bool {
         self.1 == Kind::Outputs
     }
@@ -329,7 +350,9 @@ impl JobFs {
 
     /// The host paths the start names, each with the `sub_path` of its mount and whether
     /// the job may write through it (a read-write mount's), in the order a runtime counts
-    /// its sources: the layers' first, in their order, then the mounts'.
+    /// its sources: the layers' first, in their order, then the mounts'. A source a
+    /// provider makes has no path until the provider answers one, and is not here: the
+    /// lifecycle replaces it by the path before the runtime is asked to look anything up.
     #[must_use]
     pub fn host_paths(&self) -> Vec<HostSource<'_>> {
         let layers = self.layers.iter().filter_map(|layer| match layer {
@@ -338,15 +361,15 @@ impl JobFs {
                 sub_path: None,
                 writes: false,
             }),
-            Layer::Image { .. } => None,
+            Layer::Image { .. } | Layer::Provider { .. } => None,
         });
-        let mounts = self.mounts.iter().map(|mount| {
-            let MountSource::HostPath { path } = &mount.source;
-            HostSource {
+        let mounts = self.mounts.iter().filter_map(|mount| match &mount.source {
+            MountSource::HostPath { path } => Some(HostSource {
                 path,
                 sub_path: mount.sub_path.as_deref(),
                 writes: mount.mode == js_agent_wire::MountMode::ReadWrite,
-            }
+            }),
+            MountSource::Provider { .. } => None,
         });
         layers.chain(mounts).collect()
     }
@@ -362,7 +385,7 @@ impl JobFs {
 fn layer_image(layer: &Layer) -> Option<&str> {
     match layer {
         Layer::Image { image } => Some(image),
-        Layer::HostPath { .. } => None,
+        Layer::HostPath { .. } | Layer::Provider { .. } => None,
     }
 }
 
@@ -418,6 +441,21 @@ pub trait Runtime {
     /// nothing else ends a fetch that hangs, and every run that names the image waits on it.
     fn prepare(&mut self, _image: &str, _waited: Option<Ticket>) -> Prepared {
         Prepared::Ready
+    }
+
+    /// Gives the runtime the [`Wake`] to ring when work it does off the lifecycle's worker (a
+    /// pull, a lookup or an assembly of a start's file system) is done, so the start that
+    /// waits on it is asked again at once. The default keeps none: a runtime that does
+    /// nothing off the worker, whose answers come at the next step.
+    fn set_wake(&mut self, _wake: Wake) {}
+
+    /// The runtime's own steps of the start of the container `id` (what it made, in the
+    /// order it made it), each with the wall clock time it was done at in milliseconds since
+    /// the Unix epoch, for the start's [`StartTimeline`](super::StartTimeline). Asked once,
+    /// after [`Runtime::create_and_start`] returned it; a second call has none. The default
+    /// keeps none.
+    fn start_steps(&mut self, _id: &RunHandle) -> Vec<(&'static str, u64)> {
+        Vec::new()
     }
 
     /// Creates and starts the container of `spec`. A call that fails leaves no
@@ -582,7 +620,8 @@ pub trait Runtime {
     }
 
     /// Whether the network a contained job gets is limited as the agent was told. Called
-    /// before every contained start; a start whose check fails is refused
+    /// before every contained start of a job that asked for a network (`allow-list` or
+    /// `open`), never for a `none` job; a start whose check fails is refused
     /// (`egress-unchecked`) and creates nothing. A runtime with nothing to check passes.
     ///
     /// # Errors
@@ -626,6 +665,17 @@ pub trait Runtime {
     /// [`refusal::ROOTFS_UNSUPPORTED_HERE`] before anything is made, never run without them.
     fn layered_rootfs(&self) -> bool {
         false
+    }
+
+    /// Refuses a job start's `fs` and `host_ports` this runtime cannot realise, with a code of
+    /// its own (not a VM start), asked before the host ports are admitted. The default
+    /// refuses nothing.
+    ///
+    /// # Errors
+    ///
+    /// The code and why.
+    fn check_job_fs(&self, _fs: &JobFs, _host_ports: &[HostPort]) -> Result<(), NativeRefusal> {
+        Ok(())
     }
 
     /// Whether this runtime may pull the image of an image layer (`image`, pinned by
@@ -754,11 +804,22 @@ pub trait Runtime {
 
     /// Whether every container this runtime starts is in a control group the agent can
     /// read ([`Runtime::cgroup`]). A runtime that says so and then cannot name a run's
-    /// control group is blind to that run: the lifecycle taints the host as unchecked
-    /// when it watches the run. The default is `false`: a runtime that keeps no control groups
-    /// of its own is never blind for lack of one.
+    /// control group for a settle wait is asked where that run's container is
+    /// ([`Runtime::whereabouts`]), and the lifecycle taints the host as unchecked when its
+    /// first process runs outside its group. The default is `false`: a runtime that keeps no
+    /// control groups of its own is never blind for lack of one.
     fn places_in_cgroup(&self) -> bool {
         false
+    }
+
+    /// Where the container of the run `id` is, which [`Runtime::poll`] answers as running and
+    /// [`Runtime::cgroup`] named no group for: asked only by the lifecycle, a settle wait after
+    /// it first found no group. A group that is missing because the container is not made
+    /// yet, or because it ended and was removed with its group, is [`Whereabouts::NoProcess`];
+    /// only a first process that runs outside the group is [`Whereabouts::Elsewhere`]. The
+    /// default, for a runtime that cannot name a container's process, is `NoProcess`.
+    fn whereabouts(&mut self, _id: &RunHandle) -> Whereabouts {
+        Whereabouts::NoProcess
     }
 }
 
@@ -785,6 +846,31 @@ mod tests {
         fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
             Ok(Vec::new())
         }
+    }
+
+    /// Asserts the defaults of a runtime that says nothing of native bodies and image starts:
+    /// it refuses a native body `native-unsupported` (every runtime but the Mac one), runs a
+    /// start named by its image (every container runtime) and runs no image run. Catches a
+    /// default that would let a Linux runtime take a native job, or refuse the image starts
+    /// every container runtime runs.
+    #[test]
+    fn a_runtime_that_says_nothing_runs_images_and_no_native_body() {
+        let bare = Bare;
+        let native = NativeSpec {
+            program: "/bin/true".to_owned(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: String::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            network: NetworkLevel::Off,
+            ports: Vec::new(),
+        };
+        let refused = bare.check_native(&native).unwrap_err();
+        assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
+        assert_eq!(refused.why, "this agent runs no native jobs");
+        assert!(bare.check_image().is_ok());
+        assert!(!bare.runs_image_runs());
     }
 
     /// Catches a runtime that gives no layers (the container engine's, a Mac's, a VM's)
@@ -817,7 +903,9 @@ mod tests {
 
     /// Catches the host paths of a start counted in another order than the runtime's sources
     /// (a layer's after a mount's), a read-write mount not marked as writing, a `sub_path`
-    /// lost, and an image layer taken for a host path or the other way round.
+    /// lost, an image layer taken for a host path or the other way round, and a layer or a
+    /// mount a provider makes listed as a host path (it has none until the provider answers)
+    /// or taken for an image.
     #[test]
     fn a_starts_host_paths_are_its_layers_then_its_mounts() {
         use js_agent_wire::{MountMode, Propagation};
@@ -836,12 +924,23 @@ mod tests {
                 Layer::Image {
                     image: "registry.example/a@sha256:0".to_owned(),
                 },
+                Layer::Provider {
+                    provider: "tier".to_owned(),
+                    reference: "k1".to_owned(),
+                },
                 Layer::HostPath {
                     path: "/l".to_owned(),
                 },
             ],
             mounts: vec![
                 mount("/rw", MountMode::ReadWrite, Some("sub")),
+                JobMount {
+                    source: MountSource::Provider {
+                        provider: "tier".to_owned(),
+                        reference: "k2".to_owned(),
+                    },
+                    ..mount("/unused", MountMode::ReadWrite, None)
+                },
                 mount("/cow", MountMode::CopyOnWrite, None),
             ],
         };

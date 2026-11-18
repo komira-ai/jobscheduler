@@ -17,6 +17,11 @@
 //! - Package `jobscheduler.rpc`, the wire form of `google.rpc.Status` that refusals are
 //!   carried in. It is compiled on its own so that it is not in the service's descriptor
 //!   set; `google.protobuf.Any` is `prost_types::Any`.
+//! - Package `jobscheduler.provider.v1`, the service a node-local mount provider serves
+//!   to the agent of its host. It is compiled on its own too, so that it is not in the job
+//!   service's descriptor set; its client and server are generated as the job service's
+//!   are, without transport, and a method a server does not implement answers
+//!   `UNIMPLEMENTED`.
 //!
 //! Map fields are `BTreeMap`s, so a map encodes in key order.
 
@@ -36,6 +41,10 @@ const SERVICE_FILES: [&str; 4] = [
 
 /// The file of package `jobscheduler.rpc`, from [`INCLUDE`].
 const STATUS_FILE: &str = "jobscheduler/rpc/status.proto";
+
+/// The file of package `jobscheduler.provider.v1`, the service a node-local mount provider
+/// serves to the agent, from [`INCLUDE`].
+const PROVIDER_FILE: &str = "jobscheduler/provider/v1/provider.proto";
 
 /// The message whose generated `Debug` is left out, because it would print secret file
 /// contents; `src/lib.rs` writes one that prints the name and the length only.
@@ -68,10 +77,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build_client(false)
         .build_server(false)
         .compile_fds(status.file_descriptor_set())?;
+
+    let mut provider = protox::Compiler::new([INCLUDE])?;
+    provider.include_source_info(true);
+    provider.open_files([PROVIDER_FILE])?;
+    builder(&out)
+        .generate_default_stubs(true)
+        .compile_fds(provider.file_descriptor_set())?;
     Ok(())
 }
 
-/// The generator settings both packages share.
+/// The generator settings every package shares.
 fn builder(out: &Path) -> tonic_prost_build::Builder {
     tonic_prost_build::configure()
         .build_transport(false)

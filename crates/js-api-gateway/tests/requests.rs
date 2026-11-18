@@ -12,8 +12,8 @@ use axum::body::{Body, Bytes};
 use axum::http::StatusCode;
 use js_api_gateway::BODY_LIMIT;
 use js_proto::v1::{
-    CordonHostRequest, GetJobRequest, GetUsageRequest, JobSpec, JobState, ListJobsRequest,
-    SubmitJobRequest,
+    ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetUsageRequest, JobSpec, JobState,
+    ListJobsRequest, SubmitJobRequest,
 };
 use prost::Message;
 use prost_reflect::DynamicMessage;
@@ -49,6 +49,7 @@ async fn bad_job_id_is_a_400_naming_the_field() {
         ("POST", "/v1/jobs/bad~id:cancel".to_owned(), "jobId"),
         ("POST", "/v1/hosts/:uncordon".to_owned(), "hostId"),
         ("POST", "/v1/hosts/:cordon".to_owned(), "hostId"),
+        ("POST", "/v1/hosts/:cleartaint".to_owned(), "hostId"),
         ("GET", "/v1/usage?job_id=bad~id".to_owned(), "jobId"),
     ];
     for (method, path, field) in &refused {
@@ -603,6 +604,33 @@ async fn a_streamed_body_stops_at_the_limit() {
     .await;
     assert_eq!(reply.status, StatusCode::CREATED);
     assert_eq!(stub.rpcs(), ["SubmitJob"]);
+}
+
+/// Asserts that `POST /v1/hosts/{host_id}:cleartaint` reaches the service as `ClearHostTaint`
+/// with the host of the path, percent-decoded once, from an empty body, and that the answer
+/// carries `cleared`, `clearedReason` and the host as JSON; and that a `GET` of the path is a
+/// 405 that calls nothing. Catches a route the table lacks, a host that is dropped or decoded
+/// twice, and a clear that a read-only method can reach.
+#[tokio::test]
+async fn clearing_a_taint_is_a_post_that_names_the_host_in_the_path() {
+    let (stub, router) = serve();
+    let reply = send(&router, "POST", "/v1/hosts/host%5Fa:cleartaint", "").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let answer = reply.json();
+    assert_eq!(answer["cleared"], json!(true));
+    assert_eq!(answer["clearedReason"], json!("residue"));
+    assert_eq!(answer["host"]["id"], json!("host-a"));
+    assert_eq!(
+        stub.only_request::<ClearHostTaintRequest>(),
+        ClearHostTaintRequest {
+            host_id: "host_a".to_owned(),
+        }
+    );
+
+    let (stub, router) = serve();
+    let reply = send(&router, "GET", "/v1/hosts/host-a:cleartaint", "").await;
+    assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(stub.rpcs(), Vec::<&str>::new());
 }
 
 /// Asserts that a cordon's body sets its fields beside the host the path names, and that a

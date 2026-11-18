@@ -96,7 +96,7 @@ agent, and the update hook reads the same file. The rules:
 --ca-cert=/etc/js-agent/ca.pem
 ```
 
-`--server` and `--pool` are required. `--host-id` and `--ca-cert` are optional. Set the mode
+`--server` and `--pool` are required. `--host-id` and `--ca-cert` are optional (a host of a host group may give `--host-id-from-facts=/var/lib/hostkeeper/facts.json` instead of `--host-id`, never both). Set the mode
 and owner:
 
 ```
@@ -136,7 +136,7 @@ hostkeeper ctl --endpoint https://hostkeeper.example.com:9443 --ca-file ./ca.pem
 ```
 
 The desired version of `js-agent` is set by this repository's
-`.github/workflows/hostkeeper-desired.yml` after each release that reached the stable suite, once
+`.github/workflows/hostkeeper-desired.yml`, which each release run starts once the release reached the stable suite, once
 the repository variable `JS_AGENT_SETS_DESIRED` is `true` (docs/release.md, "Deploying through
 hostkeeper"). To set a version by hand, rollback included, run that workflow from main with the
 version ("Run workflow"): it checks that the stable suite lists the release's two `.deb`s with the

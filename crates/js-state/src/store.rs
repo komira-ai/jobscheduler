@@ -140,7 +140,11 @@ pub trait Store: Send + Sync {
     /// that reads the store as the transaction sees it, which no other writer changes until it
     /// ends: it returns the transaction to commit, or `None` to decline. What it read is what
     /// the commit finds, so a decision that rests on a scan of a prefix (the rows booked on
-    /// a host) is made on the rows as they are when it commits.
+    /// a host) is made on the rows as they are when it commits. `decide` runs inside the
+    /// transaction: it reads only through the view and makes no call on the store itself
+    /// (on Postgres that would need a second connection while this one holds the commit
+    /// head), and it may be called again when the backend runs the transaction again after a
+    /// deadlock.
     ///
     /// The provided implementation is for a store one process writes: it reads without
     /// locking and puts a [`Cond::Version`] check on each claimed row at the version it read, so

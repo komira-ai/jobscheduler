@@ -291,11 +291,13 @@ mod tests {
             os: Some("linux".to_owned()),
             arch: Some("x86_64".to_owned()),
             isa_level: None,
+            os_version: None,
             exec: Some(ExecMode::Container),
             accelerator: need("nvidia-sample", 2),
             network: Default::default(),
             host_ports: Vec::new(),
             layered_rootfs: false,
+            mount_providers: Vec::new(),
         }
     }
 
@@ -310,11 +312,13 @@ mod tests {
             os: None,
             arch: None,
             isa_level: None,
+            os_version: None,
             exec: None,
             accelerator: None,
             network: Default::default(),
             host_ports: Vec::new(),
             layered_rootfs: false,
+            mount_providers: Vec::new(),
         };
         assert_eq!(offer().fit(&nothing), Ok(()));
         let mut small = demand();

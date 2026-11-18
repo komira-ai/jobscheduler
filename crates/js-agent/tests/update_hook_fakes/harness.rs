@@ -685,6 +685,10 @@ impl StateView for FaultedState<'_> {
         self.root.taint()
     }
 
+    fn restored_rechecks(&self, taint: &Taint) -> bool {
+        self.root.restored_rechecks(taint)
+    }
+
     fn owed(&self) -> Result<Vec<String>, PortError> {
         self.root.owed()
     }

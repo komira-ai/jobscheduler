@@ -5,6 +5,7 @@
 
 use std::ops::{Bound, Deref, DerefMut};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use postgres::Statement;
 use postgres::error::Severity;
@@ -38,28 +39,33 @@ pub(super) struct Statements {
     pub now: Statement,
     /// The commit head, read without a lock.
     pub head_read: Statement,
-    /// The commit head, locked until the end of the transaction.
-    pub head_lock: Statement,
-    /// `$1` the new head.
-    pub head_set: Statement,
-    /// `$1` keys: their rows, locked.
+    /// `$1` how many revisions to take: moves the commit head past them and returns the new
+    /// head (the tail runs it under `LOCK TABLE head`).
+    pub head_move: Statement,
+    /// `$1` keys, in key order: inserts a placeholder row for each key with none, which
+    /// reserves it, and locks the row of each key with one (`ON CONFLICT DO UPDATE ...
+    /// WHERE false` locks the conflicting row and changes nothing); returns the keys it
+    /// reserved.
+    pub reserve: Statement,
+    /// `$1` keys, `$2` clock override: `key, value, version, expires_us` and the store's
+    /// time, of every one of those keys this transaction sees.
     pub load: Statement,
-    /// `$1` key, `$2` value, `$3` version, `$4` expiry.
-    pub upsert: Statement,
-    /// `$1` key.
-    pub delete: Statement,
-    /// `$1` revision, `$2` key, `$3` kind, `$4` value.
-    pub feed: Statement,
+    /// The tail's writes in one statement: `$1` to `$4` the feed rows' revisions, keys, kinds
+    /// and values; `$5` to `$8` the rows' keys, values, versions and expiries; `$9` the keys
+    /// whose rows (or placeholders) go.
+    pub write: Statement,
     /// `$1` counter: its new value.
     pub counter: Statement,
-    /// The next value of the revision sequence (only the sequence flaw uses it).
+    /// `$1` how many: that many values of the revision sequence, in order (only the
+    /// sequence flaw uses it).
     pub seq: Statement,
     /// `$1` now: the keys the clock has expired, locked.
     pub due: Statement,
     /// `$1` after, `$2` upper bound, `$3` limit: feed rows.
     pub changes: Statement,
     /// `$1` the revision to trim through: deletes the feed rows at or below the lesser of
-    /// it and the head (which the trimming transaction holds locked); how many rows go.
+    /// it and the committed head (every revision at or below it has committed); how many
+    /// rows go.
     pub trim: Statement,
     /// The feed's floor: one below its oldest row, or the head when it has none.
     pub floor: Statement,
@@ -101,24 +107,33 @@ impl Statements {
             ranges,
             now: client.prepare(&format!("SELECT {}", now_sql(1)))?,
             head_read: client.prepare("SELECT rev FROM head")?,
-            head_lock: client.prepare("SELECT rev FROM head FOR UPDATE")?,
-            head_set: client.prepare("UPDATE head SET rev = $1")?,
-            load: client.prepare(
-                "SELECT key, value, version, expires_us FROM kv WHERE key = ANY($1::text[]) FOR UPDATE",
+            head_move: client.prepare("UPDATE head SET rev = rev + $1 RETURNING rev")?,
+            reserve: client.prepare(
+                "INSERT INTO kv (key, value, version, expires_us) \
+                 SELECT k, ''::bytea, 0, NULL FROM unnest($1::text[]) WITH ORDINALITY AS u(k, n) \
+                 ORDER BY n \
+                 ON CONFLICT (key) DO UPDATE SET version = kv.version WHERE false RETURNING key",
             )?,
-            upsert: client.prepare(
-                "INSERT INTO kv (key, value, version, expires_us) VALUES ($1, $2, $3, $4) \
+            load: client.prepare(&format!(
+                "SELECT key, value, version, expires_us, {now} FROM kv WHERE key = ANY($1::text[])"
+            ))?,
+            write: client.prepare(
+                "WITH fed AS (INSERT INTO feed (rev, key, kind, value) \
+                 SELECT * FROM unnest($1::int8[], $2::text[], $3::int2[], $4::bytea[])), \
+                 put AS (INSERT INTO kv (key, value, version, expires_us) \
+                 SELECT * FROM unnest($5::text[], $6::bytea[], $7::int8[], $8::int8[]) \
                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, \
-                 version = EXCLUDED.version, expires_us = EXCLUDED.expires_us",
+                 version = EXCLUDED.version, expires_us = EXCLUDED.expires_us), \
+                 gone AS (DELETE FROM kv WHERE key = ANY($9::text[])) \
+                 SELECT 1",
             )?,
-            delete: client.prepare("DELETE FROM kv WHERE key = $1")?,
-            feed: client
-                .prepare("INSERT INTO feed (rev, key, kind, value) VALUES ($1, $2, $3, $4)")?,
             counter: client.prepare(
                 "INSERT INTO counters (name, value) VALUES ($1, 1) \
                  ON CONFLICT (name) DO UPDATE SET value = counters.value + 1 RETURNING value",
             )?,
-            seq: client.prepare("SELECT nextval('rev_seq')")?,
+            seq: client.prepare(
+                "SELECT nextval('rev_seq') FROM generate_series(1, $1::int8) ORDER BY 1",
+            )?,
             due: client.prepare(
                 "SELECT key FROM kv WHERE expires_us IS NOT NULL AND expires_us <= $1 \
                  ORDER BY key FOR UPDATE",
@@ -127,8 +142,9 @@ impl Statements {
                 "SELECT rev, key, kind, value FROM feed WHERE rev > $1 AND rev <= $2 \
                  ORDER BY rev LIMIT $3",
             )?,
-            trim: client
-                .prepare("DELETE FROM feed WHERE rev <= least($1::bigint, (SELECT rev FROM head))")?,
+            trim: client.prepare(
+                "DELETE FROM feed WHERE rev <= least($1::bigint, (SELECT rev FROM head))",
+            )?,
             floor: client.prepare(
                 "SELECT coalesce((SELECT min(rev) FROM feed) - 1, (SELECT rev FROM head))",
             )?,
@@ -283,11 +299,12 @@ struct PoolState {
     open: usize,
 }
 
-/// At most `max` sessions; a caller past that waits for one to come back.
+/// At most `max` sessions; a caller past that waits for one to come back, for `wait` at most.
 pub(super) struct Pool {
     dial: Dial,
     schema: String,
     max: usize,
+    wait: Duration,
     state: Mutex<PoolState>,
     ready: Condvar,
 }
@@ -298,11 +315,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Pool {
     /// Connects once, refusing a server that does not make commits durable and a schema
-    /// outside `supported`. It creates nothing: the installer owns the schema.
+    /// outside `supported`. It creates nothing: the installer owns the schema. A checkout
+    /// waits `wait` at most for a session to come back.
     pub(super) fn open(
         dial: Dial,
         schema: String,
-        max: usize,
+        (max, wait): (usize, Duration),
         supported: Supported,
     ) -> Result<Pool, Fail> {
         let first = connect(&dial, &schema, Some(supported))?;
@@ -310,6 +328,7 @@ impl Pool {
             dial,
             schema,
             max,
+            wait,
             state: Mutex::new(PoolState {
                 idle: vec![first],
                 open: 1,
@@ -318,6 +337,9 @@ impl Pool {
         })
     }
 
+    /// A session: an idle one, or a new connection while there are fewer than `max`, or
+    /// else the first to come back within `wait`. Past `wait` the call fails with
+    /// [`Fail::Busy`], which says the store is busy, not broken: a caller may try again.
     pub(super) fn checkout(&self) -> Result<Pooled<'_>, Fail> {
         let mut state = lock(&self.state);
         loop {
@@ -341,10 +363,19 @@ impl Pool {
                     }
                 };
             }
-            state = self
+            let (back, waited) = self
                 .ready
-                .wait(state)
+                .wait_timeout_while(state, self.wait, |state| {
+                    state.idle.is_empty() && state.open >= self.max
+                })
                 .unwrap_or_else(PoisonError::into_inner);
+            if waited.timed_out() {
+                return Err(Fail::Busy(format!(
+                    "every one of the store's {} connections stayed in use for {:?}",
+                    self.max, self.wait
+                )));
+            }
+            state = back;
         }
     }
 
@@ -449,7 +480,7 @@ mod tests {
         let pool = Pool::open(
             config.dial(),
             "kbf_unit_pool".to_owned(),
-            1,
+            (1, config.timeouts.checkout),
             config.supported,
         )
         .expect("opens");

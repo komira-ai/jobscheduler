@@ -95,7 +95,10 @@
 //! server sends them only to a host whose hello reports `layered-rootfs`
 //! (`js_caps::LAYERED_ROOTFS`), and leaves each out when it is empty, so a start without
 //! them is the text it was. An unknown [`Layer`] or [`MountSource`] kind, or an unknown [`MountMode`],
-//! [`Propagation`] or [`PortProtocol`], is a decode error like an unknown `Isolation`.
+//! [`Propagation`] or [`PortProtocol`], is a decode error like an unknown `Isolation`; so an
+//! agent that predates the `provider` kind of a layer or a mount reads a start with one as
+//! [`Command::Unknown`], and a server sends one only to a host that also reports
+//! `mount-provider.<name>` (`js_caps::mount_provider_key`).
 //!
 //! # Live logs
 //!
@@ -207,12 +210,14 @@ pub use native::{
 };
 pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
 pub use per_job::{
-    BookedResources, HOST_JOBS_CAPABILITY, HeldJob, JobResult, JobResultAck, JobStartSpec,
-    PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
+    BookedResources, HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY, HeldJob, JobResult, JobResultAck,
+    JobStartSpec, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
 };
 pub use platform::{ImagePlatform, check_platform};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
-pub use rootfs::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
+pub use rootfs::{
+    HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation, is_provider_name,
+};
 pub use run::RunSpec;
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration

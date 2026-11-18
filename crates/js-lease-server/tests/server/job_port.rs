@@ -17,8 +17,8 @@ use js_lease_server::{
 };
 use js_proto::v1::job_service_client::JobServiceClient;
 use js_proto::v1::{
-    CordonHostRequest, GetJobRequest, GetUsageRequest, Host, ListHostsRequest, ListPoolsRequest,
-    ListProvidersRequest, UncordonHostRequest,
+    ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetUsageRequest, Host,
+    ListHostsRequest, ListPoolsRequest, ListProvidersRequest, UncordonHostRequest,
 };
 use js_types::HostId;
 use js_types::Timestamp;
@@ -236,10 +236,11 @@ async fn the_listener_stops_with_the_server() {
 }
 
 /// Asserts that a job holds its host until its agent reports it ended: with one host of
-/// 8 cores registered, a job of 6 cores is queued (201) and, after a tick, the agent's
-/// next heartbeat reply carries its one `job_start`; the agent lists it running and the
-/// job reads `JOB_STATE_RUNNING`; a second job of 6 cores is queued and, while the first
-/// runs, a heartbeat carries no command and the second still reads `JOB_STATE_QUEUED`;
+/// 8 cores registered, a job of 6 cores is answered `JOB_STATE_PLACED` by its own submit
+/// (201, no tick) and the agent's next heartbeat reply carries its one `job_start`; the agent
+/// lists it running and the job reads `JOB_STATE_RUNNING`; a second job of 6 cores has no
+/// room and is queued (201) and, while the first runs, a heartbeat carries no command and
+/// the second still reads `JOB_STATE_QUEUED`;
 /// once the agent reports the first exited the result is accepted, and after a heartbeat
 /// that no longer lists it and a tick the next heartbeat reply carries the second job's start, while the first reads
 /// `JOB_STATE_SUCCEEDED`. A job that wants a GPU is refused 422 `no-capable-host`, and a whole-host job cancelled
@@ -261,8 +262,7 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
 
     let first = submit_body(&h, &wide("held-1").json()).await;
     assert_eq!(first.status, 201, "{}", first.body);
-    assert_eq!(first.json()["job"]["state"], "JOB_STATE_QUEUED");
-    h.ticks.step().await;
+    assert_eq!(first.json()["job"]["state"], "JOB_STATE_PLACED");
     let (started, allocation) = one_start(&beat_with(&h, &agent, &[]).await);
     assert_eq!(started, "held-1");
     let held = beat_with(&h, &agent, &[running("held-1")]).await;
@@ -510,10 +510,11 @@ async fn gateway_post(job: SocketAddr, path: &str) -> Reply {
     request(job, "POST", path, Some(TOKEN), Some(b"{}")).await
 }
 
-/// Asserts that the six fleet calls are served on a real server's job port, over gRPC and
+/// Asserts that the seven fleet calls are served on a real server's job port, over gRPC and
 /// over the gateway: with one host registered in one elastic pool and one ended booking in
 /// the usage sink, `ListHosts` lists the host, `CordonHost` and `UncordonHost` change its
-/// cordon (each one made over one transport and read back over both), `ListPools` and
+/// cordon (each one made over one transport and read back over both), `ClearHostTaint` of
+/// the untainted host answers it with `cleared` false over both, `ListPools` and
 /// `ListProviders` name the pool `gpu`, `GetUsage` returns the ended booking by job and
 /// host, and a cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
 /// over gRPC and 500 `internal` over the gateway, whose error table does not name it yet. It catches a server that builds the job
@@ -558,6 +559,18 @@ async fn the_fleet_calls_are_served_on_the_job_port() {
     let lifted = grpc.uncordon_host(authed(uncordon)).await.unwrap();
     assert!(lifted.into_inner().lifted);
     assert_cordon(&mut grpc, job, FLEET_HOST, false).await;
+
+    let clear = ClearHostTaintRequest {
+        host_id: FLEET_HOST.to_owned(),
+    };
+    let clean = grpc.clear_host_taint(authed(clear)).await.unwrap();
+    let clean = clean.into_inner();
+    assert_eq!(clean.host.unwrap().id, FLEET_HOST);
+    assert!(!clean.cleared);
+    let clean = gateway_post(job, &format!("/v1/hosts/{FLEET_HOST}:cleartaint")).await;
+    assert_eq!(clean.status, 200, "{}", clean.body);
+    assert_eq!(clean.json()["host"]["id"], FLEET_HOST);
+    assert_eq!(clean.json()["cleared"], Value::Null);
 
     let unknown = CordonHostRequest {
         host_id: "no-such-host".to_owned(),

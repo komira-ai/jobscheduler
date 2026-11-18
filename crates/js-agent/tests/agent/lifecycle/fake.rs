@@ -8,10 +8,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, Exit, Finished, Found, FsPrepared, JobFs, NativeRefusal,
-    Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, label,
+    Clock, Exit, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
-use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
+use js_agent_wire::{HostPort, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
+
+#[path = "fake_checks.rs"]
+mod checks;
+#[path = "fake_fs.rs"]
+mod fs;
+pub use checks::ScriptedChecks;
 
 /// A clock that moves only when a test says so. Clones share one reading.
 #[derive(Clone, Default)]
@@ -72,6 +78,14 @@ struct State {
     reports: BTreeMap<String, LogReport>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
+    /// The control group the first process of the container of a run runs in, outside the
+    /// group made for it (see [`FakeRuntime::run_elsewhere`]).
+    elsewhere: BTreeMap<String, String>,
+    /// How many times `whereabouts` was asked about each run, by run id.
+    where_asks: BTreeMap<String, u32>,
+    /// The group `whereabouts` names for a run (and `cgroup` from then on) though `cgroup`
+    /// named none before it was asked (see [`FakeRuntime::group_when_asked`]).
+    grouped_when_asked: BTreeMap<String, PathBuf>,
     /// How many times the scripted checks were told the host is idle.
     idles: u32,
     /// When set, the log notes at every create whether this says the scratch directory has
@@ -99,15 +113,38 @@ struct State {
     ceiling: NetworkCeiling,
     /// How many times `network_ceiling` was asked.
     ceiling_asks: u32,
+    /// How many times `check_egress` was asked.
+    egress_asks: u32,
+    /// What `start_steps` answers, once, by run id.
+    steps: BTreeMap<String, Vec<(&'static str, u64)>>,
+    /// What the runtime was given to ring (`set_wake`).
+    wake: Wake,
     /// What `host_ports` answers; none by default, as the trait's default.
     host_ports: Vec<PortRange>,
     /// Why each run named here lost its host ports (`host_port_lost`), by run id.
     lost: BTreeMap<String, String>,
     /// The runs whose end the runtime holds once they exit ([`FakeRuntime::hold_end`]).
     held_ends: Vec<String>,
+    /// How the runtime answers a native body: `None` runs none, as the trait's default.
+    native: Option<NativeScript>,
+    /// What `check_image` refuses a start named by its image with; none: it runs them, as the
+    /// trait's default.
+    image_refusal: Option<(&'static str, String)>,
     /// What a job's file system answers (see [`FakeRuntime::give_layers`]); none: the
     /// runtime gives no layers, as the trait's default, and says nothing of them.
     fs: Option<FsScript>,
+    /// The file system each run's lookups were last asked with, by run id.
+    looked_up: BTreeMap<String, JobFs>,
+}
+
+/// What the fake answers of a native body.
+#[derive(Default)]
+struct NativeScript {
+    /// Whether a start named by its image with a `run` is run as a native body
+    /// (`runs_image_runs`).
+    image_runs: bool,
+    /// What `check_native` refuses with; none: it accepts the body.
+    refusal: Option<(&'static str, String)>,
 }
 
 /// What the fake answers of a job's file system.
@@ -119,6 +156,10 @@ struct FsScript {
     assembled: BTreeMap<String, FsPrepared>,
     /// The images of a layer `check_layer_image` refuses.
     refused_images: Vec<String>,
+    /// What `check_job_fs` refuses with; none: it accepts.
+    job_fs_refusal: Option<(&'static str, String)>,
+    /// What `check_job_fs` was asked: the layers, mounts and host ports of each call.
+    job_fs_checks: Vec<(usize, usize, usize)>,
     /// The runs whose sources did not answer after they ended (`input_failure`).
     unreadable: Vec<String>,
     /// The directory the runs' mounts are under (`mounts_of`).
@@ -157,17 +198,35 @@ impl FakeRuntime {
         }
     }
 
-    /// From now on the runtime gives a job layers and mounts (`layered_rootfs`), binds no
-    /// mount of a named root, prepares each run's file system as the test scripts it
-    /// (ready by default), and logs each call of it.
-    pub fn give_layers(&self) {
-        self.state.borrow_mut().fs = Some(FsScript::default());
+    /// From now on the runtime runs native bodies (`check_native` accepts them), as the Mac
+    /// runtime does; its network check for one stays the trait's default.
+    pub fn run_native(&self) {
+        self.state.borrow_mut().native = Some(NativeScript::default());
     }
 
-    fn script(&self) -> std::cell::RefMut<'_, FsScript> {
-        std::cell::RefMut::map(self.state.borrow_mut(), |state| {
-            state.fs.as_mut().expect("give_layers first")
-        })
+    /// From now on the runtime also runs a start named by its image with a `run` as a native
+    /// body (`runs_image_runs`), and runs native bodies.
+    pub fn run_image_runs(&self) {
+        self.state.borrow_mut().native = Some(NativeScript {
+            image_runs: true,
+            refusal: None,
+        });
+    }
+
+    /// From now on `check_image` refuses every start named by its image with `code` and `why`,
+    /// as the Mac runtime does without a bundle store.
+    pub fn refuse_images(&self, code: &'static str, why: &str) {
+        self.state.borrow_mut().image_refusal = Some((code, why.to_owned()));
+    }
+
+    /// From now on `check_native` refuses every body with `code` and `why`; the runtime runs
+    /// native bodies otherwise ([`FakeRuntime::run_native`]).
+    pub fn refuse_native(&self, code: &'static str, why: &str) {
+        let script = NativeScript {
+            image_runs: false,
+            refusal: Some((code, why.to_owned())),
+        };
+        self.state.borrow_mut().native = Some(script);
     }
 
     /// Once `run_id` exits (or now, if `held` is false, no more) the runtime holds its end:
@@ -178,31 +237,6 @@ impl FakeRuntime {
         if held {
             state.held_ends.push(run_id.to_owned());
         }
-    }
-
-    /// `resolve_fs` answers `answer` for `run_id` from now on.
-    pub fn resolve_answers(&self, run_id: &str, answer: FsPrepared) {
-        self.script().resolved.insert(run_id.to_owned(), answer);
-    }
-
-    /// `assemble_fs` answers `answer` for `run_id` from now on.
-    pub fn assembly_answers(&self, run_id: &str, answer: FsPrepared) {
-        self.script().assembled.insert(run_id.to_owned(), answer);
-    }
-
-    /// `check_layer_image` refuses `image`.
-    pub fn refuse_layer_image(&self, image: &str) {
-        self.script().refused_images.push(image.to_owned());
-    }
-
-    /// The sources of `run_id` do not answer once it has ended.
-    pub fn sources_gone(&self, run_id: &str) {
-        self.script().unreadable.push(run_id.to_owned());
-    }
-
-    /// The runs' mounts are under `dir` (`mounts_of`).
-    pub fn mount_in(&self, dir: &Path) {
-        self.script().mounts = Some(dir.to_owned());
     }
 
     /// The same runtime, which cannot use a GPU: `supports_gpus` is false.
@@ -294,6 +328,23 @@ impl FakeRuntime {
     /// How many times the network ceiling was asked for.
     pub fn ceiling_asks(&self) -> u32 {
         self.state.borrow().ceiling_asks
+    }
+
+    /// Rings the wake the runtime was given, as work it did off the worker would.
+    pub fn ring_wake(&self) {
+        let wake = self.state.borrow().wake.clone();
+        wake.wake();
+    }
+
+    /// `start_steps` answers `steps` for `run_id`, once.
+    pub fn steps_of(&self, run_id: &str, steps: &[(&'static str, u64)]) {
+        let mut state = self.state.borrow_mut();
+        state.steps.insert(run_id.to_owned(), steps.to_vec());
+    }
+
+    /// How many times the egress check was asked for.
+    pub fn egress_asks(&self) -> u32 {
+        self.state.borrow().egress_asks
     }
 
     /// Whether the runtime says it puts every container in a control group the agent can
@@ -400,6 +451,37 @@ impl FakeRuntime {
             .borrow_mut()
             .cgroups
             .insert(run_id.to_owned(), dir);
+    }
+
+    /// The first process of the container of `run_id` runs in the control group `group`,
+    /// not in the one made for it: `whereabouts` answers `Elsewhere(group)` while `cgroup`
+    /// names no group for the run. Without this, a run with no group has no process to find
+    /// (`NoProcess`).
+    pub fn run_elsewhere(&self, run_id: &str, group: &str) {
+        self.state
+            .borrow_mut()
+            .elsewhere
+            .insert(run_id.to_owned(), group.to_owned());
+    }
+
+    /// The group of the container of `run_id` is made when `whereabouts` is asked about it:
+    /// `cgroup` names none until then, `whereabouts` answers `Grouped(dir)`, and `cgroup`
+    /// names `dir` from then on.
+    pub fn group_when_asked(&self, run_id: &str, dir: &str) {
+        self.state
+            .borrow_mut()
+            .grouped_when_asked
+            .insert(run_id.to_owned(), PathBuf::from(dir));
+    }
+
+    /// How many times `whereabouts` was asked about `run_id`.
+    pub fn where_asks(&self, run_id: &str) -> u32 {
+        self.state
+            .borrow()
+            .where_asks
+            .get(run_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The container of `run_id` exits with `code`.
@@ -520,6 +602,18 @@ impl Runtime for FakeRuntime {
         }
     }
 
+    fn check_job_fs(&self, fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRefusal> {
+        let mut state = self.state.borrow_mut();
+        let Some(script) = state.fs.as_mut() else {
+            return Ok(());
+        };
+        script
+            .job_fs_checks
+            .push((fs.layers.len(), fs.mounts.len(), host_ports.len()));
+        let refused = script.job_fs_refusal.clone();
+        refused.map_or(Ok(()), |(code, why)| Err(NativeRefusal { code, why }))
+    }
+
     fn binds_named_mounts(&self) -> bool {
         self.state.borrow().fs.is_none()
     }
@@ -530,6 +624,10 @@ impl Runtime for FakeRuntime {
             fs.layers.len(),
             fs.mounts.len()
         ));
+        self.state
+            .borrow_mut()
+            .looked_up
+            .insert(run_id.to_owned(), fs.clone());
         let answer = self.script().resolved.get(run_id).cloned();
         answer.unwrap_or(FsPrepared::Ready)
     }
@@ -580,6 +678,7 @@ impl Runtime for FakeRuntime {
     }
 
     fn check_egress(&self) -> Result<(), RuntimeError> {
+        self.state.borrow_mut().egress_asks += 1;
         match self.fails("egress") {
             true => Err(err("egress")),
             false => Ok(()),
@@ -604,6 +703,17 @@ impl Runtime for FakeRuntime {
         };
         state.asks.entry(image.to_owned()).or_default().push(waited);
         answer
+    }
+
+    fn set_wake(&mut self, wake: Wake) {
+        self.state.borrow_mut().wake = wake;
+    }
+
+    fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
+        let mut state = self.state.borrow_mut();
+        let run_id = state.containers.get(&id.0).map(|c| c.run_id.clone());
+        let steps = run_id.and_then(|run_id| state.steps.remove(&run_id));
+        steps.unwrap_or_default()
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
@@ -754,6 +864,40 @@ impl Runtime for FakeRuntime {
         }
     }
 
+    fn check_native(&self, _native: &NativeSpec) -> Result<(), NativeRefusal> {
+        match &self.state.borrow().native {
+            None => Err(NativeRefusal {
+                code: js_agent_wire::refusal::NATIVE_UNSUPPORTED,
+                why: "this agent runs no native jobs".to_owned(),
+            }),
+            Some(script) => match &script.refusal {
+                Some((code, why)) => Err(NativeRefusal {
+                    code,
+                    why: why.clone(),
+                }),
+                None => Ok(()),
+            },
+        }
+    }
+
+    fn check_image(&self) -> Result<(), NativeRefusal> {
+        match &self.state.borrow().image_refusal {
+            Some((code, why)) => Err(NativeRefusal {
+                code,
+                why: why.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    fn runs_image_runs(&self) -> bool {
+        self.state
+            .borrow()
+            .native
+            .as_ref()
+            .is_some_and(|script| script.image_runs)
+    }
+
     fn supports_gpus(&self) -> bool {
         !self.state.borrow().gpus_off
     }
@@ -762,6 +906,24 @@ impl Runtime for FakeRuntime {
         let state = self.state.borrow();
         let run = &state.containers.get(&id.0)?.run_id;
         state.cgroups.get(run).cloned()
+    }
+
+    fn whereabouts(&mut self, id: &RunHandle) -> Whereabouts {
+        let mut state = self.state.borrow_mut();
+        let Some(run) = state.containers.get(&id.0).map(|c| c.run_id.clone()) else {
+            return Whereabouts::NoProcess;
+        };
+        *state.where_asks.entry(run.clone()).or_default() += 1;
+        if let Some(dir) = state.grouped_when_asked.remove(&run) {
+            state.cgroups.insert(run.clone(), dir);
+        }
+        if let Some(dir) = state.cgroups.get(&run) {
+            return Whereabouts::Grouped(dir.clone());
+        }
+        match state.elsewhere.get(&run) {
+            Some(group) => Whereabouts::Elsewhere(group.clone()),
+            None => Whereabouts::NoProcess,
+        }
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
@@ -779,71 +941,5 @@ impl Runtime for FakeRuntime {
                 never_started: !c.started,
             })
             .collect())
-    }
-}
-
-/// Post-job checks that pass until a test makes one find something, and record when
-/// they ran and what the host looked like then.
-pub struct ScriptedChecks {
-    log: Log,
-    runtime: FakeRuntime,
-    scratch_root: PathBuf,
-    findings: BTreeMap<String, CheckFinding>,
-}
-
-impl ScriptedChecks {
-    pub fn new(log: &Log, runtime: &FakeRuntime, scratch_root: &Path) -> Self {
-        Self {
-            log: Rc::clone(log),
-            runtime: runtime.clone(),
-            scratch_root: scratch_root.to_path_buf(),
-            findings: BTreeMap::new(),
-        }
-    }
-
-    pub fn find(mut self, run_id: &str, finding: CheckFinding) -> Self {
-        self.findings.insert(run_id.to_owned(), finding);
-        self
-    }
-}
-
-impl CheckHook for ScriptedChecks {
-    fn idle(&mut self) {
-        self.runtime.state.borrow_mut().idles += 1;
-    }
-
-    fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
-        let run_id = job.run_id;
-        let container = match self.runtime.gone(run_id) {
-            true => "container gone",
-            false => "container present",
-        };
-        let scratch = match self.scratch_root.join(run_id).exists() {
-            true => "scratch present",
-            false => "scratch gone",
-        };
-        self.log.borrow_mut().push(format!(
-            "check {run_id} ({container}, {scratch}){}",
-            self.runtime.marker_note()
-        ));
-        if !job.live.is_empty() {
-            let live: Vec<&str> = job.live.iter().map(|id| id.0.as_str()).collect();
-            self.log
-                .borrow_mut()
-                .push(format!("live beside {run_id}: {}", live.join(",")));
-        }
-        if !job.held_mounts.is_empty() {
-            let held: Vec<String> = job
-                .held_mounts
-                .iter()
-                .map(|dir| dir.display().to_string())
-                .collect();
-            self.log
-                .borrow_mut()
-                .push(format!("mounts held beside {run_id}: {}", held.join(",")));
-        }
-        self.findings
-            .get(run_id)
-            .map_or(Ok(()), |finding| Err(finding.clone()))
     }
 }

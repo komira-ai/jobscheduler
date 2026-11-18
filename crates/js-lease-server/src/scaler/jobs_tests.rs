@@ -36,10 +36,12 @@ fn floor() -> Demand {
         os: Some("linux".to_owned()),
         arch: None,
         isa_level: None,
+        os_version: None,
         exec: Some(ExecMode::Container),
         network: Reach::None,
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     }
 }
 
@@ -113,11 +115,13 @@ fn a_share_job_asks_for_what_admission_asked() {
         os: Some("linux".to_owned()),
         arch: Some("arm64".to_owned()),
         isa_level: Some(IsaLevel::X86_64(X86Level::V3)),
+        os_version: None,
         exec: Some(ExecMode::SandboxExec),
         accelerator,
         network: Reach::Open,
         host_ports: vec![8000, 9000],
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     };
     assert_eq!(wanted, expected);
 

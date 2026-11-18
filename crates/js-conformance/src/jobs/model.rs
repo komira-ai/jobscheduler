@@ -8,12 +8,12 @@ use js_proto::refusal::refusal_status;
 use js_proto::v1::job_service_client::JobServiceClient;
 use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
-    self, CancelJobRequest, CancelJobResponse, CordonHostRequest, CordonHostResponse,
-    GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
-    GetResultResponse, GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse,
-    ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, RefusalCode, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse,
+    self, CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
+    CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
+    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
+    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, RefusalCode, SubmitJobRequest,
+    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
@@ -575,6 +575,13 @@ impl JobService for ReferenceJobs {
         &self,
         _: Request<UncordonHostRequest>,
     ) -> Result<Response<UncordonHostResponse>, Status> {
+        unserved()
+    }
+
+    async fn clear_host_taint(
+        &self,
+        _: Request<ClearHostTaintRequest>,
+    ) -> Result<Response<ClearHostTaintResponse>, Status> {
         unserved()
     }
 

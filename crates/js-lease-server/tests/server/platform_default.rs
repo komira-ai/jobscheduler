@@ -177,10 +177,12 @@ fn wanting(cores: u64, gpus: u64) -> Requirements {
         os: Some("linux".to_owned()),
         arch: None,
         isa_level: None,
+        os_version: None,
         exec: None,
         network: JobNetwork::None,
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     }
 }
 

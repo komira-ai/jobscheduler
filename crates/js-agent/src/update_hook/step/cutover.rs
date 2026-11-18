@@ -7,7 +7,9 @@
 //! In this order:
 //! 1. the lock, the record and the params agree; there must be a record, and the release link
 //!    must point at the staged release (`link_failed` otherwise, nothing done);
-//! 2. unless the stop is begun already: a taint or an `owed-*` record halts (76), and the host
+//! 2. unless the stop is begun already: a taint the restarted agent will not re-check (see
+//!    `refuse_host` in `prepare`), or an `owed-*`
+//!    record, halts (76), and the host
 //!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
 //!    between the placing and the confirming), so a cordon of ours that is gone is put back
 //!    within the cap, and a cap that is spent or a lease that came in defers (75, class
@@ -27,12 +29,11 @@
 //!    `DelegateSubgroup` layout starts from an empty cgroup (`KillMode=process` leaves strays
 //!    behind); a cgroup still busy at the same bound ends `unit_not_empty`, class environment.
 //!    launchd's `bootout` already empties the job;
-//!    With a `helper_unit` in the params (a Mac package's root helper, see `helper`), the helper
-//!    is booted out after the agent is down and bootstrapped from the staged release's tree
-//!    and started before the agent's start is marked;
 //! 5. the record gets `link_moved` (kept under its name: the link was moved by the updater and
-//!    this is the mark that the start is next, and for a first install the commit), then
-//!    `start_issued`, then the unit is started and waited for. A start that fails is the
+//!    this is the mark that the start is next, and for a first install the commit); then, with a
+//!    `helper_unit` in the params (a Mac package's root helper, see `helper`) and the start not
+//!    issued yet, the helper is booted out and bootstrapped from the staged release's tree and
+//!    started; then the record gets `start_issued`, and the unit is started and waited for. A start that fails is the
 //!    release's fault only if the unit ran and died (`failed`, or `auto-restart` after a crash,
 //!    at any look); a unit still waiting in `start` is not.
 //!
@@ -284,7 +285,7 @@ fn busy(
 }
 
 /// What the unit manager says of a unit, in the three ways that matter here.
-pub(super) enum Life {
+pub(crate) enum Life {
     /// `active`.
     Up,
     /// `activating`, `reloading` and the like: on its way up, or waiting to restart.
@@ -295,7 +296,7 @@ pub(super) enum Life {
     Down,
 }
 
-pub(super) fn life(state: &UnitState) -> Life {
+pub(crate) fn life(state: &UnitState) -> Life {
     match state.active.as_str() {
         "active" => Life::Up,
         "inactive" | "failed" => Life::Down,

@@ -9,6 +9,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use js_registry::PoolConfig;
 use js_sched::{Backfill, MemoryPercent};
+use js_sched_placer::sizes::ColdSize;
 
 use super::CpuSlack;
 use crate::clock::SharedClock;
@@ -86,13 +87,15 @@ pub(crate) fn split(pool: PoolConfig) -> (PoolConfig, MemoryPercent) {
 }
 
 /// The placer the registry takes: its one engine is built with `cpu_slack`, the share
-/// `memory` of each host's memory, and backfill: work may backfill a host a whole-node
-/// request has set aside, up to `max_lease_wall` (`server.max_lease_wall`; none: any wall
-/// time). `clock` is the registry's.
+/// `memory` of each host's memory, the `cold` size of a job class with no estimate, and
+/// backfill: work may backfill a host a whole-node request has set aside, up to
+/// `max_lease_wall` (`server.max_lease_wall`; none: any wall time). `clock` is the
+/// registry's.
 pub(crate) fn placer(
     max_lease_wall: Option<Duration>,
     cpu_slack: CpuSlack,
     memory: MemoryPercent,
+    cold: ColdSize,
     clock: &SharedClock,
 ) -> Arc<SchedPlacer> {
     let ceiling = max_lease_wall.unwrap_or(Duration::MAX);
@@ -100,6 +103,7 @@ pub(crate) fn placer(
         backfill: Backfill::enforced(ceiling),
         load: cpu_slack.load_config(),
         memory,
+        cold,
     };
     Arc::new(SchedPlacer::new(settings, clock.clone()))
 }

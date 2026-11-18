@@ -116,6 +116,7 @@ fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
         uid_entry: Some(AbsPath::parse(entry).expect("entry")),
         inputs: vec![AbsPath::parse(input).expect("input")],
         read_denies: vec![AbsPath::parse(deny).expect("deny")],
+        mounts: vec![],
     };
     let plain = Policy::base(
         layout("/Volumes/r", "/Volumes/e", "/Volumes/i", "/Volumes/d"),

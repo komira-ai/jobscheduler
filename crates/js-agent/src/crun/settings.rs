@@ -13,7 +13,7 @@ use super::fs::{FsError, FsSettings};
 use super::{
     CALL_LIMIT, EgressPort, GpuSettings, KILL_WAIT, LedgerError, PULL_LIMIT, hand_over_no_follow,
 };
-use crate::cli_runtime::Chown;
+use crate::cli_runtime::{Chown, ProcRead, read_proc};
 use crate::host_ports::{Kernel, Listen};
 use crate::lifecycle::FilesRoot;
 
@@ -95,6 +95,9 @@ pub struct Hooks {
     pub pull_limit: Duration,
     /// How long a `crun kill` may take before it is given up ([`CALL_LIMIT`]).
     pub call_limit: Duration,
+    /// Reads a file of the agent's `/proc`: the control group of a container's first process,
+    /// read when its group below the lease is not there ([`crate::lifecycle::Whereabouts`]).
+    pub proc_read: ProcRead,
 }
 
 impl Default for Hooks {
@@ -105,6 +108,7 @@ impl Default for Hooks {
             kill_wait: KILL_WAIT,
             pull_limit: PULL_LIMIT,
             call_limit: CALL_LIMIT,
+            proc_read: read_proc,
         }
     }
 }

@@ -3,10 +3,7 @@
 //! The rig's registry, server and store read one manual clock; nothing sleeps.
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -25,6 +22,9 @@ use crate::job_api::submit::Ctx;
 use crate::job_api::writes_rig::{
     CEILING, Fixed, NEVER, Via, Writes, id, over_fake, rows, said, served, to_json, wire,
 };
+
+#[path = "submit_provider_tests.rs"]
+mod provider;
 
 /// The answer of a refusal by `code`, as the gateway says it, beside its gRPC code.
 fn refusal(code: RefusalCode) -> (StatusCode, Value) {
@@ -366,12 +366,14 @@ async fn a_failed_commit_answers_500_and_changes_nothing() {
     assert_eq!(rows(&writes.jobs), 2);
 }
 
-/// Asserts that `SubmitJob` answers on its first poll, with the job queued and no allocation,
-/// while the placement pass never runs: the handler awaits nothing but the store and the
-/// hosts' admission, so it cannot be waiting for placement, a launch or a provider. It
-/// catches a handler that awaits placement or anything after the commit.
-#[test]
-fn submit_does_not_wait_for_placement() {
+/// Asserts that `SubmitJob` of a service that does not place answers with the job queued and
+/// no allocation, in a test where nothing else runs: no tick, no heartbeat, no placement
+/// pass. The handler awaits only its store calls (on the pool for blocking calls) and the
+/// hosts' admission, so it cannot be waiting for placement, a launch or a provider: one that
+/// awaited placement would never answer here. It catches a handler of a service that does
+/// not place which places, or waits on anything after the commit.
+#[tokio::test]
+async fn submit_does_not_wait_for_placement() {
     let mut rig = clocked_rig("submit_no_wait", true, NEVER);
     rig.register("host-a", true);
     let admission = JobAdmission::new(Admit::default(), rig.agents.registry.clone());
@@ -384,10 +386,11 @@ fn submit_does_not_wait_for_placement() {
         name: js_jobs::ClientName::default_client(),
         role: crate::config::Role::Operator,
     };
-    let mut call = pin!(submit_job(&api, &caller, request));
-    let polled = call.as_mut().poll(&mut Context::from_waker(Waker::noop()));
-    let state = polled.map(|answer| answer.unwrap().into_inner().job.unwrap().state());
-    assert_eq!(state, Poll::Ready(v1::JobState::Queued));
+    let answer = submit_job(&api, &caller, request).await.unwrap();
+    assert_eq!(
+        answer.into_inner().job.unwrap().state(),
+        v1::JobState::Queued
+    );
     assert_eq!(rig.jobs.live_allocations().unwrap(), Vec::new());
     assert_eq!(rig.job(&id("job-w")).state, JobState::Queued);
 }
@@ -636,6 +639,7 @@ async fn the_answer_shows_the_job_as_recorded() {
                 arch: "aarch64".to_owned(),
                 exec: v1::ExecMode::Container.into(),
                 isa_level: "armv8.2-a".to_owned(),
+                os_version: String::new(),
                 accelerator: Some(v1::Accelerator {
                     vendor: Some("nvidia".to_owned()),
                     model: Some("nvidia-a100".to_owned()),

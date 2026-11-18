@@ -11,13 +11,15 @@ use crate::config::Cli;
 use crate::error::StartupError;
 
 /// The flags that mean something only beside `--agent-pool-config`.
-const NEED_AGENT_POOL: [&str; 7] = [
+const NEED_AGENT_POOL: [&str; 9] = [
     "--agent-hello-burst",
     "--agent-hello-interval",
     "--require-host-credential",
     "--placement",
     "--estimate-feed",
     "--cpu-slack",
+    "--cold-cpu-millis",
+    "--cold-memory-bytes",
     "--job-listen",
 ];
 
@@ -104,8 +106,8 @@ pub(crate) fn need_agent_pool(cli: &Cli) -> Result<(), StartupError> {
         .iter()
         .flatten()
         .find(|flag| NEED_AGENT_POOL.contains(&flag.as_str()));
-    match (stray, &cli.agent_pool_config) {
-        (Some(flag), None) => Err(StartupError::at(flag, "requires --agent-pool-config")),
+    match (stray, cli.agent_pool_config.is_empty()) {
+        (Some(flag), true) => Err(StartupError::at(flag, "requires --agent-pool-config")),
         _ => Ok(()),
     }
 }

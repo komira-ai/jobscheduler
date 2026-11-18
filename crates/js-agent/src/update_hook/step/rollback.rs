@@ -4,10 +4,14 @@
 //! point goes on from there and makes no act twice.
 //!
 //! In this order, each before anything is changed:
-//! 1. the lock, the record and the params agree; a taint or an `owed-*` record halts (76), here
-//!    and again before each phase below (a tainted agent refuses every start, the old release
-//!    included, so nothing is gained by going on). A rollback with no record has nothing to
-//!    undo: it has finished before, or `prepare` never wrote one;
+//! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check, or an
+//!    `owed-*` record, halts (76), here and again before each phase below (an agent with such a
+//!    taint refuses every start, the old release included, so nothing is gained by going on; a
+//!    taint it will re-check, a residue of a process the pin file does not name, does not halt the
+//!    step; if the previous release is one that predates
+//!    self-clearing, such a taint stays standing and that agent refuses starts until an operator
+//!    clears it, which is accepted because a halt would stop every release of the group). A rollback with no
+//!    record has nothing to undo: it has finished before, or `prepare` never wrote one;
 //! 2. the agent was never signalled (no `stop_begun`; for a first install, no `link_moved`):
 //!    there is nothing to repair beyond the cordon. It is lifted if this update placed it, the
 //!    record is deleted, and the step ends `reversible: true`;
@@ -72,8 +76,9 @@
 //! flag on a success). A tombstone would have to be cleared by the next `prepare`, which
 //! cannot tell it from the record of an update that was abandoned.
 //!
-//! Exit codes: 0; 1 (every ending after the stop says `reversible: false`); 76 on a taint or an
-//! owed check. Never 75: the declared contract gives a rollback no deferral. A lease server that
+//! Exit codes: 0; 1 (every ending after the stop says `reversible: false`); 76 on a taint
+//! the agent cannot clear, or an owed check. Never 75: the declared contract gives a rollback no
+//! deferral. A lease server that
 //! does not answer before the first act is waited for inside the step (bounded as below), and then
 //! the step fails with `lease_unreachable` (class
 //! environment) having changed nothing.

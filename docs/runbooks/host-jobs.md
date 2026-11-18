@@ -38,19 +38,23 @@ Host jobs are jobs only.
 
 ## Taking a host out of service afterwards
 
-Nothing in the scheduler clears a host job's taint: the machine must be reimaged. A host job's
-taint is cleared the way any taint is, once the machine is reimaged: stop the server and remove
-the `taint_` keys of the host's binding (in the `.agents` file, or in its value in the store).
+Nothing in the scheduler clears a host job's taint by itself: the machine must be reimaged. A
+host job's taint is cleared the way any taint is, once the machine is reimaged: an operator calls
+`ClearHostTaint` (`js host host-taint --host-id ID`), which clears the taint the server stores for
+the host. The call does not reach the agent: if the agent's `taint.json` is still on the host,
+move it aside first (a reimaged host has none), or the agent refuses the next start
+`host-tainted` and the server takes that as the host's taint again.
 A job store taint row that a failed write left behind (the server logs a warning that names the
 host) is put back on the binding at the next start; start the server once after such a warning,
-then stop it and clear the binding. Until it is cleared the host keeps counting toward the
+then clear the taint with the call. Until it is cleared the host keeps counting toward the
 pool's `max_machines`.
 
 ## What the agent needs
 
-Start the agent with `--runtime crun --allow-host-jobs`. Only the `crun` runtime launches a host
-job, so `js-agent` refuses `--allow-host-jobs` at start on every other runtime (the container
-engine of `--container-bin` and the native runtime of a Mac run contained jobs only). An agent
+Start the Linux agent with `--allow-host-jobs`, and without `--allow-container-engine`. Only the
+`crun` runtime launches a host job, so `js-agent` refuses `--allow-host-jobs` at start with
+`--allow-container-engine` (the container engine runs contained jobs only), and a macOS build
+has no such flag (its native runtime runs contained jobs only). An agent
 that took the flag reports `host-jobs` in its hello; no other agent does, and
 `--capability host-jobs=...` is refused as a detected key. Without an agent that reports it, every
 host job is refused `no-capable-host` at submit, and no host is tainted for a job it cannot start.

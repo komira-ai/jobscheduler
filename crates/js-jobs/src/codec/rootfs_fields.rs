@@ -7,11 +7,15 @@
 //! job that names none is the bytes a build before these fields wrote. Tags 57 and 58 are text,
 //! written only when there is a code; 58 is read only beside a result (`result_fields`).
 //!
-//! - A layer is its kind (one byte: 0 a host path, 1 an image) and its text.
-//! - A mount is a list of its parts: its source (a kind byte, 0 a host path, and its text), its
-//!   target, its mode (one byte: 0 read-only, 1 read-write, 2 copy-on-write), its `sub_path`
-//!   (empty when absent, else 1 and the text), `no_exec` (0 or 1) and its propagation (one
-//!   byte: 0 private).
+//! - A layer is its kind (one byte: 0 a host path, 1 an image, 2 a provider) and its text. The
+//!   text of a provider is its name, a NUL byte and its ref (a name has no NUL, so the first one
+//!   splits them). It is text and not a list of two items so that a build from before kind 2
+//!   reads it as a kind it does not know: that build checks a kind's text for UTF-8 before it
+//!   looks at the kind, and a list's length prefix is not always UTF-8.
+//! - A mount is a list of its parts: its source (a kind byte, 0 a host path or 2 a provider,
+//!   and its text, as a layer's), its target, its mode (one byte: 0 read-only, 1 read-write, 2
+//!   copy-on-write), its `sub_path` (empty when absent, else 1 and the text), `no_exec` (0 or 1)
+//!   and its propagation (one byte: 0 private).
 //! - A host port is five bytes: the host port and the job port (`u16` each, the job port 0
 //!   when absent) and the protocol (one byte: 0 TCP).
 //!
@@ -58,6 +62,10 @@ use job_rootfs_tag as t;
 const HOST_PATH: u8 = 0;
 /// The kind byte of an image layer.
 const IMAGE: u8 = 1;
+/// The kind byte of a provider, as a layer's or a mount's source.
+const PROVIDER: u8 = 2;
+/// The byte between a provider's name and its ref.
+const PROVIDER_SEPARATOR: char = '\0';
 /// The parts of a mount this build reads.
 const MOUNT_PARTS: usize = 6;
 /// The bytes of a host port this build reads.
@@ -159,10 +167,29 @@ fn kind_of(tag: u16, item: &[u8]) -> Result<(u8, String), DecodeError> {
     Ok((kind, text_of(tag, rest.to_vec())?))
 }
 
+/// The kind byte of a provider and its name and ref as one text.
+fn provided(provider: &str, reference: &str) -> Vec<u8> {
+    kinded(
+        PROVIDER,
+        &format!("{provider}{PROVIDER_SEPARATOR}{reference}"),
+    )
+}
+
+/// The name and the ref of the text of a provider kind: the first separator splits them.
+fn provider_of(tag: u16, text: &str) -> Result<(String, String), DecodeError> {
+    text.split_once(PROVIDER_SEPARATOR)
+        .map(|(provider, reference)| (provider.to_owned(), reference.to_owned()))
+        .ok_or(DecodeError::BadValue { tag })
+}
+
 fn layer(layer: &Layer) -> Vec<u8> {
     match layer {
         Layer::HostPath { path } => kinded(HOST_PATH, path),
         Layer::Image { image } => kinded(IMAGE, image),
+        Layer::Provider {
+            provider,
+            reference,
+        } => provided(provider, reference),
     }
 }
 
@@ -170,12 +197,25 @@ fn layer_of(tag: u16, item: &[u8]) -> Result<Layer, DecodeError> {
     match kind_of(tag, item)? {
         (HOST_PATH, path) => Ok(Layer::HostPath { path }),
         (IMAGE, image) => Ok(Layer::Image { image }),
+        (PROVIDER, text) => {
+            let (provider, reference) = provider_of(tag, &text)?;
+            Ok(Layer::Provider {
+                provider,
+                reference,
+            })
+        }
         _ => Err(DecodeError::Newer),
     }
 }
 
 fn mount(mount: &JobMount) -> Vec<u8> {
-    let MountSource::HostPath { path } = &mount.source;
+    let source = match &mount.source {
+        MountSource::HostPath { path } => kinded(HOST_PATH, path),
+        MountSource::Provider {
+            provider,
+            reference,
+        } => provided(provider, reference),
+    };
     let sub_path = mount
         .sub_path
         .as_deref()
@@ -187,7 +227,7 @@ fn mount(mount: &JobMount) -> Vec<u8> {
     };
     let Propagation::Private = mount.propagation;
     let parts = [
-        kinded(HOST_PATH, path),
+        source,
         text(&mount.target),
         vec![mode],
         sub_path,
@@ -207,6 +247,13 @@ fn mount_of(tag: u16, item: &[u8]) -> Result<JobMount, DecodeError> {
     };
     let source = match kind_of(tag, source)? {
         (HOST_PATH, path) => MountSource::HostPath { path },
+        (PROVIDER, text) => {
+            let (provider, reference) = provider_of(tag, &text)?;
+            MountSource::Provider {
+                provider,
+                reference,
+            }
+        }
         _ => return Err(DecodeError::Newer),
     };
     let mode = match byte_of(tag, mode)? {

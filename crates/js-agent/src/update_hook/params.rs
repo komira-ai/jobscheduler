@@ -381,12 +381,15 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
 }
 
 /// A required key that is a whole number of seconds.
-fn required_seconds(table: &toml::Table, key: &'static str) -> Result<u64, ParamsError> {
+pub(super) fn required_seconds(table: &toml::Table, key: &'static str) -> Result<u64, ParamsError> {
     seconds(table, key)?.ok_or(ParamsError::Missing(key))
 }
 
 /// A required key that is an absolute path.
-fn required_path(table: &toml::Table, key: &'static str) -> Result<PathBuf, ParamsError> {
+pub(super) fn required_path(
+    table: &toml::Table,
+    key: &'static str,
+) -> Result<PathBuf, ParamsError> {
     path(table, key)?.ok_or(ParamsError::Missing(key))
 }
 
@@ -399,7 +402,7 @@ fn positive(table: &toml::Table, key: &'static str) -> Result<u64, ParamsError> 
 }
 
 /// Whether the updater would have let the value through: a boolean, a number or a string.
-fn is_scalar(value: &toml::Value) -> bool {
+pub(super) fn is_scalar(value: &toml::Value) -> bool {
     matches!(
         value,
         toml::Value::Boolean(_)
@@ -423,7 +426,7 @@ fn seconds(table: &toml::Table, key: &str) -> Result<Option<u64>, ParamsError> {
 }
 
 /// `key` as a string; `None` when it is absent.
-fn string_of(table: &toml::Table, key: &str) -> Result<Option<String>, ParamsError> {
+pub(super) fn string_of(table: &toml::Table, key: &str) -> Result<Option<String>, ParamsError> {
     table
         .get(key)
         .map(|value| {

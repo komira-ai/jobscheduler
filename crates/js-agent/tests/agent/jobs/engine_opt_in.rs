@@ -1,11 +1,12 @@
-//! The container engine is a fallback the operator opts in to: `--runtime docker` runs only with
-//! `--allow-container-engine`, the opt-in runs only with `--runtime docker`, an engine flag with
-//! no `--runtime` is a crun start that refuses it, and an agent on the engine says once, at
+//! The container engine is a fallback the operator opts in to: its flags run only with
+//! `--allow-container-engine`, the opt-in runs only with `--container-bin`, an engine flag
+//! without the opt-in is a crun start that refuses it, and an agent on the engine says once, at
 //! start, that its runtime is a fallback whose jobs get no network.
 
 use std::sync::Arc;
 
-use js_agent::{ENGINE_NEEDS_OPT_IN, ENGINE_WARNING};
+use js_agent::platform::{ENGINE_WARNING, NOT_READY};
+const ENGINE_NEEDS_OPT_IN: &str = "--container-bin: needs --allow-container-engine (a flag of the container engine; without it this agent runs crun)";
 
 use super::drain::container_flags;
 use super::fake::FakeMachine;
@@ -46,49 +47,52 @@ fn less(owned: &[String], drop: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Proves the four starts of the opt-in, each on a Linux host whose engine program is a fake:
-/// `--runtime docker --container-bin <fake>` without `--allow-container-engine` exits 2 naming
-/// the opt-in, with nothing sent; the same with it starts and says hello;
-/// `--allow-container-engine` without `--runtime docker` exits 2 naming `--runtime docker`
-/// (with no `--runtime`, with `none` and with `crun`); and `--container-bin` with no `--runtime`
-/// exits 2 naming `--container-bin` and the opt-in, which crun, the default, does not take. It
-/// catches any of the four accepted, and an engine that runs jobs without the opt-in.
+/// Proves the starts of the opt-in, each on a Linux host whose engine program is a fake:
+/// `--container-bin <fake>` without `--allow-container-engine` is a crun start that exits 2
+/// naming `--container-bin` and the opt-in, with nothing sent and the engine never called; the
+/// same with the opt-in starts and says hello; `--allow-container-engine` without
+/// `--container-bin` exits 2 naming `--container-bin` (given alone, and through the default
+/// start); and `--allow-container-engine` with `--no-jobs` exits 2 naming `--no-jobs`. It
+/// catches any of these accepted, and an engine that runs jobs without the opt-in.
 #[test]
 fn docker_without_the_opt_in_flag_is_refused() {
     let dir = Scratch::new("engine-opt-in");
     let owned = container_flags(&dir);
     assert!(owned.iter().any(|word| word == "--allow-container-engine"));
 
-    let (ran, sent, _) = engine_start(&less(&owned, &["--allow-container-engine"]));
+    let without = less(&owned, &["--allow-container-engine"]);
+    assert!(without.iter().any(|word| word == "--container-bin"));
+    let (ran, sent, calls) = engine_start(&without);
     assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert_eq!(
+        calls,
+        Vec::<String>::new(),
+        "the engine was called: {}",
+        ran.err
+    );
     assert_eq!(sent, 0, "{}", ran.err);
     assert!(
         ran.err
-            .ends_with(&format!("js-agent: {ENGINE_NEEDS_OPT_IN}\n")),
+            .contains(&format!("js-agent: {ENGINE_NEEDS_OPT_IN}\n")),
         "{}",
         ran.err
     );
+    assert!(ran.err.contains(NOT_READY), "{}", ran.err);
     assert_eq!(
         ENGINE_NEEDS_OPT_IN,
-        "--runtime docker: needs --allow-container-engine (crun is the default Linux runtime; \
-         the engine is a fallback for a host that cannot run crun and for GPU jobs)"
+        "--container-bin: needs --allow-container-engine (a flag of the container engine; \
+         without it this agent runs crun)"
     );
 
     let (ran, sent, _) = engine_start(&owned);
     assert_eq!(sent, 1, "the engine agent says hello: {}", ran.err);
 
-    let alone = "js-agent: --allow-container-engine: needs --runtime docker\n";
-    for given in [
-        &["--allow-container-engine"][..],
-        &["--runtime", "none", "--allow-container-engine"],
-        &["--runtime", "crun", "--allow-container-engine"],
-    ] {
-        let given: Vec<String> = given.iter().map(|word| (*word).to_owned()).collect();
-        let (ran, sent, _) = engine_start(&given);
-        assert_eq!(ran.status(), code(2), "{given:?}: {}", ran.err);
-        assert_eq!(sent, 0, "{given:?}: {}", ran.err);
-        assert!(ran.err.ends_with(alone), "{given:?}: {}", ran.err);
-    }
+    let alone = "js-agent: --allow-container-engine: needs --container-bin\n";
+    let given = vec!["--allow-container-engine".to_owned()];
+    let (ran, sent, _) = engine_start(&given);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert_eq!(sent, 0, "{}", ran.err);
+    assert!(ran.err.ends_with(alone), "{}", ran.err);
     let mut sleeper = CountingSleeper::stopping_at(1);
     let (script, _) = Script::new(vec![refused(403, "host-bound")]);
     let bare = run_defaulted(
@@ -101,26 +105,17 @@ fn docker_without_the_opt_in_flag_is_refused() {
     assert_eq!(bare.status(), code(2), "{}", bare.err);
     assert!(bare.err.ends_with(alone), "{}", bare.err);
 
-    let defaulted = less(&owned, &["--runtime", "docker", "--allow-container-engine"]);
-    assert!(defaulted.iter().any(|word| word == "--container-bin"));
-    let (ran, sent, calls) = engine_start(&defaulted);
+    let given = vec![
+        "--no-jobs".to_owned(),
+        "--allow-container-engine".to_owned(),
+    ];
+    let (ran, sent, _) = engine_start(&given);
     assert_eq!(ran.status(), code(2), "{}", ran.err);
-    assert_eq!(
-        calls,
-        Vec::<String>::new(),
-        "the engine was called: {}",
-        ran.err
-    );
     assert_eq!(sent, 0, "{}", ran.err);
     assert!(
-        ran.err
-            .contains("js-agent: --container-bin: not accepted with --runtime crun"),
-        "{}",
-        ran.err
-    );
-    assert!(
-        ran.err
-            .contains("--runtime docker --allow-container-engine selects the engine"),
+        ran.err.ends_with(
+            "js-agent: --allow-container-engine: not with --no-jobs (an agent that runs no job)\n"
+        ),
         "{}",
         ran.err
     );

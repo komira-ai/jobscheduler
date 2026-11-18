@@ -1,13 +1,15 @@
 //! `release plan` and `release stamp`: the decisions behind the continuous release
 //! (`.github/workflows/release.yml`, docs/release.md), as code with tests.
 //!
-//! - [`plan`]: what the commit that passed `ci` on main would release: whether anything
+//! - [`plan`]: what the commit pushed to main would release: whether anything
 //!   that ships changed since the latest `v*` tag, and the version if so.
 //! - [`stamp`]: sets the release version in the CI checkout (`Cargo.toml` and `Cargo.lock`)
 //!   before the build, so `--version` of every binary prints it. Nothing is committed.
 //! - [`server_image`]: the OCI image tar of `js-lease-server` for one Linux target.
 //! - [`image_digest`]: the manifest digest of the release's linux-x86_64 image and the release's
 //!   addresses of it and its bundle, which the control plane's deploy of `js-server` is given.
+//! - [`turn`]: serializes the publish and deploy of the runs of `release.yml`: waits while an older
+//!   run holds the turn, and skips a run that a newer release or run has overtaken.
 //! - [`stage`]: lays down the files of one release archive, the binary, `LICENSE` and, in the
 //!   Linux archives of `js-lease-server`, the host updater's declaration.
 //!
@@ -24,8 +26,13 @@
 //! `js-coverage`, `js-conformance`). A file in one of the excluded places that a shipped
 //! source includes (`include_str!` and its kin, read by [`include`]) ships too.
 //!
-//! The version: one patch above the latest tag, unless the workspace version in
-//! `Cargo.toml` is above it, which is used as is. No tag yet: the workspace version.
+//! The version: the latest tag with its patch raised by the number of first-parent commits
+//! from the tag to the commit, unless the workspace version in `Cargo.toml` is above the
+//! tag, which is used as is. No tag yet: the workspace version. Releases built at once from
+//! successive pushes to main so get distinct, increasing versions whichever of them tags
+//! first; the version of a run that was superseded is never released, so the versions have
+//! gaps. Two runs started together during a bump of the workspace version both take it, and
+//! the later one's publish refuses the tag: the next push fixes it forward.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
@@ -43,6 +50,7 @@ pub mod plan;
 pub mod server_image;
 pub mod stage;
 pub mod stamp;
+pub mod turn;
 
 #[cfg(test)]
 mod tests;
@@ -76,6 +84,14 @@ pub enum Error {
     NotUtf8 {
         /// The command line.
         command: String,
+    },
+    /// A program printed a count that is not a decimal number.
+    #[error("{command} printed {got:?}, not a count")]
+    NotACount {
+        /// The command line.
+        command: String,
+        /// What it printed, without the final line end.
+        got: String,
     },
     /// A file could not be read or written.
     #[error("{path}: {why}")]
@@ -256,13 +272,14 @@ pub fn latest<'a>(tags: impl IntoIterator<Item = &'a str>) -> Option<Version> {
     tags.into_iter().filter_map(Version::parse_tag).max()
 }
 
-/// The version to release: one patch above `latest`, unless the workspace version `cargo`
-/// is above it (a minor or major bump made by a reviewed change), which is used as is. With
-/// no tag yet, `cargo`.
-pub fn next(latest: Option<Version>, cargo: Version) -> Version {
+/// The version to release: `latest`'s tag with its patch raised by the distance, the number
+/// of first-parent commits from the tag to the commit released, unless the workspace version
+/// `cargo` is above the tag (a minor or major bump made by a reviewed change), which is used
+/// as is. With no tag yet, `cargo`.
+pub fn next(latest: Option<(Version, u64)>, cargo: Version) -> Version {
     match latest {
-        Some(tagged) if tagged >= cargo => Version {
-            patch: tagged.patch + 1,
+        Some((tagged, distance)) if tagged >= cargo => Version {
+            patch: tagged.patch + distance,
             ..tagged
         },
         _ => cargo,

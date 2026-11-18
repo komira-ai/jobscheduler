@@ -567,6 +567,38 @@ fn program_arguments(plist: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every flag the agent's plist gives, and every flag of the Mac flags file it names, is one the macOS build of the agent has: a flag of every
+/// build (this build's parser knows it, and it is no Linux build's flag) or a flag of the macOS
+/// build's runtime (`platform::MACOS_ONLY`), the helper's socket among them. It runs on every
+/// build, so a Linux pull request that renames a flag the plist names fails here, and not only
+/// in the macOS beta stage. Catches a plist that names a flag the Mac agent refuses at start.
+#[test]
+fn the_agents_plist_names_only_flags_of_the_macos_agent() {
+    use clap::CommandFactory as _;
+    use js_agent::platform::{LINUX_ONLY, MACOS_ONLY};
+    let plist = Daemon::agent().render();
+    let mut words: Vec<String> = program_arguments(&plist).into_iter().skip(1).collect();
+    words.extend(js_agent::flags_file::words(MAC_FLAGS).unwrap());
+    let command = js_agent::Cli::command();
+    let flags: Vec<&str> = words
+        .iter()
+        .filter_map(|word| word.strip_prefix("--"))
+        .map(|word| word.split('=').next().unwrap_or(word))
+        .collect();
+    assert!(flags.contains(&"native-helper-socket"), "{flags:?}");
+    assert!(flags.contains(&"native-network"), "{flags:?}");
+    for flag in flags {
+        let common = command
+            .get_arguments()
+            .any(|arg| arg.get_long() == Some(flag))
+            && !LINUX_ONLY.contains(&flag);
+        assert!(MACOS_ONLY.contains(&flag) || common, "--{flag}");
+    }
+}
+
+/// The agent's plist parses as a command line of the macOS build of the agent (the native
+/// flags exist in that build only), with the pool and the helper's socket it names.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_agents_plist_names_flags_the_agent_accepts() {
     let plist = Daemon::agent().render();
@@ -589,7 +621,51 @@ fn the_agents_plist_names_flags_the_agent_accepts() {
         Some(Path::new("/etc/js-agent/flags"))
     );
     assert_eq!(
-        cli.native_helper_socket.as_deref(),
+        cli.os.native_helper_socket.as_deref(),
+        Some(Path::new("/var/run/js-mac-session/socket"))
+    );
+}
+
+/// What a Mac's `/etc/js-agent/flags` holds, one word per line, with documentation addresses.
+const MAC_FLAGS: &str = "# the Mac build host group\n\
+    --server=https://leases.example:7300\n\
+    --pool=mac\n\
+    --ca-cert=/etc/js-agent/ca.pem\n\
+    --host-id-from-facts=/var/lib/hostkeeper/facts.json\n\
+    --native-network=on\n\
+    --native-pf-uid-start=600\n\
+    --native-pf-uid-count=100\n\
+    --native-pf-endpoint=192.0.2.10:443\n\
+    --native-pf-endpoint=192.0.2.11:443\n";
+
+/// The agent's plist, once the flags file is expanded in place of `--flags-file`,
+/// is a command line `js_agent::Cli` accepts: the file gives the server, the pool and the
+/// native network, and the plist's own words give the rest. It catches a plist word the agent
+/// would refuse next to the file's, or a file word the plist makes a duplicate of.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_agents_plist_names_flags_the_agent_accepts_with_a_flags_file_expanded() {
+    let plist = Daemon::agent().render();
+    let words = program_arguments(&plist);
+    assert_eq!(words[0], format!("{BIN_DIR}/js-agent"));
+    let mut args = vec!["js-agent".to_owned()];
+    let mut rest = words.into_iter().skip(1);
+    while let Some(word) = rest.next() {
+        if word == "--flags-file" {
+            assert_eq!(rest.next().as_deref(), Some("/etc/js-agent/flags"));
+            args.extend(js_agent::flags_file::words(MAC_FLAGS).unwrap());
+        } else {
+            args.push(word);
+        }
+    }
+    let cli = js_agent::Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(cli.pool, "mac");
+    assert_eq!(
+        cli.host.host_id_from_facts.as_deref(),
+        Some(Path::new("/var/lib/hostkeeper/facts.json"))
+    );
+    assert_eq!(
+        cli.os.native_helper_socket.as_deref(),
         Some(Path::new("/var/run/js-mac-session/socket"))
     );
 }

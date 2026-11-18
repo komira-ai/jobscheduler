@@ -34,6 +34,7 @@ mod flags;
 mod flags_file;
 #[cfg(target_os = "linux")]
 mod helper_modes;
+mod host_id_facts;
 mod identity;
 #[cfg(target_os = "linux")]
 mod image_budget;
@@ -41,7 +42,10 @@ mod integrity;
 mod jobs;
 mod join_round_trip;
 mod lifecycle;
+#[cfg(target_os = "macos")]
 mod native;
+mod provider_client;
+mod provider_wire;
 mod quota;
 mod readiness;
 mod retired;

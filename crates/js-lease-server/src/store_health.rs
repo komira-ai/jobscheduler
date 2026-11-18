@@ -60,6 +60,8 @@ pub(crate) enum FailureKind {
     Failed,
     /// A read of the store's change feed began past its trim ([`StoreError::StaleCursor`]).
     StaleCursor,
+    /// The store was too busy to take the call ([`StoreError::Unavailable`]).
+    Unavailable,
 }
 
 impl FailureKind {
@@ -70,6 +72,7 @@ impl FailureKind {
             JobStoreError::Store(StoreError::Disconnected(_)) => Some(FailureKind::Disconnected),
             JobStoreError::Store(StoreError::Failed(_)) => Some(FailureKind::Failed),
             JobStoreError::Store(StoreError::StaleCursor { .. }) => Some(FailureKind::StaleCursor),
+            JobStoreError::Store(StoreError::Unavailable(_)) => Some(FailureKind::Unavailable),
             _ => None,
         }
     }
@@ -80,6 +83,7 @@ impl FailureKind {
             FailureKind::Disconnected => "disconnected",
             FailureKind::Failed => "failed",
             FailureKind::StaleCursor => "stale_cursor",
+            FailureKind::Unavailable => "unavailable",
         }
     }
 }

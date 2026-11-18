@@ -99,18 +99,19 @@ fn the_latest_tag_is_the_highest_version_not_the_last_text() {
 
 /// Catches each way the next version can go wrong: no tag must give the workspace version
 /// (not 0.0.1 or a patch above it); the workspace version at or below the latest tag must
-/// give one patch above the tag (so a merged PR never has to touch Cargo.toml); only a
-/// workspace version above the tag is used as is (a minor or major bump), and then the
-/// next release after it is a patch above it.
+/// give the tag's patch raised by the distance (so a merged PR never has to touch
+/// Cargo.toml, and parallel releases differ); only a workspace version above the tag is
+/// used as is (a minor or major bump), and then the next release after it is above it.
 #[test]
-fn the_next_version_is_a_patch_above_the_tag_unless_cargo_is_above_it() {
+fn the_next_version_is_the_tag_plus_the_distance_unless_cargo_is_above_it() {
     assert_eq!(next(None, v(0, 1, 0)), v(0, 1, 0));
-    assert_eq!(next(Some(v(0, 1, 0)), v(0, 1, 0)), v(0, 1, 1));
-    assert_eq!(next(Some(v(0, 1, 7)), v(0, 1, 0)), v(0, 1, 8));
-    assert_eq!(next(Some(v(0, 1, 7)), v(0, 2, 0)), v(0, 2, 0));
-    assert_eq!(next(Some(v(0, 1, 7)), v(1, 0, 0)), v(1, 0, 0));
-    assert_eq!(next(Some(v(0, 2, 0)), v(0, 2, 0)), v(0, 2, 1));
-    assert_eq!(next(Some(v(0, 1, 9)), v(0, 1, 10)), v(0, 1, 10));
+    assert_eq!(next(Some((v(0, 1, 0), 1)), v(0, 1, 0)), v(0, 1, 1));
+    assert_eq!(next(Some((v(0, 1, 7), 1)), v(0, 1, 0)), v(0, 1, 8));
+    assert_eq!(next(Some((v(0, 1, 7), 3)), v(0, 1, 0)), v(0, 1, 10));
+    assert_eq!(next(Some((v(0, 1, 7), 3)), v(0, 2, 0)), v(0, 2, 0));
+    assert_eq!(next(Some((v(0, 1, 7), 3)), v(1, 0, 0)), v(1, 0, 0));
+    assert_eq!(next(Some((v(0, 2, 0), 2)), v(0, 2, 0)), v(0, 2, 2));
+    assert_eq!(next(Some((v(0, 1, 9), 5)), v(0, 1, 10)), v(0, 1, 10));
 }
 
 const METADATA: &str = r#"{

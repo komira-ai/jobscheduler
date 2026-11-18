@@ -3,9 +3,16 @@
 //! lease server in the test process. The container runtime is in memory and the clock is
 //! moved by the test; the worker is a real thread, and every wait on it is for an event
 //! (an order done, a call begun) with a hang guard, never for a time.
+//!
+//! The container runtime is the Linux build's alone (crun, or the container engine it falls
+//! back to with `--allow-container-engine`), so the modules that run jobs through it are
+//! compiled on Linux only; the macOS build runs native jobs, whose worker is tested in
+//! `native`.
 
 mod answers;
+#[cfg(target_os = "linux")]
 mod contract;
+#[cfg(target_os = "linux")]
 mod contract_e2e;
 #[cfg(target_os = "linux")]
 mod crun_budget;
@@ -23,38 +30,66 @@ mod crun_logs;
 mod crun_machine;
 #[cfg(target_os = "linux")]
 mod crun_roots;
+#[cfg(target_os = "linux")]
 mod drain;
+#[cfg(target_os = "linux")]
 mod e2e;
+#[cfg(target_os = "linux")]
 mod ends;
 #[cfg(target_os = "linux")]
 mod engine_opt_in;
+#[cfg(target_os = "linux")]
 mod exclusive;
 pub mod fake;
+#[cfg(target_os = "linux")]
 mod files_flags;
+#[cfg(target_os = "linux")]
 mod per_job;
+#[cfg(target_os = "linux")]
+mod providers;
+#[cfg(target_os = "linux")]
 mod quiesce;
+#[cfg(target_os = "linux")]
 mod quota_start;
+#[cfg(target_os = "linux")]
 mod session;
+#[cfg(target_os = "linux")]
 mod silence;
 mod system;
 #[cfg(target_os = "linux")]
 mod unmounted;
+#[cfg(target_os = "linux")]
 mod usage;
+#[cfg(target_os = "linux")]
 mod worker;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use js_agent::Rescue;
+#[cfg(target_os = "linux")]
+use js_agent::Worker;
+#[cfg(target_os = "linux")]
 use js_agent::cli_runtime::Settings;
-use js_agent::lifecycle::{Capacity, Config, FilesRoot, MountRoots, ScratchRoot, StateRoot};
+use js_agent::lifecycle::{
+    Capacity, Config, FilesRoot, MountProviders, MountRoots, ScratchRoot, StateRoot,
+};
+#[cfg(target_os = "linux")]
 use js_agent::usage::Outbox;
-use js_agent::{Backend, Plan, Platform, Rescue, Worker};
-use js_agent_wire::{Command, HeartbeatReply};
-use serde_json::{Value, json};
+use js_agent::{Backend, Plan, Platform};
+#[cfg(target_os = "linux")]
+use js_agent_wire::Command;
+use js_agent_wire::HeartbeatReply;
+#[cfg(target_os = "linux")]
+use serde_json::Value;
+use serde_json::json;
 
+#[cfg(target_os = "linux")]
 use crate::lifecycle::job;
 use crate::support::Scratch;
 use fake::FakeMachine;
@@ -63,6 +98,7 @@ use fake::FakeMachine;
 pub const STEP_NEVER: Duration = Duration::from_secs(3600);
 
 /// The user containers run as, and the agent's own `(uid, gid)`.
+#[cfg(target_os = "linux")]
 pub fn user() -> (String, u32, u32) {
     let uid = rustix::process::geteuid().as_raw();
     let gid = rustix::process::getegid().as_raw();
@@ -81,6 +117,7 @@ pub fn private(dir: &Scratch, name: &str) -> std::path::PathBuf {
 }
 
 /// The checked container flags: a program that is never run, the agent's own user.
+#[cfg(target_os = "linux")]
 pub fn settings(dir: &Scratch) -> Settings {
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
     let (user, uid, gid) = user();
@@ -89,9 +126,37 @@ pub fn settings(dir: &Scratch) -> Settings {
 }
 
 /// The checked container flags with `--actions-cgroup` set to `actions`.
+#[cfg(target_os = "linux")]
 pub fn settings_in(dir: &Scratch, actions: Option<&str>) -> Settings {
     let actions = actions.map(Path::new);
     settings(dir).with_actions_cgroup(actions).unwrap()
+}
+
+/// What the jobs run with, under `dir`: the container flags of a program that is never run.
+#[cfg(target_os = "linux")]
+pub fn backend(dir: &Scratch) -> Backend {
+    Backend::Container(settings(dir))
+}
+
+/// What the jobs run with, under `dir`: the native settings of a helper socket nobody
+/// listens on.
+#[cfg(target_os = "macos")]
+pub fn backend(dir: &Scratch) -> Backend {
+    let socket = dir.path("helper.sock");
+    let homes = private(dir, "homes");
+    let flags = js_agent::native::NativeFlags {
+        socket: Some(socket.as_path()),
+        homes: Some(homes.as_path()),
+        network: None,
+        tool_roots: &[],
+        deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
+        pf: js_agent::native::PfFlags::default(),
+    };
+    let journal = dir.path("native-leases");
+    let settings = js_agent::native::NativeSettings::from_flags(&flags, &[], &journal);
+    Backend::Native(settings.unwrap().unwrap())
 }
 
 /// What a worker is made from, under `dir`: eight CPUs and 16 GiB, a scratch root and a
@@ -115,8 +180,9 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
     };
     Plan {
         config,
-        backend: Backend::Container(settings(dir)),
+        backend: backend(dir),
         host_id: "h1".to_owned(),
+        providers: MountProviders::default(),
         platform: Platform {
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
@@ -134,6 +200,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
     }
 }
 
+#[cfg(target_os = "linux")]
 /// A worker over `machine` that steps only when asked and publishes its usage in `outbox`,
 /// with `actions` as the actions control group.
 pub fn start_with_usage(
@@ -152,6 +219,7 @@ pub fn start_with_usage(
 }
 
 /// How the agent stops its containers without a worker, over `machine`.
+#[cfg(target_os = "linux")]
 pub fn rescue(dir: &Scratch, machine: &FakeMachine) -> Rescue {
     let platform = Platform {
         os: "linux".to_owned(),
@@ -159,16 +227,11 @@ pub fn rescue(dir: &Scratch, machine: &FakeMachine) -> Rescue {
     };
     let machine = Arc::new(machine.clone());
     let grace = Duration::from_secs(1);
-    Rescue::new(
-        machine,
-        Backend::Container(settings(dir)),
-        "h1".to_owned(),
-        platform,
-        grace,
-    )
+    Rescue::new(machine, backend(dir), "h1".to_owned(), platform, grace)
 }
 
 /// A worker over `machine` that steps only when asked.
+#[cfg(target_os = "linux")]
 pub fn start(dir: &Scratch, machine: &FakeMachine) -> Worker {
     match Worker::start(plan(dir, machine, STEP_NEVER)) {
         Ok(worker) => worker,
@@ -177,6 +240,7 @@ pub fn start(dir: &Scratch, machine: &FakeMachine) -> Worker {
 }
 
 /// A reply that starts these runs.
+#[cfg(target_os = "linux")]
 pub fn starts(runs: &[&str]) -> HeartbeatReply {
     let commands = runs
         .iter()
@@ -189,6 +253,7 @@ pub fn starts(runs: &[&str]) -> HeartbeatReply {
 }
 
 /// A reply that stops this run.
+#[cfg(target_os = "linux")]
 pub fn stops(run: &str) -> HeartbeatReply {
     HeartbeatReply {
         commands: vec![Command::Stop {
@@ -205,6 +270,7 @@ pub fn acks(run: &str, verdict: &str) -> HeartbeatReply {
 }
 
 /// The JSON body of a heartbeat answer that starts these runs.
+#[cfg(target_os = "linux")]
 pub fn start_answer(runs: &[&str]) -> Value {
     serde_json::to_value(starts(runs)).unwrap()
 }

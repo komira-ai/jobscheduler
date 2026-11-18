@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::job::{ARCH_KEY, ISA_LEVEL_KEY};
+use crate::job::{ARCH_KEY, ISA_LEVEL_KEY, OS_VERSION_KEY};
 use crate::{
     ACCEL_KEYS, Accelerator, AcceleratorNeed, DISK_GIB_KEY, IsaLevel, MemoryPercent, Model,
     Resources, accelerator_of, normalise_arch,
@@ -45,7 +45,7 @@ impl Shape {
     }
 
     /// Whether the host offers at least `wanted` and reports every key in `required`
-    /// with the same value. Three keys have their own comparison:
+    /// with the same value. Four keys have their own comparison:
     ///
     /// - `disk-gib` is a minimum: the host's free GiB must be at least the amount
     ///   required, and a host that reports no number (or a required amount that is not
@@ -57,6 +57,9 @@ impl Shape {
     ///   and those below, as a pool's shape may name it); otherwise the two texts must be
     ///   equal, as before levels were compared, so every pairing that satisfied before
     ///   still does. A host that states no level satisfies no level.
+    /// - `os_version` is at least, by major version: the host's reported version (`26` or
+    ///   `26.1`, read as its major) must be at least the major required, and a host that
+    ///   reports none, or text that is not a version, does not satisfy it.
     /// - The `accelerator.*` keys are one need ([`AcceleratorNeed`]), resolved through the
     ///   alias table and compared with [`AcceleratorNeed::met_by`] against the host's
     ///   accelerator ([`Self::accelerator`]), over the need the booked GPUs state when they
@@ -94,6 +97,10 @@ impl Shape {
                             None => have == Some(value),
                         }
                     }
+                    OS_VERSION_KEY => have
+                        .and_then(|have| os_major(have))
+                        .zip(os_major(value))
+                        .is_some_and(|(have, want)| want <= have),
                     _ => have == Some(value),
                 }
             });
@@ -115,6 +122,15 @@ impl Shape {
         let count = u32::try_from(self.resources.gpus()).unwrap_or(u32::MAX);
         Some(accelerator_of(&model, count, None))
     }
+}
+
+/// The major version of an operating-system version text: `26` and `26.1` are 26. `None`
+/// when the text before the first dot is not a whole number.
+fn os_major(text: &str) -> Option<u32> {
+    text.split_once('.')
+        .map_or(text, |(major, _)| major)
+        .parse()
+        .ok()
 }
 
 /// Whether `offered` has at least the CPU, memory, GPUs and disk of `wanted`, whatever the
@@ -202,6 +218,30 @@ mod tests {
         assert!(host("sparc").satisfies(&none, &want("sparc")));
         let bare = Shape::new(Resources::new(8000, 100, 0, None).unwrap(), caps(&[]));
         assert!(!bare.satisfies(&none, &want("arm64")));
+    }
+
+    /// Asserts that `os_version` is at least, by major version: a host at 26 or 26.1
+    /// serves a request for 15 and for 26, a host at 15 does not serve 26, and a host that
+    /// reports no version, or text that is no version, serves none. Catches text equality
+    /// that turns a macOS 26 host away from a job that asks for 15.
+    #[test]
+    fn os_version_is_at_least_by_major() {
+        let none = Resources::new(0, 0, 0, None).unwrap();
+        let host = |version: &str| {
+            Shape::new(
+                Resources::new(8000, 100, 0, None).unwrap(),
+                caps(&[("os_version", version)]),
+            )
+        };
+        let want = |version: &str| caps(&[("os_version", version)]);
+        assert!(host("26").satisfies(&none, &want("26")));
+        assert!(host("26.1").satisfies(&none, &want("26")));
+        assert!(host("26").satisfies(&none, &want("15")));
+        assert!(!host("15.7.2").satisfies(&none, &want("26")));
+        assert!(!host("beta").satisfies(&none, &want("15")));
+        assert!(!host("26").satisfies(&none, &want("new")));
+        let bare = Shape::new(Resources::new(8000, 100, 0, None).unwrap(), caps(&[]));
+        assert!(!bare.satisfies(&none, &want("15")));
     }
 
     /// Asserts that `isa_level` is at least, within the family: a host at v4, or listing

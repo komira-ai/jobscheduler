@@ -74,6 +74,8 @@
 //! report are tested there. Run anywhere but macOS, the ignored test stops at its first
 //! line.
 
+#![cfg(target_os = "macos")]
+
 mod after_seed;
 mod child;
 mod lines;
@@ -269,6 +271,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
             denied(&fixture.state),
             denied(&fixture.root.join("scratch")),
         ],
+        mount_roots: Vec::new(),
         read_model: ReadModel::Open,
         journal: fixture.root.join("native-leases"),
         max_file_bytes: 1 << 30,

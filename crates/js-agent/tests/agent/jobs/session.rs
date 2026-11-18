@@ -110,8 +110,15 @@ fn a_new_epoch_keeps_the_worker_and_lists_its_runs_in_the_hello() {
 }
 
 /// Asserts that the commands of an accepted reply reach the worker in the order the reply
-/// lists them, and that what the worker did is printable by the session thread. It catches
-/// a reply that is not handed over, and one handed over out of order.
+/// lists them, and that what the worker did is printable by the session thread: each start
+/// is logged with its timeline (the steps of the lifecycle on the worker's clock, which the
+/// test does not move, and none of the in-memory runtime's). It catches a reply that is not
+/// handed over, one handed over out of order, and a start logged without its timeline.
+/// The line of the start of `r1`, at the worker's clock's origin.
+const STARTED_R1: &str = "job: Started { run_id: \"r1\", timeline: StartTimeline { \
+    received_ms: 0, steps: [(\"taken\", 0), (\"admitted\", 0), (\"ready\", 0), (\"dirs\", 0), \
+    (\"created\", 0)], runtime: [] } }";
+
 #[test]
 fn the_commands_of_a_reply_reach_the_worker_in_order() {
     let dir = Scratch::new("jobs-session-commands");
@@ -129,11 +136,7 @@ fn the_commands_of_a_reply_reach_the_worker_in_order() {
 
     assert_eq!(machine.world.created(), ["r2", "r1"]);
     let lines = session.job_lines();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "job: Started { run_id: \"r1\" }")
-    );
+    assert!(lines.iter().any(|line| line == STARTED_R1), "{lines:#?}");
     assert!(session.job_lines().is_empty(), "the lines are taken once");
 }
 
@@ -294,6 +297,60 @@ fn a_reply_the_busy_worker_cannot_take_is_noted_and_the_tick_returns() {
     assert_eq!(note(&mut session), Some(Note::Busy));
     machine.world.release();
     assert!(worker.handle().settle());
+}
+
+/// Asserts that a held reply with nothing else in it (`beat_now` alone) is not handed to the
+/// worker and asks for the next heartbeat at once: with the worker's queue full, it is not
+/// noted `Busy` and the step waits zero, while an ordinary empty reply waits the interval. It
+/// catches a `beat_now` that makes every quiet held reply a delivery the worker must make room
+/// for, and one the session does not act on.
+#[test]
+fn a_held_reply_alone_is_not_delivered_and_beats_again_at_once() {
+    let dir = Scratch::new("jobs-session-held");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    machine.world.hold_creates();
+    let mut replies = vec![welcome(1)];
+    replies.extend((0..=QUEUE).map(|_| reply(200, start_answer(&["r1"]))));
+    replies.push(reply(200, json!({ "beat_now": true })));
+    replies.push(beat_ok());
+    let (mut script, _) = Script::new(replies);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    let step = |session: &mut Session<'_>| match session.tick() {
+        Step::Wait { after, note } => (after, note),
+        other => panic!("{other:?}"),
+    };
+    step(&mut session);
+    step(&mut session);
+    machine.world.wait_entered(1);
+    for n in 0..QUEUE {
+        assert_eq!(step(&mut session).1, None, "reply {n} has room");
+    }
+    assert_eq!(step(&mut session), (Duration::ZERO, None));
+    assert_eq!(step(&mut session), (Duration::from_secs(5), None));
+    machine.world.release();
+    assert!(worker.handle().settle());
+}
+
+/// Asserts that a reply that says `beat_now` beside a start still hands the start to the
+/// worker, which creates its container, and asks for the next heartbeat at once. It catches a
+/// `beat_now` that makes the session drop the rest of the reply.
+#[test]
+fn a_start_beside_beat_now_is_delivered_and_the_next_beat_goes_at_once() {
+    let dir = Scratch::new("jobs-session-start-beat-now");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    let mut body = start_answer(&["r1"]);
+    body["beat_now"] = Value::Bool(true);
+    let (mut script, _) = Script::new(vec![welcome(1), reply(200, body)]);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    session.tick();
+    match session.tick() {
+        Step::Wait { after, note } => assert_eq!((after, note), (Duration::ZERO, None)),
+        other => panic!("{other:?}"),
+    }
+    assert!(worker.handle().settle());
+    assert_eq!(machine.world.created(), ["r1"]);
 }
 
 /// Asserts that a session whose worker has ended ends with `Failed`, and that a worker that

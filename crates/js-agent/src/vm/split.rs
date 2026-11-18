@@ -10,7 +10,7 @@ use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 use super::VmRuntime;
 use crate::lifecycle::{
     Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
-    Status, Ticket, label,
+    Status, Ticket, Wake, Whereabouts, label,
 };
 
 /// The agent's runtime and its VM runtime; see the [module](self).
@@ -37,6 +37,14 @@ impl WithVms {
 impl Runtime for WithVms {
     fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
         self.other.prepare(image, waited)
+    }
+
+    fn set_wake(&mut self, wake: Wake) {
+        self.other.set_wake(wake);
+    }
+
+    fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
+        self.owner(id).start_steps(id)
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
@@ -179,5 +187,9 @@ impl Runtime for WithVms {
 
     fn places_in_cgroup(&self) -> bool {
         self.other.places_in_cgroup()
+    }
+
+    fn whereabouts(&mut self, id: &RunHandle) -> Whereabouts {
+        self.owner(id).whereabouts(id)
     }
 }

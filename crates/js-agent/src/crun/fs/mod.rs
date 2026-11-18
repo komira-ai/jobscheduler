@@ -195,6 +195,11 @@ impl Fs {
         })
     }
 
+    /// Rings `wake` whenever a lookup, an assembly or a check asked from now on has answered.
+    pub(crate) fn set_wake(&mut self, wake: crate::lifecycle::Wake) {
+        self.pool.set_wake(wake);
+    }
+
     /// Whether an image of the repository `location` may be pulled for a layer.
     pub(crate) fn allows(&self, location: &js_oci::Location) -> bool {
         self.image_allow.iter().any(|entry| entry.admits(location))
@@ -333,7 +338,9 @@ impl Fs {
             .layers
             .iter()
             .map(|layer| match layer {
-                Layer::HostPath { .. } => Some(Lower::Source),
+                // A layer a provider makes was replaced by its host path before the lookups
+                // (`lifecycle`), so it is a source like any host path.
+                Layer::HostPath { .. } | Layer::Provider { .. } => Some(Lower::Source),
                 Layer::Image { .. } => trees.next().map(Lower::Image),
             })
             .collect::<Option<Vec<Lower>>>()

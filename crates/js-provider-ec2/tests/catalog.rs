@@ -310,6 +310,7 @@ fn wanting(model: &str, count: u32) -> Demand {
         os: Some("linux".to_owned()),
         arch: None,
         isa_level: None,
+        os_version: None,
         exec: None,
         accelerator: Some(AcceleratorNeed {
             model: Some(Model::parse(model).unwrap()),
@@ -319,6 +320,7 @@ fn wanting(model: &str, count: u32) -> Demand {
         network: Default::default(),
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     }
 }
 

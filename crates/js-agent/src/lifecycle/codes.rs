@@ -63,6 +63,13 @@ pub mod code {
     /// the host its jobs run on. The container was removed and the host is tainted as
     /// unchecked.
     pub const HOST_NOT_VISIBLE: &str = "host-not-visible";
+    /// A run the runtime reports as running has no container group (the control group the
+    /// runtime puts every container in) a settle wait after the agent first saw it, and its
+    /// container's first process runs in another group (a container not made yet, or one
+    /// that ended and was removed with its group, is neither). The host is tainted as
+    /// unchecked. The post-job checks do not depend on that group, so
+    /// what the run leaves is still found, and a re-check of an idle host clears the taint.
+    pub const CGROUP_NOT_FOUND: &str = "cgroup-not-found";
     /// The taint marker could not be written. The host is tainted in memory all the same.
     pub const TAINT_WRITE_FAILED: &str = "taint-write-failed";
     /// A taint cleared itself: the host passed two re-checks while idle, the server
@@ -112,4 +119,17 @@ pub mod code {
     /// and the agent stopped it (its result's `input_failure` says
     /// [`refusal::HOST_PORT_LOST`](js_agent_wire::refusal::HOST_PORT_LOST)).
     pub const HOST_PORT_LOST: &str = "host-port-lost";
+    /// A mount provider did not answer the release of a run's sources within a minute after
+    /// the run ended: the sources named are left to the provider's own collection. The host
+    /// is not tainted and the run's slot is free.
+    pub const PROVIDER_RELEASE_FAILED: &str = "provider-release-failed";
+    /// A mount provider has not answered the sweep the agent asks of it when it starts; it is
+    /// asked again every ten seconds, and a start that names it waits meanwhile. Reported once
+    /// for each provider.
+    pub const PROVIDER_SWEEP_FAILED: &str = "provider-sweep-failed";
+    /// The record of a run's provider sources (`providers/<run>.json` in the state root) could
+    /// not be written, so the start failed; or, when the agent started, a record could not be
+    /// read, or named a provider this agent was not given (either is removed, its sources left
+    /// to the provider's own collection), or the directory of records could not be listed.
+    pub const PROVIDER_RECORD_FAILED: &str = "provider-record-failed";
 }

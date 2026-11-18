@@ -26,13 +26,18 @@ pub use crate::own_host::{
     CordonView, Cordoned, HostReading, Lease, LeaseError, MAX_CORDON_SECS, Uncordoned,
 };
 
-/// The agent's state root, read only: the taint marker, the records of owed checks and whether
+/// The agent's state root, read only: the taint marker and pin file, the records of owed checks and whether
 /// it holds a host credential.
 ///
 /// The agent runs as root on the crun unit, so the root hook can open its state root.
 pub trait StateView {
     /// The taint on record (an unreadable marker counts as a taint).
     fn taint(&self) -> Option<Taint>;
+
+    /// Whether a restarted agent re-checks `taint`, the taint on record, and so may clear it
+    /// itself: a residue of a process that the state root's pin file does not name. This is
+    /// the rule the agent applies when it starts ([`StateRoot::restored_rechecks`]).
+    fn restored_rechecks(&self, taint: &Taint) -> bool;
 
     /// The runs whose post-job checks are owed.
     ///
@@ -49,6 +54,10 @@ pub trait StateView {
 impl StateView for StateRoot {
     fn taint(&self) -> Option<Taint> {
         self.read()
+    }
+
+    fn restored_rechecks(&self, taint: &Taint) -> bool {
+        StateRoot::restored_rechecks(self, taint)
     }
 
     fn owed(&self) -> Result<Vec<String>, PortError> {

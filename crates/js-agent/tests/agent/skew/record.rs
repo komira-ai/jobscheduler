@@ -12,24 +12,60 @@
 //! agent wire").
 
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use js_agent::{Answer, Connector, Dialer, Handle, Transport};
-use js_client::{Client, ClientError};
+use js_client::Client;
+#[cfg(target_os = "linux")]
+use js_client::ClientError;
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
 use js_types::{ManualClock, Timestamp};
 use serde_json::{Value, json};
 use tokio::runtime::{Builder, Runtime};
 
+#[cfg(target_os = "linux")]
 use crate::jobs::fake::FakeMachine;
+#[cfg(target_os = "linux")]
 use crate::jobs::{private, user};
+#[cfg(target_os = "linux")]
 use crate::server::Agent;
-use crate::support::{Ran, Scratch, linux_host};
+use crate::support::Scratch;
+#[cfg(target_os = "linux")]
+use crate::support::{Ran, linux_host};
 
 /// The wall time the server's clock is set to. The server reads time only through this
 /// clock, which no step of the conversation moves: the frames carry no time.
 const T0: u64 = 1_000_000;
+
+/// [`POOL`] with the least heartbeat interval a pool takes, [`QUICK_INTERVAL_MS`]. The
+/// recording uses it: a server holds the reply of a heartbeat that has nothing to send, to an
+/// agent that reports `held-beat` (this build's does), for the interval at most, in real time,
+/// and the conversation has four such beats, which the default 5 s would make twenty seconds
+/// of the test. The previous release's transcript says 5000 where this one says
+/// [`QUICK_INTERVAL_MS`]; that is the one difference the comparison allows itself
+/// ([`super::this_version_still_says_what_the_previous_release_said`]). The replay of the
+/// previous agent runs against [`POOL`], whose hello is not `held-beat`.
+#[cfg(target_os = "linux")]
+const QUICK_POOL: &str = r#"
+heartbeat_interval = "250ms"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+"#;
+
+/// The heartbeat interval of [`QUICK_POOL`], in milliseconds, as its welcome carries it.
+pub const QUICK_INTERVAL_MS: u64 = 250;
 
 /// The pool's join token (a test value: the server reads it from a file of the scratch).
 const JOIN: &str = "join-token-S-0123456789-abcdefghijklmnop";
@@ -39,6 +75,7 @@ const CLIENT: &str = "client-token-S-0123456789-abcdefghijk";
 
 /// The stand-in the transcript holds for the session secret the server drew: the secret
 /// is random, so it is replaced wherever it appears.
+#[cfg(target_os = "linux")]
 pub const SESSION: &str = "previous-release-session";
 
 /// A pool that books a host as 4 CPUs and 4 GiB and asks that it runs Linux on `x86_64`,
@@ -71,6 +108,7 @@ fn job_body() -> Value {
 
 /// What happens between two of the agent's waits.
 #[derive(Clone, Copy, Debug)]
+#[cfg(target_os = "linux")]
 pub enum Act {
     /// The submitter queues the job ([`job_body`]).
     Submit,
@@ -83,6 +121,7 @@ pub enum Act {
 /// The conversation, after the hello: the job is queued, started by the next reply,
 /// reported running, cancelled, stopped by a reply, reported killed and acknowledged; the
 /// last heartbeat holds nothing. The agent is then asked to stop.
+#[cfg(target_os = "linux")]
 pub const SCENARIO: [Act; 8] = [
     Act::Submit,
     Act::Beat,
@@ -96,6 +135,7 @@ pub const SCENARIO: [Act; 8] = [
 
 /// The agent's flags beside `--server`, `--token-file` and `--pool`: a host id, and the
 /// container runtime of the job worker over files under `files`.
+#[cfg(target_os = "linux")]
 pub fn agent_flags(files: &Scratch) -> Vec<String> {
     let exec = files.write("docker", "#!/bin/sh\n", 0o755);
     let (user, _, _) = user();
@@ -104,8 +144,6 @@ pub fn agent_flags(files: &Scratch) -> Vec<String> {
     [
         "--host-id",
         "h1",
-        "--runtime",
-        "docker",
         "--allow-container-engine",
         "--container-bin",
         &exec.display().to_string(),
@@ -123,6 +161,7 @@ pub fn agent_flags(files: &Scratch) -> Vec<String> {
 }
 
 /// The agent program on a thread of its own, its job worker and its machine.
+#[cfg(target_os = "linux")]
 pub struct Spawned {
     pub agent: Agent,
     pub worker: Handle,
@@ -132,6 +171,7 @@ pub struct Spawned {
 
 /// Starts the agent program against `url` through `connector` and waits for the wait after
 /// its hello.
+#[cfg(target_os = "linux")]
 pub fn spawn(
     name: &str,
     url: String,
@@ -163,6 +203,7 @@ pub fn spawn(
 /// then for the worker to be done with the reply; `act` does the submitter's part. Returns
 /// every wait the agent asked for (the first is the one after its hello) and what the
 /// program printed once it was asked to stop.
+#[cfg(target_os = "linux")]
 pub fn play(running: Spawned, mut act: impl FnMut(Act)) -> (Vec<Duration>, Ran) {
     let Spawned {
         agent,
@@ -197,10 +238,20 @@ pub struct Cell {
 impl Cell {
     /// A server on a first boot over the pool [`POOL`].
     pub fn start(name: &str) -> Self {
+        Self::start_over(name, POOL)
+    }
+
+    /// A server on a first boot over the pool [`QUICK_POOL`].
+    #[cfg(target_os = "linux")]
+    pub fn start_quick(name: &str) -> Self {
+        Self::start_over(name, QUICK_POOL)
+    }
+
+    fn start_over(name: &str, pool: &str) -> Self {
         let scratch = Scratch::new(name);
         let client = scratch.write("client-token", CLIENT, 0o600);
         let join = scratch.write("join-token", JOIN, 0o600);
-        let pool = scratch.write("agent-pool.toml", POOL, 0o644);
+        let pool = scratch.write("agent-pool.toml", pool, 0o644);
         let path = |p: &Path| p.to_str().unwrap().to_owned();
         let argv = [
             "js-lease-server",
@@ -291,6 +342,7 @@ impl Drop for Cell {
 }
 
 /// One post and its answer as a transcript holds them.
+#[cfg(target_os = "linux")]
 pub fn exchange(path: &str, body: &Value, answer: &Answer) -> Value {
     let mut server = json!({ "status": answer.status, "body": answer.body });
     if let Some(after) = answer.retry_after {
@@ -301,13 +353,16 @@ pub fn exchange(path: &str, body: &Value, answer: &Answer) -> Value {
 
 /// Writes down every post the agent makes through the real transport, and its answer.
 #[derive(Clone, Default)]
+#[cfg(target_os = "linux")]
 pub struct Tape(pub Arc<Mutex<Vec<Value>>>);
 
+#[cfg(target_os = "linux")]
 struct Taping {
     inner: Box<dyn Transport>,
     flow: Arc<Mutex<Vec<Value>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl Connector for Tape {
     fn connect(
         &self,
@@ -323,6 +378,7 @@ impl Connector for Tape {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Transport for Taping {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
         let answer = self.inner.post(path, body);
@@ -340,6 +396,7 @@ impl Transport for Taping {
 }
 
 /// Replaces every string equal to `from` in `value` with `to`.
+#[cfg(target_os = "linux")]
 pub fn replace_text(value: &mut Value, from: &str, to: &str) {
     match value {
         Value::String(text) if text == from => *text = to.to_owned(),
@@ -357,8 +414,9 @@ pub fn replace_text(value: &mut Value, from: &str, to: &str) {
 /// server's refusal (asserted: status 400, `unsupported-protocol`) of a hello that speaks
 /// majors 2 to 3 only, majors above the one server and agent speak (built from the agent's own
 /// hello). The session secret is replaced by [`SESSION`].
+#[cfg(target_os = "linux")]
 pub fn record(name: &str) -> Value {
-    let cell = Cell::start(name);
+    let cell = Cell::start_quick(name);
     let tape = Tape::default();
     let flow = tape.0.clone();
     let running = spawn(name, cell.url(), &cell.join_file(), tape);
@@ -375,10 +433,14 @@ pub fn record(name: &str) -> Value {
         };
         flow.lock().unwrap().push(event);
     });
-    assert!(
-        waits.iter().all(|wait| *wait == Duration::from_secs(5)),
-        "{waits:?}"
-    );
+    let interval = Duration::from_millis(QUICK_INTERVAL_MS);
+    let held = Duration::ZERO;
+    // After the hello and each beat: the interval, but none after a reply that says
+    // `beat_now`: one the server held open for the beat (nothing to send), or one that
+    // carries only an acknowledgement. The replies with a command are the start (the job is
+    // placed by its submit) and the stop.
+    let expected = [interval, interval, held, held, interval, held, held];
+    assert_eq!(waits, expected, "{waits:?}");
     assert!(ran.err.contains("registered, epoch 1"), "{}", ran.err);
     let mut flow = std::mem::take(&mut *flow.lock().unwrap());
 

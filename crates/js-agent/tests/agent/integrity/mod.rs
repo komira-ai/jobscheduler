@@ -8,6 +8,7 @@ mod lifecycle;
 mod mapped;
 mod noise;
 mod proc;
+mod restored;
 mod rules;
 mod settle;
 

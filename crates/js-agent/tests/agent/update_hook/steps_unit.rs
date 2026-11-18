@@ -367,7 +367,7 @@ fn on_a_mac_a_changed_plist_is_recorded_and_reported_and_cutover_reads_no_cgroup
     rig.world
         .seed_unit(super::step_rig::MAC_UNIT, "active", "running");
     let spy = Spy::new(&rig);
-    *spy.version.borrow_mut() = Ok("js-agent 1.4.0\nruntimes: docker native\n".to_owned());
+    *spy.version.borrow_mut() = Ok("js-agent 1.4.0\nruntimes: native\n".to_owned());
     let done = spy.prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(

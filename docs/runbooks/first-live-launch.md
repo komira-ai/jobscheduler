@@ -25,17 +25,20 @@ Section 7 says how to stop spend from any step.
 Write down each step's output (with every secret masked) in the launch record: the date, the
 scheduler version, the head of this repository, and who ran it.
 
-## Agent artifact must know `--runtime` and `--allow-container-engine`
+## Agent artifact must take `--allow-container-engine` without `--runtime`
 
-The boot payload's agent unit names `--runtime docker --allow-container-engine`
-(`js_elastic::RUNTIME` and `js_elastic::ENGINE_OPT_IN`): `crun` is the agent's default Linux
-runtime, and an agent that has that default refuses `--runtime docker` without the opt-in. An
-agent built before either flag exists exits 2 on it, so every instance the scheduler launches
-would boot, fail to start its agent and be reaped. Bump the pinned agent artifact (its URL and
-SHA-256 in the pool's config) to a build that accepts both flags **before** a lease server that
-renders them is deployed, and confirm on one instance that `js-agent --version` runs and the
-unit is active. The boot plan's artifact is a URL and a digest with no version, so the payload
-cannot check this itself and the order is a rollout rule, not a gate.
+The boot payload's agent unit names `--allow-container-engine --container-bin /usr/bin/docker`
+(`js_elastic::ENGINE_OPT_IN` and `js_elastic::CONTAINER_BIN`) and no `--runtime`: the runtime of
+the agent's Linux build is `crun`, and the engine runs the jobs only of an agent given the opt-in
+beside the engine's path. An agent built before the runtime was the build's own still takes
+`--runtime` and refuses `--allow-container-engine` without `--runtime docker`, so on it every
+instance the scheduler launches would boot, fail to start its agent and be reaped. An agent built
+before the opt-in exists exits 2 on it too. Bump the pinned agent artifact (its URL and SHA-256 in
+the pool's config) to a build that takes the opt-in without `--runtime` **in the same deploy as**
+the lease server that renders it, never after it, and confirm on one instance that
+`js-agent --version` runs and the unit is active. The boot plan's artifact is a URL and a digest
+with no version, so the payload cannot check this itself and the order is a rollout rule, not a
+gate.
 
 ## Must land before the first live launch
 
@@ -265,7 +268,7 @@ the Lambda console during the run, and the decisions of "Must land" that are not
 
    Use the GPU model of the pool's instance type: its family (`nvidia-a10` for `gpu_1x_a10`), as the
    provider's catalog table (`crates/js-provider-lambdalabs/src/catalog.rs`) gives it. The answer is the job, `queued`: the machine
-   does not exist yet. Poll `js job get --job-id <id>`; the submit never waits for placement.
+   does not exist yet. Poll `js job get --job-id <id>`; a submit places a job itself only on a host that has room now.
 4. Watch `/v1/pools` every 10 s. `machines[].state` goes `booting`, then `registered` (the record
    begins `planned`/`launching` for the length of a tick). Also watch the Lambda console list.
 5. Leave `boot = "initialise"` until the run is over. When the machine is gone (section 6), check that

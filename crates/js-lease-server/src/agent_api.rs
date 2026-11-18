@@ -64,6 +64,14 @@
 //!
 //! A server with `sink = "none"`, and a host that did not report the capability, sends
 //! neither field, and the reply is byte for byte what it was before them.
+//!
+//! # Held replies
+//!
+//! To a host that also reported [`js_agent_wire::HELD_BEAT_CAPABILITY`], a reply with nothing
+//! to send is held open until a job is placed on the host, or for the heartbeat interval at
+//! most five seconds, and says `beat_now` ([`held`], [`crate::held_beat`]). The host's
+//! heartbeat is watched from before the store is read, so a placement after the read wakes
+//! it; the reply is then built again from the store and carries the start.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -79,7 +87,7 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, HostCredential, ProtocolRange, Welcome, refusal,
+    Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, ProtocolRange, Welcome, refusal,
 };
 use js_registry::{Credential, Refusal};
 use js_types::Clock;
@@ -88,7 +96,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
-use crate::admit::{reports_host_jobs, reports_layered_rootfs};
+use crate::admit::{
+    reported_mount_providers, reports_held_beat, reports_host_jobs, reports_layered_rootfs,
+};
 use crate::agent_state::Change;
 use crate::agents::{Agents, Session};
 use crate::api::{BODY_LIMIT, bearer};
@@ -107,7 +117,11 @@ use crate::util::blocking;
 /// store, the binding it changes could not be committed.
 const STATE_WRITE_FAILED: &str = "state-write-failed";
 
+mod held;
 mod own_host;
+
+/// The watch of a heartbeat whose reply may be held, and what building it again needs.
+type Watched = (crate::held_beat::Watch, Arc<held::Inputs>);
 
 /// The agent routes. The caller merges them into the server's router; they have no
 /// fallback of their own.
@@ -133,6 +147,11 @@ pub(crate) fn router(agents: Arc<Agents>) -> Router {
 #[derive(Clone)]
 struct OneTime(Credential);
 
+/// Marks a request that was authenticated with one of a pool's shared join tokens: the name
+/// of that pool, which a hello must name ([`serve_hello_in`]).
+#[derive(Clone)]
+struct TokenPool(String);
+
 /// Refuses a request that does not carry one of the join tokens, a one-time token or a host
 /// credential, with a 401 that says nothing else, and passes the credential the registry
 /// knows the host by on (and the mark [`OneTime`] when it is a one-time token or a host
@@ -148,11 +167,12 @@ async fn authenticate(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(bearer);
-    let pooled = given.and_then(|given| agents.tokens.identify(given));
+    let pooled = given.and_then(|given| agents.identify_pooled(given));
     let single = || given.and_then(|given| agents.joins.identify(given));
     match (pooled, single()) {
-        (Some(credential), _) => {
+        (Some((credential, pool)), _) => {
             request.extensions_mut().insert(credential);
+            request.extensions_mut().insert(TokenPool(pool));
             next.run(request).await
         }
         (None, Some(presented)) => {
@@ -203,11 +223,13 @@ fn retry_after(wait: Duration) -> u64 {
 async fn hello(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
-    one_time: Option<Extension<OneTime>>,
+    (one_time, pool): (Option<Extension<OneTime>>, Option<Extension<TokenPool>>),
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, Refused> {
     let presented = one_time.map(|Extension(OneTime(presented))| presented);
-    let welcome = serve_hello(&agents, who, presented, body, &|| ()).await?;
+    let pool = pool.map(|Extension(TokenPool(pool))| pool);
+    let given = (who, presented, pool.as_deref());
+    let welcome = serve_hello_in(&agents, given, body, &|| ()).await?;
     // The Welcome can carry the host credential, so no cache may keep it (as for a token
     // response in RFC 6749, section 5.1).
     let headers = [
@@ -224,6 +246,7 @@ async fn hello(
 /// waits on timing. `who` is the credential the registry knows the host by; `one_time` is
 /// the digest of the one-time token or host credential the request carried, when it
 /// carried one.
+#[cfg(test)]
 async fn serve_hello(
     agents: &Arc<Agents>,
     who: Credential,
@@ -231,10 +254,34 @@ async fn serve_hello(
     body: Result<Bytes, BytesRejection>,
     between: &(dyn Fn() + Sync),
 ) -> Result<Json<Welcome>, Refused> {
+    serve_hello_in(agents, (who, one_time, None), body, between).await
+}
+
+/// [`serve_hello`], for a request authenticated with a pool's shared join token when `pool`
+/// is that pool's name: the hello must name it. On a server of several pools a hello with a
+/// one-time token or a host credential must name the pool its instance's provider names.
+/// Either refusal is `unknown-pool`, before anything is taken or written: a token of one
+/// pool never registers a host into another.
+async fn serve_hello_in(
+    agents: &Arc<Agents>,
+    (who, one_time, pool): (Credential, Option<Credential>, Option<&str>),
+    body: Result<Bytes, BytesRejection>,
+    between: &(dyn Fn() + Sync),
+) -> Result<Json<Welcome>, Refused> {
     let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
     hello
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    let several = !agents.more_tokens.is_empty();
+    let launched = hello
+        .instance
+        .as_ref()
+        .map(|instance| instance.provider.as_str());
+    let named = pool.or(launched.filter(|_| several && one_time.is_some()));
+    if named.is_some_and(|named| named != hello.pool) {
+        warn!(host = %hello.host_id, pool = %hello.pool, "agent hello refused: its token is another pool's");
+        return Err(Refused::of(&Refusal::UnknownPool));
+    }
     // Hellos are taken one at a time, from the use of the token to the registry's answer
     // and the release of a refused one, so no other hello of the host comes in between.
     let gate = agents.host_writes.lock().await;
@@ -382,12 +429,17 @@ async fn heartbeat(
         agents.save_bindings().await;
     }
     let logs = uploading(&agents, &heartbeat.host_id);
-    add_jobs(&agents, &heartbeat, logs.clone(), &mut reply).await?;
+    let hold = add_jobs(&agents, &heartbeat, logs.clone(), &mut reply).await?;
     reply.log_grant =
         logs.and_then(|logs| logs.on_beat(&heartbeat.host_id, heartbeat.log_grant_state));
     if let Some(usage) = &agents.usage {
         let usage = Arc::clone(usage);
         blocking(move || usage.on_beat(&heartbeat, load)).await;
+    }
+    // Everything the beat brought is committed and counted; a reply with nothing to send to
+    // a host that takes held replies waits here for a placement on the host.
+    if let Some(hold) = hold {
+        held::hold(&agents, hold, &mut reply).await;
     }
     Ok(Json(reply))
 }
@@ -416,26 +468,35 @@ fn reports_upload(agents: &Agents, host: &str) -> bool {
 /// Adds the per-job half of the heartbeat to `reply` when the server holds the job tables
 /// and the host reported [`PER_JOB_CAPABILITY`]; leaves it as it is otherwise. Its own
 /// function, so the heartbeat route stays the same for every test binary whatever the
-/// server holds. The starts carry a log sink when `logs` is given ([`uploading`]).
+/// server holds. The starts carry a log sink when `logs` is given ([`uploading`]). Returns
+/// what holding the reply needs ([`held::Hold`]) when the host also reported
+/// [`HELD_BEAT_CAPABILITY`].
 ///
 /// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
+/// [`HELD_BEAT_CAPABILITY`]: js_agent_wire::HELD_BEAT_CAPABILITY
 async fn add_jobs(
     agents: &Arc<Agents>,
     heartbeat: &Heartbeat,
     logs: Option<Arc<LogGrants>>,
     reply: &mut HeartbeatReply,
-) -> Result<(), Refused> {
+) -> Result<Option<held::Hold>, Refused> {
     let Some(jobs) = &agents.jobs else {
-        return Ok(());
+        return Ok(None);
     };
     let room = js_agent_wire::limits::MAX_COMMANDS.saturating_sub(reply.commands.len());
-    if let Some(served) = serve_jobs(agents, jobs, heartbeat, logs, room).await? {
-        reply.commands.extend(served.commands);
-        reply.job_acks = served.job_acks;
-        reply.retired_acks = served.retired_acks;
-        reply.exclusive = reply.exclusive.take().or(served.exclusive);
-    }
-    Ok(())
+    let Some((served, watched)) = serve_jobs(agents, jobs, heartbeat, logs, room).await? else {
+        return Ok(None);
+    };
+    reply.commands.extend(served.commands);
+    reply.job_acks = served.job_acks;
+    reply.retired_acks = served.retired_acks;
+    let registry_exclusive = reply.exclusive.take();
+    reply.exclusive = registry_exclusive.clone().or(served.exclusive);
+    Ok(watched.map(|(watch, inputs)| held::Hold {
+        watch,
+        inputs,
+        registry_exclusive,
+    }))
 }
 
 /// What the registry holds of a host that reported the `per-job` capability, as
@@ -452,21 +513,24 @@ struct PerJobHost {
 }
 
 /// The per-job half of the heartbeat of a host that reported [`PER_JOB_CAPABILITY`], with
-/// room for `room` commands, its starts carrying the sinks of `logs`; `None` for any other
-/// host. The whole-host jobs placed on the host are served first ([`job_whole::serve`]: a
+/// room for `room` commands, its starts carrying the sinks of `logs`, and, for a host that
+/// reported [`HELD_BEAT_CAPABILITY`], the watch of its heartbeat (taken before the store is
+/// read, so no placement after the read is missed) with what building the reply again needs;
+/// `None` for any other host. The whole-host jobs placed on the host are served first ([`job_whole::serve`]: a
 /// ready report, a refusal, a cancel, a hello), then the listing is committed and the reply
 /// built ([`per_job::serve`]). The store is read and written on the pool for blocking calls.
 /// A failed read or commit is a 500 `state-write-failed`. A host a refused prepare
 /// tainted is written to the state file before the reply.
 ///
 /// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
+/// [`HELD_BEAT_CAPABILITY`]: js_agent_wire::HELD_BEAT_CAPABILITY
 async fn serve_jobs(
     agents: &Arc<Agents>,
     jobs: &Arc<ServerJobs>,
     heartbeat: &Heartbeat,
     logs: Option<Arc<LogGrants>>,
     room: usize,
-) -> Result<Option<JobReply>, Refused> {
+) -> Result<Option<(JobReply, Option<Watched>)>, Refused> {
     let per_job = HostId::new(&heartbeat.host_id)
         .ok()
         .and_then(|host| agents.registry.own_host(&host))
@@ -498,27 +562,34 @@ async fn serve_jobs(
         return Ok(None);
     };
     let first = agents.first_listing(&host, session);
-    let ceiling =
-        js_agent_wire::NetworkCeiling::from_capabilities(claim.capabilities()).unwrap_or_default();
-    let host_jobs = reports_host_jobs(claim.capabilities());
-    let layered_rootfs = reports_layered_rootfs(claim.capabilities());
-    let jobs = Arc::clone(jobs);
-    let listed = heartbeat.jobs.clone();
-    let retired = heartbeat.retired_jobs.clone();
+    let capabilities = claim.capabilities();
+    // Only a serving host takes a new start: a draining, preparing or tainted one is never
+    // held (a draining agent counts its drain in the waits it asks for, which a held reply
+    // would stretch).
+    let holds = reports_held_beat(capabilities) && heartbeat.phase == Phase::Serving;
+    let watch = holds.then(|| agents.wakes.watch(&host));
+    let inputs = Arc::new(held::Inputs {
+        jobs: Arc::clone(jobs),
+        ceiling: js_agent_wire::NetworkCeiling::from_capabilities(capabilities).unwrap_or_default(),
+        host_jobs: reports_host_jobs(capabilities),
+        layered_rootfs: reports_layered_rootfs(capabilities),
+        mount_providers: reported_mount_providers(capabilities),
+        booked,
+        logs,
+        listed: heartbeat.jobs.clone(),
+        retired: heartbeat.retired_jobs.clone(),
+        room,
+        host,
+    });
     let (phase, ready) = (heartbeat.phase, heartbeat.exclusive_ready.clone());
     let refused = heartbeat.exclusive_refused.clone();
     let placing = Arc::clone(agents);
+    let kept = Arc::clone(&inputs);
     let served = blocking(move || {
         let metrics = placing.meter().sink();
-        let context = per_job::BeatContext {
-            host: &host,
-            ceiling: &ceiling,
-            host_jobs,
-            layered_rootfs,
-            shape: Some(&booked),
-            logs: logs.as_deref(),
-            metrics,
-        };
+        let context = inputs.context(metrics);
+        let (jobs, host) = (&inputs.jobs, &inputs.host);
+        let (listed, retired) = (&inputs.listed, &inputs.retired);
         // The first listing after a hello loses the jobs that ran and are not listed: their
         // container went with the agent (design section 6.7, step 6). The listing's commit
         // below then frees their allocations, since the host no longer lists them.
@@ -528,14 +599,14 @@ async fn serve_jobs(
             .chain(retired.iter().map(String::as_str))
             .collect();
         let lost = match first {
-            true => job_loss::lose_unlisted(&jobs, &host, &held, metrics).map(drop),
+            true => job_loss::lose_unlisted(jobs, host, &held, metrics).map(drop),
             false => Ok(()),
         };
         // A whole-host job the host prepares for is moved before the listing is committed
         // (design section 5.4): ready starts it, a refusal fails the prepare, a hello
         // restarts it, and a cancel ends it once the agent has left `preparing`.
         let beat = job_whole::Beat {
-            host: &host,
+            host,
             phase,
             ready: ready.as_deref(),
             refused: refused.as_ref(),
@@ -545,37 +616,39 @@ async fn serve_jobs(
         let now = store_time(placing.clock.now().millis());
         let rules = placing.whole_rules();
         let taint = |host: &HostId| placing.registry.taint_after_prepare(host);
-        let serve = |()| job_whole::serve(&jobs, &beat, (&rules, now), (metrics, &taint));
+        let serve = |()| job_whole::serve(jobs, &beat, (&rules, now), (metrics, &taint));
         let whole = lost.and_then(serve);
         let served = whole.and_then(|taint_changed| {
-            let served = per_job::serve(&jobs, &context, &listed, &retired, room);
+            let served = per_job::serve(jobs, &context, listed, retired, inputs.room);
             served.map(|served| (served, taint_changed))
         });
         // Whether the listing was clean is noted before the pass, so a host that lists a job
         // it holds no live allocation for takes no start until it lists only its own (design
         // section 8, row 37).
         if let Ok((served, _)) = &served {
-            placing.note_listing(&host, served.clean);
+            placing.note_listing(host, served.clean);
         }
         // What the listing ended or freed, and the load the beat brought, can make room
-        // for a queued job: a pass places it, and its start rides on the host's next reply.
-        // A beat that changed nothing the pass depends on runs none. A host job the pass
-        // placed has tainted its host: the taint is kept below.
+        // for a queued job: a pass places it, and its start rides on the host's next reply,
+        // or on this one when it is held (the placement wakes it). A beat that changed
+        // nothing the pass depends on runs none. A host job the pass placed has tainted its
+        // host: the taint is kept below.
         let placed_taints = placing.place_jobs_after_beat();
-        (host, served, placed_taints)
+        (served, placed_taints)
     })
     .await;
-    let (host, served, placed_taints) = served;
+    let (served, placed_taints) = served;
     agents.keep_taints(placed_taints).await;
-    match (host, served) {
-        (host, Ok((served, taint_changed))) => {
-            agents.listed(&host, session);
+    let host = &kept.host;
+    match served {
+        Ok((served, taint_changed)) => {
+            agents.listed(host, session);
             if taint_changed {
                 agents.save_bindings().await;
             }
-            Ok(Some(served))
+            Ok(Some((served, watch.map(|watch| (watch, kept)))))
         }
-        (host, Err(error)) => {
+        Err(error) => {
             agents.meter().sink().store_write_failed();
             warn!(%host, %error, "a heartbeat's job listing could not be committed");
             Err(Refused::new(
@@ -900,6 +973,10 @@ mod log_life_tests;
 #[cfg(test)]
 #[path = "agent_api_whole_tests.rs"]
 mod whole_tests;
+
+#[cfg(test)]
+#[path = "agent_api_held_tests.rs"]
+mod held_tests;
 
 #[cfg(test)]
 #[path = "agent_api_whole_restart_tests.rs"]

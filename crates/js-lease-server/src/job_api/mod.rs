@@ -22,7 +22,7 @@
 //! | `logs.rs` | `GetLogs` with a stream, which `read.rs` hands it after reading the job's row |
 //! | `submit.rs` | `SubmitJob` (with `validate.rs`, the checks of a submitted job) |
 //! | `cancel.rs` | `CancelJob` |
-//! | `fleet.rs` | `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` |
+//! | `fleet.rs` | `ListHosts`, `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage` |
 //!
 //! The [`JobService`] implementation below hands each call to its group's function and
 //! writes the call's log line ([`logged`]). Serving a call replaces the body of that function
@@ -45,8 +45,8 @@
 //! (`call`), the client (`client`) and its role (`role`), the job or host the request names
 //! (`target`; `job` holds the job alone), the outcome (`outcome`: `ok`, `denied`, `not-found`,
 //! `refused` or `failed`, [`roles::outcome`]) and the gRPC code (`code`). It is the audit line
-//! of the calls that change state, `SubmitJob`, `CancelJob`, `CordonHost` and `UncordonHost`,
-//! denied ones among them. No line holds a token or its digest.
+//! of the calls that change state, `SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost` and
+//! `ClearHostTaint`, denied ones among them. No line holds a token or its digest.
 //!
 //! # One context per group
 //!
@@ -65,24 +65,49 @@
 //! whose call takes the registry's lock alone, calls no provider, and returns before the
 //! group writes the job tables.
 //!
+//! # The job tables are read and written off the runtime's workers
+//!
+//! The store's calls block: a call waits on the database for as long as the database takes
+//! (up to its statement timeout). Every call of a group on the job tables therefore goes
+//! through [`JobApi::on_tables`], which runs it on the runtime's pool for blocking calls, so
+//! a slow database holds up the calls that wait on it and nothing else: the workers go on
+//! serving the connections, and a client's HTTP/2 connection is read while its calls wait.
+//! A call whose client gives up (cancels the stream) is dropped at its next wait; a store
+//! call it started runs to its end, and what it wrote stands, as a call whose answer was
+//! lost (a resubmit under the same id is answered with that job).
+//!
+//! At most [`STORE_CALLS`] such calls run at once (four times the Postgres store's default
+//! pool of 8 connections: more would only wait for a connection inside the store). A call
+//! waits at most [`STORE_CALL_WAIT`] for one of them, and past it answers as a store too busy
+//! to take it (`UNAVAILABLE`: `state-write-failed` for a write, `store-unavailable` for a
+//! read), which a client retries. A call that is still waiting when its client gives up is
+//! dropped and never runs; one that runs keeps its place to its end. So a stalled store
+//! holds at most [`STORE_CALLS`] threads of the blocking pool, however many calls and
+//! retries arrive.
+//!
 //! A request carries at most [`js_api_gateway::BODY_LIMIT`] (64 KiB) over either transport:
 //! the gateway answers a larger body 413 `request-too-large`, and the gRPC service decodes
 //! no larger message (`OUT_OF_RANGE`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
-    CancelJobRequest, CancelJobResponse, CordonHostRequest, CordonHostResponse, GetJobRequest,
-    GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse,
-    GetUsageRequest, GetUsageResponse, ListHostsRequest, ListHostsResponse, ListJobsRequest,
-    ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse,
+    CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
+    CordonHostRequest, CordonHostResponse, GetJobRequest, GetJobResponse, GetLogsRequest,
+    GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest, GetUsageResponse,
+    ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest,
+    ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, SubmitJobRequest,
+    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use tonic::{Code, Request, Response, Status};
 use tower::Layer;
+
+use js_jobs::JobStoreError;
+use js_state::StoreError;
+use tokio::sync::Semaphore;
 
 use crate::clock::SharedClock;
 use crate::config::LiveClients;
@@ -106,6 +131,8 @@ pub(crate) use wiring::{from_server, port};
 
 #[cfg(test)]
 mod access_tests;
+#[cfg(test)]
+mod blocking_tests;
 #[cfg(test)]
 mod clients_tests;
 #[cfg(test)]
@@ -141,9 +168,33 @@ fn unimplemented<T>() -> Result<Response<T>, Status> {
     Err(Status::unimplemented(UNIMPLEMENTED))
 }
 
+/// The most calls on the job tables that run at once ([`JobApi::on_tables`]).
+pub(crate) const STORE_CALLS: usize = 32;
+
+/// How long a call on the job tables waits for one of the [`STORE_CALLS`] to come free.
+pub(crate) const STORE_CALL_WAIT: Duration = Duration::from_secs(10);
+
+/// The places of the calls on the job tables, and how long a call waits for one.
+struct Gate {
+    slots: Arc<Semaphore>,
+    size: usize,
+    wait: Duration,
+}
+
+impl Gate {
+    fn new(size: usize, wait: Duration) -> Gate {
+        Gate {
+            slots: Arc::new(Semaphore::new(size)),
+            size,
+            wait,
+        }
+    }
+}
+
 /// The job service: the job store, the clock, and the context of each call group.
 pub struct JobApi {
     jobs: Arc<ServerJobs>,
+    gate: Gate,
     clock: SharedClock,
     read: read::Ctx,
     submit: submit::Ctx,
@@ -159,6 +210,7 @@ impl JobApi {
     pub fn new(jobs: Arc<ServerJobs>, clock: SharedClock) -> JobApi {
         JobApi {
             jobs,
+            gate: Gate::new(STORE_CALLS, STORE_CALL_WAIT),
             clock,
             read: read::Ctx::default(),
             submit: submit::Ctx::default(),
@@ -166,6 +218,53 @@ impl JobApi {
             fleet: fleet::Ctx::default(),
             logs: logs::Ctx::default(),
         }
+    }
+}
+
+impl JobApi {
+    /// The service with at most `size` calls on the job tables at once, each waiting `wait`
+    /// at most for a place; every other part is kept.
+    #[cfg(test)]
+    fn with_store_calls(self, size: usize, wait: Duration) -> JobApi {
+        JobApi {
+            gate: Gate::new(size, wait),
+            ..self
+        }
+    }
+
+    /// Runs `call` over the job tables on the runtime's pool for blocking calls and waits for
+    /// it without holding up a worker, once one of the gate's places is free (see the module's
+    /// notes). With no place free within the gate's wait it runs nothing and answers
+    /// [`StoreError::Unavailable`]. The place goes with `call` and is given back when `call`
+    /// ends, even if the caller is gone by then. A panic in `call` is raised again in the
+    /// caller.
+    async fn on_tables<T: Send + 'static>(
+        &self,
+        call: impl FnOnce(&ServerJobs) -> Result<T, JobStoreError> + Send + 'static,
+    ) -> Result<T, JobStoreError> {
+        let place = match Arc::clone(&self.gate.slots).try_acquire_owned() {
+            Ok(place) => place,
+            // Only a call that finds every place taken waits on the runtime's timer (a runtime
+            // without one, as the simulation's, never meets it while there is room).
+            Err(_) => {
+                let slots = Arc::clone(&self.gate.slots);
+                let waited = tokio::time::timeout(self.gate.wait, slots.acquire_owned()).await;
+                let Ok(Ok(place)) = waited else {
+                    return Err(JobStoreError::Store(StoreError::Unavailable(format!(
+                        "all {} calls on the job tables stayed busy for {:?}",
+                        self.gate.size, self.gate.wait
+                    ))));
+                };
+                place
+            }
+        };
+        let jobs = Arc::clone(&self.jobs);
+        crate::util::blocking(move || {
+            let done = call(&jobs);
+            drop(place);
+            done
+        })
+        .await
     }
 }
 
@@ -367,6 +466,25 @@ impl JobService for JobApi {
         };
         logged(
             "UncordonHost",
+            caller.as_ref(),
+            Target::Host(&host),
+            &answer,
+        );
+        answer
+    }
+
+    async fn clear_host_taint(
+        &self,
+        request: Request<ClearHostTaintRequest>,
+    ) -> Result<Response<ClearHostTaintResponse>, Status> {
+        let caller = caller_of(&request);
+        let host = request.get_ref().host_id.clone();
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::clear_host_taint(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged(
+            "ClearHostTaint",
             caller.as_ref(),
             Target::Host(&host),
             &answer,

@@ -95,6 +95,10 @@ pub(crate) struct BeatContext<'a> {
     /// Whether the host's agent reported `layered-rootfs=true` ([`js_caps::LAYERED_ROOTFS`]); a
     /// start with layers, mounts or host ports is built only for one that did.
     pub(crate) layered_rootfs: bool,
+    /// The keys `mount-provider.<name>` the host's agent reported with the value `true`
+    /// ([`js_caps::mount_provider_key`]); a start whose job requires one of them is built only
+    /// for a host that reported it.
+    pub(crate) mount_providers: &'a [String],
     /// What the registry books for the host, which a start of the whole host books; `None`
     /// when it is not known.
     pub(crate) shape: Option<&'a Resources>,
@@ -138,16 +142,8 @@ pub(crate) fn serve(
             job_alloc::free_allocation(jobs, &allocation.job, Freed::HostConfirmed)?;
         }
     }
-    let live = jobs.live_on(host)?;
-    let exclusive = exclusive_of(&live);
-    let stops = stops_for(&live, listed, &reported.unknown)
-        .into_iter()
-        .map(|job_id| Command::JobStop { job_id });
-    let starts = starts_for(&live, &held, context)
-        .into_iter()
-        .map(|spec| Command::JobStart(Box::new(spec)));
-    let mut commands: Vec<Command> = stops.chain(starts).collect();
-    commands.truncate(room);
+    let (commands, exclusive) =
+        commands_now(jobs, context, (listed, retired), &reported.unknown, room)?;
     Ok(JobReply {
         commands,
         job_acks: reported.acks,
@@ -155,6 +151,40 @@ pub(crate) fn serve(
         clean: reported.unknown.is_empty(),
         exclusive,
     })
+}
+
+/// Step 4 of the module docs alone: the stops and starts, at most `room` of them, and the
+/// allocation of the whole-host job, that follow from what the store holds now for the host
+/// that listed `listed` and `retired`, of which `unknown` are the listed jobs it holds no live
+/// allocation for. It reads and commits nothing else, so a heartbeat whose reply is held
+/// ([`crate::held_beat`]) builds it again, once a placement wakes it, over the listing it
+/// already committed.
+///
+/// # Errors
+/// The [`JobStoreError`] of the read of the host's allocations.
+pub(crate) fn commands_now(
+    jobs: &ServerJobs,
+    context: &BeatContext<'_>,
+    (listed, retired): (&[HeldJob], &[String]),
+    unknown: &BTreeSet<String>,
+    room: usize,
+) -> Result<(Vec<Command>, Option<String>), JobStoreError> {
+    let held: BTreeSet<&str> = listed
+        .iter()
+        .map(|job| job.job_id.as_str())
+        .chain(retired.iter().map(String::as_str))
+        .collect();
+    let live = jobs.live_on(context.host)?;
+    let exclusive = exclusive_of(&live);
+    let stops = stops_for(&live, listed, unknown)
+        .into_iter()
+        .map(|job_id| Command::JobStop { job_id });
+    let starts = starts_for(&live, &held, context)
+        .into_iter()
+        .map(|spec| Command::JobStart(Box::new(spec)));
+    let mut commands: Vec<Command> = stops.chain(starts).collect();
+    commands.truncate(room);
+    Ok((commands, exclusive))
 }
 
 /// Commits what the host lists of each job (step 1 of the module docs) and answers each

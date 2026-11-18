@@ -26,6 +26,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
 | `--store`, `--allow-sqlite-store` | `server.store` and `server.allow_sqlite_store` (`false` unless given; `true` is refused without `server.store`, as the flag is without `--store`): the store the server's state is to be kept in, and the gate of its SQLite backend; see "The store" below |
 | `--store-unreachable-after` | `server.store_unreachable_after`, `"60s"` unless given: how long the store paths of the tick (the job pass) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both; zero or an unparsable value is refused at start naming the flag or the key |
+| `--cold-cpu-millis`, `--cold-memory-bytes` | `server.cold_cpu_millis` and `server.cold_memory_bytes`: what a queued job that names no CPU or memory books, for each dimension it leaves at zero, while its class has no estimate ([sizing.md](sizing.md), section 7.7), and the least memory its class books before five runs. Whole numbers: the CPU in millicores from `250`, the memory in bytes from `1073741824` (1 GiB); a value below that, negative or not an integer is refused at start naming the key. Each left out is a quarter of the most cores or bookable memory a registered host has, as before the keys; a value above the most a registered host has books that most. The flags take the same values, and either one without `--agent-pool-config` is refused |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler, and the store's `store:unreachable`, is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
 | `--client-token NAME=PATH` or `NAME:ROLE=PATH` (repeatable) | a `[[client]]` table with `name`, `token_file` and, optionally, `role` (`"client"`, the default, or `"operator"`): one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
@@ -86,9 +87,12 @@ changing its role, takes a restart (a restart ends no job); `default`'s token is
 A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
 `max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents;
 `server.agent_listen` is required as for an elastic pool. A file may declare any number of joined and elastic pools, each with its own
-`join_token_file`, but the server starts only on a file with at most one pool that registers agents: with more it refuses naming the
-second (`several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`, or `several pools register agents; ...`
-when they are not all elastic).
+`join_token_file`. The server starts on several joined pools, whose hosts share its one registry (each host in the pool its hello names,
+with that pool's shared tokens only), and on an elastic pool alone: beside another registering pool an elastic one is refused naming the
+second (`several elastic pools are parsed; this version runs one, as the server keeps one registry of agents`, or `an elastic pool is
+served alone; this version runs several pools only when every one is joined`). A joined pool after the first must not have the first's
+name, must have its `memory_schedulable_percent` and must not be of class `whole-node`; the flags say the same with a repeated
+`--agent-pool-config` (`crates/js-lease-server/src/lib.rs`).
 
 ```toml
 [[pool]]

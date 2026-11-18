@@ -5,6 +5,7 @@
 //! the rules the record is held to are pure of the steps and tested here on their own.
 
 mod args;
+mod config_hook;
 mod conformance;
 mod conformance_runs;
 mod fake_bin;
@@ -41,6 +42,7 @@ mod steps_prepare_supersede;
 mod steps_rollback;
 mod steps_rollback_first;
 mod steps_rollback_guards;
+mod steps_taint_clearable;
 mod steps_unit;
 mod steps_verify;
 mod unit_conformance;

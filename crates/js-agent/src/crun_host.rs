@@ -1,5 +1,5 @@
-//! The start check of `--runtime crun`: what this host must have before the agent runs a job
-//! with `crun`, each missing piece named.
+//! The start check of the crun runtime, the Linux build's: what this host must have before
+//! the agent runs a job with `crun`, each missing piece named.
 //!
 //! The agent is root and runs every `crun` command as a dedicated job user (`--job-user`),
 //! so the host needs, besides `crun` itself: `newuidmap` and `newgidmap` (which `crun` runs
@@ -22,7 +22,6 @@ use js_agent_wire::PortRange;
 use js_contain::subids::{IdFiles, MIN_SUBORDINATE_IDS, check_subordinate_ids};
 
 use crate::Cli;
-use crate::cli::RuntimeKind;
 use crate::facts::CommandRunner;
 use crate::lifecycle::DirLayout;
 
@@ -141,7 +140,7 @@ impl Report {
             return None;
         }
         let mut text = format!(
-            "--runtime crun: this host is not ready ({} missing):",
+            "the crun runtime: this host is not ready ({} missing):",
             self.missing.len()
         );
         for piece in &self.missing {
@@ -749,27 +748,17 @@ pub fn layered_rootfs(answers: &[(&'static str, std::io::Result<()>)]) -> (bool,
     }
 }
 
-/// What a start that names no `--runtime` is told after why `crun` cannot run, on a line of
-/// its own: `crun` is the default, and the two ways forward. A start that names
-/// `--runtime crun` is not told of the engine.
-pub const DEFAULTED: &str = "no --runtime was given, so the runtime is crun, the default Linux \
-     runtime, and the agent does not fall back to another. Either make this host ready for crun \
-     (fix what is named above; see docs/runbooks/crun-host-setup.md), or opt in to the container \
-     engine, a fallback whose jobs get network none: --runtime docker --container-bin <path> \
-     --allow-container-engine";
-
-/// What `--runtime crun`, or a Linux start that names no `--runtime` (see
-/// [`Cli::effective_runtime`]), asks of the other flags, and then of the host; the host ports
-/// a job may reach (`--host-port`) come with what it found.
+/// What the crun runtime (the Linux build's, unless the agent runs the container engine or
+/// no job) asks of the other flags, and then of the host; the host ports a job may reach
+/// (`--host-port`) come with what it found.
 ///
 /// # Errors
 ///
-/// The text for exit status 2: a flag that is wrong or missing, or [`Report::refusal`]; for a
-/// start that names no `--runtime`, followed by [`DEFAULTED`].
+/// The text for exit status 2: a flag that is wrong or missing, or [`Report::refusal`].
 pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result<Ready, String> {
     // Before anything of the host is asked: a wrong entry is named first.
-    let host_ports = crate::host_ports::allowed(&cli.host_port).map_err(|why| why.to_string());
-    let checked = host_ports.and_then(|host_ports| {
+    let host_ports = crate::host_ports::allowed(&cli.os.host_port).map_err(|why| why.to_string());
+    host_ports.and_then(|host_ports| {
         let request = flags(cli)?;
         let report = check(&request, host, commands);
         let mut ready = ready(&request, report)?;
@@ -780,11 +769,7 @@ pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result
             layered,
             ..ready
         })
-    });
-    match cli.runtime {
-        None => checked.map_err(|why| format!("{why}\n{DEFAULTED}")),
-        Some(_) => checked,
-    }
+    })
 }
 
 /// The host the check found, as the runtime is built from it.
@@ -815,58 +800,44 @@ pub fn ready(request: &Request<'_>, report: Report) -> Result<Ready, String> {
     })
 }
 
-/// The flags of `--runtime`, `--crun-bin` and `--job-user` checked against each other, for
-/// `--runtime crun` or for no `--runtime` (the caller asks only where
-/// [`Cli::effective_runtime`] is `crun`).
+/// The flags of the crun runtime checked against each other: an agent that runs no job
+/// (`--no-jobs`) or the container engine (`--allow-container-engine`) is not a crun start, and
+/// a flag of the container engine is refused (the caller asks only for a crun start).
 ///
 /// # Errors
 ///
-/// The text names the flag at fault; `--runtime docker` and `--runtime none` are not a crun
-/// start.
+/// The text names the flag at fault.
 pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
-    if matches!(cli.runtime, Some(RuntimeKind::Docker | RuntimeKind::NoJobs)) {
-        return Err("--runtime crun: not given".to_owned());
+    let os = &cli.os;
+    if cli.no_jobs || os.allow_container_engine {
+        return Err(
+            "the crun runtime: not this agent's (--no-jobs or --allow-container-engine)".to_owned(),
+        );
     }
-    let engine_flags = [
-        ("--container-bin", cli.container_bin.is_some()),
-        ("--container-user", cli.container_user.is_some()),
-        ("--container-subuid", cli.container_subuid.is_some()),
-        ("--container-host", cli.container_host.is_some()),
-        ("--container-pull", cli.container_pull.is_some()),
-        ("--container-tmp-size", cli.container_tmp_size.is_some()),
-        ("--container-add-host", !cli.container_add_host.is_empty()),
-        ("--actions-cgroup", cli.actions_cgroup.is_some()),
-        ("--gpu-toolkit-hook", cli.gpu_toolkit_hook.is_some()),
-    ];
-    if let Some((flag, _)) = engine_flags.into_iter().find(|(_, given)| *given) {
+    if let Some((flag, _)) = os.engine_flags().into_iter().find(|(_, given)| *given) {
         return Err(format!(
-            "{flag}: not accepted with --runtime crun (a flag of the container engine, which the crun runtime does not use; --runtime docker --allow-container-engine selects the engine)"
+            "{flag}: needs --allow-container-engine (a flag of the container engine; without \
+             it this agent runs crun)"
         ));
     }
-    // Native jobs are a Mac runtime; a crun agent would start and ignore them. The mount
-    // roots are accepted: the runtime opens a job's host path beneath its root and binds
-    // what it opened, never the path.
-    if let Some((flag, _)) = cli.native_flags().into_iter().find(|(_, given)| *given) {
-        return Err(format!(
-            "{flag}: not accepted with --runtime crun (a flag of native jobs)"
-        ));
-    }
-    let crun = cli.crun_bin.as_deref().unwrap_or(Path::new(DISTRO_CRUN));
+    // The mount roots are accepted: the runtime opens a job's host path beneath its root and
+    // binds what it opened, never the path.
+    let crun = os.crun_bin.as_deref().unwrap_or(Path::new(DISTRO_CRUN));
     if !crun.is_absolute() {
         return Err(format!(
             "--crun-bin: {} is not an absolute path",
             crun.display()
         ));
     }
-    let job_user = cli.job_user.as_deref().ok_or(
-        "--job-user: required with --runtime crun (the agent runs every crun as that user)",
+    let job_user = os.job_user.as_deref().ok_or(
+        "--job-user: required with the crun runtime (the agent runs every crun as that user)",
     )?;
     let state_root = cli
         .state_root
         .as_deref()
-        .ok_or("--state-root: required with --runtime crun: the taint marker is kept there")?;
+        .ok_or("--state-root: required with the crun runtime: the taint marker is kept there")?;
     let scratch_root = cli.scratch_root.as_deref().ok_or(
-        "--scratch-root: required with --runtime crun: each run's directory is made there",
+        "--scratch-root: required with the crun runtime: each run's directory is made there",
     )?;
     Ok(Request {
         crun,

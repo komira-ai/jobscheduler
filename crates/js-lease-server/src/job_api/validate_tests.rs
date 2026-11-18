@@ -66,6 +66,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
             arch: "x86_64".to_owned(),
             exec: v1::ExecMode::Container.into(),
             isa_level: "x86-64-v3".to_owned(),
+            os_version: "26".to_owned(),
             accelerator: Some(accelerator),
             isolation: v1::Isolation::Unspecified.into(),
         });
@@ -86,6 +87,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         .with_disk_bytes(2 << 30);
     let capabilities: BTreeMap<String, String> = [
         (ISA_LEVEL_KEY, "x86-64-v3"),
+        ("os_version", "26"),
         ("accelerator.vendor", "nvidia"),
         ("accelerator.model", "nvidia-a100"),
         ("accelerator.count", "2"),
@@ -133,11 +135,13 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         os: Some("linux".to_owned()),
         arch: Some("x86_64".to_owned()),
         isa_level: Some("x86-64-v3".parse::<IsaLevel>().unwrap()),
+        os_version: Some(26),
         exec: Some(ExecMode::Container),
         accelerator,
         network: Reach::Open,
         host_ports: vec![8080],
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     };
     let expected = Valid {
         id: Some(JobId::parse("job-1").unwrap()),
@@ -289,6 +293,29 @@ fn the_wall_limit_is_present_positive_and_at_most_the_ceiling() {
     assert_eq!(higher, Err(Fault::WallAboveCeiling));
 }
 
+/// Asserts that a least `os_version` of one to four digits without a leading zero is recorded
+/// under the `os_version` capability as the same text and asked of admission as that number
+/// (`1`, `26` and `9999` are the bounds and a typical value), and that an empty one records
+/// no capability and asks for none. Catches a version recorded in another spelling, which
+/// would make one job two, and one dropped on the way to admission, which would place a
+/// macOS 26 job on a macOS 15 host.
+#[test]
+fn a_least_os_version_is_recorded_as_its_number_and_empty_asks_for_none() {
+    for (given, asked) in [("1", 1), ("26", 26), ("9999", 9999)] {
+        let checked = valid(|spec| {
+            spec.constraints = Some(constraints(|c| c.os_version = given.to_owned()));
+        });
+        assert_eq!(
+            checked.spec.constraints.capabilities.get("os_version"),
+            Some(&given.to_owned())
+        );
+        assert_eq!(checked.wanted.os_version, Some(asked));
+    }
+    let none = valid(|spec| spec.constraints = Some(constraints(|_| {})));
+    assert_eq!(none.spec.constraints.capabilities.get("os_version"), None);
+    assert_eq!(none.wanted.os_version, None);
+}
+
 /// Asserts the field each fault names, one fault per case, and that the first field in the
 /// message's order is the one named when two are wrong. It catches a check that lets a bad
 /// value through to the tables and a refusal that names another field than the one at fault.
@@ -324,6 +351,36 @@ fn each_fault_names_its_field() {
             Fault::Field("spec.constraints.isaLevel"),
             Box::new(|spec| {
                 spec.constraints = Some(constraints(|c| c.isa_level = "x86-64-v9".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "26.1".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "0".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "026".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "12345".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "+26".to_owned()))
             }),
         ),
         (
@@ -743,4 +800,115 @@ fn a_job_with_layers_mounts_and_host_ports_becomes_the_explicit_record() {
         layered_capabilities()
     );
     assert!(checked.wanted.layered_rootfs);
+}
+
+/// A layer from the provider `name`, asked for `reference`.
+fn provider_layer(name: &str, reference: &str) -> v1::Layer {
+    v1::Layer {
+        source: Some(v1::layer::Source::Provider(v1::ProviderSource {
+            provider: name.to_owned(),
+            r#ref: reference.to_owned(),
+        })),
+    }
+}
+
+/// A mount at `target` from the provider `name`, asked for `reference`.
+fn provider_mount(name: &str, reference: &str, target: &str) -> v1::Mount {
+    v1::Mount {
+        source: Some(v1::mount::Source::Provider(v1::ProviderSource {
+            provider: name.to_owned(),
+            r#ref: reference.to_owned(),
+        })),
+        target: target.to_owned(),
+        ..v1::Mount::default()
+    }
+}
+
+/// Asserts that a job whose layers and mounts name providers records the capability
+/// `mount-provider.<name>=true` once for each distinct name (two layers of one provider, and a
+/// mount of it, are one key), beside `layered-rootfs`, lists the names sorted in what admission
+/// asks, and keeps the sources in the record as given; and that a job that names none, and a
+/// job of host paths, records no provider key. Catches a provider named twice recorded twice, a
+/// provider of a mount missed, a name that reaches placement but not admission, and a plain
+/// job that asks for a provider.
+#[test]
+fn a_job_naming_providers_records_a_capability_for_each_distinct_one() {
+    let checked = valid(|spec| {
+        spec.layers = vec![
+            provider_layer("tierstore", "trees/a"),
+            provider_layer("tierstore", "trees/b"),
+        ];
+        spec.mounts = vec![
+            provider_mount("cache", "inputs", "/cache"),
+            provider_mount("tierstore", "trees/c", "/more"),
+        ];
+    });
+    let mut expected = layered_capabilities();
+    for name in ["cache", "tierstore"] {
+        expected.insert(format!("mount-provider.{name}"), FLAG_SET.to_owned());
+    }
+    assert_eq!(checked.spec.constraints.capabilities, expected);
+    assert_eq!(checked.wanted.mount_providers, ["cache", "tierstore"]);
+    assert!(checked.wanted.layered_rootfs);
+    assert_eq!(
+        checked.spec.layers,
+        [
+            Layer::Provider {
+                provider: "tierstore".to_owned(),
+                reference: "trees/a".to_owned(),
+            },
+            Layer::Provider {
+                provider: "tierstore".to_owned(),
+                reference: "trees/b".to_owned(),
+            },
+        ]
+    );
+    assert_eq!(
+        checked.spec.mounts[0].source,
+        MountSource::Provider {
+            provider: "cache".to_owned(),
+            reference: "inputs".to_owned(),
+        }
+    );
+    assert_eq!(checked.spec.constraints.exec, Some(ExecMode::Container));
+    let hosted = valid(|spec| spec.mounts = one_mount());
+    assert_eq!(hosted.spec.constraints.capabilities, layered_capabilities());
+    assert!(hosted.wanted.mount_providers.is_empty());
+    assert!(valid(|_| {}).wanted.mount_providers.is_empty());
+}
+
+/// Asserts that a provider mount alone, with no layer, records its provider's capability and
+/// leaves `exec` unspecified (a mount needs no container of its own), and that a provider
+/// source is refused with a whole-host need (`spec.needs`) and with host isolation
+/// (`spec.constraints.isolation`), as any layer or mount is. Catches a provider job that the
+/// whole-host pass or a host-isolated run would take without its tree.
+#[test]
+fn a_provider_source_is_held_to_the_rules_of_any_rootfs_field() {
+    let alone = valid(|spec| spec.mounts = vec![provider_mount("tierstore", "k", "/in")]);
+    assert_eq!(alone.wanted.mount_providers, ["tierstore"]);
+    assert_eq!(alone.spec.constraints.exec, None);
+    let changes: Vec<Change> = vec![
+        Box::new(|spec| spec.layers = vec![provider_layer("tierstore", "k")]),
+        Box::new(|spec| spec.mounts = vec![provider_mount("tierstore", "k", "/in")]),
+    ];
+    let whole = Some(v1::Needs {
+        whole_host: true,
+        ..v1::Needs::default()
+    });
+    let host = Some(constraints(|c| c.isolation = v1::Isolation::Host.into()));
+    for change in changes {
+        let mut spec = wire("job-1");
+        change(&mut spec);
+        let wholly = v1::JobSpec {
+            needs: whole.clone(),
+            ..spec.clone()
+        };
+        assert_eq!(checked(&wholly).unwrap_err(), Fault::Field("spec.needs"));
+        let hosted = v1::JobSpec {
+            constraints: host.clone(),
+            ..spec
+        };
+        let refused = checked(&hosted).unwrap_err();
+        assert_eq!(refused, Fault::Field("spec.constraints.isolation"));
+    }
 }

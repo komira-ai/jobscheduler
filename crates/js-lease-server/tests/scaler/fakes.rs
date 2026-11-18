@@ -547,6 +547,7 @@ pub fn request_demand() -> Requirements {
         os: None,
         arch: None,
         isa_level: None,
+        os_version: None,
         exec: None,
         accelerator: Some(AcceleratorNeed {
             model: Some(Model::parse("nvidia-a10").unwrap()),
@@ -556,6 +557,7 @@ pub fn request_demand() -> Requirements {
         network: JobNetwork::None,
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     }
 }
 

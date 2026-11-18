@@ -63,7 +63,7 @@
         "required": false
       },
       {
-        "doc": "CPU, in thousandths of a core.",
+        "doc": "CPU, in thousandths of a core. 0: sized from the job's class.",
         "field": [
           "spec",
           "needs",
@@ -76,7 +76,7 @@
         "required": false
       },
       {
-        "doc": "Memory, in bytes.",
+        "doc": "Memory, in bytes. 0: sized from the job's class.",
         "field": [
           "spec",
           "needs",
@@ -290,6 +290,19 @@
         "required": false
       },
       {
+        "doc": "The least version of the host's operating system, as a major version such as 26 (macOS 26): a host is capable when it reports that major version or a later one. Empty: any version.",
+        "field": [
+          "spec",
+          "constraints",
+          "os_version"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.os-version",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
         "doc": "The most seconds the job may run, counted from running. The service refuses a job without one (absent or 0, wall-time-not-positive) and one above its ceiling (wall-time-above-ceiling).",
         "field": [
           "spec",
@@ -362,7 +375,7 @@
         "required": false
       },
       {
-        "doc": "The client's labels, by key. A listing can filter by them.",
+        "doc": "The client's labels, by key. A listing can filter by them. The label size-class names the job's class, whose history sizes what Needs leaves at 0; the label size-fallback names a class whose history sizes it while the job's own class has fewer than five runs.",
         "field": [
           "spec",
           "labels"
@@ -727,6 +740,32 @@
     "response": "jobscheduler.v1.UncordonHostResponse",
     "retry_key": null,
     "rpc": "UncordonHost",
+    "streaming": false
+  },
+  {
+    "doc": "Clears the taint a host has stored, so that placement offers the host jobs again. Operator only. It ends the taint in the server's registry and in the host's stored binding, which is written by compare-and-set as a heartbeat's clear is. A host that has no taint is left as it is and nothing is written. An unknown host is NOT_FOUND, as for a cordon. The call does not reach the agent: an agent whose marker still holds the taint refuses the next start as host-tainted, and the server takes that refusal as the host's taint again, so the operator moves the agent's marker and its owed-* records aside first, or lets the agent clear it itself.",
+    "flags": [
+      {
+        "doc": "The id of the host whose stored taint to clear.",
+        "field": [
+          "host_id"
+        ],
+        "kind": "Text",
+        "name": "host-id",
+        "oneof": null,
+        "repeated": false,
+        "required": true
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "host",
+      "host-taint"
+    ],
+    "request": "jobscheduler.v1.ClearHostTaintRequest",
+    "response": "jobscheduler.v1.ClearHostTaintResponse",
+    "retry_key": null,
+    "rpc": "ClearHostTaint",
     "streaming": false
   },
   {

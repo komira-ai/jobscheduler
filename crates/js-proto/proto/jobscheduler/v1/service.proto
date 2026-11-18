@@ -117,6 +117,20 @@ service JobService {
       body: "*"
     };
   }
+  // Clears the taint a host has stored, so that placement offers the host jobs again.
+  // Operator only. It ends the taint in the server's registry and in the host's stored
+  // binding, which is written by compare-and-set as a heartbeat's clear is. A host that has
+  // no taint is left as it is and nothing is written. An unknown host is NOT_FOUND, as for
+  // a cordon. The call does not reach the agent: an agent whose marker still holds the
+  // taint refuses the next start as host-tainted, and the server takes that refusal as the
+  // host's taint again, so the operator moves the agent's marker and its owed-* records
+  // aside first, or lets the agent clear it itself.
+  rpc ClearHostTaint(ClearHostTaintRequest) returns (ClearHostTaintResponse) {
+    option (google.api.http) = {
+      post: "/v1/hosts/{host_id}:cleartaint"
+      body: "*"
+    };
+  }
   // Lists the pools. Changes nothing.
   rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse) {
     option (google.api.http) = {
@@ -330,6 +344,24 @@ message UncordonHostResponse {
   Host host = 1;
   // The host was cordoned and the call lifted the cordon. False: it was not cordoned.
   bool lifted = 2;
+}
+
+// The request of ClearHostTaint.
+message ClearHostTaintRequest {
+  // The id of the host whose stored taint to clear.
+  string host_id = 1;
+}
+
+// The answer of ClearHostTaint.
+message ClearHostTaintResponse {
+  // The host after the call.
+  Host host = 1;
+  // The host had a taint and the call cleared it. False: it had none, and nothing was
+  // written.
+  bool cleared = 2;
+  // The reason code of the taint the call cleared, as Host.taint_reason gives it. Empty when
+  // cleared is false.
+  string cleared_reason = 3;
 }
 
 // The request of ListPools.

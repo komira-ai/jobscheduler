@@ -18,13 +18,14 @@ use js_proto::v1::{
     Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
 };
 use js_proto::v1::{
-    CancelJobRequest, CancelJobResponse, Constraints, CordonHostRequest, CordonHostResponse,
-    ExecMode, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
-    GetResultResponse, GetUsageRequest, GetUsageResponse, Job, JobFile, JobResult, JobSpec,
-    JobState, JobTimes, ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse,
-    ListPoolsRequest, ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, LogGap,
-    LogStream, Needs, NetworkLevel, PortForward, ResourceUsage, ResultReason, StartFailureCode,
-    SubmitJobRequest, SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
+    Constraints, CordonHostRequest, CordonHostResponse, ExecMode, GetJobRequest, GetJobResponse,
+    GetLogsRequest, GetLogsResponse, GetResultRequest, GetResultResponse, GetUsageRequest,
+    GetUsageResponse, Job, JobFile, JobResult, JobSpec, JobState, JobTimes, ListHostsRequest,
+    ListHostsResponse, ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse,
+    ListProvidersRequest, ListProvidersResponse, LogGap, LogStream, Needs, NetworkLevel,
+    PortForward, ResourceUsage, ResultReason, StartFailureCode, SubmitJobRequest,
+    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -219,6 +220,18 @@ impl JobService for Stub {
         self.answer("UncordonHost", request, response)
     }
 
+    async fn clear_host_taint(
+        &self,
+        request: Request<ClearHostTaintRequest>,
+    ) -> Result<Response<ClearHostTaintResponse>, Status> {
+        let response = ClearHostTaintResponse {
+            host: Some(host("host-a")),
+            cleared: true,
+            cleared_reason: "residue".to_owned(),
+        };
+        self.answer("ClearHostTaint", request, response)
+    }
+
     async fn list_pools(
         &self,
         request: Request<ListPoolsRequest>,
@@ -387,6 +400,7 @@ pub fn spec() -> JobSpec {
             arch: "x86_64".to_owned(),
             exec: ExecMode::Container.into(),
             isa_level: "x86-64-v3".to_owned(),
+            os_version: String::new(),
             accelerator: Some(js_proto::v1::Accelerator {
                 vendor: Some("nvidia".to_owned()),
                 model: Some("nvidia-a100".to_owned()),

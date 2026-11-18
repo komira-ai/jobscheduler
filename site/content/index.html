@@ -44,7 +44,7 @@ js: refused: no-capable-host: no host and no catalog could ever serve the job
     <p class="kicker">What it does</p>
     <h2>A job, an agent, a placement core</h2>
     <ul class="why-grid">
-      <li><h3>A job is recorded before it is placed</h3><p>A client runs <code>js job submit</code> with an image pinned by digest and a wall limit above 0, and the server records the job as queued before it answers. The same id with the same job answers from the job the first submit made. <code>js job cancel</code> cancels a job.</p></li>
+      <li><h3>A job is recorded, then placed in the same call</h3><p>A client runs <code>js job submit</code> with an image pinned by digest and a wall limit above 0, and the server records the job before it answers. When no queued job of its priority or above waits ahead, the same call places it on a host with room, and the host's waiting heartbeat carries its start. The same id with the same job answers from the job the first submit made. <code>js job cancel</code> cancels a job.</p></li>
       <li><h3>An agent on every host</h3><p><code>js-agent</code> offers the host's CPU, memory and GPUs, heartbeats, and runs container jobs on Linux (through Docker, Podman or crun) and native jobs on a Mac.</p></li>
       <li><h3>A whole node, quiet, when asked</h3><p>A job that needs the whole host is placed with the whole host booked, and starts when its host's agent reports the host quiet. A host that holds such a job's mark takes no other job, except as backfill.</p></li>
       <li><h3>Placement by measured and predicted load</h3><p>The <code>js-sched</code> crate admits an action to a worker when measured load plus predicted cost stays within the worker's CPU and memory. The server places every job with it, as the only placement; it keeps one scheduler for the life of the server and tells it of every hello and every accepted heartbeat with its load reading.</p></li>
@@ -72,7 +72,7 @@ js: refused: no-capable-host: no host and no catalog could ever serve the job
     <tr><td>A token for each tenant of the host and pool routes</td><td><span class="tag tag-planned">not built: one shared token</span></td></tr>
     <tr><td>An idempotent submit</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the id of the job: the same id with the same job answers from the job the first submit made</span></td></tr>
     <tr><td>A lease server for macOS</td><td><span class="tag tag-planned">none: Linux x86_64 and arm64 only</span></td></tr>
-    <tr><td>A published package of the agent</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the Debian package, x86_64 and arm64, in the apt repository once the release's apt settings are set; the macOS package is built, and not published</span></td></tr>
+    <tr><td>A published package of the agent</td><td><span class="tag tag-ok">built</span> <span class="tag tag-muted">the Debian package, x86_64 and arm64, in the apt repository once the release's apt settings are set; the signed macOS package under <code>pkg/jobscheduler</code> of the same bucket, for hostkeeper to install</span></td></tr>
     <tr><td>kbf running its actions on the agent</td><td><span class="tag tag-planned">design only</span></td></tr>
     </tbody></table></div>
     <p class="source-note">Sources for each row are on the <a href="concepts.html">concepts</a>, <a href="install.html">install</a> and <a href="kbf.html">kbf</a> pages.</p>

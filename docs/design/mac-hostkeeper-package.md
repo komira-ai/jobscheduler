@@ -13,12 +13,14 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
   by hand or in the release's call (`sign: true`), in the environment `pkg-signing`; without that environment's secrets
   it skips with a notice.
 - `release.yml` calls it as `beta-macos-pkg` with the release's version. Its job `pkg-upload` puts the signed package
-  in the package repository once the three beta jobs passed.
+  in the package repository once `publish` passed and `beta-macos-pkg` has ended (it waits for no beta test), before
+  the release's `desired` starts `hostkeeper-desired.yml`.
 - `cargo xtask release desired --pkg-url` adds a `macos-arm64` entry to the release's targets when the package is in the
   package repository, and `hostkeeper-desired.yml` sets it for the host group `mac-build`.
 - The agent reports the capabilities `os` and `arch` as detected (`crates/js-agent/src/host.rs`, `capabilities`):
-  `os=macos`, `arch=arm64` on an Apple silicon Mac. It reports no `os_version` capability (bundle admission reads the
-  host's version locally, `crates/js-agent/src/bundle/host.rs`).
+  `os=macos`, `arch=arm64` on an Apple silicon Mac, and `os_version` as the major version of its `ProductVersion`
+  (`crates/js-agent/src/os_version.rs`; bundle admission still reads the host's version locally,
+  `crates/js-agent/src/bundle/host.rs`).
 - kbf's executor asks every job for `os=linux`, and kbf's design leaves macOS out of scope until a macOS design exists:
   the Macs keep `kbf-daemon` with the native driver (kbf repository, `docs/design/actions-as-jobs.md`, section 14).
   A Mac agent that registers is therefore offered no kbf action until kbf asks for `os=macos`. This document does not
@@ -81,8 +83,9 @@ The parent directories `Library`, `Library/Application Support`, `Library/Launch
 as owner), any script, and another identifier or version.
 
 - The labels are `js-agent` and `js-agent.session` (`crates/js-mac-provision/src/daemon.rs`: `AGENT_LABEL`,
-  `SESSION_LABEL`; the plist goldens; the update hook's launchd tests). `js-mac-provision` has two verbs,
-  `agent-plist`, which takes no flag and prints the fixed agent plist, and `session-plist --daemon-requirement <REQ>`.
+  `SESSION_LABEL`; the plist goldens; the update hook's launchd tests). The two `js-mac-provision` verbs
+  of this package are `agent-plist`, which takes no flag and prints the fixed agent plist, and
+  `session-plist --daemon-requirement <REQ>`; its pf anchor verbs are unchanged.
   Its `postinstall` verb is gone, with its link and its tests.
 - The agent plist is fixed text, checked for drift, never edited on a host. Its program arguments are
   `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file
@@ -120,8 +123,9 @@ as owner), any script, and another identifier or version.
 
 ## Release and desired version
 
-1. `release.yml`'s `beta-macos-pkg` calls `js-agent-macos-pkg.yml` with `version` the release's and `sign: true`. A
-   pull request runs none of it.
+1. `release.yml`'s `beta-macos-pkg` calls `js-agent-macos-pkg.yml` with `version` the release's, `sign: true` and
+   `secrets: inherit` (a called workflow reads every secret it is not passed as empty, so without it `sign` would skip).
+   A pull request runs none of it.
 2. The `sign` job runs on main for that call (and for a manual run), in the environment `pkg-signing`, with the
    secrets `MACOS_INSTALLER_P12` (the "Developer ID Installer" certificate and key as a base64 PKCS#12 file) and
    `MACOS_INSTALLER_P12_PASSWORD`. It imports them into a temporary keychain for `productsign` alone, finds the
@@ -131,8 +135,8 @@ as owner), any script, and another identifier or version.
    is signed with is the one to check for first; another identity needs each Mac's signers file extended by hand and its
    daemon restarted before the first order, since nothing pushes that file to an enrolled Mac. Without the secrets the
    job says so in a notice and the release has no signed package.
-3. `pkg-upload` runs on ubuntu in the environment `apt-publish`, after `promote-macos` (so after all three beta jobs
-   and `publish`), never on a pull request. It downloads the artifact `js-agent-macos-pkg-signed`, gates on the
+3. `pkg-upload` runs on ubuntu in the environment `apt-publish`, after `publish` passed and `beta-macos-pkg` ended,
+   pass or fail (it waits for no test of the beta stage), never on a pull request. It downloads the artifact `js-agent-macos-pkg-signed`, gates on the
    settings as the apt jobs do (`channels gate`), assumes `vars.APT_PUBLISH_ROLE_ARN`, and runs `channels pkg upload
    --dir <dir> --version <V> --bucket <b> --work <dir>`. The verb checks that `<dir>/SHA256SUMS` lists exactly the
    package with its digest, puts the package and then `SHA256SUMS` under the key prefix `pkg/jobscheduler/<V>/` (the one
@@ -143,8 +147,9 @@ as owner), any script, and another identifier or version.
    `<base>/<V>/SHA256SUMS` and the package and checks the package's sha256 against it. When they are there it adds the
    `macos-arm64` entry, `{"installer":"macos-pkg","repository":"komira-stable","packageVersion":V,"digest":<sha256 of
    the signed package>,"bytes":"<size>","manifest":<the Mac manifest>}`, and writes `set-mac=true`. When the SHA256SUMS
-   is absent (404) it writes `set-mac=false` and the targets have no `macos-arm64`, so the Linux entries are
-   unaffected; any other failure is an error.
+   is absent (404, or the 403 CloudFront over a bucket it may not list answers for a missing object) it writes
+   `set-mac=false` and the targets have no `macos-arm64`, so the Linux entries are unaffected; any other failure is
+   an error.
 5. `hostkeeper-desired.yml`'s `check` job outputs `set-mac`. Its job `set-desired-mac` calls the same reusable workflow
    at the same pin with `host_group: mac-build` and the same version and targets (a version set again with other
    targets is refused `release_exists`), after `set-desired`, and runs only when both `set` and `set-mac` are `true`.
@@ -173,12 +178,16 @@ once the group has a desired version for it, so the group may list js-agent befo
 Mac. Until the group lists the package, a `set-desired` for the group is refused `not_in_host_group`.
 
 The lease server's agent pool configuration gains a pool the Macs meet: `capabilities = { os = "macos", arch =
-"arm64" }` and `exec = "sandbox-exec"`. The Macs must reach its agent listener.
+"arm64", layered-rootfs = "true" }` and `exec = "sandbox-exec"`. A joined pool places a host by the capabilities it
+names, so a job with mounts (which asks for `layered-rootfs`, as kbf's macOS action jobs do) is placed on a Mac only
+when the pool names it; every native agent of a release that takes mounts reports it, and one that does not is refused
+at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The Macs
+must reach its agent listener.
 
 ## Platform properties
 
-The hello reports `os=macos` and `arch=arm64`. An `os_version` capability, the Mac's `ProductVersion` compared as
-at-least, is a separate change in `js-caps` and the agent; until it lands a job must not ask for one.
+The hello reports `os=macos`, `arch=arm64` and `os_version`, the major version of the Mac's `ProductVersion`. A
+job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as at least, by major version.
 
 ## Order
 
@@ -203,7 +212,7 @@ at-least, is a separate change in `js-caps` and the agent; until it lands a job 
 - No token on the Mac: the agent does not start, so the hook's `verify` (the agent runs and is registered) fails;
   hostkeeper runs the hook's `rollback` and, a first install having no previous version, removes the package. A later
   order installs it again once the host setup is done.
-- No signed package for a release (the environment `pkg-signing` is not set up, or a beta job failed): `pkg-upload`
+- No signed package for a release (the environment `pkg-signing` is not set up, or `beta-macos-pkg` failed): `pkg-upload`
   uploads nothing, `release desired` writes `set-mac=false`, and the Linux nodes are set as before.
 - The entry does not resolve (no `macos-pkg` format in the descriptor, platform missing, no `packages` entry for
   js-agent): the Mac shows `no_build_for_host`.

@@ -1,4 +1,4 @@
-//! The hello of a whole `--runtime crun` agent: `gpu-passthrough` is reported by an agent
+//! The hello of a whole crun agent: `gpu-passthrough` is reported by an agent
 //! given a device list and by no other, `host-jobs` by an agent given `--allow-host-jobs` and
 //! by no other, and an operator cannot claim either. Each run of the agent
 //! has a host of its own: the stand-in files of the crun start check in a directory of the
@@ -26,7 +26,7 @@ use crate::bounds::WakeBudget;
 use crate::crun_host::Fixture;
 use crate::support::{
     Host, Jobs, Lowest, Ran, Script, ScriptConnector, beat_ok, code, flags, linux_host, refused,
-    reply, run_on, welcome,
+    reply, run_on_defaulted, welcome,
 };
 
 /// A sleeper that lets the worker (taken from the hook) finish what it was given at every
@@ -52,7 +52,7 @@ impl Sleeper for Settle<'_> {
     }
 }
 
-/// The fake machine, with the start check of `--runtime crun` reading the test's own host.
+/// The fake machine, with the start check of the crun runtime reading the test's own host.
 struct GpuHost {
     fake: FakeMachine,
     crun: CrunHost,
@@ -67,10 +67,8 @@ impl Machine for GpuHost {
     }
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
-        let plan = match build.backend {
-            Backend::Container(settings) => settings.crun().map(|plan| plan.host_jobs),
-            Backend::Native(_) => None,
-        };
+        let Backend::Container(settings) = build.backend;
+        let plan = settings.crun().map(|plan| plan.host_jobs);
         self.host_jobs.lock().expect("host jobs").push(plan);
         self.fake.runtime(build)
     }
@@ -174,8 +172,6 @@ fn run_crun(
     let mut owned: Vec<String> = [
         "--host-id",
         "h1",
-        "--runtime",
-        "crun",
         "--job-user",
         Fixture::USER,
         "--crun-bin",
@@ -209,7 +205,7 @@ fn run_crun(
     let machine: Arc<dyn Machine> = gpu_host.clone();
     let jobs: Jobs<'_> = (machine, Some(&hook));
     let host = host_of(&fixture);
-    let ran = run_on(
+    let ran = run_on_defaulted(
         &flags(&all),
         &host,
         &connector,
@@ -320,6 +316,54 @@ fn the_hello_reports_layered_rootfs_only_where_the_kernel_has_its_calls() {
     let (ran, hello) = crun_hello("hello-layered-claimed", &claimed);
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     let said = "--capability: layered-rootfs is detected and cannot be set";
+    assert!(ran.err.contains(said), "{}", ran.err);
+    assert_eq!(hello, Value::Null);
+}
+
+/// Proves a crun agent given `--mount-provider NAME=SOCKET` reports `mount-provider.NAME=true`
+/// for each provider where it reports `layered-rootfs`, and none where the kernel has not the
+/// calls of a job's layers and mounts, and that `--capability mount-provider.NAME=true` is
+/// refused naming the key before a hello is sent. Catches a server that places a job naming a
+/// provider on a host that could not give it, a provider the agent was given and never
+/// reports, and a provider an operator could claim by hand.
+#[test]
+fn the_hello_reports_a_mount_provider_only_where_layered_rootfs_is() {
+    let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "hello-providers");
+    let socket = |name: &str| format!("{name}={}/{name}.sock", dir.path().display());
+    let (first, second) = (socket("tierstore"), socket("cache"));
+    let given = [
+        "--mount-provider",
+        &first,
+        "--mount-provider",
+        &second,
+        "--mount-provider-wait",
+        "30",
+    ];
+    let (ran, hello) = crun_hello("hello-provider", &given);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let caps = &hello["capabilities"];
+    assert_eq!(
+        caps["mount-provider.tierstore"], "true",
+        "{hello} {}",
+        ran.err
+    );
+    assert_eq!(caps["mount-provider.cache"], "true", "{hello}");
+    assert_eq!(caps["layered-rootfs"], "true", "{hello}");
+
+    let (ran, hello) = crun_hello_on("hello-provider-old", &given, |host| {
+        host.kernel_calls = no_calls
+    });
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let caps = hello["capabilities"].as_object().expect("capabilities");
+    assert!(
+        !caps.keys().any(|key| key.starts_with("mount-provider.")),
+        "{hello}"
+    );
+
+    let claimed = ["--capability", "mount-provider.tierstore=true"];
+    let (ran, hello) = crun_hello("hello-provider-claimed", &claimed);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let said = "--capability: mount-provider.tierstore is detected and cannot be set";
     assert!(ran.err.contains(said), "{}", ran.err);
     assert_eq!(hello, Value::Null);
 }

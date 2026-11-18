@@ -101,6 +101,7 @@ pub fn demand() -> Demand {
         os: Some("linux".to_owned()),
         arch: Some("x86_64".to_owned()),
         isa_level: None,
+        os_version: None,
         exec: Some(ExecMode::Container),
         accelerator: Some(AcceleratorNeed {
             model: Some(Model::parse("nvidia-a10").unwrap()),
@@ -110,6 +111,7 @@ pub fn demand() -> Demand {
         network: Default::default(),
         host_ports: Vec::new(),
         layered_rootfs: false,
+        mount_providers: Vec::new(),
     }
 }
 

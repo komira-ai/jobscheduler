@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::agents_support::{JOIN, Session, entry, hosts, post};
 use crate::job_hosts::{cpu_hello, placing_server, restarted_placing};
 use crate::jobs_support::{JobBody, commands, job_agent, job_of, submit_body};
-use crate::support::{Harness, Kept, kept_bindings};
+use crate::support::{Harness, Kept, Reply, TOKEN, kept_bindings, request};
 
 /// A heartbeat of `session` carrying `extra` fields (a taint), answered 200.
 async fn beat_with(h: &Harness, session: &Session, extra: Value) -> Value {
@@ -27,6 +27,13 @@ fn agent_file(h: &Harness) -> PathBuf {
     let mut path = h.scratch.state().into_os_string();
     path.push(".agents");
     PathBuf::from(path)
+}
+
+/// `ClearHostTaint` of `host` through the job service's gateway on `h`'s job port.
+async fn clear_taint(h: &Harness, host: &str) -> Reply {
+    let job = h.running.job_addr().expect("the job service is on");
+    let path = format!("/v1/hosts/{host}:cleartaint");
+    request(job, "POST", &path, Some(TOKEN), Some(b"{}")).await
 }
 
 /// Submits the job `id` (1 core, 1 GiB), expected to be queued.
@@ -76,15 +83,17 @@ async fn a_tainted_host_is_shown_acknowledged_and_sent_no_start() {
 }
 
 /// Asserts that a taint report is not acknowledged while it cannot be written: the host is
-/// tainted at once (it is sent no start), the reply says `taint_ack` false and the failure
-/// is counted, and once the file can be written the next report is acknowledged, a tick
-/// having placed nothing on the host meanwhile. It
-/// catches an agent told to stop reporting a taint the server could lose in a restart.
+/// tainted at once (it is sent no start: the job submitted after the report is placed by its
+/// submit on a second, clean host and started there), the reply says `taint_ack` false and the
+/// failure is counted, and once the file can be written the next report is acknowledged, a tick
+/// having placed nothing on the tainted host meanwhile. It catches an agent told to stop
+/// reporting a taint the server could lose in a restart, and a host unwritable for its taint
+/// that the placement in `SubmitJob` still takes as clean.
 #[tokio::test]
 async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
     let h = placing_server("host_taint_write", Kept::Files).await;
     let me = job_agent(&h, &cpu_hello("burst-1")).await;
-    submit_job(&h, "taint-write").await;
+    let clean = job_agent(&h, &cpu_hello("burst-2")).await;
     let blocker = h.scratch.path("leases.toml.agents.tmp");
     fs::create_dir(&blocker).unwrap();
     let errors = h.running.agent_errors();
@@ -98,6 +107,7 @@ async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
         entry(&hosts(&h).await, "burst-1")["taint"]["reason"],
         "residue"
     );
+    submit_job(&h, "taint-write").await;
 
     fs::remove_dir(&blocker).unwrap();
     h.ticks.step().await;
@@ -106,6 +116,10 @@ async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
     assert_eq!(commands(&reply), (vec![], vec![]), "{reply}");
     let text = fs::read_to_string(agent_file(&h)).unwrap();
     assert!(text.contains("taint_reason = \"residue\""), "{text}");
+    let (starts, stops) = commands(&beat_with(&h, &clean, json!({})).await);
+    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    assert_eq!(jobs, ["taint-write"]);
+    assert!(stops.is_empty());
 }
 
 /// Asserts that a taint outlives a restart: two tainted hosts are put back awaiting with
@@ -233,6 +247,8 @@ async fn a_taint_reported_cleared_ends_in(kept: Kept) {
     assert_eq!(jobs, ["after-clear"], "{reply}");
 
     let h = restarted_placing(first).await;
+    let text = kept_bindings(&h);
+    assert_eq!(text.matches("taint_reason").count(), 0, "{text}");
     let listing = hosts(&h).await;
     assert!(
         listing["hosts"]
@@ -267,4 +283,59 @@ async fn a_clear_is_not_acknowledged_before_it_can_be_written() {
     assert_eq!(reply["taint_cleared_ack"], true);
     let text = fs::read_to_string(agent_file(&h)).unwrap();
     assert!(!text.contains("taint_reason"), "{text}");
+}
+
+/// Asserts the operator's clear end to end, with the bindings in files and in the store: a host
+/// whose agent reported a taint takes no job (422 `no-capable-host`); `ClearHostTaint` answers
+/// `cleared` with the reason, `GET /v1/hosts` shows no taint, the bindings hold none, a job
+/// submitted after it starts on the host (the only one), and a second call answers `cleared`
+/// false; and after a restart the host is not put back tainted (the clear survived). It
+/// catches a clear that forgets the taint in memory only (a restart would bring it back), a
+/// clear that leaves placement refusing the host, and a repeat that claims a clear.
+#[tokio::test]
+async fn a_taint_the_operator_clears_ends_and_stays_ended() {
+    for kept in Kept::BOTH {
+        a_taint_cleared_by_the_operator_ends_in(kept).await;
+    }
+}
+
+async fn a_taint_cleared_by_the_operator_ends_in(kept: Kept) {
+    let first = placing_server("host_taint_operator", kept).await;
+    let me = job_agent(&first, &cpu_hello("burst-1")).await;
+    let held = json!({ "reason": "residue", "run_id": "run-1-1", "check": "daemonised-child" });
+    let reply = beat_with(&first, &me, json!({ "taint": held })).await;
+    assert_eq!(reply["taint_ack"], true);
+    let refused = submit_body(&first, &JobBody::new("before-clear").json()).await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+
+    let cleared = clear_taint(&first, "burst-1").await;
+    assert_eq!(cleared.status, 200, "{}", cleared.body);
+    assert_eq!(cleared.json()["cleared"], true);
+    assert_eq!(cleared.json()["clearedReason"], "residue");
+    assert_eq!(cleared.json()["host"]["taintReason"], Value::Null);
+    assert_eq!(entry(&hosts(&first).await, "burst-1").get("taint"), None);
+    let text = kept_bindings(&first);
+    assert_eq!(text.matches("taint_reason").count(), 0, "{text}");
+    submit_job(&first, "after-clear").await;
+    first.ticks.step().await;
+    let reply = beat_with(&first, &me, json!({})).await;
+    let (starts, _) = commands(&reply);
+    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    assert_eq!(jobs, ["after-clear"], "{reply}");
+
+    let again = clear_taint(&first, "burst-1").await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert_eq!(again.json()["cleared"], Value::Null);
+    assert_eq!(again.json()["clearedReason"], Value::Null);
+
+    let h = restarted_placing(first).await;
+    let listing = hosts(&h).await;
+    assert!(
+        listing["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|host| host.get("taint").is_none()),
+        "{listing}"
+    );
 }
