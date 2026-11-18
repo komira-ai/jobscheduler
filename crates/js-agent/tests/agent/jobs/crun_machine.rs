@@ -11,7 +11,7 @@ use js_agent::integrity::HostView;
 use js_agent::lifecycle::{
     Found, Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
 };
-use js_agent::quota::ScratchQuota;
+use js_agent::quota::{FakeQuota, ScratchQuota};
 use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock, System};
 use js_agent_wire::{LogTail, PortRange};
 
@@ -43,6 +43,14 @@ pub(super) type HostPortsSeen = (Vec<PortRange>, Vec<PortRange>);
 impl CrunMachine {
     pub(super) fn new() -> Arc<Self> {
         Self::with_system(System::new().with_crun(seams()))
+    }
+
+    /// The node's machine whose scratch root has `quota`.
+    pub(super) fn with_quota(quota: FakeQuota) -> Arc<Self> {
+        let mut machine = Self::with_system(System::new().with_crun(seams()));
+        let only = Arc::get_mut(&mut machine).expect("a new machine");
+        only.fake = FakeMachine::new().with_quota(quota);
+        machine
     }
 
     /// The machine over `system`, with the fake machine's view, cgroup files and quota.
@@ -100,6 +108,10 @@ impl Runtime for Noting {
 
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
         self.inner.lease_dir(run_id)
+    }
+
+    fn tmp_dir(&self, run_id: &str) -> Option<PathBuf> {
+        self.inner.tmp_dir(run_id)
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {

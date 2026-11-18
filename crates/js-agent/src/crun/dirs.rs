@@ -56,6 +56,43 @@ pub(super) fn take_dir(
     fchmod_open(&open)
 }
 
+/// Takes the job's temporary directory `dir` the lifecycle made for the run
+/// ([`Runtime::tmp_dir`]) and sets its mode to `0755`: it must be there and be a directory
+/// (not a link) that holds nothing, or it is refused and nothing is made in it, so what the
+/// job writes there is all made after the lifecycle put the directory under its project.
+/// The directory is opened once, without following a link, and what is checked and set is
+/// what was opened.
+///
+/// [`Runtime::tmp_dir`]: crate::lifecycle::Runtime::tmp_dir
+pub(super) fn take_empty_dir(dir: &Path) -> io::Result<()> {
+    let open = open_nofollow(dir)?;
+    let empty = std::fs::read_dir(format!("/proc/self/fd/{}", open.as_raw_fd()))
+        .is_ok_and(|mut entries| entries.next().is_none());
+    if !empty {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not empty", dir.display()),
+        ));
+    }
+    fchmod_open(&open)
+}
+
+/// The prefix of the name of a job's temporary directory: `.tmp-<lease name>`, beside the
+/// lease's directory. A run id is `[A-Za-z0-9._-]` with a leading alphanumeric, so no run's
+/// directory and no lease's (`.lease-`) is named so.
+pub(super) const TMP_PREFIX: &str = ".tmp-";
+
+/// The directories of a job's temporary directory and where the container sees each: one
+/// bound at `/tmp`, one at `/var/tmp`, both under the one bound of the temporary directory.
+pub(super) const TMP_PLACES: [(&str, &str); 2] = [("tmp", "/tmp"), ("var-tmp", "/var/tmp")];
+
+/// The job's temporary directory of the lease whose directory is `lease_dir`, named `name`:
+/// beside the lease's directory.
+pub(super) fn tmp_dir_beside(lease_dir: &Path, name: &str) -> PathBuf {
+    let parent = lease_dir.parent().unwrap_or(lease_dir);
+    parent.join(format!("{TMP_PREFIX}{name}"))
+}
+
 /// The names of what the assembly of a run's file system puts in its lease directory before
 /// the container is made: the writable layer and the work directory of a layered root, and
 /// those of its copy-on-write mounts.

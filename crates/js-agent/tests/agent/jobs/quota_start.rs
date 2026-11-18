@@ -386,7 +386,7 @@ fn agent_starts(hello: &Hello, extra: &[&str]) -> usize {
     let local = local_with("quota-agrees-local", &rest);
     let mut h = Harness::new("quota-agrees");
     h.config.capacity = Capacity::of(hello);
-    h.config.quota = Some(local.run_quota(Arc::new(FakeQuota::new())));
+    h.config.quota = Some(local.run_quota(Arc::new(FakeQuota::new()), false));
     h.restart().unwrap();
     (0..20)
         .take_while(|n| {

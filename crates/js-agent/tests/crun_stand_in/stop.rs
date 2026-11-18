@@ -151,6 +151,37 @@ fn a_removal_that_fails_leaves_the_container_to_be_removed_again() {
     assert!(runtime.list_labelled().expect("lists").is_empty());
 }
 
+/// Proves a removal whose job's temporary directory cannot be removed (a directory in it the
+/// agent cannot write) fails with that reason and keeps the container listed, so that it is
+/// tried again, and succeeds once the cause is gone, leaving no temporary directory. Catches a
+/// container forgotten while its job's `/tmp` is still on the disk.
+#[test]
+fn a_tmp_directory_that_cannot_be_removed_leaves_the_container_to_be_removed_again() {
+    let node = Node::new("stop-tmp-removal");
+    let mut runtime = node.open();
+    let id = runtime
+        .create_and_start(&node.spec("r6-exit"))
+        .expect("started");
+    runtime.wait_ended(&id);
+    let tmp = node
+        .lease_of(&id.0)
+        .with_file_name(format!(".tmp-{}", id.0));
+    let inside = tmp.join("tmp");
+    std::fs::write(inside.join("left"), b"what the job wrote").expect("a file");
+    std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o555)).expect("mode");
+    let why = runtime.remove(&id).expect_err("not removed");
+    assert!(
+        why.to_string()
+            .contains("remove the job's temporary directory"),
+        "{why}"
+    );
+    assert_eq!(runtime.list_labelled().expect("lists").len(), 1);
+    std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    assert_eq!(runtime.remove(&id), Ok(()));
+    assert!(!tmp.exists());
+    assert!(runtime.list_labelled().expect("lists").is_empty());
+}
+
 /// Proves removing a container that still runs ends it first: a job that holds until the
 /// lease's `cgroup.kill` is written is removed without a stop, the kill ends it within the
 /// wait, and nothing of the lease is left. Catches a removal that leaves a process behind

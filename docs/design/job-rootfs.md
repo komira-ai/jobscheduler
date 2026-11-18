@@ -653,9 +653,10 @@ mount -t overlay overlay <mounts>/<lease>/rootfs \
 - The upper's root directory is made owned by the job's identity in the container (uid and gid 1000) and mode 0755, so
   the job can make files at the top of its root: `kbf-task` of a tree job makes `/.kbf-run` there, and with a root-owned
   `/` that `mkdir` failed with `EACCES`. The targets the agent makes in the root stay owned by the container's root.
-- The root is now writable where its modes allow the job (uid 1000 in the container) to write. `/tmp`, `/var/tmp` and
-  `/run` stay tmpfs, `/root` stays the run's home, `/scratch` stays the run's scratch: nothing moves for a program
-  that writes where it did.
+- The root is now writable where its modes allow the job (uid 1000 in the container) to write. `/tmp` and `/var/tmp`
+  stay the job's temporary directory (on the scratch disk, under a project quota of its own: `--job-tmp-gib`), `/run`
+  stays a tmpfs, `/root` stays the run's home, `/scratch` stays the run's scratch: nothing moves for a program that
+  writes where it did.
 
 **Where the mounts are: `<mounts>`, which is `/run/js-agent/mounts`, outside the scratch root.** The agent's start sweep
 removes every entry of the scratch root that is not a kept run (`ScratchRoot::sweep`,

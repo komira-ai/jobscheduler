@@ -92,9 +92,9 @@ esac
 
 /// The node: stand-in files of a host that passes the start check, a store with one image,
 /// cgroup directories, and the stand-in.
-struct Node {
+pub(super) struct Node {
     /// The directory of the node, removed when the test binary ends.
-    dir: TestDir,
+    pub(super) dir: TestDir,
     host: CrunHost,
     crun: PathBuf,
     state: PathBuf,
@@ -106,7 +106,7 @@ struct Node {
 
 /// The one node of this test binary: the seams are function pointers, so what they read is
 /// static.
-fn node() -> &'static Node {
+pub(super) fn node() -> &'static Node {
     static NODE: OnceLock<Node> = OnceLock::new();
     NODE.get_or_init(|| {
         let (uid, gid) = (
@@ -453,11 +453,16 @@ impl Rig {
 
     /// [`Rig::new`] over the pool `pool` describes.
     fn on_pool(name: &str, extra: &[&str], pool: &'static str) -> Self {
-        Self::on_flags(name, crun_flags("h1", extra), pool)
+        Self::on_flags(name, crun_flags("h1", extra), pool, CrunMachine::new())
     }
 
     /// [`Rig::on_pool`] with the agent's flags given whole.
-    fn on_flags(name: &str, flags: Vec<String>, pool: &'static str) -> Self {
+    pub(super) fn on_flags(
+        name: &str,
+        flags: Vec<String>,
+        pool: &'static str,
+        machine: Arc<CrunMachine>,
+    ) -> Self {
         let node = node();
         end_leftovers(&node.scratch);
         for signal in ["ready", "go", "calls"] {
@@ -471,7 +476,6 @@ impl Rig {
         let _ = fs::remove_dir_all(node.state.join("held"));
         let server = Server::start_pool(name, &[], pool);
         let address = Arc::new(Mutex::new(server.url()));
-        let machine = CrunMachine::new();
         let agent = Self::spawn(&server, &address, &flags, &machine);
         let worker = match agent.try_worker() {
             Ok(worker) => worker,
@@ -513,7 +517,7 @@ impl Rig {
     /// One heartbeat of the agent, and the worker done with the reply to it, which went
     /// through: the agent then waits the pool's interval, or nothing after a reply that says
     /// `beat_now` (a held reply, or one with no command), never a backoff after a failure.
-    fn beat(&self) {
+    pub(super) fn beat(&self) {
         self.agent.elapse();
         let wait = self.agent.next_wait();
         assert!(wait == QUICK_INTERVAL || wait.is_zero(), "{wait:?}");
@@ -521,7 +525,7 @@ impl Rig {
     }
 
     /// Submits a job of the node's image; returns its id.
-    fn queued(&self) -> String {
+    pub(super) fn queued(&self) -> String {
         let body = json!({
             "spec": {
                 "image": format!("registry.example/job:1@{}", digest()),
@@ -536,7 +540,7 @@ impl Rig {
     }
 
     /// What the server says of `job`: its state, and its result's reason when it has one.
-    fn view(&self, job: &str) -> (String, Option<String>) {
+    pub(super) fn view(&self, job: &str) -> (String, Option<String>) {
         let state = self.server.job_state(job);
         let result = self.server.job_result(job);
         let reason = result.body["result"]["reason"].as_str().map(str::to_owned);
@@ -545,7 +549,7 @@ impl Rig {
 
     /// Beats until `done` holds of what the listing says of `run`. The heartbeats are the
     /// progress events; a bound on their number keeps a regression from looping.
-    fn until(&self, run: &str, done: impl Fn(&(String, Option<String>)) -> bool) {
+    pub(super) fn until(&self, run: &str, done: impl Fn(&(String, Option<String>)) -> bool) {
         let mut seen = self.view(run);
         for _ in 0..100 {
             if done(&seen) {
@@ -558,7 +562,7 @@ impl Rig {
     }
 
     /// Beats until the stand-in has said it is up, and the job reads running.
-    fn until_up(&self, run: &str) {
+    pub(super) fn until_up(&self, run: &str) {
         let ready = node().dir.path().join("ready");
         for _ in 0..100 {
             let said = fs::read_to_string(&ready).unwrap_or_default();
@@ -567,7 +571,7 @@ impl Rig {
             }
             self.beat();
         }
-        panic!("the stand-in never said it was up");
+        panic!("the stand-in never said it was up: {:?}", self.view(run));
     }
 }
 

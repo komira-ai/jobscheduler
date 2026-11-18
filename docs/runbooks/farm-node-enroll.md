@@ -27,7 +27,8 @@ Examples use `js.example.com`, `node-5` and `farm`. Replace them.
   `js-agent --version` prints after the program name.
 - Root on the node.
 - What the agent's start check needs and the package does not carry: `crun` and `uidmap` from
-  the distribution, the scratch mount and, where user namespaces are restricted, crun's AppArmor
+  the distribution, the scratch mount (XFS with `prjquota`: see "No job starts" in section 8)
+  and, where user namespaces are restricted, crun's AppArmor
   profile ("What the host provides" in `packaging/js-agent/deb/README.md`). The package makes
   the job user `jsjob` and its subuid and subgid ranges itself, and keeps ranges a host has.
 - The node's repository entry of the stable suite, `komira-stable` (section 9), which
@@ -347,11 +348,49 @@ restart the one that changed.
 
 For `quota-without-pool-disk` on a farm node, remove `--scratch-quota` from the node's flags file
 and restart the agent: the farm allocates no disk per job, so its pools book no disk and its nodes
-enforce no per-job quota. Only a pool that does book disk per job takes quota hosts: its file
+enforce no per-run scratch quota (each job's `/tmp` and `/var/tmp` is still bounded: see the next
+section). Only a pool that does book disk per job takes quota hosts: its file
 names `scratch-quota = "project"` under `[capabilities]` and books `disk_bytes` under `[shape]` of
 at least the host's `scratch-default-gib` (2 GiB when the flag is not given) and at most the disk
 the host reports. A pool that names `scratch-quota` without `disk_bytes` is refused when the
 server loads the file.
+
+### No job starts: `quota-unavailable`, the scratch mount has no `prjquota`
+
+Each contained job's `/tmp` and `/var/tmp` is a directory of its own in the scratch root, bounded by
+an XFS project quota (`--job-tmp-gib`, 1 GiB by default), whether or not the agent runs with
+`--scratch-quota`. An agent whose scratch filesystem cannot enforce a project quota starts, and then
+starts no job: it prints `js-agent: warning: the scratch root cannot enforce a project quota, which
+bounds each job's /tmp and /var/tmp (...)` at start, reports the finding `quota-unhealthy` every
+minute, and refuses every start `quota-unavailable`. It probes again every minute, and takes jobs
+once a probe passes.
+
+The fix is the mount option, set once per node. The scratch filesystem is the host's: no package
+and no hostkeeper config carries its mount. The file is the scratch mount's unit,
+`/etc/systemd/system/var-lib-js\x2dagent-scratch.mount`, and the change is `prjquota` added to the
+`Options=` of its `[Mount]` section, keeping the options it has (for example
+`Options=noatime` becomes `Options=noatime,prjquota`). XFS takes a quota option only at mount time,
+not at a remount, so the filesystem is unmounted and mounted again. One node at a time:
+
+1. Cordon the node for the window with `js-agent cordon --for 1h`, given the node's host id and
+   credential flags as `docs/runbooks/cordon-a-node.md` says, and wait until it runs no job (the
+   lease server lists none on the host). Do not stop the agent with `systemctl stop` while it runs
+   a job; the cordon drains it.
+2. Once the node is idle, add `prjquota` to the unit's `Options=` and remount. The setup script's
+   step 4 makes this edit and the remount, with its checks: `packaging/js-agent/crun_host_setup.sh`
+   (see `docs/runbooks/crun-host-setup.md`, "scratch quota"). By hand:
+
+   ```text
+   systemctl daemon-reload
+   systemctl restart 'var-lib-js\x2dagent-scratch.mount'
+   ```
+
+   The agent's unit requires the mount (`RequiresMountsFor=`), so the restart takes the idle agent
+   down with the mount and starts it again after it.
+3. Check: `findmnt -no OPTIONS /var/lib/js-agent/scratch` lists `prjquota` (XFS shows it as
+   `prjquota` or `pquota`), and the agent's start prints `js-agent: scratch quota: project (...)`.
+4. Let the cordon end (stop the `js-agent cordon` process, or let `--for` pass), then go on to the
+   next node.
 
 ## 9. Trust: the repository's key and the pin
 

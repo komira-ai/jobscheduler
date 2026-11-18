@@ -14,6 +14,11 @@
 //!   ([`Runtime::lease_dir`]), and the lifecycle puts it under the run's project quota, so one
 //!   bound covers `/scratch`, `/work` and `/root`; a runtime opened without
 //!   `OciConfig::leases_in` keeps it as `<store>/<name>`;
+//! - the job's temporary directory `.tmp-<name>`, beside the lease directory
+//!   ([`Runtime::tmp_dir`]), whose `tmp` and `var-tmp` are bound at `/tmp` and `/var/tmp`
+//!   (`noexec`, `nosuid`, `nodev`) and named by `TMPDIR=/tmp`: on the scratch disk, not in
+//!   memory, and put by the lifecycle under the slot's temporary project, a bound of its own
+//!   (`--job-tmp-gib`, 1 GiB by default) apart from the run's scratch quota;
 //! - the cgroup `<actions>/<name>`, made by the agent with the booking as the limit
 //!   (memory the booking with no swap, CPU the booked cores: the arithmetic the lease
 //!   server's booking assumes) and given to the job user, who makes the container's cgroup
@@ -862,6 +867,14 @@ impl Runtime for CrunRuntime {
         {
             return Err(failed("remove the lease directory", &why));
         }
+        // The job's temporary directory holds no mount once the container is deleted (its
+        // binds are in the container's mount namespace).
+        let tmp = dirs::tmp_dir_beside(&run.lease.dir, &id.0);
+        if let Err(why) = js_contain::remove::remove_tree(&tmp)
+            && why.kind() != io::ErrorKind::NotFound
+        {
+            return Err(failed("remove the job's temporary directory", &why));
+        }
         self.unpin_all(&id.0)
             .map_err(|why| failed("remove the image's pin", &why))?;
         self.ledger
@@ -952,6 +965,14 @@ impl Runtime for CrunRuntime {
         }
         let name = container_name(&self.host_id, run_id).ok()?;
         Some(self.oci.lease_dirs(&name).dir)
+    }
+
+    fn tmp_dir(&self, run_id: &str) -> Option<PathBuf> {
+        if !self.leases_beside {
+            return None;
+        }
+        let name = container_name(&self.host_id, run_id).ok()?;
+        Some(self.tmp_dir_of(&name))
     }
 
     fn places_in_cgroup(&self) -> bool {
