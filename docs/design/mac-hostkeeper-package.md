@@ -13,7 +13,8 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
   by hand or in the release's call (`sign: true`), in the environment `pkg-signing`; without that environment's secrets
   it skips with a notice.
 - `release.yml` calls it as `beta-macos-pkg` with the release's version. Its job `pkg-upload` puts the signed package
-  in the package repository once the three beta jobs passed.
+  in the package repository once `publish` passed and `beta-macos-pkg` has ended (it waits for no beta test), before
+  the release's `desired` starts `hostkeeper-desired.yml`.
 - `cargo xtask release desired --pkg-url` adds a `macos-arm64` entry to the release's targets when the package is in the
   package repository, and `hostkeeper-desired.yml` sets it for the host group `mac-build`.
 - The agent reports the capabilities `os` and `arch` as detected (`crates/js-agent/src/host.rs`, `capabilities`):
@@ -134,8 +135,8 @@ as owner), any script, and another identifier or version.
    is signed with is the one to check for first; another identity needs each Mac's signers file extended by hand and its
    daemon restarted before the first order, since nothing pushes that file to an enrolled Mac. Without the secrets the
    job says so in a notice and the release has no signed package.
-3. `pkg-upload` runs on ubuntu in the environment `apt-publish`, after `promote-macos` (so after all three beta jobs
-   and `publish`), never on a pull request. It downloads the artifact `js-agent-macos-pkg-signed`, gates on the
+3. `pkg-upload` runs on ubuntu in the environment `apt-publish`, after `publish` passed and `beta-macos-pkg` ended,
+   pass or fail (it waits for no test of the beta stage), never on a pull request. It downloads the artifact `js-agent-macos-pkg-signed`, gates on the
    settings as the apt jobs do (`channels gate`), assumes `vars.APT_PUBLISH_ROLE_ARN`, and runs `channels pkg upload
    --dir <dir> --version <V> --bucket <b> --work <dir>`. The verb checks that `<dir>/SHA256SUMS` lists exactly the
    package with its digest, puts the package and then `SHA256SUMS` under the key prefix `pkg/jobscheduler/<V>/` (the one
@@ -211,7 +212,7 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - No token on the Mac: the agent does not start, so the hook's `verify` (the agent runs and is registered) fails;
   hostkeeper runs the hook's `rollback` and, a first install having no previous version, removes the package. A later
   order installs it again once the host setup is done.
-- No signed package for a release (the environment `pkg-signing` is not set up, or a beta job failed): `pkg-upload`
+- No signed package for a release (the environment `pkg-signing` is not set up, or `beta-macos-pkg` failed): `pkg-upload`
   uploads nothing, `release desired` writes `set-mac=false`, and the Linux nodes are set as before.
 - The entry does not resolve (no `macos-pkg` format in the descriptor, platform missing, no `packages` entry for
   js-agent): the Mac shows `no_build_for_host`.

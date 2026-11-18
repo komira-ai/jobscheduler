@@ -24,7 +24,7 @@ pub(super) const OTHER: &str = "333333333333333333333333333333333333333333333333
 pub(super) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Waits for the turn of one test (a failed test does not stop the others).
-pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -1,4 +1,4 @@
-//! `release plan --head <sha>`: whether the commit `--head`, which passed `ci` on main and is
+//! `release plan --head <sha>`: whether the commit `--head`, which was pushed to main and is
 //! the commit the workflow run is at, is released, and as which version. The checkout in `--repo-dir` must be at
 //! `--head` and hold every tag (`fetch-depth: 0`).
 //!
@@ -14,7 +14,12 @@
 //!    Released, as that tag's version; the tag is kept as it is.
 //! 4. Some path changed between the latest merged tag and `--head` ships
 //!    ([`super::is_shipped`], or a file a shipped source includes, [`super::include`]):
-//!    released, as [`super::next`]. Otherwise not released.
+//!    released. Otherwise not released.
+//!
+//! The version, when the tag does not name `--head`, is [`super::next`]: the latest merged
+//! tag with its patch raised by `git rev-list --count --first-parent <tag>..<head>`, so
+//! releases built in parallel from successive pushes to main get distinct, increasing
+//! versions; or the workspace version when that is above the tag, or no tag is merged.
 //!
 //! `--dry-run` (a pull request that changes the workflow) takes the same decision and then
 //! says released, so the build is exercised; the workflow never tags or publishes then.
@@ -36,7 +41,7 @@ use super::{
 /// The arguments of `release plan`.
 #[derive(clap::Args)]
 pub struct PlanArgs {
-    /// The commit that passed `ci`, a full SHA (on Actions, `GITHUB_SHA`, the commit the
+    /// The commit pushed to main, a full SHA (on Actions, `GITHUB_SHA`, the commit the
     /// run is at and the one an attestation records).
     #[arg(long)]
     pub head: String,
@@ -122,6 +127,22 @@ fn capture(program: &Path, dir: &Path, args: &[&str]) -> Result<String, Error> {
     String::from_utf8(out.stdout).map_err(|_| Error::NotUtf8 { command })
 }
 
+/// The number of first-parent commits from `tag` to `--head`.
+fn distance(a: &PlanArgs, tag: &str) -> Result<u64, Error> {
+    let range = format!("{tag}..{}", a.head);
+    let args = ["rev-list", "--count", "--first-parent", range.as_str()];
+    let counted = capture(&a.git, &a.repo_dir, &args)?;
+    let got = counted.trim_end();
+    // A number is its own canonical text: "+5" and "05" are not counts git prints.
+    got.parse::<u64>()
+        .ok()
+        .filter(|n| n.to_string() == got)
+        .ok_or_else(|| Error::NotACount {
+            command: format!("{} {}", a.git.display(), args.join(" ")),
+            got: got.to_owned(),
+        })
+}
+
 /// The decision, before `--dry-run`.
 ///
 /// `tagged` is the latest release tag merged into `--head`; `later` the latest one at a
@@ -203,14 +224,19 @@ pub fn run(a: &PlanArgs) -> Result<String, Error> {
     );
     let cargo = workspace_version(&read(&a.repo_dir.join("Cargo.toml"))?)?;
     let mut verdict = decide(a, tagged, later)?;
+    // The distance is only needed when a tag exists that does not name `--head`.
+    let latest = match (tagged, verdict.existing) {
+        (Some(tag), None) => Some((tag, distance(a, &tag.tag())?)),
+        _ => None,
+    };
     if a.dry_run {
         verdict = Verdict {
             release: true,
-            existing: None,
+            existing: verdict.existing,
             reason: format!("dry run (decided: {})", verdict.reason),
         };
     }
-    let version = verdict.existing.unwrap_or_else(|| next(tagged, cargo));
+    let version = verdict.existing.unwrap_or_else(|| next(latest, cargo));
     let lines = [
         format!("release={}", verdict.release),
         format!("version={version}"),

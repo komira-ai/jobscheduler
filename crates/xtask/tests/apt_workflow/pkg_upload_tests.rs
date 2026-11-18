@@ -40,21 +40,53 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "pkg-upload",
-        " && needs.plan.outputs.release == 'true' }}\n    runs-on",
-        " }}\n    runs-on",
+        " && needs.plan.outputs.release == 'true' && ",
+        " && ",
         "pkg-upload: `if` is not",
     ),
-    // It does not wait for the beta jobs, so a package of a failed beta stage would be uploaded.
+    // Without `!cancelled()` a failed package job would skip the upload and `desired`'s wait.
     (
         "pkg-upload",
-        "needs: [plan, deploy-tool, promote-macos]",
-        "needs: [plan, deploy-tool]",
+        "${{ !cancelled() && ",
+        "${{ ",
+        "pkg-upload: `if` is not",
+    ),
+    // Without `publish`'s success nothing is uploaded for a release that was never published.
+    (
+        "pkg-upload",
+        " && needs.publish.result == 'success'",
+        "",
+        "pkg-upload: `if` is not",
+    ),
+    (
+        "pkg-upload",
+        " && needs.deploy-tool.result == 'success'",
+        "",
+        "pkg-upload: `if` is not",
+    ),
+    // It does not wait for the package job or for `publish`, or it waits for the beta tests.
+    (
+        "pkg-upload",
+        "needs: [plan, deploy-tool, publish, beta-macos-pkg]",
+        "needs: [plan, deploy-tool, publish]",
         "pkg-upload: needs are not",
     ),
     (
         "pkg-upload",
-        "needs: [plan, deploy-tool, promote-macos]",
+        "needs: [plan, deploy-tool, publish, beta-macos-pkg]",
         "needs: [plan, deploy-tool, beta-macos-pkg]",
+        "pkg-upload: needs are not",
+    ),
+    (
+        "pkg-upload",
+        "needs: [plan, deploy-tool, publish, beta-macos-pkg]",
+        "needs: [plan, deploy-tool, publish, promote-macos]",
+        "pkg-upload: needs are not",
+    ),
+    (
+        "pkg-upload",
+        "needs: [plan, deploy-tool, publish, beta-macos-pkg]",
+        "needs: [plan, deploy-tool, publish, beta-macos-pkg, beta-macos]",
         "pkg-upload: needs are not",
     ),
     (

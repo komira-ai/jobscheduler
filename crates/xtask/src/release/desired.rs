@@ -8,15 +8,16 @@
 //!
 //! - `--version X.Y.Z` (a run by hand): the release `vX.Y.Z`, whichever it is, an older one
 //!   included (a rollback).
-//! - `--after-run <id>` (the completion of a run of `release.yml`): when the job `publish` of
-//!   that run succeeded, the newest published release of `<owner/repo>` (the highest `vX.Y.Z`,
-//!   not a draft, not a pre-release). Release runs are one at a time, so that is the release the
-//!   run published, or a newer one whose run then comes next. When `publish` did not succeed
+//! - `--after-run <id>` (by hand; no workflow passes it since release.yml's `desired` gives the
+//!   version): when the job `publish` of that run of `release.yml` succeeded, the newest
+//!   published release of `<owner/repo>` (the highest `vX.Y.Z`, not a draft, not a pre-release),
+//!   which is the release the run published or a newer one. When `publish` did not succeed
 //!   (most runs plan no release, and their `publish` is skipped) nothing is set: the output is
 //!   `set=false` and the verb succeeds.
 //!
-//! Exactly one of the two is given; an empty one counts as not given, so the workflow passes
-//! both from its two events and one is always empty.
+//! Exactly one of the two is given; an empty one counts as not given, and `--after-run` may be
+//! left out. hostkeeper-desired.yml gives `--version` alone: release.yml's job `desired` starts it
+//! with the version its run published.
 //!
 //! The release must be a published GitHub release (not a draft, not a pre-release). Its
 //! `SHA256SUMS` is downloaded into `<dir>`, and then:
@@ -54,7 +55,7 @@ pub mod manifest;
 pub mod repo;
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 /// The job of `release.yml` that publishes a release.
 pub const PUBLISH_JOB: &str = "publish";
@@ -100,8 +101,8 @@ pub struct DesiredArgs {
     /// A released version, `X.Y.Z`; empty when `--after-run` is given.
     #[arg(long)]
     pub version: String,
-    /// The id of a run of `release.yml`; empty when `--version` is given.
-    #[arg(long)]
+    /// The id of a run of `release.yml`; empty (or left out) when `--version` is given.
+    #[arg(long, default_value = "")]
     pub after_run: String,
     /// Where `SHA256SUMS` and the `Packages` files are downloaded.
     #[arg(long)]
@@ -125,7 +126,7 @@ pub struct DesiredArgs {
 }
 
 /// Runs `program args`: its stdout, when it succeeded and printed UTF-8.
-fn capture(program: &str, args: &[String]) -> Result<String, super::Error> {
+pub(super) fn capture(program: &str, args: &[String]) -> Result<String, super::Error> {
     let command = format!("{program} {}", args.join(" "));
     let out = Command::new(program)
         .args(args)
@@ -145,7 +146,7 @@ fn capture(program: &str, args: &[String]) -> Result<String, super::Error> {
 }
 
 /// The arguments as owned strings.
-fn strings(args: &[&str]) -> Vec<String> {
+pub(super) fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| (*a).to_owned()).collect()
 }
 

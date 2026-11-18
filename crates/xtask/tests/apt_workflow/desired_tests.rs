@@ -21,8 +21,7 @@ fn hostkeeper_desired_yml_checks_the_release_then_sets_it_by_its_targets() {
 fn the_variable_gate_is_the_job_level_if_of_both_jobs() {
     // Catches: a gate on a step (the job would start, and the token exist, with the deploy off),
     // a gate on another variable or on a value other than `true`, a job that runs from a branch
-    // other than main, and a release run acted on although it failed, ran on another branch or
-    // came from a fork.
+    // other than main, and a check that runs for an event other than the dispatch.
     for condition in [DESIRED_IF, SET_IF, SET_MAC_IF] {
         assert!(condition.contains("github.ref == 'refs/heads/main'"));
         assert!(condition.contains("vars.JS_AGENT_SETS_DESIRED == 'true'"));
@@ -38,11 +37,10 @@ fn the_variable_gate_is_the_job_level_if_of_both_jobs() {
             "vars.JS_AGENT_SETS_DESIRED != ''",
         ),
         ("github.ref == 'refs/heads/main' && ", ""),
-        ("github.event.workflow_run.conclusion == 'success' && ", ""),
-        ("github.event.workflow_run.head_branch == 'main' && ", ""),
+        (" && github.event_name == 'workflow_dispatch'", ""),
         (
-            " && github.event.workflow_run.head_repository.full_name == github.repository",
-            "",
+            "github.event_name == 'workflow_dispatch'",
+            "github.event_name == 'workflow_run'",
         ),
     ] {
         assert!(DESIRED_IF.contains(part), "{part}");
@@ -128,11 +126,12 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "--dir dist",
         "check: the step `desired` does not run",
     ),
-    // A run after a release that ignores which run it was: every run would set a release.
+    // The verb is not told to wait for a run of another workflow: release.yml's `desired` starts
+    // this run when the release is published.
     (
         "check",
-        " --after-run \"$RUN_ID\"",
-        "",
+        " --pkg-url",
+        " --after-run \"$RUN_ID\" --pkg-url",
         "check: the step `desired` does not run",
     ),
     (
@@ -149,9 +148,9 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "check",
-        "RUN_ID: ${{ github.event.workflow_run.id }}",
-        "RUN_ID: ${{ github.run_id }}",
-        "check: the step `desired` does not read RUN_ID from ${{ github.event.workflow_run.id }}",
+        "          GH_TOKEN: ${{ github.token }}\n",
+        "          GH_TOKEN: ${{ github.token }}\n          RUN_ID: ${{ github.run_id }}\n",
+        "check: the step `desired` reads RUN_ID, which it has no use for",
     ),
     (
         "check",
@@ -451,44 +450,29 @@ fn each_defect_in_hostkeeper_desired_yml_is_named_by_the_lint() {
 }
 
 #[test]
-fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
-    // Catches: a push or a schedule setting a version, the completion of another workflow (ci,
-    // whose success says nothing of a release) or of release on another branch, the dispatch
-    // dropped (no rollback by hand), the two ways in sharing one concurrency group or a run
-    // cancelled, a second input or none, an input that is not a required string, a job beside the
-    // two, a top level that grants something, and a document that does not parse being read as
-    // clean.
+fn a_trigger_an_input_or_a_job_other_than_the_dispatch_is_named() {
+    // Catches: a push or a schedule setting a version, the completion of another workflow (a
+    // `workflow_run` trigger of release or of ci: release.yml's `desired` starts the run, in
+    // release order), the dispatch dropped (no rollback by hand), a group that splits the runs or
+    // a run cancelled, a second input or none, an input that is not a required string, a job
+    // beside the three, a top level that grants something, and a document that does not parse
+    // being read as clean.
     let text = text_of(FILE);
     for (replace, with, says) in [
         (
-            "on:\n  workflow_run:\n",
-            "on:\n  push:\n  workflow_run:\n",
-            "triggers are [\"push\", \"workflow_dispatch\", \"workflow_run\"], not workflow_dispatch and workflow_run",
+            "on:\n  workflow_dispatch:\n",
+            "on:\n  push:\n  workflow_dispatch:\n",
+            "triggers are [\"push\", \"workflow_dispatch\"], not workflow_dispatch alone",
+        ),
+        (
+            "on:\n  workflow_dispatch:\n",
+            "on:\n  workflow_run:\n    workflows: [release]\n    types: [completed]\n    branches: [main]\n  workflow_dispatch:\n",
+            "triggers are [\"workflow_dispatch\", \"workflow_run\"], not workflow_dispatch alone",
         ),
         (
             "  workflow_dispatch:\n    inputs:\n      version:\n        description: \"A released version of js-agent, X.Y.Z (the tag without the v)\"\n        type: string\n        required: true\n",
-            "",
-            "triggers are [\"workflow_run\"], not workflow_dispatch and workflow_run",
-        ),
-        (
-            "    workflows: [release]\n",
-            "    workflows: [ci]\n",
-            "workflow_run.workflows is [\"ci\"], not [\"release\"]",
-        ),
-        (
-            "    workflows: [release]\n",
-            "    workflows: [release, ci]\n",
-            "workflow_run.workflows is [\"ci\", \"release\"], not [\"release\"]",
-        ),
-        (
-            "    types: [completed]\n",
-            "    types: [requested]\n",
-            "workflow_run.types is [\"requested\"], not [\"completed\"]",
-        ),
-        (
-            "    branches: [main]\n",
-            "",
-            "workflow_run.branches is [], not [\"main\"]",
+            "  workflow_run:\n    workflows: [release]\n    types: [completed]\n",
+            "triggers are [\"workflow_run\"], not workflow_dispatch alone",
         ),
         (
             "      version:\n        description",
@@ -510,11 +494,11 @@ fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
             "        type: string\n        required: false\n",
             "input version: required is Some(\"false\"), not true",
         ),
-        // One group for both ways in: a waiting rollback by hand is replaced by a release run.
+        // A group that splits the runs: two would set the version at once.
         (
-            "  group: hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}\n",
             "  group: hostkeeper-desired\n",
-            "concurrency: group is Some(\"hostkeeper-desired\"), not",
+            "  group: hostkeeper-desired-${{ github.run_id }}\n",
+            "concurrency: group is Some(\"hostkeeper-desired-${{ github.run_id }}\"), not",
         ),
         (
             "  cancel-in-progress: false\n",
@@ -573,8 +557,8 @@ fn the_check_runs_the_verb_and_the_call_pins_the_client_hostkeeper_releases_with
 fn no_workflow_reads_another_coordinator_variable_or_calls_the_run() {
     // Catches: a job that sets the version through another coordinator than hostkeeper's (the
     // other coordinator's variable coming back into hostkeeper-desired.yml or into a workflow that
-    // is not release.yml's gamma step), and release.yml or another workflow calling
-    // hostkeeper-desired.yml (it starts by its own trigger once release.yml completes).
+    // is not release.yml's gamma step), a workflow calling hostkeeper-desired.yml with `uses:`,
+    // and any `gh workflow run` of it outside release.yml's job `desired`.
     let files = workflows();
     for (file, text) in &files {
         assert_eq!(
@@ -626,6 +610,30 @@ fn no_workflow_reads_another_coordinator_variable_or_calls_the_run() {
         caller_problems(&calling),
         vec!["release.yml: calls hostkeeper-desired.yml, which no other workflow calls".to_owned()]
     );
+    // `gh workflow run hostkeeper-desired.yml` is release.yml's `desired` alone: in another job of
+    // release.yml, in another workflow, or in a job after it, it is refused; in a comment it is not.
+    let start = "gh workflow run hostkeeper-desired.yml --repo \"$REPO\" --ref main";
+    assert!(release.contains(start));
+    let elsewhere = release.replacen(
+        "      - run: echo \"the publish and deploy jobs of this run have ended\"",
+        &format!("      - run: {start}"),
+        1,
+    );
+    assert_ne!(elsewhere, release);
+    let moved = vec![("release.yml".to_owned(), elsewhere)];
+    let problems = caller_problems(&moved);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("outside the job `desired` of release.yml"));
+    let other = vec![(
+        "ci.yml".to_owned(),
+        format!("jobs:\n  desired:\n    steps:\n      - run: {start}\n"),
+    )];
+    assert_eq!(caller_problems(&other).len(), 1);
+    let comment = vec![(
+        "ci.yml".to_owned(),
+        format!("jobs:\n  x:\n    steps:\n      # {start}\n"),
+    )];
+    assert_eq!(caller_problems(&comment), Vec::<String>::new());
     // A workflow that is not YAML is not a caller (the YAML reader's own test names it).
     assert_eq!(
         caller_problems(&[("t.yml".to_owned(), "a: b: c\n".to_owned())]),
