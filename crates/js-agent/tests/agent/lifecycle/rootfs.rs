@@ -232,11 +232,11 @@ fn a_named_mount_is_refused_by_a_runtime_that_binds_none() {
 
 /// Asserts that a start with layers and mounts waits as `starting`, booking its slot, until
 /// its host paths are found, its images (its own and its layers') are here and its file
-/// system is assembled, in that order and each off the worker: its directories are made
-/// only once the first two are, and its container only once the assembly is; another job is
-/// admitted, started and ended meanwhile. Catches a container made before its root, a
-/// lookup or a pull that holds up the agent's other jobs, and an image of a layer not
-/// waited for.
+/// system is assembled, each off the worker: its directories are made at its admission,
+/// its assembly asked for only once the first two are done, and its container made only once
+/// the assembly is; another job is admitted, started and ended meanwhile. Catches a
+/// container made before its root, a lookup or a pull that holds up the agent's other jobs,
+/// an assembly asked for before the images are here, and an image of a layer not waited for.
 #[test]
 fn a_start_waits_for_its_lookups_its_images_and_its_assembly() {
     let mut h = harness("rootfs-wait");
@@ -248,12 +248,18 @@ fn a_start_waits_for_its_lookups_its_images_and_its_assembly() {
         image: LAYER.to_owned(),
     });
     h.apply(vec![job_start(spec)]);
-    h.life.step();
-    assert_eq!(listing(&h, "j1").state, HeldState::Starting);
+    let resolve = format!("resolve j1 (2 layers, 1 mounts, image {IMAGE:?})");
     assert_eq!(
         logged(&h, "resolve j1"),
-        [format!("resolve j1 (2 layers, 1 mounts, image {IMAGE:?})")]
+        std::slice::from_ref(&resolve),
+        "begun at once"
     );
+    assert!(h.scratch_of("j1").exists(), "made at the admission");
+    assert!(h.dir.path("scratch/.lease-fake-j1").is_dir());
+    h.life.step();
+    assert_eq!(listing(&h, "j1").state, HeldState::Starting);
+    assert_eq!(logged(&h, "resolve j1"), [resolve.clone(), resolve]);
+    assert!(logged(&h, "assemble j1").is_empty());
     assert_eq!(h.fake.asks(IMAGE), [None, Some(image)]);
     assert_eq!(h.fake.asks(LAYER), [None, Some(layer)]);
     // Another job, of another image, runs and ends while this one waits.
@@ -270,20 +276,15 @@ fn a_start_waits_for_its_lookups_its_images_and_its_assembly() {
     h.fake.resolve_answers("j1", FsPrepared::Ready);
     h.life.step();
     assert!(
-        !h.scratch_of("j1").exists(),
-        "no directory before the images"
+        logged(&h, "assemble j1").is_empty(),
+        "no assembly before the images"
     );
     h.fake.pull_done(IMAGE);
     h.life.step();
-    assert!(!h.scratch_of("j1").exists());
+    assert!(logged(&h, "assemble j1").is_empty());
     h.fake.pull_done(LAYER);
     h.fake.assembly_answers("j1", FsPrepared::Pending);
     h.life.step();
-    assert!(h.scratch_of("j1").exists(), "made for the assembly");
-    assert!(
-        h.dir.path("scratch/.lease-fake-j1").is_dir(),
-        "the lease's too"
-    );
     assert_eq!(logged(&h, "assemble j1"), ["assemble j1"], "asked at once");
     h.life.step();
     assert_eq!(logged(&h, "assemble j1").len(), 2);

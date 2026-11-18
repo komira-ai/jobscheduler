@@ -291,6 +291,7 @@ fn job_start(id: &str) -> Command {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        placed_at_ms: None,
     }))
 }
 

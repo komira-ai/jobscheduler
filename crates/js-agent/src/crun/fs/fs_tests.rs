@@ -6,6 +6,7 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use js_agent_wire::{JobMount, Layer, MountMode, refusal};
 use js_testkit::dir::TestDir;
@@ -153,7 +154,6 @@ fn each_host_path_is_opened_beneath_its_root_on_the_pool() {
         mounts: vec![sub],
     };
     let resolved = |fs_: &mut Fs, run: &str, job: &JobFs| {
-        assert_eq!(fs_.resolve((run, "lease"), "", job, 0), FsPrepared::Pending);
         until(|| match fs_.resolve((run, "lease"), "", job, 0) {
             FsPrepared::Pending => None,
             other => Some(other),
@@ -251,10 +251,6 @@ fn a_path_swapped_after_its_lookup_is_cloned_as_it_was_opened() {
     let (mut fs_, calls) = open(&dir, Paths::default());
     let data = dir.path().join("data");
     let start = job(vec![mount(&data.join("tree"), "/t", MountMode::ReadOnly)]);
-    assert_eq!(
-        fs_.resolve(("r", "lease"), "", &start, 0),
-        FsPrepared::Pending
-    );
     until(|| (fs_.resolve(("r", "lease"), "", &start, 0) == FsPrepared::Ready).then_some(()));
     fs::rename(data.join("tree"), data.join("moved")).expect("moved away");
     symlink("/etc", data.join("tree")).expect("a link in its place");
@@ -357,10 +353,6 @@ fn an_assembly_is_asked_once_and_taken_once() {
         format!("{} is not open yet", tree.display())
     );
     drop(go);
-    assert_eq!(
-        fs_.resolve(("r", "lease"), "", &layered, 0),
-        FsPrepared::Pending
-    );
     until(|| (fs_.resolve(("r", "lease"), "", &layered, 0) == FsPrepared::Ready).then_some(()));
     assert_eq!(
         fs_.assembled("r", 0),
@@ -371,10 +363,6 @@ fn an_assembly_is_asked_once_and_taken_once() {
     let (name, image, layers) = fs_.unassembled("r").expect("unassembled");
     assert_eq!((name, image, layers.len()), ("lease", "", 2));
     assert!(fs_.take("r").is_none(), "not assembled");
-    assert_eq!(
-        fs_.resolve(("r", "lease"), "", &layered, 0),
-        FsPrepared::Pending
-    );
     until(|| (fs_.resolve(("r", "lease"), "", &layered, 0) == FsPrepared::Ready).then_some(()));
     let lease = dir.path().join(".lease-lease");
     fs::create_dir(&lease).expect("the lease directory");
@@ -385,10 +373,6 @@ fn an_assembly_is_asked_once_and_taken_once() {
     );
     // The lookups were taken by the failed ask: the run is prepared again.
     fs_.discard("r", "lease").expect("discarded");
-    assert_eq!(
-        fs_.resolve(("r", "lease"), "", &layered, 0),
-        FsPrepared::Pending
-    );
     until(|| (fs_.resolve(("r", "lease"), "", &layered, 0) == FsPrepared::Ready).then_some(()));
     let layer = dir.path().join("store/layer");
     fs::create_dir_all(&layer).expect("a layer's tree");
@@ -401,10 +385,6 @@ fn an_assembly_is_asked_once_and_taken_once() {
     fs::remove_file(&mounts).expect("the file");
     fs::rename(dir.path().join("mounts-aside"), &mounts).expect("put back");
     fs_.discard("r", "lease").expect("discarded");
-    assert_eq!(
-        fs_.resolve(("r", "lease"), "", &layered, 0),
-        FsPrepared::Pending
-    );
     until(|| (fs_.resolve(("r", "lease"), "", &layered, 0) == FsPrepared::Ready).then_some(()));
     fs_.ask_assembly("r", (None, vec![layer]), lease, owners())
         .expect("asked");
@@ -444,10 +424,6 @@ fn an_assemblys_refusal_and_failure_reach_the_caller_and_a_discard_unmounts() {
     let lease = dir.path().join(".lease-lease");
     fs::create_dir(&lease).expect("the lease directory");
     let assembled = |fs_: &mut Fs, run: &str| {
-        assert_eq!(
-            fs_.resolve((run, "lease"), "", &start, 0),
-            FsPrepared::Pending
-        );
         until(|| (fs_.resolve((run, "lease"), "", &start, 0) == FsPrepared::Ready).then_some(()));
         fs_.ask_assembly(run, (None, Vec::new()), lease.clone(), owners())
             .expect("asked");
@@ -478,10 +454,6 @@ fn an_assemblys_refusal_and_failure_reach_the_caller_and_a_discard_unmounts() {
     let start = job(vec![mount(&data, "/d", MountMode::ReadOnly)]);
     let lease = failing.path().join(".lease-lease");
     fs::create_dir(&lease).expect("the lease directory");
-    assert_eq!(
-        fs_.resolve(("f", "lease"), "", &start, 0),
-        FsPrepared::Pending
-    );
     until(|| (fs_.resolve(("f", "lease"), "", &start, 0) == FsPrepared::Ready).then_some(()));
     fs_.ask_assembly("f", (None, Vec::new()), lease, owners())
         .expect("asked");
@@ -498,10 +470,6 @@ fn an_assemblys_refusal_and_failure_reach_the_caller_and_a_discard_unmounts() {
         panics: true,
         ..Mounts::under(failing.path())
     });
-    assert_eq!(
-        fs_.resolve(("p", "lost"), "", &start, 0),
-        FsPrepared::Pending
-    );
     until(|| (fs_.resolve(("p", "lost"), "", &start, 0) == FsPrepared::Ready).then_some(()));
     let lease = failing.path().join(".lease-lost");
     fs::create_dir(&lease).expect("the lease directory");
@@ -569,4 +537,184 @@ fn the_check_after_a_job_names_a_source_that_has_gone() {
         Poll::Unanswered("did not answer in time")
     );
     drop(go);
+}
+
+/// Asks until the lookups of the run `run` have an answer other than pending.
+fn resolved_run(fs_: &mut Fs, run: &str, image: &str, job: &JobFs) -> FsPrepared {
+    until(|| match fs_.resolve((run, "lease"), image, job, 0) {
+        FsPrepared::Pending => None,
+        other => Some(other),
+    })
+}
+
+/// Paths that count their opens, and the counter.
+fn counting() -> (Paths, Arc<AtomicUsize>) {
+    let paths = Paths::default();
+    let opens = Arc::clone(&paths.opens);
+    (paths, opens)
+}
+
+/// Catches a start with nothing to look up waiting for the worker's next step: the first
+/// call answers `Ready` with no task run on the pool (a held pool would never answer), and
+/// asking again changes nothing.
+#[test]
+fn a_start_with_no_host_path_is_ready_at_the_first_call() {
+    let dir = scratch("fs-none");
+    let (paths, began, go) = Paths::held();
+    let (mut fs_, _) = open(&dir, paths);
+    let layers = JobFs {
+        layers: vec![Layer::Image {
+            image: "registry.example/l@sha256:0".to_owned(),
+        }],
+        mounts: Vec::new(),
+    };
+    let answer = fs_.resolve(("r", "lease"), "", &layers, 0);
+    assert_eq!(answer, FsPrepared::Ready);
+    assert_eq!(
+        fs_.resolve(("r", "lease"), "", &layers, 0),
+        FsPrepared::Ready
+    );
+    assert!(began.try_recv().is_err(), "no lookup was asked");
+    drop(go);
+}
+
+/// Catches the image of a start with neither layers nor mounts being lost: the first call
+/// of such a start answers `Ready` at once and the assembly is given the start's image (a
+/// lost one would assemble a root without it).
+#[test]
+fn a_start_with_an_image_and_no_layers_keeps_its_image_for_the_assembly() {
+    let dir = scratch("fs-image");
+    let (paths, began, go) = Paths::held();
+    let (mut fs_, _) = open(&dir, paths);
+    let image = "registry.example/i@sha256:1";
+    let answer = fs_.resolve(("r", "lease"), image, &JobFs::default(), 0);
+    assert_eq!(answer, FsPrepared::Ready);
+    let (name, kept, layers) = fs_.unassembled("r").expect("unassembled");
+    assert_eq!((name, kept, layers), ("lease", image, &[][..]));
+    assert!(began.try_recv().is_err(), "no lookup was asked");
+    drop(go);
+}
+
+/// Catches a later call that looks up again what was begun, or loses its order: the first
+/// call asks one host path, the second adds a provider's directory as a layer and a mount;
+/// only the two new paths are opened, the first is kept, the assembly gets the image of the
+/// second call, and receives the sources in the order of the final fs (layer, then the
+/// mounts as listed).
+#[test]
+fn a_later_call_asks_only_the_host_paths_it_adds_and_keeps_their_order() {
+    let dir = scratch("fs-grow");
+    let (paths, opens) = counting();
+    let (mut fs_, calls) = open(&dir, paths);
+    let (data, ro) = (dir.path().join("data/tree"), dir.path().join("ro/tree"));
+    let first = job(vec![mount(&data, "/a", MountMode::ReadOnly)]);
+    assert_eq!(resolved_run(&mut fs_, "r", "", &first), FsPrepared::Ready);
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+    let grown = JobFs {
+        layers: vec![host_layer(&dir.path().join("data/tree/sub"))],
+        mounts: vec![
+            mount(&data, "/a", MountMode::ReadOnly),
+            mount(&ro, "/b", MountMode::ReadOnly),
+        ],
+    };
+    let answer = resolved_run(&mut fs_, "r", "img", &grown);
+    assert_eq!(answer, FsPrepared::Ready);
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        3,
+        "the layer and the mount were opened once each"
+    );
+    let (_, image, layers) = fs_.unassembled("r").expect("unassembled");
+    assert_eq!((image, layers.len()), ("img", 1));
+    let lease = dir.path().join(".lease-lease");
+    fs::create_dir(&lease).expect("the lease directory");
+    fs_.ask_assembly("r", (None, Vec::new()), lease, owners())
+        .expect("asked");
+    let made = until(|| match fs_.assembled("r", 0) {
+        FsPrepared::Pending => None,
+        other => Some(other),
+    });
+    assert_eq!(made, FsPrepared::Ready);
+    let clones: Vec<String> = calls
+        .asked()
+        .into_iter()
+        .filter(|call| call.starts_with("clone "))
+        .collect();
+    assert_eq!(
+        clones,
+        ["clone data/tree/sub", "clone data/tree", "clone ro/tree"]
+    );
+}
+
+/// Catches a lookup kept for a source the new fs no longer names, and a lookup matched
+/// twice: a later call without the first source asks nothing again; two sources of one path
+/// are two lookups, each matched once; a path with a `sub_path` is another lookup.
+#[test]
+fn a_later_call_drops_the_lookups_it_no_longer_names() {
+    let dir = scratch("fs-drop");
+    let (paths, opens) = counting();
+    let (mut fs_, _) = open(&dir, paths);
+    let (a, b) = (dir.path().join("data/tree"), dir.path().join("ro/tree"));
+    let both = job(vec![
+        mount(&a, "/a", MountMode::ReadOnly),
+        mount(&b, "/b", MountMode::ReadOnly),
+    ]);
+    assert_eq!(resolved_run(&mut fs_, "r", "", &both), FsPrepared::Ready);
+    assert_eq!(opens.load(Ordering::SeqCst), 2);
+    let only_b = job(vec![mount(&b, "/b", MountMode::ReadOnly)]);
+    assert_eq!(resolved_run(&mut fs_, "r", "", &only_b), FsPrepared::Ready);
+    assert_eq!(opens.load(Ordering::SeqCst), 2, "the kept one stays");
+    let twice = job(vec![
+        mount(&b, "/b", MountMode::ReadOnly),
+        mount(&b, "/c", MountMode::ReadOnly),
+    ]);
+    assert_eq!(resolved_run(&mut fs_, "r", "", &twice), FsPrepared::Ready);
+    assert_eq!(opens.load(Ordering::SeqCst), 3, "one lookup for one source");
+    let mut under = mount(&b, "/b", MountMode::ReadOnly);
+    under.sub_path = Some("sub".to_owned());
+    let moved = job(vec![under]);
+    assert_eq!(resolved_run(&mut fs_, "r", "", &moved), FsPrepared::Ready);
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        5,
+        "a sub path is another lookup"
+    );
+}
+
+/// Catches a refusal lost among the lookups a later call adds: a new host path beneath no
+/// root is refused `input-not-allowed`, though the lookup kept from the first call is open.
+#[test]
+fn a_refused_lookup_among_the_new_ones_is_the_answer() {
+    let dir = scratch("fs-grow-refused");
+    let (mut fs_, _) = open(&dir, Paths::default());
+    let data = dir.path().join("data/tree");
+    let first = job(vec![mount(&data, "/a", MountMode::ReadOnly)]);
+    assert_eq!(resolved_run(&mut fs_, "r", "", &first), FsPrepared::Ready);
+    let grown = job(vec![
+        mount(&data, "/a", MountMode::ReadOnly),
+        mount(Path::new("/nowhere"), "/n", MountMode::ReadOnly),
+    ]);
+    assert_eq!(
+        resolved_run(&mut fs_, "r", "", &grown),
+        FsPrepared::Refused(NativeRefusal {
+            code: refusal::INPUT_NOT_ALLOWED,
+            why: "/nowhere lies beneath no root of this agent".to_owned(),
+        })
+    );
+}
+
+/// Catches a call with the fs it was prepared with that asks again: an open path is not
+/// opened again however often the same fs is asked for.
+#[test]
+fn a_call_with_an_unchanged_fs_only_polls() {
+    let dir = scratch("fs-same");
+    let (paths, opens) = counting();
+    let (mut fs_, _) = open(&dir, paths);
+    let data = dir.path().join("data/tree");
+    let start = job(vec![mount(&data, "/a", MountMode::ReadOnly)]);
+    assert_eq!(resolved_run(&mut fs_, "r", "", &start), FsPrepared::Ready);
+    for _ in 0..3 {
+        let answer = fs_.resolve(("r", "lease"), "", &start, 0);
+        assert_eq!(answer, FsPrepared::Ready);
+    }
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
 }

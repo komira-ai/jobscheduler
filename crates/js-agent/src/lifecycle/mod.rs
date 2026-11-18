@@ -77,11 +77,13 @@
 //!   never wait for it.
 //! - **A start waits for its image without holding the worker.** When the runtime says
 //!   the image is being fetched ([`Runtime::prepare`]) the run is held as `starting` with
-//!   its booking and slot and nothing else: no scratch directory, files or container. Each
+//!   its booking and slot and nothing else: no scratch directory, files or container (a
+//!   start with layers or mounts has its directories from its admission). Each
 //!   [`Lifecycle::step`] asks again, and the container is made when the image is here. A
-//!   job start with layers or mounts waits too for every image of its layers, for the
-//!   lookups of its host paths and, once its directories are made, for its assembly
-//!   ([`Runtime::resolve_fs`], [`Runtime::assemble_fs`]), each off the worker. The
+//!   job start with layers or mounts waits too for every image of its layers, for its
+//!   providers, for the lookups of its host paths and, once those are done, for its
+//!   assembly ([`Runtime::resolve_fs`], [`Runtime::assemble_fs`]), each off the worker;
+//!   the waits that do not depend on one another run side by side. The
 //!   wall time then counts from that moment, but never past the end of the lease the
 //!   start's `valid_for_ms` named. A stop or cancel while it waits ends it without a
 //!   container, and a fetch that failed ends every run that waited on it
@@ -258,6 +260,7 @@
 mod codes;
 mod event;
 mod finding;
+mod job_fs;
 mod machine;
 mod mount_providers;
 mod mounts;
@@ -327,6 +330,13 @@ pub use wake::Wake;
 pub trait Clock {
     /// Milliseconds since the clock's origin.
     fn now_ms(&self) -> u64;
+
+    /// The Unix time now in milliseconds, for a start's timeline
+    /// ([`StartTimeline::received_at_ms`]) and for nothing else: no decision reads it. `None`
+    /// for a clock that has none, which is what this returns unless the clock says otherwise.
+    fn unix_ms(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// A job whose container and scratch directory are gone, as the post-job checks see it.

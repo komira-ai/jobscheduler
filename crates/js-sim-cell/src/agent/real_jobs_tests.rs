@@ -111,6 +111,7 @@ fn start_of(job: &str, allocation: &str) -> Command {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        placed_at_ms: None,
     }))
 }
 

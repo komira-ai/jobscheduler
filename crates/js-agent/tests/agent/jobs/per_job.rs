@@ -48,6 +48,7 @@ fn job_starts(jobs: &[&str]) -> HeartbeatReply {
                 layers: Vec::new(),
                 mounts: Vec::new(),
                 host_ports: Vec::new(),
+                placed_at_ms: None,
             }))
         })
         .collect();

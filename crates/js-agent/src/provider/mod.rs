@@ -13,7 +13,10 @@
 //!   (its group may), in a directory of root or that user that no one else can write
 //!   (`socket`).
 //! - Each call has a bound ([`CallBounds`]); a provider that does not answer within it is
-//!   answered `Unavailable`, and the lifecycle asks again when it chooses.
+//!   answered `Unavailable`, and the lifecycle asks again when it chooses. The client rings the
+//!   lifecycle's wake at once for an answer it goes on from, and for a failed or refused one
+//!   after the pause [`CallBounds::retry`], so a retry does not wait for the worker's next
+//!   step and a provider that fails at once is asked at most once per pause.
 //! - A reply of `INVALID_ARGUMENT` or `FAILED_PRECONDITION` is a refusal; every other failure
 //!   is `Unavailable`.
 //!
@@ -37,10 +40,11 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use tonic::transport::{Channel, Endpoint};
 
 use crate::lifecycle::{ProviderAnswer, ProviderCall, Providers, Wake};
-use flight::{Flights, Key};
+use flight::{Begun, Flights, Key};
 use socket::UnixConnector;
 
-/// How long each kind of call may take, from the moment it is sent to its answer.
+/// How long each kind of call may take, from the moment it is sent to its answer, and the pause
+/// after a failed one before the client rings the wake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallBounds {
     /// `Prepare`, which the provider answers at once and works on in the background.
@@ -51,17 +55,22 @@ pub struct CallBounds {
     pub release: Duration,
     /// `Sweep`.
     pub sweep: Duration,
+    /// The pause after a call that was refused or failed (or outlived its bound) before the
+    /// client rings the lifecycle's wake, so the retry does not wait for the worker's next
+    /// step. A call that succeeded rings at once.
+    pub retry: Duration,
 }
 
 impl Default for CallBounds {
     /// The bounds of the provider contract: 10 s for `Prepare`, 30 s for `Mount`, 5 s for
-    /// `Release` and 30 s for `Sweep`.
+    /// `Release` and 30 s for `Sweep`, and a retry pause of 200 ms.
     fn default() -> Self {
         Self {
             prepare: Duration::from_secs(10),
             mount: Duration::from_secs(30),
             release: Duration::from_secs(5),
             sweep: Duration::from_secs(30),
+            retry: Duration::from_millis(200),
         }
     }
 }
@@ -89,7 +98,7 @@ pub struct ProviderClient {
     /// One lazily connected channel for each provider, by name.
     clients: BTreeMap<String, Channel>,
     flights: Arc<Flights>,
-    /// Rung when a call succeeded ([`Providers::set_wake`]).
+    /// Rung when a call succeeded, and a pause after one failed ([`Providers::set_wake`]).
     wake: Wake,
     /// Kept to be shut down on drop; calls are spawned through `handle`.
     runtime: Option<Runtime>,
@@ -179,28 +188,38 @@ impl Providers for ProviderClient {
             ));
         };
         let key = flight_key(provider, call);
-        if let Some(answer) = self.flights.begin(key.clone()) {
-            return answer;
-        }
+        let (handed, sent) = match self.flights.begin(key.clone()) {
+            Begun::Settled(answer) => return answer,
+            Begun::Send(sent) => (ProviderAnswer::Pending, sent),
+            Begun::Retry(failed, sent) => (failed, sent),
+        };
         let task = call::run(
             client.clone(),
             self.agent.clone(),
             call.clone(),
             self.bounds.of(call),
         );
-        let (flights, wake) = (Arc::clone(&self.flights), self.wake.clone());
+        let (flights, wake, retry) = (
+            Arc::clone(&self.flights),
+            self.wake.clone(),
+            self.bounds.retry,
+        );
         self.handle.spawn(async move {
             let answer = task.await;
-            // Only an answer the lifecycle goes on from rings: a refused or failed call is
-            // asked again at a later step, and ringing for it would ask a provider that fails
-            // at once again and again without a pause.
+            // An answer the lifecycle goes on from rings at once. A refused or failed call
+            // rings after the retry pause, once its answer is stored: ringing for it at once
+            // would ask a provider that fails at once again and again without a pause. The
+            // step the ring brings is handed the failure and, for an unavailable one, sends
+            // the call again in the same ask.
             let goes_on = matches!(answer, ProviderAnswer::Done(_));
-            flights.finish(key, answer);
-            if goes_on {
-                wake.wake();
+            flights.finish(key.clone(), sent, answer);
+            if !goes_on {
+                tokio::time::sleep(retry).await;
+                flights.rest(&key, sent);
             }
+            wake.wake();
         });
-        ProviderAnswer::Pending
+        handed
     }
 
     fn set_wake(&mut self, wake: Wake) {

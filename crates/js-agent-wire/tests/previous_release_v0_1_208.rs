@@ -406,3 +406,32 @@ fn a_held_reply_reads_in_the_v0_1_208_structs_and_an_old_reply_is_not_held() {
         matches!(&old.commands[0], previous::Command::JobStart(spec) if spec.job_id == "job-3")
     );
 }
+
+/// Asserts that the job start in the v0.1.208 reply, which was written before the start
+/// carried its placement time, reads here with no `placed_at_ms` and is written back
+/// without the key, and that a start of this version with `placed_at_ms` decodes in the copy
+/// of that release's structs as the same job, allocation and wall limit: the field is
+/// ignored there and the rest equal. It catches a placement time that is required, or that
+/// is written when absent, or that an old agent would refuse the start over.
+#[test]
+fn a_job_start_reads_with_and_without_its_placement_time_across_v0_1_208() {
+    let sent: HeartbeatReply = serde_json::from_value(fixture(REPLY)).unwrap();
+    let Command::JobStart(released) = &sent.commands[3] else {
+        panic!("the reply's fourth command is a job start");
+    };
+    assert_eq!(released.placed_at_ms, None);
+    let wire = serde_json::to_value(released).unwrap();
+    assert!(wire.get("placed_at_ms").is_none());
+
+    let mut placed = released.clone();
+    placed.placed_at_ms = Some(1_800_000_123_456);
+    assert_eq!(placed.validate(), Ok(()));
+    let wire = serde_json::to_value(Command::JobStart(placed)).unwrap();
+    assert_eq!(wire["placed_at_ms"], 1_800_000_123_456_u64);
+    let old: previous::Command = serde_json::from_value(wire).unwrap();
+    assert!(matches!(
+        &old,
+        previous::Command::JobStart(spec) if (spec.job_id.as_str(), spec.allocation_id.as_str(), spec.wall_ms)
+            == (released.job_id.as_str(), released.allocation_id.as_str(), released.wall_ms)
+    ));
+}

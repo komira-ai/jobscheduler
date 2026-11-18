@@ -3,8 +3,11 @@
 //! and nothing waits.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use async_trait::async_trait;
 use js_contain::oci::image::PinnedImage;
@@ -38,6 +41,8 @@ struct State {
     fetched: Vec<String>,
     /// Each removal that was done, by digest, in order.
     removed: Vec<String>,
+    /// Each removal that has begun, by digest, in order, done or still held.
+    removing: Vec<String>,
 }
 
 /// A store in memory. An image fetched takes [`SIZE`] bytes, or what `sizes` says.
@@ -53,6 +58,8 @@ struct Fake {
     unlisted: bool,
     /// No image can be measured.
     unmeasured: bool,
+    /// When set, a removal waits for a permit before it is done.
+    hold: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Fake {
@@ -72,6 +79,10 @@ impl Fake {
 
     fn fetched(&self) -> Vec<String> {
         self.state.lock().unwrap().fetched.clone()
+    }
+
+    fn removing(&self) -> Vec<String> {
+        self.state.lock().unwrap().removing.clone()
     }
 }
 
@@ -107,6 +118,14 @@ impl Store for Fake {
     }
 
     async fn remove(&self, image: &PinnedImage) -> io::Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .removing
+            .push(image.digest.clone());
+        if let Some(hold) = &self.hold {
+            hold.acquire().await.unwrap().forget();
+        }
         if self.refused.contains(&image.digest) {
             return Err(io::Error::new(io::ErrorKind::ResourceBusy, "pinned"));
         }
@@ -483,4 +502,119 @@ fn the_prefetcher_forgets_an_evicted_image() {
         prefetcher.wait("registry.example/a:latest"),
         Prepared::Failed(_)
     ));
+}
+
+/// A future of these tests, boxed so that it is polled by hand.
+type Pending = Pin<Box<dyn Future<Output = Result<(), String>>>>;
+
+/// Polls `future` once, with a waker that wakes nobody.
+fn poll_once(future: &mut Pending) -> Poll<Result<(), String>> {
+    future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+}
+
+/// The use of `c` for a start, as a future to poll by hand.
+fn using_held(images: &Arc<Images>, c: char) -> Pending {
+    let images = Arc::clone(images);
+    Box::pin(async move { images.use_held(&image(c)).await })
+}
+
+/// A store of A, B and C under a budget of three images whose removals wait for a permit,
+/// with the budget loaded, and the pull of D started and stuck inside the removal of A (the
+/// admission holds the turn there). The store, its images, the pull, and the permits that
+/// let a removal go.
+fn stuck_in_an_eviction() -> (Arc<Fake>, Arc<Images>, Pending, Arc<tokio::sync::Semaphore>) {
+    let hold = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut fake = Fake::with_held(&[('a', SIZE), ('b', SIZE), ('c', SIZE)]);
+    fake.hold = Some(Arc::clone(&hold));
+    let fake = Arc::new(fake);
+    let images = Arc::new(images(&fake, 3 * SIZE, &[]).0);
+    let mut pulling: Pending = {
+        let images = Arc::clone(&images);
+        Box::pin(async move { images.ensure(&image('d')).await })
+    };
+    assert!(poll_once(&mut pulling).is_pending());
+    assert_eq!(fake.removing(), [digest('a')]);
+    assert!(fake.removed().is_empty());
+    (fake, images, pulling, hold)
+}
+
+/// Proves a start's use of an image the book holds does not wait for the turn: while the
+/// pull of D is stuck in the removal of A, the use of B completes at its first poll, and it
+/// counts as a use. After the removal is let go, the pull of E evicts C, not B: B was used
+/// after C.
+#[test]
+fn the_use_of_a_held_image_takes_no_turn_and_is_a_use() {
+    let (fake, images, mut pulling, hold) = stuck_in_an_eviction();
+    assert_eq!(
+        poll_once(&mut using_held(&images, 'b')),
+        Poll::Ready(Ok(()))
+    );
+    assert!(fake.removed().is_empty());
+    hold.add_permits(2);
+    assert_eq!(poll_once(&mut pulling), Poll::Ready(Ok(())));
+    assert_eq!(fake.removed(), [digest('a')]);
+    assert_eq!(block(images.ensure(&image('e'))), Ok(()));
+    assert_eq!(fake.removed(), [digest('a'), digest('c')]);
+    assert_eq!(fake.held(), [digest('b'), digest('d'), digest('e')]);
+}
+
+/// Proves a start's use of an image the book does not count waits for the turn and then
+/// does the full pull: while the pull of D is stuck in a removal, the use of X is pending
+/// and has fetched nothing; once the removal is let go, it completes, X is fetched and
+/// counted.
+#[test]
+fn the_use_of_an_image_the_book_lacks_waits_for_the_turn() {
+    let (fake, images, mut pulling, hold) = stuck_in_an_eviction();
+    let mut using = using_held(&images, 'x');
+    assert!(poll_once(&mut using).is_pending());
+    assert!(!fake.fetched().contains(&digest('x')));
+    hold.add_permits(2);
+    assert_eq!(poll_once(&mut pulling), Poll::Ready(Ok(())));
+    assert_eq!(poll_once(&mut using), Poll::Ready(Ok(())));
+    assert_eq!(fake.fetched(), [digest('d'), digest('x')]);
+    assert_eq!(images.counted(), 3 * SIZE);
+    assert!(fake.held().contains(&digest('x')));
+}
+
+/// Proves a start's use of an image before the budget has listed the store takes the full
+/// path: the store is listed and the image counted. Without a budget it is the store's
+/// own ensure: the image is fetched and nothing is counted.
+#[test]
+fn the_use_of_an_image_before_the_book_is_loaded_loads_it_and_without_a_budget_only_ensures() {
+    let fake = Arc::new(Fake::with_held(&[('a', SIZE)]));
+    let images = Arc::new(images(&fake, 3 * SIZE, &[]).0);
+    assert_eq!(
+        poll_once(&mut using_held(&images, 'a')),
+        Poll::Ready(Ok(()))
+    );
+    assert_eq!(images.counted(), SIZE);
+    assert!(fake.fetched().is_empty());
+
+    let open = Arc::new(Images::new(
+        Arc::clone(&fake) as Arc<dyn Store>,
+        None,
+        BTreeSet::new(),
+    ));
+    assert_eq!(poll_once(&mut using_held(&open, 'b')), Poll::Ready(Ok(())));
+    assert_eq!(fake.fetched(), [digest('b')]);
+    assert_eq!(open.counted(), 0);
+}
+
+/// Proves a held image the store cannot ensure fails the use with the store's words: B is
+/// in the book, the store cannot fetch it, and the use fails.
+#[test]
+fn the_use_of_a_held_image_fails_with_the_store() {
+    let mut fake = Fake::with_held(&[('b', SIZE)]);
+    fake.unfetchable.insert(digest('b'));
+    let fake = Arc::new(fake);
+    let images = Arc::new(images(&fake, 3 * SIZE, &[]).0);
+    // The first ensure loads the book with B, then fails.
+    assert!(block(images.ensure(&image('b'))).is_err());
+    let failed = poll_once(&mut using_held(&images, 'b'));
+    assert_eq!(
+        failed,
+        Poll::Ready(Err(format!("no registry for {}", image('b'))))
+    );
 }

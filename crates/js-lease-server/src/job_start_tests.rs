@@ -1,6 +1,7 @@
 //! The start a placement is sent, and every reason one is not.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use js_agent_wire::{
     BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, HostPort, Isolation, JobMount,
@@ -8,6 +9,7 @@ use js_agent_wire::{
     RunFile,
 };
 use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobFiles, JobId, JobRecord, NetworkPolicy};
+use js_state::StoreTime;
 use js_types::{
     Arch, ExecMode, HostId, ImageDigestRef, JobNetwork as Level, Os, PortMap, Resources,
 };
@@ -143,6 +145,24 @@ fn a_start_carries_the_job_and_what_its_allocation_booked() {
             gpu_indices: Vec::new(),
         }
     );
+}
+
+/// The start carries the Unix time in milliseconds at which the job was placed, from the
+/// record's `placed_at` exactly (a fraction of a millisecond is dropped), and none for a
+/// record that has no placement time. It catches a placement time carried in seconds or
+/// nanoseconds, or one made up when the record has none.
+#[test]
+fn a_start_carries_the_time_the_job_was_placed_in_milliseconds() {
+    let (mut job, allocation) = records();
+    job.placed_at = Some(StoreTime::from_duration(Duration::from_micros(
+        1_800_000_123_456_789,
+    )));
+    let start = build(&job, &allocation, &allow_list()).unwrap();
+    assert_eq!(start.placed_at_ms, Some(1_800_000_123_456));
+
+    job.placed_at = None;
+    let start = build(&job, &allocation, &allow_list()).unwrap();
+    assert_eq!(start.placed_at_ms, None);
 }
 
 /// Each start the wire cannot carry is refused with its reason: a whole-host booking when the
