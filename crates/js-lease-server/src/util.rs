@@ -15,8 +15,9 @@ pub(crate) async fn or_pending<T>(value: Option<T>) -> T {
 }
 
 /// Runs `work` on the runtime's pool for blocking calls and waits for it without holding
-/// up a worker: for file writes and syncs, which an async handler must not do itself. A
-/// panic in `work` is raised again in the caller.
+/// up a worker: for file writes and syncs, store calls, and any other call that blocks,
+/// which an async handler must not make itself. A panic in `work` is raised again in the
+/// caller.
 pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     match spawn_blocking(work).await {
         Ok(done) => done,
