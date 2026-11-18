@@ -14,6 +14,9 @@
 //! - `channels pkg upload --dir <dir> --version <X.Y.Z> --bucket <b> --work <dir>` ([`pkg`]): the
 //!   signed macOS installer package and its `SHA256SUMS` into `pkg/jobscheduler/<X.Y.Z>/` of the
 //!   same bucket, each once.
+//! - `channels descriptor write --bucket <b> --work <dir> [--distribution-id <id>]` ([`descriptor`]):
+//!   `js-agent` mapped to `pkg/jobscheduler` in the repository's `hostkeeper-repository.json`, which
+//!   hostkeeper's coordinator reads to find the package; nothing else in it is changed.
 //! - `channels check-apt --arch <arch> --version <X.Y.Z> ...` ([`check`]): the release installed
 //!   from the `testing` suite in a clean Ubuntu system, as a host does.
 //!
@@ -27,6 +30,7 @@ pub mod apt;
 pub mod assume;
 pub mod aws;
 pub mod check;
+pub mod descriptor;
 pub mod gate;
 pub mod pkg;
 pub mod sums;
@@ -202,6 +206,12 @@ pub enum Verb {
         #[command(subcommand)]
         verb: pkg::Verb,
     },
+    /// The repository's descriptor: this release's package mapped in it.
+    Descriptor {
+        /// Which step.
+        #[command(subcommand)]
+        verb: descriptor::Verb,
+    },
 }
 
 /// Runs a verb: the lines to print.
@@ -259,6 +269,7 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
         ),
         Verb::Apt { verb } => apt::run(verb),
         Verb::Pkg { verb } => pkg::run(verb),
+        Verb::Descriptor { verb } => descriptor::run(verb),
     }
 }
 

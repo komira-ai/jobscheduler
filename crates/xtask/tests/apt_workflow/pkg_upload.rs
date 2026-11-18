@@ -17,8 +17,12 @@
 //! - The signed package is downloaded by a step that may fail (a release whose package was not
 //!   signed has none): the steps that need it run only when that download succeeded, and one step
 //!   says in a notice that nothing is uploaded when it did not.
-//! - The role is assumed before the upload, which is the one command that writes
+//! - The role is assumed before the upload, which is the first command that writes
 //!   (`channels pkg upload`, which no other job runs).
+//! - The upload is followed by one step, under the same `if:`, that maps `js-agent` to
+//!   `pkg/jobscheduler` in the repository's descriptor (`channels descriptor write`, which no
+//!   other job runs), from the bucket and the distribution of the environment's variables: a
+//!   coordinator finds the package through that mapping.
 
 use super::apt::{GATE_IF, ROLE};
 use super::support::{at, entries, entry, job, mentions, names, permissions, steps};
@@ -52,8 +56,14 @@ pub const ASSUME: &str = "tool/xtask channels assume --role-arn \"$ROLE_ARN\" --
 /// The command that uploads: the package, then its SHA256SUMS, to `pkg/jobscheduler/<version>/`.
 pub const UPLOAD: &str = "tool/xtask channels pkg upload --dir pkg --version \"$VERSION\" --bucket \"$APT_BUCKET\" --work \"$RUNNER_TEMP/pkg-work\"";
 
+/// The command that maps `js-agent` to `pkg/jobscheduler` in the repository's descriptor.
+pub const DESCRIPTOR: &str = "tool/xtask channels descriptor write --bucket \"$APT_BUCKET\" --distribution-id \"$APT_DISTRIBUTION_ID\" --work \"$RUNNER_TEMP/descriptor\"";
+
 /// The verb that only [`PKG_JOB`] may run.
 pub const VERB: &str = "xtask channels pkg upload";
+
+/// The second verb that only [`PKG_JOB`] may run.
+pub const DESCRIPTOR_VERB: &str = "xtask channels descriptor write";
 
 /// The artifact the signing job of js-agent-macos-pkg.yml uploads.
 const SIGNED_ARTIFACT: &str = "js-agent-macos-pkg-signed";
@@ -186,6 +196,29 @@ fn step_problems(all: &[Node]) -> Vec<String> {
         && at(&all[u], &["env", "APT_BUCKET"]) != Some("${{ vars.APT_BUCKET }}")
     {
         problems.push(format!("{PKG_JOB}: the bucket is not vars.APT_BUCKET"));
+    }
+    let descriptor = runs(all, DESCRIPTOR);
+    match (upload, descriptor) {
+        (Some(u), Some(d)) if u < d => {
+            for (var, want) in [
+                ("APT_BUCKET", "${{ vars.APT_BUCKET }}"),
+                ("APT_DISTRIBUTION_ID", "${{ vars.APT_DISTRIBUTION_ID }}"),
+            ] {
+                if at(&all[d], &["env", var]) != Some(want) {
+                    problems.push(format!(
+                        "{PKG_JOB}: the descriptor step does not read {var} from {want}"
+                    ));
+                }
+            }
+            if at(&all[d], &["if"]) != at(&all[u], &["if"]) {
+                problems.push(format!(
+                    "{PKG_JOB}: the descriptor step does not run under the upload's `if`"
+                ));
+            }
+        }
+        _ => problems.push(format!(
+            "{PKG_JOB}: there is no step after the upload that runs `{DESCRIPTOR}`"
+        )),
     }
     for (index, step) in all.iter().enumerate().skip(gate + 1) {
         let condition = at(step, &["if"]).unwrap_or_default();

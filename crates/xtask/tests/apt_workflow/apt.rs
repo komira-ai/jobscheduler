@@ -31,7 +31,7 @@
 //! - The verbs of the apt channel are run by the jobs of their kind alone, and the promotion
 //!   (`stable`) waits for `check-apt` and runs only when it succeeded.
 
-use super::pkg_upload::{PKG_JOB, VERB as PKG_VERB};
+use super::pkg_upload::{DESCRIPTOR_VERB, PKG_JOB, VERB as PKG_VERB};
 use super::support::{at, entries, entry, job, mentions, names, permissions, steps, text};
 use super::yaml::Node;
 
@@ -409,10 +409,12 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
                 "{name}: holds `id-token: write`; only artifacts, pkg-upload, gamma, cp-deploy and the apt jobs that read and write may"
             ));
         }
-        if name != PKG_JOB && runs(found, PKG_VERB) {
-            problems.push(format!(
-                "{name}: runs `{PKG_VERB}...`, which only pkg-upload may"
-            ));
+        for verb in [PKG_VERB, DESCRIPTOR_VERB] {
+            if name != PKG_JOB && runs(found, verb) {
+                problems.push(format!(
+                    "{name}: runs `{verb}...`, which only pkg-upload may"
+                ));
+            }
         }
         if own.is_none()
             && name != PKG_JOB

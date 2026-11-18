@@ -544,6 +544,19 @@ re-run of the job passes and a different file at a version's key fails and is ne
 package is then at `https://packages.komira.ai/pkg/jobscheduler/X.Y.Z/js-agent-X.Y.Z-macos-arm64.pkg`
 beside its `SHA256SUMS`.
 
+A last step of the same job runs `cargo xtask channels descriptor write --bucket <b> --distribution-id <id>
+--work <dir>`: a hostkeeper coordinator finds a `macos-pkg` package through the repository's descriptor,
+`https://packages.komira.ai/hostkeeper-repository.json`, and a package with no entry in its
+`formats.macos-pkg.packages` is looked for in `pkg/<name>/`, which for `js-agent` does not exist. The verb reads
+the descriptor with its ETag and adds only this repository's part: `formats.macos-pkg.path` is `pkg`, the
+platforms hold `macos-arm64`, and `packages.js-agent` is `{"dir": "jobscheduler"}`. Every other key (`apt`, `rpm`,
+`key`, `channels`, other products' packages) stays as it was. It puts the result with `If-Match` on the ETag read
+(a `412` reads and decides again, up to `--attempts`, 3 by default), puts nothing when the descriptor holds the
+mapping already, and then invalidates `/hostkeeper-repository.json` when `APT_DISTRIBUTION_ID` is set. It
+refuses, writing nothing, a descriptor that is absent (hostkeeper's release creates it, and this repository only
+adds to it), one of a version newer than 1, one with a part that is not of its form, one whose format has another
+`path`, and one that maps `js-agent` to another directory.
+
 **Desired version.** `cargo xtask release desired --pkg-url https://packages.komira.ai/pkg/jobscheduler`
 downloads `<base>/X.Y.Z/SHA256SUMS` and the package over HTTPS and holds the package's SHA-256 to the
 digest the sums list. When both are there it writes the output `set-mac=true` and adds this entry
