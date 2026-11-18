@@ -18,9 +18,14 @@
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
 //!    release, see [`agent_in`]) `--version` names the target version (1), and the staged release
 //!    carries the unit the hook manages (`bad_artifact` otherwise);
-//! 4. a first install needs a join token: the token file must be a regular file of the hook's
-//!    user, mode 0600 or 0400, unless the state root already holds a host credential;
-//!    otherwise the step defers (75, `join_token_missing`) and the operator places the file;
+//! 4. a first install needs a way to authenticate: when the host's flags file names the host's
+//!    certificate and key (`--host-cert` and `--host-key`), both files must be there and the
+//!    key must pass the rule the agent holds it to (a regular file owned by root or the hook's
+//!    user, no access for others, not writable by its group), and the token file is not looked
+//!    at; when it names neither, or cannot be read, the state root holds a host credential, or
+//!    the token file is a regular file of the hook's user, mode 0600 or 0400. Otherwise the
+//!    step defers (75, `join_token_missing`, a reason that is a shipped wire value) and the
+//!    detail names the file to fix;
 //! 5. the record is written, with the cordon marked as ours *before* it is placed unless the
 //!    host is cordoned already (an operator's cordon is never ours), so that a step killed
 //!    after the placing finds it marked; the reply of the lease server corrects the mark;
@@ -33,7 +38,10 @@
 //! carried (the installed one, see [`plan`](crate::update_hook::plan)). A difference is recorded
 //! as the record's restart plan and named in the detail of the success; `cutover` acts on it.
 
+use std::path::Path;
 use std::time::Duration;
+
+use js_client::{HostIdentity, host_key_problem};
 
 use crate::update_hook::{
     Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, PlanError, Reason, Record,
@@ -41,7 +49,7 @@ use crate::update_hook::{
 };
 
 use super::supersede::{judge, set_aside};
-use super::{Env, check, failure, lease_failure, open_unchecked, save, success};
+use super::{Env, TokenFacts, check, failure, lease_failure, open_unchecked, save, success};
 
 /// The agent's name, the first word of its `--version`.
 const AGENT_NAME: &str = "js-agent";
@@ -130,10 +138,28 @@ fn note_restart(mut done: Done, record: &Record) -> Done {
     done
 }
 
-/// A first install needs the host's join token, which the operator (or the machine image)
-/// places: a regular file of the hook's user, mode 0600 or 0400. A host credential in the state
-/// root does without. Otherwise the step defers, with nothing changed, until the file is right.
+/// A first install needs a way to authenticate to the lease server. When the host's flags file
+/// names its certificate and key (`--host-cert` and `--host-key`), that is the way: the agent
+/// presents them and reads no token, so the token file is not looked at and nothing defers for
+/// it, and the step checks only that the certificate file is there and that the key file is a
+/// regular file the agent may use (see [`js_client::host_key_problem`]); otherwise it defers
+/// with the file to fix. When the flags file names neither, or cannot be read, the host
+/// credential of the state root does, and so does the join token, which the operator (or the
+/// machine image) places, in a regular file of the hook's user, mode 0600 or 0400. The step
+/// defers, with nothing changed, until it is right.
 fn join_token(env: &Env<'_>, params: &Params) -> Result<(), Done> {
+    if let Some(identity) = env.host_identity {
+        return match host_files_problem(env, identity) {
+            Some(problem) => Err(deferred(
+                params,
+                format!(
+                    "the host certificate and key named in {}: {problem}; fix it to install the agent",
+                    params.flags_file.display()
+                ),
+            )),
+            None => Ok(()),
+        };
+    }
     if env.ports.state.has_credential() {
         return Ok(());
     }
@@ -141,28 +167,69 @@ fn join_token(env: &Env<'_>, params: &Params) -> Result<(), Done> {
     let problem = match (env.token)(file) {
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => "is not there".to_owned(),
         Err(why) => format!("cannot be read: {why}"),
-        Ok(facts) if !facts.regular => "is not a regular file".to_owned(),
-        Ok(facts) if !matches!(facts.mode, 0o600 | 0o400) => {
-            format!("must be mode 0600 or 0400, not {:04o}", facts.mode)
-        }
-        Ok(facts) if facts.uid != env.euid => {
-            format!("must be owned by uid {}, not {}", env.euid, facts.uid)
-        }
-        Ok(_) => return Ok(()),
+        Ok(facts) => match owner_only_problem(&facts, env.euid) {
+            Some(problem) => problem,
+            None => return Ok(()),
+        },
     };
-    Err(Done {
+    Err(deferred(
+        params,
+        format!(
+            "the join token file {} {problem}; place it, root-owned and mode 0600, to install the agent",
+            file.display()
+        ),
+    ))
+}
+
+/// What is wrong with the host certificate and key files, named by path, or `None` when the
+/// certificate file is a regular file and the key passes the agent's rule. The text holds no
+/// content.
+fn host_files_problem(env: &Env<'_>, identity: &HostIdentity) -> Option<String> {
+    let cert = identity.cert_path();
+    let key = identity.key_path();
+    let look = |path: &Path| match (env.token)(path) {
+        Ok(facts) => Ok(facts),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Err("is not there".to_owned()),
+        Err(why) => Err(format!("cannot be read: {why}")),
+    };
+    let cert_problem = match look(cert) {
+        Ok(facts) => (!facts.regular).then(|| "is not a regular file".to_owned()),
+        Err(why) => Some(why),
+    };
+    if let Some(problem) = cert_problem {
+        return Some(format!("{} {problem}", cert.display()));
+    }
+    let key_problem = match look(key) {
+        Ok(facts) => host_key_problem(facts.regular, facts.mode, facts.uid, env.euid),
+        Err(why) => Some(why),
+    };
+    key_problem.map(|problem| format!("{} {problem}", key.display()))
+}
+
+/// Why a join token file is not one the agent will use: not a regular file, not mode 0600 or
+/// 0400, or not owned by the hook's user (`euid`).
+fn owner_only_problem(facts: &TokenFacts, euid: u32) -> Option<String> {
+    if !facts.regular {
+        return Some("is not a regular file".to_owned());
+    }
+    if !matches!(facts.mode, 0o600 | 0o400) {
+        return Some(format!("must be mode 0600 or 0400, not {:04o}", facts.mode));
+    }
+    (facts.uid != euid).then(|| format!("must be owned by uid {euid}, not {}", facts.uid))
+}
+
+/// The deferral of a first install that cannot authenticate yet, with nothing changed.
+fn deferred(params: &Params, detail: String) -> Done {
+    Done {
         outcome: Outcome::Deferred,
         report: Report {
             reason: Some(Reason::JoinTokenMissing),
             class: Class::Environment,
             retry_after_secs: Some(params.defer_retry_secs),
-            detail: Some(format!(
-                "the join token file {} {problem}; place it, root-owned and mode 0600, to install the agent",
-                file.display()
-            )),
+            detail: Some(detail),
             ..Report::default()
         },
-    })
+    }
 }
 
 /// The record of an update that is just beginning: nothing done, no cordon. The digest is the

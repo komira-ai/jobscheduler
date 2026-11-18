@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent::{Answer, Connector, Transport};
+use js_agent::{Answer, Connector, Login, Transport};
 use js_client::ClientError;
 use serde_json::{Value, json};
 
@@ -55,7 +55,7 @@ impl Connector for PreviousServer {
     fn connect(
         &self,
         _server: &str,
-        _token_file: &Path,
+        _login: &Login,
         _ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
         Ok(Box::new(Answering(self.clone())))

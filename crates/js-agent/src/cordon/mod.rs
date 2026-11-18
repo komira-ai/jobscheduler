@@ -1,8 +1,9 @@
 //! `js-agent cordon`: keeps leases off this host for a window, then lets them back.
 //!
 //! ```text
-//! js-agent cordon --server <url> (--state-root <dir> | --token-file <file>) --for <duration>
-//!     [--lease-secs <n>] [--host-id <id> | --host-id-from-facts <file>] [--ca-cert <file>]
+//! js-agent cordon --server <url> (--host-cert <file> --host-key <file> | --state-root <dir> |
+//!     --token-file <file>) --for <duration> [--lease-secs <n>]
+//!     [--host-id <id> | --host-id-from-facts <file>] [--ca-cert <file>]
 //! ```
 //!
 //! An operator's measurement needs a node that no lease lands on for an hour or two. The
@@ -44,7 +45,9 @@
 //! # Secrets
 //!
 //! The credential is read from its file by `js-client` and sent in the `Authorization` header
-//! only. It is not in argv, in a line of output or in an error.
+//! only. The host certificate of `--host-cert` and `--host-key` is presented in the TLS
+//! handshake instead and no `Authorization` header is sent. Neither is in argv, in a line of
+//! output or in an error.
 
 mod args;
 mod hold;
@@ -63,8 +66,8 @@ use crate::cli::host_id_of;
 use crate::own_host::{HttpLease, Lease, RequestLimit};
 
 use crate::{
-    CommandRunner, FileReader, Platform, Sleeper, SystemCommands, SystemFiles, SystemSleeper, Wake,
-    exit, host_id, machine_id,
+    CommandRunner, FileReader, Login, Platform, Sleeper, SystemCommands, SystemFiles,
+    SystemSleeper, Wake, exit, host_id, machine_id,
 };
 pub use args::{Args, parse_window};
 pub(crate) use hold::CREDENTIAL_CODES;
@@ -119,8 +122,8 @@ impl Pace for SystemPace {
 pub struct Connection<'a> {
     /// `--server`.
     pub server: &'a str,
-    /// The file the credential is read from.
-    pub credential: &'a Path,
+    /// How the client proves who it is: the credential file or the host certificate.
+    pub login: &'a Login,
     /// `--ca-cert`.
     pub ca_cert: Option<&'a Path>,
     /// The host the routes are called for.
@@ -178,10 +181,10 @@ fn begin(args: &[OsString], host: &Host<'_>) -> Result<(Args, String, Box<dyn Le
             })?,
     };
     HostId::new(&id).map_err(|why| Early::Usage(format!("--host-id: {why}")))?;
-    let credential = args::credential_file(&parsed).map_err(Early::Usage)?;
+    let login = args::login(&parsed).map_err(Early::Usage)?;
     let lease = (host.connect)(&Connection {
         server: &parsed.server,
-        credential: &credential,
+        login: &login,
         ca_cert: parsed.ca_cert.as_deref(),
         host: &id,
     })
@@ -251,7 +254,7 @@ pub fn run_system(
     let connect = |at: &Connection<'_>| {
         HttpLease::connect(
             at.server,
-            at.credential,
+            at.login,
             at.ca_cert,
             at.host,
             RequestLimit::DEFAULT,

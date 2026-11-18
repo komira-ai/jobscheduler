@@ -869,7 +869,7 @@ impl Lifecycle {
         // made: a run whose images are still being fetched, or whose file system is being
         // prepared, waits as `starting`, holding its booking, and costs the worker nothing
         // until it is ready (see `Runtime::prepare` and `prepare`).
-        self.begin_timeline(run_id, received, taken);
+        self.begin_timeline(run_id, (received, taken), given.placed_at_ms);
         let made = (mounts, slot, booked);
         self.prepare_or_begin((spec, keyed), given, made, received, events);
     }

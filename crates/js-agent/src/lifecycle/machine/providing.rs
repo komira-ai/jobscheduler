@@ -1,8 +1,9 @@
 //! The providers' part of a start (`docs/design/mount-providers.md`, section 4): a start
-//! whose layers or mounts name a provider waits in [`Phase::Providing`], beside its images,
-//! until every such source has the directory its provider made for it; then each source is
-//! replaced by that directory as a host path and the start goes on to the lookups of its
-//! host paths as any start does.
+//! whose layers or mounts name a provider keeps its [`Providing`] in [`Phase::Resolving`],
+//! beside its images and the lookups of its other host paths, until every such source has
+//! the directory its provider made for it; then each source is replaced by that directory
+//! as a host path, the step `provided` is marked, and the lookups of those paths are
+//! followed with the rest.
 //!
 //! - **At admission**, once the start has its slot, the record of its sources is written
 //!   ([`provider_record`], so a restart can release what may exist), the sources are
@@ -294,33 +295,36 @@ impl Providing {
 
 /// What the providers' part of a waiting start comes to at a step.
 pub(super) enum Follow {
-    /// The start has no providers' part (or it is done: the start is in the lookups of its
-    /// host paths now): the step goes on as any start's.
+    /// The start has no providers' part, or some source has no directory yet: the step goes
+    /// on with the images and the lookups.
     Go,
-    /// Some source has no directory yet.
-    Wait,
+    /// Every source has its directory now, bound into the start's file system, and the
+    /// providers' part is dropped: the step goes on, and `provided` is marked.
+    Bound,
     /// The start fails.
     Fail(Failure),
 }
 
 /// Follows the providers' part of `waiting`, if it has one: asks for what is lacking, and
-/// when every source has its directory replaces the sources by them and moves the start on
-/// to the lookups of its host paths.
+/// when every source has its directory replaces the sources by them and drops the part.
 pub(super) fn follow(
     waiting: &mut Waiting,
     (attached, roots): (&mut Attached, &MountRoots),
     now_ms: u64,
 ) -> Follow {
-    let Phase::Providing(providing) = &mut waiting.phase else {
+    let Phase::Resolving { providing, .. } = &mut waiting.phase else {
         return Follow::Go;
     };
-    match providing.poll(&waiting.spec.run_id, attached, roots, now_ms) {
+    let Some(part) = providing.as_mut() else {
+        return Follow::Go;
+    };
+    match part.poll(&waiting.spec.run_id, attached, roots, now_ms) {
         Err(failure) => Follow::Fail(failure),
-        Ok(false) => Follow::Wait,
+        Ok(false) => Follow::Go,
         Ok(true) => {
-            providing.bind(&mut waiting.given.fs);
-            waiting.phase = Phase::Resolving;
-            Follow::Go
+            part.bind(&mut waiting.given.fs);
+            *providing = None;
+            Follow::Bound
         }
     }
 }

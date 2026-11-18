@@ -10,6 +10,10 @@
 //!
 //! Nothing is imputed, trimmed or dropped, no clock or random source is read (the sampled
 //! permutation test uses a fixed seed), and no environment variable is read.
+//!
+//! The `timeline` module and the `js-start-timeline` program are separate from the benchmark
+//! statistics: they read the agent's `Started` journal lines and print the percentiles of the
+//! segments of a start.
 
 mod analyze;
 mod cli;
@@ -18,6 +22,7 @@ mod describe;
 mod error;
 mod quantile;
 mod render;
+pub mod timeline;
 mod types;
 
 use std::process::ExitCode;

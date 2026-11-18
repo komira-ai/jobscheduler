@@ -206,6 +206,12 @@ pub struct Cli {
     /// followed and the file it leads to is checked. SIGHUP reads it again.
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
+    /// The PEM file of the CA certificates (hostkeeper's) that sign the host certificates
+    /// of the hosts' agents, which an agent may present on the agent routes instead of a
+    /// join token: it names the host, and the host's agent is admitted with no token.
+    /// Needs `--tls-cert` and `--tls-key`. SIGHUP reads it again with the pair.
+    #[arg(long)]
+    pub agent_client_ca: Option<PathBuf>,
     /// The most connections held open at once, handshaking, idle or busy. At the cap
     /// the server stops accepting until one ends.
     #[arg(long, default_value = "256", value_parser = clap::value_parser!(u16).range(1..))]
@@ -473,6 +479,9 @@ pub struct Config {
     /// handle the bearer layer reads and the tick reloads.
     pub(crate) clients: LiveClients,
     pub(crate) tls: Option<TlsFiles>,
+    /// The CA file of the hosts' certificates (`--agent-client-ca`,
+    /// `server.agent_client_ca`); only with `tls`.
+    pub(crate) agent_client_ca: Option<PathBuf>,
     pub(crate) limits: Limits,
     /// The registering side: the pool the hosts that run `js-agent` join, and its tokens.
     pub(crate) agents: Box<AgentSetup>,
@@ -530,6 +539,7 @@ impl Config {
             "--estimate-feed",
         ));
         let tls = listen::tls_files(&cli)?;
+        let agent_client_ca = listen::agent_client_ca(&cli, tls.is_some())?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
         let clients = LiveClients::new(tokens::from_flags(&token, &cli)?);
@@ -565,6 +575,7 @@ impl Config {
             token,
             clients,
             tls,
+            agent_client_ca,
             limits,
             agents,
             usage,
@@ -694,6 +705,7 @@ impl Config {
             token: client_token,
             clients,
             tls: server.tls,
+            agent_client_ca: server.agent_client_ca,
             limits: server.limits,
             agents,
             usage,

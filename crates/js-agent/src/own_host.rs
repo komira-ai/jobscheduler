@@ -16,6 +16,7 @@ use js_client::{Client, ClientError, Reply};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::login::Login;
 use crate::transport::REQUEST_LIMIT;
 
 /// The longest cordon the lease server grants in one request; a longer ask is cut to it.
@@ -175,27 +176,29 @@ pub struct HttpLease {
 }
 
 impl HttpLease {
-    /// Connects to `server` as `host`, with the credential in the owner-only file
-    /// `credential`, trusting `ca_cert` for `https://` (or the bundled public roots without
-    /// it). `host` is a valid host id: it has no colon and nothing to escape. Every call
+    /// Connects to `server` as `host`, with the credential in the owner-only file of `login`
+    /// or the host certificate it names, trusting `ca_cert` for `https://` (or the bundled
+    /// public roots without it). `host` is a valid host id: it has no colon and nothing to escape. Every call
     /// ends within `limit`, connect and TLS included: a server that does not answer in time
     /// is [`LeaseError::Unreachable`], and the same client may be called again after it.
     ///
     /// # Errors
     ///
-    /// [`ClientError::Flag`] naming `--server`, `--token-file` or `--ca-cert` when that
-    /// flag, or the file it names, is unusable.
+    /// [`ClientError::Flag`] naming `--server`, `--token-file`, `--host-cert`, `--host-key` or
+    /// `--ca-cert` when that flag, or the file it names, is unusable.
     pub fn connect(
         server: &str,
-        credential: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
         host: &str,
         limit: RequestLimit,
     ) -> Result<Self, ClientError> {
-        Client::connect(server, credential, ca_cert, limit.get()).map(|client| Self {
-            client,
-            host: host.to_owned(),
-        })
+        login
+            .connect(server, ca_cert, limit.get())
+            .map(|client| Self {
+                client,
+                host: host.to_owned(),
+            })
     }
 
     /// The path of the route: `verb` is `cordon` or `uncordon`, or none for the read.

@@ -116,7 +116,7 @@ fn a_new_epoch_keeps_the_worker_and_lists_its_runs_in_the_hello() {
 /// handed over, one handed over out of order, and a start logged without its timeline.
 /// The line of the start of `r1`, at the worker's clock's origin.
 const STARTED_R1: &str = "job: Started { run_id: \"r1\", timeline: StartTimeline { \
-    received_ms: 0, steps: [(\"taken\", 0), (\"admitted\", 0), (\"ready\", 0), (\"dirs\", 0), \
+    received_ms: 0, placed_at_ms: None, received_at_ms: None, steps: [(\"taken\", 0), (\"admitted\", 0), (\"ready\", 0), (\"dirs\", 0), \
     (\"created\", 0)], runtime: [] } }";
 
 #[test]

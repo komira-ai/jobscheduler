@@ -88,7 +88,7 @@ impl Tree {
     /// The params of an update from 1.3.0 (or a first install). `extra` is lines of the
     /// agent's flags the way the old table gave them: `state_root` and `token_file` are params
     /// keys (the tree's own state root is not there, and its token file is a good one, unless
-    /// they say otherwise), `server`, `ca_cert` and `host_id` go to the tree's flags file, which
+    /// they say otherwise), `server`, `ca_cert`, `host_id`, `host_cert` and `host_key` go to the tree's flags file, which
     /// always names the pool, and any other line is put in the table as it is.
     pub(super) fn params(&self, previous: bool, extra: &str) -> Params {
         let previous = if previous {
@@ -115,6 +115,12 @@ impl Tree {
                 }
                 Some(("host_id", value)) => {
                     flags.push(format!("--host-id={}", value.trim_matches('"')))
+                }
+                Some(("host_cert", value)) => {
+                    flags.push(format!("--host-cert={}", value.trim_matches('"')))
+                }
+                Some(("host_key", value)) => {
+                    flags.push(format!("--host-key={}", value.trim_matches('"')))
                 }
                 Some(("host_id_from_facts", value)) => {
                     flags.push(format!("--host-id-from-facts={}", value.trim_matches('"')))
@@ -368,6 +374,7 @@ fn a_lease_that_could_not_be_made_answers_every_call_with_the_reason_it_could_no
         token_file: None,
         ca_cert: None,
         host_id: Some("mac-1".to_owned()),
+        host_identity: None,
     };
     let cases = [
         (

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use js_agent::HEARTBEAT_PATH;
-use js_agent::{Answer, Connector, Dialer, Handle, Machine, Sleeper, Transport, Wake};
+use js_agent::{Answer, Connector, Dialer, Handle, Login, Machine, Sleeper, Transport, Wake};
 use js_agent_wire::ProtocolRange;
 use js_client::{Client, ClientError, Reply};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
@@ -570,7 +570,7 @@ pub struct Redirect(pub Arc<Mutex<String>>);
 
 struct Redirected {
     to: Arc<Mutex<String>>,
-    token_file: PathBuf,
+    login: Login,
     credential: Option<String>,
 }
 
@@ -578,12 +578,12 @@ impl Connector for Redirect {
     fn connect(
         &self,
         _server: &str,
-        token_file: &Path,
+        login: &Login,
         _ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
         Ok(Box::new(Redirected {
             to: self.0.clone(),
-            token_file: token_file.to_path_buf(),
+            login: login.clone(),
             credential: None,
         }))
     }
@@ -593,7 +593,7 @@ impl Transport for Redirected {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
         let url = self.to.lock().unwrap().clone();
         Dialer
-            .connect(&url, &self.token_file, None)
+            .connect(&url, &self.login, None)
             .map_err(|err| err.to_string())
             .and_then(|mut transport| {
                 if let Some(credential) = &self.credential {
@@ -622,10 +622,10 @@ impl Connector for OtherMajors {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
-        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        let inner = Dialer.connect(server, login, ca_cert)?;
         Ok(Box::new(Rewriting {
             inner,
             majors: self.0,
@@ -661,10 +661,10 @@ impl Connector for Counting {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
-        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        let inner = Dialer.connect(server, login, ca_cert)?;
         Ok(Box::new(Counted {
             inner,
             beats: self.0.clone(),
@@ -699,10 +699,10 @@ impl Connector for Spy {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
-        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        let inner = Dialer.connect(server, login, ca_cert)?;
         Ok(Box::new(Spying {
             inner,
             seen: self.0.clone(),
@@ -740,10 +740,10 @@ impl Connector for Recorder {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
-        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        let inner = Dialer.connect(server, login, ca_cert)?;
         Ok(Box::new(Recording {
             inner,
             posted: self.0.clone(),

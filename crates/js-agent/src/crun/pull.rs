@@ -109,6 +109,28 @@ impl Images {
         admit(budget, &*self.store, image).await
     }
 
+    /// `image` in the store for a start, which runs on the worker thread: the use of an
+    /// image the store holds must not wait for another image's measure or eviction.
+    ///
+    /// Without a budget this is the store's `ensure`. With a budget that is loaded and counts
+    /// the image, it is the store's `ensure` (a stat when the image is there) and then a use
+    /// of the image in the book, which counts for the order of eviction; no turn is taken.
+    /// Otherwise it is [`Images::ensure`] in full.
+    ///
+    /// # Errors
+    /// As [`Images::ensure`].
+    pub(super) async fn use_held(&self, image: &PinnedImage) -> Result<(), String> {
+        let Some(budget) = &self.budget else {
+            return self.store.ensure(image).await;
+        };
+        if !budget.holds(&image.digest) {
+            return self.ensure(image).await;
+        }
+        self.store.ensure(image).await?;
+        budget.book().touch(&image.digest);
+        Ok(())
+    }
+
     /// The pull and unpack of `image` (a reference pinned by digest), counted against the
     /// budget: what the prefetcher runs.
     pub(super) fn pull(self: &Arc<Self>, image: String) -> PullFuture {

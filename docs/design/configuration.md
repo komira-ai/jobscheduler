@@ -12,6 +12,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 
 | flag | in the file |
 |---|---|
+| `--agent-client-ca` | `server.agent_client_ca`: the CA file of the hosts' certificates (needs `server.tls_cert` and `server.tls_key`, refused at start naming the key otherwise; read again with the TLS pair on SIGHUP). A host certificate (exactly one DNS SAN, the host id; end entity; `clientAuth` only; URIs and CN ignored) is the credential of its host on the agent routes; join tokens and the mint route stay for the scaler path; see the flag table in the server's crate documentation |
 | `--listen`, `--state-file` (the base path of the server's files: `.jobs`, `.agents`, `.joins`, `.scaler`; there is no lease file), `--boot` (`initialise` or `resume`; it governs the first start and whether the records files are required), `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
 | `--default-ttl`, `--max-ttl` | removed: a lease has no time to live (it ends when released or at its maximum wall time). Either flag, and the keys `server.default_ttl` and `server.max_ttl`, are refused at start naming the flag or the key |
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout`, `--drain-hold` | `server.<name>`, same defaults |

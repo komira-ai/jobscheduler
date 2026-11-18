@@ -1,4 +1,5 @@
-//! The HTTP client: one agent per command, bound to one server and one token.
+//! The HTTP client: one agent per command, bound to one server and one token or one
+//! host identity.
 
 use std::fmt;
 use std::path::Path;
@@ -9,10 +10,12 @@ use rustls::crypto::ring::default_provider;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use serde_json::Value;
-use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
+use ureq::RequestBuilder;
+use ureq::tls::{Certificate, ClientCert, RootCerts, TlsConfig, TlsProvider};
 use ureq::{Agent, Error as TransportError};
 
 use crate::error::ClientError;
+use crate::identity::{HostIdentity, Live};
 use crate::server_url::ServerUrl;
 use crate::token;
 
@@ -45,13 +48,21 @@ impl fmt::Debug for Reply {
     }
 }
 
-/// A connection to one server. It holds the token and never prints it: it has no
-/// `Debug`.
+/// How a client proves who it is.
+#[derive(Clone)]
+enum Auth {
+    /// The `Authorization` header value, on an agent built once.
+    Bearer { agent: Agent, bearer: String },
+    /// A client certificate, on the agent of the newest valid pair of files.
+    Identity(Arc<Live>),
+}
+
+/// A connection to one server. It holds the token, or the key of its host identity, and
+/// never prints it: it has no `Debug`.
 #[derive(Clone)]
 pub struct Client {
-    agent: Agent,
+    auth: Auth,
     server: ServerUrl,
-    bearer: String,
     limit: Duration,
 }
 
@@ -74,28 +85,52 @@ impl Client {
         let server = ServerUrl::parse(server)?;
         let bearer = token::bearer(token_file)?;
         let roots = roots(server.https, ca_cert)?;
-        let tls = TlsConfig::builder()
-            .provider(TlsProvider::Rustls)
-            .root_certs(roots)
-            .unversioned_rustls_crypto_provider(Arc::new(default_provider()))
-            .build();
-        let agent: Agent = Agent::config_builder()
-            .proxy(None)
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .https_only(server.https)
-            .timeout_global(Some(limit))
-            // A connection that sat idle between two requests may have been closed by the
-            // other side, and a request sent on a dead one fails; every request opens its
-            // own.
-            .max_idle_connections(0)
-            .tls_config(tls)
-            .build()
-            .into();
+        let agent = build_agent(server.https, limit, &roots, None);
         Ok(Self {
-            agent,
+            auth: Auth::Bearer { agent, bearer },
             server,
-            bearer,
+            limit,
+        })
+    }
+
+    /// Like [`Client::connect`], but the client proves who it is by the host identity
+    /// in `identity`: a client certificate presented in the TLS handshake, and no
+    /// `Authorization` header. Both files are read again before each request; when their
+    /// bytes changed and the pair they now hold is valid (both parse, the key passes
+    /// [`crate::host_key_problem`] and goes with the certificate), later requests use it, and otherwise the client
+    /// keeps the pair it had. A renewed pair is taken up without a new client.
+    ///
+    /// The identity is a client certificate, which exists only in a TLS handshake: a server
+    /// that is plain `http://` is refused, naming `--server`, even where a token client would
+    /// be let go to a loopback address over `http://`.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Flag`] naming `--server` or `--ca-cert` as for [`Client::connect`],
+    /// or `--host-cert` or `--host-key` and the file when the identity cannot be read or is
+    /// not valid.
+    /// The text never holds the contents of a file.
+    pub fn connect_with_identity(
+        server: &str,
+        identity: &HostIdentity,
+        ca_cert: Option<&Path>,
+        limit: Duration,
+    ) -> Result<Self, ClientError> {
+        let server = ServerUrl::parse(server)?;
+        if !server.https {
+            return Err(ClientError::flag(
+                "--server",
+                "the host identity is a client certificate, presented only over https://",
+            ));
+        }
+        let roots = roots(server.https, ca_cert)?;
+        let https = server.https;
+        let live = Live::open(identity.clone(), move |cert| {
+            build_agent(https, limit, &roots, Some(cert))
+        })?;
+        Ok(Self {
+            auth: Auth::Identity(live),
+            server,
             limit,
         })
     }
@@ -107,10 +142,28 @@ impl Client {
     /// # Errors
     ///
     /// [`ClientError::Flag`] when `secret` is empty or is not one run of printable ASCII
-    /// (see [`bearer_of`]).
+    /// (see [`bearer_of`]), and when the client authenticates by a host identity, which
+    /// takes no bearer.
     pub fn set_bearer(&mut self, secret: &str) -> Result<(), ClientError> {
-        self.bearer = token::bearer_of(secret)?;
-        Ok(())
+        match &mut self.auth {
+            Auth::Bearer { bearer, .. } => {
+                *bearer = token::bearer_of(secret)?;
+                Ok(())
+            }
+            Auth::Identity(_) => Err(ClientError::flag(
+                "--token-file",
+                "the client authenticates by its host identity and takes no bearer",
+            )),
+        }
+    }
+
+    /// The agent for the next request, and the `Authorization` value to send with it (none
+    /// for a host identity).
+    fn route(&self) -> (Agent, Option<&str>) {
+        match &self.auth {
+            Auth::Bearer { agent, bearer } => (agent.clone(), Some(bearer)),
+            Auth::Identity(live) => (live.agent(), None),
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -125,10 +178,8 @@ impl Client {
     /// read; the same for [`Client::post`], [`Client::post_within`] and
     /// [`Client::delete`].
     pub fn get(&self, path: &str) -> Result<Reply, ClientError> {
-        let request = self
-            .agent
-            .get(self.url(path))
-            .header("authorization", &self.bearer);
+        let (agent, bearer) = self.route();
+        let request = authorized(agent.get(self.url(path)), bearer);
         self.reply(request.call())
     }
 
@@ -145,33 +196,27 @@ impl Client {
         body: &Value,
         limit: Duration,
     ) -> Result<Reply, ClientError> {
-        let request = self
-            .agent
+        let (agent, bearer) = self.route();
+        let request = agent
             .post(self.url(path))
             .config()
             .timeout_global(Some(limit.min(self.limit)))
-            .build()
-            .header("authorization", &self.bearer)
-            .content_type("application/json");
+            .build();
+        let request = authorized(request, bearer).content_type("application/json");
         self.reply(request.send(body.to_string()))
     }
 
     /// `DELETE path`.
     pub fn delete(&self, path: &str) -> Result<Reply, ClientError> {
-        let request = self
-            .agent
-            .delete(self.url(path))
-            .header("authorization", &self.bearer);
+        let (agent, bearer) = self.route();
+        let request = authorized(agent.delete(self.url(path)), bearer);
         self.reply(request.call())
     }
 
     /// `DELETE path` with a JSON body, for a route that names what to remove in the body.
     pub fn delete_with(&self, path: &str, body: &Value) -> Result<Reply, ClientError> {
-        let request = self
-            .agent
-            .delete(self.url(path))
-            .force_send_body()
-            .header("authorization", &self.bearer)
+        let (agent, bearer) = self.route();
+        let request = authorized(agent.delete(self.url(path)).force_send_body(), bearer)
             .content_type("application/json");
         self.reply(request.send(body.to_string()))
     }
@@ -206,6 +251,38 @@ impl Client {
             retry_after,
         })
     }
+}
+
+/// `request` with the `Authorization` value, when there is one.
+fn authorized<B>(request: RequestBuilder<B>, bearer: Option<&str>) -> RequestBuilder<B> {
+    match bearer {
+        Some(value) => request.header("authorization", value),
+        None => request,
+    }
+}
+
+/// The HTTP agent for one server: no proxy, no redirect, one connection per request, and
+/// TLS with `roots` and, when given, a client certificate.
+fn build_agent(https: bool, limit: Duration, roots: &RootCerts, cert: Option<ClientCert>) -> Agent {
+    let tls = TlsConfig::builder()
+        .provider(TlsProvider::Rustls)
+        .root_certs(roots.clone())
+        .client_cert(cert)
+        .unversioned_rustls_crypto_provider(Arc::new(default_provider()))
+        .build();
+    Agent::config_builder()
+        .proxy(None)
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .https_only(https)
+        .timeout_global(Some(limit))
+        // A connection that sat idle between two requests may have been closed by the
+        // other side, and a request sent on a dead one fails; every request opens its
+        // own.
+        .max_idle_connections(0)
+        .tls_config(tls)
+        .build()
+        .into()
 }
 
 /// The roots to trust: none for plain http; for `https://`, the certificates of the

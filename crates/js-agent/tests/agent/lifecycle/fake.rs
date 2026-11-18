@@ -29,9 +29,25 @@ impl ManualClock {
     }
 }
 
+/// The Unix time in milliseconds at which a [`ManualClock`] reads zero.
+pub const UNIX_ORIGIN_MS: u64 = 1_800_000_000_000;
+
 impl Clock for ManualClock {
     fn now_ms(&self) -> u64 {
         self.0.get()
+    }
+
+    fn unix_ms(&self) -> Option<u64> {
+        Some(UNIX_ORIGIN_MS + self.0.get())
+    }
+}
+
+/// A [`ManualClock`] that has no Unix time.
+pub struct NoUnixClock(pub ManualClock);
+
+impl Clock for NoUnixClock {
+    fn now_ms(&self) -> u64 {
+        self.0.now_ms()
     }
 }
 

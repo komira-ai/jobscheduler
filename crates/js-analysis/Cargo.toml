@@ -15,6 +15,12 @@ publish.workspace = true
 name = "js-analysis"
 path = "src/main.rs"
 
+# `js-start-timeline`: the percentiles of the segments of an action's start, read from the
+# agent's `Started` journal lines (docs/runbooks/start-timeline.md).
+[[bin]]
+name = "js-start-timeline"
+path = "src/bin/start_timeline.rs"
+
 [dependencies]
 clap.workspace = true
 serde.workspace = true

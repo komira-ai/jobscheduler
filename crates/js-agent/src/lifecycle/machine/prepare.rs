@@ -2,14 +2,20 @@
 //! the image of each image layer), for the directories its providers make for the layers
 //! and mounts that name one (`providing`), and for the lookups and then the assembly of its
 //! file system ([`Runtime::resolve_fs`], [`Runtime::assemble_fs`]), each off the worker,
-//! asking the runtime again at every step; then its directories are made and its container
-//! created, unless the run was stopped or its lease ended first.
+//! asking the runtime again at every step; then its container is created, unless the run
+//! was stopped or its lease ended first.
 //!
-//! A start with layers or mounts has its scratch directory, and the lease directory beside
-//! it, made once its images are here and its host paths found, before the assembly, which
-//! puts its writable layers in them: the directories are made on the worker as they are
-//! for any start (local operations on the scratch volume), and the assembly, whose mounts
-//! look up the providers' file systems, runs off it.
+//! A start with layers or mounts runs its independent waits side by side. At its admission,
+//! before the worker's step returns, its providers are asked to prepare their sources, its
+//! images are asked, the runtime begins the lookups of the host paths that wait for no
+//! provider (the file system without its provider sources), and its scratch directory, and
+//! the lease directory beside it, are made. At each step its providers are followed, its
+//! images asked again and its lookups followed; once the providers have answered, their
+//! directories are bound into the file system and the runtime is asked about that. When the
+//! providers have answered, the lookups are done and no image is left, the assembly, which
+//! puts its writable layers in the directories, is asked for at once. The directories are
+//! made on the worker as they are for any start (local operations on the scratch volume),
+//! and the assembly, whose mounts look up the providers' file systems, runs off it.
 //!
 //! [`Runtime::resolve_fs`]: crate::lifecycle::Runtime::resolve_fs
 //! [`Runtime::assemble_fs`]: crate::lifecycle::Runtime::assemble_fs
@@ -19,7 +25,8 @@ use std::path::PathBuf;
 use js_agent_wire::{Isolation, JobSpec};
 
 use super::job::{Given, Keyed, Phase, Stage, Waiting, run_spec};
-use super::providing::{Follow, follow};
+use super::providing::{Follow, Providing, follow};
+use super::timeline::mark_at;
 use super::{Failure, Lifecycle, runtime_failure};
 use crate::lifecycle::runtime::{
     FsPrepared, JobFs, Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError, Ticket,
@@ -63,8 +70,9 @@ enum Next {
     End,
     /// Its preparation failed.
     Fail(Failure),
-    /// Its images and host paths are here: its directories are to be made.
-    Dirs,
+    /// Its providers have answered, its host paths are found and its images are here: its
+    /// assembly is to be asked for, in the directories made at its admission.
+    Assemble(PathBuf),
     /// Everything is here: its container is to be made, in `scratch` when its directories
     /// were made before (the assembly's).
     Begin(Option<PathBuf>),
@@ -100,56 +108,85 @@ impl Lifecycle {
             (Isolation::Host, _) | (_, true) => Vec::new(),
             (Isolation::Contained, false) => images_of(spec, &given.fs),
         };
-        let phase = match (providing, given.fs.is_empty()) {
-            (Some(providing), _) => Phase::Providing(providing),
-            (None, true) => Phase::Images,
-            (None, false) => Phase::Resolving,
-        };
-        match (ask(self.runtime.as_mut(), images), phase) {
-            (Err(why), _) => {
+        let tickets = match ask(self.runtime.as_mut(), images) {
+            Ok(tickets) => tickets,
+            Err(why) => {
                 let failure = runtime_failure(&why);
                 self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
+                return;
             }
-            (Ok(tickets), Phase::Images) if tickets.is_empty() => {
+        };
+        let phase = match (given.fs.is_empty(), tickets.is_empty()) {
+            (true, true) => {
                 let started =
                     self.begin((spec, keyed), given, (mounts, None), (slot, booked), events);
                 self.settle((spec, keyed), started, (slot, booked), at, events);
+                return;
             }
-            (Ok(tickets), phase) => {
-                // The lease the start names ends `valid_for_ms` after the reply came; a run
-                // that waits is held to that end when it starts.
-                let lease_end_ms = match spec.valid_for_ms {
-                    0 => u64::MAX,
-                    valid => received.saturating_add(valid),
-                };
-                let waiting = Waiting {
-                    spec: spec.clone(),
-                    given: given.clone(),
-                    mounts,
-                    slot,
-                    booked,
-                    tickets,
-                    phase,
-                    lease_end_ms,
-                };
-                let mut job = super::Job::of(
-                    spec,
-                    Stage::Preparing(Box::new(waiting)),
-                    0,
-                    Some(slot),
-                    booked,
-                );
-                job.keyed = keyed;
-                self.jobs.push(job);
+            (true, false) => Phase::Images,
+            (false, _) => {
+                match self.resolve_and_make_dirs((spec, given), providing, (slot, booked), events) {
+                    Ok(phase) => phase,
+                    Err(failure) => {
+                        self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
+                        return;
+                    }
+                }
             }
-        }
+        };
+        // The lease the start names ends `valid_for_ms` after the reply came; a run that
+        // waits is held to that end when it starts.
+        let lease_end_ms = match spec.valid_for_ms {
+            0 => u64::MAX,
+            valid => received.saturating_add(valid),
+        };
+        let waiting = Waiting {
+            spec: spec.clone(),
+            given: given.clone(),
+            mounts,
+            slot,
+            booked,
+            tickets,
+            phase,
+            lease_end_ms,
+        };
+        let mut job = super::Job::of(
+            spec,
+            Stage::Preparing(Box::new(waiting)),
+            0,
+            Some(slot),
+            booked,
+        );
+        job.keyed = keyed;
+        self.jobs.push(job);
+    }
+
+    /// Begins the waits of a start with layers or mounts, beside its providers' and its
+    /// images': the runtime is asked about the host paths that wait for no provider, and the
+    /// run's directories are made. The phase it waits in keeps its providers' part and its
+    /// scratch directory.
+    fn resolve_and_make_dirs(
+        &mut self,
+        (spec, given): (&JobSpec, &Given),
+        providing: Option<Providing>,
+        (slot, booked): (u32, u64),
+        events: &mut Vec<Event>,
+    ) -> Result<Phase, Failure> {
+        let now = self.clock.now_ms();
+        // Without providers the file system is whole: it is its own part without them.
+        let fs = given.fs.without_providers();
+        let asked = self.runtime.resolve_fs(&spec.run_id, &spec.image, &fs, now);
+        fs_ready(asked)?;
+        let scratch = self.make_dirs(&spec.run_id, (slot, booked), events)?;
+        Ok(Phase::Resolving { providing, scratch })
     }
 
     /// Takes the job at `index`, if it waits, one step on: stopped or cancelled while it
     /// waited, or past the end of its lease, it ends without a container (once an assembly
     /// under way has answered: what it mounts is unmounted by the cleanup, never while it is
-    /// mounting); with everything here, its directories are made, or its container created
-    /// and its wall-time limit begun; an image or a preparation that failed ends it as
+    /// mounting); with its providers answered, its host paths found and its images here, its
+    /// assembly is asked for, and once that is done its container is created and its
+    /// wall-time limit begun; an image or a preparation that failed ends it as
     /// `failed_to_start`; otherwise it waits on.
     pub(super) fn advance(&mut self, index: usize, events: &mut Vec<Event>) {
         let now = self.clock.now_ms();
@@ -158,6 +195,7 @@ impl Lifecycle {
             runtime,
             config,
             providers,
+            starting,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -168,7 +206,10 @@ impl Lifecycle {
             true => ending(runtime.as_mut(), waiting, now),
             false => match follow(waiting, (providers, &config.mounts), now) {
                 Follow::Go => step(runtime.as_mut(), waiting, now),
-                Follow::Wait => images_only(runtime.as_mut(), waiting),
+                Follow::Bound => {
+                    mark_at(starting, &waiting.spec.run_id, "provided", now);
+                    step(runtime.as_mut(), waiting, now)
+                }
                 Follow::Fail(failure) => Next::Fail(failure),
             },
         };
@@ -189,30 +230,23 @@ impl Lifecycle {
             Next::Fail(failure) => {
                 self.settle((&spec, keyed), Err(failure), (slot, booked), at, events);
             }
-            Next::Dirs => {
+            Next::Assemble(scratch) => {
+                // Everything the assembly needs is here: it is asked for at once, so a start
+                // that is ending is never asked to assemble, and it waits. An answer it gives
+                // at once is asked again at the next step.
                 self.mark(&spec.run_id, "resolved");
-                match self.make_dirs(&spec.run_id, (slot, booked), events) {
-                    Ok(scratch) => {
-                        // Its images and host paths are here: its assembly is asked for at once,
-                        // so a start that is ending is never asked to assemble, and it waits.
-                        // An answer it gives at once is asked again at the next step.
-                        let _ = self.runtime.assemble_fs(&spec.run_id, now);
-                        let waiting = Waiting {
-                            spec,
-                            given,
-                            mounts,
-                            slot,
-                            booked,
-                            tickets: Vec::new(),
-                            phase: Phase::Assembling(scratch),
-                            lease_end_ms,
-                        };
-                        self.jobs[index].stage = Stage::Preparing(Box::new(waiting));
-                    }
-                    Err(failure) => {
-                        self.settle((&spec, keyed), Err(failure), (slot, booked), at, events);
-                    }
-                }
+                let _ = self.runtime.assemble_fs(&spec.run_id, now);
+                let waiting = Waiting {
+                    spec,
+                    given,
+                    mounts,
+                    slot,
+                    booked,
+                    tickets: Vec::new(),
+                    phase: Phase::Assembling(scratch),
+                    lease_end_ms,
+                };
+                self.jobs[index].stage = Stage::Preparing(Box::new(waiting));
             }
             Next::Begin(scratch) => {
                 let started = self.begin(
@@ -307,24 +341,24 @@ fn ending(runtime: &mut dyn Runtime, waiting: &Waiting, now: u64) -> Next {
     }
 }
 
-/// A step of a start that waits for its providers: its images asked again, and nothing else
-/// yet.
-fn images_only(runtime: &mut dyn Runtime, waiting: &mut Waiting) -> Next {
-    let images = std::mem::take(&mut waiting.tickets)
-        .into_iter()
-        .map(|(image, ticket)| (image, Some(ticket)))
-        .collect();
-    match ask(runtime, images) {
-        Err(why) => Next::Fail(runtime_failure(&why)),
-        Ok(tickets) => {
-            waiting.tickets = tickets;
-            Next::Wait
-        }
+/// Whether an answer of the runtime about a file system says the lookups or the assembly are
+/// done (`true`) or under way (`false`).
+///
+/// # Errors
+///
+/// The runtime refused the start's file system or a call of it failed.
+fn fs_ready(answer: FsPrepared) -> Result<bool, Failure> {
+    match answer {
+        FsPrepared::Ready => Ok(true),
+        FsPrepared::Pending => Ok(false),
+        FsPrepared::Refused(refused) => Err((refused.code, code::START_FAILED, refused.why, false)),
+        FsPrepared::Failed(why) => Err(runtime_failure(&why)),
     }
 }
 
-/// A step of a start that waits on, once its providers have answered (`providing`): its
-/// images asked again, and its file system's preparation followed.
+/// A step of a start that waits on: its images asked again, and its file system's
+/// preparation followed. While its providers have not all answered, the lookups are of the
+/// file system without their sources.
 fn step(runtime: &mut dyn Runtime, waiting: &mut Waiting, now: u64) -> Next {
     let images = std::mem::take(&mut waiting.tickets)
         .into_iter()
@@ -333,29 +367,36 @@ fn step(runtime: &mut dyn Runtime, waiting: &mut Waiting, now: u64) -> Next {
     let asked = ask(runtime, images);
     let run_id = waiting.spec.run_id.as_str();
     let fs = match &waiting.phase {
-        // A start that waits for its providers never gets here (`follow`).
-        Phase::Images | Phase::Providing(_) => FsPrepared::Ready,
-        Phase::Resolving => runtime.resolve_fs(run_id, &waiting.spec.image, &waiting.given.fs, now),
+        Phase::Images => FsPrepared::Ready,
+        // The sources of a provider that has not answered are left out; once it has, they
+        // are host paths in the file system and nothing is left out.
+        Phase::Resolving { .. } => runtime.resolve_fs(
+            run_id,
+            &waiting.spec.image,
+            &waiting.given.fs.without_providers(),
+            now,
+        ),
         Phase::Assembling(_) => runtime.assemble_fs(run_id, now),
     };
-    let tickets = match (asked, fs) {
-        (Err(why), _) | (_, FsPrepared::Failed(why)) => return Next::Fail(runtime_failure(&why)),
-        (_, FsPrepared::Refused(refused)) => {
-            return Next::Fail((refused.code, code::START_FAILED, refused.why, false));
-        }
-        (Ok(tickets), FsPrepared::Pending) => {
+    let tickets = match (asked, fs_ready(fs)) {
+        (Err(why), _) => return Next::Fail(runtime_failure(&why)),
+        (_, Err(failure)) => return Next::Fail(failure),
+        (Ok(tickets), Ok(false)) => {
             waiting.tickets = tickets;
             return Next::Wait;
         }
-        (Ok(tickets), FsPrepared::Ready) => tickets,
+        (Ok(tickets), Ok(true)) => tickets,
     };
     if !tickets.is_empty() {
         waiting.tickets = tickets;
         return Next::Wait;
     }
     match &waiting.phase {
-        Phase::Images | Phase::Providing(_) => Next::Begin(None),
-        Phase::Resolving => Next::Dirs,
+        Phase::Images => Next::Begin(None),
+        Phase::Resolving {
+            providing: Some(_), ..
+        } => Next::Wait,
+        Phase::Resolving { scratch, .. } => Next::Assemble(scratch.clone()),
         Phase::Assembling(scratch) => Next::Begin(Some(scratch.clone())),
     }
 }

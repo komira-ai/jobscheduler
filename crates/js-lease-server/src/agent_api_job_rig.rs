@@ -636,7 +636,7 @@ impl Rig {
         };
         let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
         let agents = State(Arc::clone(&self.agents));
-        let answer = super::heartbeat(agents, Extension(self.who.clone()), None, Ok(body));
+        let answer = super::heartbeat(agents, Extension(self.who.clone()), (None, None), Ok(body));
         answer.await.map(|Json(reply)| reply)
     }
 

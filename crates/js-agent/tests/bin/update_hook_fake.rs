@@ -186,6 +186,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         runner: &staged,
         manager: Manager::Systemd,
         euid: rustix::process::geteuid().as_raw(),
+        host_identity: None,
         token: &token(
             step_now == Step::Prepare
                 && fault == Some(Fault::Defer)

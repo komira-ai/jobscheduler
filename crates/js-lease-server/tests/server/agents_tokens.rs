@@ -342,13 +342,14 @@ async fn a_token_file_that_cannot_be_read_keeps_the_tokens_in_force() {
 }
 
 /// Asserts that the hello limit of a token follows the token file: a tick that cannot
-/// read the file keeps every limit, a tick that reads a file without the token drops
-/// its limit, and the token, put back, starts with a full burst while a token that
-/// stayed in the file is still held. It catches a limiter that keeps the bucket of a
-/// rotated-out token for good, one that drops buckets on a failed read, and one that
-/// drops the buckets of tokens still in the file.
+/// read the file keeps every limit, a token that left the file and is put back while its
+/// bucket is still spent is still held (a tick does not hand out a new burst), and once the
+/// bucket has refilled the token is served again, while a token that stayed in the file is
+/// still held throughout. It catches a limiter that drops buckets on a failed read, one that
+/// drops the buckets of tokens still in the file, and one that gives a spent bucket back on a
+/// tick.
 #[tokio::test]
-async fn the_hello_limit_of_a_token_that_left_the_file_is_dropped() {
+async fn the_hello_limit_of_a_token_that_left_the_file_is_kept_until_it_refills() {
     let scratch = Scratch::new("agents_rate_rotation");
     let mut args = agent_args(&scratch);
     args.extend(
@@ -377,5 +378,9 @@ async fn the_hello_limit_of_a_token_that_left_the_file_is_dropped() {
         .write("agent-tokens", &format!("{JOIN}\n{JOIN_B}\n"), 0o600);
     h.ticks.step().await;
     assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 429);
-    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 409);
+    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 429);
+    h.clock.advance(std::time::Duration::from_secs(3600));
+    h.ticks.step().await;
+    // Served again: the host of that token was lost in the hour, so it is admitted anew.
+    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 200);
 }

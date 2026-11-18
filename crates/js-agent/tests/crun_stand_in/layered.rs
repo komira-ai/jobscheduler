@@ -181,9 +181,12 @@ fn prepare(runtime: &mut CrunRuntime, spec: &RunSpec, fs: &JobFs) -> FsPrepared 
     };
     let image = image.clone();
     let run = spec.run_id.clone();
-    assert_eq!(
-        runtime.resolve_fs(&run, &image, fs, 5000),
-        FsPrepared::Pending
+    // The first ask begins the lookups and answers how they stand at once: pending while
+    // the runtime's threads look, ready when they already have.
+    let first = runtime.resolve_fs(&run, &image, fs, 5000);
+    assert!(
+        matches!(first, FsPrepared::Pending | FsPrepared::Ready),
+        "{first:?}"
     );
     let found = settled(|| runtime.resolve_fs(&run, &image, fs, 5000));
     assert_eq!(found, FsPrepared::Ready);
@@ -368,6 +371,52 @@ fn a_failed_runs_sources_are_checked_before_its_end_is_read() {
     );
     adopted.remove(&id).expect("removed");
     assert!(!node.dir.join("mounts").join(&id.0).exists());
+}
+
+/// Proves a run whose job did not succeed and whose source's tree its mount provider lost for
+/// good (the provider answers `EIO` to a look at the source's directory, as `provider.proto`
+/// asks of a lost tree: tierstore's `tree-lost`) ends with the input failure
+/// `input-unreadable`, its exit code kept, and that a run that succeeded over the same lost
+/// source is not blamed on it. Catches a lost tree reported as the user's own failure, which a
+/// client would not run again.
+#[test]
+fn a_failed_run_whose_provider_lost_its_tree_fails_for_its_input() {
+    let node = Node::new("layered-tree-lost");
+    let calls = Arc::new(Calls::default());
+    let lost = Paths {
+        gone: Some(libc::EIO),
+        ..Paths::default()
+    };
+    let mut runtime = open(settings(&node, &calls, lost));
+    let mut ids = Vec::new();
+    for run in ["l6-exit", "l7-0"] {
+        let spec = node.job(run, 60_000);
+        assert_eq!(
+            prepare(&mut runtime, &spec, &job_fs(&node)),
+            FsPrepared::Ready
+        );
+        ids.push(runtime.create_and_start(&spec).expect("started"));
+        runtime.wait_ended(&ids[ids.len() - 1]);
+    }
+    let ended = |runtime: &mut CrunRuntime, id: &RunHandle| {
+        for _ in 0..30_000 {
+            match runtime.poll(id).expect("polled") {
+                Status::Running => std::thread::sleep(std::time::Duration::from_millis(1)),
+                other => return other,
+            }
+        }
+        panic!("the check did not answer");
+    };
+    assert!(matches!(ended(&mut runtime, &ids[0]), Status::Exited(exit) if exit.code == 3));
+    assert_eq!(
+        runtime.input_failure(&ids[0]).as_deref(),
+        Some(refusal::INPUT_UNREADABLE)
+    );
+    assert!(matches!(ended(&mut runtime, &ids[1]), Status::Exited(exit) if exit.code == 0));
+    assert_eq!(runtime.input_failure(&ids[1]), None);
+    for id in &ids {
+        runtime.remove(id).expect("removed");
+    }
 }
 
 /// Proves a run whose file system was assembled and that is never made (stopped while it

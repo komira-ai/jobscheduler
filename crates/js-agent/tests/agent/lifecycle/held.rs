@@ -51,6 +51,7 @@ fn start(job_id: &str) -> JobStartSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        placed_at_ms: None,
     }
 }
 
@@ -553,4 +554,241 @@ fn a_taken_over_jobs_file_does_not_use_up_room() {
     assert!(h.held().contains(&"r1".to_owned()));
     assert!(dir.join("r1.json").exists());
     assert!(!dir.join(format!("x{:04}.json", MAX_HELD - 1)).exists());
+}
+
+/// The retired list's log.
+fn retired_log(h: &Harness) -> PathBuf {
+    h.dir.path("state").join("retired.log")
+}
+
+/// The retired list's file as an earlier release writes it, of the run ids `ids`.
+fn list_of(ids: impl Iterator<Item = String>) -> Value {
+    let retired: Vec<Value> = ids.map(|id| json!({ "job_id": id })).collect();
+    json!({ "retired": retired })
+}
+
+/// The run id `s<n>`, of three digits so that every line of the log is as long.
+fn sid(n: usize) -> String {
+    format!("s{n:03}")
+}
+
+/// Asserts the sixteenth rule on a short list: sixteen ids are written whole one by one
+/// (`{"job_id":"sNNN"}` is 17 bytes, a line of the log 18, the list of sixteen 301 bytes,
+/// a sixteenth of which a line fits in, and the list of fifteen 283), the seventeenth is a line of the log and leaves the
+/// list as it was, and the eighteenth, which would make the log longer than a sixteenth of
+/// the list, writes the list whole with all eighteen and removes the log. A restart between
+/// the two reads the log's id as retired. It catches a log never used, a log that is never
+/// folded back into the list, and a log a restart does not read.
+#[test]
+fn an_id_is_a_line_of_the_log_while_the_log_stays_within_a_sixteenth_of_the_list() {
+    let mut h = Harness::new("held-retired-log");
+    for n in 0..16 {
+        h.stop(&sid(n));
+        assert!(
+            !retired_log(&h).exists(),
+            "{n}: a short list is written whole"
+        );
+    }
+    let sixteen = list_of((0..16).map(sid));
+    assert_eq!(json_of(&retired_file(&h)), sixteen);
+    assert_eq!(fs::read_to_string(retired_file(&h)).unwrap().len(), 301);
+
+    h.stop(&sid(16));
+    assert_eq!(
+        json_of(&retired_file(&h)),
+        sixteen,
+        "the list is not written"
+    );
+    assert_eq!(
+        fs::read_to_string(retired_log(&h)).unwrap(),
+        "{\"job_id\":\"s016\"}\n"
+    );
+    let mode = fs::metadata(retired_log(&h)).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    assert!(h.restart().unwrap().is_empty());
+    for n in [0, 15, 16] {
+        let id = sid(n);
+        assert_eq!(names(&h.start(job(&id))), [format!("skipped {id} Retired")]);
+    }
+
+    h.stop(&sid(17));
+    assert!(!retired_log(&h).exists(), "the log is folded into the list");
+    assert_eq!(json_of(&retired_file(&h)), list_of((0..18).map(sid)));
+    h.restart().unwrap();
+    assert_eq!(names(&h.start(job("s017"))), ["skipped s017 Retired"]);
+    assert_eq!(h.fake.created().len(), 0, "nothing retired runs");
+}
+
+/// Asserts the rule at the cap, on a list of 4096 ids an earlier release wrote: each id
+/// retired after it is one line of the log while the list file stays byte for byte as it
+/// was, until the log would pass a sixteenth of the list (90,125 bytes: 312 lines of 18); the next
+/// id writes the list whole, the newest 4096 with the oldest dropped, and removes the log.
+/// After a restart with the log, the oldest ids the log pushed out are no longer retired and
+/// the newest are. It catches the rewrite of the whole list for every id at the cap (90 KB
+/// here, some 370 KB with a node's ids, written and synced at each job end) and a log that
+/// does not drop the oldest ids as the list does.
+#[test]
+fn at_the_cap_an_id_costs_a_line_until_the_log_reaches_a_sixteenth_of_the_list() {
+    let mut h = Harness::new("held-retired-cap");
+    let full = list_of((0..MAX_HELD).map(|n| format!("old{n:05}")));
+    fs::write(retired_file(&h), serde_json::to_vec(&full).unwrap()).unwrap();
+    let written = fs::read(retired_file(&h)).unwrap();
+    assert!(h.restart().unwrap().is_empty());
+
+    assert_eq!(written.len(), 90_125);
+    let lines = written.len() / 16 / 18;
+    assert_eq!(lines, 312);
+    for n in 0..lines {
+        h.stop(&sid(n));
+    }
+    assert_eq!(
+        fs::read(retired_file(&h)).unwrap(),
+        written,
+        "never rewritten"
+    );
+    let log = fs::read_to_string(retired_log(&h)).unwrap();
+    assert_eq!(log.lines().count(), lines);
+    assert_eq!(log.len(), lines * 18);
+
+    assert!(h.restart().unwrap().is_empty());
+    assert_eq!(names(&h.start(job("old00000"))), ["started old00000"]);
+    let last = format!("old{:05}", MAX_HELD - 1);
+    assert_eq!(
+        names(&h.start(job(&last))),
+        [format!("skipped {last} Retired")]
+    );
+    let newest = sid(lines - 1);
+    assert_eq!(
+        names(&h.start(job(&newest))),
+        [format!("skipped {newest} Retired")]
+    );
+
+    h.stop(&sid(lines));
+    assert!(!retired_log(&h).exists());
+    let list = json_of(&retired_file(&h));
+    let ids = list["retired"].as_array().unwrap();
+    assert_eq!(ids.len(), MAX_HELD);
+    assert_eq!(ids[MAX_HELD - 1], json!({ "job_id": sid(lines) }));
+    assert_eq!(ids[0], json!({ "job_id": format!("old{:05}", lines + 1) }));
+}
+
+/// Asserts what is read of a log that a crash cut: a last line no newline ends is left out
+/// without a finding and the lines before it are read; a line in the middle that is no id is
+/// left out with one finding and the lines around it are read; a last line cut inside a
+/// character is left out like any cut line, the lines before it read; an empty log is read
+/// as no ids. After each damaged log, the next id retired writes the list whole and removes the
+/// log, so that nothing is appended after a cut line. It catches an agent that refuses to
+/// start over a cut log, one that loses the good lines with the bad, and one that appends to
+/// a log whose last line was cut, which would glue two ids into one line.
+#[test]
+fn a_cut_or_damaged_log_keeps_its_good_lines_and_is_folded_into_the_list() {
+    let line = |id: &str| format!("{{\"job_id\":\"{id}\"}}\n");
+    for (n, (log, finding)) in [
+        (format!("{}{{\"job_id\":\"s0", line("s100")), false),
+        (format!("{}not an id\n{}", line("s100"), line("s101")), true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut h = Harness::new(&format!("held-retired-cut-{n}"));
+        let list = list_of((0..16).map(sid));
+        fs::write(retired_file(&h), serde_json::to_vec(&list).unwrap()).unwrap();
+        fs::write(retired_log(&h), &log).unwrap();
+        let events = names(&h.restart().unwrap());
+        match finding {
+            true => assert_eq!(events, ["finding - held-record-unreadable"], "{n}"),
+            false => assert!(events.is_empty(), "{n}: {events:?}"),
+        }
+        assert_eq!(
+            names(&h.start(job("s100"))),
+            ["skipped s100 Retired"],
+            "{n}"
+        );
+        assert_eq!(names(&h.start(job("s0"))), ["started s0"], "{n}");
+
+        h.stop("s200");
+        assert!(!retired_log(&h).exists(), "{n}: the log is folded");
+        let ids = json_of(&retired_file(&h))["retired"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(ids.len(), 16 + 1 + usize::from(finding) + 1, "{n}");
+        assert_eq!(ids.last().unwrap(), &json!({ "job_id": "s200" }), "{n}");
+    }
+
+    // A write cut inside a character spoils only its own line.
+    let mut h = Harness::new("held-retired-cut-char");
+    let list = list_of((0..16).map(sid));
+    fs::write(retired_file(&h), serde_json::to_vec(&list).unwrap()).unwrap();
+    let mut log = line("s100").into_bytes();
+    log.extend(b"{\"job_id\":\"\xc3");
+    fs::write(retired_log(&h), log).unwrap();
+    assert!(h.restart().unwrap().is_empty());
+    assert_eq!(names(&h.start(job("s100"))), ["skipped s100 Retired"]);
+    h.stop("s200");
+    assert!(!retired_log(&h).exists(), "a cut log is folded");
+
+    let mut h = Harness::new("held-retired-empty-log");
+    let list = list_of((0..16).map(sid));
+    fs::write(retired_file(&h), serde_json::to_vec(&list).unwrap()).unwrap();
+    fs::write(retired_log(&h), "").unwrap();
+    assert!(h.restart().unwrap().is_empty());
+    h.stop("s200");
+    assert_eq!(
+        json_of(&retired_file(&h)),
+        list,
+        "an empty log is appended to"
+    );
+    assert_eq!(fs::read_to_string(retired_log(&h)).unwrap(), line("s200"));
+}
+
+/// Asserts the failures of the log: a log that cannot be read (a directory) is a finding at
+/// the restart and its ids are not there; the next id then writes the list whole and, the log
+/// not being removable, is a `held-record-failed` finding until it can be, the result file
+/// of a job retired meanwhile staying until then; and a log that cannot be opened to append
+/// to is a finding, after which the next id writes the list whole. It catches an id lost to
+/// a failed append and a result file dropped before its id is on disk.
+#[test]
+fn a_log_that_cannot_be_read_removed_or_appended_to_is_reported_and_tried_again() {
+    let mut h = ended("held-retired-log-dir");
+    fs::create_dir(retired_log(&h)).unwrap();
+    let events = names(&h.restart().unwrap());
+    assert!(
+        events.contains(&"finding - held-record-unreadable".to_owned()),
+        "{events:?}"
+    );
+    let events = ack_both(&mut h, "ACCEPTED");
+    assert!(
+        events.contains(&"finding - held-record-failed".to_owned()),
+        "{events:?}"
+    );
+    assert!(
+        held_file(&h, "r1").exists(),
+        "kept until the list is whole on disk"
+    );
+    fs::remove_dir(retired_log(&h)).unwrap();
+    assert!(h.life.step().is_empty());
+    assert!(!held_file(&h, "r1").exists());
+    assert_eq!(
+        json_of(&retired_file(&h)),
+        json!({ "retired": [
+            { "job_id": "j1", "allocation_id": "alloc-j1" },
+            { "job_id": "r1", "allocation_id": "lease-r1" },
+        ] })
+    );
+
+    let mut h = Harness::new("held-retired-log-append");
+    for n in 0..16 {
+        h.stop(&sid(n));
+    }
+    fs::create_dir(retired_log(&h)).unwrap();
+    assert_eq!(names(&h.stop(&sid(16))), ["finding - held-record-failed"]);
+    fs::remove_dir(retired_log(&h)).unwrap();
+    assert!(h.life.step().is_empty());
+    assert!(
+        !retired_log(&h).exists(),
+        "written whole after a failed append"
+    );
+    assert_eq!(json_of(&retired_file(&h)), list_of((0..17).map(sid)));
 }

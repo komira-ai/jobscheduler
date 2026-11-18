@@ -22,11 +22,16 @@
 //! store is over by when that can be done, and nothing when it cannot.
 //!
 //! Admissions take turns (one gate for the whole store), so two pulls that end together do
-//! not both evict for the room of one. The book itself is locked only between the steps of
-//! an admission, never across a removal, so a lease taken while an admission removes is not
-//! held up by it; a lease taken on an image just chosen for eviction pins it in the store
-//! first (`Oci::pin_image`), and the store then refuses its removal: that image is kept, and
-//! the next one in order is evicted instead. Only then can an admission end with
+//! not both evict for the room of one. [`load`] takes the turn too. An admission holds it
+//! across the measure of a new image and across each removal, and [`load`] across the
+//! listing of the store, so a caller that waits for the turn waits for those. The worker
+//! thread of a start does not: when the book is loaded and counts the image, a start's use
+//! of it ([`Images::use_held`](super::pull::Images::use_held)) checks the store and touches
+//! the image in the book, and takes no turn. The book itself is locked only between the
+//! steps of an admission, never across a removal, so a lease taken while an admission
+//! removes is not held up by it; a lease taken on an image just chosen for eviction pins it
+//! in the store first (`Oci::pin_image`), and the store then refuses its removal: that image
+//! is kept, and the next one in order is evicted instead. Only then can an admission end with
 //! [`NoCapacity`] after it evicted something.
 //!
 //! The images the store held before this agent started are counted when the first pull
@@ -120,7 +125,7 @@ impl Book {
     }
 
     /// `digest` is used now, when the store holds it.
-    fn touch(&mut self, digest: &str) {
+    pub(super) fn touch(&mut self, digest: &str) {
         let now = self.tick();
         if let Some(held) = self.held.get_mut(digest) {
             held.used = now;
@@ -220,6 +225,13 @@ impl Budget {
     /// The book, locked.
     pub(super) fn book(&self) -> MutexGuard<'_, Book> {
         self.book.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the book is loaded and counts the image `digest`: the images the store
+    /// held at the start are listed, so the book can answer without taking a turn.
+    pub(super) fn holds(&self, digest: &str) -> bool {
+        let book = self.book();
+        book.loaded && book.held.contains_key(digest)
     }
 
     /// From now on each eviction is told to `evicted`; the first one given stays.
