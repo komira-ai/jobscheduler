@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use js_agent::{Answer, CREDENTIAL_FILE, Connector, Dialer, HELLO_PATH, Transport};
+use js_agent::{Answer, CREDENTIAL_FILE, Connector, Dialer, HELLO_PATH, Login, Transport};
 use js_client::ClientError;
 use serde_json::{Value, json};
 
@@ -176,10 +176,10 @@ impl Connector for LoseWelcome {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
-        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        let inner = Dialer.connect(server, login, ca_cert)?;
         Ok(Box::new(Losing { inner, lost: false }))
     }
 }

@@ -83,7 +83,7 @@ own settings. These three files are the operator's (or the machine image's), roo
 
 | file | holds | mode |
 |---|---|---|
-| `/etc/js-agent/token` | the join token, one line: the pool's token, or the one-time token minted for this instance (`js join-token mint`) | root:root 0600 |
+| `/etc/js-agent/token` | the join token, one line: the pool's token, or the one-time token minted for this instance (`js join-token mint`). Not needed on a host whose flags file names `--host-cert` and `--host-key` (below) | root:root 0600 |
 | `/etc/js-agent/flags` | the host's own agent flags, one per line (below) | root-owned, not writable by group or others |
 | `/etc/js-agent/instance` | `PROVIDER:INSTANCE_ID`, the instance a one-time token is bound to (not secret) | root-owned |
 
@@ -113,8 +113,20 @@ accepts; a file that is missing or refused stops the agent (it never falls back 
 id).
 
 The first install of a host defers (the hook reports `join_token_missing` and hostkeeper retries)
-until `/etc/js-agent/token` is a regular file, owned by root, mode 0600 or 0400. Place the
-files first, then let hostkeeper install `js-agent`.
+until the host has a way to authenticate to the lease server. On a host that hostkeeper manages
+that is the host's own certificate and key: hostkeeper keeps them at fixed paths, renews both in place before
+the certificate expires, and the host group's config package names them in `/etc/js-agent/flags`
+with `--host-cert PATH` and `--host-key PATH` (both or neither). The key is mode 0640, owned by root, in a group that the agent's account
+belongs to; after following links it must be a regular file owned by root or by the user running
+the agent, with no access for others and not writable by its group (0600, 0400, 0640 and 0440
+pass). When the flags file names both, the hook does not look at the token file: it goes on when
+the certificate file is there and the key passes that rule, and the agent presents the certificate
+to the lease server (which needs `--agent-client-ca`) and sends no token (it neither reads
+`--token-file` nor keeps a `host-credential`). Otherwise the install defers and the detail names the
+file. A host whose flags file names neither flag, or cannot be read, or a node launched with a
+one-time token, has no certificate: the install defers until `/etc/js-agent/token` is a regular
+file, owned by root, mode 0600 or 0400. Place the files first, then let hostkeeper install
+`js-agent`.
 
 ## The hook manifest
 

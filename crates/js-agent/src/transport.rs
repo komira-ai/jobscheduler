@@ -7,6 +7,8 @@ use std::time::Duration;
 use js_client::{Client, ClientError};
 use serde_json::Value;
 
+use crate::login::Login;
+
 /// The longest the agent waits for one answer. A heartbeat answered later than this is
 /// close to the server's grace period anyway.
 pub const REQUEST_LIMIT: Duration = Duration::from_secs(10);
@@ -54,7 +56,7 @@ pub trait Transport {
 
 /// Makes the [`Transport`] the flags name.
 pub trait Connector {
-    /// Checks `--server`, `--token-file` and `--ca-cert` and connects.
+    /// Checks `--server`, the login (the token file or the host certificate and key) and `--ca-cert` and connects.
     ///
     /// # Errors
     ///
@@ -62,7 +64,7 @@ pub trait Connector {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError>;
 }
@@ -75,16 +77,17 @@ impl Connector for Dialer {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
-        Client::connect(server, token_file, ca_cert, REQUEST_LIMIT)
+        login
+            .connect(server, ca_cert, REQUEST_LIMIT)
             .map(|client| Box::new(HttpTransport(client)) as Box<dyn Transport>)
     }
 }
 
-/// A connected client. It holds the token, or the credential that replaced it, and has no
-/// `Debug`.
+/// A connected client. It holds the token, or the credential that replaced it, or the key of
+/// its host certificate, and has no `Debug`.
 struct HttpTransport(Client);
 
 impl Transport for HttpTransport {

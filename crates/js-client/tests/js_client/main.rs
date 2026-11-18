@@ -1,4 +1,5 @@
-//! Behaviour of the HTTP client: the server address rules, the owner-only token file,
+//! Behaviour of the HTTP client: the server address rules, the owner-only token file, the
+//! host identity (a client certificate that is reloaded between requests),
 //! and requests against small servers started in the test process on 127.0.0.1, over
 //! plain http and over TLS with a certificate made for the test; with the `jobs` feature,
 //! the job client against an in-memory job server.
@@ -8,6 +9,7 @@ mod client;
 // needs it) and a test build of js-client alone does not.
 #[cfg(feature = "jobs")]
 mod fake_jobs;
+mod identity;
 #[cfg(feature = "jobs")]
 mod job_conformance;
 #[cfg(feature = "jobs")]

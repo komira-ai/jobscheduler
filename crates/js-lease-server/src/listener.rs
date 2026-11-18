@@ -111,6 +111,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
+use js_types::HostId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
@@ -119,6 +120,7 @@ use tracing::warn;
 
 use crate::api::BODY_LIMIT;
 use crate::config::Limits;
+use crate::host_cert::{CertHost, host_of};
 use crate::io_timeout::IoTimeout;
 use crate::util::or_pending;
 
@@ -323,7 +325,11 @@ async fn connection(stream: TcpStream, tls: Option<TlsAcceptor>, talk: Talk) {
     // gate on the peer refuse it.
     let app = with_peer(app, stream.peer_addr().ok());
     let io = handshake(stream, tls, limits.handshake_timeout).await;
-    if let Some(io) = io {
+    if let Some((io, host)) = io {
+        // The host a client certificate names, for the agent routes' authentication.
+        let app = host
+            .into_iter()
+            .fold(app, |app, host| app.layer(Extension(CertHost(host))));
         match speech {
             Speech::Http1 => talk_http1(io, app, limits, stopping).await,
             Speech::Both => talk_both(io, app, limits, stopping, streams).await,
@@ -338,17 +344,23 @@ fn with_peer(app: Router, peer: Option<SocketAddr>) -> Router {
         .fold(app, |app, peer| app.layer(Extension(ConnectInfo(peer))))
 }
 
-/// Finishes the connection's handshake, if it is a TLS one. A client that fails or
-/// stalls its handshake gets `None`.
-async fn handshake(stream: TcpStream, tls: Option<TlsAcceptor>, limit: Duration) -> Option<Io> {
+/// Finishes the connection's handshake, if it is a TLS one, with the host the client's
+/// certificate names, when it presented one (the verifier of the acceptor has checked its shape,
+/// [`crate::client_verifier`]). A client that fails or stalls its handshake gets `None`.
+async fn handshake(
+    stream: TcpStream,
+    tls: Option<TlsAcceptor>,
+    limit: Duration,
+) -> Option<(Io, Option<HostId>)> {
     match tls {
-        None => Some(Box::pin(stream)),
+        None => Some((Box::pin(stream), None)),
         Some(acceptor) => {
             let shaken = tokio::time::timeout(limit, acceptor.accept(stream)).await;
-            shaken
-                .ok()
-                .and_then(Result::ok)
-                .map(|tls| Box::pin(tls) as Io)
+            shaken.ok().and_then(Result::ok).map(|tls| {
+                let leaf = tls.get_ref().1.peer_certificates().and_then(<[_]>::first);
+                let host = leaf.and_then(|der| host_of(der.as_ref()).ok());
+                (Box::pin(tls) as Io, host)
+            })
         }
     }
 }

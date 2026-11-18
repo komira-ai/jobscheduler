@@ -47,10 +47,27 @@ pub struct Cli {
     /// state root, the first hello of a host that joins with a one-time token is answered
     /// with a host credential that replaces the token (the server retires it): the agent
     /// keeps the credential in the state root and sends it from then on. Required unless
-    /// `--state-root` holds a usable `host-credential` file, which the agent then sends in
-    /// place of a token; a token file given beside it is read as before.
+    /// `--host-cert` and `--host-key` are given, which the agent then presents in place of
+    /// any token (the token file is not read), or `--state-root` holds a usable
+    /// `host-credential` file, which the agent then sends in place of a token; with a
+    /// credential a token file given beside it is read as before.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+    /// A PEM file with the host's own client certificate (the leaf first, then the rest of
+    /// its chain), which hostkeeper keeps and renews in place. With `--host-key` the agent
+    /// presents it in the TLS handshake as its credential, sends no `Authorization` header,
+    /// and neither reads `--token-file` nor keeps a host credential; both files are read
+    /// again before each request, so a renewed pair is used without a restart. The server
+    /// must be `https://` and started with the CA that signs these certificates
+    /// (`--agent-client-ca`). Both flags or neither.
+    #[arg(long, value_name = "PATH", requires = "host_key")]
+    pub host_cert: Option<PathBuf>,
+    /// The PEM private key of `--host-cert`, after following links a regular file owned by
+    /// root or by the user running the agent, with no access for others and not writable by
+    /// its group (mode 0600, 0400, 0640 or 0440, so that hostkeeper can share it through a
+    /// group the agent's account belongs to). Both flags or neither.
+    #[arg(long, value_name = "PATH", requires = "host_cert")]
+    pub host_key: Option<PathBuf>,
     /// A file holding the instance this machine runs on, as one line `PROVIDER:INSTANCE_ID`
     /// (`lambdalabs:0920582c...`), read when the agent starts. The hello names the
     /// instance, which a one-time join token minted for that instance requires: the server

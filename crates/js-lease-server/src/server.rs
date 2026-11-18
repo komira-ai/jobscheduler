@@ -2,7 +2,7 @@
 
 use std::io;
 use std::net::SocketAddr;
-
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -204,7 +204,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
     let tls = listeners
         .tls
         .as_ref()
-        .map(|files| tls::Tls::open(files, clock.clone()))
+        .map(|files| tls::Tls::open(files, listeners.agent_client_ca.as_deref(), clock.clone()))
         .transpose()?;
     let acceptor = tls.as_ref().map(tls::Tls::acceptor);
     let (listener, addr) = bind(listeners.listen, listeners.listen_flag, listeners.bound).await?;
@@ -340,6 +340,7 @@ pub(crate) struct Listeners {
     /// The clients the job service's bearer layer admits, as the tick reloads them.
     pub(crate) clients: LiveClients,
     tls: Option<TlsFiles>,
+    agent_client_ca: Option<PathBuf>,
     limits: Limits,
 }
 
@@ -400,6 +401,7 @@ pub(crate) fn prepare(
         token,
         clients,
         tls,
+        agent_client_ca,
         limits,
         agents,
         usage,
@@ -517,6 +519,7 @@ pub(crate) fn prepare(
         max_job_wall,
         clients,
         tls,
+        agent_client_ca,
         limits,
     };
     Ok((prepared, listeners))
@@ -683,11 +686,13 @@ async fn final_tick(shared: &Shared) {
 }
 
 impl Running {
-    /// Re-reads `--tls-cert` and `--tls-key` and serves the pair from the next handshake on.
+    /// Re-reads `--tls-cert` and `--tls-key` and serves the pair from the next handshake on;
+    /// with `--agent-client-ca`, reads its file again too and trusts its certificates from the
+    /// next handshake on.
     ///
     /// The pair is checked whole first: the key file owner-only, the key the certificate's,
-    /// the certificate valid now. A pair that fails is refused with one logged line and
-    /// the pair being served stays. Connections already open keep their session.
+    /// the certificate valid now. A pair or a CA file that fails is refused with one logged line
+    /// and the pair and the CA being served stay. Connections already open keep their session.
     pub fn reload_tls(&self) -> Result<(), StartupError> {
         let Some(tls) = &self.tls else {
             return Err(StartupError::new(

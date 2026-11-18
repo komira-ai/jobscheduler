@@ -15,7 +15,7 @@
 //! step, because the previous agent's heartbeat there does not list the job yet, where it
 //! is compared as any answer. Any other extra command is a problem.
 
-use js_agent::{Connector, Dialer};
+use js_agent::{Connector, Dialer, Login};
 use serde_json::Value;
 
 use super::compare::{Minted, start_after, take_early_start, uncovered};
@@ -26,7 +26,7 @@ use super::record::Cell;
 pub fn replay(name: &str, transcript: &Value) -> Vec<String> {
     let cell = Cell::start(name);
     let mut transport = Dialer
-        .connect(&cell.url(), &cell.join_file(), None)
+        .connect(&cell.url(), &Login::Token(cell.join_file()), None)
         .unwrap();
     let mut minted = Minted::default();
     let mut problems = Vec::new();

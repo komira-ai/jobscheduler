@@ -3,3 +3,6 @@
 
 # Backup files written by rustfmt
 **/*.rs.bk
+
+# LLVM coverage output
+*.profraw

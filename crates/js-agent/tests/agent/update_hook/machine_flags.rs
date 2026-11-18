@@ -80,12 +80,14 @@ fn a_flags_file_that_cannot_be_used_ends_an_update_as_a_lease_failure_naming_it(
     }
 }
 
-/// A first install asks the lease server nothing, so it does not read the flags file: a host
-/// whose flags the operator has not placed yet installs, and its agent waits for them.
+/// A first install asks the lease server nothing, and reads the flags file only to see whether
+/// it names the host's certificate and key: a flags file that is not there names none, so a host
+/// whose flags the operator has not placed yet installs by its join token, and its agent waits
+/// for them.
 ///
 /// Catches a first install held up by a file the agent itself would wait for.
 #[test]
-fn a_first_install_does_not_read_the_flags_file() {
+fn a_first_install_goes_on_when_the_flags_file_is_not_placed_yet() {
     let tree = Tree::new("hook-machine-first-no-flags");
     let params = tree.params(false, "");
     fs::remove_file(tree.flags()).unwrap();
