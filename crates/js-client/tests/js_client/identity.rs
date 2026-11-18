@@ -460,6 +460,25 @@ fn the_other_flags_are_checked_for_an_identity_client_too() {
     );
 }
 
+/// Asserts that an identity client is refused a server that is plain `http://`, even a
+/// loopback one that a token client may use, naming `--server` and saying the certificate is
+/// presented over `https://` only; the message is the same whatever the files hold.
+#[test]
+fn an_identity_client_is_refused_a_plain_http_server() {
+    let dir = Scratch::new("identity_plain_http");
+    let identity = ServiceIdentity::in_dir(&dir.path(""));
+    let said = refused(Client::connect_with_identity(
+        "http://127.0.0.1:1",
+        &identity,
+        None,
+        LIMIT,
+    ));
+    assert_eq!(
+        said,
+        "--server: the service identity is a client certificate, presented only over https://"
+    );
+}
+
 /// Asserts that a client on the identity takes no bearer: `set_bearer` is refused by name
 /// and the client still presents the identity.
 #[test]

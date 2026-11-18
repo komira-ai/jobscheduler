@@ -12,7 +12,7 @@ use crate::support::Scratch;
 
 /// A server that is not listening: a connection made with a valid login gets as far as the
 /// refused connection, which is how these tests tell a login was built.
-const NOBODY: &str = "http://127.0.0.1:1";
+const NOBODY: &str = "https://127.0.0.1:1";
 
 /// A state root holding a pair minted for the test, the key with `mode`.
 fn state_with_identity(files: &Scratch, mode: u32) -> PathBuf {

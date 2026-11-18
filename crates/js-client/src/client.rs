@@ -100,8 +100,9 @@ impl Client {
     /// and goes with the certificate), later requests use it, and otherwise the client
     /// keeps the pair it had. A renewed pair is taken up without a new client.
     ///
-    /// The identity is only a credential over TLS: a server that is plain `http://` is
-    /// refused as for a token.
+    /// The identity is a client certificate, which exists only in a TLS handshake: a server
+    /// that is plain `http://` is refused, naming `--server`, even where a token client would
+    /// be let go to a loopback address over `http://`.
     ///
     /// # Errors
     ///
@@ -115,6 +116,12 @@ impl Client {
         limit: Duration,
     ) -> Result<Self, ClientError> {
         let server = ServerUrl::parse(server)?;
+        if !server.https {
+            return Err(ClientError::flag(
+                "--server",
+                "the service identity is a client certificate, presented only over https://",
+            ));
+        }
         let roots = roots(server.https, ca_cert)?;
         let https = server.https;
         let live = Live::open(identity.clone(), move |cert| {
