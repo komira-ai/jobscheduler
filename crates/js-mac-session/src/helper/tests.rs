@@ -259,9 +259,17 @@ fn only_live_leases_in_range_are_acted_on() {
     assert!(log(&moved).iter().all(|call| !call.starts_with("kill_all")));
 }
 
-/// stdin, stdout (a pipe the test reads), stderr, and the lease directory.
+/// stdin, stdout and stderr (`/dev/null`, open for reading and for writing, so that a
+/// program's write to stdout or stderr succeeds), and the lease directory.
 pub(super) fn fds(dir: &Path) -> Vec<OwnedFd> {
-    let null = || -> OwnedFd { std::fs::File::open("/dev/null").unwrap().into() };
+    let null = || -> OwnedFd {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .unwrap()
+            .into()
+    };
     vec![
         null(),
         null(),
