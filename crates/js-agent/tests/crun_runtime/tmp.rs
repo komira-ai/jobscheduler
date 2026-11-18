@@ -30,6 +30,12 @@ const TMP_LIMIT: u64 = 1 << 30;
 /// The id of the run every test starts.
 const RUN: &str = "t1";
 
+/// The memory the job books: room for the page cache of what it writes. The loop device's
+/// writes are its own thread's, so until they are done the dirty pages of a 1 GiB write are
+/// charged to the job's cgroup, and the job's usual small booking ends it with `SIGKILL`
+/// before its write reaches the bound.
+const MEMORY: u64 = 2 << 30;
+
 /// What is cleaned up whatever a test did: the containers are stopped and removed, the
 /// directories removed, and the bound taken off the project. Declared after the subject, so
 /// it drops first.
@@ -61,6 +67,8 @@ impl Drop for Bound {
 /// What a job's script left.
 struct Ran {
     exit: i32,
+    /// Whether the kernel ended the job for its memory.
+    oom_killed: bool,
     stdout: String,
     stderr: String,
     /// What the temporary project holds while the container is held.
@@ -83,6 +91,7 @@ fn run_script(script: &str, slot: u32) -> Ran {
         panic!("spec_of makes a container job");
     };
     *args = vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()];
+    spec.memory_bytes = MEMORY;
 
     let quota = XfsQuota::new(subject.runs(), ProjectIds::default());
     let probe = quota.probe();
@@ -139,6 +148,7 @@ fn run_script(script: &str, slot: u32) -> Ran {
     subject.runtime().borrow_mut().remove(&id).expect("remove");
     let ran = Ran {
         exit: exit.code,
+        oom_killed: exit.oom_killed,
         stdout: tail.stdout,
         stderr: tail.stderr,
         used,
@@ -171,7 +181,7 @@ fn a_job_writes_900_mib_to_tmp_and_is_refused_past_1_gib_with_var_tmp() {
         60,
     );
     let out = lines(&ran);
-    assert_eq!(ran.exit, 0, "{}", ran.stderr);
+    assert_eq!((ran.exit, ran.oom_killed), (0, false), "{}", ran.stderr);
     assert!(
         out.contains(&"first=ok"),
         "900 MiB fit: {out:?} {}",
@@ -216,7 +226,12 @@ fn a_job_writing_1_1_gib_to_tmp_is_refused() {
         "dd if=/dev/zero of=/tmp/big bs=1048576 count=1127 && exit 0; exit 7",
         61,
     );
-    assert_eq!(ran.exit, 7, "the write was not refused: {}", ran.stderr);
+    assert_eq!(
+        (ran.exit, ran.oom_killed),
+        (7, false),
+        "the write was not refused: {}",
+        ran.stderr
+    );
     assert!(
         ran.stderr.contains("No space left on device"),
         "not refused as a full disk: {}",
