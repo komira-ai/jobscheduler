@@ -21,7 +21,7 @@ use js_agent::update_hook::{
     UpdateInfo, agent_in,
 };
 use js_agent_wire::Taint;
-use js_client::{SERVICE_CERT_FILE, SERVICE_KEY_FILE};
+use js_client::HostIdentity;
 use js_testkit::dir::TestDir;
 use sha2::{Digest, Sha256};
 
@@ -426,9 +426,12 @@ pub struct Spy<'a> {
     pub start_leaves: RefCell<Option<(&'static str, &'static str)>>,
     /// What the join token file shows. A good one by default.
     pub token: Rc<Cell<TokenFile>>,
-    /// What the service identity's certificate file shows. Nothing is there by default.
+    /// The host certificate and key the flags file names ([`HOST_CERT_PATH`] and
+    /// [`HOST_KEY_PATH`]); none by default, as when the flags file names neither.
+    pub host_identity: Option<HostIdentity>,
+    /// What the host certificate file shows. Nothing is there by default.
     pub identity_cert: Rc<Cell<TokenFile>>,
-    /// What the service identity's key file shows. Nothing is there by default.
+    /// What the host key file shows. Nothing is there by default.
     pub identity_key: Rc<Cell<TokenFile>>,
     token_fn: Box<TokenFn>,
     /// What `systemctl show --property=TasksCurrent` prints for the next calls, in order; once
@@ -437,7 +440,13 @@ pub struct Spy<'a> {
     record_path: PathBuf,
 }
 
-/// What looking at the join token file, or a file of the service identity, shows.
+/// The certificate file a flags file names in the tests that give the host an identity.
+pub const HOST_CERT_PATH: &str = "/run/hostkeeper/host.pem";
+
+/// The key file a flags file names in the tests that give the host an identity.
+pub const HOST_KEY_PATH: &str = "/run/hostkeeper/host.key";
+
+/// What looking at the join token file, or a file of the host identity, shows.
 #[derive(Clone, Copy, Debug)]
 pub enum TokenFile {
     /// Nothing is there.
@@ -471,13 +480,16 @@ impl<'a> Spy<'a> {
         let (seen_cert, seen_key) = (Rc::clone(&identity_cert), Rc::clone(&identity_key));
         Spy {
             token,
+            host_identity: None,
             identity_cert,
             identity_key,
             token_fn: Box::new(move |path| {
-                let shown = match path.file_name().and_then(|name| name.to_str()) {
-                    Some(SERVICE_CERT_FILE) => seen_cert.get(),
-                    Some(SERVICE_KEY_FILE) => seen_key.get(),
-                    _ => seen.get(),
+                let shown = if path == Path::new(HOST_CERT_PATH) {
+                    seen_cert.get()
+                } else if path == Path::new(HOST_KEY_PATH) {
+                    seen_key.get()
+                } else {
+                    seen.get()
                 };
                 match shown {
                     TokenFile::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
@@ -590,6 +602,7 @@ impl<'a> Spy<'a> {
             manager: rig.manager,
             euid: euid(),
             token: &*self.token_fn,
+            host_identity: self.host_identity.as_ref(),
             stat,
         }
     }

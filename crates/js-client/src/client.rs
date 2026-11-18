@@ -1,5 +1,5 @@
 //! The HTTP client: one agent per command, bound to one server and one token or one
-//! service identity.
+//! host identity.
 
 use std::fmt;
 use std::path::Path;
@@ -15,7 +15,7 @@ use ureq::tls::{Certificate, ClientCert, RootCerts, TlsConfig, TlsProvider};
 use ureq::{Agent, Error as TransportError};
 
 use crate::error::ClientError;
-use crate::identity::{Live, ServiceIdentity};
+use crate::identity::{HostIdentity, Live};
 use crate::server_url::ServerUrl;
 use crate::token;
 
@@ -57,7 +57,7 @@ enum Auth {
     Identity(Arc<Live>),
 }
 
-/// A connection to one server. It holds the token, or the key of its service identity, and
+/// A connection to one server. It holds the token, or the key of its host identity, and
 /// never prints it: it has no `Debug`.
 #[derive(Clone)]
 pub struct Client {
@@ -93,11 +93,11 @@ impl Client {
         })
     }
 
-    /// Like [`Client::connect`], but the client proves who it is by the service identity
+    /// Like [`Client::connect`], but the client proves who it is by the host identity
     /// in `identity`: a client certificate presented in the TLS handshake, and no
     /// `Authorization` header. Both files are read again before each request; when their
-    /// bytes changed and the pair they now hold is valid (both parse, the key is owner-only
-    /// and goes with the certificate), later requests use it, and otherwise the client
+    /// bytes changed and the pair they now hold is valid (both parse, the key passes
+    /// [`crate::host_key_problem`] and goes with the certificate), later requests use it, and otherwise the client
     /// keeps the pair it had. A renewed pair is taken up without a new client.
     ///
     /// The identity is a client certificate, which exists only in a TLS handshake: a server
@@ -107,11 +107,12 @@ impl Client {
     /// # Errors
     ///
     /// [`ClientError::Flag`] naming `--server` or `--ca-cert` as for [`Client::connect`],
-    /// or `--state-root` and the file when the identity cannot be read or is not valid.
+    /// or `--host-cert` or `--host-key` and the file when the identity cannot be read or is
+    /// not valid.
     /// The text never holds the contents of a file.
     pub fn connect_with_identity(
         server: &str,
-        identity: &ServiceIdentity,
+        identity: &HostIdentity,
         ca_cert: Option<&Path>,
         limit: Duration,
     ) -> Result<Self, ClientError> {
@@ -119,7 +120,7 @@ impl Client {
         if !server.https {
             return Err(ClientError::flag(
                 "--server",
-                "the service identity is a client certificate, presented only over https://",
+                "the host identity is a client certificate, presented only over https://",
             ));
         }
         let roots = roots(server.https, ca_cert)?;
@@ -141,7 +142,7 @@ impl Client {
     /// # Errors
     ///
     /// [`ClientError::Flag`] when `secret` is empty or is not one run of printable ASCII
-    /// (see [`bearer_of`]), and when the client authenticates by a service identity, which
+    /// (see [`bearer_of`]), and when the client authenticates by a host identity, which
     /// takes no bearer.
     pub fn set_bearer(&mut self, secret: &str) -> Result<(), ClientError> {
         match &mut self.auth {
@@ -151,13 +152,13 @@ impl Client {
             }
             Auth::Identity(_) => Err(ClientError::flag(
                 "--token-file",
-                "the client authenticates by its service identity and takes no bearer",
+                "the client authenticates by its host identity and takes no bearer",
             )),
         }
     }
 
     /// The agent for the next request, and the `Authorization` value to send with it (none
-    /// for a service identity).
+    /// for a host identity).
     fn route(&self) -> (Agent, Option<&str>) {
         match &self.auth {
             Auth::Bearer { agent, bearer } => (agent.clone(), Some(bearer)),

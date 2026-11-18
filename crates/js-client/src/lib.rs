@@ -4,13 +4,15 @@
 //! the PEM file it is given or, without one, the public roots bundled in `webpki-roots`
 //! (never the platform's store), and sends the token to the one host named.
 //!
-//! A client can authenticate by a service identity instead: a client certificate and key in
-//! two files of the state root (`ServiceIdentity`), presented in the TLS handshake with no
-//! `Authorization` header and read again before each request, so a renewed pair is used
-//! without a restart.
+//! A client can authenticate by the host's identity instead: a client certificate and key in
+//! two files (`HostIdentity`, given by `--host-cert` and `--host-key`), presented in the TLS
+//! handshake with no `Authorization` header and read again before each request, so a
+//! renewed pair is used without a restart. The key must pass `host_key_problem`: owned by
+//! root or by the user running the program, no access for others, not writable by its group.
 //!
-//! Failures name the flags `--server`, `--token-file`, `--ca-cert` and (for the identity files) `--state-root`, so a program that
-//! uses this crate takes its settings from flags of those names.
+//! Failures name the flags `--server`, `--token-file`, `--ca-cert` and (for the identity
+//! files) `--host-cert` and `--host-key`, so a program that uses this crate takes its
+//! settings from flags of those names.
 //!
 //! With the `jobs` feature (off by default; js-cli turns it on), `jobs` is the client of
 //! the job service (`jobscheduler.v1`, gRPC), under the same rules: `jobs::JobClient`, whose
@@ -29,6 +31,6 @@ mod token;
 
 pub use client::{Client, REQUEST_LIMIT, Reply};
 pub use error::ClientError;
-pub use identity::{SERVICE_CERT_FILE, SERVICE_KEY_FILE, ServiceIdentity};
+pub use identity::{HostIdentity, host_key_problem};
 pub use server_url::ServerUrl;
 pub use token::{bearer, bearer_of};

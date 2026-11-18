@@ -17,9 +17,11 @@ cordoned with the same `--host-id <id>`, and one whose agent takes its id from h
 file (`--host-id-from-facts`) is cordoned with
 `--host-id-from-facts /var/lib/hostkeeper/facts.json`.
 
-1. It cordons the host with the host's own credential (the one the agent keeps in its state root,
-   or `--token-file` for a host that has not swapped its one-time token yet). The pool's shared join
-   token is refused by the server on these routes.
+1. It cordons the host with the host's own credential: the host certificate that hostkeeper keeps
+   (`--host-cert` and `--host-key`, with the paths the agent's flags file names; the key must be
+   readable by the user running the verb, so that user belongs to the key's group), or the one the
+   agent keeps in its state root, or `--token-file` for a host that has not swapped its one-time
+   token yet. The pool's shared join token is refused by the server on these routes.
 2. It renews the cordon every third of `--lease-secs` (default 300, at most 3600) until `--for` has
    passed. The cordon is a lease the verb renews: a server that is not asked again lets it lapse.
 3. It lifts the cordon at the end, or at once on SIGTERM or SIGINT.

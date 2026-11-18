@@ -1,5 +1,5 @@
 //! Behaviour of the HTTP client: the server address rules, the owner-only token file, the
-//! service identity (a client certificate that is reloaded between requests),
+//! host identity (a client certificate that is reloaded between requests),
 //! and requests against small servers started in the test process on 127.0.0.1, over
 //! plain http and over TLS with a certificate made for the test; with the `jobs` feature,
 //! the job client against an in-memory job server.

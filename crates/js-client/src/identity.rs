@@ -1,11 +1,13 @@
-//! The service identity: a client certificate and its key, kept in two files that another
-//! program replaces while this one runs. A client that authenticates by it sends no bearer.
+//! The host identity: the host's client certificate and its key, kept in two files that
+//! another program (hostkeeper) replaces in place while this one runs. A client that
+//! authenticates by it sends no bearer.
 
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use rustix::process::geteuid;
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -14,18 +16,13 @@ use ureq::Agent;
 use ureq::tls::{Certificate, ClientCert, PrivateKey};
 
 use crate::error::ClientError;
-use crate::token::owner_only;
+use crate::token::{Probe, probe};
 
-/// The name, in a state root, of the file holding the service identity's certificate in
-/// PEM, the leaf first and the rest of its chain after it.
-pub const SERVICE_CERT_FILE: &str = "service-identity.pem";
+/// The flag naming the certificate file; errors about the file name it.
+const CERT_FLAG: &str = "--host-cert";
 
-/// The name, in a state root, of the file holding the service identity's private key in
-/// PEM (PKCS#8 or SEC1). It must be owner-only, as a token file must.
-pub const SERVICE_KEY_FILE: &str = "service-identity.key";
-
-/// The flag whose directory holds the identity files; errors name it.
-const FLAG: &str = "--state-root";
+/// The flag naming the key file; errors about the file name it.
+const KEY_FLAG: &str = "--host-key";
 
 /// The most a certificate file may hold: a chain of a few certificates.
 const MAX_CERT_FILE: u64 = 64 * 1024;
@@ -33,38 +30,50 @@ const MAX_CERT_FILE: u64 = 64 * 1024;
 /// The most a key file may hold.
 const MAX_KEY_FILE: u64 = 16 * 1024;
 
-/// The two files of a service identity: where they are, not what they hold. Reading them
+/// Why a key file with these facts is not one a program running as `euid` may use as the
+/// host's key, or `None` when it is. After following links it must be a regular file owned
+/// by root or by `euid`, with no permission for others and not writable by its group: mode
+/// 0600, 0400, 0640 and 0440 pass; 0644, 0660 and 0604 do not. `mode` is the permission
+/// bits. The text follows the path in a message and never holds the file's content.
+#[must_use]
+pub fn host_key_problem(regular: bool, mode: u32, owner: u32, euid: u32) -> Option<String> {
+    let mode = mode & 0o7777;
+    if !regular {
+        return Some("is not a regular file".to_owned());
+    }
+    if owner != 0 && owner != euid {
+        return Some(format!(
+            "must be owned by root or by uid {euid}, not by uid {owner}"
+        ));
+    }
+    if mode & 0o007 != 0 {
+        return Some(format!(
+            "must give others no access (mode 0600 or 0640), not mode {mode:04o}"
+        ));
+    }
+    (mode & 0o020 != 0).then(|| {
+        format!("must not be writable by its group (mode 0600 or 0640), not mode {mode:04o}")
+    })
+}
+
+/// The two files of the host's identity: where they are, not what they hold. They are the
+/// certificate and key that hostkeeper keeps for the host and renews in place. Reading them
 /// is [`crate::Client::connect_with_identity`]'s job, and again before each request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceIdentity {
+pub struct HostIdentity {
     cert: PathBuf,
     key: PathBuf,
 }
 
-impl ServiceIdentity {
-    /// The identity files [`SERVICE_CERT_FILE`] and [`SERVICE_KEY_FILE`] of `root`, which
-    /// may not exist.
+impl HostIdentity {
+    /// The identity in the certificate file `cert` (PEM, the leaf first and the rest of its
+    /// chain after it) and the key file `key` (PEM, PKCS#8 or SEC1; see
+    /// [`host_key_problem`] for the mode and owner it must have). Neither need exist yet.
     #[must_use]
-    pub fn in_dir(root: &Path) -> Self {
+    pub fn new(cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
         Self {
-            cert: root.join(SERVICE_CERT_FILE),
-            key: root.join(SERVICE_KEY_FILE),
-        }
-    }
-
-    /// The identity of `root` when both of its files exist, `None` when neither does.
-    ///
-    /// # Errors
-    ///
-    /// [`ClientError::Flag`] naming `--state-root` and the file that is missing when only
-    /// one of the two exists: half an identity is never taken for none.
-    pub fn found_in(root: &Path) -> Result<Option<Self>, ClientError> {
-        let identity = Self::in_dir(root);
-        match (identity.cert.exists(), identity.key.exists()) {
-            (true, true) => Ok(Some(identity)),
-            (false, false) => Ok(None),
-            (true, false) => Err(identity.missing(&identity.key)),
-            (false, true) => Err(identity.missing(&identity.cert)),
+            cert: cert.into(),
+            key: key.into(),
         }
     }
 
@@ -80,34 +89,43 @@ impl ServiceIdentity {
         &self.key
     }
 
-    fn missing(&self, file: &Path) -> ClientError {
-        ClientError::flag(
-            FLAG,
-            format!(
-                "{} is missing: the service identity needs both {SERVICE_CERT_FILE} and {SERVICE_KEY_FILE}",
-                file.display()
-            ),
-        )
+    fn refuse_cert(&self, why: impl std::fmt::Display) -> ClientError {
+        ClientError::flag(CERT_FLAG, format!("{} {why}", self.cert.display()))
     }
 
-    fn refuse(&self, file: &Path, why: impl std::fmt::Display) -> ClientError {
-        ClientError::flag(FLAG, format!("{} {why}", file.display()))
+    fn refuse_key(&self, why: impl std::fmt::Display) -> ClientError {
+        ClientError::flag(KEY_FLAG, format!("{} {why}", self.key.display()))
     }
 
-    /// Reads both files and checks them: the certificate parses, the key is owner-only and
-    /// parses, and the key is the certificate's. The errors name the file, never its bytes.
+    /// The key file's bytes, when the file passes [`host_key_problem`].
+    fn read_key(&self) -> Result<Vec<u8>, ClientError> {
+        let euid = geteuid().as_raw();
+        let allowed = |probe: &Probe| {
+            host_key_problem(probe.is_file, probe.mode, probe.owner, euid).is_none()
+        };
+        let read = probe(&self.key, MAX_KEY_FILE, &allowed)
+            .map_err(|why| self.refuse_key(format!("cannot be read: {why}")))?;
+        match host_key_problem(read.is_file, read.mode, read.owner, euid) {
+            Some(problem) => Err(self.refuse_key(problem)),
+            None => Ok(read.bytes),
+        }
+    }
+
+    /// Reads both files and checks them: the certificate parses, the key passes
+    /// [`host_key_problem`] and parses, and the key is the certificate's. The errors name
+    /// the file, never its bytes.
     fn read(&self) -> Result<Pair, ClientError> {
         let cert = read_public(&self.cert)
-            .map_err(|why| self.refuse(&self.cert, format!("cannot be read: {why}")))?;
-        let key = owner_only(&self.key, MAX_KEY_FILE).map_err(|why| self.refuse(&self.key, why))?;
+            .map_err(|why| self.refuse_cert(format!("cannot be read: {why}")))?;
+        let key = self.read_key()?;
         let chain = CertificateDer::pem_slice_iter(&cert)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| self.refuse(&self.cert, "does not hold PEM certificates"))?;
+            .map_err(|_| self.refuse_cert("does not hold PEM certificates"))?;
         if chain.is_empty() {
-            return Err(self.refuse(&self.cert, "holds no certificate"));
+            return Err(self.refuse_cert("holds no certificate"));
         }
         let private = PrivateKey::from_pem(&key)
-            .map_err(|_| self.refuse(&self.key, "does not hold a PEM private key"))?;
+            .map_err(|_| self.refuse_key("does not hold a PEM private key"))?;
         let signer = PrivateKeyDer::try_from(private.der())
             .ok()
             .and_then(|der| {
@@ -116,16 +134,13 @@ impl ServiceIdentity {
                     .load_private_key(der.clone_key())
                     .ok()
             })
-            .ok_or_else(|| self.refuse(&self.key, "holds a key of a kind that is not supported"))?;
+            .ok_or_else(|| self.refuse_key("holds a key of a kind that is not supported"))?;
         let certified = CertifiedKey::new(chain.clone(), signer);
         if certified.keys_match().is_err() {
-            return Err(self.refuse(
-                &self.key,
-                format!(
-                    "does not go with the certificate in {}",
-                    self.cert.display()
-                ),
-            ));
+            return Err(self.refuse_key(format!(
+                "does not go with the certificate in {}",
+                self.cert.display()
+            )));
         }
         let owned: Vec<Certificate<'static>> = chain
             .iter()
@@ -160,9 +175,9 @@ struct Current {
     bytes: (Vec<u8>, Vec<u8>),
 }
 
-/// A service identity in use: it hands out the HTTP agent of the newest valid pair.
+/// A host identity in use: it hands out the HTTP agent of the newest valid pair.
 pub(crate) struct Live {
-    identity: ServiceIdentity,
+    identity: HostIdentity,
     build: Box<dyn Fn(ClientCert) -> Agent + Send + Sync>,
     current: Mutex<Current>,
 }
@@ -170,7 +185,7 @@ pub(crate) struct Live {
 impl Live {
     /// Reads the identity and builds the first agent with `build`.
     pub(crate) fn open(
-        identity: ServiceIdentity,
+        identity: HostIdentity,
         build: impl Fn(ClientCert) -> Agent + Send + Sync + 'static,
     ) -> Result<Arc<Self>, ClientError> {
         let pair = identity.read()?;

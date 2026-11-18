@@ -177,15 +177,15 @@ pub struct HttpLease {
 
 impl HttpLease {
     /// Connects to `server` as `host`, with the credential in the owner-only file of `login`
-    /// or the service identity it names, trusting `ca_cert` for `https://` (or the bundled public roots without
-    /// it). `host` is a valid host id: it has no colon and nothing to escape. Every call
+    /// or the host certificate it names, trusting `ca_cert` for `https://` (or the bundled
+    /// public roots without it). `host` is a valid host id: it has no colon and nothing to escape. Every call
     /// ends within `limit`, connect and TLS included: a server that does not answer in time
     /// is [`LeaseError::Unreachable`], and the same client may be called again after it.
     ///
     /// # Errors
     ///
-    /// [`ClientError::Flag`] naming `--server`, `--token-file`, `--state-root` or `--ca-cert`
-    /// when that flag, or the file it names, is unusable.
+    /// [`ClientError::Flag`] naming `--server`, `--token-file`, `--host-cert`, `--host-key` or
+    /// `--ca-cert` when that flag, or the file it names, is unusable.
     pub fn connect(
         server: &str,
         login: &Login,

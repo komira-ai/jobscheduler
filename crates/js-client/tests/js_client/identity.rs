@@ -1,5 +1,5 @@
-//! The service identity: a client certificate presented in the TLS handshake, in place of
-//! a bearer, and reloaded from its two files before each request.
+//! The host identity: the host's client certificate presented in the TLS handshake, in
+//! place of a bearer, and reloaded from its two files before each request.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use js_client::{Client, ClientError, SERVICE_CERT_FILE, SERVICE_KEY_FILE, ServiceIdentity};
+use js_client::{Client, ClientError, HostIdentity, host_key_problem};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
 };
@@ -20,7 +20,13 @@ use crate::support::{Cert, Scratch, json_reply};
 
 const LIMIT: Duration = Duration::from_secs(20);
 
-/// A stand-in for the authority that issues service certificates.
+/// The certificate file of the identities these tests install.
+const CERT_FILE: &str = "host.pem";
+
+/// The key file of the identities these tests install.
+const KEY_FILE: &str = "host.key";
+
+/// A stand-in for the authority that issues host certificates.
 struct Authority(CertifiedIssuer<'static, KeyPair>);
 
 /// A certificate and key issued by an [`Authority`].
@@ -117,18 +123,18 @@ impl Mutual {
     }
 }
 
-/// The files of a state root holding `minted`, with `mode` on the key.
-fn install(dir: &Scratch, minted: &Minted, mode: u32) -> ServiceIdentity {
-    dir.write(SERVICE_CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
-    dir.write(SERVICE_KEY_FILE, minted.key_pem.as_bytes(), mode);
-    ServiceIdentity::in_dir(&dir.path(""))
+/// The identity files of `dir` holding `minted`, with `mode` on the key.
+fn install(dir: &Scratch, minted: &Minted, mode: u32) -> HostIdentity {
+    dir.write(CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
+    dir.write(KEY_FILE, minted.key_pem.as_bytes(), mode);
+    HostIdentity::new(dir.path(CERT_FILE), dir.path(KEY_FILE))
 }
 
 /// Replaces both files with `minted`'s the way a renewal does: each written aside and
 /// renamed over the old one.
 fn renew(dir: &Scratch, minted: &Minted) {
-    replace(dir, SERVICE_CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
-    replace(dir, SERVICE_KEY_FILE, minted.key_pem.as_bytes(), 0o600);
+    replace(dir, CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
+    replace(dir, KEY_FILE, minted.key_pem.as_bytes(), 0o640);
 }
 
 /// Replaces one file with `bytes` by writing a new file aside and renaming it over.
@@ -244,13 +250,13 @@ fn a_pair_that_does_not_hold_together_keeps_the_old_pair() {
     let fake = Mutual::start(server.requiring_clients_of(authority.der()), 4);
     let client = Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
 
-    replace(&dir, SERVICE_CERT_FILE, second.cert_pem.as_bytes(), 0o644);
+    replace(&dir, CERT_FILE, second.cert_pem.as_bytes(), 0o644);
     client.get("/new-cert-old-key").unwrap();
-    fs::remove_file(dir.path(SERVICE_KEY_FILE)).unwrap();
+    fs::remove_file(dir.path(KEY_FILE)).unwrap();
     client.get("/no-key").unwrap();
-    replace(&dir, SERVICE_KEY_FILE, b"not a key\n", 0o600);
+    replace(&dir, KEY_FILE, b"not a key\n", 0o600);
     client.get("/garbage-key").unwrap();
-    replace(&dir, SERVICE_KEY_FILE, second.key_pem.as_bytes(), 0o600);
+    replace(&dir, KEY_FILE, second.key_pem.as_bytes(), 0o600);
     client.get("/both").unwrap();
 
     let presented: Vec<_> = fake.seen().into_iter().map(|seen| seen.presented).collect();
@@ -265,7 +271,7 @@ fn a_pair_that_does_not_hold_together_keeps_the_old_pair() {
     );
 }
 
-/// Asserts that a key file that a later renewal leaves with a loose mode is not taken up.
+/// Asserts that a renewed key that others can read is not taken up: the client keeps the pair it had.
 #[test]
 fn a_renewed_key_with_a_loose_mode_keeps_the_old_pair() {
     let dir = Scratch::new("identity_loose_renewal");
@@ -277,8 +283,8 @@ fn a_renewed_key_with_a_loose_mode_keeps_the_old_pair() {
     let ca = ca_file(&dir, &server);
     let fake = Mutual::start(server.requiring_clients_of(authority.der()), 1);
     let client = Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
-    replace(&dir, SERVICE_CERT_FILE, second.cert_pem.as_bytes(), 0o644);
-    replace(&dir, SERVICE_KEY_FILE, second.key_pem.as_bytes(), 0o644);
+    replace(&dir, CERT_FILE, second.cert_pem.as_bytes(), 0o644);
+    replace(&dir, KEY_FILE, second.key_pem.as_bytes(), 0o644);
     client.get("/a").unwrap();
     assert_eq!(fake.seen()[0].presented, vec![first.der.clone()]);
 }
@@ -300,8 +306,8 @@ fn a_certificate_of_another_authority_fails_the_handshake() {
     assert_eq!(fake.seen()[0].head, "");
 }
 
-/// Asserts that the identity files are refused at build, naming `--state-root` and the file:
-/// a missing certificate, a missing key, a key with a loose mode, a certificate file with no
+/// Asserts that the identity files are refused at build, naming `--host-cert` or `--host-key`
+/// and the file: a missing certificate, a missing key, a certificate file with no
 /// certificate in it, a key file with no key, a key that is not a usable key, and a key that
 /// is not the certificate's. None of the messages holds the content of a file.
 #[test]
@@ -310,122 +316,216 @@ fn unusable_identity_files_are_refused_naming_the_file_and_never_its_content() {
     let authority = Authority::new();
     let minted = authority.issue("host-1");
     let other = authority.issue("host-1");
-    let identity = ServiceIdentity::in_dir(&dir.path(""));
-    let cert = dir.path(SERVICE_CERT_FILE);
-    let key = dir.path(SERVICE_KEY_FILE);
+    let identity = HostIdentity::new(dir.path(CERT_FILE), dir.path(KEY_FILE));
+    let cert = dir.path(CERT_FILE);
+    let key = dir.path(KEY_FILE);
     let connect = || Client::connect_with_identity("https://localhost:1", &identity, None, LIMIT);
 
     let said = refused(connect());
     assert!(
-        said.starts_with(&format!(
-            "--state-root: {} cannot be read: ",
-            cert.display()
-        )),
+        said.starts_with(&format!("--host-cert: {} cannot be read: ", cert.display())),
         "{said}"
     );
-    dir.write(SERVICE_CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
+    dir.write(CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
     let said = refused(connect());
     assert!(
-        said.starts_with(&format!("--state-root: {} cannot be read: ", key.display())),
+        said.starts_with(&format!("--host-key: {} cannot be read: ", key.display())),
         "{said}"
     );
 
-    for mode in [0o640, 0o604, 0o700, 0o666] {
-        dir.write(SERVICE_KEY_FILE, minted.key_pem.as_bytes(), mode);
-        let said = refused(connect());
-        let want = format!(
-            "--state-root: {} must be a regular file owned by you and readable only by you (mode 0600 or 0400), not mode {mode:04o} owned by uid ",
-            key.display()
-        );
-        assert!(said.starts_with(&want), "{said}");
-        assert!(!said.contains("PRIVATE"), "{said}");
-    }
-
-    dir.write(SERVICE_KEY_FILE, minted.key_pem.as_bytes(), 0o600);
-    dir.write(SERVICE_CERT_FILE, b"sekrit-bytes\n", 0o644);
+    dir.write(KEY_FILE, minted.key_pem.as_bytes(), 0o600);
+    dir.write(CERT_FILE, b"sekrit-bytes\n", 0o644);
     assert_eq!(
         refused(connect()),
-        format!("--state-root: {} holds no certificate", cert.display())
+        format!("--host-cert: {} holds no certificate", cert.display())
     );
     dir.write(
-        SERVICE_CERT_FILE,
+        CERT_FILE,
         b"-----BEGIN CERTIFICATE-----\n!!!sekrit!!!\n-----END CERTIFICATE-----\n",
         0o644,
     );
     assert_eq!(
         refused(connect()),
         format!(
-            "--state-root: {} does not hold PEM certificates",
+            "--host-cert: {} does not hold PEM certificates",
             cert.display()
         )
     );
-    dir.write(SERVICE_CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
+    dir.write(CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
 
-    dir.write(SERVICE_KEY_FILE, b"sekrit-bytes\n", 0o600);
+    dir.write(KEY_FILE, b"sekrit-bytes\n", 0o600);
     assert_eq!(
         refused(connect()),
         format!(
-            "--state-root: {} does not hold a PEM private key",
+            "--host-key: {} does not hold a PEM private key",
             key.display()
         )
     );
+    let unsupported = format!(
+        "--host-key: {} holds a key of a kind that is not supported",
+        key.display()
+    );
     dir.write(
-        SERVICE_KEY_FILE,
+        KEY_FILE,
         b"-----BEGIN PRIVATE KEY-----\nc2Vrcml0LWJ5dGVz\n-----END PRIVATE KEY-----\n",
         0o600,
     );
-    assert_eq!(
-        refused(connect()),
-        format!(
-            "--state-root: {} holds a key of a kind that is not supported",
-            key.display()
-        )
-    );
+    assert_eq!(refused(connect()), unsupported);
     dir.write(
-        SERVICE_KEY_FILE,
+        KEY_FILE,
         b"-----BEGIN PRIVATE KEY-----\nMAMCAQA=\n-----END PRIVATE KEY-----\n",
         0o600,
     );
-    assert_eq!(
-        refused(connect()),
-        format!(
-            "--state-root: {} holds a key of a kind that is not supported",
-            key.display()
-        )
-    );
+    assert_eq!(refused(connect()), unsupported);
 
-    dir.write(SERVICE_KEY_FILE, other.key_pem.as_bytes(), 0o600);
-    assert_eq!(
-        refused(connect()),
-        format!(
-            "--state-root: {} does not go with the certificate in {}",
-            key.display(),
-            cert.display()
-        )
+    let mismatch = format!(
+        "--host-key: {} does not go with the certificate in {}",
+        key.display(),
+        cert.display()
     );
+    dir.write(KEY_FILE, other.key_pem.as_bytes(), 0o600);
+    assert_eq!(refused(connect()), mismatch);
     dir.write(
-        SERVICE_CERT_FILE,
+        CERT_FILE,
         b"-----BEGIN CERTIFICATE-----\nc2Vrcml0LWJ5dGVz\n-----END CERTIFICATE-----\n",
         0o644,
     );
-    dir.write(SERVICE_KEY_FILE, minted.key_pem.as_bytes(), 0o600);
+    dir.write(KEY_FILE, minted.key_pem.as_bytes(), 0o600);
+    assert_eq!(refused(connect()), mismatch);
+}
+
+/// Asserts that a key file the group can read (0640, 0440) is accepted beside the owner-only
+/// modes (0600, 0400): the client connects and presents the certificate.
+#[test]
+fn a_key_readable_by_its_group_is_accepted() {
+    let authority = Authority::new();
+    for mode in [0o600, 0o400, 0o640, 0o440] {
+        let dir = Scratch::new(&format!("identity_mode_{mode:o}"));
+        let minted = authority.issue("host-1");
+        let identity = install(&dir, &minted, mode);
+        let server = Cert::new();
+        let ca = ca_file(&dir, &server);
+        let fake = Mutual::start(server.requiring_clients_of(authority.der()), 1);
+        let client =
+            Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
+        client.get("/a").unwrap();
+        assert_eq!(
+            fake.seen()[0].presented,
+            vec![minted.der.clone()],
+            "{mode:o}"
+        );
+    }
+}
+
+/// Asserts that a key file that others can read or that its group can write (0644, 0660,
+/// 0604, 0666) is refused at build with the full message naming `--host-key` and the file,
+/// and that a key that is a directory is refused as not a regular file.
+#[test]
+fn a_key_that_others_can_use_or_its_group_can_write_is_refused() {
+    let dir = Scratch::new("identity_loose_modes");
+    let minted = Authority::new().issue("host-1");
+    let identity = HostIdentity::new(dir.path(CERT_FILE), dir.path(KEY_FILE));
+    let key = dir.path(KEY_FILE);
+    dir.write(CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
+    let connect = || Client::connect_with_identity("https://localhost:1", &identity, None, LIMIT);
+
+    for mode in [0o644, 0o604, 0o666] {
+        dir.write(KEY_FILE, minted.key_pem.as_bytes(), mode);
+        assert_eq!(
+            refused(connect()),
+            format!(
+                "--host-key: {} must give others no access (mode 0600 or 0640), not mode {mode:04o}",
+                key.display()
+            )
+        );
+    }
+    dir.write(KEY_FILE, minted.key_pem.as_bytes(), 0o660);
     assert_eq!(
         refused(connect()),
         format!(
-            "--state-root: {} does not go with the certificate in {}",
-            key.display(),
-            cert.display()
+            "--host-key: {} must not be writable by its group (mode 0600 or 0640), not mode 0660",
+            key.display()
         )
+    );
+    fs::remove_file(&key).unwrap();
+    fs::create_dir(&key).unwrap();
+    assert_eq!(
+        refused(connect()),
+        format!("--host-key: {} is not a regular file", key.display())
+    );
+}
+
+/// Asserts the owner rule of the key: a regular file owned by root or by the user running the
+/// program passes with mode 0600 or 0640, one owned by another user is refused whatever its
+/// mode, and a file that is not regular is refused first.
+#[test]
+fn a_key_owned_by_another_user_is_refused() {
+    let me = 1000;
+    assert_eq!(host_key_problem(true, 0o640, 0, me), None);
+    assert_eq!(host_key_problem(true, 0o600, me, me), None);
+    assert_eq!(
+        host_key_problem(true, 0o600, 1001, me).as_deref(),
+        Some("must be owned by root or by uid 1000, not by uid 1001")
+    );
+    assert_eq!(
+        host_key_problem(false, 0o600, 1001, me).as_deref(),
+        Some("is not a regular file")
+    );
+}
+
+/// Asserts that the pair is followed through symbolic links, the way hostkeeper renews it:
+/// both names are links to a directory of one generation, and after the links are repointed
+/// to the next generation the next request of the same client presents the new certificate.
+#[test]
+fn a_renewal_that_repoints_symbolic_links_is_used_by_the_next_request() {
+    let dir = Scratch::new("identity_symlinks");
+    let authority = Authority::new();
+    let first = authority.issue("host-1");
+    let second = authority.issue("host-1");
+    for (generation, minted) in [("gen1", &first), ("gen2", &second)] {
+        fs::create_dir(dir.path(generation)).unwrap();
+        dir.write(
+            &format!("{generation}/cert.pem"),
+            minted.cert_pem.as_bytes(),
+            0o644,
+        );
+        dir.write(
+            &format!("{generation}/key.pem"),
+            minted.key_pem.as_bytes(),
+            0o640,
+        );
+    }
+    let point = |generation: &str| {
+        for (name, target) in [(CERT_FILE, "cert.pem"), (KEY_FILE, "key.pem")] {
+            let aside = dir.path(&format!("{name}.link"));
+            let _ = fs::remove_file(&aside);
+            std::os::unix::fs::symlink(dir.path(generation).join(target), &aside).unwrap();
+            fs::rename(&aside, dir.path(name)).unwrap();
+        }
+    };
+    point("gen1");
+    let identity = HostIdentity::new(dir.path(CERT_FILE), dir.path(KEY_FILE));
+    let server = Cert::new();
+    let ca = ca_file(&dir, &server);
+    let fake = Mutual::start(server.requiring_clients_of(authority.der()), 2);
+    let client = Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
+    client.get("/a").unwrap();
+    point("gen2");
+    client.get("/b").unwrap();
+    let presented: Vec<_> = fake.seen().into_iter().map(|seen| seen.presented).collect();
+    assert_eq!(
+        presented,
+        vec![vec![first.der.clone()], vec![second.der.clone()]]
     );
 }
 
 /// Asserts that the server flag and the `--ca-cert` flag are checked before the identity
-/// and named as for a token client, and that a state root's file that is a directory is
+/// and named as for a token client, and that a certificate file that is a directory is
 /// refused.
 #[test]
 fn the_other_flags_are_checked_for_an_identity_client_too() {
     let dir = Scratch::new("identity_flags");
-    let identity = ServiceIdentity::in_dir(&dir.path(""));
+    let identity = HostIdentity::new(dir.path(CERT_FILE), dir.path(KEY_FILE));
     assert!(
         refused(Client::connect_with_identity(
             "http://example.com",
@@ -444,7 +544,7 @@ fn the_other_flags_are_checked_for_an_identity_client_too() {
     ));
     assert!(said.starts_with("--ca-cert: "), "{said}");
 
-    fs::create_dir(dir.path(SERVICE_CERT_FILE)).unwrap();
+    fs::create_dir(dir.path(CERT_FILE)).unwrap();
     let said = refused(Client::connect_with_identity(
         "https://localhost:1",
         &identity,
@@ -453,8 +553,8 @@ fn the_other_flags_are_checked_for_an_identity_client_too() {
     ));
     assert!(
         said.starts_with(&format!(
-            "--state-root: {} cannot be read",
-            dir.path(SERVICE_CERT_FILE).display()
+            "--host-cert: {} cannot be read",
+            dir.path(CERT_FILE).display()
         )),
         "{said}"
     );
@@ -466,7 +566,7 @@ fn the_other_flags_are_checked_for_an_identity_client_too() {
 #[test]
 fn an_identity_client_is_refused_a_plain_http_server() {
     let dir = Scratch::new("identity_plain_http");
-    let identity = ServiceIdentity::in_dir(&dir.path(""));
+    let identity = HostIdentity::new(dir.path(CERT_FILE), dir.path(KEY_FILE));
     let said = refused(Client::connect_with_identity(
         "http://127.0.0.1:1",
         &identity,
@@ -475,7 +575,7 @@ fn an_identity_client_is_refused_a_plain_http_server() {
     ));
     assert_eq!(
         said,
-        "--server: the service identity is a client certificate, presented only over https://"
+        "--server: the host identity is a client certificate, presented only over https://"
     );
 }
 
@@ -494,55 +594,10 @@ fn an_identity_client_takes_no_bearer() {
         Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
     assert_eq!(
         client.set_bearer("host-cred").unwrap_err().to_string(),
-        "--token-file: the client authenticates by its service identity and takes no bearer"
+        "--token-file: the client authenticates by its host identity and takes no bearer"
     );
     client.get("/a").unwrap();
     let seen = fake.seen();
     assert_eq!(seen[0].presented, vec![minted.der.clone()]);
     assert!(!seen[0].head.to_ascii_lowercase().contains("authorization"));
-}
-
-/// Asserts that a state root with both files has an identity, with the paths of the two
-/// files, and that one with neither has none.
-#[test]
-fn a_state_root_with_both_files_holds_the_identity() {
-    let dir = Scratch::new("identity_found");
-    assert_eq!(ServiceIdentity::found_in(&dir.path("")).unwrap(), None);
-    let minted = Authority::new().issue("host-1");
-    install(&dir, &minted, 0o600);
-    let found = ServiceIdentity::found_in(&dir.path("")).unwrap().unwrap();
-    assert_eq!(found.cert_path(), dir.path(SERVICE_CERT_FILE));
-    assert_eq!(found.key_path(), dir.path(SERVICE_KEY_FILE));
-}
-
-/// Asserts that a state root with only one of the two files is an error naming the file
-/// that is missing, in both directions, and not a silent fall back to none.
-#[test]
-fn a_state_root_with_one_file_names_the_missing_one() {
-    let dir = Scratch::new("identity_half_present");
-    let minted = Authority::new().issue("host-1");
-    dir.write(SERVICE_CERT_FILE, minted.cert_pem.as_bytes(), 0o644);
-    let said = ServiceIdentity::found_in(&dir.path(""))
-        .unwrap_err()
-        .to_string();
-    assert_eq!(
-        said,
-        format!(
-            "--state-root: {} is missing: the service identity needs both service-identity.pem and service-identity.key",
-            dir.path(SERVICE_KEY_FILE).display()
-        )
-    );
-    fs::remove_file(dir.path(SERVICE_CERT_FILE)).unwrap();
-    dir.write(SERVICE_KEY_FILE, minted.key_pem.as_bytes(), 0o600);
-    let said = ServiceIdentity::found_in(&dir.path(""))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        said.starts_with(&format!(
-            "--state-root: {} is missing: ",
-            dir.path(SERVICE_CERT_FILE).display()
-        )),
-        "{said}"
-    );
-    assert!(!said.contains("PRIVATE"), "{said}");
 }

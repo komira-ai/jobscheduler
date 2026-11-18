@@ -22,6 +22,8 @@ use std::io;
 use std::os::fd::BorrowedFd;
 use std::path::Path;
 
+use js_client::HostIdentity;
+
 use crate::facts::CommandRunner;
 
 use super::{
@@ -37,7 +39,7 @@ pub use rollback::rollback;
 pub use verify::verify;
 
 /// What the hook finds when it looks at a secret file: the join token file, or a file of the
-/// service identity.
+/// host's certificate and key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TokenFacts {
     /// Whether it is a regular file after following links.
@@ -48,7 +50,8 @@ pub struct TokenFacts {
     pub uid: u32,
 }
 
-/// How the token file and the service identity files are looked at (see [`TokenFacts`]).
+/// How the token file and the host certificate and key files are looked at (see
+/// [`TokenFacts`]).
 pub type TokenFn = dyn Fn(&Path) -> io::Result<TokenFacts>;
 
 /// Everything a step touches.
@@ -62,8 +65,12 @@ pub struct Env<'a> {
     pub manager: Manager,
     /// The user the hook runs as: the owner the join token file must have.
     pub euid: u32,
-    /// How the join token file and the service identity files are looked at.
+    /// How the join token file and the host certificate and key files are looked at.
     pub token: &'a TokenFn,
+    /// The host certificate and key the host's flags file (`flags_file`) names, when it names
+    /// both; `None` when it names neither or cannot be read. A first install that has them
+    /// needs no join token (see `prepare`).
+    pub host_identity: Option<&'a HostIdentity>,
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,

@@ -3,8 +3,8 @@
 //!
 //! What a step needs of the machine comes from three places: the params, which name the agent's
 //! state root and token file; the host's flags file (`flags_file`, the file `js-agent
-//! --flags-file` reads), which names the lease server, the certificate to trust and the host id
-//! ([`ConnectParams`]); and the machine itself (its id, how the state directory's owner and the
+//! --flags-file` reads), which names the lease server, the certificate to trust, the host id and
+//! the host's own certificate and key ([`ConnectParams`]); and the machine itself (its id, how the state directory's owner and the
 //! token file are looked at). A [`Machine`] holds those seams, so a test can run the same steps
 //! against a real lease server in its own process and a state directory it owns.
 //!
@@ -12,6 +12,9 @@
 //! cannot be used, no credential, an id that is no id) is not an error of the hook as a whole: a
 //! step that never asks the lease server (a first install) does not need it, and one that does
 //! ends with `lease_unreachable`, class environment, saying why.
+//! A first install reads the flags file only to see whether it names the host certificate and
+//! key, which stand in for the join token; a flags file that cannot be used names none, and the
+//! install goes by the token file as it always did.
 //!
 //! The agent's state root is looked at before any step runs. An update needs the state root of
 //! the agent that runs, so one that is not there ends every step `state_invalid`: an absent root
@@ -32,7 +35,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use js_agent_wire::Taint;
-use js_client::ClientError;
+use js_client::{ClientError, HostIdentity};
 use js_mac_provision::daemon::AGENT_EXIT_TIMEOUT_SECS;
 use js_types::HostId;
 use js_update_hook::peek;
@@ -126,34 +129,29 @@ impl Machine<'static> {
     }
 }
 
-/// How the lease connection proves who it is, with the params key that led to it: the service
-/// identity of the state root when it holds one (the agent presents it then), else the host
-/// credential of the state root when it holds one, which is what the agent sends once it has
-/// one, and otherwise the token file. A state root that is there and not private is an error of
-/// its own: it is not trusted with a credential, and the join token is not used in its place (the
-/// server would refuse it on the host's own routes, which says nothing of the cause). A state
-/// root with one identity file only, and a credential file that is there and cannot be read, or
-/// holds no credential, are refused by the key `state_root`, and the token file is not used in
-/// their place either: the agent would not use it. `root` is what the hook found at
-/// `state_root`.
+/// How the lease connection proves who it is, with the params key that led to it: the host's
+/// certificate and key when the flags file names them (the agent presents them then), else the
+/// host credential of the state root when it holds one, which is what the agent sends once it
+/// has one, and otherwise the token file. A state root that is there and not private is an error
+/// of its own: it is not trusted with a credential, and the join token is not used in its place
+/// (the server would refuse it on the host's own routes, which says nothing of the cause). A
+/// credential file that is there and cannot be read, or holds no credential, is refused by the
+/// key `state_root`, and the token file is not used in its place either: the agent would not use
+/// it. `root` is what the hook found at `state_root`; a host certificate needs none.
 fn credential(
     params: &ConnectParams,
     root: Result<&Root, &RootError>,
 ) -> Result<(Login, &'static str), String> {
+    if let Some(identity) = &params.host_identity {
+        return Ok((Login::HostCertificate(identity.clone()), FLAGS_FILE_KEY));
+    }
     let kept = match root.map_err(RootError::to_string)? {
         Root::Open(root) => {
-            let identity =
-                Login::identity_of(root.path()).map_err(|why| named(&why, STATE_ROOT_KEY))?;
-            match identity {
-                Some(identity) => Some((identity, STATE_ROOT_KEY)),
-                None => {
-                    let file = CredentialFile::in_dir(root.path());
-                    let loaded = file
-                        .load()
-                        .map_err(|why| format!("{STATE_ROOT_KEY}: {why}"))?;
-                    loaded.map(|_| (Login::Token(file.path()), STATE_ROOT_KEY))
-                }
-            }
+            let file = CredentialFile::in_dir(root.path());
+            let loaded = file
+                .load()
+                .map_err(|why| format!("{STATE_ROOT_KEY}: {why}"))?;
+            loaded.map(|_| (Login::Token(file.path()), STATE_ROOT_KEY))
         }
         Root::Absent => None,
     };
@@ -162,24 +160,19 @@ fn credential(
         file.map(|file| (Login::Token(file), TOKEN_FILE_KEY))
     })
     .ok_or_else(|| {
-        format!(
-            "{TOKEN_FILE_KEY}: required unless {STATE_ROOT_KEY} holds a service identity or a host credential"
-        )
+        format!("{TOKEN_FILE_KEY}: required unless {STATE_ROOT_KEY} holds a host credential")
     })
 }
 
 /// Why the client could not be built, as the client says it. The client's text begins with the
-/// command-line flag of the programs it serves (`--server: `, `--token-file: `, `--state-root: `,
-/// `--ca-cert: `): the server and the certificate are flags of the host's flags file, so their
-/// text is told as it is; the token and state root flags are not ones the hook has, only its
-/// params, and the credential may be the state root's rather than a token file's
-/// (`credential_key` says which).
+/// command-line flag of the programs it serves (`--server: `, `--token-file: `, `--ca-cert: `,
+/// `--host-cert: `, `--host-key: `): the server, the certificate to trust and the host
+/// certificate and key are flags of the host's flags file, so their text is told as it is; the
+/// token flag is not one the hook has, only its params, and the credential may be the state
+/// root's rather than a token file's (`credential_key` says which).
 fn named(error: &ClientError, credential_key: &str) -> String {
     let text = error.to_string();
-    let why = text
-        .strip_prefix("--token-file: ")
-        .or_else(|| text.strip_prefix("--state-root: "));
-    match why {
+    match text.strip_prefix("--token-file: ") {
         Some(why) => format!("{credential_key}: {why}"),
         None => text,
     }
@@ -293,8 +286,8 @@ impl Lease for MachineLease {
     }
 }
 
-/// How to reach the lease server: the server, the certificate and the host id of the host's own
-/// agent flags (`flags_file`), read as `js-agent --flags-file` reads them, with the state root
+/// How to reach the lease server: the server, the certificate to trust, the host certificate and
+/// key, and the host id of the host's own agent flags (`flags_file`), read as `js-agent --flags-file` reads them, with the state root
 /// and the token file of the params.
 ///
 /// # Errors
@@ -345,6 +338,10 @@ pub(super) fn connect_with(
         token_file: Some(token_file.to_owned()),
         ca_cert: cli.ca_cert,
         host_id,
+        host_identity: cli
+            .host_cert
+            .zip(cli.host_key)
+            .map(|(cert, key)| HostIdentity::new(cert, key)),
     })
 }
 
@@ -520,15 +517,22 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
     let units = platform_units(&commands, &stop, &params.token_file);
-    let lease = match connect_of(params, machine) {
+    // A flags file that cannot be read names no host certificate: a first install then goes by
+    // the join token as before, and a step that asks the lease server ends with the reason.
+    let connect = connect_of(params, machine);
+    let lease = match &connect {
         Ok(connect) => MachineLease::with_root(
-            &connect,
+            connect,
             Ok(&state),
             machine.own_host_id,
             RequestLimit::DEFAULT,
         ),
-        Err(why) => MachineLease::failed(why),
+        Err(why) => MachineLease::failed(why.clone()),
     };
+    let host_identity = connect
+        .as_ref()
+        .ok()
+        .and_then(|connect| connect.host_identity.as_ref());
     let env = Env {
         ports: Ports {
             units: &units,
@@ -542,6 +546,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         manager: MANAGER,
         euid: machine.euid,
         token: machine.token,
+        host_identity,
         stat: machine.stat,
     };
     match invocation.step {

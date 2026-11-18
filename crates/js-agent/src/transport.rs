@@ -56,8 +56,7 @@ pub trait Transport {
 
 /// Makes the [`Transport`] the flags name.
 pub trait Connector {
-    /// Checks `--server`, the login (the token file or the service identity of the state
-    /// root) and `--ca-cert` and connects.
+    /// Checks `--server`, the login (the token file or the host certificate and key) and `--ca-cert` and connects.
     ///
     /// # Errors
     ///
@@ -88,7 +87,7 @@ impl Connector for Dialer {
 }
 
 /// A connected client. It holds the token, or the credential that replaced it, or the key of
-/// its service identity, and has no `Debug`.
+/// its host certificate, and has no `Debug`.
 struct HttpTransport(Client);
 
 impl Transport for HttpTransport {

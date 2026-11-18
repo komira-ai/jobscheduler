@@ -124,7 +124,7 @@ hostkeeper-hook = { workspace = true, features = ["conformance"] }
 # hostkeeper's daemon's step runner: a first install of the package as a native entry, run as the
 # daemon runs it (tests/agent/update_hook/hostkeeper_runner.rs).
 hostkeeper-steps.workspace = true
-# The certificates the service identity tests mint (tests/agent/update_hook/machine_identity.rs).
+# The certificates the host certificate tests mint (tests/agent/update_hook/machine_host_certificate.rs).
 rcgen.workspace = true
 
 [lints]

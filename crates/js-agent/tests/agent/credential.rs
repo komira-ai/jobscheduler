@@ -13,7 +13,7 @@ use js_agent::{
     CredentialStore, Dialer, HEARTBEAT_PATH, HELLO_PATH, Login, Note, Session, Step,
 };
 use js_agent_wire::HostCredential;
-use js_client::{ClientError, SERVICE_CERT_FILE, SERVICE_KEY_FILE, ServiceIdentity};
+use js_client::{ClientError, HostIdentity};
 use serde_json::{Value, json};
 
 use crate::jobs::private;
@@ -508,29 +508,30 @@ fn the_token_file_is_optional_only_with_a_credential_in_the_state_root() {
     assert!(files.is_empty(), "{files:?}");
 }
 
-/// Writes the two files of a service identity into `dir` (their content is the connector's
-/// business, and the connector here is a script) and returns the identity they make.
-fn put_identity(dir: &Path) -> ServiceIdentity {
-    fs::write(dir.join(SERVICE_CERT_FILE), "cert\n").unwrap();
-    fs::write(dir.join(SERVICE_KEY_FILE), "key\n").unwrap();
-    ServiceIdentity::in_dir(dir)
+/// Adds `--host-cert` and `--host-key` for the files `cert` and `key` of `dir` to `args`.
+fn with_host_files(args: &[String], dir: &Path) -> (Vec<String>, HostIdentity) {
+    let (cert, key) = (dir.join("host.pem"), dir.join("host.key"));
+    let mut named = args.to_vec();
+    for (flag, path) in [("--host-cert", &cert), ("--host-key", &key)] {
+        named.extend([flag.to_owned(), path.display().to_string()]);
+    }
+    (named, HostIdentity::new(cert, key))
 }
 
-/// Asserts that an agent whose state root holds the service identity needs no `--token-file`,
-/// connects with the identity (the connector is told so), and even beside a `--token-file` and
-/// a host credential file uses the identity: the credential file is not read (a damaged one
-/// does not stop the agent), the hello does not ask to be given a credential, and a credential
-/// the welcome carries is neither kept nor adopted.
+/// Asserts that an agent given `--host-cert` and `--host-key` needs no `--token-file`,
+/// connects with them (the connector is told so), and even beside a `--token-file` and a host
+/// credential file uses them: the token and credential files are not read (a damaged one does
+/// not stop the agent), the hello does not ask to be given a credential, and a credential the
+/// welcome carries is neither kept nor adopted.
 #[test]
-fn an_agent_with_the_service_identity_in_the_state_root_connects_with_it() {
-    let (_scratch, dir) = state_dir("credential-identity");
+fn an_agent_given_its_host_certificate_and_key_connects_with_them() {
+    let (_scratch, dir) = state_dir("credential-host-cert");
     let state = dir.display().to_string();
-    let identity = put_identity(&dir);
-    let args = tokenless(&state);
+    let (args, identity) = with_host_files(&tokenless(&state), &dir);
 
     let (ran, sent, logins) = run_recording(&args, vec![welcome(1)]);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
-    assert_eq!(logins, [Login::Identity(identity.clone())]);
+    assert_eq!(logins, [Login::HostCertificate(identity.clone())]);
     assert_eq!(paths(&sent), [HELLO_PATH, HEARTBEAT_PATH]);
     assert!(sent.borrow()[0].1.get("accepts_host_credential").is_none());
 
@@ -540,17 +541,17 @@ fn an_agent_with_the_service_identity_in_the_state_root_connects_with_it() {
     beside.extend(["--token-file".to_owned(), "/no/such/token".to_owned()]);
     let (ran, sent, logins) = run_recording(&beside, vec![welcome_issuing(1, CREDENTIAL)]);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
-    assert_eq!(logins, [Login::Identity(identity)]);
+    assert_eq!(logins, [Login::HostCertificate(identity)]);
     assert_eq!(paths(&sent), [HELLO_PATH, HEARTBEAT_PATH]);
     assert_eq!(fs::read_to_string(file.path()).unwrap(), "not a credential");
     assert!(!ran.err.contains(CREDENTIAL) && !ran.out.contains(CREDENTIAL));
 }
 
-/// Asserts that a state root without the identity connects as before: with the token file
-/// when one is given.
+/// Asserts that an agent without the host flags connects as before: with the token file when
+/// one is given.
 #[test]
-fn an_agent_without_the_service_identity_connects_with_its_token_file() {
-    let (scratch, dir) = state_dir("credential-no-identity");
+fn an_agent_without_the_host_flags_connects_with_its_token_file() {
+    let (scratch, dir) = state_dir("credential-no-host-cert");
     let token = scratch.write("token", "tok-1\n", 0o600);
     let mut args = tokenless(&dir.display().to_string());
     args.extend(["--token-file".to_owned(), token.display().to_string()]);
@@ -559,34 +560,28 @@ fn an_agent_without_the_service_identity_connects_with_its_token_file() {
     assert_eq!(logins, [Login::Token(token)]);
 }
 
-/// Asserts that a state root with exactly one of the two identity files stops the agent with
-/// the usage status before it connects or says anything, naming the file that is missing, in
-/// both directions and whatever `--token-file` is given.
+/// Asserts that one of the two host flags without the other stops the agent with the usage
+/// status before it connects or says anything, naming the flag that is missing, in both
+/// directions and whatever `--token-file` is given.
 #[test]
-fn exactly_one_identity_file_stops_the_agent_naming_the_missing_one() {
-    for (name, keep, missing) in [
-        (
-            "credential-identity-no-key",
-            SERVICE_CERT_FILE,
-            SERVICE_KEY_FILE,
-        ),
-        (
-            "credential-identity-no-cert",
-            SERVICE_KEY_FILE,
-            SERVICE_CERT_FILE,
-        ),
+fn exactly_one_host_flag_stops_the_agent_naming_the_other() {
+    for (name, given, missing) in [
+        ("credential-host-no-key", "--host-cert", "--host-key"),
+        ("credential-host-no-cert", "--host-key", "--host-cert"),
     ] {
         let (scratch, dir) = state_dir(name);
-        fs::write(dir.join(keep), "x\n").unwrap();
         let token = scratch.write("token", "tok-1\n", 0o600);
         let mut args = tokenless(&dir.display().to_string());
         args.extend(["--token-file".to_owned(), token.display().to_string()]);
+        args.extend([
+            given.to_owned(),
+            dir.join("host.file").display().to_string(),
+        ]);
         let (ran, sent, logins) = run_recording(&args, vec![welcome(1)]);
         assert_eq!(ran.status(), code(2), "{name}: {}", ran.err);
         assert!(
             ran.err.contains(&format!(
-                "--state-root: {} is missing",
-                dir.join(missing).display()
+                "the following required arguments were not provided:\n  {missing} <PATH>"
             )),
             "{name}: {}",
             ran.err

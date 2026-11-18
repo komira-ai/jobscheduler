@@ -18,14 +18,14 @@
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
 //!    release, see [`agent_in`]) `--version` names the target version (1), and the staged release
 //!    carries the unit the hook manages (`bad_artifact` otherwise);
-//! 4. a first install needs a way to authenticate: the state root holds the service identity
-//!    hostkeeper writes there (`service-identity.pem` and `service-identity.key`, the key a
-//!    regular file of the hook's user, mode 0600 or 0400), or a host credential, or the token
-//!    file is a regular file of the hook's user, mode 0600 or 0400; a state root with one
-//!    identity file only, or a key that is not private, defers whatever else it holds, since
-//!    the agent would refuse to start on it. Otherwise the step defers (75,
-//!    `join_token_missing`, a reason that is a shipped wire value) and the detail names the
-//!    token file and the service identity as the two ways;
+//! 4. a first install needs a way to authenticate: when the host's flags file names the host's
+//!    certificate and key (`--host-cert` and `--host-key`), both files must be there and the
+//!    key must pass the rule the agent holds it to (a regular file owned by root or the hook's
+//!    user, no access for others, not writable by its group), and the token file is not looked
+//!    at; when it names neither, or cannot be read, the state root holds a host credential, or
+//!    the token file is a regular file of the hook's user, mode 0600 or 0400. Otherwise the
+//!    step defers (75, `join_token_missing`, a reason that is a shipped wire value) and the
+//!    detail names the file to fix;
 //! 5. the record is written, with the cordon marked as ours *before* it is placed unless the
 //!    host is cordoned already (an operator's cordon is never ours), so that a step killed
 //!    after the placing finds it marked; the reply of the lease server corrects the mark;
@@ -41,7 +41,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use js_client::{SERVICE_CERT_FILE, SERVICE_KEY_FILE};
+use js_client::{HostIdentity, host_key_problem};
 
 use crate::update_hook::{
     Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, PlanError, Reason, Record,
@@ -138,31 +138,31 @@ fn note_restart(mut done: Done, record: &Record) -> Done {
     done
 }
 
-/// A first install needs a way to authenticate to the lease server. The service identity of the
-/// state root does (both files, the key a regular file of the hook's user, mode 0600 or 0400:
-/// the agent presents it and needs no token), and so does a host credential there; the agent
-/// takes the identity first. Otherwise the join token, which the operator (or the machine image) places, must be in a regular file of the
-/// hook's user, mode 0600 or 0400. A state root with one identity file only, or with a key that
-/// is not private, defers with the cause and the token file is not looked at: the agent would
-/// not start on such a root. The step defers, with nothing changed, until it is right.
+/// A first install needs a way to authenticate to the lease server. When the host's flags file
+/// names its certificate and key (`--host-cert` and `--host-key`), that is the way: the agent
+/// presents them and reads no token, so the token file is not looked at and nothing defers for
+/// it, and the step checks only that the certificate file is there and that the key file is a
+/// regular file the agent may use (see [`js_client::host_key_problem`]); otherwise it defers
+/// with the file to fix. When the flags file names neither, or cannot be read, the host
+/// credential of the state root does, and so does the join token, which the operator (or the
+/// machine image) places, in a regular file of the hook's user, mode 0600 or 0400. The step
+/// defers, with nothing changed, until it is right.
 fn join_token(env: &Env<'_>, params: &Params) -> Result<(), Done> {
-    match service_identity(env, &params.state_root) {
-        Identity::Usable => return Ok(()),
-        Identity::Unusable(problem) => {
-            return Err(deferred(
+    if let Some(identity) = env.host_identity {
+        return match host_files_problem(env, identity) {
+            Some(problem) => Err(deferred(
                 params,
-                format!("the service identity {problem}; fix it or remove it"),
-            ));
-        }
-        Identity::Absent => {}
+                format!(
+                    "the host certificate and key named in {}: {problem}; fix it to install the agent",
+                    params.flags_file.display()
+                ),
+            )),
+            None => Ok(()),
+        };
     }
     if env.ports.state.has_credential() {
         return Ok(());
     }
-    let ways = format!(
-        "{SERVICE_CERT_FILE} and {SERVICE_KEY_FILE} in {}",
-        params.state_root.display()
-    );
     let file = &params.token_file;
     let problem = match (env.token)(file) {
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => "is not there".to_owned(),
@@ -175,51 +175,39 @@ fn join_token(env: &Env<'_>, params: &Params) -> Result<(), Done> {
     Err(deferred(
         params,
         format!(
-            "the join token file {} {problem}; place it, root-owned and mode 0600, or have hostkeeper write the service identity ({ways}), to install the agent",
+            "the join token file {} {problem}; place it, root-owned and mode 0600, to install the agent",
             file.display()
         ),
     ))
 }
 
-/// What the state root holds of the service identity.
-enum Identity {
-    /// Neither file is there.
-    Absent,
-    /// Both files are there and the key is private.
-    Usable,
-    /// The files cannot be used; the text says which and why, and holds no content.
-    Unusable(String),
-}
-
-/// Looks at the identity files of `root` through the hook's token port: neither there, both
-/// there with a private key, or something wrong, named.
-fn service_identity(env: &Env<'_>, root: &Path) -> Identity {
-    let cert = root.join(SERVICE_CERT_FILE);
-    let key = root.join(SERVICE_KEY_FILE);
+/// What is wrong with the host certificate and key files, named by path, or `None` when the
+/// certificate file is a regular file and the key passes the agent's rule. The text holds no
+/// content.
+fn host_files_problem(env: &Env<'_>, identity: &HostIdentity) -> Option<String> {
+    let cert = identity.cert_path();
+    let key = identity.key_path();
     let look = |path: &Path| match (env.token)(path) {
-        Ok(facts) => Ok(Some(facts)),
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(why) => Err(format!("file {} cannot be read: {why}", path.display())),
+        Ok(facts) => Ok(facts),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Err("is not there".to_owned()),
+        Err(why) => Err(format!("cannot be read: {why}")),
     };
-    match (look(&cert), look(&key)) {
-        (Err(why), _) | (_, Err(why)) => Identity::Unusable(why),
-        (Ok(None), Ok(None)) => Identity::Absent,
-        (Ok(Some(_)), Ok(None)) => Identity::Unusable(missing(&key)),
-        (Ok(None), Ok(Some(_))) => Identity::Unusable(missing(&cert)),
-        (Ok(Some(_)), Ok(Some(facts))) => match owner_only_problem(&facts, env.euid) {
-            Some(problem) => Identity::Unusable(format!("key {} {problem}", key.display())),
-            None => Identity::Usable,
-        },
+    let cert_problem = match look(cert) {
+        Ok(facts) => (!facts.regular).then(|| "is not a regular file".to_owned()),
+        Err(why) => Some(why),
+    };
+    if let Some(problem) = cert_problem {
+        return Some(format!("{} {problem}", cert.display()));
     }
+    let key_problem = match look(key) {
+        Ok(facts) => host_key_problem(facts.regular, facts.mode, facts.uid, env.euid),
+        Err(why) => Some(why),
+    };
+    key_problem.map(|problem| format!("{} {problem}", key.display()))
 }
 
-/// The text for a half-written identity: the other file of the pair is there.
-fn missing(file: &Path) -> String {
-    format!("is half there: {} is missing", file.display())
-}
-
-/// Why a secret file is not one the agent will use: not a regular file, not mode 0600 or 0400,
-/// or not owned by the hook's user (`euid`).
+/// Why a join token file is not one the agent will use: not a regular file, not mode 0600 or
+/// 0400, or not owned by the hook's user (`euid`).
 fn owner_only_problem(facts: &TokenFacts, euid: u32) -> Option<String> {
     if !facts.regular {
         return Some("is not a regular file".to_owned());

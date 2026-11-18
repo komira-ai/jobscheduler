@@ -1,8 +1,9 @@
 //! `js-agent cordon`: keeps leases off this host for a window, then lets them back.
 //!
 //! ```text
-//! js-agent cordon --server <url> (--state-root <dir> | --token-file <file>) --for <duration>
-//!     [--lease-secs <n>] [--host-id <id> | --host-id-from-facts <file>] [--ca-cert <file>]
+//! js-agent cordon --server <url> (--host-cert <file> --host-key <file> | --state-root <dir> |
+//!     --token-file <file>) --for <duration> [--lease-secs <n>]
+//!     [--host-id <id> | --host-id-from-facts <file>] [--ca-cert <file>]
 //! ```
 //!
 //! An operator's measurement needs a node that no lease lands on for an hour or two. The
@@ -44,8 +45,9 @@
 //! # Secrets
 //!
 //! The credential is read from its file by `js-client` and sent in the `Authorization` header
-//! only. A service identity in the state root is presented in the TLS handshake instead and
-//! no `Authorization` header is sent. Neither is in argv, in a line of output or in an error.
+//! only. The host certificate of `--host-cert` and `--host-key` is presented in the TLS
+//! handshake instead and no `Authorization` header is sent. Neither is in argv, in a line of
+//! output or in an error.
 
 mod args;
 mod hold;
@@ -120,7 +122,7 @@ impl Pace for SystemPace {
 pub struct Connection<'a> {
     /// `--server`.
     pub server: &'a str,
-    /// How the client proves who it is: the credential file or the service identity.
+    /// How the client proves who it is: the credential file or the host certificate.
     pub login: &'a Login,
     /// `--ca-cert`.
     pub ca_cert: Option<&'a Path>,
