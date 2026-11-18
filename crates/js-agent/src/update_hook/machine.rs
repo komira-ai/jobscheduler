@@ -287,33 +287,29 @@ impl Lease for MachineLease {
 }
 
 /// How to reach the lease server: the server, the certificate to trust, the host certificate and
-/// key, and the host id of the host's own agent flags (`flags_file`), read as `js-agent --flags-file` reads them, with the state root
-/// and the token file of the params.
+/// key, and the host id of the host's own agent flags (`flags_file`), read as `js-agent
+/// --flags-file` reads them, with the state root and the token file of the params.
 ///
 /// # Errors
-/// The flags file cannot be used (see [`flags_file::expand_with`]), or its flags are not the
-/// agent's (the server and the pool are required, as for the agent). The text starts with the
-/// params key, `flags_file`.
-fn connect_of(params: &Params, machine: &Machine<'_>) -> Result<ConnectParams, String> {
-    connect_with(
-        &params.flags_file,
-        &params.state_root,
-        &params.token_file,
-        machine,
-    )
-}
-
-/// [`connect_of`] for the three params a hook of another package names the same way: the flags
-/// file, the agent's state root and the token file (see `config`).
-///
-/// # Errors
-/// As [`connect_of`].
+/// The flags file cannot be used (see [`flags_file::expand_with`]), its flags are not the
+/// agent's (the server and the pool are required, as for the agent), or its host id cannot be
+/// resolved. The text starts with the params key, `flags_file`.
 pub(super) fn connect_with(
     flags_file: &Path,
     state_root: &Path,
     token_file: &Path,
     machine: &Machine<'_>,
 ) -> Result<ConnectParams, String> {
+    let cli = read_flags(flags_file, machine)?;
+    connect_from(cli, state_root, token_file, machine)
+}
+
+/// The agent's flags as the flags file names them.
+///
+/// # Errors
+/// The flags file cannot be used, or holds flags the agent does not take. The text starts with
+/// the params key, `flags_file`.
+fn read_flags(flags_file: &Path, machine: &Machine<'_>) -> Result<Cli, String> {
     let args = vec![
         "js-agent".into(),
         flags_file::FLAG.into(),
@@ -321,7 +317,7 @@ pub(super) fn connect_with(
     ];
     let words = flags_file::expand_with(args, machine.euid, machine.flags)
         .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))?;
-    let cli = Cli::try_parse_from(words).map_err(|why| {
+    Cli::try_parse_from(words).map_err(|why| {
         let text = why.to_string();
         let reason: Vec<&str> = text
             .lines()
@@ -329,19 +325,39 @@ pub(super) fn connect_with(
             .filter(|line| !line.trim().is_empty())
             .collect();
         format!("{FLAGS_FILE_KEY}: {}", reason.join(" "))
-    })?;
+    })
+}
+
+/// The host's certificate and key when the flags name both. It does not depend on the host id:
+/// a host id that cannot be resolved leaves the files named.
+fn identity_of(cli: &Cli) -> Option<HostIdentity> {
+    cli.host_cert
+        .clone()
+        .zip(cli.host_key.clone())
+        .map(|(cert, key)| HostIdentity::new(cert, key))
+}
+
+/// The connection the flags `cli` describe.
+///
+/// # Errors
+/// The host id cannot be resolved (`--host-id-from-facts` names a facts file that cannot be
+/// used). The text starts with the params key, `flags_file`.
+fn connect_from(
+    cli: Cli,
+    state_root: &Path,
+    token_file: &Path,
+    machine: &Machine<'_>,
+) -> Result<ConnectParams, String> {
     let host_id = resolve_host_id(&cli, machine.euid, machine.flags)
         .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))?;
+    let host_identity = identity_of(&cli);
     Ok(ConnectParams {
         server: Some(cli.server),
         state_root: Some(state_root.to_owned()),
         token_file: Some(token_file.to_owned()),
         ca_cert: cli.ca_cert,
         host_id,
-        host_identity: cli
-            .host_cert
-            .zip(cli.host_key)
-            .map(|(cert, key)| HostIdentity::new(cert, key)),
+        host_identity,
     })
 }
 
@@ -519,7 +535,10 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     let units = platform_units(&commands, &stop, &params.token_file);
     // A flags file that cannot be read names no host certificate: a first install then goes by
     // the join token as before, and a step that asks the lease server ends with the reason.
-    let connect = connect_of(params, machine);
+    let flags = read_flags(&params.flags_file, machine);
+    let host_identity = flags.as_ref().ok().and_then(identity_of);
+    let connect =
+        flags.and_then(|cli| connect_from(cli, &params.state_root, &params.token_file, machine));
     let lease = match &connect {
         Ok(connect) => MachineLease::with_root(
             connect,
@@ -529,10 +548,6 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         ),
         Err(why) => MachineLease::failed(why.clone()),
     };
-    let host_identity = connect
-        .as_ref()
-        .ok()
-        .and_then(|connect| connect.host_identity.as_ref());
     let env = Env {
         ports: Ports {
             units: &units,
@@ -546,7 +561,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         manager: MANAGER,
         euid: machine.euid,
         token: machine.token,
-        host_identity,
+        host_identity: host_identity.as_ref(),
         stat: machine.stat,
     };
     match invocation.step {

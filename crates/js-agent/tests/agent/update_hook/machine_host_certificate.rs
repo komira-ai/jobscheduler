@@ -185,3 +185,36 @@ fn a_first_install_with_a_flags_file_that_cannot_be_used_keeps_the_join_token_ch
     let done = tree.run(Step::Prepare, &params, Err("unused"));
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
 }
+
+/// Asserts that a first install whose flags file names the host files and takes the host id
+/// from a facts file that is not there still checks the host files, and does not ask for the
+/// join token file: with no token file in place it goes on when the key is one the agent may
+/// use, and defers naming the key when its mode is loose.
+#[test]
+fn a_first_install_checks_the_host_files_when_the_host_id_cannot_be_resolved() {
+    let tree = Tree::new("hook-machine-first-host-files-no-facts");
+    let identity = host_files(&tree.files, 0o644);
+    let facts = tree.files.path("no-such-facts.json");
+    let named = format!(
+        "{}host_id_from_facts = \"{}\"\n",
+        naming_host_files(&identity),
+        facts.display()
+    );
+    let params = tree.params(false, &named);
+    fs::remove_file(&params.token_file).unwrap();
+    let done = tree.run(Step::Prepare, &params, Err("unused"));
+    assert_eq!(done.outcome, Outcome::Deferred, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::JoinTokenMissing));
+    assert_eq!(
+        done.report.detail,
+        Some(format!(
+            "the host certificate and key named in {}: {} must give others no access (mode 0600 or 0640), not mode 0644; fix it to install the agent",
+            params.flags_file.display(),
+            identity.key_path().display()
+        ))
+    );
+    assert!(!tree.record().exists());
+    fs::set_permissions(identity.key_path(), fs::Permissions::from_mode(0o640)).unwrap();
+    let done = tree.run(Step::Prepare, &params, Err("unused"));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+}

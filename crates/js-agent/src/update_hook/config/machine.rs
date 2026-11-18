@@ -3,8 +3,9 @@
 //!
 //! Where the lease server is, and the host id the agent registers under, come from the flags
 //! file now in place, read as `js-agent --flags-file` reads it (the same words as the update
-//! hook's: see [`Machine`]); the bearer is the host credential in the agent's state root, or the
-//! token file. Nothing here is an environment variable.
+//! hook's: see [`Machine`]); the host authenticates by its own certificate and key when the flags
+//! file names `--host-cert` and `--host-key` (no bearer), else by the host credential in the
+//! agent's state root, else by the token file. Nothing here is an environment variable.
 
 use std::time::Duration;
 
