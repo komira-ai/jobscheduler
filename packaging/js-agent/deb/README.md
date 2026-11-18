@@ -114,9 +114,9 @@ id).
 
 The first install of a host defers (the hook reports `join_token_missing` and hostkeeper retries)
 until the host has a way to authenticate to the lease server. On a host that hostkeeper manages
-that is the host's own certificate and key: hostkeeper keeps them, renews both in place before the
-certificate expires, and writes `--host-cert PATH` and `--host-key PATH` into `/etc/js-agent/flags`
-(both or neither). The key is mode 0640, owned by root, in a group that the agent's account
+that is the host's own certificate and key: hostkeeper keeps them at fixed paths, renews both in place before
+the certificate expires, and the host group's config package names them in `/etc/js-agent/flags`
+with `--host-cert PATH` and `--host-key PATH` (both or neither). The key is mode 0640, owned by root, in a group that the agent's account
 belongs to; after following links it must be a regular file owned by root or by the user running
 the agent, with no access for others and not writable by its group (0600, 0400, 0640 and 0440
 pass). When the flags file names both, the hook does not look at the token file: it goes on when

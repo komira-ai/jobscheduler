@@ -46,6 +46,7 @@ mod estimate_feed;
 mod gpu_path_pin;
 mod guard_names;
 mod host_certs;
+mod host_certs_agent;
 mod host_certs_hosts;
 mod host_certs_start;
 mod host_certs_support;

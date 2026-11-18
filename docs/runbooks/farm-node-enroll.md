@@ -109,13 +109,16 @@ chmod 644 /etc/js-agent/flags
 ## 3A. A node that hostkeeper manages needs no join token
 
 An enrolled, approved node is trusted. hostkeeper keeps the host's own certificate and private key
-and renews both in place before the certificate expires; it writes their paths into the flags file
-(`/etc/js-agent/flags`) as two lines:
+at fixed paths it documents and renews both in place before the certificate expires. The flags file
+(`/etc/js-agent/flags`), which the host group's config package installs like every other setting,
+names the two paths, for example:
 
 ```
---host-cert=/path/to/the/host-certificate.pem
---host-key=/path/to/the/host-key.pem
+--host-cert=/var/lib/hostkeeper/identity/host.crt
+--host-key=/var/lib/hostkeeper/identity/host.key
 ```
+
+hostkeeper does not edit the flags file.
 
 The key is mode 0640, owned by root, in a group made for the purpose (for example
 `hostkeeper-identity`) that the agent's account belongs to; hostkeeper may also repoint a symbolic

@@ -273,8 +273,8 @@ names, gzip without a name. The verb refuses a version that is not `X.Y.Z`, a bi
 carry the version's `--version` line, and a file that is already there. The package carries no
 server address, pool, token or host name: the host's own flags are in `/etc/js-agent/flags` (read
 with `--flags-file`) and its join token in `/etc/js-agent/token`, which an operator places. A host
-whose hostkeeper keeps the host's certificate and key, and names them in the flags file
-(`--host-cert` and `--host-key`), needs no token file (`packaging/js-agent/deb/README.md`).
+whose hostkeeper keeps the host's certificate and key, and whose flags file (from its host
+group's config package) names them (`--host-cert` and `--host-key`), needs no token file (`packaging/js-agent/deb/README.md`).
 
 The `.deb` replaces the hostkeeper archive package of earlier releases (`js-agent-X.Y.Z-<platform>.tar.zst`
 and `js-agent-index.json`): hostkeeper installs native packages only. The pull-request check
