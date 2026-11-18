@@ -1,7 +1,7 @@
 //! The hosts the agent routes refuse (`--agent-deny-file`): one host id per line.
 //!
 //! Blank lines and lines starting with `#` are skipped, and a line may have spaces around its
-//! host id. The file is read at start, where a line that is not a host id stops the start, and
+//! host id; a byte order mark at the start of the file is skipped. The file is read at start, where a line that is not a host id stops the start, and
 //! again at every tick, where a file that cannot be read or is not valid keeps the set in
 //! force. A refusal names the line's number and never anything of its text, so a secret
 //! pasted into the file by mistake is not logged. The file holds no secret and is not
@@ -85,6 +85,8 @@ fn read(path: &Path) -> Result<BTreeSet<HostId>, StartupError> {
         return Err(refuse(format!("is larger than {MAX_BYTES} bytes")));
     }
     let text = String::from_utf8(bytes).map_err(|_| refuse("is not text".to_owned()))?;
+    // An editor that saves a byte order mark would otherwise make the first line no host id.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let mut hosts = BTreeSet::new();
     for (index, line) in text.lines().enumerate() {
         let line = line.trim();

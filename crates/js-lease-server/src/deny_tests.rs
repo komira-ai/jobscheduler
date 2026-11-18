@@ -33,6 +33,31 @@ fn the_hosts_of_the_file_are_denied_and_no_other() {
     assert!(!list.denies_text("Not A Host"));
 }
 
+/// Asserts that a UTF-8 byte order mark at the start of the file is skipped, whether it comes
+/// before a host id (the host is denied) or before a comment (no line is refused), and that the
+/// number of a bad line after it is still its line's number.
+#[test]
+fn a_byte_order_mark_at_the_start_of_the_file_is_skipped() {
+    let (_dir, path) = file_with("\u{feff}farm-1\nfarm-2\n".as_bytes());
+    let list = DenyList::open(path).unwrap();
+    assert!(list.denies(&host("farm-1")));
+    assert!(list.denies(&host("farm-2")));
+
+    let (_dir, path) = file_with("\u{feff}# retired hosts\nfarm-3\n".as_bytes());
+    let list = DenyList::open(path).unwrap();
+    assert!(list.denies(&host("farm-3")));
+
+    let (_dir, path) = file_with("\u{feff}farm-1\nnot a host\n".as_bytes());
+    let said = DenyList::open(path.clone()).err().unwrap().to_string();
+    assert_eq!(
+        said,
+        format!(
+            "--agent-deny-file: {}: line 2: not a host id",
+            path.display()
+        )
+    );
+}
+
 /// Asserts that a list with no file denies no host and that reloading it is a no-op.
 #[test]
 fn a_list_without_a_file_denies_no_host() {
