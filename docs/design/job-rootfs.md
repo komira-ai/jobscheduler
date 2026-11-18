@@ -1037,6 +1037,7 @@ and the host's input is to blame), or the job's own result stands.
 | An overlay or clone mount fails (the kernel refuses a lower, the upper's volume is not local) | preparing | start fails with the existing runtime failure code; it is the host's configuration |
 | A read of a lazy lower fails while the job runs (`EIO`) | the job | the job's own result: the agent cannot tell one file's failed read from the job's |
 | The job did not succeed, and after it ended a host path of its layers or mounts no longer answers its lookup (`ENOTCONN`, `EIO`, `ESTALE`, or no answer within 5 s) | after exit | `FAILED`, reason `INPUT_FAILED`, `input_failure: input-unreadable`, exit code kept |
+| A mount provider lost a source's tree while the job ran (a part of it gone for good; tierstore's `tree-lost`, komira-ai/tierstore `docs/design/fetch-cache-serve.md` section 4.6): the provider answers `EIO` to the job's reads of what is missing and to the source directory's `statfs` and listing until the source is released (`provider.proto`) | after exit | as the row above: `FAILED`, reason `INPUT_FAILED`, `input_failure: input-unreadable`, exit code kept. The failure is the host's, not the job's: a client runs the job again as a new job (kbf does), and jobscheduler does not requeue it |
 | A host port cannot be offered again after an agent restart | adoption | the run is stopped; `FAILED`, reason `INPUT_FAILED`, `input_failure: host-port-lost` |
 | The host's service behind a host port refuses or drops a connection | the job | the job's own result |
 | A program in a `no_exec` mount is run | the job | the job's own result (`EACCES`), as for any file it may not run |
@@ -1050,7 +1051,10 @@ the assembly, and the check is an `fstatfs` and a `getdents` of one entry throug
 before the result is built (`Event::ResultReady`), only for a job that did not succeed: a job that succeeded read what
 it needed. It catches the case that matters most, a provider whose whole file system went away under a running job, so
 that a compiler's "cannot read file" is not reported as the user's build error; it does not catch one file's failed
-fill, which only the provider knows, and which a client with a provider asks that provider about (decision LR11).
+fill, which only the provider knows, and which a client with a provider asks that provider about (decision LR11). A
+provider that lost a source's tree for good (tierstore's `tree-lost`) makes the loss the case the check catches: the
+source's directory answers `EIO` from then on (the provider contract, `provider.proto`), so the job fails for its input
+and is not reported as the user's build error.
 
 **The detail reaches the client.** `JobState::FailedToStart` gains the agent's code, stored in a new tag of the job's
 row and shown in `Job.start_failure_detail`; `end_of` maps `input-unavailable` to `StartFailure::InputUnavailable` and

@@ -29,6 +29,13 @@
 // - The provider keeps its own collection of sources (a lifetime each): an agent's record
 //   of a run can be lost with its host, and Sweep is the agent's way to catch up, not the
 //   only one.
+//
+// A tree the provider can no longer give whole while a job holds it (a part of it is gone
+// for good; tierstore names this `tree-lost`) answers EIO to every read of what is missing
+// and to every look at its directory (statfs, listing) until it is released. The agent
+// looks at each source's directory once after a job that did not succeed has ended, and a
+// source that answers EIO there fails the job for its host's input (reason INPUT_FAILED,
+// `input-unreadable`), not for its own: a client runs such a job again.
 
 syntax = "proto3";
 
