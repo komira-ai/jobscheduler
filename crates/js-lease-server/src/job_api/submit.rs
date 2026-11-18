@@ -40,8 +40,10 @@
 //!    store ([`js_jobs::JobStore::insert_queued`]), with the name of the client the bearer
 //!    layer named (never a value of the request); only after it returns is the answer
 //!    built, from the record it returns. A store that fails is `INTERNAL` with the message
-//!    `state-write-failed` (500 `state-write-failed`), the cause logged and never answered,
-//!    and nothing happened: the handler holds nothing outside the store, so there is
+//!    `state-write-failed` (500 `state-write-failed`), and a store too busy to take the call
+//!    ([`js_state::StoreError::Unavailable`]: no connection came free, or a statement waited
+//!    past its limit) is `UNAVAILABLE` with the same message (503 `state-write-failed`), which
+//!    a caller may retry; the cause is logged and never answered, and nothing happened: the handler holds nothing outside the store, so there is
 //!    nothing to roll back. A second writer that recorded a different job under the id
 //!    between the lookup and the commit is `job-id-conflict`.
 //!
@@ -70,6 +72,7 @@ use std::time::Duration;
 use js_jobs::{Isolation, JobRecord, JobStoreError, NewJob};
 use js_proto::refusal::refusal_status;
 use js_proto::v1::{RefusalCode, SubmitJobRequest, SubmitJobResponse};
+use js_state::StoreError;
 use js_types::Requirements;
 use tonic::{Request, Response, Status};
 
@@ -211,10 +214,15 @@ fn id_conflict() -> Status {
 }
 
 /// The answer to a store operation that did not happen: `job-id-conflict` for an id that
-/// names another job, else `state-write-failed`, the cause logged and never answered.
+/// names another job, else `state-write-failed`, `UNAVAILABLE` when the store was only too
+/// busy to take it and `INTERNAL` otherwise, the cause logged and never answered.
 pub(super) fn not_written() -> impl Fn(JobStoreError) -> Status {
     move |error| match error {
         JobStoreError::JobIdConflict { .. } => id_conflict(),
+        JobStoreError::Store(StoreError::Unavailable(why)) => {
+            tracing::warn!(%why, "a write of the job tables did not happen: the store is busy");
+            Status::unavailable(STATE_WRITE_FAILED)
+        }
         error => {
             tracing::warn!(%error, "a write of the job tables did not happen");
             Status::internal(STATE_WRITE_FAILED)

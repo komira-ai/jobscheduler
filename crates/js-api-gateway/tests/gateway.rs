@@ -369,7 +369,7 @@ fn refusal_to_status_table_matches_golden() {
 }
 
 /// The messages each gRPC code is tried with in the status table.
-const MESSAGES: [&str; 12] = [
+const MESSAGES: [&str; 13] = [
     "unknown-job",
     "expired",
     "not-finished",
@@ -382,6 +382,7 @@ const MESSAGES: [&str; 12] = [
     "too-many-follows",
     "log-store-unavailable",
     "field: fromOffset",
+    "store-unavailable",
 ];
 
 /// Asserts that every gRPC code with each message of [`MESSAGES`] maps to the line of
@@ -547,6 +548,16 @@ async fn a_status_message_selects_the_row() {
             Status::unavailable("log-store-unavailable"),
             503,
             json!({ "error": "log-store-unavailable" }),
+        ),
+        (
+            Status::unavailable("state-write-failed"),
+            503,
+            json!({ "error": "state-write-failed" }),
+        ),
+        (
+            Status::unavailable("store-unavailable"),
+            503,
+            json!({ "error": "store-unavailable" }),
         ),
     ];
     for (status, code, body) in rows {

@@ -1,13 +1,12 @@
 //! Writers that queue behind the commit head on a real Postgres server: each waits its
 //! turn and then commits, and none is rolled back and run again.
 //!
-//! The batch is a `SERIALIZABLE` transaction whose first statement locks the head row. A
-//! transaction that waits on that row has its snapshot from before the wait, so when the
-//! holder commits it is told "could not serialize access due to concurrent update" and the
-//! store runs it again, behind the same queue. With several writers every waiter fails
-//! every round but the one that is lucky enough to take the lock, and a takeover that
-//! competes with a busy writer can use up its attempts. The store therefore queues on a
-//! table lock before its snapshot is taken.
+//! A batch takes the head row at its tail, after its body, and holds it to its commit. A
+//! transaction that waited on that row in a `SERIALIZABLE` snapshot taken before the wait would
+//! be told "could not serialize access due to concurrent update" when the holder commits, and
+//! run again behind the same queue, every waiter but one each round. The store therefore runs
+//! read committed and queues on a table lock (`LOCK TABLE head`) before it moves the head, so
+//! a waiter finds the head free and current.
 //!
 //! The test needs a server (`KBF_TEST_POSTGRES_URL` names it) and fails without one. It holds
 //! a transaction open on the server, so the interleaving is the one under test and not a
@@ -29,9 +28,9 @@ fn url() -> String {
 }
 
 // Catches a batch that waits for the commit head inside a snapshot that predates the wait:
-// A holds the head with a write in flight, four writers queue behind it, A commits. Every
-// writer must then commit on its first attempt. With the head row as the only lock, all
-// four are rolled back for a serialization failure and the store's retry counter is not 0.
+// A holds the head with a write in flight (its tail run, its commit held), four writers run
+// their bodies and queue behind it, A commits. Every writer must then commit on its first
+// attempt; one rolled back for a serialization failure moves the store's retry counter.
 #[test]
 fn writers_queued_behind_the_head_commit_without_a_retry() {
     let backend = PostgresBackend::new(&url(), Flaw::None);

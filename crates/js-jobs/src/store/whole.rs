@@ -123,8 +123,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let mut failed = None;
         let mut placed = None;
         let claim = [keys::job(id)];
+        // The store's time is read before the transaction opens: a call on the store from
+        // inside the decision would need a second connection while the decision holds one.
+        let now = self.store.now();
         let outcome = self.store.claim_decide(&claim, &mut |read| {
-            let decided = self.decide_placement(read, id, (host, booked, placement), capacity);
+            let decided = self.decide_placement(read, id, (host, booked, placement), capacity, now);
             match decided {
                 Ok((txn, job, allocation)) => {
                     placed = Some((job, allocation));
@@ -144,13 +147,15 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
     }
 
-    /// The transaction [`JobStore::place_claimed`] commits, decided on what `read` shows.
+    /// The transaction [`JobStore::place_claimed`] commits, decided on what `read` shows, with
+    /// `now` the store's time it stamps the placement with. It reads only through `read`.
     fn decide_placement(
         &self,
         read: &mut dyn TxnRead,
         id: &JobId,
         (host, booked, placement): (&HostId, Booked, &Placement),
         capacity: Option<&Capacity>,
+        now: StoreTime,
     ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
         let job_key = keys::job(id);
         let row = read
@@ -162,9 +167,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             .get(&earlier_key)?
             .map(|row| allocation_at(&earlier_key, &row.value).map(|found| (found, row.version)))
             .transpose()?;
-        // The host's reservation row is read first, which locks it (`FOR UPDATE` on Postgres), so
-        // the host's allocations are summed after any placement ahead of this one on the host has
-        // committed, and not before.
+        // The host's reservation row is read first, so the host's allocations are summed after
+        // any placement ahead of this one on the host has committed, and not before (on Postgres
+        // the decision runs while the store holds its commit head, which no placement shares).
         let book_key = keys::hostbook(host);
         let cond = read
             .get(&book_key)?
@@ -184,6 +189,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             (job, row.version),
             earlier,
             (host.clone(), booked, placement.clone()),
+            now,
         )?;
         let mark_key = keys::mark(id);
         let txn = match read.get(&mark_key)? {
@@ -206,18 +212,20 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
         let job = self.job_row(id)?;
         let earlier = self.read_allocation(id)?;
-        self.build_placement(id, job, earlier, (host, booked, placement))
+        let now = self.store.now();
+        self.build_placement(id, job, earlier, (host, booked, placement), now)
     }
 
     /// The transaction that places the queued job `id`, read at `job`, on a host as
-    /// [`JobStore::place`] describes, given its `earlier` allocation as read, and the job and
-    /// allocation it writes.
+    /// [`JobStore::place`] describes, given its `earlier` allocation as read and the store's
+    /// time `now`, and the job and allocation it writes. It makes no call on the store.
     fn build_placement(
         &self,
         id: &JobId,
         (job, job_version): (JobRecord, Version),
         earlier: Option<(AllocationRecord, Version)>,
         (host, booked, placement): (HostId, Booked, Placement),
+        now: StoreTime,
     ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
         ensure(
             job.state == JobState::Queued,
@@ -241,7 +249,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             }
         };
         let allocation_id = self.fresh_allocation_id(earlier_id)?;
-        let now = self.store.now();
         let host_ports: BTreeSet<u16> = job.spec.ports.iter().map(|port| port.host).collect();
         let allocation = AllocationRecord {
             job: id.clone(),
@@ -468,6 +475,7 @@ mod tests {
             &id,
             (&host, Booked::WholeHost, &Placement::default()),
             None,
+            StoreTime::ZERO,
         );
         assert_eq!(decided.err(), Some(JobStoreError::NotFound { id }));
     }

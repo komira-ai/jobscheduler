@@ -62,8 +62,9 @@ impl From<Fail> for OpenError {
                 None => io_cause(err).is_some_and(|io| not_listening(io.kind())),
             },
             Fail::Tls(tls) => return OpenError::Tls(tls.clone()),
-            // A schema or durability refusal came from a server that answered.
-            Fail::Refused(_) => false,
+            // A schema or durability refusal came from a server that answered; the first
+            // connection is made, not waited for, so a busy pool is never met here.
+            Fail::Refused(_) | Fail::Busy(_) => false,
         };
         let error = fail.into_failed();
         if not_up {
