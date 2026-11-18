@@ -18,10 +18,10 @@ use crate::support::{Host, Scratch, code, linux_host, mac_host};
 /// What the verb asked the connector for.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Seen {
-    server: String,
-    login: Login,
-    ca_cert: Option<PathBuf>,
-    host: String,
+    pub(super) server: String,
+    pub(super) login: Login,
+    pub(super) ca_cert: Option<PathBuf>,
+    pub(super) host: String,
 }
 
 /// What a run of the verb printed and how it ended.

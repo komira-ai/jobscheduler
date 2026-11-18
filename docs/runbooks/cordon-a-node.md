@@ -7,24 +7,60 @@ for an operator's script, on Linux and on macOS.
 
 ## What it does
 
+On a host the agent runs on, as root, name the agent's own flags file and its state root:
+
+```text
+sudo js-agent cordon --flags-file /etc/js-agent/flags --state-root /var/lib/js-agent/state --for 2h
+```
+
+`--flags-file` is read as the agent reads it (the same owner and mode rules, the same flags), and
+the verb takes from it the lease server (`--server`), the certificate to trust (`--ca-cert`), the
+host id (`--host-id` or `--host-id-from-facts`) and the host's certificate and key (`--host-cert`
+and `--host-key`). It therefore cordons the host the agent registers, with what the agent
+presents. `--state-root` and `--token-file` are given beside it, as the agent's unit gives them
+beside the file; a flag the file names may not be given again, and `--server`, `--ca-cert`,
+`--host-id`, `--host-id-from-facts`, `--host-cert` and `--host-key` may not be given with
+`--flags-file` at all.
+
+Without a flags file the verb takes the same values as its own flags:
+
 ```text
 js-agent cordon --server <url> --state-root <dir> --for 2h
 ```
 
-The verb cordons the host under the id the agent registers with. Without a flag that is the
+It cordons the host under the id the agent registers with. Without a flag that is the
 default derived from the machine id; a host whose agent is started with `--host-id <id>` is
 cordoned with the same `--host-id <id>`, and one whose agent takes its id from hostkeeper's facts
 file (`--host-id-from-facts`) is cordoned with
 `--host-id-from-facts /var/lib/hostkeeper/facts.json`.
 
-1. It cordons the host with the host's own credential: the host certificate that hostkeeper keeps
-   (`--host-cert` and `--host-key`, with the paths the agent's flags file names; the key must be
-   readable by the user running the verb, so that user belongs to the key's group), or the one the
+1. It cordons the host with the host's own credential, chosen as the agent chooses it: the host
+   certificate that hostkeeper keeps (`--host-cert` and `--host-key`; the key must be readable by
+   the user running the verb, so that user is root or belongs to the key's group), or the one the
    agent keeps in its state root, or `--token-file` for a host that has not swapped its one-time
    token yet. The pool's shared join token is refused by the server on these routes.
 2. It renews the cordon every third of `--lease-secs` (default 300, at most 3600) until `--for` has
    passed. The cordon is a lease the verb renews: a server that is not asked again lets it lapse.
 3. It lifts the cordon at the end, or at once on SIGTERM or SIGINT.
+
+### When the server refuses the credential
+
+A host whose agent presents its host certificate reads no `host-credential` file, so a file left in
+its state root by an earlier registration is not what the agent uses. Given that state root and no
+host certificate, the verb sends that file, and the server refuses it: `join-token-not-admitted`
+when the earlier registration used another host id than the one asked for, `join-token-expired` or
+`http-401` once the server has let the unused credential lapse. `join-token-not-admitted` also
+comes when the verb is told another host id than the one the agent registered with (a
+`--host-id-from-facts` on a host whose agent registered with `--host-id`). Standard error then
+says what was sent and for which host:
+
+```text
+js-agent cordon: credential error: cannot cordon the host: the server refused the credential (join-token-not-admitted)
+js-agent cordon: it sent the host credential in /var/lib/js-agent/state/host-credential for host <id>; to cordon with what the agent on this host presents, give the agent's flags file with --flags-file (such as /etc/js-agent/flags)
+```
+
+Run it again with `--flags-file` as above: the verb then takes the host id and the credential from
+the agent's own flags, so it asks for the host the agent registers, with what the agent presents.
 
 It lifts only a cordon it placed. The server cannot say who placed a cordon, and an uncordon lifts
 any, so the verb relies on the `already_cordoned` flag of its first reply: when that says `true`,
@@ -77,7 +113,7 @@ last renewal (at most an hour).
 
 ```sh
 log=$(mktemp)
-js-agent cordon --server https://leases.example:7300 --state-root /var/lib/js-agent \
+js-agent cordon --flags-file /etc/js-agent/flags --state-root /var/lib/js-agent/state \
     --for 2h > "$log" &
 cordon=$!
 # Wait for the node to be quiet: no lease, nothing releasing, not set aside.

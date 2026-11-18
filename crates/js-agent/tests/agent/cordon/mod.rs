@@ -6,6 +6,7 @@
 
 mod binary;
 mod fakes;
+mod flags_file;
 mod hold;
 pub(crate) mod http;
 mod verb;
