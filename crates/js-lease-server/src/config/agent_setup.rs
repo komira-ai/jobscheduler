@@ -109,10 +109,8 @@ impl Config {
         if let Some(store) = self.store.as_mut() {
             store.clock = crate::config::StoreClock(Some(Arc::clone(&clock)));
         }
-        self.agents.job_sources = JobSources {
-            clock,
-            ids: ServerIds::new(ids),
-        };
+        self.agents.job_sources.clock = clock;
+        self.agents.job_sources.ids = ServerIds::new(ids);
         self
     }
 }
